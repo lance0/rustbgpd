@@ -300,6 +300,14 @@ class EvpnRrAnalyzerContracts(unittest.TestCase):
         cycles = smoke_cycles(epoch_over={4: {"invalid": 1}})
         self.assert_only_failure("evpn_convergence", cycles=cycles)
 
+    def test_self_reflected_route_fails_even_when_counts_match(self):
+        cycles = smoke_cycles(epoch_over={6: {"self_reflected": 1}})
+        gate = self.assert_only_failure("evpn_convergence", cycles=cycles)
+        self.assertIn("self_reflected=1", gate["value"]["defects"][0])
+        receipt = [line.replace(" self_reflected=0", " self_reflected=1")
+                   if "evpn_receipt" in line else line for line in smoke_cycles()]
+        self.assert_only_failure("evpn_terminal_receipt", cycles=receipt)
+
     def test_missing_epoch_line_fails(self):
         cycles = smoke_cycles(drop=("evpn_epoch n=5 ",))
         self.assert_only_failure("evpn_convergence", cycles=cycles)

@@ -585,6 +585,57 @@ class FlagshipLifecycleContracts(unittest.TestCase):
         self.assertEqual(append("2026-01-01T00:00:30Z", "30").returncode, 0)
         self.assertEqual(snapshots(), 3)
 
+    def run_evpn_release(self, directory, last_elapsed, sample_records=True):
+        """Source the EVPN runner, stub its externals, and call release_driver."""
+        run_dir = directory / "run"
+        (run_dir / "engine-finish").mkdir(parents=True)
+        (run_dir / "engine-finish/ready").write_text("ready\n")
+        events = directory / "events"
+        script = textwrap.dedent(f"""\
+            source "$1"
+            RUN_DIR={run_dir}
+            CYCLES_LOG="$RUN_DIR/cycles.log"
+            SAMPLE_START_EPOCH=$(($(date +%s) - {last_elapsed}))
+            LAST_SAMPLE_ELAPSED={last_elapsed}
+            SAMPLE_ROWS=5
+            H_PID=$$
+            sample_row() {{
+                echo "sample $1" >>{events}
+                if [[ {str(sample_records).lower()} == true ]]; then
+                    LAST_SAMPLE_ELAPSED=$1
+                    SAMPLE_ROWS=$((SAMPLE_ROWS + 1))
+                fi
+            }}
+            stop_management_load() {{ echo stop >>{events}; }}
+            monotonic_now() {{ echo 1.0; }}
+            write_run_json() {{ :; }}
+            release_driver
+            """)
+        return subprocess.run(
+            ["bash", "-c", script, "evpn-release", str(HERE / "run-soak-evpn-rr.sh")],
+            text=True, capture_output=True, check=False, timeout=30,
+        ), events, run_dir
+
+    def test_evpn_release_records_a_final_sample_before_draining_the_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, events, run_dir = self.run_evpn_release(Path(tmp), last_elapsed=0)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = events.read_text().split()
+            self.assertEqual(lines[0], "sample")
+            # Strictly after the previous row, while every session is held.
+            self.assertGreater(int(lines[1]), 0)
+            self.assertEqual(lines[2], "stop")
+            self.assertTrue((run_dir / "engine-finish/ack").exists())
+
+    def test_evpn_release_aborts_when_the_final_sample_is_not_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, events, run_dir = self.run_evpn_release(
+                Path(tmp), last_elapsed=0, sample_records=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("final sample", (run_dir / "cycles.log").read_text())
+            self.assertNotIn("stop", events.read_text())
+            self.assertFalse((run_dir / "engine-finish/ack").exists())
+
     def test_failed_snapshot_append_leaves_the_archive_readable(self):
         for runner in RUNNERS:
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:

@@ -315,6 +315,8 @@ process_log() {
 
 SCRAPE_FAILS=0
 SAMPLE_ROWS=0
+SAMPLE_START_EPOCH=0
+LAST_SAMPLE_ELAPSED=-1
 sample_row() {
     local elapsed=$1
     # The driver holds the sessions; once it exits a sample would record the
@@ -353,6 +355,7 @@ sample_row() {
         prom_snapshot "$timestamp" "$elapsed" || cycle_log "metrics snapshot append failed"
     fi
     SAMPLE_ROWS=$((SAMPLE_ROWS + 1))
+    LAST_SAMPLE_ELAPSED=$elapsed
     local avail_kib
     avail_kib=$(df -Pk "$RUN_DIR" | awk 'NR==2 {print $4}')
     if ((avail_kib < 5 * 1024 * 1024)); then
@@ -390,6 +393,27 @@ start_management_load() {
     wait "$MANAGEMENT_LOAD_PID" 2>/dev/null || rc=$?
     MANAGEMENT_LOAD_PID=""
     abort "management-plane load failed before its start record (rc=$rc)"
+}
+
+# The driver holds every session until ack. Record one final sample first,
+# so the sampled flap counter includes a flap that landed after the last
+# scheduled sample, then drain the load so no probe overlaps the final Cease
+# fan-out.
+release_driver() {
+    local rows=$SAMPLE_ROWS elapsed
+    elapsed=$(($(date +%s) - SAMPLE_START_EPOCH))
+    if ((elapsed <= LAST_SAMPLE_ELAPSED)); then
+        sleep 1
+        elapsed=$(($(date +%s) - SAMPLE_START_EPOCH))
+    fi
+    sample_row "$elapsed"
+    ((SAMPLE_ROWS > rows)) || abort "final sample was not recorded before releasing the driver"
+    MEASURED_END_MONOTONIC=$(monotonic_now)
+    stop_management_load || abort "management-plane load did not terminate cleanly"
+    pid_running "$H_PID" || abort "driver exited while draining management-plane load"
+    ENGINE_FINISH_RELEASE_MONOTONIC=$(monotonic_now)
+    write_run_json
+    printf 'ack\n' >"$RUN_DIR/engine-finish/ack"
 }
 
 write_run_json() {
@@ -540,6 +564,7 @@ main() {
     echo "timestamp,elapsed_sec,rss_mb,intern_size,established,flaps_total,msgs_sent_total,max_prefix_exceeded_total,readyz_code,readyz_ms" >"$SAMPLES_CSV"
     local start_epoch now next_sample overall_deadline
     start_epoch=$(date +%s)
+    SAMPLE_START_EPOCH=$start_epoch
     next_sample=$start_epoch
     overall_deadline=$((start_epoch + OVERALL_CAP_SEC))
 
@@ -550,14 +575,7 @@ main() {
         pid_running "$DAEMON_PID" || abort "daemon died mid-soak"
         process_log
         if [[ -f $RUN_DIR/engine-finish/ready ]]; then
-            # The driver holds every session until ack; drain the load first so
-            # no probe overlaps the final Cease fan-out.
-            MEASURED_END_MONOTONIC=$(monotonic_now)
-            stop_management_load || abort "management-plane load did not terminate cleanly"
-            pid_running "$H_PID" || abort "driver exited while draining management-plane load"
-            ENGINE_FINISH_RELEASE_MONOTONIC=$(monotonic_now)
-            write_run_json
-            printf 'ack\n' >"$RUN_DIR/engine-finish/ack"
+            release_driver
             break
         fi
         if ((now >= next_sample)); then

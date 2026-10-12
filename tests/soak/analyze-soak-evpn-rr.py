@@ -22,7 +22,8 @@ management-plane gate (with the EVPN operation set). Scenario-specific:
   - max-prefix flat: bgp_max_prefix_exceeded_total stays 0
   - EVPN convergence: one line per planned epoch, each with every client
     receiving exactly the expected reflected set (min == max == expected,
-    receivers == clients, no invalid routes, no parse errors), within the
+    receivers == clients, no unexpected, self-reflected or unparseable
+    route), within the
     convergence cap, with the planned churn/flap/reload schedule
   - EVPN terminal receipt: exactly one, matching the plan
   - per-series sent counters: every bgp_messages_sent_total series in the
@@ -131,6 +132,7 @@ def check_epochs(epochs: list[dict], meta: dict) -> dict:
         want = {
             "receivers": clients, "expected": expected, "min_live": expected,
             "max_live": expected, "converged": 1, "invalid": 0, "parse_errors": 0,
+            "self_reflected": 0,
             "churn_events": per_client * (clients - 1 if flap_due else clients),
         }
         bad = [f"{k}={e.get(k)} expected {v}" for k, v in want.items() if e.get(k) != v]
@@ -168,6 +170,7 @@ def check_receipt(receipts: list[dict], meta: dict) -> dict:
             "flaps": meta["planned_flaps"], "reloads": meta["planned_reloads"],
             "receivers": meta["peers"], "min_live": meta["expected_per_client"],
             "max_live": meta["expected_per_client"], "invalid": 0, "parse_errors": 0,
+            "self_reflected": 0,
         }
         defects = [f"{k}={r.get(k)} expected {v}" for k, v in want.items() if r.get(k) != v]
     return {"value": {"receipt": receipts[:1], "defects": defects}, "pass": not defects}
