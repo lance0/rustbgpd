@@ -4506,24 +4506,30 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 
 ### FRR all-active ES peers
 
-Set `df_algorithm = "highest-preference"` when sharing an all-active ES
-with FRR 10.7.1, and bind `interface` to the CE-facing bond. FRR supports
-preference election and becomes non-DF when an ES peer advertises another
-algorithm. With rustbgpd's default `"default-modulo"`, both PEs can be
-non-DF for a VNI in the control plane. Matching highest-preference
-settings avoid that algorithm disagreement. See the
-[pinned FRR election logic](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/zebra/zebra_evpn_mh.c#L1948-L1976).
+When rustbgpd shares an all-active ES with stock FRR 10.7.1 on Linux:
+
+- Set `df_algorithm = "highest-preference"` and bind `interface` to the
+  CE-facing bond. FRR runs only preference election, and it becomes non-DF
+  on every VNI when an ES peer advertises another algorithm. rustbgpd then
+  falls back to modulo (RFC 8584 §2.2), so the two PEs disagree on the DF.
+  See the [pinned FRR election logic](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/zebra/zebra_evpn_mh.c#L1948-L1976).
+- Give FRR the higher DF preference: set FRR's `evpn mh es-df-pref` above
+  rustbgpd's `df_preference`. FRR on Linux does not filter BUM when it is
+  non-DF. It reports `non-df`, but its netlink provider
+  [returns success without applying](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/zebra/kernel_netlink.c#L1473-L1478)
+  the non-DF bridge-port update, so its ES port keeps flooding. rustbgpd as
+  non-DF does filter, so with FRR as DF the CE receives each BUM frame once.
 
 Highest-preference elects the same winner across an ES's member VNIs;
 changing the VNI does not distribute the DF role between its PEs.
 
-Election agreement does not establish non-DF forwarding enforcement.
-Stock FRR 10.7.1 Linux netlink returns success without applying its
-bridge-port update. The [partial mixed-peer receipt](../artifacts/interop/evpn-all-active-frr-20261012T000900Z/README.md)
-passed the FRR-DF cell, including rustbgpd non-DF BUM suppression and
-carrier recovery, but failed with duplicate BUM delivery when rustbgpd
-was DF. The default-modulo forwarding cell was not reached. A working
-FRR dataplane provider is required before qualifying the complete matrix.
+**Known limitation:** with rustbgpd as DF beside stock-Linux FRR, the CE
+receives each BUM frame twice, once through each PE. This is not a
+supported mode. The same applies to any VNI on which rustbgpd is DF under
+`default-modulo`. On a VNI that modulo assigns to FRR, rustbgpd filters and
+the CE receives one copy, from FRR's still-flooding port; BUM is not lost.
+The [mixed-peer receipt](../artifacts/interop/evpn-all-active-frr-20261012T131652Z/README.md) records all
+three cases.
 
 ### Auto-derived ESI (LACP, Type 1)
 

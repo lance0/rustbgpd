@@ -1,7 +1,8 @@
 ### Documentation
 
-- Document the `highest-preference` control-plane requirement for all-active
-  Ethernet Segments shared with FRR 10.7.1 and the separate FRR dataplane
-  provider requirement. A partial local receipt records passing FRR-DF
-  forwarding and carrier recovery, duplicate BUM delivery when rustbgpd
-  is DF, and the still-unqualified complete mixed-peer matrix.
+- Document the FRR 10.7.1 requirements for a shared all-active Ethernet
+  Segment: use `highest-preference` and give FRR the higher DF preference.
+  Stock FRR on Linux does not filter BUM when it is non-DF, so with
+  rustbgpd as DF the CE receives each BUM frame twice; this is a known
+  limitation. A new interop receipt covers FRR-DF forwarding and carrier
+  recovery, the rustbgpd-DF duplicate, and the default-modulo case.

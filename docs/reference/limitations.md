@@ -156,15 +156,14 @@ Known EVPN gaps:
   row to local origination; Linux retains the external-learning marker.
   Concurrent foreign FDB writers can also race the pre-apply ownership check;
   see the [ADR-0085 amendment](../adr/0085-evpn-es-interface-binding.md#amendment-2026-10-11-peer-synchronized-local-fdb-forwarding).
-- A shared all-active ES with FRR 10.7.1 requires `highest-preference` DF
-  election. FRR becomes non-DF on algorithm disagreement, so rustbgpd's
-  default-modulo election can leave both PEs non-DF in the control plane.
-  Matching election settings alone do not qualify forwarding: stock FRR
-  10.7.1 Linux netlink does not apply its non-DF bridge-port update. The
-  [partial mixed-peer receipt](../artifacts/interop/evpn-all-active-frr-20261012T000900Z/README.md)
-  passed the FRR-DF cell but recorded duplicate BUM delivery when rustbgpd
-  was DF; the default-modulo cell was not reached. Full mixed-DF forwarding
-  remains unqualified pending a working FRR dataplane provider. See
+- A shared all-active ES with stock FRR 10.7.1 on Linux is qualified only
+  with `highest-preference` and FRR as the DF. FRR becomes non-DF on every
+  VNI on algorithm disagreement, and it does not filter BUM when it is
+  non-DF: its netlink provider never applies the non-DF bridge-port update.
+  With rustbgpd as DF beside it, the CE receives each BUM frame twice, once
+  through each PE. The [mixed-peer receipt](../artifacts/interop/evpn-all-active-frr-20261012T131652Z/README.md)
+  covers one rustbgpd PE, one FRR PE and one FRR remote VTEP in a single
+  all-active ES; it is not scale evidence. See
   [FRR all-active ES peers](configuration.md#frr-all-active-es-peers).
 - Symmetric Interface-less IRB does not implement `RTA_VIA`, so a Type 5
   prefix and its next hop must be the same address family. Under an IPv6
