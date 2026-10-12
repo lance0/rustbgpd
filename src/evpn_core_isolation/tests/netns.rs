@@ -277,10 +277,11 @@ async fn netns_isolation_holds_bond_members_and_shutdown_raises_them() {
 
     // Boot hold: down until EVPN has been synced for the settle time.
     wait_for("startup hold", || !admin_up("m0") && !admin_up("m1")).await;
-    assert_eq!(
-        state(&rig.metrics, "bond0").as_deref(),
-        Some("startup_hold")
-    );
+    // The state publishes after the pass that took the links down.
+    wait_for("startup_hold state", || {
+        state(&rig.metrics, "bond0").as_deref() == Some("startup_hold")
+    })
+    .await;
     wait_for("startup release", || admin_up("m0") && admin_up("m1")).await;
     wait_for("receipt cleared", || receipt_names(dir.path()).is_empty()).await;
     assert!(dir.path().join(LOCK_FILE).exists());

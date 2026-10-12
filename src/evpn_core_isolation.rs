@@ -208,7 +208,10 @@ impl HoldPlanner {
                     events.push(self.release("released", "startup hold released after EVPN sync"));
                 } else if now.saturating_duration_since(since) >= self.backstop {
                     events.push(self.release_backstop("startup"));
-                } else if !isolated {
+                } else if !isolated && observation.sessions.synced {
+                    // The core counts as seen only once EVPN has synced,
+                    // when the peer latch can first be taken. A core lost
+                    // before that leaves the startup hold in place.
                     self.phase = Phase::Startup {
                         since,
                         core_seen_up: true,

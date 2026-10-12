@@ -96,6 +96,25 @@ async fn boot_hold_holds_every_binding_until_sync_settles() {
     assert_eq!(events[0].0, "released");
 }
 
+/// Before the first EVPN sync no peer can be latched, so a core lost then
+/// stays under the startup hold instead of becoming a peerless (and so
+/// released) isolation. After a sync it becomes an isolation hold.
+#[tokio::test(start_paused = true)]
+async fn core_lost_before_first_sync_keeps_the_startup_hold() {
+    let b = bindings(&["bond0"]);
+    let mut planner = HoldPlanner::startup(&settings(10, 180), Instant::now());
+    planner.observe(&b, &core_up(false, &["10.0.0.2"]), Instant::now());
+    planner.observe(&b, &core_lost(), Instant::now());
+    assert_eq!(
+        planner.decision("bond0"),
+        HoldDecision::Hold("startup_hold")
+    );
+
+    planner.observe(&b, &core_up(true, &["10.0.0.2"]), Instant::now());
+    planner.observe(&b, &core_lost(), Instant::now());
+    assert_eq!(planner.decision("bond0"), HoldDecision::Hold("isolated"));
+}
+
 #[tokio::test(start_paused = true)]
 async fn isolation_holds_a_segment_whose_peer_was_seen_while_the_core_was_up() {
     let b = bindings(&["bond0"]);
