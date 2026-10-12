@@ -758,9 +758,10 @@ fn same_as_matches_derived_equality() {
 /// IPv6 one on an IPv4-NLRI route stays (RFC 8950). Both the chain and the
 /// single-policy evaluators agree.
 #[test]
-fn ipv4_set_next_hop_does_not_apply_to_an_ipv6_family_route() {
+fn set_next_hop_applies_by_family() {
     let ipv4 = NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
     let ipv6 = NextHopAction::Specific("2001:db8::9".parse().unwrap());
+    let self_ = NextHopAction::Self_;
     let v6_route = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
         "2001:db8:1::".parse().unwrap(),
         48,
@@ -769,16 +770,24 @@ fn ipv4_set_next_hop_does_not_apply_to_an_ipv6_family_route() {
     for (prefix, family, action, applies) in [
         (v6_route, RouteFamily::Ipv6Unicast, &ipv4, false),
         (v6_route, RouteFamily::Ipv6Unicast, &ipv6, true),
-        (v6_route, RouteFamily::Ipv6LabeledUnicast, &ipv4, false),
-        (v6_route, RouteFamily::Ipv6LabeledUnicast, &ipv6, true),
-        (v6_route, RouteFamily::Vpnv6, &ipv4, false),
-        (v6_route, RouteFamily::Vpnv6, &ipv6, true),
+        (v6_route, RouteFamily::Ipv6Unicast, &self_, true),
         (v4_route, RouteFamily::Ipv4Unicast, &ipv4, true),
         (v4_route, RouteFamily::Ipv4Unicast, &ipv6, true),
-        (v4_route, RouteFamily::Ipv4LabeledUnicast, &ipv4, true),
-        (v4_route, RouteFamily::Ipv4LabeledUnicast, &ipv6, true),
-        (v4_route, RouteFamily::Vpnv4, &ipv4, true),
-        (v4_route, RouteFamily::Vpnv4, &ipv6, true),
+        (v4_route, RouteFamily::Ipv4Unicast, &self_, true),
+        // Labeled-unicast and VPN routes keep their received next hop: the
+        // labels are bound there (RFC 8277 §3.2.2), so no action applies.
+        (v6_route, RouteFamily::Ipv6LabeledUnicast, &ipv4, false),
+        (v6_route, RouteFamily::Ipv6LabeledUnicast, &ipv6, false),
+        (v6_route, RouteFamily::Ipv6LabeledUnicast, &self_, false),
+        (v6_route, RouteFamily::Vpnv6, &ipv4, false),
+        (v6_route, RouteFamily::Vpnv6, &ipv6, false),
+        (v6_route, RouteFamily::Vpnv6, &self_, false),
+        (v4_route, RouteFamily::Ipv4LabeledUnicast, &ipv4, false),
+        (v4_route, RouteFamily::Ipv4LabeledUnicast, &ipv6, false),
+        (v4_route, RouteFamily::Ipv4LabeledUnicast, &self_, false),
+        (v4_route, RouteFamily::Vpnv4, &ipv4, false),
+        (v4_route, RouteFamily::Vpnv4, &ipv6, false),
+        (v4_route, RouteFamily::Vpnv4, &self_, false),
     ] {
         let mut statement = stmt(None, PolicyAction::Permit, vec![]);
         statement.modifications.set_next_hop = Some(action.clone());

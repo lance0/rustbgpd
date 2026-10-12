@@ -1174,6 +1174,36 @@ impl CompiledChain {
         self.any_action_mods(&|mods| matches!(mods.as_path_prepend, Some((0, _))))
     }
 
+    /// The first `(policy, term)` whose `set next-hop` can execute for a
+    /// route of `family`, including inside loop bodies. A term counts unless
+    /// its guard provably never matches that family (see
+    /// [`guard_excludes_family`]); anything the analysis cannot prove counts.
+    #[must_use]
+    pub fn set_next_hop_reaching(
+        &self,
+        family: RouteFamily,
+    ) -> Option<(Option<&str>, Option<&str>)> {
+        fn reaches(term: &Term, family: RouteFamily) -> bool {
+            if guard_excludes_family(&term.guard, family) {
+                return false;
+            }
+            match &term.action {
+                TermAction::Permit(mods) | TermAction::Continue(mods) => {
+                    mods.set_next_hop.is_some()
+                }
+                TermAction::ForEach(node) => node.body.iter().any(|body| reaches(body, family)),
+                _ => false,
+            }
+        }
+        self.policies.iter().find_map(|policy| {
+            policy
+                .terms
+                .iter()
+                .find(|term| reaches(term, family))
+                .map(|term| (policy.name.as_deref(), term.name.as_deref()))
+        })
+    }
+
     /// Does any term across all policies — recursing into
     /// [`TermAction::ForEach`] bodies (LAN-303) — satisfy `pred`?
     fn any_term_node(&self, pred: &impl Fn(&Term) -> bool) -> bool {
@@ -1195,6 +1225,39 @@ impl CompiledChain {
             TermAction::Permit(mods) | TermAction::Continue(mods) => pred(mods),
             _ => false,
         })
+    }
+}
+
+/// Does `guard` never match a route of `family`? Only family and EVPN
+/// route-type predicates (and their `and`/`or`/`not` combinations) are
+/// analysed; any other predicate is unknown, so the answer is `false`.
+fn guard_excludes_family(guard: &MatchExpr, family: RouteFamily) -> bool {
+    match guard {
+        MatchExpr::FamilyIs(other) => *other != family,
+        MatchExpr::FamilyNe(other) => *other == family,
+        // Only an EVPN NLRI carries an EVPN route type.
+        MatchExpr::EvpnRouteTypeIs(_) | MatchExpr::EvpnRouteTypeNe(_) => {
+            family != RouteFamily::Evpn
+        }
+        MatchExpr::And(children) => children.iter().any(|g| guard_excludes_family(g, family)),
+        MatchExpr::Or(children) => children.iter().all(|g| guard_excludes_family(g, family)),
+        MatchExpr::Not(inner) => guard_matches_family(inner, family),
+        _ => false,
+    }
+}
+
+/// Does `guard` match every route of `family`? The dual of
+/// [`guard_excludes_family`], needed for `not`/`else` branches. Assumes
+/// a typed family, which every live evaluation context carries.
+fn guard_matches_family(guard: &MatchExpr, family: RouteFamily) -> bool {
+    match guard {
+        MatchExpr::True => true,
+        MatchExpr::FamilyIs(other) => *other == family,
+        MatchExpr::FamilyNe(other) => *other != family,
+        MatchExpr::And(children) => children.iter().all(|g| guard_matches_family(g, family)),
+        MatchExpr::Or(children) => children.iter().any(|g| guard_matches_family(g, family)),
+        MatchExpr::Not(inner) => guard_excludes_family(inner, family),
+        _ => false,
     }
 }
 

@@ -1667,8 +1667,9 @@ impl Config {
         validate_bfd(self)?;
         // Every named chain (global, group, neighbor) already went through
         // `resolve_chain_with_store` above, which charges the same node budget, so only
-        // the inherited effective chains remain to be bounded here.
-        self.validate_effective_policy_chain_nodes()?;
+        // the inherited effective chains remain to be bounded here. The same pass
+        // checks each effective export chain against its binding's families.
+        self.validate_effective_policy_chains(true)?;
 
         Ok(())
     }

@@ -2484,6 +2484,7 @@ mod evpn_instances;
 mod evpn_ip_vrf;
 mod evpn_segments;
 mod examples;
+mod export_next_hop;
 mod families;
 mod grpc_security;
 mod gshut_blackhole;

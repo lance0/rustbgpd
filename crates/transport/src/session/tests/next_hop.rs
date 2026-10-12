@@ -2790,19 +2790,20 @@ const MPLS_FAMILIES: [(Afi, Safi); 4] = [
     (Afi::Ipv6, Safi::MplsVpn),
 ];
 
-/// A dual-stack export policy shared across families sets an IPv4 next hop.
-/// Through the real RIB staging, exact-export preflight and transport
-/// encoder, labeled-IPv6 and `VPNv6` routes keep their IPv6 next hop (16 and
-/// 24 octets), while labeled-IPv4 and `VPNv4` routes take the IPv4 one (4 and
-/// 12 octets). A `VPNv6` route stored with an IPv4 next hop (the 12-octet form
-/// the decoder accepts) is withheld rather than encoded. Explain reports the
-/// next hop that reaches the wire.
+/// An export policy that bypassed config validation sets an IPv4 next hop
+/// on every MPLS family. Through the real RIB staging, exact-export preflight
+/// and transport encoder, every labeled-unicast and VPN route keeps its
+/// received next hop, where its labels are bound (RFC 8277 §3.2.2): 4, 16,
+/// 12 and 24 octets. A `VPNv6` route stored with an IPv4 next hop (the
+/// 12-octet form the decoder accepts) is withheld rather than encoded.
+/// Explain reports the next hop that reaches the wire and no next-hop
+/// modification.
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one ordered RIB-to-wire scenario across four MPLS families"
 )]
-async fn ipv4_export_set_next_hop_skips_labeled_ipv6_and_vpnv6_on_the_wire() {
+async fn export_set_next_hop_keeps_labeled_and_vpn_next_hops_on_the_wire() {
     let (mut session, rib_rx) =
         make_test_session_with_metrics_and_identity(BgpMetrics::new(), SessionIdentity::primary(7));
     let (client, mut server) = connected_stream_pair().await;
@@ -2911,9 +2912,9 @@ async fn ipv4_export_set_next_hop_skips_labeled_ipv6_and_vpnv6_on_the_wire() {
     let rd_zero = [0_u8; 8];
     let with_rd = |ip: Vec<u8>| [rd_zero.to_vec(), ip].concat();
     let mut expected = vec![
-        (1, 4, 4, vec![192, 0, 2, 9]),
+        (1, 4, 4, vec![192, 0, 2, 7]),
         (2, 4, 16, ipv6_bytes(RECEIVED_IPV6_NEXT_HOP)),
-        (1, 128, 12, with_rd(vec![192, 0, 2, 9])),
+        (1, 128, 12, with_rd(vec![192, 0, 2, 7])),
         (2, 128, 24, with_rd(ipv6_bytes(RECEIVED_IPV6_NEXT_HOP))),
     ];
     let mut wire = Vec::new();
@@ -2931,15 +2932,16 @@ async fn ipv4_export_set_next_hop_skips_labeled_ipv6_and_vpnv6_on_the_wire() {
     assert_eq!(wire, expected, "MP_REACH (AFI, SAFI, NH-Len, next hop)");
 
     // Explain reports the next hop that reached the wire, and no
-    // inapplicable IPv4 next-hop modification.
+    // inapplicable next-hop modification.
+    let received_v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
     for (prefix, rd, labeled, next_hop) in [
-        (labeled_v4, None, true, set_ipv4),
+        (labeled_v4, None, true, received_v4),
         (labeled_v6, None, true, v6_next_hop),
         (
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24)),
             Some(()),
             false,
-            set_ipv4,
+            received_v4,
         ),
         (
             Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 48)),
@@ -2963,11 +2965,8 @@ async fn ipv4_export_set_next_hop_skips_labeled_ipv6_and_vpnv6_on_the_wire() {
             .unwrap();
         let explain = explained.await.unwrap().unwrap();
         assert_eq!(explain.next_hop, Some(next_hop), "explain {prefix}");
-        let expected_mod = next_hop
-            .is_ipv4()
-            .then_some(rustbgpd_policy::NextHopAction::Specific(set_ipv4));
         assert_eq!(
-            explain.modifications.set_next_hop, expected_mod,
+            explain.modifications.set_next_hop, None,
             "explain modifications {prefix}"
         );
     }
@@ -3105,13 +3104,14 @@ async fn labeled_ipv4_route_with_ipv6_next_hop_requires_labeled_extended_nexthop
 }
 
 /// Labeled-IPv4 export through the real RIB staging, exact-export preflight,
-/// transport encoder and a socket read, for both sources of an IPv6 next hop:
-/// a route received with one (from an Extended Next Hop peer), and an export
-/// policy `set next-hop <IPv6>`. A control route keeps its IPv4 next hop.
+/// transport encoder and a socket read, for a route received with an IPv6
+/// next hop (from an Extended Next Hop peer). An export policy
+/// `set next-hop <IPv6>` does not apply to a labeled route, so its target
+/// keeps its IPv4 next hop, like the control route.
 ///
-/// With `<1,4,2>` negotiated the IPv6 next hops reach the wire as 16 octets.
-/// Without it neither route is staged or encoded, and each is counted as
-/// `bgp_exact_export_rejections_total{reason="ipv4_requires_extended_next_hop"}`.
+/// With `<1,4,2>` negotiated the received IPv6 next hop reaches the wire as
+/// 16 octets. Without it that route is not staged or encoded, and is counted
+/// as `bgp_exact_export_rejections_total{reason="ipv4_requires_extended_next_hop"}`.
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -3202,10 +3202,9 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
             .await
             .unwrap();
 
-        let mut expected = vec![(control_prefix, 4, ipv4)];
+        let mut expected = vec![(control_prefix, 4, ipv4), (set_prefix, 4, ipv4)];
         if enhe == LabeledEnhe::Labeled {
             expected.push((received_prefix, 16, received_v6));
-            expected.push((set_prefix, 16, set_v6));
         }
         let rejections = || {
             counter_samples(&rib_metrics, "bgp_exact_export_rejections_total")
@@ -3220,7 +3219,7 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
         let expected_rejections = if enhe == LabeledEnhe::Labeled {
             0.0
         } else {
-            2.0
+            1.0
         };
 
         // Forward every RIB export (End-of-RIB included) to the transport
@@ -3292,13 +3291,14 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
 }
 
 /// Exercise policy staging, exact-export preflight and wire encoding together.
-/// An unchanged primary may keep its same-interface link-local companion; a
-/// changed primary must discard both the companion and its source scope.
+/// An export `set next-hop` never applies to a labeled-IPv6 or `VPNv6` route
+/// (RFC 8277 §3.2.2), so the received primary keeps its same-interface
+/// link-local companion and source scope whatever the policy names.
 #[expect(
     clippy::too_many_lines,
     reason = "one RIB-to-wire scenario with unchanged and rewritten next-hop controls"
 )]
-async fn check_mpls_specific_rewrite_link_local(safi: Safi, add_path: bool) {
+async fn check_mpls_set_next_hop_keeps_link_local(safi: Safi, add_path: bool) {
     let primary: IpAddr = RECEIVED_IPV6_NEXT_HOP.parse().unwrap();
     let rewritten: IpAddr = "2001:db8::9".parse().unwrap();
     let companion = "fe80::a8c1:1".parse().unwrap();
@@ -3429,10 +3429,8 @@ async fn check_mpls_specific_rewrite_link_local(safi: Safi, add_path: bool) {
                 break (wire, raw);
             }
         };
-        let selected = override_addr.unwrap_or(primary);
-        let changed = selected != primary;
         let mut expected = Vec::new();
-        for addr in std::iter::once(selected).chain((!changed).then_some(IpAddr::V6(companion))) {
+        for addr in [primary, IpAddr::V6(companion)] {
             if safi == Safi::MplsVpn {
                 expected.extend([0_u8; 8]);
             }
@@ -3464,8 +3462,8 @@ async fn check_mpls_specific_rewrite_link_local(safi: Safi, add_path: bool) {
                 _ => None,
             })
             .expect("MP_REACH attribute");
-        assert_eq!(mp.next_hop, selected);
-        assert_eq!(mp.link_local_next_hop, (!changed).then_some(companion));
+        assert_eq!(mp.next_hop, primary);
+        assert_eq!(mp.link_local_next_hop, Some(companion));
         if safi == Safi::LabeledUnicast {
             assert_eq!(mp.labeled_announced.len(), 1);
             assert_eq!(
@@ -3481,9 +3479,9 @@ async fn check_mpls_specific_rewrite_link_local(safi: Safi, add_path: bool) {
             );
             assert_eq!(mp.vpn_announced[0].path_id, staged.3);
         }
-        assert_eq!(staged.0, selected);
-        assert_eq!(staged.1, (!changed).then_some(companion));
-        assert_eq!(staged.2, (!changed).then_some(scope.clone()));
+        assert_eq!(staged.0, primary);
+        assert_eq!(staged.1, Some(companion));
+        assert_eq!(staged.2, Some(scope.clone()));
         assert_eq!(staged.3 != 0, add_path, "outbound Add-Path identity");
         drop(session);
         manager_task.abort();
@@ -3492,21 +3490,21 @@ async fn check_mpls_specific_rewrite_link_local(safi: Safi, add_path: bool) {
 }
 
 #[tokio::test]
-async fn labeled_ipv6_specific_rewrite_link_local_on_the_wire() {
-    check_mpls_specific_rewrite_link_local(Safi::LabeledUnicast, false).await;
+async fn labeled_ipv6_set_next_hop_keeps_link_local_on_the_wire() {
+    check_mpls_set_next_hop_keeps_link_local(Safi::LabeledUnicast, false).await;
 }
 
 #[tokio::test]
-async fn labeled_ipv6_add_path_specific_rewrite_link_local_on_the_wire() {
-    check_mpls_specific_rewrite_link_local(Safi::LabeledUnicast, true).await;
+async fn labeled_ipv6_add_path_set_next_hop_keeps_link_local_on_the_wire() {
+    check_mpls_set_next_hop_keeps_link_local(Safi::LabeledUnicast, true).await;
 }
 
 #[tokio::test]
-async fn vpnv6_specific_rewrite_link_local_on_the_wire() {
-    check_mpls_specific_rewrite_link_local(Safi::MplsVpn, false).await;
+async fn vpnv6_set_next_hop_keeps_link_local_on_the_wire() {
+    check_mpls_set_next_hop_keeps_link_local(Safi::MplsVpn, false).await;
 }
 
 #[tokio::test]
-async fn vpnv6_add_path_specific_rewrite_link_local_on_the_wire() {
-    check_mpls_specific_rewrite_link_local(Safi::MplsVpn, true).await;
+async fn vpnv6_add_path_set_next_hop_keeps_link_local_on_the_wire() {
+    check_mpls_set_next_hop_keeps_link_local(Safi::MplsVpn, true).await;
 }
