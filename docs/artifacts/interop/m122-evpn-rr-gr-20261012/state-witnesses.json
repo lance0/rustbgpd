@@ -1,0 +1,881 @@
+[
+  {
+    "client_flaps": 0,
+    "client_keys": [
+      "[type:A-D][rd:65001:11][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][etag:0]",
+      "[type:A-D][rd:65001:12][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:02][etag:0]",
+      "[type:Prefix][rd:65001:51][etag:0][prefix:203.0.113.1/32]",
+      "[type:Prefix][rd:65001:52][etag:0][prefix:203.0.113.2/32]",
+      "[type:esi][rd:65001:41][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][ip:10.0.122.2]",
+      "[type:esi][rd:65001:42][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:02][ip:10.0.122.2]",
+      "[type:macadv][rd:65001:21][etag:0][mac:02:00:00:00:12:01][ip:192.0.2.1]",
+      "[type:macadv][rd:65001:22][etag:0][mac:02:00:00:00:12:02][ip:192.0.2.2]",
+      "[type:multicast][rd:65001:31][etag:0][ip:10.0.122.2]",
+      "[type:multicast][rd:65001:32][etag:0][ip:10.0.122.2]"
+    ],
+    "client_llgr_keys": [],
+    "phase": "initial",
+    "rr": [
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:32",
+        "route_type": 3,
+        "route_type_name": "imet",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "0.0.0.0",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "203.0.113.2/32",
+        "rd": "65001:52",
+        "route_type": 5,
+        "route_type_name": "ip-prefix",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "192.0.2.1",
+        "label": 10122,
+        "label2": 0,
+        "mac": "02:00:00:00:12:01",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:21",
+        "route_type": 2,
+        "route_type_name": "mac-ip",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:31",
+        "route_type": 3,
+        "route_type_name": "imet",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:02",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:12",
+        "route_type": 1,
+        "route_type_name": "ead",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:02",
+        "ethernet_tag": "",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:42",
+        "route_type": 4,
+        "route_type_name": "es",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "192.0.2.2",
+        "label": 10122,
+        "label2": 0,
+        "mac": "02:00:00:00:12:02",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:22",
+        "route_type": 2,
+        "route_type_name": "mac-ip",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:11",
+        "route_type": 1,
+        "route_type_name": "ead",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "0.0.0.0",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "203.0.113.1/32",
+        "rd": "65001:51",
+        "route_type": 5,
+        "route_type_name": "ip-prefix",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:41",
+        "route_type": 4,
+        "route_type_name": "es",
+        "tunnel_type": 8
+      }
+    ],
+    "source_stale": null
+  },
+  {
+    "client_flaps": 0,
+    "client_keys": [
+      "[type:A-D][rd:65001:11][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][etag:0]",
+      "[type:A-D][rd:65001:12][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:02][etag:0]",
+      "[type:Prefix][rd:65001:51][etag:0][prefix:203.0.113.1/32]",
+      "[type:Prefix][rd:65001:52][etag:0][prefix:203.0.113.2/32]",
+      "[type:esi][rd:65001:41][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][ip:10.0.122.2]",
+      "[type:esi][rd:65001:42][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:02][ip:10.0.122.2]",
+      "[type:macadv][rd:65001:21][etag:0][mac:02:00:00:00:12:01][ip:192.0.2.1]",
+      "[type:macadv][rd:65001:22][etag:0][mac:02:00:00:00:12:02][ip:192.0.2.2]",
+      "[type:multicast][rd:65001:31][etag:0][ip:10.0.122.2]",
+      "[type:multicast][rd:65001:32][etag:0][ip:10.0.122.2]"
+    ],
+    "client_llgr_keys": [],
+    "phase": "gr-ten",
+    "rr": [
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:32",
+        "route_type": 3,
+        "route_type_name": "imet",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "0.0.0.0",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "203.0.113.2/32",
+        "rd": "65001:52",
+        "route_type": 5,
+        "route_type_name": "ip-prefix",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "192.0.2.1",
+        "label": 10122,
+        "label2": 0,
+        "mac": "02:00:00:00:12:01",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:21",
+        "route_type": 2,
+        "route_type_name": "mac-ip",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:31",
+        "route_type": 3,
+        "route_type_name": "imet",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:02",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:12",
+        "route_type": 1,
+        "route_type_name": "ead",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:02",
+        "ethernet_tag": "",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:42",
+        "route_type": 4,
+        "route_type_name": "es",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "192.0.2.2",
+        "label": 10122,
+        "label2": 0,
+        "mac": "02:00:00:00:12:02",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:22",
+        "route_type": 2,
+        "route_type_name": "mac-ip",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:11",
+        "route_type": 1,
+        "route_type_name": "ead",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "0.0.0.0",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "203.0.113.1/32",
+        "rd": "65001:51",
+        "route_type": 5,
+        "route_type_name": "ip-prefix",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:41",
+        "route_type": 4,
+        "route_type_name": "es",
+        "tunnel_type": 8
+      }
+    ],
+    "source_stale": 10
+  },
+  {
+    "client_flaps": 0,
+    "client_keys": [
+      "[type:A-D][rd:65001:11][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][etag:0]",
+      "[type:Prefix][rd:65001:51][etag:0][prefix:203.0.113.1/32]",
+      "[type:esi][rd:65001:41][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][ip:10.0.122.2]",
+      "[type:macadv][rd:65001:21][etag:0][mac:02:00:00:00:12:01][ip:192.0.2.1]",
+      "[type:multicast][rd:65001:31][etag:0][ip:10.0.122.2]"
+    ],
+    "client_llgr_keys": [],
+    "phase": "eor-five",
+    "rr": [
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "192.0.2.1",
+        "label": 10122,
+        "label2": 0,
+        "mac": "02:00:00:00:12:01",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:21",
+        "route_type": 2,
+        "route_type_name": "mac-ip",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:31",
+        "route_type": 3,
+        "route_type_name": "imet",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:11",
+        "route_type": 1,
+        "route_type_name": "ead",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "0.0.0.0",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "203.0.113.1/32",
+        "rd": "65001:51",
+        "route_type": 5,
+        "route_type_name": "ip-prefix",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:41",
+        "route_type": 4,
+        "route_type_name": "es",
+        "tunnel_type": 8
+      }
+    ],
+    "source_stale": 0
+  },
+  {
+    "client_flaps": 0,
+    "client_keys": [
+      "[type:A-D][rd:65001:11][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][etag:0]",
+      "[type:Prefix][rd:65001:51][etag:0][prefix:203.0.113.1/32]",
+      "[type:esi][rd:65001:41][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][ip:10.0.122.2]",
+      "[type:macadv][rd:65001:21][etag:0][mac:02:00:00:00:12:01][ip:192.0.2.1]",
+      "[type:multicast][rd:65001:31][etag:0][ip:10.0.122.2]"
+    ],
+    "client_llgr_keys": [],
+    "phase": "gr-five",
+    "rr": [
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "192.0.2.1",
+        "label": 10122,
+        "label2": 0,
+        "mac": "02:00:00:00:12:01",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:21",
+        "route_type": 2,
+        "route_type_name": "mac-ip",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:31",
+        "route_type": 3,
+        "route_type_name": "imet",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:11",
+        "route_type": 1,
+        "route_type_name": "ead",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "0.0.0.0",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "203.0.113.1/32",
+        "rd": "65001:51",
+        "route_type": 5,
+        "route_type_name": "ip-prefix",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:41",
+        "route_type": 4,
+        "route_type_name": "es",
+        "tunnel_type": 8
+      }
+    ],
+    "source_stale": 5
+  },
+  {
+    "client_flaps": 0,
+    "client_keys": [
+      "[type:A-D][rd:65001:11][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][etag:0]",
+      "[type:Prefix][rd:65001:51][etag:0][prefix:203.0.113.1/32]",
+      "[type:esi][rd:65001:41][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][ip:10.0.122.2]",
+      "[type:macadv][rd:65001:21][etag:0][mac:02:00:00:00:12:01][ip:192.0.2.1]",
+      "[type:multicast][rd:65001:31][etag:0][ip:10.0.122.2]"
+    ],
+    "client_llgr_keys": [
+      "[type:A-D][rd:65001:11][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][etag:0]",
+      "[type:Prefix][rd:65001:51][etag:0][prefix:203.0.113.1/32]",
+      "[type:esi][rd:65001:41][esi:ESI_ARBITRARY | 00:00:00:00:00:00:00:12:01][ip:10.0.122.2]",
+      "[type:macadv][rd:65001:21][etag:0][mac:02:00:00:00:12:01][ip:192.0.2.1]",
+      "[type:multicast][rd:65001:31][etag:0][ip:10.0.122.2]"
+    ],
+    "phase": "llgr-five",
+    "rr": [
+      {
+        "as_path": [],
+        "communities": [
+          "LLGR_STALE"
+        ],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "192.0.2.1",
+        "label": 10122,
+        "label2": 0,
+        "mac": "02:00:00:00:12:01",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:21",
+        "route_type": 2,
+        "route_type_name": "mac-ip",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [
+          "LLGR_STALE"
+        ],
+        "esi": "",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:31",
+        "route_type": 3,
+        "route_type_name": "imet",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [
+          "LLGR_STALE"
+        ],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:11",
+        "route_type": 1,
+        "route_type_name": "ead",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [
+          "LLGR_STALE"
+        ],
+        "esi": "00:00:00:00:00:00:00:00:00:00",
+        "ethernet_tag": "0",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "0.0.0.0",
+        "ip": "",
+        "label": 10122,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "203.0.113.1/32",
+        "rd": "65001:51",
+        "route_type": 5,
+        "route_type_name": "ip-prefix",
+        "tunnel_type": 8
+      },
+      {
+        "as_path": [],
+        "communities": [
+          "LLGR_STALE"
+        ],
+        "esi": "00:00:00:00:00:00:00:00:12:01",
+        "ethernet_tag": "",
+        "extended_communities": [
+          842127122628730,
+          219550481834311688
+        ],
+        "gateway": "",
+        "ip": "10.0.122.2",
+        "label": 0,
+        "label2": 0,
+        "mac": "",
+        "next_hop": "10.0.122.2",
+        "peer": "10.0.122.2",
+        "prefix": "",
+        "rd": "65001:41",
+        "route_type": 4,
+        "route_type_name": "es",
+        "tunnel_type": 8
+      }
+    ],
+    "source_stale": 5
+  },
+  {
+    "client_flaps": 0,
+    "client_keys": [],
+    "client_llgr_keys": [],
+    "phase": "expired",
+    "rr": [],
+    "source_stale": 0
+  }
+]
