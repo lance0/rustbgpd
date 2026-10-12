@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded management-plane load for the route-server flagship soak.
+"""Bounded management-plane load for the flagship soaks.
 
 Five independent workers exercise the shipped HTTP and ``rbgp`` surfaces.
 Only timing, disposition, byte count, and a payload digest are retained; the
@@ -9,6 +9,10 @@ client-side failure stays attributable without daemon-side evidence. A
 ``doctor`` run that exits nonzero is the one exception to discarding bodies:
 its stdout report is saved, size-capped, next to the JSONL evidence, and the
 record names that file plus the red checks that decided the verdict.
+
+``--evpn-peer`` selects the EVPN route-reflector operation set: the unicast
+``policy_stats`` and ``rib_prefix`` reads are replaced by the paged EVPN peer
+views (``rbgp evpn received|advertised <peer>``) for that never-flapped client.
 """
 
 from __future__ import annotations
@@ -31,6 +35,9 @@ from typing import BinaryIO, Callable, Optional
 
 
 OPERATIONS = ("metrics", "neighbor", "policy_stats", "rib_prefix", "doctor")
+EVPN_OPERATIONS = ("metrics", "neighbor", "evpn_received", "evpn_advertised", "doctor")
+# The EVPN soak originates only Type 2 and Type 5 routes.
+EVPN_ROUTE_TYPES = (2, 5)
 
 # `rbgp doctor` exits 2 when it wrote a bundle but at least one check is red;
 # that is a report, not a CLI failure, so its JSON is still validated.
@@ -63,6 +70,14 @@ PHASE_FRACTIONS = {
     "neighbor": 0.35,
     "policy_stats": 0.5,
     "rib_prefix": 0.65,
+    "doctor": 0.8,
+}
+# The EVPN views take the slots of the unicast reads they replace.
+EVPN_PHASE_FRACTIONS = {
+    "metrics": 0.0,
+    "neighbor": 0.35,
+    "evpn_received": 0.5,
+    "evpn_advertised": 0.65,
     "doctor": 0.8,
 }
 
@@ -116,12 +131,39 @@ def validate_metrics(status: int, payload: Optional[bytes], byte_count: int) -> 
     return "ok"
 
 
+def validate_evpn_view(operation: str, value: object, peer: str) -> str:
+    """One page of a peer EVPN view: received rows come from `peer`, advertised
+    rows never do (a reflector does not send a client its own routes)."""
+    received = operation == "evpn_received"
+    if (
+        not isinstance(value, dict)
+        or value.get("view") != ("received" if received else "advertised")
+        or value.get("neighbor") != peer
+        or not isinstance(value.get("routes"), list)
+        or isinstance(value.get("total_count"), bool)
+        or not isinstance(value.get("total_count"), int)
+    ):
+        return "schema"
+    routes = value["routes"]
+    if not routes or value["total_count"] < len(routes):
+        return "route"
+    for row in routes:
+        if (
+            not isinstance(row, dict)
+            or row.get("route_type") not in EVPN_ROUTE_TYPES
+            or (row.get("peer") == peer) != received
+        ):
+            return "route"
+    return "ok"
+
+
 def validate_cli_json(
     operation: str,
     payload: Optional[bytes],
     peer_count: int,
     route_prefix: str,
 ) -> str:
+    """`route_prefix` is the EVPN peer address for the EVPN view operations."""
     if payload is None:
         return "payload_too_large"
     try:
@@ -142,6 +184,8 @@ def validate_cli_json(
         if len(value) != 1 or not isinstance(value[0], dict):
             return "route"
         return "ok" if value[0].get("prefix") == route_prefix else "route"
+    if operation in ("evpn_received", "evpn_advertised"):
+        return validate_evpn_view(operation, value, route_prefix)
     if operation == "doctor":
         return validate_doctor(value)
     raise ValueError(f"unsupported CLI operation: {operation}")
@@ -284,17 +328,24 @@ def run_cli_command(
 
 
 def cli_commands(
-    rbgp: str, uds: str, route_prefix: str, doctor_bundle: str
+    rbgp: str, uds: str, route_prefix: str, doctor_bundle: str,
+    evpn_peer: Optional[str] = None,
 ) -> dict[str, list[str]]:
     base = [rbgp, "-s", uds, "--json"]
-    return {
+    commands = {
         "neighbor": [*base, "neighbor"],
-        "policy_stats": [*base, "policy", "stats", "--direction", "both"],
-        "rib_prefix": [*base, "rib", "--prefix", route_prefix],
         # One fixed bundle path, rewritten in place: a defaulted output name
         # is timestamped and would accumulate a tarball per attempt.
         "doctor": [*base, "doctor", "--output", doctor_bundle],
     }
+    if evpn_peer is None:
+        commands["policy_stats"] = [*base, "policy", "stats", "--direction", "both"]
+        commands["rib_prefix"] = [*base, "rib", "--prefix", route_prefix]
+    else:
+        # One default-size page each: bounded work, the paged peer views.
+        commands["evpn_received"] = [*base, "evpn", "received", evpn_peer]
+        commands["evpn_advertised"] = [*base, "evpn", "advertised", evpn_peer]
+    return commands
 
 
 class JsonlSink:
@@ -344,34 +395,43 @@ class ManagementPlaneLoad:
         cli_interval_seconds: float,
         doctor_interval_seconds: float,
         timeout_seconds: float,
+        evpn_peer: Optional[str] = None,
     ) -> None:
         self.sink = JsonlSink(output)
+        self.operations = OPERATIONS if evpn_peer is None else EVPN_OPERATIONS
+        # The identity the analyzer matches: the unicast route the RIB read
+        # asks for, or the EVPN client whose peer views are read.
+        self.identity = (
+            {"route_prefix": route_prefix} if evpn_peer is None
+            else {"evpn_peer": evpn_peer}
+        )
+        self.subject = route_prefix if evpn_peer is None else evpn_peer
         self.evidence_dir = os.path.dirname(os.path.abspath(output))
         self.metrics_url = metrics_url
         self.peer_count = peer_count
         self.route_prefix = route_prefix
         self.timeout_seconds = timeout_seconds
         self.intervals = {
-            "metrics": metrics_interval_seconds,
-            "neighbor": cli_interval_seconds,
-            "policy_stats": cli_interval_seconds,
-            "rib_prefix": cli_interval_seconds,
-            "doctor": doctor_interval_seconds,
+            operation: metrics_interval_seconds if operation == "metrics"
+            else doctor_interval_seconds if operation == "doctor"
+            else cli_interval_seconds
+            for operation in self.operations
         }
         # Wrapped into each operation's own interval: the knobs are independent.
+        fractions = PHASE_FRACTIONS if evpn_peer is None else EVPN_PHASE_FRACTIONS
         self.phase_offsets = {
             operation: round(
-                PHASE_FRACTIONS[operation] * metrics_interval_seconds
+                fractions[operation] * metrics_interval_seconds
                 % self.intervals[operation], 6,
             )
-            for operation in OPERATIONS
+            for operation in self.operations
         }
-        self.commands = cli_commands(rbgp, uds, route_prefix, doctor_bundle)
+        self.commands = cli_commands(rbgp, uds, route_prefix, doctor_bundle, evpn_peer)
         self.stop = threading.Event()
         self.counter_lock = threading.Lock()
         self.counts = {
             operation: {"scheduled": 0, "completed": 0, "missed": 0}
-            for operation in OPERATIONS
+            for operation in self.operations
         }
         self.started_monotonic = time.monotonic()
         self.stop_requested_monotonic: Optional[float] = None
@@ -409,7 +469,7 @@ class ManagementPlaneLoad:
             operation,
             self.timeout_seconds,
             self.peer_count,
-            self.route_prefix,
+            self.subject,
         )
 
     def request_stop(self) -> None:
@@ -475,12 +535,12 @@ class ManagementPlaneLoad:
         self.sink.write({
             "record": "start",
             "started_monotonic": round(self.started_monotonic, 6),
-            "operations": list(OPERATIONS),
+            "operations": list(self.operations),
             "interval_seconds": self.intervals,
             "phase_offset_seconds": self.phase_offsets,
             "timeout_seconds": self.timeout_seconds,
             "peer_count": self.peer_count,
-            "route_prefix": self.route_prefix,
+            **self.identity,
         })
         workers = [
             threading.Thread(
@@ -489,7 +549,7 @@ class ManagementPlaneLoad:
                 name=operation,
                 daemon=True,
             )
-            for operation in OPERATIONS
+            for operation in self.operations
         ]
         for worker in workers:
             worker.start()
@@ -506,9 +566,9 @@ class ManagementPlaneLoad:
         if self.stop_requested_monotonic is None:
             self.sink.close()
             return 1
-        scheduled = {op: self.counts[op]["scheduled"] for op in OPERATIONS}
-        completed = {op: self.counts[op]["completed"] for op in OPERATIONS}
-        missed = {op: self.counts[op]["missed"] for op in OPERATIONS}
+        scheduled = {op: self.counts[op]["scheduled"] for op in self.operations}
+        completed = {op: self.counts[op]["completed"] for op in self.operations}
+        missed = {op: self.counts[op]["missed"] for op in self.operations}
         self.sink.write({
             "record": "summary",
             "started_monotonic": round(self.started_monotonic, 6),
@@ -530,7 +590,7 @@ class ManagementPlaneLoad:
             "interval_seconds": self.intervals,
             "timeout_seconds": self.timeout_seconds,
             "peer_count": self.peer_count,
-            "route_prefix": self.route_prefix,
+            **self.identity,
         }, terminal=True)
         self.sink.close()
         return 0
@@ -558,6 +618,8 @@ def main() -> int:
     parser.add_argument("--socket", required=True)
     parser.add_argument("--peers", required=True, type=positive_int)
     parser.add_argument("--route-prefix", default="20.0.0.0/24")
+    parser.add_argument("--evpn-peer", default=None,
+                        help="EVPN RR mode: read this client's EVPN peer views")
     parser.add_argument("--doctor-bundle", required=True)
     parser.add_argument("--metrics-interval", type=positive_float, default=1.0)
     parser.add_argument("--cli-interval", type=positive_float, default=5.0)
@@ -577,6 +639,7 @@ def main() -> int:
         cli_interval_seconds=args.cli_interval,
         doctor_interval_seconds=args.doctor_interval,
         timeout_seconds=args.timeout,
+        evpn_peer=args.evpn_peer,
     )
 
     def stop_on_sigterm(_signum: int, _frame: object) -> None:

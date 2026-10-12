@@ -15,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 HELPER = HERE / "fd-headroom.sh"
-RUNNERS = ("run-soak-rs-flagship.sh", "run-soak-rr-flagship.sh")
+RUNNERS = ("run-soak-rs-flagship.sh", "run-soak-rr-flagship.sh", "run-soak-evpn-rr.sh")
 
 
 def run_guard(script, *, hard_limit=None, env_target=None):

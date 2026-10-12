@@ -827,6 +827,205 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     handle.await.unwrap();
 }
 
+/// A Type 2 or Type 5 route from 10.0.0.1, distinguished by `n`.
+fn churn_route(n: u8, type5: bool) -> EvpnRibRoute {
+    let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let rd = RouteDistinguisher([0, 1, 10, 0, 0, 1, 0, 1]);
+    route.route = if type5 {
+        EvpnRoute::IpPrefix(rustbgpd_wire::EvpnIpPrefixRoute {
+            rd,
+            esi: EthernetSegmentIdentifier([0; 10]),
+            ethernet_tag: EthernetTagId(0),
+            prefix: rustbgpd_wire::EvpnIpPrefixValue::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(100, 64, 0, n),
+                32,
+            )),
+            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            label: MplsLabel::new(50_000),
+        })
+    } else {
+        EvpnRoute::MacIp(EvpnMacIp {
+            rd,
+            esi: EthernetSegmentIdentifier([0; 10]),
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress([2, 0, 0, 0, 0, n]),
+            ip: Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, n))),
+            label1: MplsLabel::new(10_100),
+            label2: None,
+        })
+    };
+    route
+}
+
+/// Apply outbound updates to a client view until it equals `expected`
+/// (keys and route content) or `wait` passes; returns the final view.
+async fn drain_view(
+    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    view: &mut BTreeMap<rustbgpd_wire::EvpnRouteKey, EvpnRoute>,
+    expected: &BTreeMap<rustbgpd_wire::EvpnRouteKey, EvpnRoute>,
+    wait: Duration,
+    stop_when_exact: bool,
+) {
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        if stop_when_exact && view == expected {
+            return;
+        }
+        match tokio::time::timeout_at(deadline, out_rx.recv()).await {
+            Ok(Some(update)) => {
+                for key in &update.evpn_withdraw {
+                    view.remove(key);
+                }
+                for route in &update.evpn_announce {
+                    view.insert(route.route.key(), route.route.clone());
+                }
+            }
+            Ok(None) => panic!("outbound channel closed unexpectedly"),
+            Err(_) => return,
+        }
+    }
+}
+
+/// A deferred EVPN update (outbound channel full) must recover through the
+/// dirty resync without losing an announcement or a withdrawal: after
+/// Type 2/5 churn that includes withdrawals of already-sent routes and an
+/// announce-then-withdraw inside the deferral window, the client's view is
+/// exactly the current table, and stays so across further resync ticks.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "setup, saturated churn and the exact-view drain in one scenario"
+)]
+async fn deferred_evpn_churn_recovers_exact_announces_and_withdrawals() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let mut outputs = Vec::new();
+    for (peer, router_id, capacity) in [(target, 2, 1), (source, 1, 64)] {
+        let (out_tx, mut out_rx) = mpsc::channel(capacity);
+        tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, router_id),
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        outputs.push(out_rx);
+    }
+    let mut out_rx = outputs.remove(0);
+    let _source_out = outputs.remove(0);
+
+    let send = |announce: Vec<EvpnRibRoute>, withdraw: Vec<EvpnRibRoute>| {
+        let tx = tx.clone();
+        async move {
+            tx.send(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: source,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: announce,
+                evpn_withdrawn: withdraw.iter().map(|r| r.route.key()).collect(),
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+            // Let the manager distribute each change on its own.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let table = |routes: &[(u8, bool)]| {
+        routes
+            .iter()
+            .map(|&(n, t5)| {
+                let route = churn_route(n, t5).route;
+                (route.key(), route)
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    // Initial table, delivered normally.
+    let mut view = BTreeMap::new();
+    send(
+        vec![
+            churn_route(1, false),
+            churn_route(2, false),
+            churn_route(1, true),
+        ],
+        vec![],
+    )
+    .await;
+    let initial = table(&[(1, false), (2, false), (1, true)]);
+    drain_view(
+        &mut out_rx,
+        &mut view,
+        &initial,
+        Duration::from_secs(10),
+        true,
+    )
+    .await;
+    assert_eq!(view, initial, "initial table must arrive exactly");
+
+    // Churn without draining: the first change fills the one-slot channel
+    // and every later one is deferred.
+    send(vec![churn_route(3, false)], vec![churn_route(1, false)]).await;
+    send(vec![churn_route(2, true)], vec![churn_route(1, true)]).await;
+    send(vec![churn_route(4, false)], vec![]).await;
+    send(vec![], vec![churn_route(4, false)]).await;
+    send(vec![churn_route(5, false)], vec![churn_route(2, false)]).await;
+    assert_eq!(
+        out_rx.len(),
+        1,
+        "the channel must be saturated, so later changes were deferred"
+    );
+
+    let current = table(&[(3, false), (5, false), (2, true)]);
+    drain_view(
+        &mut out_rx,
+        &mut view,
+        &current,
+        Duration::from_secs(10),
+        true,
+    )
+    .await;
+    assert_eq!(
+        view, current,
+        "deferred churn must recover to the exact table"
+    );
+    // Further resync ticks must not resurrect a withdrawn route.
+    drain_view(
+        &mut out_rx,
+        &mut view,
+        &current,
+        Duration::from_millis(2500),
+        false,
+    )
+    .await;
+    assert_eq!(view, current, "the view must stay exact after recovery");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn evpn_gr_marks_stale_and_demotes_routes() {
     let (tx, rx) = mpsc::channel(64);
