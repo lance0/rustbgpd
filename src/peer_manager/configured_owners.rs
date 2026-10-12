@@ -272,14 +272,10 @@ impl PeerManager {
                 );
                 // SIGHUP settlement runs this after a reload completes, when
                 // the RIB's primary queue can hold seconds of post-commit
-                // export work; keep answering readiness meanwhile.
-                self.await_with_readiness(
-                    send,
-                    OperatorReadAdmission::Fenced {
-                        reason: "the configured-owner catalogue is mid-publication",
-                    },
-                )
-                .await?;
+                // export work. The configuration is already committed and
+                // reads never touch the owner catalogue, so serve them too.
+                self.await_with_readiness(send, OperatorReadAdmission::Served)
+                    .await?;
                 for entry in next.values() {
                     entry.admission.acknowledge_publication();
                 }

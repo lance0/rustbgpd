@@ -6,5 +6,5 @@
   readiness probes while it waited for that acknowledgement. After an
   export-policy change on 1000 peers, the RIB can take 1-2 s to acknowledge
   while it works through post-commit export updates. The peer manager now
-  answers readiness probes during that wait. The 200 ms deadline is
-  unchanged.
+  answers readiness probes and neighbor reads during that wait. The 200 ms
+  deadline is unchanged.
