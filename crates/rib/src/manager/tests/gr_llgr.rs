@@ -3375,6 +3375,7 @@ async fn gr_retention_rows(
         comparison: None,
         reply,
         stale_counts: true,
+        include_retained: false,
     })
     .await
     .unwrap();
@@ -3444,6 +3445,7 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
         comparison: None,
         reply,
         stale_counts: false,
+        include_retained: false,
     })
     .await
     .unwrap();
@@ -3460,6 +3462,7 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
         comparison: None,
         reply,
         stale_counts: false,
+        include_retained: false,
     })
     .await
     .unwrap();
@@ -3490,6 +3493,95 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
     tokio::time::advance(Duration::from_secs(3_001)).await;
     tokio::task::yield_now().await;
     assert_eq!(gr_retention_rows(&tx, source).await, Vec::new());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+async fn retained_query(
+    tx: &mpsc::Sender<RibUpdate>,
+    peers: Vec<IpAddr>,
+    include_retained: bool,
+) -> crate::update::NeighborRibSnapshotResponse {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryNeighborRibSnapshots {
+        peers,
+        comparison: None,
+        reply,
+        stale_counts: false,
+        include_retained,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap()
+}
+
+/// A down dynamic neighbor has left the neighbor inventory, so a list read
+/// names only the inventory's peers. `include_retained` adds a row for every
+/// other peer whose routes the RIB still retains, with its recorded ASN,
+/// never one the request named, and none once the sweep ends retention.
+/// Dropping the retained roster loses the row.
+#[tokio::test]
+async fn include_retained_reports_unlisted_peer_until_sweep() {
+    use crate::update::GrRetentionPhase::GrRestart;
+
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let listed = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let _source_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
+    let _listed_rx = channel_peer_up(&tx, listed, ipv4_sendable()).await;
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 1),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        retained_query(&tx, vec![listed], true).await.retained,
+        Vec::new()
+    );
+
+    tx.send(gr_with_llgr(source, 120, ipv4_sendable(), vec![], 0))
+        .await
+        .unwrap();
+    let response = retained_query(&tx, vec![listed], true).await;
+    assert_eq!(response.snapshots.len(), 1);
+    assert_eq!(response.snapshots[0].peer, listed);
+    assert_eq!(response.retained.len(), 1, "{:?}", response.retained);
+    let row = &response.retained[0];
+    assert_eq!(row.peer, source);
+    assert_eq!(row.remote_asn, Some(65000));
+    assert_eq!(row.gr_retention.len(), 1);
+    assert_eq!(row.gr_retention[0].phase, GrRestart);
+    assert_eq!(row.gr_retention[0].remaining_secs, Some(120));
+    assert_eq!(row.gr_retention[0].stale_routes, None);
+    // A requested peer is never repeated as a retained row.
+    let response = retained_query(&tx, vec![source, listed], true).await;
+    assert_eq!(response.snapshots[0].gr_retention.len(), 1);
+    assert_eq!(response.retained, Vec::new());
+    // Without the flag the roster is not read.
+    assert_eq!(
+        retained_query(&tx, vec![listed], false).await.retained,
+        Vec::new()
+    );
+
+    // GR expiry without LLGR sweeps the routes, ending retention.
+    tokio::time::advance(Duration::from_secs(121)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        retained_query(&tx, vec![listed], true).await.retained,
+        Vec::new()
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -3538,10 +3630,28 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
                 comparison: None,
                 reply,
                 stale_counts: false,
+                include_retained: false,
             })
             .unwrap();
         manager.replacement_checkpoint(true);
-        assert_eq!(response.try_recv().unwrap().snapshots, vec![expected]);
+        assert_eq!(
+            response.try_recv().unwrap().snapshots,
+            vec![expected.clone()]
+        );
+        // The frozen view also serves the retained roster for a list read
+        // that does not name the down peer.
+        let (reply, mut response) = oneshot::channel();
+        summary_tx
+            .try_send(crate::update::RibSummaryQuery::NeighborRibSnapshots {
+                peers: Vec::new(),
+                comparison: None,
+                reply,
+                stale_counts: false,
+                include_retained: true,
+            })
+            .unwrap();
+        manager.replacement_checkpoint(true);
+        assert_eq!(response.try_recv().unwrap().retained, vec![expected]);
     });
 }
 

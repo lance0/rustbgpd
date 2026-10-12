@@ -534,13 +534,21 @@ as the rest of the neighbor snapshot, so the rows are present while the
 session is down. Phase and deadline are lookups; the count scans the peer's
 received routes, so only `GetNeighborState` reports it and `ListNeighbors`
 omits `stale_routes`. The count can be zero while End-of-RIB is still
-awaited after every stale route was re-advertised. A dynamic neighbor is
-removed from the neighbor inventory when its session goes idle, so neither
-RPC returns its row while it is down even though the RIB still retains its
-routes; `bgp_gr_stale_routes{peer}` still reports them.
+awaited after every stale route was re-advertised.
 `gr_retention_available` is present and true from a daemon that exposes the
 rows; its absence means an older daemon, so an empty list must not be read as
 "nothing retained" unless the flag is present.
+
+A dynamic neighbor leaves the neighbor inventory when its session goes idle,
+but the RIB can still retain its routes. Both RPCs still return a row for it
+while they are retained, with `retention_only` present and true: the row
+carries `config.address`, `config.remote_asn` (the ASN the RIB last recorded,
+0 if unknown), state `SESSION_STATE_IDLE`, and the RIB-owned fields including
+`gr_retention`; every other configuration and session field is its default.
+`ListNeighbors` merges these rows into address order; `GetNeighborState`
+returns one only for an address without an interface or comparison peer.
+The row disappears when retention ends. `retention_only` is absent on
+ordinary rows and from older daemons, which return no row for such a peer.
 
 `NeighborState.max_prefix_action` is the effective current disposition of a
 crossed inbound bound, not a straight echo of the `max_prefix_action`

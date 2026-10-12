@@ -338,6 +338,7 @@ fn neighbor_rib_snapshot_query_projects_policy_stats() {
         comparison: None,
         reply,
         stale_counts: false,
+        include_retained: false,
     });
     let response = response
         .try_recv()

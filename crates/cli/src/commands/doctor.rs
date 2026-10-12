@@ -3309,6 +3309,15 @@ async fn run_with_deadlines(
                         let identity = cfg.map_or_else(String::new, |config| {
                             peer_identity(&config.address, &config.interface)
                         });
+                        // A down dynamic neighbor whose routes are still
+                        // retained has no session or configuration to check;
+                        // only its retention is reported.
+                        if n.retention_only == Some(true) {
+                            for check in llgr_retention_checks(&identity, &n.gr_retention) {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
+                            continue;
+                        }
                         let policy_check = rfc8212_policy_check(
                             &identity,
                             n.rfc8212_import_policy,
@@ -3348,6 +3357,7 @@ async fn run_with_deadlines(
                                 flap_count: n.flap_count,
                                 last_error: redact_text(&n.last_error),
                                 is_dynamic: n.is_dynamic,
+                                retention_only: n.retention_only,
                                 accepted_dynamic_range: output::json_accepted_dynamic_range(
                                     n.accepted_dynamic_range.as_ref(),
                                 ),
@@ -3840,6 +3850,7 @@ mod tests {
                 flap_count: 0,
                 last_error: String::new(),
                 is_dynamic: false,
+                retention_only: None,
                 accepted_dynamic_range: None,
                 route_reflector_client: false,
                 description: String::new(),
@@ -7024,6 +7035,53 @@ paths = ["x"]
                 .unwrap()
                 .contains("llgr_retention.ipv6_unicast")
         }));
+    }
+
+    /// A retention-only row (a down dynamic neighbor whose stale routes the
+    /// RIB still retains) has no session or configuration: doctor reports
+    /// only its retention and keeps a green exit code. Running the ordinary
+    /// per-peer checks on it adds session and policy checks for a peer that
+    /// is gone.
+    #[tokio::test]
+    async fn doctor_reports_only_retention_for_retention_only_neighbor() {
+        let server = spawn_mock_server(None).await;
+        let row = rustbgpd_api::proto::NeighborState {
+            config: Some(rustbgpd_api::proto::NeighborConfig {
+                address: "192.0.2.9".to_string(),
+                remote_asn: 65009,
+                ..Default::default()
+            }),
+            state: rustbgpd_api::proto::SessionState::Idle as i32,
+            retention_only: Some(true),
+            gr_retention_available: Some(true),
+            gr_retention: vec![rustbgpd_api::proto::GracefulRestartRetentionState {
+                family: "ipv4_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(3_600),
+                stale_routes: None,
+            }],
+            ..Default::default()
+        };
+        *server.state.list_neighbors_response.lock().await = vec![row];
+        let output_dir = tempfile::tempdir().unwrap();
+        let (code, manifest) =
+            run_doctor(&server.addr, &output_dir.path().join("bundle.tar.gz"), None).await;
+
+        assert_eq!(code, 0, "retention is advisory");
+        let peer_checks: Vec<&str> = manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|check| check["name"].as_str())
+            .filter(|name| name.starts_with("peer.192.0.2.9."))
+            .collect();
+        assert_eq!(
+            peer_checks,
+            ["peer.192.0.2.9.llgr_retention.ipv4_unicast"],
+            "{manifest}"
+        );
+        let check = manifest_check(&manifest, "peer.192.0.2.9.llgr_retention.ipv4_unicast");
+        assert_eq!(check["status"], "warn");
     }
 
     #[tokio::test]

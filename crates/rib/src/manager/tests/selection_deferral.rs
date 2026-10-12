@@ -2068,6 +2068,7 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
             comparison: None,
             reply,
             stale_counts: false,
+            include_retained: false,
         })
         .unwrap();
     let summary = Arc::new(Mutex::new(summary));

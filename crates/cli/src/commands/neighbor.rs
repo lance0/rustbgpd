@@ -83,6 +83,7 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         flap_count: n.flap_count,
         last_error: n.last_error.clone(),
         is_dynamic: n.is_dynamic,
+        retention_only: n.retention_only,
         accepted_dynamic_range: output::json_accepted_dynamic_range(
             n.accepted_dynamic_range.as_ref(),
         ),
@@ -343,6 +344,7 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
         flap_count: n.flap_count,
         last_error: n.last_error.clone(),
         is_dynamic: n.is_dynamic,
+        retention_only: n.retention_only,
         accepted_dynamic_range: output::json_accepted_dynamic_range(
             n.accepted_dynamic_range.as_ref(),
         ),
@@ -1798,6 +1800,7 @@ mod tests {
                 stale_routes: Some(160),
             }],
             gr_retention_available: Some(true),
+            retention_only: None,
         }
     }
 

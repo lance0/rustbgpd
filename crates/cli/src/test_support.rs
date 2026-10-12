@@ -1263,6 +1263,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             inbound_prefix_limits: vec![],
             gr_retention: vec![],
             gr_retention_available: Some(true),
+            retention_only: None,
             effective_posture: self.state.neighbor_effective_posture.lock().await.clone(),
         };
         response.update_group_comparison = self.state.neighbor_comparison.lock().await.clone();

@@ -278,6 +278,7 @@ mod tests {
                 comparison: None,
                 reply,
                 stale_counts: false,
+                include_retained: false,
             }
         })
         .await

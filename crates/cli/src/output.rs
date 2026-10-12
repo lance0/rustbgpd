@@ -315,6 +315,11 @@ pub struct JsonNeighbor {
     pub flap_count: u64,
     pub last_error: String,
     pub is_dynamic: bool,
+    /// `Some(true)` on a row for an address with no neighbor-inventory entry
+    /// whose GR/LLGR stale routes the RIB still retains (a down dynamic
+    /// neighbor). Omitted on ordinary rows and from older daemons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_dynamic_range: Option<JsonAcceptedDynamicRange>,
     pub route_reflector_client: bool,
@@ -339,7 +344,9 @@ pub fn json_accepted_dynamic_range(
 /// Describe whether a live peer was statically configured or dynamically
 /// accepted, retaining an explicit rolling-upgrade fallback for older daemons.
 pub fn neighbor_source_label(neighbor: &proto::NeighborState) -> String {
-    if !neighbor.is_dynamic {
+    if neighbor.retention_only == Some(true) {
+        "retention only (no session or configuration)".to_string()
+    } else if !neighbor.is_dynamic {
         "static".to_string()
     } else if let Some(range) = neighbor.accepted_dynamic_range.as_ref() {
         format!("dynamic ({}, group {})", range.prefix, range.peer_group)
@@ -385,6 +392,11 @@ pub struct JsonNeighborDetail {
     pub flap_count: u64,
     pub last_error: String,
     pub is_dynamic: bool,
+    /// `Some(true)` on a row for an address with no neighbor-inventory entry
+    /// whose GR/LLGR stale routes the RIB still retains (a down dynamic
+    /// neighbor). Omitted on ordinary rows and from older daemons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_dynamic_range: Option<JsonAcceptedDynamicRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1921,6 +1933,7 @@ mod tests {
             flap_count: 7,
             last_error: String::new(),
             is_dynamic: true,
+            retention_only: Some(true),
             accepted_dynamic_range: Some(JsonAcceptedDynamicRange {
                 prefix: "10.0.0.0/24".to_string(),
                 peer_group: "rs-clients".to_string(),
@@ -2348,6 +2361,15 @@ mod tests {
         assert_eq!(
             neighbor_source_label(&older_daemon),
             "dynamic (range unavailable)"
+        );
+
+        let retention_only = proto::NeighborState {
+            retention_only: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            neighbor_source_label(&retention_only),
+            "retention only (no session or configuration)"
         );
     }
 

@@ -3552,9 +3552,16 @@ impl RibManager {
                 peers,
                 comparison,
                 stale_counts,
+                include_retained,
                 reply,
             } => {
-                self.handle_query_neighbor_rib_snapshots(peers, comparison, stale_counts, reply);
+                self.handle_query_neighbor_rib_snapshots(
+                    peers,
+                    comparison,
+                    stale_counts,
+                    include_retained,
+                    reply,
+                );
             }
             RibUpdate::QueryUpdateGroupSnapshot { reply } => {
                 self.handle_query_update_group_snapshot(reply);

@@ -4951,6 +4951,7 @@ policy customer-in(peer_lp: u32) {
                 comparison: None,
                 reply,
                 stale_counts: false,
+                include_retained: false,
             })
             .unwrap();
         let (roster, _publication) = stats_roster();
