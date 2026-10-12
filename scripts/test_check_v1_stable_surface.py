@@ -263,6 +263,51 @@ class EvpnReflectorRoleTests(unittest.TestCase):
                     expected,
                 )
 
+    # Test-gated Rust is not production emission evidence for a pinned value.
+    HELPER ='fn helper(m: &Metrics) {\n    m.set_loc_rib_prefixes("evpn", 1);\n}\n'
+    MISSING = "pinned metric bgp_rib_loc_prefixes label afi_safi values ['evpn']"
+
+    def without_live_loc_emitter(self):
+        return self.emitted_by(
+            "crates/rib/src/manager/distribution/evpn.rs",
+            '.set_loc_rib_prefixes("evpn"',
+            '.set_loc_rib_prefixes("l2vpn_evpn"',
+        )
+
+    def check_with(self, extra):
+        sources = {**self.without_live_loc_emitter(), **extra}
+        checker.check_metrics(self.inventory, self.metric_source, sources)
+
+    def fixture_sources(self, declaration):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "crates/fixture/src"
+            source.mkdir(parents=True)
+            (source / "lib.rs").write_text(f"{declaration}\nmod live;\n")
+            (source / "test_support.rs").write_text(self.HELPER)
+            (source / "live.rs").write_text("")
+            return checker.production_rust_sources(Path(temp))
+
+    def test_value_emitted_only_in_a_test_gated_module_file_fails(self):
+        sources = self.fixture_sources("#[cfg(test)]\nmod test_support;")
+        self.assertNotIn("crates/fixture/src/test_support.rs", sources)
+        self.assertIn("crates/fixture/src/live.rs", sources)
+        self.rejected(lambda: self.check_with(sources), self.MISSING)
+
+    def test_value_emitted_only_in_a_compound_test_gate_fails(self):
+        for gate in ('all(test, target_os = "linux")', "any(test, feature = \"x\")", "test"):
+            with self.subTest(gate=gate):
+                text = checker.strip_cfg_test_items(f"#[cfg({gate})]\n{self.HELPER}")
+                self.rejected(
+                    lambda text=text: self.check_with({"fixture.rs": text}), self.MISSING
+                )
+
+    def test_production_emitter_still_counts(self):
+        self.check_with(self.fixture_sources("mod test_support;"))
+        for prefix in ("", "#[cfg(not(test))]\n", '#[cfg(feature = "test-utils")]\n'):
+            with self.subTest(prefix=prefix):
+                text = checker.strip_cfg_test_items(prefix + self.HELPER)
+                self.check_with({"fixture.rs": text})
+
 
 if __name__ == "__main__":
     unittest.main()

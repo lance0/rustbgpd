@@ -867,34 +867,112 @@ def metric_definition(source: str, name: str) -> tuple[str, list[str]] | None:
 
 
 def production_rust_sources(root: Path) -> dict[str, str]:
-    """Comment-stripped non-test Rust sources that can emit metric labels."""
-    sources = {}
-    for path in sorted([*root.glob("src/**/*.rs"), *root.glob("crates/*/src/**/*.rs")]):
-        relative = path.relative_to(root)
-        if "tests" in relative.parts or path.stem == "tests" or path.stem.endswith("_tests"):
-            continue
-        sources[str(relative)] = strip_cfg_test_items(strip_rust_comments(path.read_text()))
-    return sources
+    """Comment-stripped non-test Rust sources that can emit metric labels.
+
+    Files under `tests` paths, and files whose `mod` declaration is test-gated
+    (with their submodules), are dropped; test-gated items are stripped.
+    """
+    files = {
+        path: strip_rust_comments(path.read_text())
+        for path in sorted([*root.glob("src/**/*.rs"), *root.glob("crates/*/src/**/*.rs")])
+        if "tests" not in path.relative_to(root).parts
+        and path.stem != "tests"
+        and not path.stem.endswith("_tests")
+    }
+    gated: set[Path] = set()
+    for path, text in files.items():
+        inner = re.match(r"\s*(?:#!\[[^\]]*\]\s*)*#!\[cfg\((.*?)\)\]", text, re.DOTALL)
+        if inner and cfg_is_test_only(inner.group(1)):
+            gated.add(path)
+        directory = path.parent if path.name in {"lib.rs", "main.rs", "mod.rs"} else (
+            path.parent / path.stem
+        )
+        position = 0
+        while found := cfg_attribute(text, position):
+            predicate, item_start, position = found
+            declaration = MOD_DECLARATION_RE.match(text, item_start)
+            if declaration and cfg_is_test_only(predicate):
+                name = declaration.group(1)
+                gated.update({directory / f"{name}.rs", directory / name})
+    return {
+        str(path.relative_to(root)): strip_cfg_test_items(text)
+        for path, text in files.items()
+        if not any(path == gate or gate in path.parents for gate in gated)
+    }
 
 
-CFG_TEST_ITEM_RE = re.compile(
-    r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?"
-    r"(?:mod|fn|impl)\b[^{;]*\{"
+MOD_DECLARATION_RE = re.compile(
+    r"\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;"
+)
+CFG_ATTRIBUTE_RE = re.compile(r"#\[cfg\(")
+
+
+def cfg_attribute(text: str, position: int) -> tuple[str, int, int] | None:
+    """Next `#[cfg(...)]` at or after `position`: (predicate, item start, attribute start + 1)."""
+    match = CFG_ATTRIBUTE_RE.search(text, position)
+    if match is None:
+        return None
+    depth, cursor = 1, match.end()
+    while cursor < len(text) and depth:
+        depth += {"(": 1, ")": -1}.get(text[cursor], 0)
+        cursor += 1
+    close = text.find("]", cursor - 1)
+    if close < 0:
+        return None
+    return text[match.end() : cursor - 1], close + 1, match.start() + 1
+
+
+def cfg_is_test_only(predicate: str) -> bool:
+    """Whether a cfg predicate names the `test` token, other than a bare `not(test)`.
+
+    ponytail: conservative, not a cfg evaluator. `any(test, x)` or
+    `not(all(test, x))` items are also treated as test-only, so evidence they
+    hold is ignored (fails closed); only a bare `not(test)` is kept.
+    """
+    compact = re.sub(r"\s+", "", re.sub(r'"[^"]*"', '""', predicate))
+    return re.search(r"\btest\b", compact) is not None and compact != "not(test)"
+
+
+ITEM_KEYWORD_RE = re.compile(
+    r"\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const|extern)\s+)*"
+    r"(fn|mod|impl|trait|struct|enum|union)\b"
 )
 
 
-def strip_cfg_test_items(text: str) -> str:
-    """Drop `#[cfg(test)]` modules, functions and impls, brace-matched.
+def item_extent(text: str, start: int) -> int:
+    """End of the item, statement, field or block that begins at `start`."""
+    keyword = ITEM_KEYWORD_RE.match(text, start)
+    depth, cursor = 0, start
+    while cursor < len(text):
+        char = text[cursor]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif depth == 0:
+            if char == ";" or (char == "," and keyword is None):
+                return cursor + 1
+            if char == "}":
+                return cursor
+            if char == "{":
+                braces = 1
+                cursor += 1
+                while cursor < len(text) and braces:
+                    braces += {"{": 1, "}": -1}.get(text[cursor], 0)
+                    cursor += 1
+                return cursor
+        cursor += 1
+    return cursor
 
-    ponytail: other cfg(test) items (fields, statements) stay; they do not
-    call metric setters today.
-    """
-    while match := CFG_TEST_ITEM_RE.search(text):
-        depth, end = 1, match.end()
-        while end < len(text) and depth:
-            depth += {"{": 1, "}": -1}.get(text[end], 0)
-            end += 1
-        text = text[: match.start()] + text[end:]
+
+def strip_cfg_test_items(text: str) -> str:
+    """Drop every attribute-gated item whose cfg predicate is test-only."""
+    position = 0
+    while found := cfg_attribute(text, position):
+        predicate, item_start, position = found
+        if cfg_is_test_only(predicate):
+            text = text[: position - 1] + text[item_extent(text, item_start) :]
+            position -= 1
     return text
 
 
@@ -1011,6 +1089,8 @@ def check_metrics(
             source = strip_rust_comments(path.read_text())
         except OSError as error:
             fail(f"cannot read metric source {section['source']}: {error}")
+    # Test-only literals in the metric module itself are not emission evidence.
+    source = strip_cfg_test_items(source)
     series = section["scoped_rr_only_series"]
     if not isinstance(series, list) or not series:
         fail("metrics.scoped_rr_only_series must pin at least one series")
