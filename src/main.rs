@@ -6093,6 +6093,7 @@ async fn run<T>(
             max_prefixes_ipv6: transport_config.max_prefixes_ipv6,
             max_prefixes_received_ipv4: transport_config.max_prefixes_received_ipv4,
             max_prefixes_received_ipv6: transport_config.max_prefixes_received_ipv6,
+            max_prefixes_family: transport_config.max_prefixes_family,
             max_prefix_action: transport_config.max_prefix_action,
             max_prefix_warning_percent: transport_config.max_prefix_warning_percent,
             max_prefix_restart_seconds: neighbor.max_prefix_restart_seconds,

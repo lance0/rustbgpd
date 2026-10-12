@@ -4616,6 +4616,7 @@ impl PeerManager {
             max_prefixes_ipv6: tc.max_prefixes_ipv6,
             max_prefixes_received_ipv4: tc.max_prefixes_received_ipv4,
             max_prefixes_received_ipv6: tc.max_prefixes_received_ipv6,
+            max_prefixes_family: tc.max_prefixes_family,
             max_prefix_action: tc.max_prefix_action,
             max_prefix_warning_percent: tc.max_prefix_warning_percent,
             max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
