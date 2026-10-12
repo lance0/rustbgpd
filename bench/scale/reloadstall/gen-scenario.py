@@ -58,6 +58,15 @@ harness's positional arg contract; the daemon never loads them). Mutually
 exclusive with the trip knobs. Absent (the default), the emitted config is
 byte-for-byte the historical one.
 
+EVPN route-reflector extension (EVPN RR soak): `GEN_EVPN=1` together with
+`GEN_IBGP_RR_ASN` gives every neighbor `families = ["l2vpn_evpn"]` and a
+`description` ending in the reload generation, and additionally writes
+`config-gen-a.toml` (identical to `config.toml`) and `config-gen-b.toml`,
+whose only difference is the description suffix. Copying one over
+`config.toml` and sending SIGHUP is a content-real, session-neutral reload: a
+description edit is a hot neighbor update. The clients are
+`bench/evpn-load`'s `evpn-rr-soak` driver, which uses the same addressing.
+
 Dual-stack extension: setting `GEN_DUALSTACK=1` gives every neighbor
 `families = ["ipv4_unicast", "ipv6_unicast"]`, matching the harness's
 `RELOADSTALL_DUALSTACK=1` stubs (IPv6 base table `3001:HHHH:LLLL::/48`,
@@ -119,6 +128,12 @@ if ibgp_rr_asn is not None:
         sys.exit("GEN_IBGP_RR_ASN must be in 1..=65535 (stub OPENs carry it as u16)")
     if trip_max_prefixes is not None:
         sys.exit("GEN_IBGP_RR_ASN is mutually exclusive with the GEN_TRIP_* knobs")
+evpn = os.environ.get("GEN_EVPN", "0")
+if evpn not in ("0", "1"):
+    sys.exit("GEN_EVPN must be 0 or 1")
+evpn = evpn == "1"
+if evpn and (ibgp_rr_asn is None or dualstack or filter_count):
+    sys.exit("GEN_EVPN requires GEN_IBGP_RR_ASN and excludes GEN_DUALSTACK/GEN_FILTER_COUNT")
 converged_rejoin = os.environ.get("GEN_CONVERGED_REJOIN", "0")
 if converged_rejoin not in ("0", "1"):
     sys.exit("GEN_CONVERGED_REJOIN must be 0 or 1")
@@ -314,9 +329,13 @@ for i in range(n_peers):
         "route_server_client = true"
         if ibgp_rr_asn is None
         else "route_reflector_client = true",
-        'families = ["ipv4_unicast", "ipv6_unicast"]' if dualstack else 'families = ["ipv4_unicast"]',
+        'families = ["l2vpn_evpn"]' if evpn
+        else 'families = ["ipv4_unicast", "ipv6_unicast"]' if dualstack
+        else 'families = ["ipv4_unicast"]',
         "hold_time = 180",
     ]
+    if evpn:
+        neighbor.append(f'description = "evpn-rr-client-{i} gen-a"')
     if converged_rejoin:
         neighbor += ["graceful_restart = true", "gr_peer_restart_time_max = 180",
                      "gr_stale_routes_time = 360"]
@@ -329,6 +348,10 @@ for i in range(n_peers):
         neighbor.append('export_policy_chain = ["stable-out"]')
     config += neighbor + [""]
 (out / "config.toml").write_text("\n".join(config))
+if evpn:
+    text = "\n".join(config)
+    (out / "config-gen-a.toml").write_text(text)
+    (out / "config-gen-b.toml").write_text(text.replace(' gen-a"', ' gen-b"'))
 
 trip_note = (
     f", trip_member_0(max_prefixes={trip_max_prefixes}, "
@@ -342,6 +365,8 @@ rr_note = (
     else ""
 )
 dualstack_note = ", dualstack(ipv4_unicast+ipv6_unicast)" if dualstack else ""
+if evpn:
+    dualstack_note += ", evpn(l2vpn_evpn, config-gen-a.toml, config-gen-b.toml)"
 filter_note = (
     f", filter(gen-b rejects {len(filtered_prefixes)} named prefixes: base indexes 0..{filter_count} per family)"
     if filter_count > 0

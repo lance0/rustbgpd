@@ -15,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 LIFECYCLE = HERE / "flagship-lifecycle.sh"
-RUNNERS = ("run-soak-rs-flagship.sh", "run-soak-rr-flagship.sh")
+RUNNERS = ("run-soak-rs-flagship.sh", "run-soak-rr-flagship.sh", "run-soak-evpn-rr.sh")
 
 
 def free_port():
@@ -222,13 +222,17 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             root / "target/scale/reloadstall": (
                 "#!/usr/bin/env bash\nprintf '%s\\n' \"$$\" >>\"$STUB_RUN_DIR/children\"\nprintf 'converged (stub)\\n'\nexec sleep 300\n"
             ),
+            root / "target/release/evpn-rr-soak": (
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$$\" >>\"$STUB_RUN_DIR/children\"\nprintf 'converged (initial) stub\\n'\nexec sleep 300\n"
+            ),
             root / "bench/scale/reloadstall/gen-scenario.py": textwrap.dedent("""\
                 #!/usr/bin/env python3
                 import pathlib
                 import sys
                 directory = pathlib.Path(sys.argv[2])
                 directory.mkdir(parents=True, exist_ok=True)
-                for name in ("config.toml", "member.rpol", "gen-a.rpol", "gen-b.rpol"):
+                for name in ("config.toml", "member.rpol", "gen-a.rpol", "gen-b.rpol",
+                             "config-gen-a.toml", "config-gen-b.toml"):
                     (directory / name).write_text("stub\\n")
                 """),
             fake_bin / "cargo": "#!/usr/bin/env bash\nexit 0\n",
@@ -265,6 +269,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             RUN_JSON="$RUN_DIR/run.json"
             RUSTBGPD_LOG="$RUN_DIR/rustbgpd.log"
             RELOADSTALL_LOG="$RUN_DIR/reloadstall.log"
+            DRIVER_LOG="$RUN_DIR/driver.log"
             MANAGEMENT_LOAD_JSONL="$RUN_DIR/management-plane-load.jsonl"
             MANAGEMENT_LOAD_LOG="$RUN_DIR/management-plane-load.log"
             DOCTOR_BUNDLE="$RUN_DIR/doctor-bundle.tar.gz"
@@ -305,6 +310,8 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             "TRIP_RESTART_SECONDS": "10",
             "TRIP_FINAL_QUIESCE_SEC": "30",
             "CONVERGE_CAP_SEC": "5",
+            "FLAP_EVERY": "1",
+            "RELOAD_EVERY": "1",
             "STUB_RUN_DIR": str(run_dir),
             "STUB_PORT": str(port),
         }
@@ -396,7 +403,8 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                 try:
                     identity = run_dir / "runner.identity"
                     wait_for(identity)
-                    wait_for_children(run_dir / "children", 3 if runner.startswith("run-soak-rs") else 2)
+                    wait_for_children(
+                        run_dir / "children", 2 if runner == "run-soak-rr-flagship.sh" else 3)
                     wait_for(run_dir / "metrics-snapshots.txt.gz")
                     actual_pid = int(identity.read_text().split()[0])
                     self.assertNotEqual(outer.pid, actual_pid)
@@ -422,7 +430,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                     )
                     with socket.socket() as listener:
                         listener.bind(("127.0.0.1", port))
-                    if runner.startswith("run-soak-rs"):
+                    if runner != "run-soak-rr-flagship.sh":
                         self.assertIn("clean_sigterm", (run_dir / "management-plane-load.jsonl").read_text())
                     self.assertFalse((run_dir / "verdict.json").exists())
                     with gzip.open(run_dir / "metrics-snapshots.txt.gz", "rt", encoding="utf-8") as retained:

@@ -454,6 +454,54 @@ sampled aggregate counter proves neither that every churn update propagated in
 real time nor that partial or sub-sampling-interval stalls were absent, and the
 churn-floor slack is unchanged.
 
+### 12. EVPN route reflector (Type 2/5 churn, client flaps, reloads) — `run-soak-evpn-rr.sh` (`analyze-soak-evpn-rr.py`)
+
+A bare-host daemon reflecting `l2vpn_evpn` only to `SOAK_CLIENTS` real iBGP
+route-reflector-client sessions (default 200), driven by `bench/evpn-load`'s
+`evpn-rr-soak` driver. Each client advertises a sliding window of
+`SOAK_TYPE2` Type 2 MAC/IP routes (default 400) and `SOAK_TYPE5` Type 5 IPv4
+prefix routes (default 100), with its own RD, a route target and the VXLAN
+encapsulation community. The default 24 h shape is 1440 epochs of 60 s. In
+every epoch, each client announces `SOAK_SHIFT2` + `SOAK_SHIFT5` new routes
+(default 40 + 10) and withdraws as many old ones, paced across the first 30 s.
+Every fifth epoch, one client sends Cease/Administrative Reset, reconnects and
+re-announces; client 0 never flaps. Every thirtieth epoch, the driver copies
+the other description generation over the live config and sends SIGHUP to the
+daemon PID. That is a hot neighbor update on every client. The defaults give 288 flaps
+and 48 reloads per 24 h. The management-plane load is scenario 10's driver with the
+EVPN operation set. It reads `/metrics` every second, `rbgp neighbor` every
+5 s, one page of each of client 0's paged EVPN views (`rbgp evpn received` and
+`rbgp evpn advertised`) every 5 s, and `rbgp doctor` every 600 s. The same
+fd-headroom precondition and `daemon_log` gate as scenarios 10 and 11 apply.
+The default shape is sized for an 8 vCPU / 15 GiB soak host and needs no
+containers.
+
+The convergence check after each epoch is exact on the wire. Every client
+must hold exactly the current windows of every other client: no more, no
+fewer and nothing else. That is (`SOAK_CLIENTS` − 1) × (`SOAK_TYPE2` +
+`SOAK_TYPE5`) = 99 500 routes at the default shape. The driver also counts
+reflected routes it never originated and UPDATEs it cannot parse. The RSS
+ceiling, slope bounds and readyz rule are scenario 10's, reused through its
+analyzer. Each epoch rotates route identities, so this tests intern-table
+release as well as reflection.
+
+| Gate | Precommitted bound | Evidence | Refreshes under scenario via |
+|------|--------------------|----------|------------------------------|
+| Session floor | `established == SOAK_CLIENTS` on every post-warmup sample, except exactly one client down inside a flap window (`down` − 1 sample interval … `up` + 1 sample interval) | CSV `established` + `cycles.log` `evpn_flap` lines | Every flap takes one session down and back. |
+| Flap accounting exact | executed flaps == planned (`epochs ÷ FLAP_EVERY`), numbered 1…planned, never client 0, each re-established within `REESTABLISH_CAP_SEC` | `cycles.log` `evpn_flap … down` / `… up reestablish_ms=` | One per flap epoch. |
+| Session-flap budget exact | daemon flap delta == executed flaps | CSV `flaps_total` | Each deliberate reset is one transition out of Established; any other reset breaks equality. |
+| Reload accounting exact | issued == complete == planned (`epochs ÷ RELOAD_EVERY`); each completion is one `complete` SIGHUP outcome with no other outcome counter moving | `cycles.log` `reload N issued` / `reload N complete` (driver verifies `bgp_sighup_reload_outcomes_total` and fails closed) | One per reload epoch. |
+| EVPN reflected-route convergence | one `evpn_epoch` line per planned epoch, numbered 1…planned; each has `converged=1`, `receivers == SOAK_CLIENTS`, `min_live == max_live ==` the expected count with exact set membership, `invalid == 0`, `parse_errors == 0`, `converge_ms` ≤ `CONVERGE_CAP_SEC`, the planned churn volume, and the flap/reload schedule | `cycles.log` `evpn_epoch` lines | Each epoch replaces routes on every client and re-checks every client's whole view. |
+| EVPN terminal receipt | exactly one `evpn_receipt` matching the planned epochs, flaps and reloads, with every client at the exact expected count | `cycles.log` `evpn_receipt` | Emitted once after the last epoch. |
+| No lost session | zero `evpn_session_lost` lines (an unrequested session close also aborts the run) | `cycles.log` | Any non-deliberate session close. |
+| Per-series sent counters | every `bgp_messages_sent_total{peer,type}` series in a retained `/metrics` snapshot is present in each later snapshot and never decreases; at least two snapshots with at least one series | `metrics-snapshots.txt.gz` (every `METRICS_SNAPSHOT_EVERY` samples; 0 is refused) | Flaps reconnect a peer; a counter reset or a dropped series on reconnect fails. |
+| Aggregate sent counter | `bgp_messages_sent_total` sum never decreases (scenario 10 rule) | CSV `msgs_sent_total` | Churn and keepalives on every session. |
+| Max-prefix flat | `bgp_max_prefix_exceeded_total` == 0 on every sample | CSV `max_prefix_exceeded_total` | No bounds are configured. |
+| Peak RSS / RSS slope / intern slope | scenario 10 bounds (< 3072 MB; < 10 MB/h and < 100 entries/h over the final 25 %, evaluated when that window ≥ 1 h) | CSV `rss_mb`, `intern_size` | Route identities rotate every epoch. |
+| readyz availability | scenario 10 rule (fewer than 3 consecutive misses of 200 within 250 ms; no dropped scrape or observation gap) | CSV `readyz_code`, `readyz_ms` | Probed every sample under churn, flaps and reloads. |
+| Management plane | scenario 10's management gates with the EVPN operation set and identity `evpn_peer == 127.1.0.1`; EVPN view rows must be Type 2 or 5, sourced from client 0 (received) or never from client 0 (advertised) | `management-plane-load.jsonl` | Bounded reads throughout the measured window. |
+| Minimum sample count / no abort / daemon log | scenario 10 rules | CSV, `cycles.log`, `rustbgpd.log` | As scenario 10. |
+
 ## Failure-injection inventory
 
 What each scenario actually injects (inventoried from the harness
