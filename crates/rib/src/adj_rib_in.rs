@@ -5701,23 +5701,17 @@ mod tests {
 
         use super::*;
 
-        const FAMILIES: [(Afi, Safi); 11] = [
-            (Afi::Ipv4, Safi::Unicast),
-            (Afi::Ipv6, Safi::Unicast),
-            (Afi::Ipv4, Safi::FlowSpec),
-            (Afi::Ipv6, Safi::FlowSpec),
-            (Afi::L2Vpn, Safi::Evpn),
-            (Afi::Ipv4, Safi::MplsVpn),
-            (Afi::Ipv4, Safi::LabeledUnicast),
-            (Afi::Ipv6, Safi::LabeledUnicast),
-            (Afi::BgpLs, Safi::BgpLs),
-            (Afi::BgpLs, Safi::BgpLsVpn),
-            (Afi::Ipv4, Safi::RtConstrain),
-        ];
+        /// Every family the daemon can be configured for, so a family added
+        /// later cannot be left out of the sequence (its table arm below
+        /// must exist, or the test panics).
+        fn family_at(index: usize) -> (Afi, Safi) {
+            let (_, afi, safi) = rustbgpd_wire::CONFIGURED_FAMILIES[index];
+            (afi, safi)
+        }
 
         #[derive(Debug, Clone)]
         enum Op {
-            /// Announce (or re-advertise) one route of `FAMILIES[family]`;
+            /// Announce (or re-advertise) one route of `family_at(family)`;
             /// `flags` 1 and 2 insert it already GR- or LLGR-stale.
             Insert {
                 family: usize,
@@ -5745,7 +5739,7 @@ mod tests {
         }
 
         fn op() -> impl Strategy<Value = Op> {
-            let family = 0..FAMILIES.len();
+            let family = 0..rustbgpd_wire::CONFIGURED_FAMILIES.len();
             let flags = prop_oneof![6 => Just(0u8), 1 => Just(1), 1 => Just(2)];
             prop_oneof![
                 8 => (family.clone(), 0u8..4, flags, any::<bool>()).prop_map(
@@ -5776,7 +5770,7 @@ mod tests {
             attrs
         }
 
-        /// Insert one route of `FAMILIES[family]` with `insert = Some((flags,
+        /// Insert one route of `family_at(family)` with `insert = Some((flags,
         /// no_llgr))`, or withdraw it with `None`.
         #[expect(
             clippy::too_many_lines,
@@ -5792,7 +5786,7 @@ mod tests {
                 insert.map_or((false, false), |(flags, _)| (flags == 1, flags == 2));
             let no_llgr = insert.is_some_and(|(_, no_llgr)| no_llgr);
             let attr_set = AttrSet::new(attrs(no_llgr));
-            match FAMILIES[family] {
+            match family_at(family) {
                 (afi, Safi::Unicast) => {
                     let mut route = if afi == Afi::Ipv4 {
                         make_route(
@@ -5853,8 +5847,16 @@ mod tests {
                         is_llgr_stale: llgr,
                     });
                 }
-                (_, Safi::MplsVpn) => {
-                    let mut route = make_vpn_route(vpn_nlri([10, key, 0, 0], 16, 100), 1);
+                (afi, Safi::MplsVpn) => {
+                    let mut nlri = vpn_nlri([10, key, 0, 0], 16, 100);
+                    if afi == Afi::Ipv6 {
+                        nlri.prefix = VpnPrefix::v6(
+                            Ipv6Addr::new(0x2001, 0xdb8, u16::from(key), 0, 0, 0, 0, 0),
+                            48,
+                        )
+                        .unwrap();
+                    }
+                    let mut route = make_vpn_route(nlri, 1);
                     if insert.is_none() {
                         rib.withdraw_vpn(&route.key());
                         return;
@@ -5922,7 +5924,7 @@ mod tests {
                 } => insert_or_withdraw(rib, family, key, Some((flags, no_llgr))),
                 Op::Withdraw { family, key } => insert_or_withdraw(rib, family, key, None),
                 Op::Mark(f) => {
-                    let family = FAMILIES[f];
+                    let family = family_at(f);
                     rib.mark_stale(family);
                     rib.mark_stale_flowspec(family);
                     rib.mark_stale_evpn(family);
@@ -5932,7 +5934,7 @@ mod tests {
                     rib.mark_stale_rtc(family);
                 }
                 Op::Promote(f) => {
-                    let family = FAMILIES[f];
+                    let family = family_at(f);
                     rib.promote_to_llgr_stale(family, intern);
                     rib.promote_to_llgr_stale_flowspec(family);
                     rib.promote_to_llgr_stale_evpn(family, intern);
@@ -5942,7 +5944,7 @@ mod tests {
                     rib.promote_to_llgr_stale_rtc(family, intern);
                 }
                 Op::ClearStale(f) => {
-                    let family = FAMILIES[f];
+                    let family = family_at(f);
                     rib.clear_stale(family);
                     rib.clear_stale_flowspec(family);
                     rib.clear_stale_evpn(family);
@@ -5952,7 +5954,7 @@ mod tests {
                     rib.clear_stale_rtc(family);
                 }
                 Op::ClearLlgr(f) => {
-                    let family = FAMILIES[f];
+                    let family = family_at(f);
                     rib.clear_llgr_stale(family);
                     rib.clear_llgr_stale_flowspec(family);
                     rib.clear_llgr_stale_evpn(family);
@@ -5962,10 +5964,10 @@ mod tests {
                     rib.clear_llgr_stale_rtc(family);
                 }
                 Op::FinishGrUnicast(f) => {
-                    rib.finish_gr_family(FAMILIES[f]);
+                    rib.finish_gr_family(family_at(f));
                 }
                 Op::SweepStaleFamily(f) => {
-                    let family = FAMILIES[f];
+                    let family = family_at(f);
                     rib.sweep_stale_family(family);
                     rib.sweep_stale_flowspec_family(family);
                     rib.sweep_stale_family_evpn(family);
@@ -5975,7 +5977,7 @@ mod tests {
                     rib.sweep_stale_family_rtc(family);
                 }
                 Op::SweepLlgrFamily(f) => {
-                    let family = FAMILIES[f];
+                    let family = family_at(f);
                     rib.sweep_llgr_stale_family(family);
                     rib.sweep_llgr_stale_flowspec_family(family);
                     rib.sweep_llgr_stale_family_evpn(family);
@@ -6003,9 +6005,9 @@ mod tests {
                     rib.sweep_llgr_stale_rtc();
                 }
                 Op::WithdrawFamiliesExcept(f) => {
-                    rib.withdraw_families_except(&[FAMILIES[f]]);
+                    rib.withdraw_families_except(&[family_at(f)]);
                 }
-                Op::WithdrawAll(f) => match FAMILIES[f].1 {
+                Op::WithdrawAll(f) => match family_at(f).1 {
                     Safi::FlowSpec => rib.clear_flowspec(),
                     Safi::MplsVpn => drop(rib.withdraw_all_vpn()),
                     Safi::LabeledUnicast => drop(rib.withdraw_all_labeled()),
