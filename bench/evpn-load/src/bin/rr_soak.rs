@@ -1151,6 +1151,98 @@ mod tests {
         }
     }
 
+    fn exact_fleet(s: Shape) -> Vec<Client> {
+        (0..s.clients)
+            .map(|index| {
+                let mut view = View::new(s);
+                for origin in (0..s.clients).filter(|&o| o != index) {
+                    for idx in s.window2(0) {
+                        view.apply(index, s, &type2_route(origin, idx), true);
+                    }
+                    for idx in s.window5(0) {
+                        view.apply(index, s, &type5_route(origin, idx), true);
+                    }
+                }
+                Client {
+                    index,
+                    tx: None,
+                    view: Arc::new(Mutex::new(view)),
+                    up: Arc::new(AtomicBool::new(true)),
+                    expect_down: Arc::new(AtomicBool::new(false)),
+                    shifts: 0,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn epoch_check_requires_every_withdrawn_route_to_be_absent() {
+        let s = Shape {
+            clients: 4,
+            type2: 6,
+            type5: 3,
+            shift2: 2,
+            shift5: 1,
+        };
+        let clients = exact_fleet(s);
+        assert!(converged(&check(s, &clients), s));
+
+        // Origin 2 churns once: its window moves on. Client 0 receives the
+        // new routes but never the withdrawal of the old ones.
+        let mut clients = exact_fleet(s);
+        clients[2].shifts = 1;
+        let start2 = s.window2(0).next().unwrap();
+        let start5 = s.window5(0).next().unwrap();
+        for client in clients.iter().filter(|c| c.index != 2) {
+            let mut view = client.view.lock().unwrap();
+            for j in 0..s.shift2 {
+                view.apply(client.index, s, &type2_route(2, start2 + s.type2 + j), true);
+            }
+            for j in 0..s.shift5 {
+                view.apply(client.index, s, &type5_route(2, start5 + s.type5 + j), true);
+            }
+            if client.index != 0 {
+                for j in 0..s.shift2 {
+                    view.apply(client.index, s, &type2_route(2, start2 + j), false);
+                }
+                for j in 0..s.shift5 {
+                    view.apply(client.index, s, &type5_route(2, start5 + j), false);
+                }
+            }
+        }
+        let stale = check(s, &clients);
+        assert!(!converged(&stale, s), "a stale withdrawn route must fail");
+        assert!(stale.max_live > s.expected());
+
+        // Same count, wrong set: one new route missing, one withdrawn
+        // route still present.
+        {
+            let mut view = clients[0].view.lock().unwrap();
+            for j in 1..s.shift2 {
+                view.apply(0, s, &type2_route(2, start2 + j), false);
+            }
+            for j in 0..s.shift5 {
+                view.apply(0, s, &type5_route(2, start5 + j), false);
+            }
+            view.apply(0, s, &type2_route(2, start2 + s.type2), false);
+        }
+        let swapped = check(s, &clients);
+        assert_eq!(swapped.min_live, s.expected());
+        assert_eq!(swapped.max_live, s.expected());
+        assert!(
+            !converged(&swapped, s),
+            "equal counts with a stale route must fail"
+        );
+
+        // Delivering the last withdrawal and the missing route recovers.
+        {
+            let mut view = clients[0].view.lock().unwrap();
+            view.apply(0, s, &type2_route(2, start2), false);
+            view.apply(0, s, &type2_route(2, start2 + s.type2), true);
+        }
+        assert!(converged(&check(s, &clients), s));
+    }
+
     #[test]
     fn a_self_reflected_route_blocks_convergence() {
         let s = shape();

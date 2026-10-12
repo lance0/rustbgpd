@@ -186,6 +186,7 @@ def daemon_record(message, elapsed, **fields):
     }) + "\n").encode()
 
 
+DEFERRED = "outbound channel full \u2014 EVPN update deferred"
 CLEAN_DAEMON = daemon_record("daemon ready", 70) + daemon_record(
     "BGP NOTIFICATION", 200000, direction="received", code=6, subcode=2)
 
@@ -231,7 +232,8 @@ class EvpnRrAnalyzerContracts(unittest.TestCase):
             "rss_late_slope_per_hour", "intern_late_slope_per_hour", "no_abort",
             "reload_accounting", "session_floor", "flap_accounting", "flap_budget",
             "max_prefix_flat", "evpn_convergence", "evpn_terminal_receipt",
-            "evpn_sessions_not_lost", "sent_counters_monotone", "daemon_log",
+            "evpn_sessions_not_lost", "sent_counters_monotone",
+            "evpn_deferral_recovery", "daemon_log",
             "management_evidence", "management_lifetime", "management_operations",
             "management_completion", "management_cadence", "management_failures",
             "management_doctor",
@@ -307,6 +309,62 @@ class EvpnRrAnalyzerContracts(unittest.TestCase):
         receipt = [line.replace(" self_reflected=0", " self_reflected=1")
                    if "evpn_receipt" in line else line for line in smoke_cycles()]
         self.assert_only_failure("evpn_terminal_receipt", cycles=receipt)
+
+    def deferrals(self, *elapsed):
+        records = b"".join(
+            daemon_record(DEFERRED, e, peer=f"127.1.0.{i + 2}")
+            for i, e in enumerate(elapsed))
+        return daemon_record("daemon ready", 1) + records + daemon_record(
+            "BGP NOTIFICATION", 200000, direction="received", code=6, subcode=2)
+
+    def test_deferrals_followed_by_exact_epochs_pass_and_are_reported(self):
+        result, payload = run_analyzer(daemon=self.deferrals(15, 15, 95))
+        self.assertEqual(result.returncode, 0, payload["gates"])
+        gate = payload["gates"]["evpn_deferral_recovery"]
+        self.assertEqual(gate["value"]["count"], 3)
+        self.assertEqual(gate["value"]["first"], ts(15))
+        self.assertEqual(gate["value"]["last"], ts(95))
+        self.assertEqual(gate["value"]["peers"], 3)
+        # Epoch 2 (logged at 30) and epoch 6 (logged at 110) are the checks.
+        self.assertEqual(gate["value"]["checked_by_epochs"], [2, 6])
+
+    def test_deferral_then_missing_route_fails(self):
+        cycles = smoke_cycles(epoch_over={6: {"min_live": EXPECTED - 1, "converged": 0}})
+        result, payload = run_analyzer(cycles=cycles, daemon=self.deferrals(95))
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["evpn_deferral_recovery"]
+        self.assertFalse(gate["pass"])
+        self.assertIn("epoch 6", gate["value"]["unrecovered"][0]["reason"])
+
+    def test_deferral_then_stale_withdrawal_fails(self):
+        cycles = smoke_cycles(epoch_over={6: {"max_live": EXPECTED + 1, "converged": 0}})
+        result, payload = run_analyzer(cycles=cycles, daemon=self.deferrals(95))
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["evpn_deferral_recovery"]["pass"])
+
+    def test_deferral_without_a_later_epoch_check_fails(self):
+        gate = self.assert_only_failure(
+            "evpn_deferral_recovery", daemon=self.deferrals(235))
+        self.assertIn("no later epoch", gate["value"]["unrecovered"][0]["reason"])
+
+    def test_deferral_in_the_same_second_as_an_epoch_line_waits_for_the_next(self):
+        # Epoch 5 is logged at second 90; a deferral in that second may follow
+        # it, so only epoch 6 can prove recovery.
+        result, payload = run_analyzer(daemon=self.deferrals(90))
+        self.assertEqual(result.returncode, 0, payload["gates"])
+        self.assertEqual(
+            payload["gates"]["evpn_deferral_recovery"]["value"]["checked_by_epochs"], [6])
+
+    def test_teardown_deferrals_are_reported_but_not_gated(self):
+        result, payload = run_analyzer(daemon=self.deferrals(200001))
+        self.assertEqual(result.returncode, 0, payload["gates"])
+        value = payload["gates"]["evpn_deferral_recovery"]["value"]
+        self.assertEqual((value["count"], value["teardown_excluded"]), (0, 1))
+
+    def test_unreadable_daemon_log_fails_the_deferral_gate_closed(self):
+        result, payload = run_analyzer(daemon=b'{"not json\n')
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["evpn_deferral_recovery"]["pass"])
 
     def test_missing_epoch_line_fails(self):
         cycles = smoke_cycles(drop=("evpn_epoch n=5 ",))

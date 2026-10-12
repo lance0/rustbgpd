@@ -29,6 +29,12 @@ management-plane gate (with the EVPN operation set). Scenario-specific:
   - per-series sent counters: every bgp_messages_sent_total series in the
     retained /metrics snapshots is present in each later snapshot and never
     decreases
+  - deferred-update recovery: every "outbound channel full — EVPN update
+    deferred" record in rustbgpd.log before the first received
+    Cease/Administrative Shutdown (the final teardown) must be followed by
+    an epoch line logged in a later second, and that epoch must be exact
+    (full announced set present, every withdrawn route absent). The count,
+    first and last timestamps and distinct peers are reported.
 
 Missing evidence fails closed. Stdlib only. Exit code 0 on pass, 1 on any
 gate failure, 2 on harness/input error.
@@ -39,6 +45,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+from datetime import datetime
 import importlib.util
 import json
 import re
@@ -73,6 +80,7 @@ META_INTS = (
     "reload_every", "planned_flaps", "planned_reloads", "sample_interval_sec",
     "warmup_sec",
 )
+DEFERRED_MESSAGE = "outbound channel full \u2014 EVPN update deferred"
 KV_RE = re.compile(r"(\w+)=(-?\d+)")
 SENT_RE = re.compile(r"^bgp_messages_sent_total\{(?P<labels>[^}]*)\} (?P<value>\S+)$")
 
@@ -93,7 +101,7 @@ def parse_evpn_cycles(lines: list[str]) -> dict:
         ts = rs.parse_ts(m.group("ts"))
         body = m.group("body")
         if body.startswith("evpn_epoch "):
-            epochs.append(kv(body))
+            epochs.append({**kv(body), "_ts": ts})
         elif body.startswith("evpn_receipt "):
             receipts.append(kv(body))
         elif body.startswith("evpn_session_lost "):
@@ -114,12 +122,35 @@ def parse_evpn_cycles(lines: list[str]) -> dict:
     return {"epochs": epochs, "receipts": receipts, "flaps": flaps, "lost": lost}
 
 
+def epoch_defects(e: dict, meta: dict) -> list[str]:
+    """Why one epoch line is not an exact, on-schedule convergence."""
+    expected = meta["expected_per_client"]
+    clients = meta["peers"]
+    per_client = 2 * (meta["shift2_per_epoch"] + meta["shift5_per_epoch"])
+    n = e.get("n")
+    flap_due = isinstance(n, int) and n % meta["flap_every"] == 0
+    reload_due = isinstance(n, int) and n % meta["reload_every"] == 0
+    want = {
+        "receivers": clients, "expected": expected, "min_live": expected,
+        "max_live": expected, "converged": 1, "invalid": 0, "parse_errors": 0,
+        "self_reflected": 0,
+        "churn_events": per_client * (clients - 1 if flap_due else clients),
+    }
+    bad = [f"{k}={e.get(k)} expected {v}" for k, v in want.items() if e.get(k) != v]
+    if (e.get("flap_client", -1) != -1) != flap_due or e.get("flap_client") == 0:
+        bad.append(f"flap_client={e.get('flap_client')} (flap due: {flap_due})")
+    if (e.get("reload", 0) != 0) != reload_due:
+        bad.append(f"reload={e.get('reload')} (reload due: {reload_due})")
+    ms = e.get("converge_ms")
+    if ms is None or ms > meta["converge_cap_sec"] * 1000:
+        bad.append(f"converge_ms={ms} > cap {meta['converge_cap_sec'] * 1000}")
+    return bad
+
+
 def check_epochs(epochs: list[dict], meta: dict) -> dict:
     planned = meta["planned_epochs"]
     expected = meta["expected_per_client"]
-    clients = meta["peers"]
     cap_ms = meta["converge_cap_sec"] * 1000
-    per_client = 2 * (meta["shift2_per_epoch"] + meta["shift5_per_epoch"])
     defects: list[str] = []
     numbers = [e.get("n") for e in epochs]
     if numbers != list(range(1, planned + 1)):
@@ -127,23 +158,9 @@ def check_epochs(epochs: list[dict], meta: dict) -> dict:
     converge_ms = []
     for e in epochs:
         n = e.get("n")
-        flap_due = isinstance(n, int) and n % meta["flap_every"] == 0
-        reload_due = isinstance(n, int) and n % meta["reload_every"] == 0
-        want = {
-            "receivers": clients, "expected": expected, "min_live": expected,
-            "max_live": expected, "converged": 1, "invalid": 0, "parse_errors": 0,
-            "self_reflected": 0,
-            "churn_events": per_client * (clients - 1 if flap_due else clients),
-        }
-        bad = [f"{k}={e.get(k)} expected {v}" for k, v in want.items() if e.get(k) != v]
-        if (e.get("flap_client", -1) != -1) != flap_due or e.get("flap_client") == 0:
-            bad.append(f"flap_client={e.get('flap_client')} (flap due: {flap_due})")
-        if (e.get("reload", 0) != 0) != reload_due:
-            bad.append(f"reload={e.get('reload')} (reload due: {reload_due})")
+        bad = epoch_defects(e, meta)
         ms = e.get("converge_ms")
-        if ms is None or ms > cap_ms:
-            bad.append(f"converge_ms={ms} > cap {cap_ms}")
-        else:
+        if ms is not None and ms <= cap_ms:
             converge_ms.append(ms)
         if bad and len(defects) < 20:
             defects.append(f"epoch {n}: " + "; ".join(bad))
@@ -252,6 +269,71 @@ def sent_series_monotone(path: Path) -> dict:
     }
 
 
+def deferral_events(run_dir: str) -> tuple[list[tuple[float, str]], str | None]:
+    """(unix time, peer) of every deferred-EVPN-update record in rustbgpd.log."""
+    events = []
+    try:
+        with (Path(run_dir) / "rustbgpd.log").open(encoding="utf-8") as stream:
+            for number, line in enumerate(stream, 1):
+                # Cheap prefilter; JSON may escape the dash, so match the tail.
+                if "EVPN update deferred" not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                    fields = record["fields"]
+                    if fields["message"] != DEFERRED_MESSAGE:
+                        continue
+                    stamp = datetime.fromisoformat(
+                        record["timestamp"].replace("Z", "+00:00")).timestamp()
+                    events.append((stamp, str(fields.get("peer"))))
+                except (ValueError, TypeError, KeyError) as exc:
+                    return events, f"line {number}: unreadable deferral record: {exc}"
+    except (OSError, UnicodeError) as exc:
+        return events, f"cannot read rustbgpd.log: {exc}"
+    return events, None
+
+
+def deferral_recovery(run_dir: str, epochs: list[dict], meta: dict,
+                      daemon_log: dict) -> dict:
+    """Every in-window deferral must be followed by an exact epoch check."""
+    events, error = deferral_events(run_dir)
+    if error is None and not daemon_log["pass"]:
+        error = "daemon log evidence is incomplete (see daemon_log)"
+    teardown = daemon_log["value"]["first_administrative_shutdown_unix"]
+    gated = [(t, p) for t, p in events if teardown is None or t < teardown]
+    unrecovered, checked = [], set()
+    for stamp, peer in gated:
+        # Epoch lines carry whole-second stamps: only a line in a later
+        # second is certainly after the deferral.
+        later = next((e for e in epochs if e["_ts"] >= int(stamp) + 1), None)
+        if later is None:
+            reason = "no later epoch check"
+        else:
+            bad = epoch_defects(later, meta)
+            checked.add(later.get("n"))
+            reason = f"epoch {later.get('n')}: " + "; ".join(bad) if bad else None
+        if reason and len(unrecovered) < 20:
+            unrecovered.append({"deferred_at": iso(stamp), "peer": peer, "reason": reason})
+    return {
+        "value": {
+            "count": len(gated),
+            "first": iso(gated[0][0]) if gated else None,
+            "last": iso(gated[-1][0]) if gated else None,
+            "peers": len({p for _, p in gated}),
+            "checked_by_epochs": sorted(checked),
+            "teardown_excluded": len(events) - len(gated),
+            "unrecovered": unrecovered,
+            "error": error,
+        },
+        "pass": error is None and not unrecovered,
+    }
+
+
+def iso(stamp: float) -> str:
+    return datetime.fromtimestamp(stamp, tz=rs.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
 def evpn_identity(meta: dict) -> tuple[dict, list[str]]:
     peer = meta.get("management_evpn_peer")
     errors = [] if peer == EVPN_PEER else [
@@ -298,6 +380,8 @@ def analyze(run_dir: str, rows: list[dict], cycle_lines: list[str], meta: dict,
     gates["sent_counters_monotone"] = sent_series_monotone(
         Path(run_dir) / "metrics-snapshots.txt.gz")
     gates["daemon_log"] = analyze_daemon_log(run_dir)
+    gates["evpn_deferral_recovery"] = deferral_recovery(
+        run_dir, evpn["epochs"], meta, gates["daemon_log"])
     gates.update(rs.analyze_management_load(
         management_raw, meta,
         gates["daemon_log"]["value"]["first_administrative_shutdown_unix"],
