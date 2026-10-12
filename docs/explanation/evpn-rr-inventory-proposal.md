@@ -17,10 +17,9 @@ segment or multi-homing behavior.
 | Surface | Candidate Type 1–5 RR boundary | Current status and exclusions |
 |---|---|---|
 | Configuration | `l2vpn_evpn` (AFI 25/SAFI 70) in `Neighbor.families` or `PeerGroupConfig.families`; optionally require it through `required_families`. Use the already inventoried common `Global.asn`, `Global.router_id`, `Global.cluster_id`, `Neighbor.remote_asn`, and neighbor/peer-group `route_reflector_client`. Existing common restart keys are neighbor/peer-group `graceful_restart`, `gr_restart_time`, `gr_peer_restart_time_max`, `gr_stale_routes_time`, and `llgr_stale_time`. A client must be iBGP; absent an explicit cluster ID, the router ID supplies it. | The config **keys** are already stable, but the `l2vpn_evpn` **family value is alpha today**. The proposed role would scope that value to Types 1–5 RR operation, including the named restart settings; it would add no EVPN-specific knob. RR-only operation has no local EVI: leave `Config.evpn_instances`, `Config.evpn_ip_vrfs`, Ethernet segments, managed netdevs, and all dataplane configuration alpha. See [family and mode](../reference/configuration.md#address-families) and [RR configuration](../reference/configuration.md#route-reflector-rfc-4456). |
-| `RibService.ListEvpnRoutes` | Type 1–5 selected Loc-RIB, using `ListEvpnRequest.route_type_filter=1`, `peer_filter=2`, `rd_filter=3`; `ListEvpnResponse.routes=1`. Require a type filter in `1..=5` for this scoped promise. | Current method is unpaginated, accepts `0` (all) and `6`, and is explicitly outside v1. Unfiltered and Type 6 queries remain alpha. |
 | `RibService.ListReceivedEvpnRoutes` and `ListAdvertisedEvpnRoutes` | Accepted post-policy Adj-RIB-In from a source peer, or committed Adj-RIB-Out for a destination peer. `ListPeerEvpnRoutesRequest`: `neighbor_address=1`, `route_type_filter=2`, `rd_filter=3`, `page_size=4`, `page_token=5`. `ListPeerEvpnRoutesResponse`: `routes=1`, `next_page_token=2`, `total_count=3`, `page_version=4`; `RoutePageVersion.epoch=1`, `generation=2`. Require a type filter in `1..=5`. An advertised row's `peer_address` remains its source peer. | Both methods currently accept `0` and `6` and are outside v1. A committed row proves outbound admission, not remote receipt. Default page size is 100, maximum 1000; continuation is process-local and invalidated by table mutation. |
-| Route projection | For Type 1–5 results, pin `EvpnRouteEntry` fields 1–16: `route_type`, `rd`, `esi`, `ethernet_tag`, `mac`, `ip`, `prefix`, `gateway`, `label`, `label2`, `next_hop`, `peer_address`, `as_path`, `communities`, `extended_communities`, `tunnel_type`. | Field 17 `prefix_sid` is an optional decoded SRv6-related view; field 18 `smet` is Type 6. Neither belongs to this proposal. Labels/VNIs, gateway, and tunnel type are route data for query and reflection, not promises to program them. |
-| CLI | Candidate paths are `rbgp evpn`, `rbgp evpn received PEER`, and `rbgp evpn advertised PEER`, **only with `--route-type TYPE`, where `TYPE` is one of `1`, `2`, `3`, `4`, or `5`**. Base list filters are `--neighbor`/`--peer` and `--rd`; peer views add `--rd`, `--limit` (1–1000), and `--page-token`. Base `--json` is an array of route rows; peer-view `--json` is a page object with `view`, `neighbor`, `routes`, `next_page_token`, `total_count`, and `page_version` (`epoch`, `generation`). | The CLI spells this `evpn`, not `rib evpn`. Unfiltered output, Type 6, `evpn explain`, injection/deletion, runtime, instance, ES, and dataplane commands stay alpha. The existing CLI inventory pins command paths only; a JSON type floor would need separate design and tests. |
+| Route projection | For Type 1–5 peer-view results, pin `EvpnRouteEntry` fields 1–16: `route_type`, `rd`, `esi`, `ethernet_tag`, `mac`, `ip`, `prefix`, `gateway`, `label`, `label2`, `next_hop`, `peer_address`, `as_path`, `communities`, `extended_communities`, `tunnel_type`. | Field 17 `prefix_sid` is an optional decoded SRv6-related view; field 18 `smet` is Type 6. Neither belongs to this proposal. Labels/VNIs, gateway, and tunnel type are route data for query and reflection, not promises to program them. |
+| CLI | Candidate paths are `rbgp evpn received PEER` and `rbgp evpn advertised PEER`, **only with `--route-type TYPE`, where `TYPE` is one of `1`, `2`, `3`, `4`, or `5`**. Peer views accept `--rd`, `--limit` (1–1000), and `--page-token`; `--json` is a page object with `view`, `neighbor`, `routes`, `next_page_token`, `total_count`, and `page_version` (`epoch`, `generation`). | The CLI spells this `evpn`, not `rib evpn`. Base `rbgp evpn`, unfiltered output, Type 6, `evpn explain`, injection/deletion, runtime, instance, ES, and dataplane commands stay alpha. The existing CLI inventory pins command paths only; a JSON type floor would need separate design and tests. |
 | CLI route row | JSON row: `route_type`, `route_type_name`, `rd`, `esi`, `ethernet_tag`, `mac`, `ip`, `prefix`, `gateway`, `label`, `label2`, `tunnel_type`, `next_hop`, `peer`, `as_path`, `communities`, `extended_communities`. Human rows show the route-type label, RD and present identity fields, next hop, and source peer; present labels and encapsulation are displayed. | `peer` is the JSON projection of RPC `peer_address`. Conditional JSON `prefix_sid` and `smet` are alpha. No per-route `stale` or `llgr_stale` field exists in the EVPN RPC/CLI today; this proposal does not invent one. |
 
 The RPC names and field numbers above come from the current
@@ -28,6 +27,19 @@ The RPC names and field numbers above come from the current
 [EVPN command](../../crates/cli/src/commands/evpn.rs). A type-filtered query is
 one route type at a time; callers can query each of Types 1–5. The methods
 also serve alpha cases, so merely naming a method does not widen the role.
+
+The selected Loc-RIB view is **deferred**, not part of this initial candidate.
+Its existing `RibService.ListEvpnRoutes` takes `ListEvpnRequest` fields
+`route_type_filter=1`, `peer_filter=2`, and `rd_filter=3`, and returns
+`ListEvpnResponse.routes=1`. Base `rbgp evpn` accepts `--route-type`,
+`--neighbor`/`--peer`, and `--rd`; its `--json` output is a bare route-row
+array. The method is unpaginated: it scans the EVPN table and clones every
+matching row. A Type 1–5 filter does not bound the scan or number of matching
+rows returned. Its existing behavior is accepted as alpha; this proposal adds
+no latency claim or measurement gate. Including it later needs an explicit
+cost/inclusion decision or a bounded replacement. The existing Scoped RR
+families' query precedent does not decide that EVPN profile automatically.
+No RPC or CLI runtime behavior changes are proposed here.
 
 ### Metrics to inventory
 
@@ -68,8 +80,7 @@ hashes must be computed only after that design and the final scope are approved.
  # Retain a separate alpha EVPN role for Type 6 and PE/dataplane behavior.
  grpc.scoped_rr_only_method_sets += {
    "service": "RibService",
-   "methods": ["ListEvpnRoutes", "ListReceivedEvpnRoutes",
-               "ListAdvertisedEvpnRoutes"],
+   "methods": ["ListReceivedEvpnRoutes", "ListAdvertisedEvpnRoutes"],
    "excluded_message_fields": ["EvpnRouteEntry.prefix_sid",
                                "EvpnRouteEntry.smet"],
    "signature_sha256": "<compute after approval>",
@@ -77,12 +88,10 @@ hashes must be computed only after that design and the final scope are approved.
  }
  grpc.explicitly_unstable_message_fields += ["EvpnRouteEntry.prefix_sid",
                                                "EvpnRouteEntry.smet"]
- grpc.explicitly_outside_v1 -= ["RibService.ListEvpnRoutes",
-                                "RibService.ListReceivedEvpnRoutes",
+ grpc.explicitly_outside_v1 -= ["RibService.ListReceivedEvpnRoutes",
                                 "RibService.ListAdvertisedEvpnRoutes"]
- # Keep RibService.ExplainEvpnRoute outside v1.
- cli.scoped_rr_only_command_paths += ["evpn", "evpn received",
-                                       "evpn advertised"]
+ # Keep RibService.ListEvpnRoutes and ExplainEvpnRoute outside v1.
+ cli.scoped_rr_only_command_paths += ["evpn received", "evpn advertised"]
  # Add an explicit, type-filtered CLI JSON/human output floor and a checked
  # metric name/type/label floor only if their checker/test representation is
  # designed and reviewed. Do not copy the unicast rbgp-rib/1.1 schema.
