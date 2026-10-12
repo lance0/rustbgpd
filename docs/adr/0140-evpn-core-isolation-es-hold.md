@@ -720,6 +720,29 @@ Implementation review tightened decision 4 in two ways.
   route flush can fall between the two values, which is at least as strong as
   the ordered pair of reads decision 4 allowed.
 
+## Amendment (2026-10-12): re-enslaved members and ambiguous entries
+
+- **A re-enslaved member is held again.** The classification table in
+  decision 3 lists an owned admin-up member as `overridden`. That conflicts
+  with the paragraph above it for a held member that left the bond and was
+  enslaved again: releasing a member closes it and enslaving opens it, so the
+  kernel, not another writer, raised it. A member seen outside the bound bond
+  during the hold is therefore taken down again when it returns; an owned
+  member raised while it stayed in the bond is still `overridden`.
+- **Ambiguous entries with nothing left down are dropped.** Decision 6 keeps
+  every ambiguous entry, so one could never be cleared once the operator had
+  raised or deleted its link. The release helper and the startup reconcile
+  now drop an ambiguous entry when no link with its ifindex or name exists, or
+  every such link is admin-up. Dropping never raises a link. An entry whose
+  link still exists and is admin-down is kept.
+- **The startup hold waits for every binding to latch.** The startup hold
+  becomes an isolation hold only after EVPN has synced and every bound
+  segment has a peer record. An `auto-lacp` segment the startup hold leaves
+  unresolved has none, so it stays under the startup hold.
+- **A stalled RIB is no reading.** A poll the RIB does not answer is not a
+  repeat of the last reading. Only backstops act without a reading, and an
+  isolation hold is released after `backstop_seconds` with no answer.
+
 ## Consequences
 
 - An isolated all-active PE stops attracting CE traffic. At recovery and
