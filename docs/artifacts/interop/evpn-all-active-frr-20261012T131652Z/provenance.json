@@ -1,0 +1,47 @@
+{
+  "execution": "containerlab 0.74.3 deploy of the tracked M121 topology with the controller image built by docker build --target dev; tracked shell and Python drivers unchanged",
+  "date_utc": "2026-10-12",
+  "source_commit": "2d27cb49ce7e6ddb84354cb114f16f70b8d5a944",
+  "runtime_clean": true,
+  "harness_clean": true,
+  "source_id": "296b392ff808fe865f2406a35c96984dc0b21c8df39a374dd0009bdc1449b4a2",
+  "source_id_matches_tree": true,
+  "daemon_sha256": "8a2c4b7dfcb77a662f3f96d9d272ed5e7688e7c55938d92dcdef83f4f8e5244c",
+  "cli_sha256": "71cf552dd1fc3db6b03b3a6b6ef967a696d1526804e30e8f571a642106181d96",
+  "driver_sha256": "22fe1123e5b78fff9b2b377feece0ad41a6f2ef29b2c484c2146d4c493b3aea2",
+  "harness_sha256": {
+    "tests/interop/scripts/m121_all_active_frr.py": "22fe1123e5b78fff9b2b377feece0ad41a6f2ef29b2c484c2146d4c493b3aea2",
+    "tests/interop/scripts/m121_all_active_oracle.py": "6f546a3d3c47f539fd278d84a4fca8ad2ac179579b1528cd243d00e5ce8817ed",
+    "tests/interop/scripts/m121_all_active_wire.py": "64b6201b210fdb8dd7dbaf676bd2abe4043bb71a2d4af5bc39a8896d98fe08f3",
+    "tests/interop/scripts/evpn_frr_peer_sync.py": "b1957d5396c73f93ebfc47eb928c87af3a5477d57c997ae6c080373f08071102",
+    "tests/interop/scripts/m105_capture_oracle.py": "9d152b017ff20a27e8db17b4e2b5afab5e40d050e2b9144f6d70730a67a434c9",
+    "tests/interop/scripts/test-m121-evpn-all-active-frr.sh": "069568dae477ae04f6c82538f5c942600cd73b3513dffeec05a914cd5d9253b3",
+    "tests/interop/scripts/source-id-guard.sh": "d4bddf6b1a72f09ab18041887559fe4b2fd9ce83c0a1b1afe6d5bc0de614835e",
+    "scripts/source-id.sh": "703efb7e015d4e98e18160486d1ef3bb1a1a542eb42ea6699358804924fca5d6",
+    "tests/interop/configs/rustbgpd-m121-pe.toml": "7c5af5f33be26e0189c713dfc50642261e58e26b417d62bf384e4633ea2908d3",
+    "tests/interop/m121-evpn-all-active-frr.clab.yml": "04a887b908828e01e69dfa5439fc1456da2282accafaf4b783090679e0b3f071",
+    "tests/fixtures/grpc-test-only-operator.token": "d0a48e1189063c4afb5d62ad2a6121894cac5991a2771c8eaec9192cb88000ab",
+    "docs/artifacts/interop/evpn-frr-peer-sync-20261011/result.json": "ae3f7cc6d24d384b45913bd55d4a60f13604a2c257ec811ed1beb50210b36d4f"
+  },
+  "containers": {
+    "a": {
+      "image": "quay.io/frrouting/frr:10.7.1",
+      "image_id": "sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2"
+    },
+    "r": {
+      "image": "quay.io/frrouting/frr:10.7.1",
+      "image_id": "sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2"
+    },
+    "controller": {
+      "image": "rustbgpd:dev-lan2103",
+      "image_id": "sha256:0f68c4f3e6ffc95ef121cfa6690056caf1c3df3f56ee93669a05693cd93f0979"
+    }
+  },
+  "kernel": "7.0.0-30-generic",
+  "tshark_version": "TShark (Wireshark) 4.0.17 (Git v4.0.17 packaged as 4.0.17-0+deb12u3).",
+  "frr_version": "10.7.1_git",
+  "frr_source_commit": "f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1",
+  "compare_historical": false,
+  "hosted_qualification": false,
+  "public_evidence": "UDP captures unchanged; snapshot JSON omits hostname keys; BGP is derived UPDATE-only exact bytes, not complete public TCP captures"
+}

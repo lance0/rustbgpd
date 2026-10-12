@@ -156,6 +156,15 @@ Known EVPN gaps:
   row to local origination; Linux retains the external-learning marker.
   Concurrent foreign FDB writers can also race the pre-apply ownership check;
   see the [ADR-0085 amendment](../adr/0085-evpn-es-interface-binding.md#amendment-2026-10-11-peer-synchronized-local-fdb-forwarding).
+- A shared all-active ES with stock FRR 10.7.1 on Linux is qualified only
+  with `highest-preference` and FRR as the DF. FRR becomes non-DF on every
+  VNI on algorithm disagreement, and it does not filter BUM when it is
+  non-DF: its netlink provider never applies the non-DF bridge-port update.
+  With rustbgpd as DF beside it, the CE receives each BUM frame twice, once
+  through each PE. The [mixed-peer receipt](../artifacts/interop/evpn-all-active-frr-20261012T131652Z/README.md)
+  covers one rustbgpd PE, one FRR PE and one FRR remote VTEP in a single
+  all-active ES; it is not scale evidence. See
+  [FRR all-active ES peers](configuration.md#frr-all-active-es-peers).
 - Symmetric Interface-less IRB does not implement `RTA_VIA`, so a Type 5
   prefix and its next hop must be the same address family. Under an IPv6
   VTEP only IPv6 tenant prefixes are carried: an IPv4 prefix is refused at

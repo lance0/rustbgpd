@@ -1,0 +1,54 @@
+# M121 FRR-DF cell. The driver renders fresh Rust-DF and default-modulo cells.
+config_epoch = 2
+
+[global]
+ebgp_requires_policy = true
+asn = 65000
+router_id = "10.211.0.2"
+listen_port = 179
+runtime_state_dir = "/var/lib/rustbgpd-m121"
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.211.0.2:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.211.0.2"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "03:aa:bb:cc:dd:ee:ff:00:00:01"
+member_vnis = [100]
+df_algorithm = "highest-preference"
+df_preference = 100
+redundancy_mode = "all-active"
+originator_ip = "10.211.0.2"
+interface = "es0"
+recovery_delay_seconds = 5
+
+[[neighbors]]
+address = "10.211.0.1"
+remote_asn = 65000
+families = ["l2vpn_evpn"]
+hold_time = 30
+
+[[neighbors]]
+address = "10.211.0.3"
+remote_asn = 65000
+families = ["l2vpn_evpn"]
+hold_time = 30

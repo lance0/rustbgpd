@@ -1,0 +1,29 @@
+# M121: three fresh all-active cells, with FRR 10.7.1 and a real LACP CE.
+# The controller builds an isolated underlay and Rust/CE/remote-host namespaces.
+# /hostproc gives namespace handles for these two FRR nodes only; no host links
+# or daemon processes are changed. This works with containerlab 0.74.3.
+# Run test-m121-evpn-all-active-frr.sh after deploy; it retains /tmp/m121 evidence.
+name: m121-evpn-all-active-frr
+
+topology:
+  nodes:
+    a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      cmd: /bin/sleep infinity
+    r:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      cmd: /bin/sleep infinity
+    controller:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - /proc:/hostproc:ro
+        - ./scripts:/m121/scripts:ro
+        - ./configs/rustbgpd-m121-pe.toml:/m121/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      env:
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_segment=debug

@@ -1,0 +1,140 @@
+{
+  "source": "https://github.com/lance0/rustbgpd/actions/runs/38177409053",
+  "derivation": "Target MAC rows only from first completed FRR RIB read and following Rust RIB read; field values unchanged.",
+  "mac": "02:aa:bb:cc:dd:20",
+  "vni": 100,
+  "frr_routes": {
+    "10.211.0.1:2": {
+      "rd": "10.211.0.1:2",
+      "[2]:[0]:[48]:[02:aa:bb:cc:dd:20]": {
+        "prefix": "[2]:[0]:[48]:[02:aa:bb:cc:dd:20]",
+        "prefixLen": 352,
+        "pathCount": 1,
+        "multiPathCount": 1,
+        "paths": [
+          [
+            {
+              "valid": true,
+              "bestpath": true,
+              "selectionReason": "First path received",
+              "pathFrom": "internal",
+              "routeType": 2,
+              "ethTag": 0,
+              "macLen": 48,
+              "mac": "02:aa:bb:cc:dd:20",
+              "locPrf": 100,
+              "weight": 0,
+              "peerId": "10.211.0.1",
+              "path": "",
+              "origin": "IGP",
+              "esi": "03:aa:bb:cc:dd:ee:ff:00:00:01",
+              "extendedCommunity": {
+                "string": "RT:65000:100 ET:8 ND:Proxy"
+              },
+              "nexthops": [
+                {
+                  "ip": "10.211.0.1",
+                  "hostname": "a",
+                  "afi": "ipv4",
+                  "used": true
+                }
+              ]
+            }
+          ]
+        ],
+        "flags": {
+          "bestPathExists": true
+        }
+      }
+    },
+    "10.211.0.2:100": {
+      "rd": "10.211.0.2:100",
+      "[2]:[0]:[48]:[02:aa:bb:cc:dd:20]": {
+        "prefix": "[2]:[0]:[48]:[02:aa:bb:cc:dd:20]",
+        "prefixLen": 352,
+        "pathCount": 1,
+        "multiPathCount": 1,
+        "paths": [
+          [
+            {
+              "valid": true,
+              "bestpath": true,
+              "selectionReason": "First path received",
+              "pathFrom": "internal",
+              "routeType": 2,
+              "ethTag": 0,
+              "macLen": 48,
+              "mac": "02:aa:bb:cc:dd:20",
+              "locPrf": 100,
+              "weight": 0,
+              "peerId": "10.211.0.2",
+              "path": "",
+              "origin": "IGP",
+              "esi": "03:aa:bb:cc:dd:ee:ff:00:00:01",
+              "extendedCommunity": {
+                "string": "RT:65000:100 ET:8"
+              },
+              "nexthops": [
+                {
+                  "ip": "10.211.0.2",
+                  "afi": "ipv4",
+                  "used": true
+                }
+              ]
+            }
+          ]
+        ],
+        "flags": {
+          "bestPathExists": true
+        }
+      }
+    }
+  },
+  "rust_routes": [
+    {
+      "as_path": [],
+      "communities": [],
+      "esi": "03:aa:bb:cc:dd:ee:ff:00:00:01",
+      "ethernet_tag": "0",
+      "extended_communities": [
+        842122827661412,
+        219550481834311688
+      ],
+      "gateway": "",
+      "ip": "",
+      "label": 100,
+      "label2": 0,
+      "mac": "02:aa:bb:cc:dd:20",
+      "next_hop": "10.211.0.2",
+      "peer": "0.0.0.0",
+      "prefix": "",
+      "rd": "10.211.0.2:100",
+      "route_type": 2,
+      "route_type_name": "mac-ip",
+      "tunnel_type": 8
+    },
+    {
+      "as_path": [],
+      "communities": [],
+      "esi": "03:aa:bb:cc:dd:ee:ff:00:00:01",
+      "ethernet_tag": "0",
+      "extended_communities": [
+        219550481834311688,
+        842122827661412,
+        434601762087763968
+      ],
+      "gateway": "",
+      "ip": "",
+      "label": 100,
+      "label2": 0,
+      "mac": "02:aa:bb:cc:dd:20",
+      "next_hop": "10.211.0.1",
+      "peer": "10.211.0.1",
+      "prefix": "",
+      "rd": "10.211.0.1:2",
+      "route_type": 2,
+      "route_type_name": "mac-ip",
+      "tunnel_type": 8
+    }
+  ]
+}

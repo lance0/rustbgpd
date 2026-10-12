@@ -383,6 +383,18 @@ rows do not originate new Type 2 routes. Unbound segments provide control-plane 
 not provide this forwarding behavior. See the
 [ADR-0085 amendment](../adr/0085-evpn-es-interface-binding.md#amendment-2026-10-11-peer-synchronized-local-fdb-forwarding).
 
+**Use `highest-preference` with an FRR 10.7.1 ES peer, and make FRR the DF.**
+Set `df_algorithm = "highest-preference"` on rustbgpd, and set FRR's
+`evpn mh es-df-pref` on its access bond above rustbgpd's `df_preference`.
+FRR becomes non-DF on every VNI when the algorithms disagree. Stock FRR on
+Linux also does not filter BUM when it is non-DF: its netlink provider
+never applies the non-DF bridge-port update. With rustbgpd as DF, the CE
+receives each BUM frame twice, once through each PE. This is a known
+limitation, not a supported mode. With FRR as DF, rustbgpd filters as
+non-DF and the CE receives one copy. Highest-preference chooses one winner
+across the ES's VNIs. See
+[FRR all-active ES peers](../reference/configuration.md#frr-all-active-es-peers).
+
 What you still provide:
 
 - Each `member_vnis` entry must be a configured `[[evpn_instances]]`

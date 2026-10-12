@@ -183,6 +183,12 @@ jobs:
           bash tests/interop/scripts/test-test-wait-helper.sh
           python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
           python3 tests/interop/scripts/test_evpn_frr_peer_sync.py
+          python3 tests/interop/scripts/test_m121_all_active_oracle.py
+          python3 tests/interop/scripts/test_m121_all_active_wire.py
+          python3 tests/interop/scripts/test_m121_all_active_driver.py
+          python3 -m py_compile tests/interop/scripts/m121_all_active_frr.py tests/interop/scripts/m121_all_active_oracle.py tests/interop/scripts/m121_all_active_wire.py
+          bash -n tests/interop/scripts/test-m121-evpn-all-active-frr.sh
+          shellcheck -x tests/interop/scripts/test-m121-evpn-all-active-frr.sh
           python3 tests/interop/scripts/test_interop_signal_cleanup.py
           python3 tests/interop/scripts/test_m66_failure_diagnostics.py
           python3 tests/interop/scripts/test_m67_rerun_mode.py
