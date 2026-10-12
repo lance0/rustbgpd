@@ -184,6 +184,9 @@ configuration stays live:
 #!/bin/sh -e
 # cron: refresh member filters (arouteserver caches govern data staleness)
 arouteserver template-context --output "$STATE/context.yml"
+# The output directory must be absent or an empty mode-0700 directory: the
+# rendered config.toml can carry member MD5 keys, so files are mode 0600.
+rm -rf "${STATE:?}/candidate"
 rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
 # --strict: warnings fail the gate, so a refresh never swaps in a config

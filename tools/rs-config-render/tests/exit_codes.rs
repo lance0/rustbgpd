@@ -370,6 +370,15 @@ fn every_error_variant_maps_to_the_shared_table() {
         (ixp_manager::Error::Input, Exit::InvalidInput),
         (ixp_manager::Error::Refused(""), Exit::Refused),
         (ixp_manager::Error::Output, Exit::OutputUnusable),
+        (
+            ixp_manager::Error::Write {
+                action: "write",
+                path: "out/config.toml".into(),
+                kind: std::io::ErrorKind::StorageFull,
+                cause: String::new(),
+            },
+            Exit::OutputUnusable,
+        ),
         (ixp_manager::Error::CheckerUnavailable, Exit::Refused),
         (ixp_manager::Error::Checker, Exit::StrictCheckFailed),
     ];
@@ -378,6 +387,7 @@ fn every_error_variant_maps_to_the_shared_table() {
             ixp_manager::Error::Input
             | ixp_manager::Error::Refused(_)
             | ixp_manager::Error::Output
+            | ixp_manager::Error::Write { .. }
             | ixp_manager::Error::CheckerUnavailable
             | ixp_manager::Error::Checker => {}
         }

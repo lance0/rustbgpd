@@ -1,5 +1,6 @@
 # Containerlab topology: arouteserver white-list / control-community
-# differential lab (M106 — the M90 topology, verbatim, under its own name)
+# differential lab (M106 — the M90 topology under its own name, plus a
+# fourth member for the strict-Role row)
 #
 # One IXP peering LAN (192.0.2.0/24, RFC 5737) bridged through a
 # dedicated switch node, carrying:
@@ -12,7 +13,11 @@
 #     peering with BOTH route servers and injecting the canned
 #     announcement set from
 #     m106-rs-white-list-control-differential/announcements.json (the
-#     member configs are the M90 ones: same ASNs, addresses, sessions)
+#     member2/member3 configs are the M90 ones; member1 adds the site's
+#     TCP MD5 password)
+#   - GoBGP member4          192.0.2.14 (AS64503), which sends no BGP Role
+#     capability; the site sets a strict Role for it, so both route
+#     servers must refuse its session
 #
 # Both route servers carry BGP identifier 192.0.2.10 (the single
 # router_id in general.yml renders into both configs). They never peer
@@ -35,7 +40,7 @@ name: m106-rs-white-list-control-differential
 
 topology:
   nodes:
-    # Plain bridge over all five access ports (the m65 CE idiom):
+    # Plain bridge over all six access ports (the m65 CE idiom):
     # a multipoint peering LAN out of containerlab's p2p links.
     switch:
       kind: linux
@@ -48,11 +53,13 @@ topology:
         - ip link set eth3 master br0
         - ip link set eth4 master br0
         - ip link set eth5 master br0
+        - ip link set eth6 master br0
         - ip link set eth1 up
         - ip link set eth2 up
         - ip link set eth3 up
         - ip link set eth4 up
         - ip link set eth5 up
+        - ip link set eth6 up
         - ip link set br0 up
 
     rustbgpd:
@@ -80,7 +87,7 @@ topology:
       image: gobgp:interop
       cmd: sleep infinity
       binds:
-        - ./configs/gobgp-m90-member1.toml:/config/gobgp.toml:ro
+        - ./configs/gobgp-m106-member1.toml:/config/gobgp.toml:ro
       exec:
         - ip addr add 192.0.2.11/24 dev eth1
         - ip link set eth1 up
@@ -105,15 +112,27 @@ topology:
         - ip addr add 192.0.2.13/24 dev eth1
         - ip link set eth1 up
 
+    member4:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m106-member4.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.14/24 dev eth1
+        - ip link set eth1 up
+
   links:
     - endpoints: ["switch:eth1", "rustbgpd:eth1"]
     - endpoints: ["switch:eth2", "bird:eth1"]
     - endpoints: ["switch:eth3", "member1:eth1"]
     - endpoints: ["switch:eth4", "member2:eth1"]
     - endpoints: ["switch:eth5", "member3:eth1"]
+    - endpoints: ["switch:eth6", "member4:eth1"]
 
 # rustbgpd RS: AS 64496, 192.0.2.9 (BGP identifier 192.0.2.10)
 # BIRD RS:     AS 64496, 192.0.2.10
 # member1: AS64500, 192.0.2.11 — IRR-clean
 # member2: AS64501, 192.0.2.12 — out-of-set announcements
 # member3: AS64502, 192.0.2.13 — hygiene violations
+# member4: AS64503, 192.0.2.14 — strict Role, no Role capability: refused

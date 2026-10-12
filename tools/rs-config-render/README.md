@@ -24,6 +24,11 @@ explicit import chain and the declared transparent export chain (RFC 7947
 permit-all, plus `ebgp_requires_policy` so deleting it fails closed) — so
 the refresh loop can gate on warnings, not just on rejection.
 
+As in IXP Manager mode, `--out-dir` must be absent or an empty, non-symlink
+mode-0700 directory; it is created mode 0700 and every generated file mode
+0600, because `config.toml` can carry member MD5 keys. Anything else exits 8
+before writing. Remove the previous candidate before each render.
+
 [arouteserver]: https://github.com/pierky/arouteserver
 
 ## IXP Manager v7.4 manual candidate
@@ -453,7 +458,7 @@ and against a live run of the pinned arouteserver image by
 
 | File | Contents |
 |---|---|
-| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, an explicit `rs_control_communities` (on only when the site configures exactly the daemon's control matrix, see below), both unicast families on an RFC 8950 session, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
+| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"` (plus `strict_role = true` when the client's effective `roles.strict_mode` is on), `md5_password` from the client's `password`, strict next-hop ownership, an explicit `rs_control_communities` (on only when the site configures exactly the daemon's control matrix, see below), both unicast families on an RFC 8950 session, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
 | `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub every configured `*_validated_*` tag (`route_validated_via_white_list`, `prefix_validated_via_rpki_roas`, `prefix_validated_via_arin_whois_db_dump`, `prefix_validated_via_registrobr_whois_db_dump`) whether or not the renderer sets it, and every configured internal `rpki_bgp_origin_validation_valid`/`unknown`/`invalid` or `reject_cause_map_*` community and every `custom_communities` entry (the renderer sets none of these); reject invalid/private/reserved ASNs in the path, transit-free ASNs (only when `transit_free.action` is `reject`; a null or absent action disables the filter, as in arouteserver) and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, and RPKI origin validation. RPKI-invalid routes are rejected when `rpki_bgp_origin_validation.reject_invalid` is true (the default). With `reject_invalid: false` they are accepted and kept in the Adj-RIB-In, visible to `rbgp rib received` and the explain surfaces, and ordinary RPKI-invalid routes are never announced: the file then also defines `rs-rpki-invalid-export`, which leads every client's export chain, ahead of site hooks and blackhole policy, and rejects them. The exception is an authorized blackhole request (accepted by client import and tagged BLACKHOLE, in a family with an active blackhole policy): as in arouteserver and per [RFC 7999 §3.3](https://www.rfc-editor.org/rfc/rfc7999.html#section-3.3), it is not origin-validated and follows each client's blackhole export policy, including `announce_to_client`. No RFC 8097 validation-state tag is added, because route-server-client export would pass it to every member |
 | `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, an RPKI-valid accept term bound to the origin dataset when `irrdb.use_rpki_roas_as_route_objects` is enabled, one ordered accept term per `white_list_route` entry (optionally bound to `route.origin-as`, tagged when the site configures `route_validated_via_white_list` and `tag_as_set`), one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
 | `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs (IRR members plus `white_list_asn`), one canonical entry per line |
@@ -481,6 +486,7 @@ transfers verbatim:
 #!/bin/sh -e
 # cron: refresh member filters (arouteserver caches govern data staleness)
 arouteserver template-context --output "$STATE/context.yml"
+rm -rf "${STATE:?}/candidate"        # the output directory must be absent or empty
 rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
 rustbgpd --check --strict "$STATE/candidate/config.toml"
@@ -555,7 +561,8 @@ than `strict`
  enabled `irrdb.use_arin_bulk_whois_data` or `irrdb.use_registrobr_bulk_whois_data`
  (registry whois-dump prefixes are not rendered; dropping them would reject
  routes arouteserver accepts),
- and disabling both IRR enforcement knobs. `shutdown` emits the positive family ceilings;
+ disabling both IRR enforcement knobs on any client, and the per-client
+ overrides listed below. `shutdown` emits the positive family ceilings;
 `restart` additionally requires a positive `restart_after` in minutes, checked
 while converting to `u32` seconds. `block` and `warning` emit the ceilings plus
 `max_prefix_action = "block"` (net-new prefixes beyond the bound are withheld
@@ -645,7 +652,44 @@ blackhole terms run first.
 
 The general `irrdb` section is parsed strictly. An unknown key there, or under
 one of its three `use_*` options, fails the render with exit 1 naming the key,
-because each of those options changes which routes arouteserver accepts.
+because each of those options changes which routes arouteserver accepts. The
+same holds for every client's `cfg` mapping, its `filtering` map, and the
+`irrdb`, `max_prefix`, `roles`, and `rpki_bgp_origin_validation` maps under it,
+so a new client option at those levels fails the render instead of being
+dropped.
+
+ARouteServer resolves every client option over the general one before the
+dump, so per-client values are read client-first:
+
+- `password` renders as the neighbor's `md5_password`. The generated
+  `config.toml` then carries the key, so the output is written private
+  (see above); keep the context file private too.
+- `roles.strict_mode` (client, else general) renders `strict_role = true`: an
+  OPEN without a Role capability is refused. `roles.local_role` other than `rs`
+  is refused. `roles.enabled: false`, ARouteServer's default, is a deliberate
+  divergence: every rendered session still advertises the route-server Role
+  and applies RFC 9234 OTC handling, where arouteserver-rendered BIRD
+  advertises no Role.
+- `irrdb.enforce_origin_in_as_set` and `irrdb.enforce_prefix_in_as_set`
+  render per client: a client that disables one loses that dataset and its
+  accept-term conjunct. The blackhole and ROA requirements above apply to each
+  client's effective values.
+- `ipv4_pref_len`, `ipv6_pref_len`, `reject_invalid_as_in_as_path`, and (while
+  origin validation is enabled) `rpki_bgp_origin_validation.reject_invalid`
+  are enforced by the shared hygiene policy, so a client value that differs
+  from the general one is refused with exit 2 naming the client and key.
+- `graceful_shutdown.enabled: false` on a client is refused while the general
+  switch is on: the daemon honors GRACEFUL_SHUTDOWN for every session.
+- `prepend_rs_as: true`, `custom_options` (daemon-specific configuration
+  lines), and, while control communities render on, `16bit_mapped_asn` are
+  refused: the daemon has no mapped-ASN form of the standard control
+  communities, so a member's `0:<mapped>` request would be ignored.
+- `passive: false` warns (the daemon both listens and connects).
+  `max_as_path_len` and `rpki_bgp_origin_validation.enabled` on a client are
+  ignored, as ARouteServer's own BIRD template reads only the general values.
+
+The M106 differential covers the password and strict-role rows against
+arouteserver-rendered BIRD.
 
 The renderer also refuses effective nonzero multihop. An effective
 `rfc8950: true` on an IPv6 session renders the uniform-fleet shape only:
@@ -690,7 +734,8 @@ and `EXPECTED_SECTION_NAMES` (`src/lib.rs`).
 
 ```text
 --context <PATH>       template-context output (YAML; JSON parses too)
---out-dir <DIR>        output directory
+--out-dir <DIR>        output directory: absent or an empty mode-0700
+                       directory; files are written mode 0600
 --rtr-cache <ADDR>     RTR cache host:port, repeatable; required when the
                        context enables RPKI origin validation (the context
                        carries no cache address)

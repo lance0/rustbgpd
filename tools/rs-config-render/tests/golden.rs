@@ -1311,7 +1311,23 @@ fn m106_sectioned_dump_renders_identically_and_exercises_both_surfaces() {
         );
     }
     let config = &real.files["config.toml"];
-    assert_eq!(config.matches("rs_control_communities = true\n").count(), 3);
+    assert_eq!(config.matches("rs_control_communities = true\n").count(), 4);
+    // The differential's session rows: member1's MD5 key and member4's strict
+    // Role render from the real dump, on those members only.
+    assert_eq!(
+        neighbor(&real, "192.0.2.11")["md5_password"].as_str(),
+        Some("m106-md5-member1")
+    );
+    assert_eq!(
+        neighbor(&real, "192.0.2.14")["strict_role"].as_bool(),
+        Some(true)
+    );
+    for address in ["192.0.2.12", "192.0.2.13", "192.0.2.14"] {
+        assert!(!neighbor(&real, address).contains_key("md5_password"));
+    }
+    for address in ["192.0.2.11", "192.0.2.12", "192.0.2.13"] {
+        assert!(!neighbor(&real, address).contains_key("strict_role"));
+    }
     assert!(
         real.files["datasets/client-as64500-1-prefixes.list"].contains("198.51.100.128/25 le 32\n")
     );
@@ -1336,7 +1352,7 @@ fn m106_sectioned_dump_renders_identically_and_exercises_both_surfaces() {
             .iter()
             .map(|c| c["white_list_routes"].as_u64().unwrap())
             .collect::<Vec<_>>(),
-        [0, 1, 0]
+        [0, 1, 0, 0]
     );
 }
 
@@ -2844,4 +2860,387 @@ fn transit_free_without_action_renders_no_filter() {
         );
         assert!(run_rpol_tests(hygiene).unwrap().all_passed());
     }
+}
+
+/// The rendered neighbor table for `address`.
+fn neighbor(rendered: &rs_config_render::Rendered, address: &str) -> toml::Table {
+    let config: toml::Table =
+        toml::from_str(&rendered.files["config.toml"]).expect("config.toml parses");
+    config["neighbors"]
+        .as_array()
+        .expect("neighbors array")
+        .iter()
+        .map(|n| n.as_table().expect("neighbor table").clone())
+        .find(|n| n["address"].as_str() == Some(address))
+        .unwrap_or_else(|| panic!("no neighbor {address}"))
+}
+
+#[test]
+/// Load-bearing: dropping the password renders a neighbor without the key,
+/// and that member's MD5-signed session never establishes.
+fn client_password_renders_as_md5_password() {
+    let mut value = healthy_value();
+    set_client(&mut value, 0, &["password"], "s3cr\"et\\key".into());
+    set_client(&mut value, 1, &["password"], serde_yaml::Value::Null);
+    let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
+    assert_eq!(
+        neighbor(&rendered, "192.0.2.11")["md5_password"].as_str(),
+        Some("s3cr\"et\\key")
+    );
+    assert!(!neighbor(&rendered, "2001:db8:0:1::22").contains_key("md5_password"));
+    assert!(
+        !rendered.receipt.to_string().contains("s3cr"),
+        "the receipt must not carry the key"
+    );
+}
+
+#[test]
+/// Load-bearing: a general or per-client `roles.strict_mode: true` renders
+/// `strict_role = true`; the per-client value wins. `roles.enabled: false`
+/// is a documented divergence: the route-server Role is still advertised.
+fn roles_strict_mode_renders_strict_role() {
+    let strict = |rendered: &rs_config_render::Rendered, address: &str| {
+        neighbor(rendered, address)
+            .get("strict_role")
+            .and_then(toml::Value::as_bool)
+    };
+    let mut general = healthy_value();
+    set_path(
+        &mut general,
+        &["cfg", "filtering", "roles"],
+        yaml("{enabled: false, strict_mode: true}"),
+    );
+    let rendered = render(&to_yaml(&general), &rtr_options()).expect("render");
+    assert_eq!(strict(&rendered, "192.0.2.11"), Some(true));
+    assert_eq!(strict(&rendered, "2001:db8:0:1::22"), Some(true));
+    assert_eq!(
+        neighbor(&rendered, "192.0.2.11")["role"].as_str(),
+        Some("route_server")
+    );
+
+    set_client(
+        &mut general,
+        1,
+        &["cfg", "filtering", "roles"],
+        yaml("{enabled: true, local_role: rs, strict_mode: false}"),
+    );
+    let rendered = render(&to_yaml(&general), &rtr_options()).expect("render");
+    assert_eq!(strict(&rendered, "192.0.2.11"), Some(true));
+    assert_eq!(strict(&rendered, "2001:db8:0:1::22"), None);
+
+    let mut client = healthy_value();
+    set_client(
+        &mut client,
+        1,
+        &["cfg", "filtering", "roles"],
+        yaml("{enabled: true, local_role: rs, strict_mode: true}"),
+    );
+    let rendered = render(&to_yaml(&client), &rtr_options()).expect("render");
+    assert_eq!(strict(&rendered, "192.0.2.11"), None);
+    assert_eq!(strict(&rendered, "2001:db8:0:1::22"), Some(true));
+}
+
+#[test]
+/// Load-bearing: IRR enforcement resolves per client. A client that disables
+/// prefix enforcement loses its prefix dataset and conjunct while its
+/// neighbor keeps both; a client that disables both is refused by name even
+/// when the general values enforce.
+fn per_client_irr_enforcement_is_rendered_per_client() {
+    let mut value = healthy_value();
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "irrdb", "enforce_prefix_in_as_set"],
+        false.into(),
+    );
+    let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
+    assert!(
+        !rendered
+            .files
+            .contains_key("datasets/client-as4242-1-prefixes.list")
+    );
+    assert!(
+        rendered
+            .files
+            .contains_key("datasets/client-as4242-1-origins.list")
+    );
+    assert!(
+        rendered
+            .files
+            .contains_key("datasets/client-as197000-1-prefixes.list")
+    );
+    assert!(!rendered.files["policy/client-as4242-1.rpol"].contains("client-as4242-1-prefixes"));
+    let report = run_rpol_tests(&rendered.files["policy/client-as4242-1.rpol"]).unwrap();
+    assert!(report.all_passed(), "{:?}", report.failures);
+
+    // The general values relax while every client keeps enforcing: renders.
+    let mut relaxed = healthy_value();
+    for key in ["enforce_origin_in_as_set", "enforce_prefix_in_as_set"] {
+        set_path(
+            &mut relaxed,
+            &["cfg", "filtering", "irrdb", key],
+            false.into(),
+        );
+        for n in 0..2 {
+            set_client(
+                &mut relaxed,
+                n,
+                &["cfg", "filtering", "irrdb", key],
+                true.into(),
+            );
+        }
+    }
+    let rendered = render(&to_yaml(&relaxed), &rtr_options()).expect("render");
+    assert!(
+        rendered
+            .files
+            .contains_key("datasets/client-as4242-1-prefixes.list")
+    );
+
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "irrdb", "enforce_origin_in_as_set"],
+        false.into(),
+    );
+    let items = refusals(render(&to_yaml(&value), &rtr_options()));
+    assert!(
+        items.iter().any(|i| i.starts_with("client AS4242_1:")
+            && i.contains("both IRR enforcement knobs may not be disabled")),
+        "{items:?}"
+    );
+}
+
+#[test]
+/// Load-bearing: each per-client option the rendered sessions cannot carry is
+/// refused by client and key when it changes ARouteServer's behavior, one
+/// fixture per key.
+fn per_client_overrides_are_refused_by_client_and_key() {
+    let cases: &[(&[&str], &str, &str)] = &[
+        (
+            &["cfg", "filtering", "ipv4_pref_len"],
+            "{min: 8, max: 26}",
+            "ipv4_pref_len",
+        ),
+        (
+            &["cfg", "filtering", "ipv6_pref_len"],
+            "{min: 12, max: 64}",
+            "ipv6_pref_len",
+        ),
+        (
+            &["cfg", "filtering", "reject_invalid_as_in_as_path"],
+            "false",
+            "reject_invalid_as_in_as_path",
+        ),
+        (
+            &["cfg", "filtering", "rpki_bgp_origin_validation"],
+            "{enabled: true, reject_invalid: false}",
+            "rpki_bgp_origin_validation.reject_invalid",
+        ),
+        (
+            &["cfg", "graceful_shutdown"],
+            "{enabled: false}",
+            "graceful_shutdown.enabled=false",
+        ),
+        (&["cfg", "prepend_rs_as"], "true", "prepend_rs_as"),
+        (
+            &["cfg", "filtering", "roles"],
+            "{enabled: true, local_role: peer, strict_mode: false}",
+            "roles.local_role `peer`",
+        ),
+        (
+            &["cfg", "custom_options"],
+            "{bird: {any: {protocol: {config_lines: ['debug all;']}}}}",
+            "custom_options",
+        ),
+    ];
+    for (path, new, key) in cases {
+        let mut value = healthy_value();
+        set_client(&mut value, 0, path, yaml(new));
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(
+            items
+                .iter()
+                .any(|i| i.starts_with("client AS4242_1:") && i.contains(key)),
+            "no refusal naming AS4242_1 and {key:?}: {items:?}"
+        );
+    }
+
+    // The resolved dump repeats every general value on each client; equal
+    // values render.
+    let mut value = healthy_value();
+    for (path, same) in [
+        (
+            &["cfg", "filtering", "ipv4_pref_len"][..],
+            "{min: 8, max: 24}",
+        ),
+        (
+            &["cfg", "filtering", "reject_invalid_as_in_as_path"],
+            "true",
+        ),
+        (
+            &["cfg", "filtering", "rpki_bgp_origin_validation"],
+            "{enabled: true, reject_invalid: true}",
+        ),
+        (&["cfg", "graceful_shutdown"], "{enabled: true}"),
+        (&["cfg", "prepend_rs_as"], "false"),
+        (&["cfg", "passive"], "false"),
+        (&["16bit_mapped_asn"], "64512"),
+    ] {
+        set_client(&mut value, 0, path, yaml(same));
+    }
+    let rendered = render(&to_yaml(&value), &rtr_options()).expect("equal values render");
+    assert!(
+        rendered
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("client AS4242_1: passive=false is ignored")),
+        "{:?}",
+        rendered.warnings
+    );
+
+    // A mapped 16-bit ASN refuses only while control communities render on.
+    set_control_matrix(&mut value, 65500);
+    let items = refusals(render(&to_yaml(&value), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|i| i.starts_with("client AS4242_1:") && i.contains("16bit_mapped_asn 64512")),
+        "{items:?}"
+    );
+}
+
+#[test]
+/// Load-bearing: an option the model does not know fails the parse instead of
+/// being dropped, at the client `cfg` level, under its `filtering` map, and
+/// under each strict map inside it.
+fn unknown_client_options_fail_the_parse() {
+    for (path, new) in [
+        (&["cfg", "filtering", "next_new_option"][..], "true"),
+        (&["cfg", "filtering", "irrdb", "next_new_option"], "true"),
+        (&["cfg", "next_new_option"], "true"),
+        (
+            &["cfg", "filtering", "max_prefix"],
+            "{limit_ipv4: 5000, action: shutdown, next_new_option: true}",
+        ),
+        (
+            &["cfg", "filtering", "roles"],
+            "{enabled: true, strict_mode: true, next_new_option: true}",
+        ),
+        (
+            &["cfg", "filtering", "rpki_bgp_origin_validation"],
+            "{enabled: true, reject_invalid: true, next_new_option: true}",
+        ),
+    ] {
+        let mut value = healthy_value();
+        set_client(&mut value, 0, path, yaml(new));
+        match render(&to_yaml(&value), &rtr_options()) {
+            Err(error @ RenderError::Parse(_)) => {
+                assert!(error.to_string().contains("next_new_option"), "{error}");
+                assert_eq!(error.exit_code(), Exit::InvalidInput);
+            }
+            Err(other) => panic!("{path:?}: expected a parse error, got {other}"),
+            Ok(_) => panic!("{path:?}: unknown key was dropped silently"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+/// Load-bearing: `config.toml` can carry MD5 keys, so arouteserver-mode output
+/// lands in a mode-0700 directory as mode-0600 files, and an existing output
+/// directory must be private and empty, as in IXP Manager mode.
+fn cli_output_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let mode = |path: &std::path::Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    let render = |context: &std::path::Path, out: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+            .arg("--context")
+            .arg(context)
+            .arg("--out-dir")
+            .arg(out)
+            .arg("--rtr-cache")
+            .arg("127.0.0.1:3323")
+            .output()
+            .unwrap()
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let context = temp.path().join("context.yml");
+    let mut value = healthy_value();
+    set_client(&mut value, 0, &["password"], "private-key".into());
+    std::fs::write(&context, to_yaml(&value)).unwrap();
+
+    let out = temp.path().join("out");
+    let output = render(&context, &out);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        std::fs::read_to_string(out.join("config.toml"))
+            .unwrap()
+            .contains("md5_password = \"private-key\"")
+    );
+    assert_eq!(mode(&out), 0o700);
+    for dir in ["policy", "datasets"] {
+        assert_eq!(mode(&out.join(dir)), 0o700, "{dir}");
+    }
+    for file in [
+        "config.toml",
+        "render-receipt.json",
+        "policy/rs-hygiene.rpol",
+        "datasets/client-as4242-1-origins.list",
+    ] {
+        assert_eq!(mode(&out.join(file)), 0o600, "{file}");
+    }
+
+    // A non-empty directory (a previous render) and a non-private empty one
+    // are refused before anything is written.
+    let output = render(&context, &out);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    let shared = temp.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = render(&context, &shared);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+/// Load-bearing: a directory or file that cannot be written is reported with
+/// its path and the OS cause, not as a non-empty output directory.
+fn cli_output_write_failure_names_path_and_cause() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let context = temp.path().join("context.yml");
+    std::fs::write(&context, to_yaml(&healthy_value())).unwrap();
+    let parent = temp.path().join("read-only");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = parent.join("out");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+        .arg("--context")
+        .arg(&context)
+        .arg("--out-dir")
+        .arg(&out)
+        .arg("--rtr-cache")
+        .arg("127.0.0.1:3323")
+        .output()
+        .unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("cannot create {}", out.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Permission denied"), "{stderr}");
+    assert!(!stderr.contains("absent or empty"), "{stderr}");
 }

@@ -1,0 +1,26 @@
+# M106 member4 (AS64503, 192.0.2.14) — a plain session with no BGP Role
+# capability toward both route servers. clients.yml sets a strict Role for
+# this member, so both route servers must refuse its OPEN.
+[global.config]
+as = 64503
+router-id = "192.0.2.14"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.9"
+peer-as = 64496
+description = "rustbgpd-rs"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.10"
+peer-as = 64496
+description = "bird-rs"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"

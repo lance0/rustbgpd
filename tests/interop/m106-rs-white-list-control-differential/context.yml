@@ -105,6 +105,7 @@ clients:
     asn: 64500
     ip: "192.0.2.11"
     description: "member1 - IRR-clean member"
+    password: "m106-md5-member1"
     cfg:
       filtering:
         irrdb:
@@ -135,6 +136,16 @@ clients:
         irrdb:
           as_set_bundle_ids: ["AS64502_bundle"]
         max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown, count_rejected_routes: false}
+  - id: AS64503_1
+    asn: 64503
+    ip: "192.0.2.14"
+    description: "member4 - strict role, sends no Role capability"
+    cfg:
+      filtering:
+        irrdb:
+          as_set_bundle_ids: ["AS64503_bundle"]
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown, count_rejected_routes: false}
+        roles: {enabled: true, local_role: rs, strict_mode: true}
 irrdb_info:
   AS64500_bundle:
     asns: [64500]
@@ -153,3 +164,7 @@ irrdb_info:
     asns: [64502]
     prefixes:
       - {prefix: "203.0.113.64", length: 26, exact: true}
+  AS64503_bundle:
+    asns: [64503]
+    prefixes:
+      - {prefix: "203.0.113.224", length: 27, exact: true}

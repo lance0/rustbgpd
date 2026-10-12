@@ -22,6 +22,16 @@ lab proves:
   AS64502), `0:64496` + `64496:64501` (announce to none, except AS64501),
   and `64496:102:64502` (prepend twice toward AS64502) prove per-target
   suppression, the override ladder, prepending, and scrubbing.
+- **Per-client session options.** member1 carries a TCP MD5 `password`
+  (its GoBGP config, `configs/gobgp-m106-member1.toml`, sets the same key),
+  so its sessions establish only when both route servers render it. A
+  fourth GoBGP member, AS64503 at 192.0.2.14, sets `roles.strict_mode` with
+  roles enabled and sends no Role capability: BIRD renders
+  `require roles on` and rustbgpd `strict_role = true`, and both must
+  refuse its OPEN. The driver asserts both rendered configs carry each row
+  on that member only, that member4 is refused after its OPEN arrived (BIRD
+  with a Role mismatch), and that exactly members 1-3 are Established on
+  both route servers.
 
 The M90 fixtures stay untouched (M104 pins their hashes); this directory
 holds its own copies of the site files with the additions above. The
@@ -58,8 +68,9 @@ containerlab destroy -t tests/interop/m106-rs-white-list-control-differential.cl
 The driver carries the M90 driver's phases (render, start, inject,
 verdicts) as a copy — the M90 script stays unchanged as the record of its
 dated receipt — with community-carrying injection, explain checks on accept
-rows, and the export phase added; the topology is the M90 one under its own
-name, reusing the M90 GoBGP member configs. The offline half is
+rows, the export phase, and the session rows added; the topology is the M90
+one under its own name plus member4, reusing the M90 GoBGP configs for
+member2 and member3. The offline half is
 
 ```bash
 bash tests/interop/m106-rs-white-list-control-differential/prove-context-ingestion.sh
@@ -68,10 +79,16 @@ bash tests/interop/m106-rs-white-list-control-differential/prove-context-ingesti
 which re-dumps the site from the pinned arouteserver image, asserts the dump
 still matches `context-sectioned.yml` byte for byte, renders both context
 forms identically, and checks the control knob, white-list members, tagged
-accept term, and hygiene scrub in the rendered output. The renderer's test
-suite pins the same parity offline.
+accept term, hygiene scrub, and the MD5 and strict-Role rows in the
+rendered output. The renderer's test suite pins the same parity offline.
 
 ## Verified receipt
+
+This receipt predates the per-client session rows (member1's MD5 password
+and member4's strict Role), which changed `clients.yml`, both context
+fixtures, the stub, the topology, and the driver. The offline context proof
+with those rows passes 29/29; the full differential has not been re-run with
+them yet, so the counts and hashes below describe the earlier site.
 
 Run from this change set on base `7d82c569017d73a1e24ac1faa9d17444f22d44b2`
 against pinned arouteserver 1.23.2
