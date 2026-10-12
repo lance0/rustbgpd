@@ -2541,7 +2541,10 @@ promotes them to LLGR; LLGR expiry sweeps them), and the stale-route count.
 The count is reported for a single neighbor only: `rbgp neighbor` without an
 address and `rbgp doctor` omit it, so a neighbor list during a mass restart
 event does not scan every peer's received routes. The row disappears once
-nothing is retained. `llgr_stale_time` can hold a
+nothing is retained. A dynamic neighbor leaves the neighbor inventory when its
+session goes idle, so it has no row while down even though its stale routes
+are retained; use `bgp_gr_stale_routes{peer}` and
+`rbgp rib received <address>` for it. `llgr_stale_time` can hold a
 route for up to about 194 days by design, so `rbgp doctor` reports each
 family in the `llgr` phase as a `peer.<scoped-address>.llgr_retention.<family>`
 warning that names the time left, not as a failure.

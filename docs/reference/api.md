@@ -534,7 +534,10 @@ as the rest of the neighbor snapshot, so the rows are present while the
 session is down. Phase and deadline are lookups; the count scans the peer's
 received routes, so only `GetNeighborState` reports it and `ListNeighbors`
 omits `stale_routes`. The count can be zero while End-of-RIB is still
-awaited after every stale route was re-advertised.
+awaited after every stale route was re-advertised. A dynamic neighbor is
+removed from the neighbor inventory when its session goes idle, so neither
+RPC returns its row while it is down even though the RIB still retains its
+routes; `bgp_gr_stale_routes{peer}` still reports them.
 `gr_retention_available` is present and true from a daemon that exposes the
 rows; its absence means an older daemon, so an empty list must not be read as
 "nothing retained" unless the flag is present.
