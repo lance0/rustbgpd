@@ -145,8 +145,9 @@ surfaces.
 - Some interop rows require local fixtures or longer runtime and remain manual:
   the earlier M21 origin-validation lab, selected BIRD/GoBGP/platform-diversity
   checks, and GR/LLGR long-wall-clock gates.
-- EVPN is still alpha. The archived EVPN soaks prove specific gates and defaults;
-  they do not claim full EVPN/MPLS/PBB/MVPN parity.
+- EVPN outside the scoped Types 1–5 route-reflector role is still alpha. The
+  archived EVPN soaks prove specific gates and defaults; they do not claim full
+  EVPN/MPLS/PBB/MVPN parity.
 
 ## Refreshing the receipts
 

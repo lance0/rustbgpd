@@ -44,7 +44,8 @@ those.
 | BGP Roles + Only-to-Customer (9234) | Shipped | Static eBGP, IPv4/IPv6 unicast (ADR-0071, M55) |
 | BGP unnumbered / IPv6 link-local peering | Shipped | Static interface-bound link-local (ADR-0069, M53) |
 | Confederation (5065) | Rejected | See "Researched and rejected" under Next — no demand signal; revival requires a new recorded decision |
-| EVPN-VXLAN: Route Reflector (types 1–6) | Shipped, alpha | Type 6 SMET is relay-only; [M113 raw-peer/TShark proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md), vendor interoperability unproven |
+| EVPN-VXLAN: Route Reflector (types 1–5) | Shipped, scoped RR-only v1 | `route-reflector-evpn` [boundary](../reference/v1-stable-contract.md#evpn-route-reflector-boundary): type-filtered received/advertised peer views, their CLI JSON page and named metrics; GR/LLGR receipt M122; the unpaged `ListEvpnRoutes` / base `rbgp evpn` view stays alpha |
+| EVPN-VXLAN: Type 6 SMET relay | Shipped, alpha | Relay-only; [M113 raw-peer/TShark proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md), vendor interoperability unproven |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
@@ -205,7 +206,9 @@ remain visible without automatically blocking a release whose agreed gates pass.
   families, plus the [scoped FlowSpec controller API](../reference/v1-stable-contract.md#flowspec-controller-boundary).
   [ADR-0139](../adr/0139-flowspec-controller-contract.md) promotes that controller
   boundary using separate dual-stack functional qualification; receive-side
-  validation, GR/LLGR guarantees and enforcement remain excluded.
+  validation, GR/LLGR guarantees and enforcement remain excluded. EVPN Types
+  1–5 reflection is the scoped RR-only
+  [`route-reflector-evpn` role](../reference/v1-stable-contract.md#evpn-route-reflector-boundary).
   Keep its stability, migration, deprecation, and compatibility
   rules current while EVPN VTEP/IRB remains alpha and outside this contract.
   What tagging v1.0 means — the frozen surfaces, evidence bar, and post-1.0

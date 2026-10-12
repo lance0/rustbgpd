@@ -34,6 +34,15 @@ types. M113 does not establish vendor interoperability; no SMET origination,
 IGMP/MLD proxy, or multicast forwarding is implemented. See the
 [SMET boundary](../reference/rfc-notes.md#type-6-smet-reflection).
 
+Types 1–5 reflection is the scoped RR-only `route-reflector-evpn` v1 role.
+Its compatibility promise covers the per-peer views
+`rbgp evpn received PEER --route-type N` and
+`rbgp evpn advertised PEER --route-type N` for N in 1–5, their `--json` page,
+and the named RIB, loop, discard and restart metrics; see the
+[EVPN reflector boundary](../reference/v1-stable-contract.md#evpn-route-reflector-boundary).
+The whole-table `rbgp evpn` listings under Verify and the EVPN event stream
+remain useful but alpha.
+
 ## Config
 
 ```toml
