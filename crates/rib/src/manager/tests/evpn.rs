@@ -1687,6 +1687,106 @@ async fn zero_esi_vpws_ead_per_evi_reflects_byte_identically() {
     handle.await.unwrap();
 }
 
+/// RFC 9135 §9.1.1 / RFC 7432 §7.2: a Type 2 with MAC Address Length 0 is
+/// treat-as-withdraw, and its key is not the 48-bit route's. Applying the
+/// revised parser's treat-as-withdraw keys for an UPDATE carrying it next
+/// to a valid sibling withdraws only the sibling from a reflection client;
+/// the peer's 48-bit route for the same MAC is still reflected state.
+#[tokio::test]
+async fn zero_length_mac_type2_withdraws_only_its_siblings_from_clients() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let client = Ipv4Addr::new(10, 0, 0, 2);
+    let _source_rx = evpn_rr_client_up(&tx, source).await;
+    let mut client_rx = evpn_rr_client_up(&tx, client).await;
+    let mac = make_evpn_macip(source, [0, 0x11, 0x22, 0x33, 0x44, 0x55], None, false);
+    let sibling = make_evpn_macip(source, [0, 0x11, 0x22, 0x33, 0x44, 0x66], None, false);
+    for route in [&mac, &sibling] {
+        evpn_routes_received(&tx, source, route.clone()).await;
+        let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+            .await
+            .expect("client should receive the reflection within 2s")
+            .expect("outbound channel open");
+        assert_eq!(msg.evpn_announce.len(), 1);
+    }
+
+    let mut nlri = Vec::new();
+    rustbgpd_wire::encode_evpn_nlri(&[mac.route.clone(), sibling.route.clone()], &mut nlri)
+        .unwrap();
+    assert_eq!(nlri[24], 48);
+    nlri[24] = 0; // first route: MAC Address Length 0
+    let mut value = vec![0, 25, 70, 4, 10, 0, 0, 1, 0];
+    value.extend(nlri);
+    let mut attributes = vec![0x40, 1, 1, 0, 0x40, 2, 0, 0x90, 14];
+    attributes.extend(u16::try_from(value.len()).unwrap().to_be_bytes());
+    attributes.extend(value);
+    let parsed = rustbgpd_wire::UpdateMessage {
+        withdrawn_routes: bytes::Bytes::new(),
+        path_attributes: bytes::Bytes::from(attributes),
+        nlri: bytes::Bytes::new(),
+    }
+    .parse_revised(true, true, false, &[])
+    .expect("zero-length MAC must not be session-reset");
+    assert_eq!(parsed.malformed.len(), 1);
+    let withdrawn: Vec<_> = parsed
+        .update
+        .attributes
+        .iter()
+        .filter_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp.evpn_announced.iter().map(EvpnRoute::key)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: withdrawn,
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+        .await
+        .expect("client should receive the withdrawal within 2s")
+        .expect("outbound channel open");
+    assert!(msg.evpn_announce.is_empty());
+    assert_eq!(msg.evpn_withdraw, vec![sibling.key()]);
+
+    // The 48-bit route was never withdrawn: withdrawing it now reaches the
+    // client.
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![mac.key()],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+        .await
+        .expect("client should receive the 48-bit withdrawal within 2s")
+        .expect("outbound channel open");
+    assert_eq!(msg.evpn_withdraw, vec![mac.key()]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Withdrawing an unknown EVPN key surfaces a user-visible error
 /// (controller got a bad route identifier).
 #[tokio::test]

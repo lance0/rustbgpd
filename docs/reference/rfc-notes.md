@@ -1885,12 +1885,18 @@ carries inactive (absent), unlimited (zero), or finite.
     semantic collapse.
   - **Type 2 MAC/IP Advertisement.** IP Addr Length is in **bits**
     (0 / 32 / 128). Label2 is optional — either 0 or 3 trailing bytes
-    after the primary label.
+    after the primary label. A MAC Address Length of 0 is RFC 7606
+    treat-as-withdraw (RFC 9135 §9.1.1), not a session reset. The MAC
+    Address Length is part of the route key (RFC 7432 §7.2), so such a
+    route is dropped rather than keyed as the 48-bit route for the same
+    MAC: it never removes that route and is never reflected.
   - **Type 3 IMET.** IP length is in bits (32 / 128).
   - **Type 4 ES.** IP length in bits.
   - **Type 5 IP Prefix (RFC 9136).** Fixed total length disambiguates
     IPv4 (34 bytes) from IPv6 (58 bytes) — prefix-length byte alone
-    cannot distinguish since 32 is valid for both.
+    cannot distinguish since 32 is valid for both. An announcement with
+    both a non-zero ESI and a non-zero GW IP is treat-as-withdraw
+    (RFC 9136 §3.2).
 - Route Distinguisher (RFC 4364) displays as `<asn16>:<u32>` (Type 0),
   `<ipv4>:<u16>` (Type 1), `<asn32>:<u16>` (Type 2). Unknown RD types
   fall back to hex.
