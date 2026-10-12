@@ -523,6 +523,25 @@ therefore never proof that no bound is configured. Counts come from the
 session actor's O(1) enforcement accounting, never from the RIB, whose rows
 carry different Add-Path and lifecycle semantics.
 
+`NeighborState.gr_retention` reports RFC 4724 / RFC 9494 helper-side
+stale-route retention, one `GracefulRestartRetentionState` per family the RIB
+tracks in a GR or LLGR phase: the `family` label, the `phase`
+(`gr_restart` while the session is down and the restart timer runs,
+`gr_awaiting_eor` after re-establishment until End-of-RIB, or `llgr`), the
+`remaining_seconds` until the RIB's next retention deadline for that family,
+and the `stale_routes` count. The RIB reads all of it in the same actor turn
+as the rest of the neighbor snapshot, so the rows are present while the
+session is down. Phase and deadline are lookups; the count scans the peer's
+received routes, so only `GetNeighborState` reports it and `ListNeighbors`
+omits `stale_routes`. The count can be zero while End-of-RIB is still
+awaited after every stale route was re-advertised. A dynamic neighbor is
+removed from the neighbor inventory when its session goes idle, so neither
+RPC returns its row while it is down even though the RIB still retains its
+routes; `bgp_gr_stale_routes{peer}` still reports them.
+`gr_retention_available` is present and true from a daemon that exposes the
+rows; its absence means an older daemon, so an empty list must not be read as
+"nothing retained" unless the flag is present.
+
 `NeighborState.max_prefix_action` is the effective current disposition of a
 crossed inbound bound, not a straight echo of the `max_prefix_action`
 configuration key. `block` and `warning` mirror the configured value.

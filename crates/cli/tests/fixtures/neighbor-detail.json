@@ -98,6 +98,15 @@
       "reason": "reason-value"
     }
   ],
+  "gr_retention": [
+    {
+      "family": "family-value",
+      "phase": "phase-value",
+      "remaining_seconds": 159,
+      "stale_routes": 160
+    }
+  ],
+  "gr_retention_available": true,
   "slow_peer": true,
   "graceful_shutdown_advertise_intent": false,
   "negotiation_available": true,

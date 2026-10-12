@@ -5,10 +5,10 @@ use crate::connection::{
 };
 use crate::error::CliError;
 use crate::output::{
-    self, JsonEffectiveNeighborPosture, JsonInboundPrefixLimit, JsonNegotiatedGracefulRestart,
-    JsonNegotiatedSession, JsonNeighbor, JsonNeighborDetail, JsonOutboundPrefixLimit,
-    JsonPathsLimit, JsonSelectionDeferralFamily, JsonTcpAoKeyState, JsonTcpAoState,
-    JsonUpdateGroupComparison, outln,
+    self, JsonEffectiveNeighborPosture, JsonGrRetentionFamily, JsonInboundPrefixLimit,
+    JsonNegotiatedGracefulRestart, JsonNegotiatedSession, JsonNeighbor, JsonNeighborDetail,
+    JsonOutboundPrefixLimit, JsonPathsLimit, JsonSelectionDeferralFamily, JsonTcpAoKeyState,
+    JsonTcpAoState, JsonUpdateGroupComparison, outln,
 };
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
@@ -461,6 +461,17 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
                 reason: row.reason.clone(),
             })
             .collect(),
+        gr_retention: n
+            .gr_retention
+            .iter()
+            .map(|row| JsonGrRetentionFamily {
+                family: row.family.clone(),
+                phase: row.phase.clone(),
+                remaining_seconds: row.remaining_seconds,
+                stale_routes: row.stale_routes,
+            })
+            .collect(),
+        gr_retention_available: n.gr_retention_available,
     }
 }
 
@@ -904,6 +915,22 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
             );
         }
     }
+    if !n.gr_retention.is_empty() {
+        rows.line(0, "Stale Route Retention:");
+        for row in &n.gr_retention {
+            rows.line(
+                1,
+                format!(
+                    "{:<14} phase={}; remaining={}; stale_routes={}",
+                    row.family,
+                    row.phase,
+                    retention_remaining_label(row.remaining_seconds),
+                    row.stale_routes
+                        .map_or_else(|| "unknown".to_string(), |n| n.to_string())
+                ),
+            );
+        }
+    }
     rows.field(0, "Flap Count", n.flap_count);
     if !n.last_error.is_empty() {
         rows.field(0, "Last Error", &n.last_error);
@@ -945,6 +972,11 @@ fn negotiated_session_json(
             }),
         });
     (state.negotiation_available, negotiated)
+}
+
+/// Remaining GR/LLGR retention as `HH:MM:SS` or days, or `unknown`.
+pub(crate) fn retention_remaining_label(seconds: Option<u64>) -> String {
+    seconds.map_or_else(|| "unknown".to_string(), crate::output::format_duration)
 }
 
 pub(crate) fn optional_seconds_label(value: Option<u32>) -> String {
@@ -1759,6 +1791,13 @@ mod tests {
                 blocking: false,
                 reason: Some("reason-value".to_string()),
             }],
+            gr_retention: vec![crate::proto::GracefulRestartRetentionState {
+                family: "family-value".to_string(),
+                phase: "phase-value".to_string(),
+                remaining_seconds: Some(159),
+                stale_routes: Some(160),
+            }],
+            gr_retention_available: Some(true),
         }
     }
 
@@ -1903,6 +1942,24 @@ mod tests {
         assert!(
             captured_neighbor_detail(&state)
                 .get("negotiation_available")
+                .is_none()
+        );
+        // An older daemon omits retention entirely; a current daemon with
+        // nothing retained reports availability without rows.
+        state.gr_retention.clear();
+        assert_eq!(
+            captured_neighbor_detail(&state)["gr_retention_available"],
+            true
+        );
+        assert!(
+            captured_neighbor_detail(&state)
+                .get("gr_retention")
+                .is_none()
+        );
+        state.gr_retention_available = None;
+        assert!(
+            captured_neighbor_detail(&state)
+                .get("gr_retention_available")
                 .is_none()
         );
     }
@@ -2208,6 +2265,8 @@ Outbound Prefix Limits:
   family-value   usage=102; limit=103; headroom=104; blocking=reason-value
 Inbound Prefix Limits:
   scope-value            usage=102; limit=103; headroom=104; blocking=reason-value
+Stale Route Retention:
+  family-value   phase=phase-value; remaining=00:02:39; stale_routes=160
 Flap Count:               110
 Last Error:               last_error-value
 "

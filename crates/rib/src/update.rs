@@ -60,6 +60,11 @@ pub enum RibSummaryQuery {
         peers: Vec<IpAddr>,
         /// Optional update-group comparison.
         comparison: Option<(IpAddr, IpAddr)>,
+        /// Count each retained family's stale routes. Counting scans the
+        /// peer's Adj-RIB-In, so only a single-neighbor read sets this;
+        /// list and doctor reads leave it false. Honored only for a
+        /// one-peer request.
+        stale_counts: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },
@@ -71,10 +76,12 @@ impl From<RibSummaryQuery> for RibUpdate {
             RibSummaryQuery::NeighborRibSnapshots {
                 peers,
                 comparison,
+                stale_counts,
                 reply,
             } => Self::QueryNeighborRibSnapshots {
                 peers,
                 comparison,
+                stale_counts,
                 reply,
             },
         }
@@ -1823,6 +1830,50 @@ pub struct NeighborRibSnapshot {
     pub policy_stats: NeighborPolicyStats,
     /// Live outbound registration and capacity state.
     pub outbound: PeerOutboundState,
+    /// RFC 4724 / RFC 9494 helper-side stale-route retention, one row per
+    /// family the RIB tracks in a GR or LLGR phase. Empty when nothing is
+    /// retained.
+    pub gr_retention: Vec<GrRetentionFamilyState>,
+}
+
+/// Helper-side retention phase of one family's stale routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrRetentionPhase {
+    /// Session down; the peer's GR restart timer is running.
+    GrRestart,
+    /// Session re-established; waiting for the family's End-of-RIB.
+    GrAwaitingEor,
+    /// RFC 9494 long-lived stale phase.
+    Llgr,
+}
+
+impl GrRetentionPhase {
+    /// Stable operator label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GrRestart => "gr_restart",
+            Self::GrAwaitingEor => "gr_awaiting_eor",
+            Self::Llgr => "llgr",
+        }
+    }
+}
+
+/// Neighbor-facing GR/LLGR retention state for one family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrRetentionFamilyState {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub phase: GrRetentionPhase,
+    /// Whole seconds, rounded up, until the RIB's next retention deadline
+    /// for this family: GR timer expiry (sweep, or promotion when LLGR is
+    /// negotiated) or the LLGR sweep, whichever is first. `None` when no
+    /// deadline is armed.
+    pub remaining_secs: Option<u64>,
+    /// Routes of this family still held GR- or LLGR-stale. Counted only for
+    /// a single-peer query, because counting scans the peer's Adj-RIB-In;
+    /// `None` in multi-peer responses and the replacement summary view.
+    pub stale_routes: Option<u64>,
 }
 
 /// One actor-turn response for `NeighborService`'s RIB-owned state.
@@ -2669,6 +2720,11 @@ pub enum RibUpdate {
         peers: Vec<IpAddr>,
         /// Optional `(primary, comparison)` update-group comparison.
         comparison: Option<(IpAddr, IpAddr)>,
+        /// Count each retained family's stale routes. Counting scans the
+        /// peer's Adj-RIB-In, so only a single-neighbor read sets this;
+        /// list and doctor reads leave it false. Honored only for a
+        /// one-peer request.
+        stale_counts: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },

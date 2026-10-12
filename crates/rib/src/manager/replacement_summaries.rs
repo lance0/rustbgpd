@@ -37,9 +37,11 @@ impl ReplacementSummaries {
                 trace.emit("summary");
             }
             match query {
+                // The frozen view captured no stale counts.
                 RibSummaryQuery::NeighborRibSnapshots {
                     peers,
                     comparison,
+                    stale_counts: _,
                     reply,
                 } => {
                     super::queries::send_neighbor_rib_snapshot(
@@ -53,6 +55,7 @@ impl ReplacementSummaries {
                                     advertised_count: 0,
                                     policy_stats: NeighborPolicyStats::default(),
                                     outbound: self.view.unknown_outbound.clone(),
+                                    gr_retention: Vec::new(),
                                 }
                             })
                         },
@@ -203,6 +206,11 @@ impl RibManager {
             .chain(self.adj_ribs_out.keys())
             .chain(self.export_policy_stats.keys())
             .chain(self.update_groups.members.keys())
+            // A peer in GR/LLGR retention may have no outbound registration
+            // while its session is down; its retention row must survive.
+            .chain(self.gr_peers.keys())
+            .chain(self.llgr_peers.keys())
+            .chain(self.llgr_stale_deadlines.keys().map(|(peer, _, _)| peer))
         {
             peers.insert(*peer);
             self.replacement_checkpoint(false);
@@ -215,7 +223,7 @@ impl RibManager {
         }
         let mut neighbors = HashMap::with_capacity(peers.len());
         for peer in peers {
-            neighbors.insert(peer, self.neighbor_rib_snapshot(peer));
+            neighbors.insert(peer, self.neighbor_rib_snapshot(peer, false));
             self.replacement_checkpoint(false);
         }
         let unknown_outbound = PeerOutboundState {
@@ -302,6 +310,7 @@ mod tests {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
+                stale_counts: false,
             })
             .unwrap();
             response
@@ -378,7 +387,7 @@ mod tests {
                 }],
             });
         let expected_neighbors =
-            [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer));
+            [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer, false));
         manager.with_replacement_summary_reads("restore", |manager| {
             // Mutating these canonical inputs cannot change the captured values.
             manager.selection_deferral = None;
@@ -387,6 +396,7 @@ mod tests {
                 peers: vec![unknown, waiter, unknown],
                 comparison: Some((unknown, waiter)),
                 reply,
+                stale_counts: false,
             })
             .unwrap();
             let (canceled_reply, canceled_response) = oneshot::channel();
@@ -395,6 +405,7 @@ mod tests {
                 peers: vec![unknown],
                 comparison: None,
                 reply: canceled_reply,
+                stale_counts: false,
             })
             .unwrap();
             manager.with_replacement_summary_reads("apply", |manager| {
@@ -413,6 +424,7 @@ mod tests {
             peers: Vec::new(),
             comparison: None,
             reply,
+            stale_counts: false,
         })
         .unwrap();
         manager.drain_summary_queries();
@@ -513,6 +525,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    stale_counts: false,
                 })
                 .unwrap();
             context.state.lock().unwrap().last_service -= budget;
@@ -581,6 +594,7 @@ mod tests {
                             peers: Vec::new(),
                             comparison: None,
                             reply,
+                            stale_counts: false,
                         })
                         .unwrap();
                     snapshots.push(response);
@@ -651,6 +665,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    stale_counts: false,
                 })
                 .unwrap();
             (count, snapshot)
@@ -746,6 +761,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    stale_counts: false,
                 })
                 .unwrap();
             response
@@ -881,6 +897,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    stale_counts: false,
                 })
                 .unwrap();
                 replies.push(response);
