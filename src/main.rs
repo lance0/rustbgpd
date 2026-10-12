@@ -10916,6 +10916,7 @@ peer_group = "plain"
             dynamic_neighbors: Vec::new(),
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),
+            evpn_core_isolation: None,
             evpn_ip_vrfs: Vec::new(),
             managed_netdevs: crate::config::ManagedNetdevsConfig::default(),
             fib_tables: Vec::new(),

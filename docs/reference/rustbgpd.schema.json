@@ -65,6 +65,17 @@
         "synchronous": "full"
       }
     },
+    "evpn_core_isolation": {
+      "description": "ADR-0140 core-isolation hold for bound Ethernet Segments. Absent\nby default; `enabled = true` lets rustbgpd take the CE-facing\nmembers of each bound segment administratively down while the PE\nis core-isolated and at startup until EVPN syncs.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvpnCoreIsolationConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "evpn_instances": {
       "description": "Local EVPN instances on this VTEP. Empty by default — only set\nwhen this daemon is acting as a leaf VTEP (Phase 2). Route\nreflector deployments leave this list empty; reflection has no\ndependency on local EVI state.",
       "type": "array",
@@ -820,6 +831,41 @@
           "description": "`SQLite` `PRAGMA synchronous` mode. `full` (default) fsyncs\nper commit; `normal` checkpoints periodically and trades a\nsmall crash window for throughput.",
           "type": "string",
           "default": "full"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EvpnCoreIsolationConfig": {
+      "description": "`[evpn_core_isolation]` (ADR-0140): hold the CE-facing links of\nbound Ethernet Segments administratively down while this PE is\ncore-isolated, and at startup until EVPN has synced.\n\nOpt-in. Enabling it gives rustbgpd ownership of the admin state of\nevery member of each bound bond (or the bound link itself). Accepted\nonly with at least one `[[ethernet_segments]]` entry that has an\n`interface`, on Linux.",
+      "type": "object",
+      "properties": {
+        "backstop_seconds": {
+          "description": "Seconds after daemon start (startup hold) or after the core\nreturns (isolation hold) at which a hold releases even without\nEVPN sync, with a warning. Default 180, range `1..=3600`, and at\nleast `hold_after_sync_seconds`.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 180,
+          "maximum": 3600,
+          "minimum": 1
+        },
+        "enabled": {
+          "description": "Take control of bound-segment link admin state. Default `false`.",
+          "type": "boolean",
+          "default": false
+        },
+        "hold_after_sync_seconds": {
+          "description": "Seconds EVPN must stay synced before a hold releases. Default 10,\nrange `0..=3600`.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "maximum": 3600,
+          "minimum": 0
+        },
+        "uplinks": {
+          "description": "Underlay uplink names. When set and every one lacks carrier, the\nPE is core-isolated even with EVPN sessions up. Optional.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

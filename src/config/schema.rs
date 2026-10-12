@@ -139,6 +139,12 @@ pub struct Config {
     /// the observable-without-enforcement scope decision.
     #[serde(default)]
     pub ethernet_segments: Vec<EthernetSegmentConfig>,
+    /// ADR-0140 core-isolation hold for bound Ethernet Segments. Absent
+    /// by default; `enabled = true` lets rustbgpd take the CE-facing
+    /// members of each bound segment administratively down while the PE
+    /// is core-isolated and at startup until EVPN syncs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evpn_core_isolation: Option<EvpnCoreIsolationConfig>,
     /// Local IP-VRFs / L3VNIs this VTEP serves (Gate 9 symmetric
     /// Interface-less IRB, RFC 9136 §4.4.2). Empty by default —
     /// L2-only VTEPs and route reflectors leave it empty. See
@@ -3637,6 +3643,52 @@ fn add_legacy_recovery_delay_secs_property(schema: &mut Schema) {
     properties.insert("recovery_delay_secs".to_string(), legacy);
 }
 
+/// `[evpn_core_isolation]` (ADR-0140): hold the CE-facing links of
+/// bound Ethernet Segments administratively down while this PE is
+/// core-isolated, and at startup until EVPN has synced.
+///
+/// Opt-in. Enabling it gives rustbgpd ownership of the admin state of
+/// every member of each bound bond (or the bound link itself). Accepted
+/// only with at least one `[[ethernet_segments]]` entry that has an
+/// `interface`, on Linux.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvpnCoreIsolationConfig {
+    /// Take control of bound-segment link admin state. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Underlay uplink names. When set and every one lacks carrier, the
+    /// PE is core-isolated even with EVPN sessions up. Optional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uplinks: Vec<String>,
+    /// Seconds EVPN must stay synced before a hold releases. Default 10,
+    /// range `0..=3600`.
+    #[serde(default = "default_core_isolation_hold_after_sync")]
+    #[schemars(range(max = 3600))]
+    pub hold_after_sync_seconds: u64,
+    /// Seconds after daemon start (startup hold) or after the core
+    /// returns (isolation hold) at which a hold releases even without
+    /// EVPN sync, with a warning. Default 180, range `1..=3600`, and at
+    /// least `hold_after_sync_seconds`.
+    #[serde(default = "default_core_isolation_backstop")]
+    #[schemars(range(min = 1, max = 3600))]
+    pub backstop_seconds: u64,
+}
+
+/// ADR-0140 decision 3 default for `hold_after_sync_seconds`.
+pub const DEFAULT_CORE_ISOLATION_HOLD_AFTER_SYNC_SECS: u64 = 10;
+/// ADR-0140 decision 3 default for `backstop_seconds` (FRR's
+/// `startup-delay` default).
+pub const DEFAULT_CORE_ISOLATION_BACKSTOP_SECS: u64 = 180;
+
+fn default_core_isolation_hold_after_sync() -> u64 {
+    DEFAULT_CORE_ISOLATION_HOLD_AFTER_SYNC_SECS
+}
+
+fn default_core_isolation_backstop() -> u64 {
+    DEFAULT_CORE_ISOLATION_BACKSTOP_SECS
+}
+
 /// RFC 9785 §3: the DF Election preference default MUST be 32767.
 pub const DEFAULT_DF_PREFERENCE: u32 = 32_767;
 
@@ -3753,6 +3805,8 @@ pub enum ConfigError {
     InvalidEvpnInstance { reason: String },
     #[error("invalid Ethernet Segment config: {reason}")]
     InvalidEthernetSegment { reason: String },
+    #[error("invalid [evpn_core_isolation] config: {reason}")]
+    InvalidEvpnCoreIsolation { reason: String },
     #[error("invalid EVPN IP-VRF config: {reason}")]
     InvalidEvpnIpVrf { reason: String },
     #[error("invalid managed netdev config: {reason}")]

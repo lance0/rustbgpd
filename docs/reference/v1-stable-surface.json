@@ -163,6 +163,7 @@
       {"path": "Config.apply_bum_enforcement", "classification": "alpha"},
       {"path": "Config.bfd_profiles", "classification": "outside_v1"},
       {"path": "Config.ethernet_segments", "classification": "alpha"},
+      {"path": "Config.evpn_core_isolation", "classification": "alpha"},
       {"path": "Config.evpn_instances", "classification": "alpha"},
       {"path": "Config.evpn_ip_vrfs", "classification": "alpha"},
       {"path": "Config.fib_tables", "classification": "alpha"},
