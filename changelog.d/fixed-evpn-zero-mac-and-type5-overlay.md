@@ -9,7 +9,9 @@
   ESI and a non-zero gateway IP is now treat-as-withdraw (RFC 9136 §3.2)
   instead of being accepted and reflected. An `MP_UNREACH_NLRI` whose EVPN
   routes were all dropped, including unsupported route types, is no longer
-  mistaken for End-of-RIB.
+  mistaken for End-of-RIB. Likewise, an `MP_REACH_NLRI` whose NLRI were all
+  dropped still counts as carrying NLRI, so a treat-as-withdraw error in its
+  UPDATE no longer escalates to a session reset (RFC 7606 §5.2).
   **Operator-visible:** both cases count as
   `bgp_update_malformed_total{disposition="treat_as_withdraw"}` when
   announced; the session stays up.

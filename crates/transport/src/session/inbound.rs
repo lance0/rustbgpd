@@ -66,6 +66,23 @@ fn raw_path_attribute(mut attrs: &[u8], type_code: u8) -> Option<&[u8]> {
     None
 }
 
+/// Whether the raw `MP_REACH_NLRI` encodes any NLRI octets after its AFI,
+/// SAFI, next-hop length, next hop and reserved octet.
+fn raw_mp_reach_encodes_nlri(raw_attrs: &[u8]) -> bool {
+    use rustbgpd_wire::constants::{attr_flags, attr_type};
+    raw_path_attribute(raw_attrs, attr_type::MP_REACH_NLRI).is_some_and(|attr| {
+        let header = if attr[0] & attr_flags::EXTENDED_LENGTH != 0 {
+            4
+        } else {
+            3
+        };
+        let value = &attr[header..];
+        value
+            .get(3)
+            .is_some_and(|&next_hop_len| value.len() > 5 + usize::from(next_hop_len))
+    })
+}
+
 fn malformed_subcode_reason(subcode: u8) -> MalformedUpdateReason {
     use rustbgpd_wire::notification::update_subcode;
     match subcode {
@@ -1844,10 +1861,11 @@ impl PeerSession {
             .attributes
             .iter()
             .any(|a| matches!(a, PathAttribute::MpReachNlri(_)));
-        let mp_reach_carries_nlri = parsed.attributes.iter().any(|a| match a {
-            PathAttribute::MpReachNlri(mp) => mp_reach_announced_count(mp) != 0,
-            _ => false,
-        });
+        // Judge NLRI content from the raw attribute: the decoder may drop
+        // every NLRI it carried (RFC 7606 §5.4 unsupported EVPN types,
+        // RFC 9135 §9.1.1 zero-length-MAC Type 2), and NLRI that was encoded
+        // and parsed still makes treat-as-withdraw the right action.
+        let mp_reach_carries_nlri = raw_mp_reach_encodes_nlri(&update.path_attributes);
         let has_body_nlri = !parsed.announced.is_empty();
         let has_nlri = has_body_nlri || has_mp_reach_attr;
         let mut validation_options = rustbgpd_wire::UpdateValidationOptions::default();

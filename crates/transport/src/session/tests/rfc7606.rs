@@ -305,6 +305,67 @@ async fn zero_length_mac_type2_keeps_48_bit_route_and_session() {
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
 
+/// An `MP_REACH_NLRI` whose only NLRI is a zero-length-MAC Type 2 carries
+/// NLRI on the wire, so the RFC 9135 §9.1.1 treat-as-withdraw stands: the
+/// RFC 7606 §5.2 missing-NLRI escalation must not reset the session even
+/// though the decoder dropped the route. Nothing is announced or withdrawn.
+#[tokio::test]
+async fn lone_zero_length_mac_type2_is_treat_as_withdraw_not_reset() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
+    rfc7606_drain(&mut rib_rx);
+    let mac = evpn_test_macip([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+
+    session
+        .process_update(with_zero_mac_length(smet_update(vec![mac.clone()]), &mac))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    assert!(rib_rx.try_recv().is_err(), "nothing announced or withdrawn");
+    assert!(session.known_evpn.is_empty());
+}
+
+/// RFC 7606 §5.4: an `MP_REACH_NLRI` whose only NLRI is an unsupported EVPN
+/// route type still encoded NLRI, so a treat-as-withdraw error elsewhere in
+/// the UPDATE (here an invalid ORIGIN) stays treat-as-withdraw rather than
+/// escalating to a §5.2 session reset.
+#[tokio::test]
+async fn unsupported_only_evpn_mp_reach_keeps_treat_as_withdraw() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
+    rfc7606_drain(&mut rib_rx);
+
+    let mut attributes = vec![0x40, 1, 1, 5]; // invalid ORIGIN
+    attributes.extend([0x40, 2, 6, 2, 1, 0, 0, 0xFD, 0xEA]);
+    attributes.extend([
+        0x80, 14, 13, 0, 25, 70, 4, 10, 0, 0, 2, 0, 99, 2, 0xaa, 0xbb,
+    ]);
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from(attributes),
+            nlri: Bytes::new(),
+        })
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    assert!(rib_rx.try_recv().is_err(), "nothing announced or withdrawn");
+}
+
 /// RFC 9136 §3.2: a Type 5 with both a non-zero ESI and a non-zero GW IP
 /// "SHOULD be treat as withdraw". The UPDATE withdraws the previously
 /// accepted route for the same prefix and its sibling; the session stays up.
