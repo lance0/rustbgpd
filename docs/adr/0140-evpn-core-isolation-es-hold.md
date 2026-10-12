@@ -1,7 +1,10 @@
 # ADR-0140: EVPN core isolation and startup hold for bound Ethernet Segments
 
-**Status:** Accepted (design; no runtime behavior shipped. The four open
-decisions were taken on 2026-10-12; see [Decisions](#decisions))
+**Status:** Accepted. The four open decisions were taken on 2026-10-12; see
+[Decisions](#decisions). Implemented: `[evpn_core_isolation]`, the hold
+controller, the ownership receipt, the `--release-core-isolation` helper and
+the observability surface, with unit and privileged netns evidence. The
+interop evidence in decision 8 is pending.
 **Date:** 2026-10-12
 
 ## Context

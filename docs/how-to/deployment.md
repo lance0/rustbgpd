@@ -527,6 +527,14 @@ Notes on the sandbox:
   `CAP_NET_ADMIN`, so the unprivileged unit cannot program the kernel.
 - `ProtectSystem=strict` + explicit `ReadWritePaths` confines the
   daemon to `/var/lib/rustbgpd` (state) and `/etc/rustbgpd` (config).
+- `ExecStart` passes `--runtime-state-dir /var/lib/rustbgpd`; the daemon
+  refuses to start when that differs from the config's `runtime_state_dir`,
+  so change both together. `ExecStopPost=` runs
+  `rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd`
+  after every stop, crash or failed start: it raises CE-facing links that an
+  EVPN [core-isolation hold](../reference/configuration.md#evpn_core_isolation)
+  left down, needs `CAP_NET_ADMIN` only when there is something to release,
+  and exits 0 when there is nothing to release.
 - `ExecReload=kill -HUP` is the supported reload path. See the
   [reload matrix](../reference/reload-matrix.md) for which fields hot-apply vs.
   need a restart.
