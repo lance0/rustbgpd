@@ -519,3 +519,129 @@ async fn eorr_reconciles_family_accounting_before_later_check() {
     );
     assert_eq!(family_usage(&session, family), 2);
 }
+
+/// Mutant: sending bare Cease/1 under the negotiated N-bit lets the peer keep
+/// the over-limit routes as stale; dropping the encapsulated RFC 4486 data
+/// loses the family that tripped.
+#[tokio::test]
+async fn family_limit_under_notification_gr_sends_hard_reset_wrapping_cease_data() {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 1;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)];
+    peer_config.graceful_restart = true;
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.max_prefixes_family.0[PrefixLimitFamily::L2vpnEvpn as usize] = Some(1);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut session = PeerSession::new_with_identity_and_lifecycle(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::primary(81),
+    );
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    let mut open = notification_gr_open(false);
+    open.capabilities.push(Capability::MultiProtocol {
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    });
+    session.drive_fsm(Event::OpenReceived(open)).await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    let negotiated = session.negotiated.as_ref().unwrap();
+    assert!(negotiated.peer_notification_gr);
+    assert!(
+        negotiated
+            .negotiated_families
+            .contains(&(Afi::L2Vpn, Safi::Evpn))
+    );
+    while rib_rx.try_recv().is_ok() {}
+
+    let family = PrefixLimitFamily::L2vpnEvpn;
+    session.process_update(announce(family, &[1])).await;
+    assert!(session.read_half.is_some(), "at the bound");
+    session.process_update(announce(family, &[2])).await;
+
+    let notification = read_until_notification(&mut server).await;
+    assert_eq!(notification.code, NotificationCode::Cease);
+    assert_eq!(notification.subcode, cease_subcode::HARD_RESET);
+    // Cease (6), Maximum Number of Prefixes Reached (1), AFI 25, SAFI 70,
+    // bound 1.
+    assert_eq!(
+        notification.data.as_ref(),
+        [6, 1, 0x00, 0x19, 0x46, 0x00, 0x00, 0x00, 0x01].as_slice()
+    );
+    let mut down = None;
+    while let Ok(update) = rib_rx.try_recv() {
+        if matches!(
+            update,
+            RibUpdate::PeerDown { .. } | RibUpdate::PeerGracefulRestart { .. }
+        ) {
+            down = Some(update);
+        }
+    }
+    assert!(
+        matches!(down, Some(RibUpdate::PeerDown { .. })),
+        "Hard Reset must not retain the over-limit routes through GR"
+    );
+}
+
+/// Mutant: leaving RFC 7606 treat-as-withdraw outside the family accounting
+/// keeps EVPN usage at the bound, so the block episode never ends and the
+/// family is never refreshed.
+#[tokio::test]
+async fn evpn_treat_as_withdraw_releases_family_slots_and_ends_block() {
+    let family = PrefixLimitFamily::L2vpnEvpn;
+    let config = family_config(family, 2, MaxPrefixAction::Block);
+    let (mut session, mut rib_rx, _notify_rx, mut server) = notifying_session(config).await;
+    install_family_session(&mut session, family, false);
+    let scope = MaxPrefixScope::Family(family);
+    let good = make_smet_route(0xf2).route;
+    let sibling = EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+        rd: "65000:100".parse().unwrap(),
+        ethernet_tag: EthernetTagId(100),
+        originator_ip: "192.0.2.10".parse().unwrap(),
+    });
+
+    session
+        .process_update(smet_update(vec![good, sibling.clone()]))
+        .await;
+    assert_eq!(family_usage(&session, family), 2);
+    session.process_update(announce(family, &[3])).await;
+    assert!(
+        session.max_prefix_scope_blocking(scope),
+        "third route withheld"
+    );
+    rfc7606_drain(&mut rib_rx);
+
+    // IPv6 (S,G) flags 0xf1 are invalid: the whole UPDATE is treated as a
+    // withdrawal of both previously accepted keys.
+    session
+        .process_update(smet_update(vec![make_smet_route(0xf1).route, sibling]))
+        .await;
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_eq!(family_usage(&session, family), 0, "both slots released");
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "l2vpn_evpn", Some(0.0));
+    assert!(!session.max_prefix_scope_blocking(scope), "episode ended");
+    let refresh = loop {
+        if let Message::RouteRefresh(rr) = read_single_bgp_message(&mut server).await {
+            break rr;
+        }
+    };
+    assert_eq!(
+        (refresh.afi_raw, refresh.safi_raw),
+        (Afi::L2Vpn as u16, Safi::Evpn as u8)
+    );
+}
