@@ -2729,7 +2729,8 @@ unicast replay immediately. FlowSpec import still sees the destination
 prefix's RPKI state and is not retained, so negotiated FlowSpec families keep
 Route Refresh. An import policy that starts depending on validation state
 during an established session falls back the same way until the session
-resets.
+resets. A peer whose import-policy Route Refresh failed and awaits retry also
+falls back, because its retained input predates the policy change.
 
 The retained input costs memory in proportion to the routes received from
 validation-dependent peers. RFC 9324 Section 4 requires this control to be

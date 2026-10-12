@@ -2844,8 +2844,8 @@ impl PeerManager {
     /// RFC 9324 (`[rpki] local_revalidation`): each dependent session
     /// re-evaluates its retained input locally. Route Refresh is sent only to
     /// a session whose retained input is incomplete (reject bound exceeded,
-    /// or retention started mid-session) and for families the store does not
-    /// hold. The session answers before it re-evaluates, so this pass waits
+    /// retention started mid-session, or an import-policy refresh still
+    /// pending) and for families the store does not hold. The session answers before it re-evaluates, so this pass waits
     /// for command admission and the answer, not for the work.
     #[expect(
         clippy::too_many_lines,
@@ -2907,14 +2907,25 @@ impl PeerManager {
                     skipped_not_established += 1;
                     continue;
                 }
-                Ok(Some(rustbgpd_transport::ImportRevalidation::Local { refresh_families })) => {
+                // An unfired import-policy refresh means routes received
+                // before the policy change were never re-evaluated under it,
+                // so the retained input is not authoritative: refresh.
+                Ok(Some(rustbgpd_transport::ImportRevalidation::Local { refresh_families }))
+                    if !self
+                        .peers
+                        .get(peer_key)
+                        .is_some_and(|managed| managed.pending_refresh) =>
+                {
                     revalidated_locally += 1;
                     if refresh_families.is_empty() {
                         continue;
                     }
                     refresh_families
                 }
-                Ok(Some(rustbgpd_transport::ImportRevalidation::Incomplete)) => {
+                Ok(Some(
+                    rustbgpd_transport::ImportRevalidation::Local { .. }
+                    | rustbgpd_transport::ImportRevalidation::Incomplete,
+                )) => {
                     fallback += 1;
                     warn!(
                         peer = %peer_key,
