@@ -17,12 +17,19 @@ from scripts.check_semver_publishable_crates import (
 
 ROOT = "/repo"
 WORKFLOW = """
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    # A comment between the key and its entries.
+    paths:
       - "crates/wire/**"
       - "crates/fsm/**"
       - "crates/rpki/**"
       - ".github/workflows/semver-checks.yml"
       - "scripts/check_semver_publishable_crates.py"
       - "scripts/test_check_semver_publishable_crates.py"
+  workflow_dispatch:
 """
 
 
@@ -129,7 +136,10 @@ class PublishableCrateContractTests(unittest.TestCase):
                 "publish": None,
             }
         )
-        workflow = WORKFLOW + '      - "crates/surprise/**"\n'
+        workflow = WORKFLOW.replace(
+            '      - "crates/rpki/**"\n',
+            '      - "crates/rpki/**"\n      - "crates/surprise/**"\n',
+        )
         with self.assertRaisesRegex(ContractError, "rustbgpd-surprise@0.1.0"):
             derive(
                 changed,
@@ -167,6 +177,57 @@ class PublishableCrateContractTests(unittest.TestCase):
                     WORKFLOW.replace(f'      - "{path}"\n', ""),
                     lambda _name: RegistryState.NORMAL_RELEASE,
                 )
+
+    def test_crates_io_publish_list_is_publishable(self) -> None:
+        changed = metadata()
+        changed["packages"][0]["publish"] = ["crates-io"]
+        checked, _ = derive(
+            changed, WORKFLOW, lambda _name: RegistryState.NORMAL_RELEASE
+        )
+        self.assertIn("rustbgpd-wire", [package.name for package in checked])
+
+    def test_publish_list_without_crates_io_is_not_publishable(self) -> None:
+        changed = metadata()
+        changed["packages"][0]["publish"] = ["private-registry"]
+        checked, _ = derive(
+            changed,
+            WORKFLOW.replace('      - "crates/wire/**"\n', ""),
+            lambda _name: RegistryState.NORMAL_RELEASE,
+        )
+        self.assertNotIn("rustbgpd-wire", [package.name for package in checked])
+
+    def test_commented_trigger_entry_does_not_count(self) -> None:
+        for commented in (
+            '      # - "crates/wire/**"\n',
+            '      - "crates/fsm/**" # - "crates/wire/**"\n',
+        ):
+            with self.subTest(commented=commented), self.assertRaisesRegex(
+                ContractError, "crates/wire"
+            ):
+                derive(
+                    metadata(),
+                    WORKFLOW.replace('      - "crates/wire/**"\n', commented),
+                    lambda _name: RegistryState.NORMAL_RELEASE,
+                )
+
+    def test_scalar_valued_paths_key_is_not_a_filter(self) -> None:
+        for value in ("|", ">-", "[]"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ContractError, "paths filter is missing"
+            ):
+                derive(
+                    metadata(),
+                    WORKFLOW.replace("    paths:\n", f"    paths: {value}\n"),
+                    lambda _name: RegistryState.NORMAL_RELEASE,
+                )
+
+    def test_only_pull_request_paths_count(self) -> None:
+        moved = WORKFLOW.replace('      - "crates/wire/**"\n', "").replace(
+            '    tags: ["v*"]\n',
+            '    tags: ["v*"]\n    paths:\n      - "crates/wire/**"\n',
+        )
+        with self.assertRaisesRegex(ContractError, "crates/wire"):
+            derive(metadata(), moved, lambda _name: RegistryState.NORMAL_RELEASE)
 
     @patch("scripts.check_semver_publishable_crates.urllib.request.urlopen")
     def test_registry_normal_release_is_accepted(self, urlopen) -> None:

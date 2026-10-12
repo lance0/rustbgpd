@@ -7,6 +7,7 @@ on:
       - Cargo.lock
       - Dockerfile
       - README.md
+      - LICENSES.md
       - docs/how-to/deployment.md
       - docs/tutorials/quickstart.md
       - docs/reference/operations.md
@@ -40,6 +41,7 @@ on:
       - Cargo.lock
       - Dockerfile
       - README.md
+      - LICENSES.md
       - docs/how-to/deployment.md
       - docs/tutorials/quickstart.md
       - docs/reference/operations.md
