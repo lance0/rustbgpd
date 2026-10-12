@@ -780,7 +780,9 @@ impl RibManager {
             info!(%peer, "GR timer expired — promoting to LLGR stale phase");
 
             self.enter_llgr_phase(peer, &gr_families, &llgr_config);
-            // GR remains "active" for metrics until LLGR completes
+            // GR remains "active" for metrics until LLGR completes. The
+            // promotion purged non-LLGR families and NO_LLGR routes.
+            self.publish_gr_stale_routes(peer);
             return;
         }
 
@@ -888,7 +890,11 @@ impl RibManager {
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
 
-        if !llgr_retention_remains {
+        if llgr_retention_remains {
+            // LLGR-stale routes from an earlier cycle keep the series alive;
+            // it must drop the GR-stale routes just swept.
+            self.publish_gr_stale_routes(peer);
+        } else {
             self.release_peer_state_if_departed(peer);
         }
         self.prune_exact_export_rejections();
@@ -1305,7 +1311,9 @@ impl RibManager {
             .map(|(&(peer, afi, safi), _)| (peer, afi, safi))
             .collect();
         for (peer, afi, safi) in expired {
+            let stale_before = self.retained_stale_count(peer);
             self.finish_route_refresh(peer, afi, safi, true);
+            self.republish_gr_stale_routes_if_moved(peer, stale_before);
         }
         self.prune_exact_export_rejections();
     }

@@ -2780,6 +2780,32 @@ fn received(source: IpAddr, announced: Vec<Route>, withdrawn: Vec<(Prefix, u32)>
     }
 }
 
+/// GR expiry promotes the LLGR families and purges the rest; the gauge must
+/// drop the purged routes at that promotion, not keep its GR-entry value.
+#[tokio::test(start_paused = true)]
+async fn gr_stale_gauge_drops_routes_purged_at_llgr_promotion() {
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    manager.handle_update(gr_with_llgr(
+        source,
+        10,
+        vec![V4_UNICAST, V6_UNICAST],
+        vec![V4_UNICAST],
+        60,
+    ));
+    assert_eq!(gr_gauges(&manager, source), (1.0, 2.0));
+
+    manager.sweep_gr_stale(source);
+    assert_llgr_stale(
+        adj_route(&manager, source, retention_v4_prefix()),
+        "v4 promoted",
+    );
+    assert!(adj_route(&manager, source, retention_v6_prefix()).is_none());
+    assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+}
+
 /// While a reconnected peer re-advertises before End-of-RIB,
 /// `bgp_gr_stale_routes` and the retention row follow the maintained
 /// counters: a re-advertised stale route stops counting, and so does a
