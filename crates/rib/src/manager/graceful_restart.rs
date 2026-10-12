@@ -15,6 +15,7 @@ use super::helpers::{
     validate_route_rpki,
 };
 use crate::route::{BgpLsFamily, BgpLsRouteKey};
+use crate::update::{GrRetentionFamilyState, GrRetentionPhase};
 
 /// Deadline registry with a cached minimum. The actor loop probes the
 /// nearest GR / LLGR / refresh deadline on every iteration; with the cache
@@ -162,7 +163,115 @@ pub(super) fn retained_stale_count(rib: &crate::adj_rib_in::AdjRibIn) -> usize {
             .count()
 }
 
+/// Per-family split of [`retained_stale_count`] for the requested families.
+/// One pass over the peer's tables; only runs for a peer in retention.
+fn retained_stale_counts(
+    rib: &crate::adj_rib_in::AdjRibIn,
+    families: &[(Afi, Safi)],
+) -> HashMap<(Afi, Safi), u64> {
+    let mut counts: HashMap<(Afi, Safi), u64> = families.iter().map(|&f| (f, 0)).collect();
+    let mut count = |family: (Afi, Safi), stale: bool| {
+        if stale && let Some(n) = counts.get_mut(&family) {
+            *n += 1;
+        }
+    };
+    for r in rib.iter() {
+        let afi = match r.prefix {
+            Prefix::V4(_) => Afi::Ipv4,
+            Prefix::V6(_) => Afi::Ipv6,
+        };
+        count((afi, Safi::Unicast), r.is_stale || r.is_llgr_stale);
+    }
+    for r in rib.iter_flowspec() {
+        count((r.afi, Safi::FlowSpec), r.is_stale || r.is_llgr_stale);
+    }
+    for r in rib.iter_evpn() {
+        count((Afi::L2Vpn, Safi::Evpn), r.is_stale || r.is_llgr_stale);
+    }
+    for r in rib.iter_vpn() {
+        count(r.afi_safi(), r.is_stale || r.is_llgr_stale);
+    }
+    for r in rib.iter_labeled() {
+        count(r.afi_safi(), r.is_stale || r.is_llgr_stale);
+    }
+    for r in rib.iter_bgpls() {
+        count(r.family.to_afi_safi(), r.is_stale || r.is_llgr_stale);
+    }
+    for r in rib.iter_rtc() {
+        count(r.afi_safi(), r.is_stale || r.is_llgr_stale);
+    }
+    counts
+}
+
 impl RibManager {
+    /// Helper-side retention rows for `peer`, read from the same deadline
+    /// registries the GR/LLGR timer arms sweep from. A family in `gr_peers`
+    /// reports the GR phase (restart while the session is absent, awaiting
+    /// End-of-RIB once it is back); a family with only an LLGR deadline
+    /// reports `llgr`. A GR-phase family that also kept its original LLGR
+    /// deadline across a reconnect reports the earlier of the two.
+    ///
+    /// The stale counts scan the retained peer's Adj-RIB-In once per query;
+    /// per-family stale counters in `AdjRibIn` would make this O(1) if a
+    /// profile ever shows the scan.
+    pub(super) fn gr_retention_snapshot(&self, peer: IpAddr) -> Vec<GrRetentionFamilyState> {
+        let mut rows: Vec<((Afi, Safi), GrRetentionPhase, Option<tokio::time::Instant>)> =
+            Vec::new();
+        if let Some(families) = self.gr_peers.get(&peer) {
+            let present = self.outbound_peers.contains_key(&peer)
+                || self.live_sessions.get(&peer).is_some_and(|s| !s.is_empty());
+            let phase = if present {
+                GrRetentionPhase::GrAwaitingEor
+            } else {
+                GrRetentionPhase::GrRestart
+            };
+            let deadline = self.gr_stale_deadlines.get(&peer).copied();
+            rows.extend(families.iter().map(|&family| (family, phase, deadline)));
+        }
+        for (&(p, afi, safi), &deadline) in &self.llgr_stale_deadlines {
+            if p != peer {
+                continue;
+            }
+            match rows.iter_mut().find(|row| row.0 == (afi, safi)) {
+                Some(row) => row.2 = Some(row.2.map_or(deadline, |d| d.min(deadline))),
+                None => rows.push(((afi, safi), GrRetentionPhase::Llgr, Some(deadline))),
+            }
+        }
+        for &family in self.llgr_peers.get(&peer).into_iter().flatten() {
+            if !rows.iter().any(|row| row.0 == family) {
+                rows.push((family, GrRetentionPhase::Llgr, None));
+            }
+        }
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let families: Vec<(Afi, Safi)> = rows.iter().map(|row| row.0).collect();
+        let counts = self
+            .ribs
+            .get(&peer)
+            .map(|rib| retained_stale_counts(rib, &families))
+            .unwrap_or_default();
+        let now = tokio::time::Instant::now();
+        let mut out: Vec<GrRetentionFamilyState> = rows
+            .into_iter()
+            .filter_map(|((afi, safi), phase, deadline)| {
+                let stale_routes = counts.get(&(afi, safi)).copied().unwrap_or(0);
+                (stale_routes > 0).then(|| GrRetentionFamilyState {
+                    afi,
+                    safi,
+                    phase,
+                    remaining_secs: deadline.map(|d| {
+                        let left = d.saturating_duration_since(now);
+                        left.as_secs() + u64::from(left.subsec_nanos() > 0)
+                    }),
+                    stale_routes,
+                })
+            })
+            .collect();
+        out.sort_by_key(|row| (row.afi as u16, row.safi as u8));
+        out
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "GR peer-up carries negotiated restart and LLGR session state together"

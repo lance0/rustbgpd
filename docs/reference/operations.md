@@ -2530,6 +2530,19 @@ request and retries it through the bounded RIB resync cadence. A closed channel
 retires the request without spinning; the original selection-deferral deadline
 remains the bounded fallback.
 
+For a peer whose stale routes "won't go away", `rbgp neighbor <address>`
+(and `GetNeighborState`'s `gr_retention`) shows a **Stale Route Retention**
+row per family while the RIB holds stale routes for it, including while the
+session is down: the phase (`gr_restart`: session down, restart timer
+running; `gr_awaiting_eor`: re-established, waiting for End-of-RIB before
+`gr_stale_routes_time` expires; `llgr`: long-lived stale), the time remaining
+until the RIB's next deadline for that family (GR expiry sweeps the routes or
+promotes them to LLGR; LLGR expiry sweeps them), and the stale-route count.
+The row disappears once nothing is retained. `llgr_stale_time` can hold a
+route for up to about 194 days by design, so `rbgp doctor` reports each
+family in the `llgr` phase as a `peer.<scoped-address>.llgr_retention.<family>`
+warning that names the time left, not as a failure.
+
 The `active` and `waiters` gauges, plus ordinary `all_eor`,
 `collision_refresh`, and `all_excluded` releases, are dashboard context rather
 than alert conditions. This avoids paging on normal planned-restart progress;
@@ -2868,6 +2881,11 @@ It names the peer and the five keys that can set a bound: `max_prefixes`,
 are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
 are excluded; the check also requires the daemon's global ASN and peer
 configuration to be available. This advisory warning retains exit status 0.
+
+`peer.<scoped-address>.llgr_retention.<family>` is yellow for each family the
+RIB holds in the RFC 9494 LLGR phase. The detail names the stale-route count
+and the time until the LLGR sweep; long retention is a configured outcome, so
+the warning retains exit status 0. GR-phase families add no check.
 
 Doctor parses the effective-config document once and reads probe targets from
 its documented key paths. With `global.listen_addresses`, a local check uses

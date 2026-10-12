@@ -2796,6 +2796,7 @@ impl RibManager {
                 .copied()
                 .unwrap_or_default(),
             outbound: self.peer_outbound_state(peer),
+            gr_retention: self.gr_retention_snapshot(peer),
         }
     }
 
@@ -3342,6 +3343,7 @@ mod cancellation_tests {
                             selection_deferral: Vec::new(),
                             outbound_prefix_limits: Vec::new(),
                         },
+                        gr_retention: Vec::new(),
                     }
                 }
             },
@@ -3375,6 +3377,7 @@ mod cancellation_tests {
                         selection_deferral: Vec::new(),
                         outbound_prefix_limits: Vec::new(),
                     },
+                    gr_retention: Vec::new(),
                 }
             },
             |_, _| panic!("comparison must not be built after the final row canceled"),

@@ -982,6 +982,27 @@ fn inbound_prefix_limit_checks(
         .collect()
 }
 
+/// A family in the RFC 9494 LLGR phase is retained by configuration, possibly
+/// for months; warn with the time left instead of failing.
+fn llgr_retention_checks(
+    identity: &str,
+    rows: &[crate::proto::GracefulRestartRetentionState],
+) -> Vec<Check> {
+    rows.iter()
+        .filter(|row| row.phase == "llgr")
+        .map(|row| Check {
+            name: format!("peer.{identity}.llgr_retention.{}", row.family),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "peer {identity} family {} holds {} LLGR-stale routes; sweep in {}",
+                row.family,
+                row.stale_routes,
+                super::neighbor::retention_remaining_label(row.remaining_seconds)
+            ),
+        })
+        .collect()
+}
+
 fn inbound_prefix_bound_check(
     identity: &str,
     neighbor: &crate::proto::NeighborState,
@@ -3307,6 +3328,7 @@ async fn run_with_deadlines(
                                     &n.inbound_prefix_limits,
                                 ))
                                 .chain(inbound_prefix_bound_check(&identity, n, local_asn))
+                                .chain(llgr_retention_checks(&identity, &n.gr_retention))
                         {
                             reporter.record(check.name, check.status, check.detail)?;
                         }
@@ -6953,6 +6975,56 @@ paths = ["x"]
             3
         );
         assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A family held in the LLGR phase is a configured outcome: doctor warns
+    /// with the time left and the exit code stays green. A GR-phase family
+    /// raises no retention check. Dropping the check loses the warning;
+    /// classifying it as a failure turns the exit code red.
+    #[tokio::test]
+    async fn doctor_warns_llgr_retention_with_remaining_time() {
+        let server = spawn_mock_server(None).await;
+        let mut peer = neighbor(
+            "192.0.2.2",
+            rustbgpd_api::proto::SessionState::Established as i32,
+            0,
+            "",
+        );
+        peer.update_group = "group:1".to_string();
+        peer.config.as_mut().unwrap().max_prefixes = 10;
+        peer.gr_retention_available = Some(true);
+        peer.gr_retention = vec![
+            rustbgpd_api::proto::GracefulRestartRetentionState {
+                family: "ipv4_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(16_416_000),
+                stale_routes: 42,
+            },
+            rustbgpd_api::proto::GracefulRestartRetentionState {
+                family: "ipv6_unicast".to_string(),
+                phase: "gr_awaiting_eor".to_string(),
+                remaining_seconds: Some(300),
+                stale_routes: 7,
+            },
+        ];
+        *server.state.list_neighbors_response.lock().await = vec![peer];
+        let output_dir = tempfile::tempdir().unwrap();
+        let (code, manifest) =
+            run_doctor(&server.addr, &output_dir.path().join("bundle.tar.gz"), None).await;
+
+        assert_eq!(code, 0, "LLGR retention is advisory");
+        let check = manifest_check(&manifest, "peer.192.0.2.2.llgr_retention.ipv4_unicast");
+        assert_eq!(check["status"], "warn");
+        assert_eq!(
+            check["detail"],
+            "peer 192.0.2.2 family ipv4_unicast holds 42 LLGR-stale routes; sweep in 190d 0h"
+        );
+        assert!(!manifest["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"]
+                .as_str()
+                .unwrap()
+                .contains("llgr_retention.ipv6_unicast")
+        }));
     }
 
     #[tokio::test]

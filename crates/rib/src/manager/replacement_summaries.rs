@@ -53,6 +53,7 @@ impl ReplacementSummaries {
                                     advertised_count: 0,
                                     policy_stats: NeighborPolicyStats::default(),
                                     outbound: self.view.unknown_outbound.clone(),
+                                    gr_retention: Vec::new(),
                                 }
                             })
                         },
@@ -203,6 +204,11 @@ impl RibManager {
             .chain(self.adj_ribs_out.keys())
             .chain(self.export_policy_stats.keys())
             .chain(self.update_groups.members.keys())
+            // A peer in GR/LLGR retention may have no outbound registration
+            // while its session is down; its retention row must survive.
+            .chain(self.gr_peers.keys())
+            .chain(self.llgr_peers.keys())
+            .chain(self.llgr_stale_deadlines.keys().map(|(peer, _, _)| peer))
         {
             peers.insert(*peer);
             self.replacement_checkpoint(false);

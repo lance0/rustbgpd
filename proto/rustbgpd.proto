@@ -768,6 +768,30 @@ message NeighborState {
   // enforcement order. Empty from an older daemon, a stale peer-session
   // snapshot, or a peer with no finite bound.
   repeated InboundPrefixLimitState inbound_prefix_limits = 58;
+  // RFC 4724 / RFC 9494 helper-side stale-route retention, one row per family
+  // the RIB still holds stale routes for. Present while the session is down;
+  // empty when nothing is retained.
+  repeated GracefulRestartRetentionState gr_retention = 59;
+  // Presence distinguishes an older daemon that does not expose retention
+  // from a current daemon whose empty gr_retention means nothing is retained.
+  optional bool gr_retention_available = 60;
+}
+
+// Stale routes one family of a neighbor still holds for GR or LLGR.
+message GracefulRestartRetentionState {
+  // Family label, for example "ipv4_unicast".
+  string family = 1;
+  // "gr_restart" (session down, restart timer running), "gr_awaiting_eor"
+  // (session re-established, waiting for End-of-RIB), or "llgr" (RFC 9494
+  // long-lived stale phase).
+  string phase = 2;
+  // Whole seconds, rounded up, until the RIB's next retention deadline for
+  // this family: GR timer expiry (sweep, or promotion to LLGR when
+  // negotiated) or the LLGR sweep, whichever comes first. Absent when no
+  // deadline is armed.
+  optional uint64 remaining_seconds = 3;
+  // Routes of this family still held GR- or LLGR-stale.
+  uint64 stale_routes = 4;
 }
 
 message AcceptedDynamicNeighborRange {

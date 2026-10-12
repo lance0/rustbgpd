@@ -482,6 +482,25 @@ pub struct JsonNeighborDetail {
     /// amendment).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inbound_prefix_limits: Vec<JsonInboundPrefixLimit>,
+    /// GR/LLGR helper retention, one row per family still holding stale
+    /// routes. Present while the session is down.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gr_retention: Vec<JsonGrRetentionFamily>,
+    /// `None` means the daemon predates retention exposure; `Some(true)`
+    /// with no rows means nothing is retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gr_retention_available: Option<bool>,
+}
+
+/// Stale routes one family still holds for GR or LLGR. `phase` is
+/// `gr_restart`, `gr_awaiting_eor`, or `llgr`.
+#[derive(Serialize)]
+pub struct JsonGrRetentionFamily {
+    pub family: String,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_seconds: Option<u64>,
+    pub stale_routes: u64,
 }
 
 /// One finite inbound max-prefix bound. `reason` carries the stable
@@ -1577,6 +1596,11 @@ mod tests {
                         assert_json_shape(row, nested, contract_id);
                     }
                 }
+                "gr_retention[]" => {
+                    for row in value["gr_retention"].as_array().unwrap() {
+                        assert_json_shape(row, nested, contract_id);
+                    }
+                }
                 "tcp_ao" => assert_json_shape(&value["tcp_ao"], nested, contract_id),
                 "tcp_ao.keys[]" => {
                     for key in value["tcp_ao"]["keys"].as_array().unwrap() {
@@ -2031,6 +2055,13 @@ mod tests {
                 blocking: true,
                 reason: Some("inbound_prefix_limit_reached".to_string()),
             }],
+            gr_retention: vec![JsonGrRetentionFamily {
+                family: "ipv4_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(86_400),
+                stale_routes: 3,
+            }],
+            gr_retention_available: Some(true),
         };
 
         let value: Value =

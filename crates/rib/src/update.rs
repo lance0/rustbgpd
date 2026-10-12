@@ -1823,6 +1823,47 @@ pub struct NeighborRibSnapshot {
     pub policy_stats: NeighborPolicyStats,
     /// Live outbound registration and capacity state.
     pub outbound: PeerOutboundState,
+    /// RFC 4724 / RFC 9494 helper-side stale-route retention, one row per
+    /// family that still holds stale routes. Empty when nothing is retained.
+    pub gr_retention: Vec<GrRetentionFamilyState>,
+}
+
+/// Helper-side retention phase of one family's stale routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrRetentionPhase {
+    /// Session down; the peer's GR restart timer is running.
+    GrRestart,
+    /// Session re-established; waiting for the family's End-of-RIB.
+    GrAwaitingEor,
+    /// RFC 9494 long-lived stale phase.
+    Llgr,
+}
+
+impl GrRetentionPhase {
+    /// Stable operator label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GrRestart => "gr_restart",
+            Self::GrAwaitingEor => "gr_awaiting_eor",
+            Self::Llgr => "llgr",
+        }
+    }
+}
+
+/// Neighbor-facing GR/LLGR retention state for one family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrRetentionFamilyState {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub phase: GrRetentionPhase,
+    /// Whole seconds, rounded up, until the RIB's next retention deadline
+    /// for this family: GR timer expiry (sweep, or promotion when LLGR is
+    /// negotiated) or the LLGR sweep, whichever is first. `None` when no
+    /// deadline is armed.
+    pub remaining_secs: Option<u64>,
+    /// Routes of this family still held GR- or LLGR-stale.
+    pub stale_routes: u64,
 }
 
 /// One actor-turn response for `NeighborService`'s RIB-owned state.

@@ -467,6 +467,17 @@ fn apply_rib_snapshot(state: &mut proto::NeighborState, snapshot: &NeighborRibSn
     state.selection_deferral = selection_deferral_to_proto(&snapshot.outbound.selection_deferral);
     state.outbound_prefix_limits =
         outbound_prefix_limits_to_proto(&snapshot.outbound.outbound_prefix_limits);
+    state.gr_retention = snapshot
+        .gr_retention
+        .iter()
+        .map(|row| proto::GracefulRestartRetentionState {
+            family: family_to_string(row.afi, row.safi),
+            phase: row.phase.as_str().to_string(),
+            remaining_seconds: row.remaining_secs,
+            stale_routes: row.stale_routes,
+        })
+        .collect();
+    state.gr_retention_available = Some(true);
 }
 
 fn update_group_comparison_to_proto(
@@ -1157,6 +1168,10 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         // RIB-owned (ADR-0113); the outbound query fills it in for callers
         // that issue one.
         outbound_prefix_limits: Vec::new(),
+        // RIB-owned; the snapshot query fills both in. Absent availability
+        // means the retention state was not observed.
+        gr_retention: Vec::new(),
+        gr_retention_available: None,
         effective_posture: Some(proto::EffectiveNeighborPosture {
             next_hop_ownership: if info.next_hop_ownership_strict_peer {
                 proto::NextHopOwnershipMode::StrictPeer
@@ -2066,6 +2081,7 @@ mod tests {
                                 selection_deferral: Vec::new(),
                                 outbound_prefix_limits: Vec::new(),
                             },
+                            gr_retention: Vec::new(),
                         }],
                         comparison: None,
                     })
@@ -3700,6 +3716,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one responder fixture covers every RIB-owned snapshot field"
+    )]
     async fn prefixes_sent_populated() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
@@ -3762,6 +3782,13 @@ mod tests {
                                         },
                                     ],
                                 },
+                                gr_retention: vec![rustbgpd_rib::GrRetentionFamilyState {
+                                    afi: Afi::Ipv6,
+                                    safi: Safi::Unicast,
+                                    phase: rustbgpd_rib::GrRetentionPhase::Llgr,
+                                    remaining_secs: Some(86_400),
+                                    stale_routes: 12,
+                                }],
                             }],
                             comparison: None,
                         });
@@ -3797,6 +3824,16 @@ mod tests {
         assert_eq!(resp.selection_deferral[0].waiter_session_id, Some(42));
         assert_eq!(resp.selection_deferral[0].blocking_waiters, 2);
         assert_eq!(resp.selection_deferral[0].remaining_millis, 1_500);
+        assert_eq!(resp.gr_retention_available, Some(true));
+        assert_eq!(
+            resp.gr_retention,
+            vec![proto::GracefulRestartRetentionState {
+                family: "ipv6_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(86_400),
+                stale_routes: 12,
+            }]
+        );
     }
 
     /// Load-bearing: restoring the former per-peer triple-query loop sends a
@@ -3845,6 +3882,7 @@ mod tests {
                     selection_deferral: vec![],
                     outbound_prefix_limits: vec![],
                 },
+                gr_retention: Vec::new(),
             };
             reply
                 .send(NeighborRibSnapshotResponse {
@@ -3863,6 +3901,7 @@ mod tests {
                                 selection_deferral: vec![],
                                 outbound_prefix_limits: vec![],
                             },
+                            gr_retention: Vec::new(),
                         },
                         NeighborRibSnapshot {
                             peer: tenth,
@@ -3879,6 +3918,7 @@ mod tests {
                                 selection_deferral: vec![],
                                 outbound_prefix_limits: vec![],
                             },
+                            gr_retention: Vec::new(),
                         },
                         // RIB identity is address-only and forbids this duplicate
                         // live topology; identical clones isolate comparator order.
@@ -3981,12 +4021,14 @@ mod tests {
                         advertised_count: 7,
                         policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
                         outbound: empty_outbound_state(),
+                        gr_retention: Vec::new(),
                     },
                     NeighborRibSnapshot {
                         peer: second,
                         advertised_count: 9,
                         policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
                         outbound: empty_outbound_state(),
+                        gr_retention: Vec::new(),
                     },
                 ],
                 comparison: None,
@@ -4069,6 +4111,7 @@ mod tests {
                         advertised_count: 0,
                         policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
                         outbound: empty_outbound_state(),
+                        gr_retention: Vec::new(),
                     }],
                     comparison: None,
                 })
@@ -4129,6 +4172,7 @@ mod tests {
                         advertised_count: 0,
                         policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
                         outbound: empty_outbound_state(),
+                        gr_retention: Vec::new(),
                     }],
                     comparison: None,
                 })
@@ -4271,6 +4315,7 @@ mod tests {
                             headroom: Some(1), blocking: false,
                         }],
                     },
+                    gr_retention: Vec::new(),
                 }],
                 comparison: Some(UpdateGroupPeerComparison {
                     primary_update_group: "group:7".into(), verdict: UpdateGroupComparisonVerdict::Separate,
@@ -4352,6 +4397,7 @@ mod tests {
                     blocking: false,
                 }],
             },
+            gr_retention: Vec::new(),
         };
         let peer_task = tokio::spawn(async move {
             for expected in [primary, primary, secondary] {
