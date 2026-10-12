@@ -3145,6 +3145,7 @@ fn unknown_client_options_fail_the_parse() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 /// Load-bearing: `config.toml` can carry MD5 keys, so arouteserver-mode output
 /// lands in a mode-0700 directory as mode-0600 files, and an existing output
@@ -3210,6 +3211,7 @@ fn cli_output_is_private() {
     assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 0);
 }
 
+#[cfg(unix)]
 #[test]
 /// Load-bearing: a directory or file that cannot be written is reported with
 /// its path and the OS cause, not as a non-empty output directory.

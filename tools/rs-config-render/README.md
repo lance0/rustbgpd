@@ -486,7 +486,7 @@ transfers verbatim:
 #!/bin/sh -e
 # cron: refresh member filters (arouteserver caches govern data staleness)
 arouteserver template-context --output "$STATE/context.yml"
-rm -rf "$STATE/candidate"        # the output directory must be absent or empty
+rm -rf "${STATE:?}/candidate"        # the output directory must be absent or empty
 rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
 rustbgpd --check --strict "$STATE/candidate/config.toml"
