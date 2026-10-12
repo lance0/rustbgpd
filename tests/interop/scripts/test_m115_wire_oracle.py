@@ -129,7 +129,7 @@ class M115WireOracleTests(unittest.TestCase):
         packets.append(packet(50.0, SRC, "10.115.0.1", notification))
         self.assertEqual(verdicts(packets)[6], "FAIL")
 
-    def test_every_notification_fails_decoded(self) -> None:
+    def test_every_notification_decoded(self) -> None:
         for name, (want, segments) in notification_scenarios("10.115.0.1", SRC, RX).items():
             with self.subTest(name):
                 root = ET.fromstring(f"<pdml>{''.join(good_packets() + segments)}</pdml>")

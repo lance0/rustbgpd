@@ -12,7 +12,9 @@
 #   - a tshark capture in rustbgpd's network namespace: every UPDATE carrying
 #     the prefix has exactly one NEXT_HOP attribute with the expected address,
 #     no receiver-bound UPDATE carries MP_REACH_NLRI or MP_UNREACH_NLRI, and
-#     no NOTIFICATION is sent or received;
+#     no NOTIFICATION is sent or received except a Cease / Connection
+#     Collision Resolution (6/7) on a connection that never reached
+#     Established, which simultaneous opens legitimately produce;
 #   - both receiver sessions stay on their first connection.
 #
 # Topology: frr-source (eBGP) -> rustbgpd -> frr-ibgp (iBGP) + frr-rs (RS client)
