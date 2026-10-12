@@ -450,6 +450,23 @@ struct Filtering {
     max_prefix: Option<MaxPrefixCfg>,
     #[serde(default)]
     reject_policy: RejectPolicy,
+    #[serde(default)]
+    roles: Roles,
+}
+
+/// RFC 9234 BGP Role settings, general or per client.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct Roles {
+    /// Not rendered: every rendered session advertises the route-server Role
+    /// and applies OTC handling (a documented divergence from the default).
+    #[serde(default, rename = "enabled")]
+    _enabled: Option<bool>,
+    #[serde(default)]
+    strict_mode: Option<bool>,
+    /// Client-only in ARouteServer; anything but `rs` is refused.
+    #[serde(default)]
+    local_role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -466,7 +483,7 @@ impl Default for NextHop {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 struct PrefLen {
     min: u8,
     max: u8,
@@ -570,11 +587,21 @@ struct Client {
     ip: String,
     #[serde(default)]
     description: Option<String>,
+    /// TCP MD5 key, rendered as the neighbor's `md5_password`.
+    #[serde(default)]
+    password: Option<String>,
+    /// Private 16-bit ASN standing in for this 32-bit client in standard
+    /// control communities; refused while those are enforced.
+    #[serde(default, rename = "16bit_mapped_asn")]
+    mapped_16bit_asn: Option<u32>,
     #[serde(default)]
     cfg: ClientCfg,
 }
 
+/// Every ARouteServer client option is modeled, so an unknown key fails the
+/// parse instead of being dropped.
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct ClientCfg {
     #[serde(default)]
     description: Option<String>,
@@ -591,12 +618,37 @@ struct ClientCfg {
     filtering: ClientFiltering,
     #[serde(default)]
     attach_custom_communities: Option<serde_yaml::Value>,
+    #[serde(default)]
+    custom_options: Option<serde_yaml::Value>,
+    #[serde(default)]
+    prepend_rs_as: Option<bool>,
+    #[serde(default)]
+    passive: Option<bool>,
+    #[serde(default)]
+    graceful_shutdown: Option<Toggle>,
 }
 
+/// Like [`Irrdb`], an unknown key fails the parse: a new per-client
+/// filtering option must not be dropped silently.
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct ClientFiltering {
     #[serde(default)]
     irrdb: ClientIrrdb,
+    #[serde(default)]
+    ipv4_pref_len: Option<PrefLen>,
+    #[serde(default)]
+    ipv6_pref_len: Option<PrefLen>,
+    /// ARouteServer's BIRD template reads only the general value, as the
+    /// shared hygiene policy does.
+    #[serde(default, rename = "max_as_path_len")]
+    _max_as_path_len: Option<u32>,
+    #[serde(default)]
+    reject_invalid_as_in_as_path: Option<bool>,
+    #[serde(default)]
+    rpki_bgp_origin_validation: Option<ClientRpkiOv>,
+    #[serde(default)]
+    roles: Option<Roles>,
     #[serde(default)]
     next_hop: Option<NextHop>,
     #[serde(default)]
@@ -608,9 +660,27 @@ struct ClientFiltering {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ClientRpkiOv {
+    /// ARouteServer validates only when the general switch is on.
+    #[serde(default, rename = "enabled")]
+    _enabled: Option<bool>,
+    #[serde(default)]
+    reject_invalid: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct ClientIrrdb {
     #[serde(default)]
     as_set_bundle_ids: Vec<String>,
+    /// AS-SET acquisition input; arouteserver resolved it into the bundles.
+    #[serde(default, rename = "as_sets")]
+    _as_sets: Option<serde_yaml::Value>,
+    #[serde(default)]
+    enforce_origin_in_as_set: Option<bool>,
+    #[serde(default)]
+    enforce_prefix_in_as_set: Option<bool>,
     /// Extra authorized origin ASNs, folded into the origin dataset.
     #[serde(default)]
     white_list_asn: Option<Vec<AsnLit>>,
@@ -624,7 +694,11 @@ struct ClientIrrdb {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClientMaxPrefix {
+    /// PeeringDB limit input; arouteserver resolved it into the limits.
+    #[serde(default, rename = "peering_db")]
+    _peering_db: Option<serde_yaml::Value>,
     #[serde(default)]
     limit_ipv4: Option<u32>,
     #[serde(default)]
@@ -1046,6 +1120,9 @@ struct ResolvedClient<'a> {
     rfc8950: bool,
     /// Session-family `white_list_route` entries, in emission order.
     white_list_routes: Vec<&'a PrefixEntry>,
+    /// Effective `roles.strict_mode`: refuse an OPEN without a Role capability.
+    strict_role: bool,
+    md5_password: Option<&'a str>,
 }
 impl ResolvedClient<'_> {
     /// TOML keys carrying this client's family limits: ARouteServer's
@@ -1669,16 +1746,6 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
     check_next_hop_policy(&filtering.next_hop.policy, "general", &mut refusals);
     check_reject_policy(&filtering.reject_policy.policy, "general", &mut refusals);
     let active_blackhole = blackhole.policy_ipv4.is_some() || blackhole.policy_ipv6.is_some();
-    if !filtering.irrdb.enforce_origin_in_as_set
-        && (!filtering.irrdb.enforce_prefix_in_as_set || active_blackhole)
-    {
-        refusals.push(
-            "an active blackhole policy requires irrdb.enforce_origin_in_as_set=true; \
-             without blackhole filtering, both IRR enforcement knobs may not be disabled \
-             because the renderer requires an IRR-enforcing per-client policy"
-                .to_owned(),
-        );
-    }
     if filtering.rpki_bgp_origin_validation.enabled && opts.rtr_caches.is_empty() {
         refusals.push(
             "rpki_bgp_origin_validation is enabled but no --rtr-cache endpoint was given; \
@@ -1687,22 +1754,12 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
         );
     }
     let irrdb = &filtering.irrdb;
-    if irrdb.use_rpki_roas_as_route_objects.enabled {
-        if opts.rtr_caches.is_empty() {
-            refusals.push(
-                "irrdb.use_rpki_roas_as_route_objects is enabled but no --rtr-cache endpoint \
-                 was given; the daemon reads ROAs only over RTR"
-                    .to_owned(),
-            );
-        }
-        if !irrdb.enforce_origin_in_as_set {
-            refusals.push(
-                "irrdb.use_rpki_roas_as_route_objects requires \
-                 irrdb.enforce_origin_in_as_set=true; the ROA acceptance is bound to the \
-                 client's AS-SET origin dataset"
-                    .to_owned(),
-            );
-        }
+    if irrdb.use_rpki_roas_as_route_objects.enabled && opts.rtr_caches.is_empty() {
+        refusals.push(
+            "irrdb.use_rpki_roas_as_route_objects is enabled but no --rtr-cache endpoint \
+             was given; the daemon reads ROAs only over RTR"
+                .to_owned(),
+        );
     }
     for (name, source) in [
         ("use_arin_bulk_whois_data", &irrdb.use_arin_bulk_whois_data),
@@ -1729,6 +1786,22 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
 
     for client in &ctx.clients {
         let scope = format!("client {}", client.id);
+        let (enforce_origin, enforce_prefix) = irr_enforcement(ctx, client);
+        if !enforce_origin && (!enforce_prefix || active_blackhole) {
+            refusals.push(format!(
+                "{scope}: an active blackhole policy requires irrdb.enforce_origin_in_as_set=true; \
+                 without blackhole filtering, both IRR enforcement knobs may not be disabled \
+                 because the renderer requires an IRR-enforcing per-client policy"
+            ));
+        }
+        if irrdb.use_rpki_roas_as_route_objects.enabled && !enforce_origin {
+            refusals.push(format!(
+                "{scope}: irrdb.use_rpki_roas_as_route_objects requires \
+                 irrdb.enforce_origin_in_as_set=true; the ROA acceptance is bound to the \
+                 client's AS-SET origin dataset"
+            ));
+        }
+        check_client_overrides(ctx, client, &scope, &mut refusals);
         let ipv6 = client.ip.contains(':');
         let multihop = client.cfg.multihop.or(cfg.multihop).unwrap_or(0);
         if multihop > 0 {
@@ -1832,6 +1905,113 @@ fn value_present(value: Option<&serde_yaml::Value>) -> bool {
         serde_yaml::Value::Mapping(m) => !m.is_empty(),
         _ => true,
     })
+}
+
+/// The client's resolved IRR enforcement `(origin, prefix)`. ARouteServer
+/// resolves every client option over the general one before the dump; the
+/// fallback covers hand-authored contexts.
+fn irr_enforcement(ctx: &Context, client: &Client) -> (bool, bool) {
+    let general = &ctx.cfg.filtering.irrdb;
+    let irrdb = &client.cfg.filtering.irrdb;
+    (
+        irrdb
+            .enforce_origin_in_as_set
+            .unwrap_or(general.enforce_origin_in_as_set),
+        irrdb
+            .enforce_prefix_in_as_set
+            .unwrap_or(general.enforce_prefix_in_as_set),
+    )
+}
+
+/// Per-client options the rendered sessions cannot carry. Each one is refused
+/// only when it would change what ARouteServer's own BIRD template does.
+fn check_client_overrides(ctx: &Context, client: &Client, scope: &str, refusals: &mut Vec<String>) {
+    let cfg = &ctx.cfg;
+    let general = &cfg.filtering;
+    let filtering = &client.cfg.filtering;
+    let shared = |key: &str| {
+        format!(
+            "{scope}: {key} differs from the general value; the shared rs-hygiene policy \
+             applies only the general value"
+        )
+    };
+    for (key, window, general_window) in [
+        (
+            "ipv4_pref_len",
+            &filtering.ipv4_pref_len,
+            &general.ipv4_pref_len,
+        ),
+        (
+            "ipv6_pref_len",
+            &filtering.ipv6_pref_len,
+            &general.ipv6_pref_len,
+        ),
+    ] {
+        if window.is_some() && window != general_window {
+            refusals.push(shared(key));
+        }
+    }
+    if filtering
+        .reject_invalid_as_in_as_path
+        .is_some_and(|value| value != general.reject_invalid_as_in_as_path)
+    {
+        refusals.push(shared("reject_invalid_as_in_as_path"));
+    }
+    let rpki = &general.rpki_bgp_origin_validation;
+    if rpki.enabled
+        && filtering
+            .rpki_bgp_origin_validation
+            .as_ref()
+            .and_then(|ov| ov.reject_invalid)
+            .is_some_and(|value| value != rpki.reject_invalid)
+    {
+        refusals.push(shared("rpki_bgp_origin_validation.reject_invalid"));
+    }
+    if cfg.graceful_shutdown.enabled
+        && client
+            .cfg
+            .graceful_shutdown
+            .as_ref()
+            .is_some_and(|toggle| !toggle.enabled)
+    {
+        refusals.push(format!(
+            "{scope}: graceful_shutdown.enabled=false is not rendered; the daemon honors \
+             GRACEFUL_SHUTDOWN for every member session"
+        ));
+    }
+    // A general `prepend_rs_as` is refused once, at the general level.
+    if client.cfg.prepend_rs_as == Some(true) && !cfg.prepend_rs_as {
+        refusals.push(format!(
+            "{scope}: prepend_rs_as: the rendered sessions are transparent \
+             route-server-client sessions and never prepend the route-server ASN"
+        ));
+    }
+    if let Some(role) = filtering
+        .roles
+        .as_ref()
+        .and_then(|roles| roles.local_role.as_deref())
+        .filter(|role| *role != "rs")
+    {
+        refusals.push(format!(
+            "{scope}: roles.local_role `{role}` is not rendered; every rendered session \
+             advertises the route-server Role"
+        ));
+    }
+    if let Some(mapped) = client.mapped_16bit_asn
+        && control_communities_enabled(cfg)
+    {
+        refusals.push(format!(
+            "{scope}: 16bit_mapped_asn {mapped} is not rendered; the daemon has no \
+             mapped-ASN form of the standard control communities, so a member's \
+             0:{mapped} request would be ignored"
+        ));
+    }
+    if value_present(client.cfg.custom_options.as_ref()) {
+        refusals.push(format!(
+            "{scope}: custom_options is not rendered; its daemon-specific configuration \
+             lines would be silently dropped"
+        ));
+    }
 }
 
 fn community_configured(value: &CommunityValues) -> bool {
@@ -2339,8 +2519,7 @@ fn resolve_clients<'a>(
             .unwrap_or(&ctx.cfg.filtering.reject_policy)
             .policy
             == "tag_and_reject";
-        let enforce_origin = ctx.cfg.filtering.irrdb.enforce_origin_in_as_set;
-        let enforce_prefix = ctx.cfg.filtering.irrdb.enforce_prefix_in_as_set;
+        let (enforce_origin, enforce_prefix) = irr_enforcement(ctx, client);
 
         let mut prefixes: Vec<&PrefixEntry> = Vec::new();
         // A client's bundles overlap (arouteserver resolves both the
@@ -2498,6 +2677,13 @@ fn resolve_clients<'a>(
             tag_and_reject,
             rfc8950,
             white_list_routes,
+            strict_role: filtering
+                .roles
+                .as_ref()
+                .and_then(|roles| roles.strict_mode)
+                .or(ctx.cfg.filtering.roles.strict_mode)
+                .unwrap_or(false),
+            md5_password: client.password.as_deref().filter(|p| !p.is_empty()),
         });
     }
 
@@ -2549,6 +2735,13 @@ fn resolve_blackhole(ctx: &Context, client: &Client, ipv6: bool) -> Option<Resol
 fn collect_warnings(ctx: &Context, warnings: &mut Vec<String>) {
     if ctx.cfg.passive == Some(false) {
         warnings.push("passive=false is ignored: the daemon both listens and connects".to_owned());
+    } else {
+        for client in ctx.clients.iter().filter(|c| c.cfg.passive == Some(false)) {
+            warnings.push(format!(
+                "client {}: passive=false is ignored: the daemon both listens and connects",
+                client.id
+            ));
+        }
     }
 }
 
@@ -2720,6 +2913,13 @@ fn render_toml(
             rc.client.asn,
             toml_escape(&rc.description),
         );
+        if rc.strict_role {
+            out.push_str("strict_role = true\n");
+        }
+        if let Some(password) = rc.md5_password {
+            let quoted = serde_json::to_string(password).expect("string serialization cannot fail");
+            let _ = writeln!(out, "md5_password = {quoted}");
+        }
         if rc.rfc8950 {
             out.push_str(
                 "# RFC 8950: IPv4 unicast rides this IPv6 session. The dual-family session\n\
