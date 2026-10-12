@@ -4735,8 +4735,11 @@ after `recovery_delay_seconds`.
 
 **Peer rule.** Isolation holds a segment only if a remote PE's Type 4 route for
 its ESI, with the matching ES-Import route target, was present while the core
-was up and EVPN was synced. Otherwise the CE has no other member and the hold
-is suppressed (`suppressed_no_peer`). A reload that gives a bound interface
+was up and EVPN was synced; a session that has not yet sent End-of-RIB never
+updates that record. Otherwise the CE has no other member and the hold is
+suppressed (`suppressed_no_peer`). Before the first sync after startup no peer
+is recorded, so a core loss then keeps the startup hold rather than becoming a
+suppressed isolation. A reload that gives a bound interface
 another ESI or originator drops that peer record and the hold: the members are
 released, and the segment is held again only after a Type 4 is seen for the
 new identity.

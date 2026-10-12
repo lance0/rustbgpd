@@ -698,6 +698,28 @@ The four questions this record left open were decided on 2026-10-12.
    configured uplinks are down. Losing one redundant uplink while another
    still carries traffic does not isolate the PE.
 
+## Amendment (2026-10-12): synced-only peer latch
+
+Implementation review tightened decision 4 in two ways.
+
+- **The peer latch updates only while EVPN is synced:** an L2VPN/EVPN session
+  is Established, every Established session has sent End-of-RIB, and GR
+  selection deferral does not hold the family. Before End-of-RIB, a
+  reconnecting session's Type 4 set may be incomplete. Latching it could drop
+  a real peer and leave a segment that has another member un-held at the next
+  isolation. The latch keeps its last synced value until the next sync.
+- **Before the first sync, the startup hold covers isolation.** A fresh start
+  has no latched peer. The startup hold therefore becomes an isolation hold
+  only after the core has been up and synced. A core lost before that leaves
+  the startup hold in place, released by sync or the backstop as decision 5
+  describes.
+- **One RIB read replaces the "Type 4 before sessions" order.** The Type 4
+  rows and the session counts are read in one RIB actor turn through
+  `QueryEvpnEsSnapshot`. The Loc-RIB keeps an index of its Type 4 keys, so the
+  read costs O(Type 4), not a walk of the EVPN table. No session teardown or
+  route flush can fall between the two values, which is at least as strong as
+  the ordered pair of reads decision 4 allowed.
+
 ## Consequences
 
 - An isolated all-active PE stops attracting CE traffic. At recovery and
