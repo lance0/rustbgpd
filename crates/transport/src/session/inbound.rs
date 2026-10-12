@@ -2071,7 +2071,12 @@ impl PeerSession {
                 return;
             }
             // MP EoR: UPDATE with only an empty MP_UNREACH_NLRI (IPv6 unicast, FlowSpec, etc.)
-            if parsed.attributes.len() == 1
+            // The decoder can drop every EVPN NLRI it carried (RFC 7606 §5.4
+            // unsupported types, RFC 9135 §9.1.1 zero-length MAC), so also
+            // require the raw attribute to encode none: a 3- or 4-octet
+            // header plus the 3-octet AFI/SAFI value.
+            if matches!(update.path_attributes.len(), 6 | 7)
+                && parsed.attributes.len() == 1
                 && let Some(PathAttribute::MpUnreachNlri(mp)) = parsed.attributes.first()
                 && self.negotiated_families().contains(&(mp.afi, mp.safi))
                 && (mp.afi, mp.safi) != (Afi::Ipv4, Safi::Unicast)

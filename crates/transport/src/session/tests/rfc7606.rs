@@ -198,6 +198,175 @@ async fn zero_esi_evpn_routes_never_reset_the_session() {
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
 
+/// `update` with the Type 2 NLRI for `route`'s MAC rewritten to MAC Address
+/// Length 0; every other byte is unchanged.
+fn with_zero_mac_length(update: UpdateMessage, route: &EvpnRoute) -> UpdateMessage {
+    let EvpnRoute::MacIp(route) = route else {
+        panic!("Type 2 route")
+    };
+    let mut needle = vec![48];
+    needle.extend(route.mac.0);
+    let mut attrs = update.path_attributes.to_vec();
+    let at = attrs
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("Type 2 NLRI present");
+    attrs[at] = 0;
+    UpdateMessage {
+        path_attributes: Bytes::from(attrs),
+        ..update
+    }
+}
+
+fn evpn_test_macip(mac: [u8; 6]) -> EvpnRoute {
+    EvpnRoute::MacIp(rustbgpd_wire::EvpnMacIp {
+        rd: "65000:100".parse().unwrap(),
+        esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+        mac: rustbgpd_wire::MacAddress::new(mac),
+        ip: None,
+        label1: rustbgpd_wire::MplsLabel::new(100),
+        label2: None,
+    })
+}
+
+/// RFC 9135 §9.1.1: a Type 2 with MAC Address Length 0 is treat-as-withdraw.
+/// RFC 7432 §7.2 keys the route by MAC Address Length too, so it must never
+/// remove the peer's 48-bit route for the same MAC, whether it arrives in
+/// `MP_REACH_NLRI` (only its UPDATE siblings withdraw) or `MP_UNREACH_NLRI`
+/// (nothing withdraws, and it is not an End-of-RIB). The session stays up
+/// and the 48-bit route is still withdrawable afterwards.
+#[tokio::test]
+async fn zero_length_mac_type2_keeps_48_bit_route_and_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
+    rfc7606_drain(&mut rib_rx);
+    let mac = evpn_test_macip([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    let sibling = evpn_test_macip([0x00, 0x11, 0x22, 0x33, 0x44, 0x66]);
+
+    session
+        .process_update(smet_update(vec![mac.clone(), sibling.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("48-bit announcements")
+    };
+    assert_eq!(evpn_announced.len(), 2);
+
+    let zero_announce = with_zero_mac_length(smet_update(vec![mac.clone(), sibling.clone()]), &mac);
+    session.process_update(zero_announce).await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("UPDATE-wide withdrawal")
+    };
+    assert!(evpn_announced.is_empty());
+    assert_eq!(evpn_withdrawn, vec![sibling.key()]);
+    assert_eq!(session.known_evpn.len(), 1);
+    assert!(session.known_evpn.contains(&mac.key()));
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+
+    let withdrawal = session
+        .publish_export_profile()
+        .probe_withdrawal(ExportWithdrawal::Evpn(&mac.key()))
+        .unwrap()
+        .message;
+    session
+        .process_update(with_zero_mac_length(withdrawal.clone(), &mac))
+        .await;
+    // The withdrawal removes nothing, and its MP_UNREACH encoded an NLRI,
+    // so it is not an End-of-RIB either.
+    assert!(
+        !session
+            .received_eor_families
+            .contains(&(Afi::L2Vpn, Safi::Evpn))
+    );
+    assert!(rib_rx.try_recv().is_err());
+    assert!(session.known_evpn.contains(&mac.key()));
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+
+    session.process_update(withdrawal).await;
+    let RibUpdate::RoutesReceived { evpn_withdrawn, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("48-bit withdrawal")
+    };
+    assert_eq!(evpn_withdrawn, vec![mac.key()]);
+    assert!(session.known_evpn.is_empty());
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// RFC 9136 §3.2: a Type 5 with both a non-zero ESI and a non-zero GW IP
+/// "SHOULD be treat as withdraw". The UPDATE withdraws the previously
+/// accepted route for the same prefix and its sibling; the session stays up.
+#[tokio::test]
+async fn type5_esi_and_gateway_is_treat_as_withdraw() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
+    rfc7606_drain(&mut rib_rx);
+    let gateway_only = rustbgpd_wire::EvpnIpPrefixRoute {
+        rd: "65000:100".parse().unwrap(),
+        esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: rustbgpd_wire::EthernetTagId(0),
+        prefix: rustbgpd_wire::EvpnIpPrefixValue::V4(Ipv4Prefix::new(
+            Ipv4Addr::new(10, 0, 0, 0),
+            24,
+        )),
+        gateway: "192.0.2.1".parse().unwrap(),
+        label: rustbgpd_wire::MplsLabel::new(100),
+    };
+    let both = EvpnRoute::IpPrefix(rustbgpd_wire::EvpnIpPrefixRoute {
+        esi: rustbgpd_wire::EthernetSegmentIdentifier([1, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+        ..gateway_only
+    });
+    let gateway_only = EvpnRoute::IpPrefix(gateway_only);
+    let sibling = evpn_test_macip([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+
+    session
+        .process_update(smet_update(vec![gateway_only.clone(), sibling.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("valid announcements")
+    };
+    assert_eq!(evpn_announced.len(), 2);
+
+    session
+        .process_update(smet_update(vec![both.clone(), sibling.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        mut evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("UPDATE-wide withdrawal")
+    };
+    assert!(evpn_announced.is_empty());
+    evpn_withdrawn.sort();
+    let mut expected = vec![both.key(), sibling.key()];
+    expected.sort();
+    assert_eq!(evpn_withdrawn, expected);
+    assert!(session.known_evpn.is_empty());
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
 #[tokio::test]
 async fn smet_noncanonical_payload_resets_session_in_both_directions() {
     for withdrawn in [false, true] {
@@ -2303,6 +2472,14 @@ async fn unsupported_evpn_route_type_is_observed_without_losing_supported_routes
         })
         .await;
     assert_eq!(session.fsm.state(), SessionState::Established);
+    // The MP_UNREACH encoded NLRI, so it is not an End-of-RIB (RFC 4724 §2)
+    // even though every NLRI was discarded.
+    assert!(
+        !session
+            .received_eor_families
+            .contains(&(Afi::L2Vpn, Safi::Evpn))
+    );
+    assert!(rib_rx.try_recv().is_err());
     assert!(
         (counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_total")[0].1 - 5.0).abs()
             < f64::EPSILON
