@@ -33,5 +33,18 @@
     "oracle_sha256": "fe86e66022b369114ced0f039fff697ee9472e9974204a2d9cbe9c87f8d4d506",
     "refreshed_routes": 5,
     "result": "pass"
+  },
+  "strengthened_snapshot_replay": {
+    "focused_regressions": 17,
+    "phase_source_stale": {
+      "eor-five": 0,
+      "expired": 0,
+      "gr-five": 5,
+      "gr-ten": 10,
+      "initial": null,
+      "llgr-five": 5
+    },
+    "result": "pass",
+    "runner_sha256": "7771d74eb2d8bba6068038dc45a8e27424df73d5f77b8aca4685168c1e170de7"
   }
 }

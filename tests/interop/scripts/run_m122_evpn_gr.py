@@ -114,7 +114,10 @@ def snapshot(phase, sets, llgr=False):
     sink = wait(f"{phase}: exact client identities", sink_rows, lambda rows: check_client(rows, sets, llgr))
     need(flaps() == 0, "client session flapped")
     # The labelled gauge is created by the first GR transition, not PeerUp.
-    stale = None if phase == "initial" else metric("bgp_gr_stale_routes")
+    expected_stale = {"gr-ten": 10, "gr-five": 5, "llgr-five": 5, "eor-five": 0, "expired": 0}
+    stale = None if phase == "initial" else wait(
+        f"{phase}: exact stored stale gauge", lambda: metric("bgp_gr_stale_routes"),
+        lambda value: need(value == expected_stale[phase], "phase stale gauge differs"))
     save(f"{phase}.json", {"rr": rr, "client": sink, "source_stale": stale, "client_flaps": 0})
 
 

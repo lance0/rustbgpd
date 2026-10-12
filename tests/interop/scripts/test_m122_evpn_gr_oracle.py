@@ -224,6 +224,30 @@ class OracleTests(unittest.TestCase):
         with patch.object(runner, "docker", return_value=f'bgp_gr_stale_routes{{peer="{oracle.SOURCE}"}} 0\n'):
             self.assertEqual(runner.metric("bgp_gr_stale_routes"), 0)
 
+    def test_snapshot_requires_llgr_and_eor_stale_gauges(self):
+        original_wait = runner.wait
+        for phase, llgr, expected in (("llgr-five", True, 5), ("eor-five", False, 0)):
+            rr = rr_fixture()
+            communities = [oracle.LLGR_STALE] if llgr else []
+            for row in rr:
+                row["communities"] = ["LLGR_STALE"] if llgr else []
+            sink = {oracle.client_key(t, 1): [{"attrs": [{"type": 8, "communities": communities}]}] for t in range(1, 6)}
+            for gauge in (0, 5):
+                with self.subTest(phase=phase, gauge=gauge), \
+                        patch.object(runner, "rr_rows", return_value=rr), \
+                        patch.object(runner, "sink_rows", return_value=sink), \
+                        patch.object(runner, "flaps", return_value=0), \
+                        patch.object(runner, "metric", return_value=gauge), \
+                        patch.object(runner, "save") as saved, \
+                        patch.object(runner, "wait", side_effect=lambda label, read, check: original_wait(label, read, check, timeout=0)):
+                    if gauge != expected:
+                        with self.assertRaises(ValueError):
+                            runner.snapshot(phase, [1], llgr)
+                        saved.assert_not_called()
+                    else:
+                        runner.snapshot(phase, [1], llgr)
+                        self.assertEqual(saved.call_args.args[1]["source_stale"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

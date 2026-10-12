@@ -25,6 +25,11 @@ replay passes; its oracle hash and test verdict are recorded separately in
 dirty harness, while the hosted job exercises the final committed driver and
 oracle together.
 
+The retained six phase snapshots also pass the later strengthened driver
+checks for each phase's exact stale gauge. That offline snapshot replay and
+its driver hash are recorded separately in `strengthened_snapshot_replay`;
+the original executed driver hash is preserved.
+
 A separate live peer admission preceded the new leg. In the M122 topology,
 both directions of both sessions were admitted again from captured OPENs:
 MP capability 1 contains `00190046` (AFI 25, SAFI 70), GR capability 64
@@ -69,7 +74,8 @@ zero and are not identity fields. Raw witnesses are in
 The source negotiates only EVPN, so its peer-labelled `bgp_gr_stale_routes`
 gauge counts these EVPN paths. The gauge is created on the first GR
 transition. Subsequent missing metrics or failed queries fail the driver;
-they never become zero or route absence. The EVPN route RPC has no
+they never become zero or route absence. Each later snapshot waits for its
+phase's exact gauge value before it is saved. The EVPN route RPC has no
 per-route stale flags, so the oracle uses the gauge and exact retained
 identities. LLGR is observed through its community. Focused
 regressions reject wrong capabilities, zero LLGR time, missing restart
