@@ -1285,7 +1285,8 @@ pub(crate) fn decode_path_attributes_revised_observed(
                     && let Err(error) = crate::evpn::validate_evpn_announcements(&mp.evpn_announced)
                 {
                     // RFC 9251 §9.7: canonical SMET keys remain extractable
-                    // when announcement flags are invalid. Retain all NLRI
+                    // when announcement flags are invalid, as do zero-ESI
+                    // Type 4 keys (RFC 7432 §8.1.1). Retain all NLRI
                     // for RFC 7606 UPDATE-wide treat-as-withdraw, including
                     // valid siblings. MP_UNREACH deliberately bypasses this.
                     malformed.push(MalformedAttribute {

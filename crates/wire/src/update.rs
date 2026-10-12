@@ -1048,6 +1048,111 @@ mod tests {
         assert_eq!(observations, vec![(42, 2), (99, 2), (255, 1)]);
     }
 
+    /// Raw EVPN UPDATE carrying `nlri` in `MP_REACH_NLRI` or `MP_UNREACH_NLRI`.
+    fn evpn_update(reach: bool, nlri: &[u8]) -> UpdateMessage {
+        let mut value = vec![0, 25, 70]; // L2VPN / EVPN
+        if reach {
+            value.extend([4, 192, 0, 2, 7, 0]); // IPv4 next hop, reserved
+        }
+        value.extend(nlri);
+        let mut attributes = vec![0x80, if reach { 14 } else { 15 }];
+        attributes.push(u8::try_from(value.len()).unwrap());
+        attributes.extend(value);
+        UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from(attributes),
+            nlri: Bytes::new(),
+        }
+    }
+
+    const EVPN_RD: [u8; 8] = [0, 0, 0xfd, 0xe8, 0, 0, 0, 100]; // 65000:100
+
+    /// Type 1 with an all-zero ESI and the given Ethernet Tag and label.
+    fn zero_esi_type1(tag: [u8; 4], label: [u8; 3]) -> Vec<u8> {
+        let mut nlri = vec![1, 25];
+        nlri.extend(EVPN_RD);
+        nlri.extend([0; 10]);
+        nlri.extend(tag);
+        nlri.extend(label);
+        nlri
+    }
+
+    /// Type 4 with an all-zero ESI and originator 192.0.2.1.
+    fn zero_esi_type4() -> Vec<u8> {
+        let mut nlri = vec![4, 23];
+        nlri.extend(EVPN_RD);
+        nlri.extend([0; 10]);
+        nlri.extend([32, 192, 0, 2, 1]);
+        nlri
+    }
+
+    /// RFC 8214 §4: a single-homed VPWS per-EVI Ethernet A-D route carries
+    /// ESI 0 (RFC 7432 §5). RFC 7432 §8.2.1 says only that a per-ES A-D
+    /// route "is not needed" for ESI 0. Both are well-formed NLRI, so
+    /// announcement and withdrawal decode without error.
+    #[test]
+    fn parse_revised_accepts_zero_esi_type1_announce_and_withdraw() {
+        for nlri in [
+            zero_esi_type1([0, 0, 0, 100], [0, 0x06, 0x41]), // per-EVI, VPWS id 100
+            zero_esi_type1([0xff; 4], [0; 3]),               // per-ES (MAX-ET)
+        ] {
+            for reach in [true, false] {
+                let msg = evpn_update(reach, &nlri);
+                let parsed = msg
+                    .parse_revised_observed_with_error_context(true, false, false, &[])
+                    .unwrap_or_else(|context| {
+                        panic!("zero-ESI Type 1 (reach={reach}) must not reset: {context:?}")
+                    })
+                    .0;
+                assert!(parsed.malformed.is_empty(), "{:?}", parsed.malformed);
+                let mp = &parsed.update.attributes[0];
+                let routes = match (reach, mp) {
+                    (true, PathAttribute::MpReachNlri(mp)) => &mp.evpn_announced,
+                    (false, PathAttribute::MpUnreachNlri(mp)) => &mp.evpn_withdrawn,
+                    other => panic!("unexpected attribute {other:?}"),
+                };
+                assert_eq!(routes.len(), 1);
+                let mut encoded = Vec::new();
+                crate::evpn::encode_evpn_nlri(routes, &mut encoded).unwrap();
+                assert_eq!(encoded, nlri, "byte-identical re-encoding");
+            }
+        }
+    }
+
+    /// RFC 7432 §§5, 8.1.1: an Ethernet Segment route exists only for a
+    /// multihomed segment, which has a non-zero ESI. The NLRI still parses
+    /// (RFC 7606 §5.3), so an announcement is treat-as-withdraw for the whole
+    /// UPDATE (RFC 7606 §2, §3 (j)), never a session reset. A withdrawal of
+    /// the same key is accepted.
+    #[test]
+    fn parse_revised_zero_esi_type4_is_treat_as_withdraw() {
+        let sibling = zero_esi_type1([0, 0, 0, 100], [0, 0x06, 0x41]);
+        let nlri = [zero_esi_type4(), sibling].concat();
+        let parsed = evpn_update(true, &nlri)
+            .parse_revised(true, false, false, &[])
+            .expect("zero-ESI Type 4 must not be session-reset");
+        assert_eq!(parsed.malformed.len(), 1);
+        assert_eq!(parsed.malformed[0].type_code, 14);
+        assert_eq!(
+            parsed.malformed[0].disposition,
+            crate::ErrorDisposition::TreatAsWithdraw
+        );
+        // Both keys stay extractable for UPDATE-wide withdrawal.
+        let PathAttribute::MpReachNlri(mp) = &parsed.update.attributes[0] else {
+            panic!("MP_REACH retained");
+        };
+        assert_eq!(mp.evpn_announced.len(), 2);
+
+        let parsed = evpn_update(false, &zero_esi_type4())
+            .parse_revised(true, false, false, &[])
+            .expect("zero-ESI Type 4 withdrawal must decode");
+        assert_eq!(parsed.malformed, Vec::new());
+        let PathAttribute::MpUnreachNlri(mp) = &parsed.update.attributes[0] else {
+            panic!("MP_UNREACH retained");
+        };
+        assert_eq!(mp.evpn_withdrawn.len(), 1);
+    }
+
     #[test]
     fn revised_fatal_context_preserves_type_and_notification_data() {
         for (attributes, nlri, type_code) in [

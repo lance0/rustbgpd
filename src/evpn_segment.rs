@@ -2778,9 +2778,9 @@ mod tests {
 
     /// Regression: a key shape the Type 1/4 originators never emit is
     /// skipped, not "handled" by synthesizing a fallback route. The old
-    /// fallback built a zero-ESI Type 4 that the wire decoder itself
-    /// rejects ("EVPN Type 4 ES route with all-zero ESI"), so a fired
-    /// fallback put undecodable bytes on the wire.
+    /// fallback built a zero-ESI Type 4, which names no multihomed segment
+    /// (RFC 7432 §8.1.1) and which receivers, including this daemon, treat
+    /// as withdraw.
     #[test]
     fn build_es_route_skips_unexpected_key_shape() {
         let inst = instance(100);
