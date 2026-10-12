@@ -994,8 +994,11 @@ fn llgr_retention_checks(
             name: format!("peer.{identity}.llgr_retention.{}", row.family),
             status: CheckStatus::Warn,
             detail: format!(
-                "peer {identity} family {} is in the LLGR stale phase; sweep in {}",
+                "peer {identity} family {} is in the LLGR stale phase{}; sweep in {}",
                 row.family,
+                row.stale_routes
+                    .map(|n| format!(" holding {n} stale routes"))
+                    .unwrap_or_default(),
                 super::neighbor::retention_remaining_label(row.remaining_seconds)
             ),
         })
@@ -3365,10 +3368,7 @@ async fn run_with_deadlines(
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
                                 ),
-                                gr_retention: super::neighbor::json_gr_retention(
-                                    &n.gr_retention,
-                                    false,
-                                ),
+                                gr_retention: super::neighbor::json_gr_retention(&n.gr_retention),
                                 gr_retention_available: n.gr_retention_available,
                             },
                             identity,
@@ -7018,7 +7018,7 @@ paths = ["x"]
                 family: "ipv4_unicast".to_string(),
                 phase: "llgr".to_string(),
                 remaining_seconds: Some(16_416_000),
-                stale_routes: None,
+                stale_routes: Some(42),
             },
             rustbgpd_api::proto::GracefulRestartRetentionState {
                 family: "ipv6_unicast".to_string(),
@@ -7037,7 +7037,7 @@ paths = ["x"]
         assert_eq!(check["status"], "warn");
         assert_eq!(
             check["detail"],
-            "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase; sweep in 190d 0h"
+            "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase holding 42 stale routes; sweep in 190d 0h"
         );
         assert!(!manifest["checks"].as_array().unwrap().iter().any(|check| {
             check["name"]

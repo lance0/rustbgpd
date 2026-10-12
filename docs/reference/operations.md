@@ -2487,7 +2487,7 @@ counters, using a 15-minute increase window:
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_gr_active_peers` | Peers currently in GR stale-route state |
-| `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale) |
+| `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale); falls as the peer re-advertises or withdraws them before End-of-RIB |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
 | `bgp_selection_deferral_active{afi_safi}` | Planned-restart family convergence/release gate (1 = active); it remains active while collision failback waits for EoRR even after route selection is staged |
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking family convergence/release, including an `awaiting_refresh` survivor after route selection is staged |
@@ -2538,10 +2538,10 @@ running; `gr_awaiting_eor`: re-established, waiting for End-of-RIB before
 `gr_stale_routes_time` expires; `llgr`: long-lived stale), the time remaining
 until the RIB's next deadline for that family (GR expiry sweeps the routes or
 promotes them to LLGR; LLGR expiry sweeps them), and the stale-route count.
-The count is reported for a single neighbor only: `rbgp neighbor` without an
-address and `rbgp doctor` omit it, so a neighbor list during a mass restart
-event does not scan every peer's received routes. The row disappears once
-nothing is retained. A dynamic neighbor leaves the neighbor inventory when its
+The count comes from counters the RIB maintains per family, so the neighbor
+list (`rbgp neighbor`, `--json` included) and `rbgp doctor` report it too
+without scanning any peer's received routes during a mass restart event. The
+row disappears once nothing is retained. A dynamic neighbor leaves the neighbor inventory when its
 session goes idle; while the RIB still retains its routes it stays listed as a
 retention-only row (source `retention only (no session or configuration)`,
 `"retention_only": true` in JSON) with the same retention rows, and
@@ -2549,7 +2549,7 @@ retention-only row (source `retention only (no session or configuration)`,
 check for such a row. `llgr_stale_time` can hold a
 route for up to about 194 days by design, so `rbgp doctor` reports each
 family in the `llgr` phase as a `peer.<scoped-address>.llgr_retention.<family>`
-warning that names the time left, not as a failure.
+warning that names the stale-route count and the time left, not as a failure.
 
 The `active` and `waiters` gauges, plus ordinary `all_eor`,
 `collision_refresh`, and `all_excluded` releases, are dashboard context rather

@@ -325,8 +325,7 @@ pub struct JsonNeighbor {
     pub route_reflector_client: bool,
     pub description: String,
     /// GR/LLGR helper retention, one row per family still holding stale
-    /// routes; same shape as the detail view, without `stale_routes`, which
-    /// a list never counts.
+    /// routes; same shape as the detail view.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gr_retention: Vec<JsonGrRetentionFamily>,
     /// `None` means the daemon predates retention exposure; `Some(true)`
@@ -521,7 +520,7 @@ pub struct JsonGrRetentionFamily {
     pub phase: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_seconds: Option<u64>,
-    /// Absent from list views, which do not count.
+    /// Absent only when the daemon did not report it (an older daemon).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_routes: Option<u64>,
 }
