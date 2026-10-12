@@ -1535,7 +1535,9 @@ doctor and management-correctness gates) and the
 [2026-10-04 run](soaks/soak-rs-flagship-24h-2026-10-04.md) on the v0.74.0
 tag (peak 564.7 MB, 5th–95th percentile 458.8–478.5 MB) and the
 [2026-10-06 run](soaks/soak-rs-flagship-24h-2026-10-06.md) on the v0.75.0
-tag (peak 641.2 MB in a reload window, 5th–95th percentile 453.0–481.0 MB). The
+tag (peak 641.2 MB in a reload window, 5th–95th percentile 453.0–481.0 MB) and the
+[2026-10-11 run](soaks/soak-rs-flagship-24h-2026-10-11.md) on the v0.76.0
+tag (peak 601.3 MB in a reload window, 5th–95th percentile 455.3–475.8 MB). The
 [2026-09-28 route-reflector run](soaks/soak-rr-flagship-24h-2026-09-28.md) on
 the v0.73.0 tag, on the same virtualized host shape, passed its RSS gates
 (hold band 237.7–254.6 MB, peak 427.6 MB in the terminal refresh). Different hosts

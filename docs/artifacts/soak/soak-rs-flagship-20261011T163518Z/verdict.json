@@ -1,0 +1,261 @@
+{
+  "verdict": "pass",
+  "samples": 2920,
+  "reloads_issued": 48,
+  "reloads_complete": 48,
+  "trips_executed": 6,
+  "trips_planned": 6,
+  "peak_rss_mb": 601.3,
+  "rss_late_slope_per_hour": -0.31726003736832464,
+  "intern_late_slope_per_hour": -0.003434785963001967,
+  "slope_window_evaluated": true,
+  "gates": {
+    "min_samples": {
+      "value": 2920,
+      "limit": 2592.0,
+      "pass": true
+    },
+    "session_floor": {
+      "value": {
+        "violations": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "reload_accounting": {
+      "value": {
+        "issued": 48,
+        "complete": 48,
+        "planned": 48
+      },
+      "pass": true
+    },
+    "trip_accounting": {
+      "value": {
+        "executed": 6,
+        "planned": 6,
+        "defects": {}
+      },
+      "pass": true
+    },
+    "exceeded_exact": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "flap_budget": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "msgs_sent_monotone": {
+      "value": {
+        "breaks": 0
+      },
+      "pass": true
+    },
+    "readyz": {
+      "value": {
+        "bad_samples": 2,
+        "status_failures": 2,
+        "latency_failures": 0,
+        "longest_consecutive": 1,
+        "first": [
+          {
+            "elapsed_sec": 16411.0,
+            "code": 503,
+            "latency_ms": 250.7,
+            "kind": "status"
+          },
+          {
+            "elapsed_sec": 60125.0,
+            "code": 503,
+            "latency_ms": 250.6,
+            "kind": "status"
+          }
+        ],
+        "limit_ms": 250.0,
+        "limit_consecutive": 3,
+        "sample_scrape_failures": 0,
+        "observation_gaps": [],
+        "observation_gap_count": 0
+      },
+      "pass": true
+    },
+    "rss_peak_mb": {
+      "value": 601.3,
+      "limit": 3072.0,
+      "pass": true
+    },
+    "rss_late_slope_per_hour": {
+      "value": -0.31726003736832464,
+      "limit": 10.0,
+      "pass": true,
+      "note": null
+    },
+    "intern_late_slope_per_hour": {
+      "value": -0.003434785963001967,
+      "limit": 100.0,
+      "pass": true,
+      "note": null
+    },
+    "no_abort": {
+      "value": [],
+      "pass": true
+    },
+    "daemon_log": {
+      "value": {
+        "records": 76896,
+        "errors": 0,
+        "defects": 0,
+        "warnings_by_message": {
+          "TCP connect failed": 6,
+          "inbound connection from unknown peer, dropping": 292,
+          "max prefix exceeded": 6,
+          "outbound channel full or closed \u2014 marking dirty for resync": 2,
+          "readiness probe failed": 2
+        },
+        "first_administrative_shutdown_unix": 1791824956.924663,
+        "examples": []
+      },
+      "pass": true
+    },
+    "management_evidence": {
+      "value": {
+        "errors": [],
+        "count_mismatches": []
+      },
+      "pass": true
+    },
+    "management_lifetime": {
+      "value": {
+        "load_start": 1800997.935206,
+        "measured_start": 1800998.060415281,
+        "measured_end": 1888582.321383583,
+        "stop_requested": 1888582.35461,
+        "load_end": 1888582.357263,
+        "last_operation_completed": 1888582.124355,
+        "engine_finish_release": 1888582.480926192,
+        "load_end_unix": 1791824956.7443554,
+        "engine_first_shutdown_unix": 1791824956.924663
+      },
+      "pass": true
+    },
+    "management_operations": {
+      "value": {
+        "metrics": 87559,
+        "neighbor": 17517,
+        "policy_stats": 17517,
+        "rib_prefix": 17517,
+        "doctor": 146
+      },
+      "pass": true
+    },
+    "management_completion": {
+      "value": {
+        "metrics": {
+          "scheduled": 87585,
+          "completed": 87559,
+          "ratio": 0.9997031455157847
+        },
+        "neighbor": {
+          "scheduled": 17517,
+          "completed": 17517,
+          "ratio": 1.0
+        },
+        "policy_stats": {
+          "scheduled": 17517,
+          "completed": 17517,
+          "ratio": 1.0
+        },
+        "rib_prefix": {
+          "scheduled": 17517,
+          "completed": 17517,
+          "ratio": 1.0
+        },
+        "doctor": {
+          "scheduled": 146,
+          "completed": 146,
+          "ratio": 1.0
+        }
+      },
+      "limit": 0.9,
+      "pass": true
+    },
+    "management_cadence": {
+      "value": {
+        "defects": [],
+        "operations": {
+          "metrics": {
+            "missed": 26,
+            "per_reload": {
+              "1": 1,
+              "2": 1,
+              "6": 1,
+              "7": 1,
+              "12": 1,
+              "13": 1,
+              "15": 1,
+              "17": 1,
+              "22": 1,
+              "24": 1,
+              "25": 1,
+              "26": 1,
+              "27": 1,
+              "28": 1,
+              "30": 1,
+              "32": 1,
+              "33": 1,
+              "34": 1,
+              "35": 1,
+              "36": 1,
+              "37": 1,
+              "38": 1,
+              "41": 1,
+              "44": 1,
+              "45": 1,
+              "47": 1
+            },
+            "outside_windows": []
+          },
+          "neighbor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "policy_stats": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "rib_prefix": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "doctor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          }
+        }
+      },
+      "limit": 2,
+      "pass": true
+    },
+    "management_failures": {
+      "value": {
+        "count": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "management_doctor": {
+      "value": {
+        "attempts": 146,
+        "failures": []
+      },
+      "pass": true
+    }
+  }
+}

@@ -186,7 +186,11 @@ Ethernet Segments, single-homed VLAN-aware bundle VTEP service with IRB, and
 promotes the scoped FlowSpec controller role into the v1 inventory, with
 next-hop export, EVPN DF election and flood-list fixes. It publishes wire
 0.24.0, FSM 0.11.0 and RPKI 0.6.0. It ships on its per-change regression
-tests and main CI; no flagship receipt covers it. The
+tests and main CI. The
+[2026-10-11 run](../soaks/soak-rs-flagship-24h-2026-10-11.md) then qualified
+the v0.76.0 tag under the current gates (on-host verdict, no reanalysis;
+every gate passes, with all 146 `rbgp doctor` runs `ok`), so the published
+route-server flagship receipt now describes v0.76.0. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
