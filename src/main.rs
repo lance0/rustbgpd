@@ -25,6 +25,8 @@ mod confirm_journal;
 mod dampening_control;
 mod evpn_ack;
 mod evpn_auto_esi;
+#[cfg(target_os = "linux")]
+mod evpn_core_isolation;
 mod evpn_dataplane;
 mod evpn_es_drain;
 mod evpn_es_link_drain;
@@ -2137,6 +2139,17 @@ fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
     }
 }
 
+/// Whether two directory spellings name the same directory: equal paths
+/// (component-wise, so a trailing slash does not matter) or, when both
+/// exist, equal canonical paths.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 fn invalid_invocation(message: impl std::fmt::Display) -> ! {
     eprintln!("error: {message}");
     process::exit(2);
@@ -2407,6 +2420,21 @@ change.
 \fB\-\-json\fR
 Output the diff as JSON (only with \fB\-\-diff\fR).
 .TP
+\fB\-\-runtime\-state\-dir\fR \fIDIR\fR
+Assert the config's \fBruntime_state_dir\fR. The daemon (and
+\fB\-\-check\fR) refuses to start when \fIDIR\fR differs from it, so a
+supervisor's stop hook and the daemon cannot use different directories.
+.TP
+\fB\-\-release\-core\-isolation\fR
+One-shot, with \fB\-\-runtime\-state\-dir\fR only: raise the CE-facing
+links that an exited daemon's EVPN core-isolation hold left
+administratively down, using the ownership receipt in \fIDIR\fR and
+without reading the config. Refuses while a running daemon holds the
+receipt lock. Exits 0 only when no owned link is left down; 1 when the
+directory, lock or receipt is unusable or an ambiguous entry remains
+down. Run it from the supervisor's stop hook (systemd
+\fBExecStopPost=\fR).
+.TP
 \fB\-\-init\-config\fR \fIPROFILE\fR
 Print a starter config to stdout and exit. Profiles: {profiles}.
 .TP
@@ -2519,6 +2547,12 @@ fn main() -> ExitCode {
                                      and deployment gates). Rejected without --check\n  \
                --diff PATH           Compare config against PATH and show what SIGHUP would change\n  \
                --json                Output diff as JSON (only with --diff)\n  \
+               --runtime-state-dir DIR\n                        \
+                                     Assert the config's runtime_state_dir; the daemon refuses\n                        \
+                                     to start when they differ\n  \
+               --release-core-isolation\n                        \
+                                     With --runtime-state-dir only: raise the links an exited\n                        \
+                                     daemon's EVPN core-isolation hold left down, then exit\n  \
                --init-config PROFILE Print a starter config to stdout and exit.\n                        \
                                      Profiles: {}\n  \
                --stdout              Accepted with --init-config and ignored (output always\n                        \
@@ -2540,6 +2574,8 @@ fn main() -> ExitCode {
                   or metrics/readiness server exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument).\n     \
                   For --diff: also a config that could not be loaded\n  \
+                  --release-core-isolation exits 0 only when no owned link is left\n     \
+                  down, and 1 otherwise\n  \
                70 Internal error",
                     env!("CARGO_PKG_VERSION"),
                     crate::config::profiles::PROFILE_NAMES.join(", ")
@@ -2569,8 +2605,24 @@ fn main() -> ExitCode {
     let mut config_path: Option<String> = None;
     let mut expect_diff_path = false;
     let mut expect_init_profile = false;
+    let mut runtime_state_dir_flag: Option<String> = None;
+    let mut expect_runtime_state_dir = false;
+    let mut release_core_isolation = false;
     for arg in &args[1..] {
-        if expect_diff_path {
+        if expect_runtime_state_dir {
+            if arg.starts_with('-') {
+                invalid_invocation("--runtime-state-dir requires a directory argument");
+            }
+            runtime_state_dir_flag = Some(arg.clone());
+            expect_runtime_state_dir = false;
+        } else if arg == "--runtime-state-dir" {
+            if runtime_state_dir_flag.is_some() {
+                invalid_invocation("--runtime-state-dir may only be specified once");
+            }
+            expect_runtime_state_dir = true;
+        } else if arg == "--release-core-isolation" {
+            release_core_isolation = true;
+        } else if expect_diff_path {
             if arg.starts_with('-') {
                 invalid_invocation("--diff requires a path argument");
             }
@@ -2613,7 +2665,7 @@ fn main() -> ExitCode {
         } else {
             eprintln!("error: unknown option: {arg}");
             eprintln!(
-                "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE] [--dump-config-schema] [CONFIG_PATH]\n       rustbgpd (--help | -h)\n       rustbgpd (--version | -V)\n       rustbgpd --man"
+                "usage: rustbgpd [--runtime-state-dir DIR] [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE] [--dump-config-schema] [CONFIG_PATH]\n       rustbgpd --release-core-isolation --runtime-state-dir DIR\n       rustbgpd (--help | -h)\n       rustbgpd (--version | -V)\n       rustbgpd --man"
             );
             process::exit(2);
         }
@@ -2621,6 +2673,34 @@ fn main() -> ExitCode {
     if expect_diff_path {
         eprintln!("error: --diff requires a path argument");
         process::exit(2);
+    }
+    if expect_runtime_state_dir {
+        invalid_invocation("--runtime-state-dir requires a directory argument");
+    }
+    // ADR-0140: a one-shot release that never reads the config, so a
+    // broken config cannot stop it from raising the links.
+    if release_core_isolation {
+        let Some(directory) = runtime_state_dir_flag else {
+            invalid_invocation("--release-core-isolation requires --runtime-state-dir DIR");
+        };
+        if args.len() != 4 {
+            invalid_invocation("--release-core-isolation takes only --runtime-state-dir DIR");
+        }
+        #[cfg(target_os = "linux")]
+        return ExitCode::from(evpn_core_isolation::release_core_isolation(Path::new(
+            &directory,
+        )));
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = directory;
+            eprintln!("error: --release-core-isolation needs Linux");
+            return ExitCode::from(1);
+        }
+    }
+    if runtime_state_dir_flag.is_some()
+        && (diff_path.is_some() || init_profile.is_some() || dump_schema)
+    {
+        invalid_invocation("--runtime-state-dir applies only to a daemon start or --check");
     }
     if expect_init_profile {
         eprintln!(
@@ -2776,6 +2856,16 @@ fn main() -> ExitCode {
         }
     };
     let config = accepted.config();
+    if let Some(flag) = runtime_state_dir_flag.as_deref()
+        && !same_directory(Path::new(flag), &config.runtime_state_dir())
+    {
+        eprintln!(
+            "error: --runtime-state-dir {flag} differs from the config's runtime_state_dir {}; \
+             the core-isolation stop hook and the daemon must use the same directory",
+            config.runtime_state_dir().display()
+        );
+        process::exit(1);
+    }
 
     if check_only {
         // Retain the exact staged generation used for credential preflight so

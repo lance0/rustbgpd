@@ -28,6 +28,7 @@ const NOT_MIRRORED: &[&str] = &[
     "dampening_control",
     "evpn_ack",
     "evpn_auto_esi",
+    "evpn_core_isolation",
     "evpn_dataplane",
     "evpn_es_drain",
     "evpn_es_link_drain",
