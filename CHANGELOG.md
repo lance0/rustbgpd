@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.77.0] — 2026-10-12
+
 ### Security
 
 - **`rs-config-render` parses YAML with `yaml_serde` 0.10.7 instead of the

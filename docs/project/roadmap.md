@@ -190,7 +190,18 @@ tests and main CI. The
 [2026-10-11 run](../soaks/soak-rs-flagship-24h-2026-10-11.md) then qualified
 the v0.76.0 tag under the current gates (on-host verdict, no reanalysis;
 every gate passes, with all 146 `rbgp doctor` runs `ok`), so the published
-route-server flagship receipt now describes v0.76.0. The
+route-server flagship receipt now describes v0.76.0. v0.77.0 (2026-10-12) is
+a minor release that adds the opt-in EVPN core-isolation hold for bound
+Ethernet Segments, per-family inbound max-prefix limits for the non-unicast
+families a route reflector carries, persistent `admin_down` neighbors,
+per-family GR/LLGR stale-route retention reporting and the latest SIGHUP
+result. It refuses export next-hop rewrites that can reach labeled-unicast or
+VPN routes, treats malformed zero-length-MAC Type 2 and ESI-plus-gateway
+Type 5 routes as withdraws instead of resetting the session, accepts
+zero-ESI Type 1 routes, and keeps readiness probes answered through mass
+graceful-restart entry and large reloads. It publishes wire 0.25.0, FSM
+0.12.0 and RPKI 0.7.0. It ships on its per-change regression tests and main
+CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

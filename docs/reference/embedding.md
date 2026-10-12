@@ -219,7 +219,7 @@ intentional split (ADR-0005: pure state machine, no I/O in the FSM).
 # Cargo.toml
 [dependencies]
 rustbgpd-wire = "0.25.0"
-rustbgpd-fsm = "0.11.0"
+rustbgpd-fsm = "0.12.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -282,7 +282,7 @@ wire boundary. This example resolves entirely from crates.io.
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.6.0"
+rustbgpd-rpki = "0.7.0"
 rustbgpd-wire = "0.25.0"
 ```
 

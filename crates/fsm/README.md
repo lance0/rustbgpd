@@ -10,6 +10,10 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+`rustbgpd-fsm` 0.12.0 moves to wire `0.25.0` for its EVPN decode and
+validation behavior changes. There is no FSM API or state-machine change;
+upgrade crates exchanging public wire types together when adopting this line.
+
 `rustbgpd-fsm` 0.11.0 adds `PeerConfig::link_local_next_hop` (default false)
 and exposes bilateral negotiation through `NegotiatedSession`. Advertise it
 only when the embedding transport supplies a directly attached interface
