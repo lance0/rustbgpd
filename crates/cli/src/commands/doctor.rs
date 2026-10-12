@@ -997,7 +997,7 @@ fn llgr_retention_checks(
                 "peer {identity} family {} is in the LLGR stale phase{}; sweep in {}",
                 row.family,
                 row.stale_routes
-                    .map(|n| format!(" holding {n} stale routes"))
+                    .map(|n| format!(" holding {n} stale route{}", if n == 1 { "" } else { "s" }))
                     .unwrap_or_default(),
                 super::neighbor::retention_remaining_label(row.remaining_seconds)
             ),
@@ -6995,6 +6995,33 @@ paths = ["x"]
             3
         );
         assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The LLGR warning names the count with the right number, and omits it
+    /// for a daemon that does not report one.
+    #[test]
+    fn llgr_retention_detail_counts_stale_routes() {
+        let row = |stale_routes| crate::proto::GracefulRestartRetentionState {
+            family: "ipv4_unicast".to_string(),
+            phase: "llgr".to_string(),
+            remaining_seconds: Some(60),
+            stale_routes,
+        };
+        let detail = |stale_routes| {
+            llgr_retention_checks("192.0.2.2", &[row(stale_routes)])
+                .remove(0)
+                .detail
+        };
+        let prefix = "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase";
+        assert_eq!(
+            detail(Some(1)),
+            format!("{prefix} holding 1 stale route; sweep in 00:01:00")
+        );
+        assert_eq!(
+            detail(Some(2)),
+            format!("{prefix} holding 2 stale routes; sweep in 00:01:00")
+        );
+        assert_eq!(detail(None), format!("{prefix}; sweep in 00:01:00"));
     }
 
     /// A family held in the LLGR phase is a configured outcome: doctor warns
