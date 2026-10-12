@@ -2162,6 +2162,7 @@ mod collision_hold;
 mod denied_replacements;
 mod exact_export;
 mod export_policy;
+mod family_max_prefix;
 mod forwarding_state;
 mod import_policy;
 mod inbound_update;

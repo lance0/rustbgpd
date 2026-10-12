@@ -1482,10 +1482,10 @@ impl PeerSession {
                 .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
         }
         for rule in &loop_fs_withdrawn {
-            self.known_flowspec.remove(rule);
+            self.forget_flowspec(rule);
         }
         for rule in loop_fs_rejected {
-            if self.known_flowspec.remove(&rule) {
+            if self.forget_flowspec(&rule) {
                 loop_fs_withdrawn.push(rule);
             }
         }
@@ -1506,18 +1506,18 @@ impl PeerSession {
             }
         }
         for key in &loop_l3vpn_withdrawn {
-            self.known_vpn.remove(key);
+            self.forget_vpn(key);
         }
         for key in loop_l3vpn_rejected {
-            if self.known_vpn.remove(&key) {
+            if self.forget_vpn(&key) {
                 loop_l3vpn_withdrawn.push(key);
             }
         }
         for key in &loop_labeled_withdrawn {
-            self.known_labeled.remove(key);
+            self.forget_labeled(key);
         }
         for key in loop_labeled_rejected {
-            if self.known_labeled.remove(&key) {
+            if self.forget_labeled(&key) {
                 loop_labeled_withdrawn.push(key);
             }
         }
@@ -3460,15 +3460,16 @@ impl PeerSession {
                 .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
         }
         for key in &flowspec_withdrawn {
-            self.known_flowspec.remove(key);
+            self.forget_flowspec(key);
         }
         for key in denied_flowspec {
-            if self.known_flowspec.remove(&key) {
+            if self.forget_flowspec(&key) {
                 flowspec_withdrawn.push(key);
             }
         }
+        self.block_over_limit_flowspec(&mut flowspec_announced);
         for route in &flowspec_announced {
-            self.known_flowspec.insert(route.selection_key());
+            self.remember_flowspec(route.selection_key());
         }
         for key in &evpn_withdrawn {
             self.known_evpn.remove(key);
@@ -3478,6 +3479,7 @@ impl PeerSession {
                 evpn_withdrawn.push(key);
             }
         }
+        self.block_over_limit_evpn(&mut evpn_announced);
         for route in &evpn_announced {
             self.known_evpn.insert(route.key());
         }
@@ -3493,33 +3495,37 @@ impl PeerSession {
             self.known_bgpls.insert(route.key());
         }
         for key in &vpn_withdrawn {
-            self.known_vpn.remove(key);
+            self.forget_vpn(key);
         }
         for key in denied_vpn {
-            if self.known_vpn.remove(&key) {
+            if self.forget_vpn(&key) {
                 vpn_withdrawn.push(key);
             }
         }
+        self.block_over_limit_vpn(&mut vpn_announced);
         for route in &vpn_announced {
             // Keyed by (RD+prefix, path_id): under VPN Add-Path each received
-            // path counts toward max-prefix separately. Deliberately stricter
-            // than unicast's unique-prefix refcount — over-counting tears the
-            // session down earlier, never lets a peer bypass the cap.
-            self.known_vpn.insert(route.key());
+            // path counts toward the aggregate max-prefix separately.
+            // Deliberately stricter than unicast's unique-prefix refcount —
+            // over-counting tears the session down earlier, never lets a peer
+            // bypass the cap. The per-family bound collapses Add-Path paths.
+            self.remember_vpn(route.key());
         }
         for key in &labeled_withdrawn {
-            self.known_labeled.remove(key);
+            self.forget_labeled(key);
         }
         for key in denied_labeled {
-            if self.known_labeled.remove(&key) {
+            if self.forget_labeled(&key) {
                 labeled_withdrawn.push(key);
             }
         }
+        self.block_over_limit_labeled(&mut labeled_announced);
         for route in &labeled_announced {
             // Keyed by (prefix, path_id): under labeled Add-Path each
-            // received path counts toward max-prefix separately — the same
-            // deliberately-strict accounting as the VPN sibling.
-            self.known_labeled.insert(route.key());
+            // received path counts toward the aggregate max-prefix
+            // separately — the same deliberately-strict accounting as the
+            // VPN sibling. The per-family bound collapses Add-Path paths.
+            self.remember_labeled(route.key());
         }
         for key in &rtc_withdrawn {
             self.known_rtc.remove(key);
@@ -3529,6 +3535,7 @@ impl PeerSession {
                 rtc_withdrawn.push(key);
             }
         }
+        self.block_over_limit_rtc(&mut rtc_announced);
         for route in &rtc_announced {
             self.known_rtc.insert(route.key());
         }

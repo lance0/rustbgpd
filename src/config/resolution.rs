@@ -1041,6 +1041,33 @@ impl Config {
         transport.max_prefixes_received_ipv6 = neighbor
             .max_prefixes_received_ipv6
             .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6));
+        // Indexed by `PrefixLimitFamily`, in `PrefixLimitFamily::ALL` order.
+        transport.max_prefixes_family = rustbgpd_transport::FamilyPrefixLimits([
+            neighbor
+                .max_prefixes_l3vpn_ipv4_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_l3vpn_ipv4_unicast)),
+            neighbor
+                .max_prefixes_l3vpn_ipv6_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_l3vpn_ipv6_unicast)),
+            neighbor
+                .max_prefixes_ipv4_labeled_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4_labeled_unicast)),
+            neighbor
+                .max_prefixes_ipv6_labeled_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6_labeled_unicast)),
+            neighbor
+                .max_prefixes_l2vpn_evpn
+                .or_else(|| group.and_then(|g| g.max_prefixes_l2vpn_evpn)),
+            neighbor
+                .max_prefixes_ipv4_flowspec
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4_flowspec)),
+            neighbor
+                .max_prefixes_ipv6_flowspec
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6_flowspec)),
+            neighbor
+                .max_prefixes_rtc
+                .or_else(|| group.and_then(|g| g.max_prefixes_rtc)),
+        ]);
         // Spelling and cross-field rules are enforced in `Config::validate`;
         // an unparseable value cannot reach a loaded configuration.
         transport.max_prefix_action = neighbor
@@ -1264,6 +1291,14 @@ impl Config {
             max_prefixes_ipv6: None,
             max_prefixes_received_ipv4: None,
             max_prefixes_received_ipv6: None,
+            max_prefixes_l3vpn_ipv4_unicast: None,
+            max_prefixes_l3vpn_ipv6_unicast: None,
+            max_prefixes_ipv4_labeled_unicast: None,
+            max_prefixes_ipv6_labeled_unicast: None,
+            max_prefixes_l2vpn_evpn: None,
+            max_prefixes_ipv4_flowspec: None,
+            max_prefixes_ipv6_flowspec: None,
+            max_prefixes_rtc: None,
             max_prefix_action: None,
             max_prefix_warning_percent: None,
             max_prefixes_out_ipv4: None,

@@ -154,6 +154,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefixes_family: rustbgpd_transport::FamilyPrefixLimits::default(),
         max_prefix_action: MaxPrefixAction::Shutdown,
         max_prefix_warning_percent: None,
         peer_group: None,

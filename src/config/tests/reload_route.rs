@@ -94,6 +94,30 @@ fn plan_hot_updates_inherited_live_fields_without_reshape() {
     assert_eq!(actions.len(), 2);
 }
 
+/// Mutant: leaving `max_prefixes_family` out of the hot-knob probe turns an
+/// inherited per-family limit edit into a session-resetting Replace.
+#[test]
+fn plan_hot_updates_an_inherited_per_family_max_prefix_change() {
+    let prior = rs(&RS_TOML.replace(
+        "max_prefixes = 1000",
+        "max_prefixes = 1000\nmax_prefixes_l2vpn_evpn = 10",
+    ));
+    let candidate = rs(&RS_TOML.replace(
+        "max_prefixes = 1000",
+        "max_prefixes = 1000\nmax_prefixes_l2vpn_evpn = 20",
+    ));
+    let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
+    assert_eq!(
+        action(&actions, "10.0.0.2"),
+        Some(ReloadPeerActionKind::HotUpdate)
+    );
+    assert_eq!(
+        action(&actions, "10.0.0.3"),
+        Some(ReloadPeerActionKind::HotUpdate)
+    );
+    assert_eq!(actions.len(), 2, "{actions:?}");
+}
+
 #[test]
 fn plan_ignores_per_peer_explain_knobs() {
     let prior = rs(RS_TOML);

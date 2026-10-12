@@ -1017,7 +1017,17 @@ fn inbound_prefix_bound_check(
         || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
-        || !neighbor.inbound_prefix_limits.is_empty()
+        || neighbor.inbound_prefix_limits.iter().any(|row| {
+            // Non-unicast family scopes bound only their own family.
+            matches!(
+                row.scope.as_str(),
+                "aggregate"
+                    | "ipv4_unicast"
+                    | "ipv6_unicast"
+                    | "ipv4_unicast_received"
+                    | "ipv6_unicast_received"
+            )
+        })
         || neighbor.effective_max_prefixes.is_some()
         || neighbor.effective_max_prefixes_ipv4.is_some()
         || neighbor.effective_max_prefixes_ipv6.is_some()
@@ -4592,6 +4602,17 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             }];
             assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
         }
+        // A non-unicast family bound (for example `max_prefixes_rtc`) leaves
+        // the unicast feed and the aggregate unbounded: the warning stays.
+        let mut family_only = peer.clone();
+        family_only.inbound_prefix_limits = vec![crate::proto::InboundPrefixLimitState {
+            scope: "rtc".to_string(),
+            limit: 10,
+            ..Default::default()
+        }];
+        let check = inbound_prefix_bound_check("10.0.0.2", &family_only, Some(65001))
+            .expect("a family-only bound must not satisfy the unicast check");
+        assert_eq!(check.status, CheckStatus::Warn);
         for case in 0..4 {
             let mut bounded = peer.clone();
             match case {

@@ -300,6 +300,93 @@ impl MaxPrefixAction {
     }
 }
 
+/// A non-unicast family with its own accepted-route bound,
+/// `max_prefixes_<label>`. The order is the enforcement order after the
+/// unicast bounds and the index into [`FamilyPrefixLimits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrefixLimitFamily {
+    /// VPN-IPv4 (AFI 1, SAFI 128).
+    L3vpnIpv4,
+    /// VPN-IPv6 (AFI 2, SAFI 128).
+    L3vpnIpv6,
+    /// IPv4 labeled unicast (AFI 1, SAFI 4).
+    Ipv4LabeledUnicast,
+    /// IPv6 labeled unicast (AFI 2, SAFI 4).
+    Ipv6LabeledUnicast,
+    /// EVPN (AFI 25, SAFI 70).
+    L2vpnEvpn,
+    /// IPv4 `FlowSpec` (AFI 1, SAFI 133).
+    Ipv4Flowspec,
+    /// IPv6 `FlowSpec` (AFI 2, SAFI 133).
+    Ipv6Flowspec,
+    /// RT-Constrain (AFI 1, SAFI 132).
+    Rtc,
+}
+
+impl PrefixLimitFamily {
+    /// Every family, in enforcement and index order.
+    pub const ALL: [Self; 8] = [
+        Self::L3vpnIpv4,
+        Self::L3vpnIpv6,
+        Self::Ipv4LabeledUnicast,
+        Self::Ipv6LabeledUnicast,
+        Self::L2vpnEvpn,
+        Self::Ipv4Flowspec,
+        Self::Ipv6Flowspec,
+        Self::Rtc,
+    ];
+
+    /// Wire AFI/SAFI, carried in the RFC 4486 Cease/1 data.
+    #[must_use]
+    pub const fn afi_safi(self) -> (Afi, Safi) {
+        match self {
+            Self::L3vpnIpv4 => (Afi::Ipv4, Safi::MplsVpn),
+            Self::L3vpnIpv6 => (Afi::Ipv6, Safi::MplsVpn),
+            Self::Ipv4LabeledUnicast => (Afi::Ipv4, Safi::LabeledUnicast),
+            Self::Ipv6LabeledUnicast => (Afi::Ipv6, Safi::LabeledUnicast),
+            Self::L2vpnEvpn => (Afi::L2Vpn, Safi::Evpn),
+            Self::Ipv4Flowspec => (Afi::Ipv4, Safi::FlowSpec),
+            Self::Ipv6Flowspec => (Afi::Ipv6, Safi::FlowSpec),
+            Self::Rtc => (Afi::Ipv4, Safi::RtConstrain),
+        }
+    }
+
+    /// Canonical family label: the config key suffix and the max-prefix
+    /// metric `scope` value.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::L3vpnIpv4 => "l3vpn_ipv4_unicast",
+            Self::L3vpnIpv6 => "l3vpn_ipv6_unicast",
+            Self::Ipv4LabeledUnicast => "ipv4_labeled_unicast",
+            Self::Ipv6LabeledUnicast => "ipv6_labeled_unicast",
+            Self::L2vpnEvpn => "l2vpn_evpn",
+            Self::Ipv4Flowspec => "ipv4_flowspec",
+            Self::Ipv6Flowspec => "ipv6_flowspec",
+            Self::Rtc => "rtc",
+        }
+    }
+}
+
+/// Accepted-route bounds for the non-unicast families, indexed by
+/// [`PrefixLimitFamily`]; `None` = unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FamilyPrefixLimits(pub [Option<u32>; PrefixLimitFamily::ALL.len()]);
+
+impl FamilyPrefixLimits {
+    /// The configured bound for one family.
+    #[must_use]
+    pub const fn get(&self, family: PrefixLimitFamily) -> Option<u32> {
+        self.0[family as usize]
+    }
+
+    /// Whether any family has a bound.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.0.iter().any(Option::is_some)
+    }
+}
+
 /// Private AS removal mode for eBGP outbound `AS_PATH` manipulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RemovePrivateAs {
@@ -503,6 +590,10 @@ pub struct TransportConfig {
     pub max_prefixes_received_ipv4: Option<u32>,
     /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
     pub max_prefixes_received_ipv6: Option<u32>,
+    /// Unique accepted routes per non-unicast family before the configured
+    /// action (`max_prefixes_<family>`), enforced independently of every
+    /// other bound.
+    pub max_prefixes_family: FamilyPrefixLimits,
     /// What a crossed inbound max-prefix bound does (ADR-0108 amendment).
     pub max_prefix_action: MaxPrefixAction,
     /// Optional warning threshold as a percentage of each finite bound
@@ -673,6 +764,7 @@ impl TransportConfig {
             max_prefixes_ipv6: None,
             max_prefixes_received_ipv4: None,
             max_prefixes_received_ipv6: None,
+            max_prefixes_family: FamilyPrefixLimits::default(),
             max_prefix_action: MaxPrefixAction::Shutdown,
             max_prefix_warning_percent: None,
             peer_group: None,

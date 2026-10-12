@@ -2285,7 +2285,7 @@
           ]
         },
         "max_prefix_action": {
-          "description": "What a crossed max-prefix bound does: `\"shutdown\"` (default;\nCease/1 teardown and latch, optionally followed by a timed\nrestart), `\"block\"` (withhold net-new prefixes beyond the\nbound while the session stays Established), or `\"warning\"`\n(warn once per crossing and keep accepting). `block` applies\nto the per-family unicast bounds and requires the aggregate\n`max_prefixes` to be unset; `block` and `warning` exclude\n`max_prefix_restart_seconds`.",
+          "description": "What a crossed max-prefix bound does: `\"shutdown\"` (default;\nCease/1 teardown and latch, optionally followed by a timed\nrestart), `\"block\"` (withhold net-new prefixes beyond the\nbound while the session stays Established), or `\"warning\"`\n(warn once per crossing and keep accepting). `block` applies\nto the per-family bounds and requires the aggregate\n`max_prefixes` to be unset; `block` and `warning` exclude\n`max_prefix_restart_seconds`.",
           "type": [
             "string",
             "null"
@@ -2328,8 +2328,71 @@
           "format": "uint32",
           "minimum": 0
         },
+        "max_prefixes_ipv4_flowspec": {
+          "description": "Maximum unique accepted IPv4 `FlowSpec` rules\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv4_labeled_unicast": {
+          "description": "Maximum unique accepted IPv4 labeled-unicast prefixes\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "max_prefixes_ipv6": {
           "description": "Maximum unique IPv6-unicast prefixes accepted from this peer\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes` (ADR-0108). Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_flowspec": {
+          "description": "Maximum unique accepted IPv6 `FlowSpec` rules\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_labeled_unicast": {
+          "description": "Maximum unique accepted IPv6 labeled-unicast prefixes\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l2vpn_evpn": {
+          "description": "Maximum unique accepted EVPN routes (unique RFC 7432 route keys)\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l3vpn_ipv4_unicast": {
+          "description": "Maximum unique accepted VPN-IPv4 (`l3vpn_ipv4_unicast`) routes, unique by RD + prefix\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l3vpn_ipv6_unicast": {
+          "description": "Maximum unique accepted VPN-IPv6 (`l3vpn_ipv6_unicast`) routes, unique by RD + prefix\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
           "type": [
             "integer",
             "null"
@@ -2366,6 +2429,15 @@
         },
         "max_prefixes_received_ipv6": {
           "description": "Maximum unique IPv6-unicast prefixes this peer may announce,\ncounted before import policy (accepted and rejected alike),\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes_ipv6` (ADR-0108 amendment).\nUnset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_rtc": {
+          "description": "Maximum unique accepted RT-Constrain membership routes\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
           "type": [
             "integer",
             "null"
@@ -2880,8 +2952,71 @@
           "format": "uint32",
           "minimum": 0
         },
+        "max_prefixes_ipv4_flowspec": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv4_flowspec`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv4_labeled_unicast": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv4_labeled_unicast`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "max_prefixes_ipv6": {
           "description": "IPv6-unicast prefix limit inherited by neighbors in this group.\nSee the neighbor-level `max_prefixes_ipv6`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_flowspec": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv6_flowspec`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_labeled_unicast": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv6_labeled_unicast`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l2vpn_evpn": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_l2vpn_evpn`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l3vpn_ipv4_unicast": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_l3vpn_ipv4_unicast`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l3vpn_ipv6_unicast": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_l3vpn_ipv6_unicast`.",
           "type": [
             "integer",
             "null"
@@ -2918,6 +3053,15 @@
         },
         "max_prefixes_received_ipv6": {
           "description": "Pre-policy IPv6-unicast received-prefix limit inherited by\nneighbors in this group. See the neighbor-level\n`max_prefixes_received_ipv6`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_rtc": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_rtc`.",
           "type": [
             "integer",
             "null"
