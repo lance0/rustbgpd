@@ -403,8 +403,9 @@ pub(super) fn reject_depends_on_validation(
                 aspa_state,
                 ..*ctx
             };
-            rustbgpd_policy::evaluate_chain(Some(chain), &alternative).action
-                == PolicyAction::Permit
+            // Hypothetical outcomes: the compiled IR's non-counting evaluator
+            // keeps them out of the policy hit counters.
+            chain.compiled().evaluate(&alternative).action == PolicyAction::Permit
         })
     })
 }

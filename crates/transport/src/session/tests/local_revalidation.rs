@@ -490,6 +490,31 @@ async fn mid_session_store_completes_after_every_unicast_family_refreshes() {
     f.assert_wire_silent().await;
 }
 
+/// The retention probe asks whether another validation outcome would admit a
+/// denied route. Those hypothetical evaluations must not reach the policy
+/// statistics: the counters match a session without local re-evaluation.
+#[tokio::test]
+async fn retention_probe_leaves_policy_hit_counters_unchanged() {
+    async fn hit_counters(local_revalidation: bool) -> (u64, Vec<rustbgpd_policy::TermHitRow>) {
+        let mut f = fixture_with(
+            vrps(vec![vrp(INVALID, 65099)]),
+            deny_invalid(true),
+            |config| {
+                config.local_revalidation = local_revalidation;
+            },
+        )
+        .await;
+        f.announce(INVALID).await;
+        f.announce(VALID).await;
+        assert_eq!(f.rib_routes(), (vec![Prefix::V4(prefix(VALID))], vec![]));
+        let chain = f.session.import_policy.as_ref().unwrap();
+        (chain.hit_counters().evals(), chain.term_hit_rows())
+    }
+    let local = hit_counters(true).await;
+    assert_eq!(local.0, 2, "one evaluation per received route");
+    assert_eq!(local, hit_counters(false).await);
+}
+
 fn aspa(records: Vec<(u32, u32)>) -> ValidationSnapshot {
     ValidationSnapshot {
         vrp_table: None,
