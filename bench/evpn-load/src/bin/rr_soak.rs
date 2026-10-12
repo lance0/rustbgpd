@@ -612,6 +612,8 @@ async fn churn(shape: Shape, client: &mut Client) -> u64 {
 }
 
 struct Check {
+    /// Wall-clock time the check started (every view read is after it).
+    wall_us: u128,
     receivers: u32,
     min_live: u64,
     max_live: u64,
@@ -624,6 +626,7 @@ struct Check {
 fn check(shape: Shape, clients: &[Client]) -> Check {
     let expected = shape.expected();
     let mut out = Check {
+        wall_us: wall_us(),
         receivers: 0,
         min_live: u64::MAX,
         max_live: 0,
@@ -991,9 +994,11 @@ async fn main() -> anyhow::Result<()> {
         let (ok, result, converge_ms) = converge(shape, &clients, &lost, converge_cap).await;
         converged_epochs += u32::from(ok);
         println!(
-            "evpn_epoch n={n} receivers={} expected={} min_live={} max_live={} converged={} \
+            "evpn_epoch n={n} check_wall_us={} receivers={} expected={} min_live={} \
+             max_live={} converged={} \
              converge_ms={converge_ms} churn_events={churned} flap_client={} reload={} \
              invalid={} parse_errors={} self_reflected={}",
+            result.wall_us,
             result.receivers,
             shape.expected(),
             result.min_live,
@@ -1244,9 +1249,25 @@ mod tests {
     }
 
     #[test]
+    fn check_records_its_own_start_time() {
+        let s = Shape {
+            clients: 3,
+            type2: 2,
+            type5: 1,
+            shift2: 1,
+            shift5: 1,
+        };
+        let clients = exact_fleet(s);
+        let before = wall_us();
+        let result = check(s, &clients);
+        assert!(before <= result.wall_us && result.wall_us <= wall_us());
+    }
+
+    #[test]
     fn a_self_reflected_route_blocks_convergence() {
         let s = shape();
         let mut result = Check {
+            wall_us: 1,
             receivers: s.clients,
             min_live: s.expected(),
             max_live: s.expected(),

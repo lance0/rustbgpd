@@ -32,7 +32,8 @@ management-plane gate (with the EVPN operation set). Scenario-specific:
   - deferred-update recovery: every "outbound channel full — EVPN update
     deferred" record in rustbgpd.log before the first received
     Cease/Administrative Shutdown (the final teardown) must be followed by
-    an epoch line logged in a later second, and that epoch must be exact
+    an epoch whose exact check the driver started strictly later (its own
+    check_wall_us, not the runner's copy time), and that epoch must be exact
     (full announced set present, every withdrawn route absent). The count,
     first and last timestamps and distinct peers are reported.
 
@@ -141,6 +142,8 @@ def epoch_defects(e: dict, meta: dict) -> list[str]:
         bad.append(f"flap_client={e.get('flap_client')} (flap due: {flap_due})")
     if (e.get("reload", 0) != 0) != reload_due:
         bad.append(f"reload={e.get('reload')} (reload due: {reload_due})")
+    if not isinstance(e.get("check_wall_us"), int) or e["check_wall_us"] <= 0:
+        bad.append(f"check_wall_us={e.get('check_wall_us')} (driver check time missing)")
     ms = e.get("converge_ms")
     if ms is None or ms > meta["converge_cap_sec"] * 1000:
         bad.append(f"converge_ms={ms} > cap {meta['converge_cap_sec'] * 1000}")
@@ -303,9 +306,15 @@ def deferral_recovery(run_dir: str, epochs: list[dict], meta: dict,
     gated = [(t, p) for t, p in events if teardown is None or t < teardown]
     unrecovered, checked = [], set()
     for stamp, peer in gated:
-        # Epoch lines carry whole-second stamps: only a line in a later
-        # second is certainly after the deferral.
-        later = next((e for e in epochs if e["_ts"] >= int(stamp) + 1), None)
+        # Compare against the driver's own check time, never the runner's
+        # cycles.log stamp (log polling can copy an earlier check into a
+        # later second). Equal or unknown is not proof.
+        stamp_us = round(stamp * 1_000_000)
+        later = next(
+            (e for e in epochs
+             if isinstance(e.get("check_wall_us"), int) and e["check_wall_us"] > stamp_us),
+            None,
+        )
         if later is None:
             reason = "no later epoch check"
         else:

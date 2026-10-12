@@ -57,10 +57,17 @@ def smoke_meta(**over):
     return meta
 
 
+def wall_us(elapsed):
+    return round((T0.timestamp() + elapsed) * 1_000_000)
+
+
 def epoch_line(n, **over):
     flap = n % 4 == 0
     fields = {
-        "n": n, "receivers": PEERS, "expected": EXPECTED, "min_live": EXPECTED,
+        # The driver's own time for the exact check: half a second before
+        # the runner copies the line into cycles.log at 20 (n - 1) + 10.
+        "n": n, "check_wall_us": wall_us(20 * (n - 1) + 9.5),
+        "receivers": PEERS, "expected": EXPECTED, "min_live": EXPECTED,
         "max_live": EXPECTED, "converged": 1, "converge_ms": 412,
         "churn_events": 20 * (PEERS - 1 if flap else PEERS),
         "flap_client": 1 + (n // 4 - 1) % (PEERS - 1) if flap else -1,
@@ -179,9 +186,13 @@ def management_jsonl(meta, *, failure=None, peer=None):
     return b"".join((json.dumps(r) + "\n").encode() for r in records)
 
 
+def ts_us(elapsed):
+    return (T0 + timedelta(seconds=elapsed)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def daemon_record(message, elapsed, **fields):
     return (json.dumps({
-        "timestamp": ts(elapsed), "level": "INFO", "target": "rustbgpd",
+        "timestamp": ts_us(elapsed), "level": "INFO", "target": "rustbgpd",
         "fields": {"message": message, **fields},
     }) + "\n").encode()
 
@@ -347,13 +358,38 @@ class EvpnRrAnalyzerContracts(unittest.TestCase):
             "evpn_deferral_recovery", daemon=self.deferrals(235))
         self.assertIn("no later epoch", gate["value"]["unrecovered"][0]["reason"])
 
-    def test_deferral_in_the_same_second_as_an_epoch_line_waits_for_the_next(self):
-        # Epoch 5 is logged at second 90; a deferral in that second may follow
-        # it, so only epoch 6 can prove recovery.
-        result, payload = run_analyzer(daemon=self.deferrals(90))
-        self.assertEqual(result.returncode, 0, payload["gates"])
-        self.assertEqual(
-            payload["gates"]["evpn_deferral_recovery"]["value"]["checked_by_epochs"], [6])
+    def checked_by(self, *deferred, cycles=None):
+        result, payload = run_analyzer(cycles=cycles, daemon=self.deferrals(*deferred))
+        return result, payload["gates"]["evpn_deferral_recovery"]
+
+    def test_check_before_the_deferral_never_proves_recovery_despite_a_later_copy(self):
+        # Epoch 5's check ran at 89.5 and the runner copied it into
+        # cycles.log at 90, after a deferral at 89.7: only epoch 6 proves it.
+        result, gate = self.checked_by(89.7)
+        self.assertEqual(result.returncode, 0, gate)
+        self.assertEqual(gate["value"]["checked_by_epochs"], [6])
+
+    def test_check_strictly_after_the_deferral_proves_recovery(self):
+        result, gate = self.checked_by(89.4)
+        self.assertEqual(result.returncode, 0, gate)
+        self.assertEqual(gate["value"]["checked_by_epochs"], [5])
+
+    def test_check_at_the_same_instant_is_not_proof(self):
+        _, gate = self.checked_by(89.5)
+        self.assertEqual(gate["value"]["checked_by_epochs"], [6])
+
+    def test_epoch_without_driver_check_time_is_not_proof(self):
+        cycles = [
+            " ".join(part for part in line.split(" ") if not part.startswith("check_wall_us="))
+            for line in smoke_cycles()
+        ]
+        result, payload = run_analyzer(cycles=cycles, daemon=self.deferrals(15))
+        self.assertEqual(result.returncode, 1)
+        # Missing driver check times also fail the convergence gate closed.
+        self.assertFalse(payload["gates"]["evpn_convergence"]["pass"])
+        gate = payload["gates"]["evpn_deferral_recovery"]
+        self.assertFalse(gate["pass"])
+        self.assertIn("no later epoch", gate["value"]["unrecovered"][0]["reason"])
 
     def test_teardown_deferrals_are_reported_but_not_gated(self):
         result, payload = run_analyzer(daemon=self.deferrals(200001))
