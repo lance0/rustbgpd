@@ -11,6 +11,311 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **`rs-config-render` parses YAML with `yaml_serde` 0.10.7 instead of the
+  deprecated `serde_yaml` 0.9.34**, clearing RUSTSEC-2024-0449
+  (`unsafe-libyaml` unmaintained). `yaml_serde` is the YAML organization's
+  maintained continuation of `serde_yaml` with the same libyaml port, so
+  template-context parsing is unchanged. The `rustbgpd` daemon never carried
+  this dependency; no configuration change is needed.
+
+### Added
+
+- `rbgp doctor` warns when an established eBGP peer has no effective inbound
+  prefix limit after peer-group inheritance, naming the peer and available
+  configuration keys. iBGP and route-reflector clients are excluded; the
+  advisory warning retains exit status 0.
+- Opt-in `[evpn_core_isolation]` (ADR-0140) holds the CE-facing links of bound
+  Ethernet Segments administratively down while the PE has no Established or
+  GR-retained L2VPN/EVPN session, or every configured `uplinks` entry has lost
+  carrier, and at startup until EVPN has synced, so an all-active CE moves its
+  traffic to the other ES member instead of hashing flows into a PE that drops
+  them. Every member of a bound bond is taken down (the bond stays up); a
+  segment with no remote ES peer seen while the core was up is not held. A
+  hold releases after EVPN has stayed synced for `hold_after_sync_seconds`
+  (default 10) or, with a warning, after `backstop_seconds` (default 180).
+  Each admin-down is preceded by a durable identity receipt in
+  `runtime_state_dir`; clean shutdown, the new
+  `rustbgpd --release-core-isolation --runtime-state-dir DIR` stop-hook
+  helper, and the next start raise only links whose recorded identity still
+  matches, and report the rest as `ownership_ambiguous`. New
+  `evpn_es_core_isolation_state{interface, state}` and
+  `evpn_core_isolated{signal}` gauges and `rbgp doctor` checks
+  `evpn.es.<interface>.core_isolation` and `evpn.core_isolation.uplinks`
+  report it. See
+  [`[evpn_core_isolation]`](docs/reference/configuration.md#evpn_core_isolation).
+- Pinned GoBGP 4.10.0 interoperability coverage for EVPN Types 1–5 route
+  reflection through graceful restart, End-of-RIB stale sweep and long-lived
+  graceful restart marking and expiry. This receipt does not change EVPN
+  stability classifications or add a dataplane support promise.
+- Neighbors and peer groups accept `admin_down = true`, with an optional RFC
+  9003 `admin_down_reason` of at most 128 bytes, to keep a configured neighbor
+  administratively down across restarts without deleting it. The peer is added
+  disabled: it makes no connection attempts, refuses inbound connections,
+  reads 0 in `bgp_peer_admin_enabled`, and stays listed in `rbgp neighbor`. On
+  `SIGHUP`, setting the key sends Cease/Administrative Shutdown with the
+  reason and clearing it enables the peer. The runtime
+  `rbgp neighbor <addr> enable|disable` toggle stays transient and holds until
+  a restart or a reload that changes the key. `admin_down` is rejected on a
+  peer group referenced by `[[dynamic_neighbors]]`. `rbgp config import` maps
+  BIRD `disabled`, FRR `neighbor X shutdown [message ...]` and GoBGP
+  `admin-down` to the new key. See
+  [Administrative down](docs/reference/configuration.md#administrative-down-admin_down).
+- A dynamic neighbor whose session went idle stays visible while the RIB
+  retains its GR or LLGR stale routes: `rbgp neighbor`, `ListNeighbors` and
+  `GetNeighborState` return a row for it with its retention phase and time
+  left, marked by the new presence-aware `retention_only` field
+  (`"retention_only": true` in JSON, source
+  `retention only (no session or configuration)`). The row disappears when
+  retention ends. `rbgp doctor` runs only the retention check for such a
+  row, and `rbgp diff advertised` refuses it as not configured. The
+  `rbgp neighbor --json` list now also carries the optional `gr_retention`
+  rows, with stale-route counts, and `gr_retention_available`. See
+  [Graceful Restart](docs/reference/operations.md#graceful-restart).
+- `rbgp neighbor PEER` and `NeighborService.GetNeighborState` show a
+  per-family stale-route retention row while the RIB retains GR or LLGR stale
+  routes for a peer, including while its session is down: the phase
+  (`gr_restart`, `gr_awaiting_eor`, or `llgr`), the time until the RIB's next
+  sweep or LLGR promotion for that family, and the stale-route count. The new
+  `gr_retention` rows and the presence-aware `gr_retention_available` flag are
+  additive; `rbgp doctor` warns, naming the time left and the stale-route
+  count, for each family in the LLGR phase. See
+  [Graceful Restart](docs/reference/operations.md#graceful-restart).
+- Neighbors and peer groups accept per-family inbound limits for the
+  non-unicast families a route reflector carries:
+  `max_prefixes_l3vpn_ipv4_unicast`, `max_prefixes_l3vpn_ipv6_unicast`,
+  `max_prefixes_ipv4_labeled_unicast`, `max_prefixes_ipv6_labeled_unicast`,
+  `max_prefixes_l2vpn_evpn`, `max_prefixes_ipv4_flowspec`,
+  `max_prefixes_ipv6_flowspec` and `max_prefixes_rtc`. Each bounds the unique
+  routes accepted in its family, with Add-Path paths of one route collapsed,
+  independently of the aggregate `max_prefixes` and of every other family, so
+  a VPN leak can be capped without capping the peer's EVPN routes.
+  `max_prefix_action` applies per family: `shutdown` sends Cease/1 carrying the
+  RFC 4486 AFI, SAFI and bound, `block` withholds net-new routes of that family
+  while the session stays Established, and `warning` reports. The keys
+  hot-apply on reload. `bgp_max_prefix_usage`, `bgp_max_prefix_limit`,
+  `bgp_max_prefix_headroom` and `bgp_max_prefix_blocking` gain the family
+  label as a `scope` value while the bound is set. See the
+  [neighbor reference](docs/reference/configuration.md).
+- `rbgp config last-reload` and `rbgp doctor` expose the latest SIGHUP result,
+  including a closed failure reason and bounded applied/unapplied operation
+  identities for partial reloads. gRPC credential publication is recorded as an
+  applied operation on success or a known partial result on failure. Doctor also
+  warns when the retained reload task fails.
+
+### Fixed
+
+- In-place `rbgp policy fmt` rewrites use a unique sibling temporary file,
+  preserve file permissions, and sync the file and parent directory. MRT
+  dumps also sync their completed payload before rename and the output
+  directory afterward. Both writers remove their temporary file when
+  publication fails.
+- Show still-current Linux EVPN L2 apply failures in the
+  `evpn_current_apply_failures` metric and instance
+  status, including host-wide failures and operations held by permanent
+  suppression or retry backoff.
+  Clear them after success, withdrawal, or a changed operation shape.
+- Legacy unscoped EVPN remote-MAC FDB programming checks foreign VLAN
+  siblings before changing the bridge entry, including a static row present
+  only on the port's PVID. A conflicting sibling blocks programming or
+  removal until the operator clears it; explicitly configured bridge VLANs
+  retain their own scope. Shared nexthop groups also defer installs and
+  updates while a blocked row retains a reference to the group.
+- Forward aliased known unicast through a healthy bound all-active Ethernet Segment
+  when only an ES peer learned the CE MAC. Eligible peer Type 2 routes now
+  create owned local-port FDB rows with pre-apply local/foreign ownership
+  checks, VLAN scope, and duplicate-MAC quarantine. Withdrawal, drain, link failure,
+  and segment removal remove that forwarding state. All-active CE forwarding
+  requires `interface`; peer-only routes do not create new BGP advertisements.
+  After restart, live peer forwarding retains validated local VLAN siblings
+  and converts an adopted overlay row without waiting for orphan-reap grace.
+  Single-active DF recovery retains ordinary local MAC relearning.
+  Reconciliation repairs incomplete owned legacy VLAN row sets and retains
+  desired adopted rows while their startup attachment is not ready.
+- An EVPN Type 1 Ethernet A-D route with an all-zero ESI no longer resets the
+  session. A single-homed VPWS per-EVI route carries ESI 0 (RFC 8214 §4), so a
+  reflector now accepts and reflects it unchanged; the per-ES form is accepted
+  too. A Type 4 Ethernet Segment route with an all-zero ESI names no
+  multihomed segment (RFC 7432 §8.1.1) and is now handled as RFC 7606
+  treat-as-withdraw for its UPDATE instead of a session reset.
+- An EVPN Type 2 route with MAC Address Length 0 no longer resets the
+  session. RFC 9135 §9.1.1 makes it treat-as-withdraw: its UPDATE withdraws
+  its other routes, and the route itself is dropped. Because the MAC Address
+  Length is part of the route key (RFC 7432 §7.2), it never removes the
+  peer's 48-bit route for the same MAC, in an announcement or a withdrawal,
+  and it is never reflected. A Type 5 route announced with both a non-zero
+  ESI and a non-zero gateway IP is now treat-as-withdraw (RFC 9136 §3.2)
+  instead of being accepted and reflected. An `MP_UNREACH_NLRI` whose EVPN
+  routes were all dropped, including unsupported route types, is no longer
+  mistaken for End-of-RIB. Likewise, an `MP_REACH_NLRI` whose NLRI were all
+  dropped still counts as carrying NLRI, so a treat-as-withdraw error in its
+  UPDATE no longer escalates to a session reset (RFC 7606 §5.2).
+- Unicast export explain reports `outbound_prefix_limit_reached` when a
+  peer's outbound maximum withholds a net-new prefix, including the family,
+  limit, and usage. Grouped peer explanations use the same admitted route
+  view as advertised listings; admitted prefixes remain exportable at the
+  limit.
+- `bgp_gr_stale_routes{peer}` now falls as a reconnected peer re-advertises
+  or withdraws its stale routes before End-of-RIB, and when the GR timer
+  purges routes, either at promotion to LLGR (families without LLGR and
+  `NO_LLGR` routes) or while older LLGR-stale routes remain. It was set only
+  at GR entry, End-of-RIB and the LLGR sweep, so it overstated the retained
+  routes in between. The gauge now reads per-family counters the RIB
+  maintains on every stale-route change instead of scanning the peer's
+  routes. Tearing down a peer whose only remaining retention was an LLGR
+  deadline from an earlier restart now also clears its `bgp_gr_active_peers`
+  and `bgp_gr_stale_routes` series. See
+  [Graceful Restart](docs/reference/operations.md#graceful-restart).
+- Bound peer-pushed Address-Prefix ORF state to 4,096 entries per peer and
+  AFI/SAFI. An overflowing group is rejected without changing the installed
+  filter or ending the session; `REMOVE` and `REMOVE-ALL` can free capacity.
+  Sequence-keyed entries avoid rescanning the list for each update. Warnings
+  and `bgp_orf_capacity_rejections_total{peer,family}` report rejected groups.
+- `/readyz` and `GetHealth` no longer miss their 200 ms deadline when many
+  peers enter graceful restart at once. The RIB answered the probe promptly,
+  but then kept its runtime worker while it applied the rest of the queued
+  GR entries, and the answered probe could not run on another worker. At
+  200 simultaneous disconnects that delay was about 200 ms. The RIB and the
+  peer manager now yield after they answer a readiness probe.
+  Graceful-restart handling and the deadline are unchanged.
+- `/readyz` and `GetHealth` no longer report the peer manager as timed out
+  shortly after a large SIGHUP reload. Reload settlement publishes the
+  configured peer owners to the RIB, and the peer manager stopped answering
+  readiness probes while it waited for that acknowledgement. After an
+  export-policy change on 1000 peers, the RIB can take 1-2 s to acknowledge
+  while it works through post-commit export updates. The peer manager now
+  answers readiness probes and neighbor reads during that wait. The 200 ms
+  deadline is unchanged.
+- In arouteserver mode, `rs-config-render` no longer drops per-client options
+  without a word. A client `password` now renders as the neighbor's
+  `md5_password`, an effective `roles.strict_mode: true` renders
+  `strict_role = true`, and per-client `irrdb.enforce_origin_in_as_set` and
+  `enforce_prefix_in_as_set` apply to that client only. A client value of
+  `ipv4_pref_len`, `ipv6_pref_len`, `reject_invalid_as_in_as_path`, or
+  `rpki_bgp_origin_validation.reject_invalid` that differs from the general
+  one, `graceful_shutdown.enabled: false`, `prepend_rs_as`, a `local_role`
+  other than `rs`, `custom_options`, and `16bit_mapped_asn` while control
+  communities are on are refused with exit 2 naming the client and key.
+  An unknown key in a client's `cfg` or `filtering` map now fails the parse
+  with exit 1. See the
+  [renderer README](tools/rs-config-render/README.md).
+- Because the rendered `config.toml` can now carry MD5 keys, arouteserver
+  mode writes its output the way IXP Manager mode does: `--out-dir` must be
+  absent or an empty, non-symlink mode-0700 directory, and every file is
+  created mode 0600. See the
+  [renderer README](tools/rs-config-render/README.md).
+- `rbgp events sessions` and `ListSessionEvents` `lost` rows now end with
+  the teardown cause recorded when the session left Established: the sent
+  or received NOTIFICATION code, subcode and description with any valid
+  RFC 9003 shutdown communication (sanitized), a transport cause, or
+  `closed without NOTIFICATION`. The cause is no longer missing, and it is
+  not taken from `Last Error`, which a later failed reconnect overwrites
+  and a clean close leaves stale. The
+  [peer-flap runbook](docs/cookbook/peer-flap-triage.md) shows the
+  output.
+
+### Documentation
+
+- A generated [capability evidence table](docs/reference/capabilities.md)
+  links route reflection, BMP export, and the FlowSpec controller to the
+  dated interop evidence behind each one, with behavior and compatibility
+  shown separately; it promotes nothing. A curated leg index at the top of
+  the [interop results](docs/interop.md#curated-leg-index) and a new
+  [labs index](labs/README.md) share one navigation slug per scenario
+  with the cookbook pages, while M-series leg names stay unchanged. The
+  stable-surface checker and the public docs contract fail when a generated
+  page drifts from its sources.
+- Document the FRR 10.7.1 requirements for a shared all-active Ethernet
+  Segment: use `highest-preference` and give FRR the higher DF preference.
+  Stock FRR on Linux does not filter BUM when it is non-DF, so with
+  rustbgpd as DF the CE receives each BUM frame twice; this is a known
+  limitation. A new interop receipt covers FRR-DF forwarding and carrier
+  recovery, the rustbgpd-DF duplicate, and the default-modulo case.
+- Published-crate versions now have one source: each crate's manifest. The
+  `rustbgpd-wire` and `rustbgpd-rpki` README install snippets name the
+  version being published, so the crates.io page of the next release no
+  longer shows the previous one, as wire 0.24.0 and rpki 0.6.0 did. The
+  release preflight fails on a mismatch, including in the coordinated
+  version set of the [embedding guide](docs/reference/embedding.md)
+  examples. The guide links to each crate's `CHANGELOG.md` instead of
+  restating its release history, and
+  `docs/reference/published-crate-versions.json` is removed.
+- Clarify that the fully compensated runtime-config outcome marker applies to
+  neighbor, peer-group, and policy mutations; link the separate
+  `ApplyEvpnRuntime` failure status guidance.
+
+### Upgrade notes
+
+- Config validation now rejects an export policy whose `set_next_hop`
+  (`"self"` or an address) can reach an `ipv4_labeled_unicast`,
+  `ipv6_labeled_unicast`, `l3vpn_ipv4_unicast` or `l3vpn_ipv6_unicast` route
+  on the neighbor, peer group or dynamic range it is bound to. The rewrite
+  used to be applied while the received labels were kept, and those labels
+  are valid only at the received next hop (RFC 8277 §3.2.2), so the
+  reflected traffic was black-holed. This is an operator-visible
+  compatibility change: an existing configuration with such a binding fails
+  to start, and a SIGHUP or API change carrying one is refused, until it is
+  corrected. Bind the policy only to unicast peers, or in `.rpol` guard the
+  action with `route.family == ipv4-unicast` or
+  `route.family == ipv6-unicast`. The error names the family, the policy and
+  the binding. Policy evaluation and explain no longer apply a next-hop
+  action to a labeled or VPN route. See
+  [route modifications](docs/reference/configuration.md#route-modifications-set-actions).
+- Embedders of the published crates: `rustbgpd-wire` 0.25.0 changes EVPN
+  decode and validation behavior without changing any public item or
+  signature. `decode_evpn_nlri` accepts an all-zero ESI in Type 1 and Type 4
+  routes, and `validate_evpn_announcements` rejects a zero-ESI Type 4 and a
+  Type 5 carrying both a non-zero ESI and a non-zero gateway IP, so
+  `UpdateMessage::parse_revised` reports them as treat-as-withdraw.
+  `parse_revised` also treats a Type 2 route with MAC Address Length 0 as
+  treat-as-withdraw instead of returning an error. `rustbgpd-fsm` 0.12.0 and
+  `rustbgpd-rpki` 0.7.0 move to wire 0.25 with no other API change; upgrade
+  the three together.
+- EVPN route reflectors: a VPWS PE advertising single-homed services with a
+  zero-ESI Type 1 route no longer flaps its session and every family on it.
+  A zero-ESI Type 4 route, a Type 2 route with MAC Address Length 0 and a
+  Type 5 route carrying both a non-zero ESI and a non-zero gateway IP are now
+  treat-as-withdraw instead of a session reset (the zero-length-MAC case) or
+  reflection (the Type 5 case). Each announced case counts as
+  `bgp_update_malformed_total{disposition="treat_as_withdraw"}` and the
+  session stays up.
+- `rs-config-render` in arouteserver mode now renders client `password`,
+  `roles.strict_mode` and per-client IRR enforcement that it used to drop
+  silently, so an MD5 member that never established can now come up, and a
+  strict-role or stricter per-client filter setting is no longer relaxed. A
+  site that relied on any refused per-client override gets exit 2 until it is
+  removed; `roles.enabled: false` remains a documented divergence. A refresh
+  loop that re-renders into the previous candidate directory now exits 8
+  without writing; remove the directory before each render, as the
+  [cookbook loop](docs/cookbook/ixp-filter-pipeline.md) does.
+- The `reason`/`summary` text of `lost` rows from `rbgp events sessions` and
+  `ListSessionEvents` gains a `; <cause>` suffix naming the teardown cause.
+  The JSON fields are unchanged; update consumers that match the full text.
+- `rbgp neighbor`, `ListNeighbors` and `GetNeighborState` can now return a
+  row for a dynamic neighbor that has no session or configuration while the
+  RIB retains its GR or LLGR stale routes, marked `retention_only`. Consumers
+  that treat every listed neighbor as configured should check that field.
+- `bgp_max_prefix_usage`, `bgp_max_prefix_limit`, `bgp_max_prefix_headroom`
+  and `bgp_max_prefix_blocking` gain a series per non-unicast family whose new
+  `max_prefixes_<family>` bound is set, using the family name as the `scope`
+  label value. Dashboards and alerts that assume only the existing scopes
+  should account for the new values.
+- `bgp_gr_stale_routes{peer}` now tracks the retained stale routes
+  continuously instead of holding its GR-entry value until End-of-RIB or the
+  LLGR sweep, so it reads lower during recovery than before. Alerts tuned to
+  the old value may need review.
+- The shipped `rustbgpd.service` now starts the daemon with
+  `--runtime-state-dir /var/lib/rustbgpd` and runs
+  `rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd` as
+  `ExecStopPost=`. The daemon refuses to start when `--runtime-state-dir`
+  differs from the config's `runtime_state_dir`, so a deployment that sets a
+  different `runtime_state_dir` must change both unit lines to match before
+  restarting. With no core-isolation receipt the stop hook exits 0 without
+  touching any link. Supervisors without a stop hook should run the same
+  command after the daemon exits when `[evpn_core_isolation]` is enabled. See
+  the [systemd notes](docs/how-to/deployment.md#systemd).
+
 ## [0.76.0] — 2026-10-11
 
 ### Added
