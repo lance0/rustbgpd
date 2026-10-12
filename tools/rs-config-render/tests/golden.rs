@@ -3112,15 +3112,28 @@ fn per_client_overrides_are_refused_by_client_and_key() {
 
 #[test]
 /// Load-bearing: an option the model does not know fails the parse instead of
-/// being dropped, under the client `filtering` map and at the `cfg` level.
+/// being dropped, at the client `cfg` level, under its `filtering` map, and
+/// under each strict map inside it.
 fn unknown_client_options_fail_the_parse() {
-    for path in [
-        &["cfg", "filtering", "next_new_option"][..],
-        &["cfg", "filtering", "irrdb", "next_new_option"],
-        &["cfg", "next_new_option"],
+    for (path, new) in [
+        (&["cfg", "filtering", "next_new_option"][..], "true"),
+        (&["cfg", "filtering", "irrdb", "next_new_option"], "true"),
+        (&["cfg", "next_new_option"], "true"),
+        (
+            &["cfg", "filtering", "max_prefix"],
+            "{limit_ipv4: 5000, action: shutdown, next_new_option: true}",
+        ),
+        (
+            &["cfg", "filtering", "roles"],
+            "{enabled: true, strict_mode: true, next_new_option: true}",
+        ),
+        (
+            &["cfg", "filtering", "rpki_bgp_origin_validation"],
+            "{enabled: true, reject_invalid: true, next_new_option: true}",
+        ),
     ] {
         let mut value = healthy_value();
-        set_client(&mut value, 0, path, true.into());
+        set_client(&mut value, 0, path, yaml(new));
         match render(&to_yaml(&value), &rtr_options()) {
             Err(error @ RenderError::Parse(_)) => {
                 assert!(error.to_string().contains("next_new_option"), "{error}");
