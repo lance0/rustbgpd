@@ -440,7 +440,6 @@ async fn query_neighbor_rib_snapshots(
     summary_tx: Option<&mpsc::Sender<RibSummaryQuery>>,
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
-    stale_counts: bool,
     include_retained: bool,
 ) -> Result<NeighborRibSnapshotResponse, Status> {
     tokio::time::timeout(
@@ -449,7 +448,6 @@ async fn query_neighbor_rib_snapshots(
             RibSummaryQuery::NeighborRibSnapshots {
                 peers,
                 comparison,
-                stale_counts,
                 include_retained,
                 reply,
             }
@@ -478,7 +476,7 @@ fn apply_rib_snapshot(state: &mut proto::NeighborState, snapshot: &NeighborRibSn
             family: family_to_string(row.afi, row.safi),
             phase: row.phase.as_str().to_string(),
             remaining_seconds: row.remaining_secs,
-            stale_routes: row.stale_routes,
+            stale_routes: Some(row.stale_routes),
         })
         .collect();
     state.gr_retention_available = Some(true);
@@ -1358,8 +1356,6 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             self.rib_summary_tx.as_ref(),
             infos.iter().map(|info| info.address).collect(),
             None,
-            // A list never scans per-peer stale routes in the RIB turn.
-            false,
             // Down dynamic neighbors whose routes are still retained.
             true,
         )
@@ -1453,7 +1449,6 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 self.rib_summary_tx.as_ref(),
                 vec![peer.address],
                 None,
-                true,
                 false,
             )
             .await?
@@ -1484,7 +1479,6 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             self.rib_summary_tx.as_ref(),
             vec![info.address],
             comparison_pair,
-            true,
             false,
         )
         .await?;
@@ -2136,7 +2130,6 @@ mod tests {
                     peers,
                     comparison,
                     reply,
-                    stale_counts: _,
                     include_retained: _,
                 } = summary_rx.recv().await.unwrap();
                 assert_eq!(peers, ["192.0.2.1".parse::<IpAddr>().unwrap()]);
@@ -2201,7 +2194,6 @@ mod tests {
                             peers: Vec::new(),
                             comparison: None,
                             reply,
-                            stale_counts: false,
                             include_retained: false,
                         })
                         .await
@@ -3821,7 +3813,6 @@ mod tests {
                         peers,
                         comparison,
                         reply,
-                        stale_counts: _,
                         include_retained: _,
                     } => {
                         assert_eq!(peers, vec![addr]);
@@ -3866,7 +3857,7 @@ mod tests {
                                     safi: Safi::Unicast,
                                     phase: rustbgpd_rib::GrRetentionPhase::Llgr,
                                     remaining_secs: Some(86_400),
-                                    stale_routes: Some(12),
+                                    stale_routes: 12,
                                 }],
                             }],
                             retained: Vec::new(),
@@ -3946,7 +3937,6 @@ mod tests {
                 peers,
                 comparison,
                 reply,
-                stale_counts,
                 include_retained,
             }) = rib_rx.recv().await
             else {
@@ -3954,7 +3944,6 @@ mod tests {
             };
             assert_eq!(peers, vec![second, tenth, link_local, link_local]);
             assert!(comparison.is_none());
-            assert!(!stale_counts, "a neighbor list never requests stale counts");
             assert!(include_retained, "a neighbor list asks for retained peers");
             let link_local_snapshot = NeighborRibSnapshot {
                 peer: link_local,
@@ -4088,7 +4077,6 @@ mod tests {
             peers,
             comparison,
             reply,
-            stale_counts: _,
             include_retained: _,
         }) = tokio::time::timeout(Duration::from_secs(3), rib_rx.recv())
             .await
@@ -4255,7 +4243,6 @@ mod tests {
                 peers,
                 comparison: comparison_pair,
                 reply,
-                stale_counts: _,
                 include_retained: _,
             } = rib_rx.recv().await.expect("RIB snapshot")
             else {
@@ -4387,13 +4374,12 @@ mod tests {
             }
         });
         let rib_task = tokio::spawn(async move {
-            let Some(RibUpdate::QueryNeighborRibSnapshots { peers, comparison: comparison_pair, stale_counts, include_retained: _, reply })
+            let Some(RibUpdate::QueryNeighborRibSnapshots { peers, comparison: comparison_pair, include_retained: _, reply })
                 = rib_rx.recv().await else {
                 panic!("comparison must use the aggregate RIB snapshot query");
             };
             assert_eq!(peers, vec![primary]);
             assert_eq!(comparison_pair, Some((primary, comparison)));
-            assert!(stale_counts, "a single-neighbor read requests stale counts");
             reply.send(NeighborRibSnapshotResponse {
                 snapshots: vec![NeighborRibSnapshot {
                     peer: primary,
@@ -4519,7 +4505,6 @@ mod tests {
                     peers,
                     comparison: actual,
                     reply,
-                    stale_counts: _,
                     include_retained: _,
                 }) = rib_rx.recv().await
                 else {

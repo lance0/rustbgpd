@@ -1156,7 +1156,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1384 bytes |
+| `AdjRibIn` | 1552 bytes |
 | `LocRib` | 1040 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
@@ -1171,17 +1171,23 @@ interned globally, across all peers, so the per-route impact is amortized to
 near zero (see below), but the enum size sets the per-unique-attribute-set
 heap cost.
 
-`AdjRibIn` (1032 → 1384 bytes) and `LocRib` (96 → 1040 bytes) grew the same
+`AdjRibIn` (1032 → 1384 bytes, before the stale counters below) and `LocRib` (96 → 1040 bytes) grew the same
 way — each struct picked up a route map and/or secondary index per added RIB
 family (VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS, FlowSpec; see
 `crates/rib/src/adj_rib_in.rs` and `crates/rib/src/loc_rib.rs`). Confirmed
 via `std::mem::size_of` against the current struct definitions; these two
 rows aren't in the allocator-tracked harness JSON.
 
-The final 48 bytes of `AdjRibIn` are two inline, allocation-free
+Of the 1384 bytes, 48 are two inline, allocation-free
 `RpkiValidationCounts` values, one for each unicast family. They keep the
 exact RPKI post-policy BMP counters on the route mutation path instead of
 requiring a periodic route-table scan.
+
+The last 168 bytes (1384 → 1552) are seven empty `Vec` headers, one per route
+table, holding per-family GR/LLGR stale-route counters. They allocate only
+when a table first holds a stale route, and they let neighbor reads and
+`bgp_gr_stale_routes` report retained counts without scanning the peer's
+routes.
 
 `Route` fell from 136 to 112 bytes when it stopped carrying two per-session
 values inline: the receive time became a 4-byte whole-second monotonic stamp

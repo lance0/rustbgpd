@@ -531,10 +531,12 @@ tracks in a GR or LLGR phase: the `family` label, the `phase`
 `remaining_seconds` until the RIB's next retention deadline for that family,
 and the `stale_routes` count. The RIB reads all of it in the same actor turn
 as the rest of the neighbor snapshot, so the rows are present while the
-session is down. Phase and deadline are lookups; the count scans the peer's
-received routes, so only `GetNeighborState` reports it and `ListNeighbors`
-omits `stale_routes`. The count can be zero while End-of-RIB is still
-awaited after every stale route was re-advertised.
+session is down. Phase and deadline are lookups, and the count comes from
+per-family counters the RIB maintains as routes are marked stale,
+re-advertised, withdrawn and swept, so `ListNeighbors` and `GetNeighborState`
+both report `stale_routes` without scanning received routes. The count can be
+zero while End-of-RIB is still awaited after every stale route was
+re-advertised.
 `gr_retention_available` is present and true from a daemon that exposes the
 rows; its absence means an older daemon, so an empty list must not be read as
 "nothing retained" unless the flag is present.

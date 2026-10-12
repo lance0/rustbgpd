@@ -5559,7 +5559,6 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
             peers: Vec::new(),
             comparison: None,
             reply,
-            stale_counts: false,
             include_retained: false,
         })
         .unwrap();
@@ -8942,7 +8941,6 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
-                stale_counts: false,
                 include_retained: false,
             })
             .unwrap();
@@ -12401,7 +12399,7 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
             let expected_rows: Vec<_> = fleet
                 .members
                 .iter()
-                .map(|peer| fleet.manager.neighbor_rib_snapshot(*peer, false))
+                .map(|peer| fleet.manager.neighbor_rib_snapshot(*peer))
                 .collect();
             let expected_comparison = fleet
                 .manager
@@ -12474,7 +12472,6 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                                     peers: peers.clone(),
                                     comparison: Some((peers[0], peers[1])),
                                     reply: neighbors_reply,
-                                    stale_counts: false,
                                     include_retained: false,
                                 })
                                 .unwrap();

@@ -2067,7 +2067,6 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
             peers: Vec::new(),
             comparison: None,
             reply,
-            stale_counts: false,
             include_retained: false,
         })
         .unwrap();

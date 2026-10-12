@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc aecaf3764d5d2fb16bc873b663d22387b7af1f58a636d739d47a1153be767ab3 # shrinks to ops = [Insert { family: 0, key: 0, flags: 0, no_llgr: false }, FlipFlagsThroughAccountedMutation, Insert { family: 0, key: 0, flags: 0, no_llgr: false }]
+cc 1bd892711358e452d5bca390a2bb92c08d7319d05c083659db730967b04e532c # shrinks to ops = [Insert { family: 2, key: 0, flags: 1, no_llgr: false }, SweepStaleAll]

@@ -348,17 +348,12 @@ impl RibManager {
             let peer_label = peer.to_string();
             #[cfg(feature = "bench-internals")]
             let stale_count_started = Instant::now();
-            let stale_count = self
-                .ribs
-                .get(&peer)
-                .map_or(0, super::graceful_restart::retained_stale_count);
+            self.publish_gr_stale_routes(peer);
             #[cfg(feature = "bench-internals")]
             {
                 self.adj_rib_out_commit_stats.eor_stale_count_ns =
                     u64::try_from(stale_count_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
             }
-            self.metrics
-                .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
 
             let all_done = self.gr_peers.get(&peer).is_some_and(HashSet::is_empty);
             if all_done {
@@ -527,17 +522,12 @@ impl RibManager {
             let peer_label = peer.to_string();
             #[cfg(feature = "bench-internals")]
             let stale_count_started = Instant::now();
-            let llgr_stale_count = self
-                .ribs
-                .get(&peer)
-                .map_or(0, super::graceful_restart::retained_stale_count);
+            self.publish_gr_stale_routes(peer);
             #[cfg(feature = "bench-internals")]
             {
                 self.adj_rib_out_commit_stats.eor_stale_count_ns =
                     u64::try_from(stale_count_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
             }
-            self.metrics
-                .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_count));
 
             let all_done = self.llgr_peers.get(&peer).is_some_and(HashSet::is_empty);
             if all_done {

@@ -1156,14 +1156,14 @@ impl RibManager {
         let stale = self
             .ribs
             .get(&peer)
-            .map_or(0, super::graceful_restart::retained_stale_count);
+            .map_or(0, crate::adj_rib_in::AdjRibIn::retained_stale_count);
         [
             total,
             stats.eor_unicast_recompute_ns,
             stats.eor_unicast_distribute_ns,
             u64::try_from(stats.eor_unicast_affected).expect("count fits u64"),
             u64::try_from(stats.eor_unicast_changed).expect("count fits u64"),
-            u64::try_from(stale).expect("count fits u64"),
+            stale,
             u64::from(!self.gr_peers.contains_key(&peer)),
             stats.eor_attr_gc_ns,
             stats.eor_stale_count_ns,
