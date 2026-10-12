@@ -2072,6 +2072,10 @@ pub struct PeerManagerNeighborConfig {
     pub description: String,
     /// Optional peer-group reference used to derive defaults.
     pub peer_group: Option<String>,
+    /// Config-owned administrative-down state: `Some(reason)` adds the peer
+    /// disabled (an empty reason sends no RFC 9003 shutdown communication);
+    /// `None` adds it enabled.
+    pub admin_down: Option<String>,
     /// Override hold time (None = use default).
     pub hold_time: Option<u16>,
     /// Minimum hold time accepted from the peer.

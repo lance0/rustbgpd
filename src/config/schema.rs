@@ -1312,6 +1312,35 @@ macro_rules! define_neighbor_and_peer_group_configs {
 
 define_neighbor_and_peer_group_configs! {
     before_security {
+        admin_down: Option<bool> {
+            neighbor {
+                /// Keep this configured neighbor administratively down: it is
+                /// added disabled at startup, makes no connection attempts and
+                /// refuses inbound connections, but stays visible in `rbgp
+                /// neighbor`, the looking glass, and per-peer metrics. On
+                /// reload, setting it sends Cease/Administrative Shutdown
+                /// (RFC 4486 subcode 2) and clearing it enables the peer. The
+                /// runtime `rbgp neighbor <addr> enable|disable` toggle stays
+                /// transient: it holds until a restart or a reload that changes
+                /// this key. Default: false.
+            }
+            peer_group {
+                /// Administrative-down boot state inherited by neighbors in this
+                /// group. See the neighbor-level `admin_down`. Not allowed on a
+                /// group referenced by `[[dynamic_neighbors]]`.
+            }
+        }
+        admin_down_reason: Option<String> {
+            neighbor {
+                /// RFC 9003 shutdown communication sent with the
+                /// Cease/Administrative Shutdown when `admin_down` takes an
+                /// Established session down. UTF-8, at most 128 bytes.
+            }
+            peer_group {
+                /// Shutdown communication inherited by neighbors in this group.
+                /// See the neighbor-level `admin_down_reason`.
+            }
+        }
         hold_time: Option<u16> {
             neighbor {
                 /// Hold time in seconds: 0 disables, otherwise >= 3. Default 90.
@@ -1949,6 +1978,8 @@ impl fmt::Debug for Neighbor {
             .field("remote_asn", &self.remote_asn)
             .field("description", &self.description)
             .field("peer_group", &self.peer_group)
+            .field("admin_down", &self.admin_down)
+            .field("admin_down_reason", &self.admin_down_reason)
             .field("hold_time", &self.hold_time)
             .field("min_hold_time", &self.min_hold_time)
             .field("send_hold_time", &self.send_hold_time)
@@ -2152,6 +2183,8 @@ impl Serialize for TcpAoKeyringConfig {
 impl fmt::Debug for PeerGroupConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerGroupConfig")
+            .field("admin_down", &self.admin_down)
+            .field("admin_down_reason", &self.admin_down_reason)
             .field("hold_time", &self.hold_time)
             .field("min_hold_time", &self.min_hold_time)
             .field("send_hold_time", &self.send_hold_time)

@@ -1931,6 +1931,7 @@ mod tests {
                 handle,
                 session_id,
                 ManagedPeerState {
+                    admin_down: None,
                     policy_known_down: false,
                     remote_asn: 65_002,
                     description: address.to_string(),

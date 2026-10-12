@@ -4324,6 +4324,8 @@ impl PeerManager {
             })
             .cloned()
             .unwrap_or_else(|| crate::config::Neighbor {
+                admin_down: None,
+                admin_down_reason: None,
                 tcp_mss: None,
                 min_hold_time: None,
                 address: address.to_string(),
@@ -4604,6 +4606,7 @@ impl PeerManager {
             remote_asn: tc.peer.remote_asn,
             description: resolved.label,
             peer_group: resolved.peer_group,
+            admin_down: resolved.admin_down,
             hold_time: Some(tc.peer.hold_time),
             min_hold_time: tc.peer.min_hold_time,
             send_hold_time: Some(tc.peer.send_hold_time),

@@ -1124,8 +1124,21 @@ impl Config {
         let policy =
             self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, store)?;
 
+        let admin_down = neighbor
+            .admin_down
+            .or_else(|| group.and_then(|group| group.admin_down))
+            .unwrap_or(false)
+            .then(|| {
+                neighbor
+                    .admin_down_reason
+                    .clone()
+                    .or_else(|| group.and_then(|group| group.admin_down_reason.clone()))
+                    .unwrap_or_default()
+            });
+
         Ok(ResolvedNeighbor {
             transport_config: transport,
+            admin_down,
             max_prefix_restart_seconds: neighbor
                 .max_prefix_restart_seconds
                 .or_else(|| group.and_then(|group| group.max_prefix_restart_seconds))
@@ -1157,6 +1170,8 @@ impl Config {
         peer_group_name: &str,
     ) -> Neighbor {
         Neighbor {
+            admin_down: None,
+            admin_down_reason: None,
             tcp_mss: None,
             min_hold_time: None,
             address: addr.to_string(),
@@ -1441,6 +1456,10 @@ pub fn outbound_prefix_limits_loosen(rollback: &Config, candidate: &Config) -> b
 #[derive(Clone)]
 pub struct ResolvedNeighbor {
     pub transport_config: TransportConfig,
+    /// Config-owned administrative-down boot state: `Some(reason)` when the
+    /// resolved `admin_down` is true (an empty reason sends no RFC 9003
+    /// shutdown communication), `None` when the peer may run.
+    pub admin_down: Option<String>,
     pub max_prefix_restart_seconds: Option<u32>,
     pub label: String,
     pub import_policy: Option<PolicyChain>,

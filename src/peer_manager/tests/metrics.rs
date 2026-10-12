@@ -845,7 +845,7 @@ fn peer_presence_source_ordering_contracts() {
         .unwrap()
         .0;
     let public_add = public_add.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(public_add.contains("add_peer_impl(config, sync_config_snapshot, true, true)"));
+    assert!(public_add.contains("add_peer_impl(config, sync_config_snapshot, enabled, true)"));
     let internal_add = lifecycle
         .split_once("pub(super) async fn add_peer_with_admin_state(")
         .unwrap()

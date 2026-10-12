@@ -949,6 +949,8 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `remote_asn`           | u32      | yes      | --      | Peer's autonomous system number                  |
 | `description`          | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
 | `peer_group`           | string   | no       | --      | Named peer-group to inherit transport and policy defaults from      |
+| `admin_down`           | bool     | no       | false   | Keep the configured neighbor administratively down: added disabled at startup, no connection attempts, inbound connections refused, still listed in `rbgp neighbor` and metrics. Inherits from the peer group. See [Administrative down](#administrative-down-admin_down) |
+| `admin_down_reason`    | string   | no       | --      | RFC 9003 shutdown communication sent with the Cease/Administrative Shutdown when `admin_down` takes an Established session down. UTF-8, at most 128 bytes. Inherits from the peer group |
 | `hold_time`            | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
 | `min_hold_time`        | u16      | no       | unset   | Minimum hold time accepted from the peer (3..=65535). The effective local `hold_time` must be non-zero and at least this value; a peer proposal of 0 is rejected. |
 | `send_hold_time`       | u32      | no       | (auto)  | RFC 9687 send hold timer in seconds: tear the session down when the peer stops draining its TCP socket for this long. 0 disables; non-zero must be > `hold_time`. Default: `max(480, 2 × hold_time)` per RFC 9687 §6. Pending outbound queue admission uses the same interval; when 0, admission still has the default finite resource deadline (Cease/8) |
@@ -1251,6 +1253,38 @@ observation-gate predecessor deprecation in the same immutable generation.
 A still-later SIGHUP can delete deprecated MKTs that are not selected, provided
 the owner set, survivor order, and key definitions are unchanged; deleting a
 non-deprecated or selected key remains restart-required.
+
+### Administrative down (`admin_down`)
+
+`admin_down = true` keeps a configured neighbor down across restarts without
+deleting it, so it stays visible in `rbgp neighbor`, the looking glass and the
+per-peer metrics:
+
+```toml
+[[neighbors]]
+address = "192.0.2.10"
+remote_asn = 64510
+admin_down = true
+admin_down_reason = "quarantined pending abuse review"
+```
+
+At startup, and whenever the neighbor is added, the peer is added disabled. It
+makes no connection attempts, refuses inbound connections and reads 0 in
+`bgp_peer_admin_enabled`. On `SIGHUP`, setting the key on a running peer sends
+Cease/Administrative Shutdown carrying `admin_down_reason`, and clearing it
+enables the peer. The [reload matrix](reload-matrix.md#administrative-state)
+classifies both.
+
+The runtime `rbgp neighbor <addr> enable|disable` toggle stays transient (it
+is not persisted to the file). A reload acts only when the resolved
+`admin_down` changes; otherwise it keeps the runtime state. A runtime `enable`
+of a config-down peer therefore lasts until the next restart or a reload that
+changes `admin_down`. To bring the peer up permanently, remove the key and
+reload.
+
+`admin_down` can be set on a peer group and overridden per neighbor
+(`admin_down = false`). It is rejected on a group referenced by
+`[[dynamic_neighbors]]`; remove the range to stop accepting its peers.
 
 ### TCP MSS clamp
 
@@ -1596,7 +1630,7 @@ hold_time = 45  # neighbor override beats peer-group default
 
 Peer-group fields mirror every neighbor setting except `address`,
 `interface`, `remote_asn`, `description`, `peer_group`, and `tcp_ao`.
-That covers timers, families,
+That covers `admin_down` / `admin_down_reason` (static members only), timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
 `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
 `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and

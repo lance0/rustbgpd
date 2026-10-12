@@ -1919,6 +1919,14 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "export_policy_chain"
         | "route_flap_dampening"
         | "conditional_advertisements" => (ConfigFieldImpact::HotApplied, "hot-applied"),
+        "admin_down" => (
+            ConfigFieldImpact::HotApplied,
+            "hot-applied: setting sends Cease/Administrative Shutdown; clearing enables the peer",
+        ),
+        "admin_down_reason" => (
+            ConfigFieldImpact::HotApplied,
+            "hot-applied: sent with the next admin_down shutdown",
+        ),
         "remote_asn" => (
             ConfigFieldImpact::SessionReset,
             "session reset: peer re-established with new ASN",
@@ -2088,6 +2096,8 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(remote_asn);
     cmp_field!(description);
     cmp_field!(peer_group);
+    cmp_field!(admin_down);
+    cmp_field!(admin_down_reason);
     cmp_field!(hold_time);
     cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
@@ -2228,6 +2238,8 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.remote_asn == new.remote_asn
         && old.description == new.description
         && old.peer_group == new.peer_group
+        && old.admin_down == new.admin_down
+        && old.admin_down_reason == new.admin_down_reason
         && old.hold_time == new.hold_time
         && old.min_hold_time == new.min_hold_time
         && old.send_hold_time == new.send_hold_time
@@ -3822,6 +3834,7 @@ fn resolved_session_change(
         return Some(ReloadPeerActionKind::Replace);
     }
     let hot_moved = !knobs_unchanged
+        || old.admin_down != new.admin_down
         || old.label != new.label
         || old.max_prefix_restart_seconds != new.max_prefix_restart_seconds;
     hot_moved.then_some(ReloadPeerActionKind::HotUpdate)
@@ -6215,6 +6228,8 @@ pub fn describe_peer_group_changes(
         };
     }
 
+    cmp_field!(admin_down);
+    cmp_field!(admin_down_reason);
     cmp_field!(hold_time);
     cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
@@ -6284,6 +6299,8 @@ pub fn describe_peer_group_changes(
 /// classified here as config-file-only or API-owned.
 pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &PeerGroupConfig) {
     let PeerGroupConfig {
+        admin_down,
+        admin_down_reason,
         tcp_mss,
         slow_peer_threshold_pct,
         slow_peer_duration,
@@ -6338,6 +6355,8 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         import_policy_chain: _,
         export_policy_chain: _,
     } = source.clone();
+    target.admin_down = admin_down;
+    target.admin_down_reason = admin_down_reason;
     target.tcp_mss = tcp_mss;
     target.slow_peer_threshold_pct = slow_peer_threshold_pct;
     target.slow_peer_duration = slow_peer_duration;

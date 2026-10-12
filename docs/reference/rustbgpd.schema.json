@@ -2094,6 +2094,20 @@
           "description": "Peer IP address (IPv4 or IPv6).",
           "type": "string"
         },
+        "admin_down": {
+          "description": "Keep this configured neighbor administratively down: it is\nadded disabled at startup, makes no connection attempts and\nrefuses inbound connections, but stays visible in `rbgp\nneighbor`, the looking glass, and per-peer metrics. On\nreload, setting it sends Cease/Administrative Shutdown\n(RFC 4486 subcode 2) and clearing it enables the peer. The\nruntime `rbgp neighbor <addr> enable|disable` toggle stays\ntransient: it holds until a restart or a reload that changes\nthis key. Default: false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "admin_down_reason": {
+          "description": "RFC 9003 shutdown communication sent with the\nCease/Administrative Shutdown when `admin_down` takes an\nEstablished session down. UTF-8, at most 128 bytes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "bfd": {
           "description": "BFD (RFC 5880/5881/5883) attachment, referencing a\n`[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.\nAttachment edits apply on SIGHUP; profile definitions require restart.",
           "anyOf": [
@@ -2644,6 +2658,20 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "admin_down": {
+          "description": "Administrative-down boot state inherited by neighbors in this\ngroup. See the neighbor-level `admin_down`. Not allowed on a\ngroup referenced by `[[dynamic_neighbors]]`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "admin_down_reason": {
+          "description": "Shutdown communication inherited by neighbors in this group.\nSee the neighbor-level `admin_down_reason`.",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "bfd": {

@@ -820,6 +820,7 @@ impl Config {
             if let Some(mss) = neighbor.tcp_mss {
                 validate_tcp_mss(&neighbor.address, mss)?;
             }
+            validate_admin_down_reason(&neighbor.address, neighbor.admin_down_reason.as_deref())?;
 
             if let Some(reason) = neighbor
                 .md5_password
@@ -1441,6 +1442,16 @@ impl Config {
                          supported for dynamic neighbors (static neighbors only in v1; \
                          set `bfd = {{ enabled = false }}` on the group or use static \
                          neighbors — see ADR-0067)",
+                        dn.peer_group
+                    ),
+                });
+            }
+            if group.admin_down == Some(true) {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}]: peer_group {:?} sets admin_down, but \
+                         admin_down applies to static neighbors only; remove the range \
+                         to stop accepting its peers",
                         dn.peer_group
                     ),
                 });
@@ -2867,6 +2878,25 @@ fn tcp_ao_overlap_id_collision(
 
 /// Linux accepts `TCP_MAXSEG` in 88..=32767; reject the rest at load so a bad
 /// clamp is a config error, not a listener bind failure.
+/// rustbgpd sends at most 128 bytes of RFC 9003 shutdown communication (the
+/// interoperable length, RFC 9003 §3). The runtime
+/// `disable` truncates longer text; a configured reason is refused instead, so
+/// the file never states a reason the wire does not carry. TOML strings are
+/// always UTF-8.
+fn validate_admin_down_reason(address: &str, reason: Option<&str>) -> Result<(), ConfigError> {
+    match reason {
+        Some(reason) if reason.len() > 128 => Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "admin_down_reason".to_string(),
+            reason: format!(
+                "shutdown communication is {} bytes; at most 128 bytes are sent (RFC 9003)",
+                reason.len()
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
 fn validate_tcp_mss(address: &str, mss: u16) -> Result<(), ConfigError> {
     if !(88..=32767).contains(&mss) {
         return Err(ConfigError::InvalidNeighborConfig {
@@ -3015,6 +3045,10 @@ fn validate_peer_group(
     if let Some(mss) = group.tcp_mss {
         validate_tcp_mss(&format!("peer_group.{name}"), mss)?;
     }
+    validate_admin_down_reason(
+        &format!("peer_group.{name}"),
+        group.admin_down_reason.as_deref(),
+    )?;
     if let Some(reason) = group
         .md5_password
         .as_deref()

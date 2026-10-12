@@ -563,6 +563,7 @@ impl PeerManager {
                     handle,
                     session_id,
                     ManagedPeerState {
+                        admin_down: None,
                         policy_known_down: false,
                         remote_asn,
                         description,

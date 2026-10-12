@@ -51,7 +51,8 @@ prints the result as `SIGHUP reload route`:
 | **rejected** | Dataset content/binding or BFD attachment changes combined with TCP-AO rotation or a listener MD5/GTSM edit; a sequential candidate whose peer-group edit adds or changes a config-file-only group field (below), or that changes a conditional-advertisement definition or neighbor attachment; or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
 
 The sequential route applies peer-group edits as `SetPeerGroup` definitions,
-which cannot carry the config-file-only group fields: `role`, `strict_role`,
+which cannot carry the config-file-only group fields: `admin_down`,
+`admin_down_reason`, `role`, `strict_role`,
 `prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`, the slow-peer knobs,
 the per-family and received prefix limits, `max_prefix_action`,
 `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
@@ -115,7 +116,7 @@ changes the GR settings themselves. The explicit purge reset for
 `discard_path_attributes` bypasses this retention.
 
 Static-neighbor edits whose **every** changed field is hot-applied
-(`description`, `max_prefixes`, `max_prefixes_ipv4`,
+(`description`, `admin_down`, `admin_down_reason`, `max_prefixes`, `max_prefixes_ipv4`,
 `max_prefixes_ipv6`, `max_prefixes_received_ipv4`,
 `max_prefixes_received_ipv6`, `max_prefix_action`,
 `max_prefix_warning_percent`, `max_prefixes_out_ipv4`,
@@ -195,12 +196,33 @@ planning and policy-only transactions also retain the scoped peer in their
 policy targets without requiring a fresh interface lookup. Transaction edits
 that rebuild sessions still require fresh scope resolution during planning.
 
+### Administrative state
+
+`admin_down` is the configured boot state and the runtime
+`rbgp neighbor <addr> enable|disable` toggle stays transient
+([ADR-0043](../adr/0043-config-persistence.md)):
+
+- At startup, and whenever a neighbor is added, `admin_down = true` adds the
+  peer disabled. It makes no connection attempts, refuses inbound
+  connections, reads 0 in `bgp_peer_admin_enabled`, and stays listed in
+  `rbgp neighbor`.
+- On reload, only a *change* to the resolved `admin_down` acts. Setting it
+  disables the peer: an Established session receives Cease/Administrative
+  Shutdown with `admin_down_reason` as its RFC 9003 shutdown communication.
+  Clearing it enables the peer.
+- While the resolved value is unchanged, a reload keeps the runtime toggle. A
+  runtime `enable` of a config-down peer therefore lasts until the next
+  daemon restart or a reload that changes `admin_down`; a runtime `disable`
+  of a config-up peer lasts the same way.
+
 | Field | Class | Notes |
 |---|---|---|
 | `address` | restart-required (identity) | Part of the diff key. Edit = delete + add. To change the peer address in place, delete the old neighbor (gRPC or remove from config + reload), then add the new one. |
 | `interface` | restart-required (identity) | Part of the diff key. Same as `address`. Used by IPv6 link-local + BGP unnumbered peering. |
 | `remote_asn` | live (session reset, identity) | Not part of the diff key: on SIGHUP the reconciler rebuilds the session immediately with the new ASN. Equivalent to delete + add of the neighbor — no daemon restart needed. Annotated "session reset: peer re-established with new ASN" by `rustbgpd --diff`. |
 | `description` | live | Metadata only; hot-applied in place — session task untouched. |
+| `admin_down` | live | Hot-applied in place through the operator disable/enable path; see [Administrative state](#administrative-state). Setting it sends Cease/Administrative Shutdown with `admin_down_reason`; clearing it starts the session. Mixed with a session-reset edit, the peer is rebuilt once and comes back in the new state; that rebuild's Cease carries no shutdown communication. |
+| `admin_down_reason` | live | RFC 9003 shutdown communication, at most 128 bytes. A change is recorded in place and sent with the next `admin_down` shutdown. |
 | `peer_group` | live (session reset) | A reassignment changes the peer's effective inherited config, so SIGHUP reconcile (and the transaction session-reshape executor) rebuild the session. Group *field* edits on an unchanged membership hot-apply per the `[peer_groups.<name>]` table below. |
 | `hold_time` | live (effective next session) | Negotiated in OPEN. On SIGHUP the reconciler rebuilds the session immediately, so the new value is negotiated right away. |
 | `min_hold_time` | live (effective next session) | Validates the peer's next OPEN proposal. On SIGHUP the reconciler rebuilds the session immediately; existing sessions are not re-evaluated in place. |
@@ -289,6 +311,8 @@ static neighbors.
 
 | Field | Class | Notes |
 |---|---|---|
+| `admin_down` | live | Same as neighbor for inheriting static members. Rejected on a group referenced by `[[dynamic_neighbors]]`. |
+| `admin_down_reason` | live | Same as neighbor. |
 | `hold_time` | live (effective next session) | Same as neighbor. |
 | `min_hold_time` | live (effective next session) | Same as neighbor; static members are rebuilt, while accepted dynamic members follow the group caveat above. |
 | `send_hold_time` | live (effective next session) | Same as neighbor. |

@@ -1468,3 +1468,109 @@ fn link_local_next_hop_rejects_neighbors_without_interface_scope() {
         }
     }
 }
+
+#[test]
+fn admin_down_resolves_with_peer_group_inheritance_and_override() {
+    let toml_str = format!(
+        r#"
+{}
+[peer_groups.parked]
+admin_down = true
+admin_down_reason = "carrier outage"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "parked"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+peer_group = "parked"
+admin_down = false
+
+[[neighbors]]
+address = "10.0.0.5"
+remote_asn = 65005
+admin_down = true
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let admin_down = |address: &str| {
+        let neighbor = config
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == address)
+            .unwrap();
+        config.resolve_neighbor(neighbor).unwrap().admin_down
+    };
+    assert_eq!(admin_down("10.0.0.2"), None);
+    assert_eq!(admin_down("10.0.0.3").as_deref(), Some("carrier outage"));
+    assert_eq!(
+        admin_down("10.0.0.4"),
+        None,
+        "neighbor false overrides group"
+    );
+    assert_eq!(admin_down("10.0.0.5").as_deref(), Some(""));
+}
+
+#[test]
+fn admin_down_reason_longer_than_sent_shutdown_communication_is_rejected() {
+    let fits = valid_toml().replace(
+        "hold_time = 90",
+        &format!(
+            "hold_time = 90\nadmin_down = true\nadmin_down_reason = \"{}\"",
+            "é".repeat(64)
+        ),
+    );
+    parse(&fits).expect("128 bytes is the sent maximum");
+
+    let neighbor = valid_toml().replace(
+        "hold_time = 90",
+        &format!(
+            "hold_time = 90\nadmin_down_reason = \"{}\"",
+            "x".repeat(129)
+        ),
+    );
+    let err = parse(&neighbor).unwrap_err();
+    assert!(
+        matches!(&err, ConfigError::InvalidNeighborConfig { field, .. } if field == "admin_down_reason"),
+        "{err}"
+    );
+
+    let group = format!(
+        "{}\n[peer_groups.parked]\nadmin_down_reason = \"{}\"\n",
+        valid_toml(),
+        "x".repeat(129)
+    );
+    let err = parse(&group).unwrap_err();
+    assert!(
+        matches!(&err, ConfigError::InvalidNeighborConfig { address, field, .. }
+            if address == "peer_group.parked" && field == "admin_down_reason"),
+        "{err}"
+    );
+}
+
+#[test]
+fn admin_down_on_a_dynamic_range_peer_group_is_rejected() {
+    let toml_str = format!(
+        r#"
+{}
+[peer_groups.ixp]
+admin_down = true
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ixp"
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(
+        matches!(&err, ConfigError::InvalidDynamicNeighbor { reason } if reason.contains("admin_down")),
+        "{err}"
+    );
+    parse(&toml_str.replace("admin_down = true", "admin_down = false"))
+        .expect("an explicit false is allowed");
+}

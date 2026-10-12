@@ -242,6 +242,7 @@ fn build_transport_config_reflects_every_transport_field() {
     );
 
     let config = PeerManagerNeighborConfig {
+        admin_down: None,
         min_hold_time: Some(30),
         address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         interface: Some("test-if".to_string()),
@@ -316,6 +317,7 @@ fn build_transport_config_reflects_every_transport_field() {
         remote_asn,
         description: _description, // NON-TRANSPORT: operator label only.
         peer_group,
+        admin_down: _admin_down, // NON-TRANSPORT: manager-owned admin state.
         hold_time,
         send_hold_time,
         max_prefixes,

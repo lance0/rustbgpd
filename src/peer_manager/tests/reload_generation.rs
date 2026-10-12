@@ -217,6 +217,7 @@ impl GenerationHarness {
                     handle,
                     session_id,
                     ManagedPeerState {
+                        admin_down: None,
                         policy_known_down: false,
                         remote_asn: resolved.transport_config.peer.remote_asn,
                         description: resolved.label,

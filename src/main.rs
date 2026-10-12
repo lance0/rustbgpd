@@ -6083,6 +6083,7 @@ async fn run<T>(
             remote_asn: transport_config.peer.remote_asn,
             description: label.clone(),
             peer_group,
+            admin_down: neighbor.admin_down,
             hold_time: Some(transport_config.peer.hold_time),
             min_hold_time: transport_config.peer.min_hold_time,
             send_hold_time: Some(transport_config.peer.send_hold_time),
@@ -10717,6 +10718,8 @@ peer_group = "plain"
             security: crate::config::SecurityConfig::default(),
             neighbors: vec![
                 crate::config::Neighbor {
+                    admin_down: None,
+                    admin_down_reason: None,
                     tcp_mss: None,
                     min_hold_time: None,
                     address: "10.0.0.2".to_string(),
@@ -10777,6 +10780,8 @@ peer_group = "plain"
                     log_level: None,
                 },
                 crate::config::Neighbor {
+                    admin_down: None,
+                    admin_down_reason: None,
                     tcp_mss: None,
                     min_hold_time: None,
                     address: "10.0.0.3".to_string(),
@@ -10837,6 +10842,8 @@ peer_group = "plain"
                     log_level: None,
                 },
                 crate::config::Neighbor {
+                    admin_down: None,
+                    admin_down_reason: None,
                     tcp_mss: None,
                     min_hold_time: None,
                     address: "10.0.0.4".to_string(),
@@ -10940,6 +10947,7 @@ peer_group = "plain"
         );
         transport.tcp_mss = tcp_mss;
         config::ResolvedNeighbor {
+            admin_down: None,
             transport_config: transport,
             max_prefix_restart_seconds: None,
             label: format!("peer-{addr}"),
