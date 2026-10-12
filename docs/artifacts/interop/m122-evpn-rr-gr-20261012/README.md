@@ -30,6 +30,12 @@ checks for each phase's exact stale gauge. That offline snapshot replay and
 its driver hash are recorded separately in `strengthened_snapshot_replay`;
 the original executed driver hash is preserved.
 
+An ordered wire replay also passes. It assigns each decoded message the
+capture row at which the complete TCP prefix through its end was available,
+including fragmented and out-of-order segments. Its oracle hash and ordered
+witnesses are recorded in `ordered_wire_replay` separately from the original
+executed harness hashes.
+
 A separate live peer admission preceded the new leg. In the M122 topology,
 both directions of both sessions were admitted again from captured OPENs:
 MP capability 1 contains `00190046` (AFI 25, SAFI 70), GR capability 64
@@ -66,7 +72,10 @@ After the second source loss, all five remaining Types gained `LLGR_STALE`
 the community. Expiry withdraws all five. No client withdrawals occurred
 in either GR retention window. The oracle compares full announced NLRI
 bytes and complete withdrawal keys; reconstructed withdrawal labels are
-zero and are not identity fields. Raw witnesses are in
+zero and are not identity fields. The ordered replay proves the omitted
+withdrawals follow the complete source EoR, and survivor withdrawals follow
+all five LLGR promotions. No withdrawn identity is later reannounced. Raw
+witnesses are in
 [wire-witnesses.json](wire-witnesses.json), phase state is in
 [state-witnesses.json](state-witnesses.json), and the result is in
 [verdict.json](verdict.json).

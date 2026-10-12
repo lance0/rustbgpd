@@ -13,6 +13,51 @@
     "tests/interop/scripts/run_m122_evpn_gr.py": "b46547433d6b9b762eb7f78988eb545a8bd43e9cb46331ca14c208aee84ed536",
     "tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh": "85ecb8f4a0e26d4fae0d37a6f17ee214fae2e15acf3d4481637cf714e2c4cc2b"
   },
+  "ordered_wire_replay": {
+    "client_order": {
+      "expiry_withdrawals": [
+        {
+          "completion": [
+            49,
+            1993
+          ],
+          "keys": [
+            "1:0000fde90000000b0000000000000000120100000000",
+            "2:0000fde900000015000000003002000000120120c0000201",
+            "3:0000fde90000001f00000000200a007a02",
+            "4:0000fde90000002900000000000000001201200a007a02",
+            "5:0000fde9000000330000000020cb007101"
+          ]
+        }
+      ],
+      "llgr_promotion_completion": [
+        46,
+        1799
+      ],
+      "omitted_withdrawals": [
+        {
+          "completion": [
+            41,
+            1425
+          ],
+          "keys": [
+            "1:0000fde90000000c0000000000000000120200000000",
+            "2:0000fde900000016000000003002000000120220c0000202",
+            "3:0000fde90000002000000000200a007a02",
+            "4:0000fde90000002a00000000000000001202200a007a02",
+            "5:0000fde9000000340000000020cb007102"
+          ]
+        }
+      ],
+      "source_eor_completion": [
+        40,
+        445
+      ]
+    },
+    "focused_regressions": 25,
+    "oracle_sha256": "df315db369fb1ac2186b9622533e6582d1707e2970225993687c5b25547fdb3c",
+    "result": "pass"
+  },
   "peers": [
     {
       "gobgp_sha256": "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",

@@ -166,23 +166,68 @@ def admit_open(body):
             "restart": bool(flags_time & 0x8000), "forwarding": bool(evpn[0][3] & 0x80)}
 
 
+def completed_messages(segments):
+    # Reuse the strict full-stream decoder, then attach the capture row at
+    # which every byte through each message end had arrived. This includes
+    # preceding gaps when segments arrive out of order or are retransmitted.
+    data = reassemble([(sequence, payload) for sequence, payload, _ in segments])
+    base = min(sequence for sequence, _, _ in segments)
+    first_seen = [None] * len(data)
+    for sequence, payload, ordinal in segments:
+        for offset in range(sequence - base, sequence - base + len(payload)):
+            if first_seen[offset] is None:
+                first_seen[offset] = ordinal
+    ready = 0
+    for offset, ordinal in enumerate(first_seen):
+        need(ordinal is not None, "TCP byte has no capture position")
+        ready = max(ready, ordinal)
+        first_seen[offset] = ready
+    end = 0
+    for typ, body in messages(data):
+        end += len(body) + 19
+        yield (first_seen[end - 1], end), typ, body
+
+
+def check_client_order(events, eor_position):
+    survivors = {nlri_key(n) for n in expected_nlri([1])}
+    omitted = {nlri_key(n) for n in expected_nlri([2])}
+    promoted, retired = set(), set()
+    witness = {"source_eor_completion": eor_position, "omitted_withdrawals": [],
+               "llgr_promotion_completion": None, "expiry_withdrawals": []}
+    for position, announced, llgr, withdrawn in sorted(events, key=lambda event: event[0]):
+        need(not llgr & withdrawn, "same UPDATE promotes and withdraws an EVPN key")
+        need(not announced & retired, "client reannounces an EVPN key after its withdrawal")
+        if withdrawn & omitted:
+            need(position > eor_position, "omitted withdrawal precedes complete source EoR")
+            witness["omitted_withdrawals"].append({"completion": position, "keys": sorted(withdrawn & omitted)})
+        if withdrawn & survivors:
+            need(promoted == survivors, "survivor withdrawal precedes all five LLGR promotions")
+            witness["expiry_withdrawals"].append({"completion": position, "keys": sorted(withdrawn & survivors)})
+        promoted.update(llgr)
+        if promoted == survivors and witness["llgr_promotion_completion"] is None:
+            witness["llgr_promotion_completion"] = position
+        retired.update(withdrawn)
+    return witness
+
+
 def analyze_wire(lines):
     parts = defaultdict(list)
-    for line in lines:
+    for ordinal, line in enumerate(lines, 1):
         fields = line.rstrip("\n").split("\t")
         need(len(fields) == 5, "capture row must have five fields")
         stream, src, dst, seq, payload = fields
         if payload:
-            parts[(stream, src, dst)].append((int(seq), bytes.fromhex(payload.replace(":", ""))))
+            parts[(stream, src, dst)].append((int(seq), bytes.fromhex(payload.replace(":", "")), ordinal))
     opens, announced, withdrawn, promoted, eors = [], defaultdict(set), defaultdict(set), set(), []
+    client_events = []
     restarted = False
     initial_sources = []
     for (stream, src, dst), segments in parts.items():
-        decoded = messages(reassemble(segments))
+        decoded = completed_messages(segments)
         stream_announced = set()
         is_restart = False
         source_opens = 0
-        for typ, body in decoded:
+        for position, typ, body in decoded:
             need(typ != 3, "captured BGP NOTIFICATION")
             if typ == 1:
                 witness = admit_open(body)
@@ -198,6 +243,7 @@ def analyze_wire(lines):
             old_withdraw, attrs, old_announce = update(body)
             need(not old_withdraw and not old_announce, "unexpected legacy NLRI")
             validate_attributes(attrs)
+            event_announced, event_promoted, event_withdrawn = set(), set(), set()
             if 14 in attrs:
                 reach = attrs[14][1]
                 need(reach[:4] == bytes.fromhex("00194604") and reach[4:8] == ipaddress.IPv4Address(SOURCE).packed, "MP_REACH family/next-hop differs")
@@ -209,9 +255,11 @@ def analyze_wire(lines):
                 if any(route.startswith("03") for route in routes):
                     need(attrs[22][1] == b"\x00\x06" + LABEL.to_bytes(3, "big") + ipaddress.IPv4Address(SOURCE).packed, "wire IMET PMSI differs")
                 if src == RR_CLIENT and dst == CLIENT:
+                    event_announced = {nlri_key(n) for n in routes}
                     need(attrs[9][1] == ipaddress.IPv4Address(SOURCE).packed and attrs[10][1] == ipaddress.IPv4Address(RR).packed, "reflection attributes differ")
                     if 8 in attrs and LLGR_STALE.to_bytes(4, "big") in [attrs[8][1][i:i + 4] for i in range(0, len(attrs[8][1]), 4)]:
                         promoted.update(routes)
+                        event_promoted = event_announced
                 announced[(src, dst)].update(routes)
                 stream_announced.update(routes)
             if 15 in attrs:
@@ -222,9 +270,14 @@ def analyze_wire(lines):
                     if is_restart:
                         need(stream_announced == expected_nlri([1]), "restart EoR precedes exactly the refreshed five")
                         eors.append({"stream": stream, "source": src, "mp_unreach": unreach.hex(),
-                                     "update_body": body.hex(), "refreshed_nlri": sorted(stream_announced)})
+                                     "update_body": body.hex(), "refreshed_nlri": sorted(stream_announced),
+                                     "completion": position})
                 else:
-                    withdrawn[(src, dst)].update(split_evpn(unreach[3:]))
+                    routes = split_evpn(unreach[3:])
+                    withdrawn[(src, dst)].update(routes)
+                    event_withdrawn = {nlri_key(n) for n in routes}
+            if (src, dst) == (RR_CLIENT, CLIENT):
+                client_events.append((position, event_announced, event_promoted, event_withdrawn))
         if (src, dst) == (SOURCE, RR):
             need(source_opens == 1, "source TCP stream must contain exactly one OPEN")
             if is_restart:
@@ -239,7 +292,8 @@ def analyze_wire(lines):
     need(promoted == expected_nlri([1]), "client lacks five exact LLGR wire announcements")
     withdrawn_keys = {nlri_key(n) for n in withdrawn[(RR_CLIENT, CLIENT)]}
     need(withdrawn_keys == {nlri_key(n) for n in expected_nlri([1, 2])}, "client wire withdrawal keys differ")
+    order = check_client_order(client_events, eors[0]["completion"])
     return {"opens": opens, "restart_eor": eors, "initial_source": initial_sources[0],
             "initial_nlri": initial_sources[0]["nlri"],
             "llgr_nlri": sorted(promoted), "withdrawn_keys": sorted(withdrawn_keys),
-            "withdrawn_nlri": sorted(withdrawn[(RR_CLIENT, CLIENT)])}
+            "withdrawn_nlri": sorted(withdrawn[(RR_CLIENT, CLIENT)]), "client_order": order}

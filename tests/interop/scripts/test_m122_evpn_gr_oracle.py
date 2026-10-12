@@ -50,6 +50,10 @@ def announce(t, s, reflected=False, llgr=False):
     return message(2, update_body(attrs))
 
 
+def withdraw(types, s):
+    return message(2, update_body(attr(15, bytes.fromhex("001946") + b"".join(oracle.nlri(t, s) for t in types))))
+
+
 def fixture(restart_forwarding=True, include_eor=True):
     initial = message(1, open_body()) + b"".join(announce(t, s) for s in (1, 2) for t in range(1, 6))
     restart = message(1, open_body(True, restart_forwarding)) + b"".join(announce(t, 1) for t in range(1, 6))
@@ -82,6 +86,67 @@ class OracleTests(unittest.TestCase):
         result = oracle.analyze_wire(fixture())
         self.assertEqual(len(result["llgr_nlri"]), 5)
         self.assertEqual(len(result["withdrawn_nlri"]), 10)
+
+    def test_survivor_withdrawal_before_llgr_promotion_fails(self):
+        lines = fixture()
+        first = announce(1, 1, True, True).hex()
+        lines[2] = lines[2].replace(first, withdraw(range(1, 6), 1).hex() + first, 1)
+        with self.assertRaisesRegex(ValueError, "survivor withdrawal"):
+            oracle.analyze_wire(lines)
+
+    def test_survivor_withdrawal_requires_all_five_promotions(self):
+        lines = fixture()
+        last = announce(5, 1, True, True).hex()
+        lines[2] = lines[2].replace(last, withdraw([1], 1).hex() + last, 1)
+        with self.assertRaisesRegex(ValueError, "survivor withdrawal"):
+            oracle.analyze_wire(lines)
+
+    def test_no_reannouncement_after_expiry_withdrawal(self):
+        lines = fixture()
+        lines[2] += announce(1, 1, True, True).hex()
+        with self.assertRaisesRegex(ValueError, "reannounces"):
+            oracle.analyze_wire(lines)
+
+    def test_same_update_cannot_promote_and_withdraw_a_key(self):
+        lines = fixture()
+        original = announce(1, 1, True, True)
+        attrs = original[23:] + attr(15, bytes.fromhex("001946") + oracle.nlri(1, 1))
+        lines[2] = lines[2].replace(original.hex(), message(2, update_body(attrs)).hex(), 1)
+        with self.assertRaisesRegex(ValueError, "same UPDATE"):
+            oracle.analyze_wire(lines)
+
+    def test_omitted_withdrawal_must_follow_source_eor(self):
+        lines = fixture()
+        with self.assertRaisesRegex(ValueError, "complete source EoR"):
+            oracle.analyze_wire([lines[0], lines[2], lines[1]])
+
+    def test_eor_completion_waits_for_fragments_and_preceding_gaps(self):
+        lines = fixture()
+        restart = bytes.fromhex(lines[1].split("\t")[4])
+        eor_length = len(message(2, update_body(attr(15, bytes.fromhex("001946")))))
+        for split, tail_first in ((len(restart) - 1, False), (len(restart) - eor_length, True)):
+            head = f"2\t{oracle.SOURCE}\t{oracle.RR}\t100\t{restart[:split].hex()}"
+            tail = f"2\t{oracle.SOURCE}\t{oracle.RR}\t{100 + split}\t{restart[split:].hex()}"
+            first, last = (tail, head) if tail_first else (head, tail)
+            with self.subTest(tail_first=tail_first):
+                with self.assertRaisesRegex(ValueError, "complete source EoR"):
+                    oracle.analyze_wire([lines[0], first, lines[2], last])
+                result = oracle.analyze_wire([lines[0], first, last, lines[2]])
+                self.assertEqual(result["client_order"]["source_eor_completion"][0], 3)
+
+    def test_message_completion_uses_first_complete_tcp_prefix(self):
+        raw = message(4, b"") * 3
+        segments = [(119, raw[19:38], 1), (100, raw[:10], 2), (138, raw[38:], 3),
+                    (110, raw[10:19], 4), (100, raw[:19], 5)]
+        decoded = list(oracle.completed_messages(segments))
+        self.assertEqual([position for position, _, _ in decoded], [(4, 19), (4, 38), (4, 57)])
+        self.assertTrue(all(typ == 4 and body == b"" for _, typ, body in decoded))
+
+    def test_legitimate_refresh_before_expiry_remains_accepted(self):
+        lines = fixture()
+        final = withdraw(range(1, 6), 1).hex()
+        lines[2] = lines[2].replace(final, announce(1, 1, True, True).hex() + final, 1)
+        oracle.analyze_wire(lines)
 
     def test_zero_label_withdrawals_keep_complete_route_identity(self):
         for t in (1, 2, 5):
