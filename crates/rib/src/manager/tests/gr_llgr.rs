@@ -3528,3 +3528,31 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
         assert_eq!(response.try_recv().unwrap().snapshots, vec![expected]);
     });
 }
+
+/// An LLGR deadline that outlived both family maps still reports its row,
+/// found by keyed lookup; another peer's deadline never leaks into it.
+/// Dropping the configured-family probe loses the orphaned row.
+#[tokio::test(start_paused = true)]
+async fn retention_row_reports_llgr_deadline_outside_family_maps() {
+    let (_tx, mut manager) = direct_manager(None);
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let now = tokio::time::Instant::now();
+    manager.llgr_stale_deadlines.insert(
+        (peer, Afi::Ipv6, Safi::Unicast),
+        now + Duration::from_secs(100),
+    );
+    manager.llgr_stale_deadlines.insert(
+        (other, Afi::Ipv4, Safi::Unicast),
+        now + Duration::from_secs(50),
+    );
+    let rows = manager.gr_retention_snapshot(peer, false);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].afi, rows[0].safi), (Afi::Ipv6, Safi::Unicast));
+    assert_eq!(rows[0].phase, crate::update::GrRetentionPhase::Llgr);
+    assert_eq!(rows[0].remaining_secs, Some(100));
+    assert_eq!(
+        manager.gr_retention_snapshot(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), false),
+        Vec::new()
+    );
+}

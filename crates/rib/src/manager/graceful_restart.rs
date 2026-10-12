@@ -222,9 +222,11 @@ impl RibManager {
         peer: IpAddr,
         with_stale_counts: bool,
     ) -> Vec<GrRetentionFamilyState> {
+        let gr_families = self.gr_peers.get(&peer);
+        let llgr_families = self.llgr_peers.get(&peer);
         let mut rows: Vec<((Afi, Safi), GrRetentionPhase, Option<tokio::time::Instant>)> =
             Vec::new();
-        if let Some(families) = self.gr_peers.get(&peer) {
+        if let Some(families) = gr_families {
             let present = self.outbound_peers.contains_key(&peer)
                 || self.live_sessions.get(&peer).is_some_and(|s| !s.is_empty());
             let phase = if present {
@@ -235,20 +237,35 @@ impl RibManager {
             let deadline = self.gr_stale_deadlines.get(&peer).copied();
             rows.extend(families.iter().map(|&family| (family, phase, deadline)));
         }
-        for (&(p, afi, safi), &deadline) in &self.llgr_stale_deadlines {
-            if p != peer {
-                continue;
-            }
-            match rows.iter_mut().find(|row| row.0 == (afi, safi)) {
-                Some(row) => row.2 = Some(row.2.map_or(deadline, |d| d.min(deadline))),
-                None => rows.push(((afi, safi), GrRetentionPhase::Llgr, Some(deadline))),
+        rows.extend(
+            llgr_families
+                .into_iter()
+                .flatten()
+                .filter(|family| gr_families.is_none_or(|gr| !gr.contains(family)))
+                .map(|&family| (family, GrRetentionPhase::Llgr, None)),
+        );
+        // Keyed LLGR deadline lookups, never a walk of every peer's entries.
+        // A deadline can outlive both family maps (an LLGR-stale family the
+        // re-established session did not promote again), so every family the
+        // RIB can hold routes in is probed too.
+        for &(_, afi, safi) in rustbgpd_wire::CONFIGURED_FAMILIES {
+            if !rows.iter().any(|row| row.0 == (afi, safi)) {
+                rows.push(((afi, safi), GrRetentionPhase::Llgr, None));
             }
         }
-        for &family in self.llgr_peers.get(&peer).into_iter().flatten() {
-            if !rows.iter().any(|row| row.0 == family) {
-                rows.push((family, GrRetentionPhase::Llgr, None));
+        rows.retain_mut(|(family, phase, deadline)| {
+            let llgr = self
+                .llgr_stale_deadlines
+                .get(&(peer, family.0, family.1))
+                .copied();
+            if let Some(llgr) = llgr {
+                *deadline = Some(deadline.map_or(llgr, |d| d.min(llgr)));
             }
-        }
+            // A probed family is kept only when it holds an LLGR deadline.
+            llgr.is_some()
+                || *phase != GrRetentionPhase::Llgr
+                || llgr_families.is_some_and(|families| families.contains(family))
+        });
         if rows.is_empty() {
             return Vec::new();
         }
