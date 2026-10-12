@@ -5501,8 +5501,12 @@ async fn failed_generation_keeps_a_runtime_disabled_peer_down() {
         0,
         "no session start"
     );
-    // The forward step re-asserts the config disable (one Stop to the idle
-    // session); the restore adds none.
-    assert!(counters.stops.load(Ordering::SeqCst) <= 1);
+    // Exactly the forward step's re-asserted disable reaches the idle session.
+    // The stub records it asynchronously, so wait for it; it exits after that
+    // Stop, so a restoring Stop could not enqueue and the generation would not
+    // be FullyCompensated.
+    wait_counter(&counters.stops, 1).await;
+    assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.starts.load(Ordering::SeqCst), 0);
     harness.shutdown().await;
 }
