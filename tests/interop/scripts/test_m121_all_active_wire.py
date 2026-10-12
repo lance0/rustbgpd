@@ -7,6 +7,7 @@ import shutil
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from m121_all_active_wire import verify_pcap, verify_wire
 
@@ -98,6 +99,15 @@ class WireTests(unittest.TestCase):
                 with self.subTest(reason=name, extended=bool(length_flag)), self.assertRaisesRegex(
                         ValueError, 'MP_REACH flags'):
                     verify_wire(tcp_rows(mp_flags=flags | length_flag), MAC, 100)
+
+    def test_pcap_extraction_timeout_default_and_override(self):
+        for options, expected in (({}, 60), ({'timeout': 0.25}, 0.25)):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                with patch('m121_all_active_wire.subprocess.run') as run:
+                    run.return_value.stdout = '\n'.join(tcp_rows())
+                    result = verify_pcap(Path(directory) / 'capture.pcap', MAC, 100, **options)
+                self.assertEqual(run.call_args.kwargs['timeout'], expected)
+                self.assertEqual(result['frr_proxy_type2'], 1)
 
     @unittest.skipUnless(shutil.which('tshark'), 'tshark is not installed')
     def test_real_tshark_extracts_raw_vni_and_reserved_bytes(self):

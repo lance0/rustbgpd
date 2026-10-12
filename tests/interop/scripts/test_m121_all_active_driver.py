@@ -4,9 +4,13 @@ import ast
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import re
+import select
+import signal
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -59,13 +63,132 @@ class RustOriginTests(unittest.TestCase):
                      patch.object(driver, 'snapshot'), patch.object(driver, 'stop_captures'), \
                      patch('m121_all_active_wire.verify_pcap', return_value={'type2': 1}) as wire:
                     if inactive and active:
-                        driver.rust_origin(100, 100, None)
-                        wire.assert_called_once()
+                        bgp = ('rust-bgp', Mock(poll=Mock(return_value=None)), None)
+                        driver.rust_origin(100, 100, bgp)
+                        self.assertEqual(wire.call_count, 2)
+                        self.assertGreater(wire.call_args_list[0].kwargs['timeout'], 0)
+                        self.assertNotIn('timeout', wire.call_args_list[1].kwargs)
                     else:
                         with self.assertRaises(AssertionError):
                             driver.rust_origin(100, 100, None)
                         wire.assert_not_called()
                 self.assertEqual(json.loads(Path(directory, 'rust-origin-frr-sync.json').read_text()), state)
+
+
+class CaptureCompletionTests(unittest.TestCase):
+    def test_tcpdump_requests_immediate_delivery(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(driver, 'OUT', Path(directory)), \
+             patch.object(driver, 'CAPTURES', []), patch.object(driver.subprocess, 'Popen') as popen:
+            item = driver.start_capture('bgp', 'b', 'any', ['tcp', 'port', '179'])
+            try:
+                self.assertIn('--immediate-mode', popen.call_args.args[0])
+                self.assertIn('-U', popen.call_args.args[0])
+            finally:
+                item[2].close()
+
+    def test_partial_oracle_and_tshark_reads_retry_before_success(self):
+        clock = [0.0]
+        process = Mock(poll=Mock(return_value=None))
+        failures = [ValueError('missing proxy'),
+                    subprocess.CalledProcessError(2, ['tshark'], stderr='partial record')]
+        with patch.object(driver, 'OUT', Path('/receipt')), \
+             patch.object(driver.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), \
+             patch.object(driver.time, 'sleep', side_effect=lambda seconds, clock=clock: clock.__setitem__(0, clock[0]+seconds)), \
+             patch('m121_all_active_wire.verify_pcap', side_effect=[*failures, {'type2': 1}]) as verify:
+            driver.wait_bgp_capture(('rust-bgp', process, None), 100, 100)
+        self.assertEqual([c.kwargs['timeout'] for c in verify.call_args_list], [30, 29.75, 29.5])
+        process.send_signal.assert_not_called()
+
+    def test_permanent_missing_evidence_or_timeout_hits_total_deadline(self):
+        for error in (ValueError('missing proxy'), subprocess.TimeoutExpired('tshark', 30)):
+            clock = [0.0]
+            def verify(*args, error=error, clock=clock, **kwargs):
+                if isinstance(error, subprocess.TimeoutExpired):
+                    clock[0] += kwargs['timeout']
+                raise error
+            with self.subTest(error=error), patch.object(driver, 'OUT', Path('/receipt')), \
+                 patch.object(driver.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), \
+                 patch.object(driver.time, 'sleep', side_effect=lambda seconds, clock=clock: clock.__setitem__(0, clock[0]+seconds)), \
+                 patch('m121_all_active_wire.verify_pcap', side_effect=verify):
+                with self.assertRaisesRegex(AssertionError, 'timed out waiting for complete BGP capture'):
+                    driver.wait_bgp_capture(('rust-bgp', Mock(poll=Mock(return_value=None)), None), 100, 100)
+                self.assertEqual(clock[0], 30)
+
+    def test_capture_exit_before_or_during_success_is_fatal(self):
+        for statuses in ([0], [None, 0]):
+            with self.subTest(statuses=statuses), patch.object(driver, 'OUT', Path('/receipt')), \
+                 patch('m121_all_active_wire.verify_pcap', return_value={'type2': 1}):
+                process = Mock(poll=Mock(side_effect=statuses))
+                with self.assertRaisesRegex(RuntimeError, 'tcpdump rust-bgp exited'):
+                    driver.wait_bgp_capture(('rust-bgp', process, None), 100, 100)
+
+
+class DaemonStopTests(unittest.TestCase):
+    def test_confirmed_stop_precedes_body_and_resume_survives_body_failure(self):
+        process = Mock(pid=123, returncode=None)
+        stopped = (signal.SIGSTOP << 8) | 0x7f
+        events = []
+        with patch.object(driver, 'DAEMON', process), \
+             patch.object(driver.os, 'waitpid', return_value=(123, stopped)) as waitpid, \
+             patch.object(driver, 'event', side_effect=lambda name, **_: events.append(name)):
+            with self.assertRaisesRegex(ValueError, 'carrier failure'):
+                with driver.pause_owned_daemon():
+                    self.assertEqual(process.send_signal.call_args.args, (signal.SIGSTOP,))
+                    self.assertEqual(events, ['daemon_stop_confirmed_for_carrier'])
+                    raise ValueError('carrier failure')
+        waitpid.assert_called_once_with(123, os.WUNTRACED | os.WNOHANG)
+        self.assertEqual([c.args[0] for c in process.send_signal.call_args_list], [signal.SIGSTOP, signal.SIGCONT])
+        self.assertEqual(events[-1], 'daemon_resume_requested_after_carrier')
+
+    def test_failed_signal_or_exited_child_still_attempts_resume(self):
+        for exited in (False, True):
+            process = Mock(pid=123, returncode=None)
+            if not exited:
+                process.send_signal.side_effect = [RuntimeError('stop failed'), None]
+            with self.subTest(exited=exited), patch.object(driver, 'DAEMON', process), \
+                 patch.object(driver.os, 'waitpid', return_value=(123, 7 << 8)), patch.object(driver, 'event'):
+                with self.assertRaises(RuntimeError):
+                    with driver.pause_owned_daemon():
+                        self.fail('unconfirmed stop must not enter carrier operation')
+            self.assertEqual([c.args[0] for c in process.send_signal.call_args_list], [signal.SIGSTOP, signal.SIGCONT])
+            if exited:
+                self.assertEqual(process.returncode, 7)
+
+    def test_missing_stop_confirmation_is_bounded_and_resumes(self):
+        process = Mock(pid=123, returncode=None)
+        clock = [0.0]
+        with patch.object(driver, 'DAEMON', process), patch.object(driver, 'event'), \
+             patch.object(driver.os, 'waitpid', return_value=(0, 0)), \
+             patch.object(driver.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), \
+             patch.object(driver.time, 'sleep', side_effect=lambda seconds, clock=clock: clock.__setitem__(0, clock[0]+seconds)):
+            with self.assertRaisesRegex(RuntimeError, 'stop handshake exceeded'):
+                with driver.pause_owned_daemon():
+                    self.fail('unconfirmed stop must not enter carrier operation')
+        self.assertLess(clock[0], 5.02)
+        self.assertEqual(process.send_signal.call_args.args, (signal.SIGCONT,))
+
+    def test_actual_owned_child_stop_and_resume(self):
+        process = subprocess.Popen([sys.executable, '-c',
+                                    'import sys; print("ready", flush=True); print(sys.stdin.readline().strip(), flush=True)'],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0], 'child failed to start')
+            self.assertEqual(process.stdout.readline().strip(), 'ready')
+            with patch.object(driver, 'DAEMON', process), patch.object(driver, 'event'):
+                with driver.pause_owned_daemon():
+                    self.assertIn('T (stopped)', Path(f'/proc/{process.pid}/status').read_text())
+                    process.stdin.write('resumed\n')
+                    process.stdin.flush()
+                    self.assertFalse(select.select([process.stdout], [], [], 0)[0])
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0], 'owned child was not resumed')
+            self.assertEqual(process.stdout.readline().strip(), 'resumed')
+            self.assertEqual(process.wait(timeout=5), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdin.close()
+            process.stdout.close()
 
 
 class HistoricalComparisonTests(unittest.TestCase):
@@ -193,6 +316,7 @@ class NamespaceCleanupTests(unittest.TestCase):
 class CarrierRecoveryTests(unittest.TestCase):
     def recover(self, carrier_hold, full_readiness=6.25, response_duration=0.0):
         clock = [0.0]
+        process = Mock(pid=123, poll=Mock(return_value=None))
         def sleep(seconds):
             clock[0] += seconds
         def wait(predicate, description):
@@ -203,15 +327,20 @@ class CarrierRecoveryTests(unittest.TestCase):
             self.assertTrue(predicate())
         def ctl(*args):
             if clock[0] >= 10:
+                self.assertEqual(process.send_signal.call_args.args, (signal.SIGCONT,))
                 clock[0] += response_duration
             return dict(segments=[dict(drained=clock[0] < 10 + carrier_hold)])
         def ns(node, *args):
+            if node == 'b' and args == ('ip', 'link', 'set', 'ac', 'up'):
+                self.assertEqual(process.send_signal.call_args.args, (signal.SIGSTOP,))
             if node == 'ce' and args == ('ip', '-j', 'link', 'show', 'bond0'):
                 return json.dumps([dict(address=driver.PEER_MAC)])
             return json.dumps([dict(flags=['LOWER_UP'])])
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(driver, 'OUT', Path(directory)))
-            stack.enter_context(patch.object(driver.time, 'monotonic', side_effect=lambda: clock[0]))
+            stack.enter_context(patch.object(driver, 'DAEMON', process))
+            stack.enter_context(patch.object(driver.os, 'waitpid', return_value=(123, (signal.SIGSTOP << 8) | 0x7f)))
+            stack.enter_context(patch.object(driver.time, 'monotonic', side_effect=lambda clock=clock: clock[0]))
             stack.enter_context(patch.object(driver.time, 'sleep', side_effect=sleep))
             stack.enter_context(patch.object(driver, 'wait', side_effect=wait))
             stack.enter_context(patch.object(driver, 'ns', side_effect=ns))
@@ -237,7 +366,10 @@ class CarrierRecoveryTests(unittest.TestCase):
         self.assertFalse(self.hold_samples[-1]['state']['segments'][0]['drained'])
 
     def test_recovery_receipt_measures_from_observed_carrier_return(self):
-        self.assertEqual(self.recover(5)['carrier_observation_elapsed_seconds'], 6.25)
+        result = self.recover(5)
+        self.assertEqual(result['carrier_observation_elapsed_seconds'], 6.25)
+        self.assertIn('controlled daemon resume', result['timing_scope'])
+        self.assertIn('not natural timer latency', result['timing_scope'])
 
     def test_rpc_completed_after_hold_boundary_does_not_require_drained(self):
         self.assertEqual(self.recover(5, response_duration=.125)['carrier_observation_elapsed_seconds'], 6.25)

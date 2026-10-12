@@ -167,13 +167,13 @@ def verify_wire(rows, mac, vni, df_preference=100):
     return seen
 
 
-def verify_pcap(path, mac, vni, df_preference=100):
+def verify_pcap(path, mac, vni, df_preference=100, *, timeout=60):
     """Extract and retain the raw TCP witness beside its source capture."""
     fields = ('tcp.stream', 'ip.src', 'ip.dst', 'tcp.seq_raw', 'tcp.payload')
     command = ['tshark', '-r', str(path), '-Y', 'tcp.len > 0 && tcp.port == 179',
                '-T', 'fields', '-E', 'separator=/t']
     command += [arg for field in fields for arg in ('-e', field)]
-    result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=60)
+    result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=timeout)
     Path(str(path) + '.payloads.tsv').write_text(result.stdout)
     return verify_wire(result.stdout.splitlines(), mac, vni, df_preference)
 

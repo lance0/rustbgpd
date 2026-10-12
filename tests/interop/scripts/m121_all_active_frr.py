@@ -2,6 +2,7 @@
 """M121's isolated FRR/rustbgpd all-active cells; invoked by the lab shell driver."""
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -237,7 +238,7 @@ def snapshot(name, vni):
 
 def start_capture(name, node, interface, expression):
     err = (OUT / (name + '.stderr')).open('w')
-    process = subprocess.Popen([*prefix(node), 'tcpdump', '-U', '-n', '-i', interface,
+    process = subprocess.Popen([*prefix(node), 'tcpdump', '--immediate-mode', '-U', '-n', '-i', interface,
                                 '-w', str(OUT / (name + '.pcap')), *expression],
                                stdout=subprocess.DEVNULL, stderr=err)
     item = (name, process, err)
@@ -262,6 +263,28 @@ def stop_captures(items):
         err.close()
         CAPTURES.remove(item)
         assert process.returncode == 0, f'tcpdump {name}: exit {process.returncode}'
+
+
+def wait_bgp_capture(bgp, vni, preference):
+    """Wait for complete wire evidence before stopping a still-live capture."""
+    from m121_all_active_wire import verify_pcap
+    name, process, _ = bgp
+    deadline, last = time.monotonic() + 30, None
+    while (remaining := deadline - time.monotonic()) > 0:
+        if process.poll() is not None:
+            raise RuntimeError(f'tcpdump {name} exited before wire evidence')
+        try:
+            verify_pcap(OUT / (name + '.pcap'), RUST_MAC, vni,
+                        df_preference=preference, timeout=remaining)
+        except (ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            # A live PCAP can end in a partial record or an incomplete TCP message.
+            last = str(error)
+        else:
+            if process.poll() is not None:
+                raise RuntimeError(f'tcpdump {name} exited during wire verification')
+            return
+        time.sleep(min(.25, max(0, deadline - time.monotonic())))
+    raise AssertionError(f'timed out waiting for complete BGP capture: {last}')
 
 
 def send(node, interface, seeds, count=1, destination=PEER_MAC, source=REMOTE_MAC):
@@ -457,6 +480,7 @@ def rust_origin(vni, preference, bgp):
         return True
     wait(check, 'Rust original, FRR synchronized proxy and two-member NHG')
     snapshot('rust-only-before-bidirectional', vni)
+    wait_bgp_capture(bgp, vni, preference)
     stop_captures([bgp])
     # Extract raw TCP bytes; the oracle checks the actual BGP NLRI/attributes.
     from m121_all_active_wire import verify_pcap
@@ -516,6 +540,33 @@ def bum(vni, winner):
     return dict(vxlan_ingress_a=1, vxlan_ingress_b=1, ce_delivered=0 if winner is None else 1, df=winner)
 
 
+@contextmanager
+def pause_owned_daemon():
+    """Confirm the owned child is stopped, and always resume it before cleanup."""
+    process = DAEMON
+    assert process is not None and process.pid > 1, 'missing owned daemon'
+    try:
+        process.send_signal(signal.SIGSTOP)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            pid, status = os.waitpid(process.pid, os.WUNTRACED | os.WNOHANG)
+            if pid:
+                if not os.WIFSTOPPED(status):
+                    process.returncode = os.waitstatus_to_exitcode(status)
+                    raise RuntimeError(f'owned daemon exited before stop handshake: {process.returncode}')
+                if os.WSTOPSIG(status) != signal.SIGSTOP:
+                    raise RuntimeError('owned daemon stopped with unexpected signal')
+                break
+            time.sleep(.01)
+        else:
+            raise RuntimeError('owned daemon stop handshake exceeded five seconds')
+        event('daemon_stop_confirmed_for_carrier', pid=process.pid)
+        yield
+    finally:
+        process.send_signal(signal.SIGCONT)
+        event('daemon_resume_requested_after_carrier', pid=process.pid)
+
+
 def carrier_cycle(vni, survivor_seeds):
     from evpn_frr_peer_sync import verify_delivery
     from m121_all_active_oracle import verify_discovery, verify_frr_es_routes, verify_frr_peer_originated
@@ -542,11 +593,13 @@ def carrier_cycle(vni, survivor_seeds):
     snapshot('carrier-withdrawn', vni)
     packets = capture('carrier-survivor', survivor_seeds)
     verify_delivery(packets, 'carrier-survivor', survivor_seeds, 'a', True)
-    event('carrier_up_requested')
-    ns('b', 'ip', 'link', 'set', 'ac', 'up')
-    wait(lambda: 'LOWER_UP' in json.loads(ns('b', 'ip', '-j', 'link', 'show', 'es0'))[0]['flags'],
-         'actual Rust attachment-circuit carrier return')
-    carrier = event('carrier_up_observed')
+    # The actor cannot arm recovery before this observation while its process is stopped.
+    with pause_owned_daemon():
+        event('carrier_up_requested')
+        ns('b', 'ip', 'link', 'set', 'ac', 'up')
+        wait(lambda: 'LOWER_UP' in json.loads(ns('b', 'ip', '-j', 'link', 'show', 'es0'))[0]['flags'],
+             'actual Rust attachment-circuit carrier return')
+        carrier = event('carrier_up_observed', daemon_stopped=True)
     samples = []
     while time.monotonic() - carrier['monotonic'] < 5:
         state = ctl('evpn', 'es', 'list')
@@ -571,7 +624,7 @@ def carrier_cycle(vni, survivor_seeds):
                 recovered_rust_delivered=len(b) * 10,
                 recovered_rust_flow_seeds=b, recovered_frr_flow_seeds=a,
                 recovery_delay_seconds=5, carrier_observation_elapsed_seconds=elapsed,
-                timing_scope='external carrier observation to full readiness ordering; observer may follow actor edge; not internal hold or latency measurement')
+                timing_scope='controlled daemon resume after observed carrier return; five-second recovery ordering, not natural timer latency')
 
 
 def cleanup_diagnostics(phase):
