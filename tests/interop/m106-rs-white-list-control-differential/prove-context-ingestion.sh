@@ -94,16 +94,16 @@ diff <(jq -S '{clients, warnings}' "$WORK/render-real/render-receipt.json") \
 # fixture makes the earlier byte-for-byte pinned-image comparison fail.
 for render in render-real render-hand; do
     jq -e \
-        '.clients | length == 3 and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
+        '.clients | length == 4 and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
         "$WORK/$render/render-receipt.json" >/dev/null \
-        || die "$render receipt does not carry all three exact 100/12000 limits"
-    [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$WORK/$render/config.toml")" -eq 3 ] \
-        || die "$render config does not emit exactly three IPv4 limits of 100"
-    [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$WORK/$render/config.toml")" -eq 3 ] \
-        || die "$render config does not emit exactly three IPv6 limits of 12000"
+        || die "$render receipt does not carry all four exact 100/12000 limits"
+    [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$WORK/$render/config.toml")" -eq 4 ] \
+        || die "$render config does not emit exactly four IPv4 limits of 100"
+    [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$WORK/$render/config.toml")" -eq 4 ] \
+        || die "$render config does not emit exactly four IPv6 limits of 12000"
     jq -e '
         .schema == "rustbgpd.arouteserver-reject-communities.v1" and
-        .peers == ["192.0.2.11", "192.0.2.12", "192.0.2.13"] and
+        .peers == ["192.0.2.11", "192.0.2.12", "192.0.2.13", "192.0.2.14"] and
         .std == {"dynamic":"65520:dyn_val","cause_map":{"3":"64512:3"}} and
         .lrg == {"dynamic":"64496:65520:dyn_val","cause_map":{"3":"64496:65521:3"}}
     ' "$WORK/$render/birdwatcher-reject-communities.json" >/dev/null \
@@ -112,11 +112,11 @@ done
 ok "receipts, configs, and startup artifacts carry exact member data"
 
 # Load-bearing for this site: the control matrix keeps the knob on for all
-# three members, the white lists reach the datasets and the client policy,
+# four members, the white lists reach the datasets and the client policy,
 # and the tag is scrubbed in shared hygiene.
 for render in render-real render-hand; do
-    [ "$(grep -c '^rs_control_communities = true$' "$WORK/$render/config.toml")" -eq 3 ] \
-        || die "$render config does not keep rs_control_communities on for all three members"
+    [ "$(grep -c '^rs_control_communities = true$' "$WORK/$render/config.toml")" -eq 4 ] \
+        || die "$render config does not keep rs_control_communities on for all four members"
     grep -qx '198.51.100.128/25 le 32' "$WORK/$render/datasets/client-as64500-1-prefixes.list" \
         || die "$render prefix dataset lacks the white-listed prefix"
     grep -qx '64510' "$WORK/$render/datasets/client-as64500-1-origins.list" \
@@ -127,18 +127,32 @@ for render in render-real render-hand; do
     grep -qF 'term scrub-white-list-tag { remove community 65530:2; remove large-community 64496:65530:2 }' \
         "$WORK/$render/policy/rs-hygiene.rpol" \
         || die "$render hygiene does not scrub the white-list tag"
-    jq -e '[.clients[] | .white_list_routes] == [0, 1, 0]' "$WORK/$render/render-receipt.json" >/dev/null \
+    jq -e '[.clients[] | .white_list_routes] == [0, 1, 0, 0]' "$WORK/$render/render-receipt.json" >/dev/null \
         || die "$render receipt does not count exactly one white-listed route for member2"
 done
 ok "control matrix, white-list members, tagged accept term, and hygiene scrub are rendered"
 
 for render in render-real render-hand; do
-    [ "$(find "$WORK/$render/datasets" -type f | wc -l)" -eq 6 ] \
-        || die "$render does not carry exactly two datasets for each of three members"
-    [ "$(grep -c '^\[policy.datasets.client-' "$WORK/$render/config.toml")" -eq 6 ] \
-        || die "$render config does not bind all six per-client datasets"
+    [ "$(find "$WORK/$render/datasets" -type f | wc -l)" -eq 8 ] \
+        || die "$render does not carry exactly two datasets for each of four members"
+    [ "$(grep -c '^\[policy.datasets.client-' "$WORK/$render/config.toml")" -eq 8 ] \
+        || die "$render config does not bind all eight per-client datasets"
 done
-ok "dataset directories and all six relative bindings are retained"
+ok "dataset directories and all eight relative bindings are retained"
+
+# The session rows: member1's MD5 key and member4's strict Role render on
+# those members only, from both input forms.
+for render in render-real render-hand; do
+    python3 -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb"))["neighbors"]))' \
+        "$WORK/$render/config.toml" \
+        | jq -e '
+            ([.[] | select(.md5_password != null) | [.address, .md5_password]]
+              == [["192.0.2.11", "m106-md5-member1"]]) and
+            ([.[] | select(.strict_role == true) | .address] == ["192.0.2.14"])
+        ' >/dev/null \
+        || die "$render config lacks the exact md5_password/strict_role rows"
+done
+ok "md5_password renders on member1 only and strict_role on member4 only"
 
 step "pipeline gates on the real-dump render"
 cargo run -q -p rustbgpd --manifest-path "$REPO_DIR/Cargo.toml" -- \

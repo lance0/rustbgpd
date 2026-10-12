@@ -681,6 +681,9 @@ dump, so per-client values are read client-first:
   `max_as_path_len` and `rpki_bgp_origin_validation.enabled` on a client are
   ignored, as ARouteServer's own BIRD template reads only the general values.
 
+The M106 differential covers the password and strict-role rows against
+arouteserver-rendered BIRD.
+
 The renderer also refuses effective nonzero multihop. An effective
 `rfc8950: true` on an IPv6 session renders the uniform-fleet shape only:
 the session carries both unicast families (`families = ["ipv4_unicast",

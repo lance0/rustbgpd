@@ -1311,7 +1311,23 @@ fn m106_sectioned_dump_renders_identically_and_exercises_both_surfaces() {
         );
     }
     let config = &real.files["config.toml"];
-    assert_eq!(config.matches("rs_control_communities = true\n").count(), 3);
+    assert_eq!(config.matches("rs_control_communities = true\n").count(), 4);
+    // The differential's session rows: member1's MD5 key and member4's strict
+    // Role render from the real dump, on those members only.
+    assert_eq!(
+        neighbor(&real, "192.0.2.11")["md5_password"].as_str(),
+        Some("m106-md5-member1")
+    );
+    assert_eq!(
+        neighbor(&real, "192.0.2.14")["strict_role"].as_bool(),
+        Some(true)
+    );
+    for address in ["192.0.2.12", "192.0.2.13", "192.0.2.14"] {
+        assert!(!neighbor(&real, address).contains_key("md5_password"));
+    }
+    for address in ["192.0.2.11", "192.0.2.12", "192.0.2.13"] {
+        assert!(!neighbor(&real, address).contains_key("strict_role"));
+    }
     assert!(
         real.files["datasets/client-as64500-1-prefixes.list"].contains("198.51.100.128/25 le 32\n")
     );
@@ -1336,7 +1352,7 @@ fn m106_sectioned_dump_renders_identically_and_exercises_both_surfaces() {
             .iter()
             .map(|c| c["white_list_routes"].as_u64().unwrap())
             .collect::<Vec<_>>(),
-        [0, 1, 0]
+        [0, 1, 0, 0]
     );
 }
 
