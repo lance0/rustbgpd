@@ -2532,6 +2532,44 @@ async fn mp_eor_empty_mp_unreach_marks_end_of_rib() {
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
 
+/// RFC 4724 §2 End-of-RIB is defined by the `MP_UNREACH_NLRI` value carrying
+/// no NLRI. An unknown optional non-transitive attribute alongside it is
+/// quietly ignored (RFC 4271 §5) and must not hide the End-of-RIB, including with
+/// an extended-length `MP_UNREACH_NLRI` header.
+#[tokio::test]
+async fn mp_eor_with_ignored_unknown_attribute_marks_end_of_rib() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    install_dual_stack_session(&mut session, false);
+    rfc7606_drain(&mut rib_rx);
+    // Unknown optional non-transitive type 254, then an extended-length
+    // MP_UNREACH_NLRI: AFI=2 (IPv6), SAFI=1 (unicast), no NLRI.
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from_static(&[
+                0x80, 254, 2, 0xaa, 0xbb, 0x90, 15, 0, 3, 0, 2, 1,
+            ]),
+            nlri: Bytes::new(),
+        })
+        .await;
+    assert!(
+        session
+            .received_eor_families
+            .contains(&(Afi::Ipv6, Safi::Unicast))
+    );
+    match rib_rx.try_recv().unwrap() {
+        RibUpdate::EndOfRib { afi, safi, .. } => {
+            assert_eq!(afi, Afi::Ipv6);
+            assert_eq!(safi, Safi::Unicast);
+        }
+        _ => panic!("expected EndOfRib"),
+    }
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
 /// RFC 4724 §2 scopes MP End-of-RIB to an AFI/SAFI negotiated on the session.
 /// The same valid empty IPv6 `MP_UNREACH` bytes must be ignored by an IPv4-only
 /// session rather than mutating GR state or notifying the RIB.
