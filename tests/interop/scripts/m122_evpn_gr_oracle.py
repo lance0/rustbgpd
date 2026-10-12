@@ -226,7 +226,8 @@ def collided_streams(parts):
                     updates.add(stream)
             if typ == 3:
                 need(body[:2] == b"\x06\x07", "captured BGP NOTIFICATION")
-                ceases.setdefault(stream, ordinal)
+                # The last Cease bounds them all: each must precede Established.
+                ceases[stream] = max(ceases.get(stream, ordinal), ordinal)
     for stream, ordinal in ceases.items():
         live = [first for (live_stream, _), first in first_live.items() if live_stream == stream]
         need(len(live) < 2 or ordinal < max(live), "captured BGP NOTIFICATION after Established")
