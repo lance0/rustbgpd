@@ -3572,3 +3572,184 @@ async fn retention_row_reports_llgr_deadline_outside_family_maps() {
         Vec::new()
     );
 }
+
+/// A mass disconnect queues one `PeerGracefulRestart` per peer, and the actor
+/// applies them back to back inside one task poll, up to Tokio's cooperative
+/// budget. A readiness reply sent mid-burst wakes the probe's task into this
+/// worker's LIFO slot, which no other worker can steal, so without a yield the
+/// answered probe waits for the rest of that poll (about 200 ms at 200 peers).
+/// The hook holds every later GR entry until the answered probe has run:
+/// a stranded probe cannot run, the hold times out and the test fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression drives a real 200-peer GR-entry burst through the run loop with a handshake"
+)]
+async fn readiness_probe_runs_during_mass_graceful_restart_entry() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const PEERS: u8 = 200;
+    let (tx, rx) = mpsc::channel(usize::from(PEERS) * 2);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (ran_tx, ran_rx) = std::sync::mpsc::channel::<()>();
+    let probe_ran = Arc::new(AtomicBool::new(false));
+    let stranded = Arc::new(AtomicBool::new(false));
+    let gr_entries = Arc::new(AtomicUsize::new(0));
+    manager.test_primary_update_hook = Some(Arc::new({
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let ran_rx = Mutex::new(ran_rx);
+        let probe_ran = Arc::clone(&probe_ran);
+        let stranded = Arc::clone(&stranded);
+        let gr_entries = Arc::clone(&gr_entries);
+        let readiness_tx = readiness_tx.clone();
+        move |update| {
+            if !matches!(update, RibUpdate::PeerGracefulRestart { .. }) {
+                return;
+            }
+            if gr_entries.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Hold the first GR entry inside the actor's poll until the
+                // probe is queued behind the rest of the burst.
+                entered_tx.lock().unwrap().send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test releases the first GR entry");
+                return;
+            }
+            // The readiness lane has capacity 1, so a free slot means the
+            // actor has dequeued the probe and, in the same arm, replied.
+            let answered = readiness_tx.capacity() == readiness_tx.max_capacity();
+            if answered && !probe_ran.load(Ordering::SeqCst) && !stranded.load(Ordering::SeqCst) {
+                // Bounded so the unfixed actor fails instead of hanging.
+                if ran_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_err()
+                {
+                    stranded.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    }));
+
+    let peers: Vec<IpAddr> = (1..=PEERS)
+        .map(|index| IpAddr::V4(Ipv4Addr::new(10, 57, 0, index)))
+        .collect();
+    let mut outbound = Vec::new();
+    for &peer in &peers {
+        let (outbound_tx, outbound_rx) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 1,
+            peer,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        outbound.push(outbound_rx);
+    }
+    let handle = tokio::spawn(manager.run());
+    for outbound_rx in &mut outbound {
+        drain_eor(outbound_rx).await;
+    }
+
+    for &peer in &peers {
+        tx.send(RibUpdate::PeerGracefulRestart {
+            session_id: 1,
+            peer,
+            restart_time: 180,
+            stale_routes_time: 360,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        })
+        .await
+        .unwrap();
+    }
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("actor enters the GR burst");
+    })
+    .await
+    .unwrap();
+
+    let (armed_tx, armed_rx) = oneshot::channel::<()>();
+    let probe = tokio::spawn({
+        let probe_ran = Arc::clone(&probe_ran);
+        async move {
+            let (reply, mut response) = oneshot::channel();
+            let started = Instant::now();
+            readiness_tx
+                .send(RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: started,
+                })
+                .await
+                .unwrap();
+            // Signal only once the reply waker is registered, so the actor's
+            // reply has to wake this task rather than find it already ready.
+            let mut armed = Some(armed_tx);
+            let result = std::future::poll_fn(|cx| {
+                let poll = std::future::Future::poll(std::pin::Pin::new(&mut response), cx);
+                if poll.is_pending()
+                    && let Some(armed) = armed.take()
+                {
+                    armed.send(()).unwrap();
+                }
+                poll
+            })
+            .await;
+            let elapsed = started.elapsed();
+            probe_ran.store(true, Ordering::SeqCst);
+            let _ = ran_tx.send(());
+            (result, elapsed)
+        }
+    });
+    armed_rx.await.unwrap();
+    release_tx.send(()).unwrap();
+
+    let (result, elapsed) = probe.await.unwrap();
+    assert_eq!(result.unwrap(), Ok(0));
+    assert!(
+        !stranded.load(Ordering::SeqCst),
+        "the answered readiness probe stayed parked on the actor's worker behind queued GR entries"
+    );
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "readiness probe took {elapsed:?} during the GR-entry burst"
+    );
+
+    // Every peer really entered GR: each outbound registration was cleared.
+    for outbound_rx in &mut outbound {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), outbound_rx.recv())
+                .await
+                .expect("GR entry clears the outbound registration")
+                .is_none()
+        );
+    }
+    assert_eq!(gr_entries.load(Ordering::SeqCst), usize::from(PEERS));
+    drop(tx);
+    handle.await.unwrap();
+}

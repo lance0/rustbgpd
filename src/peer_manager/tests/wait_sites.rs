@@ -2547,3 +2547,146 @@ async fn detached_snapshot_reply_after_the_deadline_is_stale_behind_a_held_row()
         "a reply after the deadline is not fresh"
     );
 }
+
+/// The peer manager drains ready commands back to back inside one task poll,
+/// up to Tokio's cooperative budget. A readiness reply sent mid-queue wakes
+/// the probe's task into this worker's LIFO slot, which no other worker can
+/// steal, so without a yield the answered probe waits for the rest of the
+/// poll. The hook holds every later command until the answered probe has run:
+/// a stranded probe cannot run, the hold times out and the test fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression drives a held command queue through the run loop with a handshake"
+)]
+async fn readiness_ping_runs_while_commands_stay_queued() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const COMMANDS: usize = 64;
+    let (commands, command_rx) = mpsc::channel(COMMANDS);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (ran_tx, ran_rx) = std::sync::mpsc::channel::<()>();
+    let probe_ran = Arc::new(AtomicBool::new(false));
+    let stranded = Arc::new(AtomicBool::new(false));
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    manager.test_command_hook = Some(Arc::new({
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let ran_rx = Mutex::new(ran_rx);
+        let probe_ran = Arc::clone(&probe_ran);
+        let stranded = Arc::clone(&stranded);
+        let dispatched = Arc::clone(&dispatched);
+        let readiness_tx = readiness_tx.clone();
+        move |command| {
+            if !matches!(command, PeerManagerCommand::Ping { .. }) {
+                return;
+            }
+            if dispatched.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Hold the first command inside the actor's poll until the
+                // probe is queued behind the rest of the queue.
+                entered_tx.lock().unwrap().send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test releases the first command");
+                return;
+            }
+            // The readiness lane has capacity 1, so a free slot means the
+            // actor has dequeued the probe and, in the same arm, replied.
+            let answered = readiness_tx.capacity() == readiness_tx.max_capacity();
+            if answered
+                && !probe_ran.load(Ordering::SeqCst)
+                && !stranded.load(Ordering::SeqCst)
+                && ran_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_err()
+            {
+                // Bounded so the unfixed actor fails instead of hanging.
+                stranded.store(true, Ordering::SeqCst);
+            }
+        }
+    }));
+    let actor = tokio::spawn(manager.run());
+
+    // Command replies are dropped, so answering them wakes no task.
+    for _ in 0..COMMANDS {
+        let (reply, _) = oneshot::channel();
+        commands
+            .send(PeerManagerCommand::Ping { reply })
+            .await
+            .unwrap();
+    }
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("actor dispatches the first command");
+    })
+    .await
+    .unwrap();
+
+    let (armed_tx, armed_rx) = oneshot::channel::<()>();
+    let probe = tokio::spawn({
+        let probe_ran = Arc::clone(&probe_ran);
+        async move {
+            let (reply, mut response) = oneshot::channel();
+            let started = std::time::Instant::now();
+            readiness_tx
+                .send(rustbgpd_api::peer_types::PeerManagerReadinessQuery::Ping { reply })
+                .await
+                .unwrap();
+            // Signal only once the reply waker is registered, so the actor's
+            // reply has to wake this task rather than find it already ready.
+            let mut armed = Some(armed_tx);
+            let result = std::future::poll_fn(|cx| {
+                let poll = std::future::Future::poll(std::pin::Pin::new(&mut response), cx);
+                if poll.is_pending()
+                    && let Some(armed) = armed.take()
+                {
+                    armed.send(()).unwrap();
+                }
+                poll
+            })
+            .await;
+            let elapsed = started.elapsed();
+            probe_ran.store(true, Ordering::SeqCst);
+            let _ = ran_tx.send(());
+            (result, elapsed)
+        }
+    });
+    armed_rx.await.unwrap();
+    release_tx.send(()).unwrap();
+
+    let (result, elapsed) = probe.await.unwrap();
+    result.unwrap();
+    assert!(
+        !stranded.load(Ordering::SeqCst),
+        "the answered readiness ping stayed parked on the actor's worker behind queued commands"
+    );
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "readiness ping took {elapsed:?} behind queued commands"
+    );
+
+    commands.send(PeerManagerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+    assert_eq!(dispatched.load(Ordering::SeqCst), COMMANDS);
+}
