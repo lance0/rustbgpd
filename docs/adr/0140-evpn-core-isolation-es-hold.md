@@ -205,9 +205,17 @@ segment. Today two explicit-ESI segments may bind the same interface; with
 the feature on, validation rejects that and names both segments. With two
 segments on one link, isolating one ES would also disconnect the other,
 which might be `suppressed_no_peer`, and a per-interface state could not
-represent both. This record does not define per-interface aggregation. Runtime reload may
-toggle `enabled`, edit the lists and change the timers. Disabling the
-feature releases every held link at once (decision 6).
+represent both. This record does not define per-interface aggregation.
+
+Validation also rejects any `uplinks` entry that names a bound
+`interface`, and the error names both the uplink and the segment. Without
+this check, isolation would latch: rustbgpd's own admin-down would remove
+that uplink's carrier, and the ORed signal would never clear. Config
+validation does not read the kernel, so the runtime check in decision 2
+covers an uplink that is enslaved under a bound bond.
+
+Runtime reload may toggle `enabled`, edit the lists and change the timers.
+Disabling the feature releases every held link at once (decision 6).
 
 ### 2. Signal: core isolation
 
@@ -226,6 +234,18 @@ The PE is **core-isolated** when either condition holds.
   lack carrier in the `link_carrier` projection. A missing link counts as
   down, as in ADR-0085. Losing one redundant uplink while another still has
   carrier does not isolate the PE.
+- **Our own actions never feed the uplink signal.** An uplink is excluded
+  from the signal whenever it is a managed member, the bound link itself,
+  or a link whose master is a bound bond. "Managed member" covers anything
+  in the receipt or found by member discovery. Discovery and the
+  `link_carrier` projection see the same kernel state, so this applies at
+  runtime.
+  - The daemon logs an error that names both the uplink and the binding.
+  - The binding's state becomes `uplink_overlap`, and `rbgp doctor`
+    reports it as `fail`.
+  - If every configured uplink is excluded, the uplink signal is false.
+  - Carrier loss caused by rustbgpd's own admin-down therefore cannot hold
+    the PE isolated.
 
 The two are **ORed**. The session signal is topology-independent but only
 as fast as the hold timer or BFD. The uplink signal is immediate but sees
@@ -331,7 +351,7 @@ rejoins LACP, so the CE would hash into the isolated PE again.
   - **In the receipt, identity matches, admin-down:** held.
   - **In the receipt, admin-up:** `overridden` (below).
   - **Not in the receipt, admin-up, not previously overridden:** new. The
-    receipt entry is written and fsynced first, and the member is then taken
+    receipt entry is durably published first, and the member is then taken
     down.
   - **Not in the receipt, admin-down:** left alone and not recorded.
 - A member already admin-down when a hold begins is therefore left out of
@@ -448,13 +468,26 @@ start, which is the failure decision 6 exists to prevent.
 
 ### 6. Crash and reconcile safety
 
-**Receipt.** Before each admin-down, rustbgpd writes and fsyncs
+**Receipt.** Before each admin-down, rustbgpd durably publishes
 `<runtime_state_dir>/evpn-core-isolation-owned.json`. The receipt records
-**intent**, not proof that the write completed. If it cannot be written,
+**intent**, not proof that the write completed. If it cannot be published,
 rustbgpd does not act and reports `action_failed`. Entries are removed
 after a successful admin-up. This follows ADR-0079: admin state has no
-kernel marker, so ownership needs an exact-value receipt. While running, the
-daemon holds an exclusive advisory lock on the receipt.
+kernel marker, so ownership needs an exact-value receipt.
+
+**Atomic publication and a stable lock.**
+
+- Every receipt update is published atomically, as the BLACKHOLE and FIB
+  ownership receipts already are: write a temporary file, fsync it, rename
+  it over the receipt, then fsync the directory.
+- A rename replaces the receipt's inode, so a lock held on the receipt
+  itself would not survive an update. Mutual exclusion therefore uses a
+  separate lock file, `<runtime_state_dir>/evpn-core-isolation-owned.json.lock`.
+  That file is created once and never renamed or removed.
+- The daemon takes an exclusive advisory lock on the lock file at startup
+  and holds it until exit. The kernel drops the lock when the process dies.
+- The release helper takes the same lock before it reads or rewrites the
+  receipt. Both of them update the receipt only while holding the lock.
 
 **Incarnation identity.** `name` and `ifindex` are not durable: the kernel
 reuses ifindex values, and a link can be renamed. ADR-0085 already resolves
@@ -493,32 +526,53 @@ netlink exposes that distinguishes one link incarnation from another:
   reported, not raised under its new name. A member that left the bond
   while held is handled the same way.
 
-**Crash between fsync and the kernel write.** The receipt names a member
+**Crash between publication and the kernel write.** The receipt names a member
 that was never taken down. At reconcile that member is admin-up. The entry
 is discarded, because there is nothing to raise. If the startup hold applies,
-the member is taken down again after a fresh receipt write.
+the member is taken down again after a fresh receipt publication. A crash
+during publication leaves either the old receipt or the new one, never a
+partial file.
 
 **Release paths, and what each one guarantees.**
 
 - **Clean shutdown.** The daemon closes the EVPN sessions, releases every
   held link through the fresh checks, and then removes the receipt.
 - **Out-of-process release after any exit.**
-  - `rustbgpd --release-core-isolation <config>` is a one-shot mode beside
-    `--check` and `--diff`. It reads `runtime_state_dir` from the config,
-    or uses the default when the config cannot be parsed. It takes the
-    receipt lock without blocking and exits non-zero without acting if a
-    live daemon holds it. Otherwise it applies the incarnation guards and
-    safe rule above, raises only the members whose guards all match,
-    rewrites the receipt with whatever remains, and exits 0 when nothing is
-    held.
-  - The shipped systemd unit runs it as
-    `ExecStopPost=/usr/local/bin/rustbgpd --release-core-isolation /etc/rustbgpd/config.toml`.
+  - `rustbgpd --release-core-isolation --runtime-state-dir <dir>` is a
+    one-shot mode beside `--check` and `--diff`.
+  - It does not parse the configuration. The config is mutable and may be
+    the reason the daemon failed. The receipt's location therefore never
+    depends on it.
+  - The daemon accepts the same `--runtime-state-dir` flag. When the flag is
+    given and differs from the config's `runtime_state_dir`, the daemon
+    refuses to start. The flag and the daemon's actual directory therefore
+    cannot diverge silently.
+  - The helper takes the lock without blocking. It exits non-zero without
+    acting if a live daemon holds the lock.
+  - Otherwise it applies the incarnation guards and safe rule above, raises
+    only the members whose guards all match, and atomically republishes the
+    receipt with whatever remains. It exits 0 only when nothing owned is
+    left down. It exits non-zero while `ownership_ambiguous` entries
+    remain.
+  - **Failing loudly.** The helper fails with a non-zero exit and a message
+    on stderr, which the journal records, when any of these holds:
+    - the directory is missing or unreadable;
+    - the lock file cannot be opened;
+    - the receipt exists but cannot be read or parsed.
+  - **Proving there is nothing to release.** A missing receipt counts as
+    success only when the directory exists and is readable, and the helper
+    holds the lock. Every admin-down is preceded by a durable receipt
+    publication in that directory. A missing receipt there therefore proves
+    that no owned link is down.
+  - The shipped systemd unit passes the directory to both commands:
+    `ExecStart=/usr/local/bin/rustbgpd --runtime-state-dir /var/lib/rustbgpd /etc/rustbgpd/config.toml`
+    and
+    `ExecStopPost=/usr/local/bin/rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd`.
     systemd runs `ExecStopPost=` after the service stops, after an
     unexpected exit, and after a failed start. It therefore also runs when
     `StartLimitBurst` stops further restarts.
   - The helper needs `CAP_NET_ADMIN`. The unit's capability set applies to
-    it, and EVPN deployments already grant that capability. With no receipt
-    it does nothing.
+    it, and EVPN deployments already grant that capability.
   - Supervisors without a stop hook, such as plain containers, runit or
     OpenRC without a `stop_post`, must run the same command after the
     daemon exits. The operator guide documents this.
@@ -560,6 +614,8 @@ the hold.
   - `overridden`
   - `ownership_ambiguous` (decision 6: a receipt entry that the safe rule
     will not raise)
+  - `uplink_overlap` (decision 2: an uplink is, or is enslaved under, this
+    binding and is excluded from the signal)
   - `action_failed`
   - `disabled`
 - `evpn_core_isolated{signal}`: 0 or 1, with `signal` ∈ {`sessions`,
@@ -570,7 +626,8 @@ the hold.
   bound ES while the feature is enabled, built like the auto-lacp check.
   - `warn` for `isolated`, `backstop_released`, `suppressed_no_peer` or
     `overridden`.
-  - `fail` for `action_failed` and `ownership_ambiguous`.
+  - `fail` for `action_failed`, `ownership_ambiguous` and
+    `uplink_overlap`.
   - It also warns when every configured uplink lacks carrier while
     sessions are Established, which points to a wrong `uplinks` list.
 
@@ -586,7 +643,9 @@ Each regression must fail when the action is removed:
   - the peer latch across the last-session-down flush;
   - override handling, including no re-down by the discovery pass;
   - validation rejecting two segments that bind one interface while the
-    feature is enabled.
+    feature is enabled, and an uplink that names a bound interface;
+  - an uplink found at runtime under a bound bond is excluded, so isolation
+    still releases once the core is back.
 - Netns tests (privileged runner):
   - member admin-down and admin-up on a bond and on a veth;
   - receipt write-ahead;
@@ -600,7 +659,10 @@ Each regression must fail when the action is removed:
   - a member enslaved while isolated: its receipt entry is written before
     it is taken down, and it is raised on release;
   - `--release-core-isolation`:
-    - refuses while the daemon holds the lock;
+    - refuses while the daemon holds the lock, including across a receipt
+      update, which replaces the receipt's inode;
+    - exits non-zero for a missing directory or an unreadable receipt, and
+      exits 0 for a readable directory with no receipt;
     - after a simulated crash, raises exactly the guarded members and leaves
       ambiguous ones down.
 - Interop in the existing FRR all-active topology:
