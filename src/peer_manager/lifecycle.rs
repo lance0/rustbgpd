@@ -1348,9 +1348,18 @@ impl PeerManager {
         // A changed config `admin_down` reuses the operator disable/enable
         // paths: setting it sends Cease/Administrative Shutdown with the
         // configured RFC 9003 reason, clearing it starts the session.
-        let enabled = self.peers.get(&peer).is_some_and(|managed| managed.enabled);
+        // A config transition stays pending until its Stop is enqueued: a
+        // failed `disable_peer` leaves `enabled` false but `admin_down`
+        // unrecorded, so the next reload retries it whatever `enabled` says.
+        let (enabled, pending_edge) = self.peers.get(&peer).map_or((false, false), |managed| {
+            (
+                managed.enabled,
+                config.restore_admin_enabled.is_none()
+                    && managed.admin_down.is_some() != config.admin_down.is_some(),
+            )
+        });
         match admin_enable {
-            Some(false) if enabled => {
+            Some(false) if enabled || pending_edge => {
                 self.disable_peer(peer.clone(), admin_down_shutdown_communication(&config))
                     .await?;
             }

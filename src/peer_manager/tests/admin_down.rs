@@ -288,3 +288,58 @@ async fn reconfigure_restore_that_takes_the_peer_down_sends_the_prior_reason() {
     assert_eq!(managed.admin_down.as_deref(), Some("restored quarantine"));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
 }
+
+/// A config-driven disable counts as applied only once `Stop` was enqueued.
+/// The first reload cannot enqueue it (full session channel); the peer is left
+/// disabled but `admin_down` unrecorded, and the next reload sends the Stop
+/// with the configured reason.
+#[tokio::test(start_paused = true)]
+async fn failed_admin_down_stop_enqueue_is_retried_by_the_next_reload() {
+    use rustbgpd_transport::PeerCommand;
+
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(1);
+    session_tx.try_send(PeerCommand::Start).unwrap();
+    let (gate_tx, gate_rx) = oneshot::channel::<()>();
+    let (stop_tx, mut stops) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        let _ = gate_rx.await;
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::Stop { reason } => {
+                    let _ = stop_tx.send(reason);
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+    let mut down = forward_config(&mgr, addr);
+    down.admin_down = Some("maintenance".to_string());
+
+    assert!(mgr.hot_update_peer_in_place(down.clone()).await.is_err());
+    assert_eq!(mgr.peers[&key(addr)].admin_down, None, "not recorded");
+
+    gate_tx.send(()).unwrap();
+    mgr.hot_update_peer_in_place(down).await.unwrap();
+    let reason = tokio::time::timeout(Duration::from_secs(1), stops.recv())
+        .await
+        .expect("the retry enqueues Stop");
+    assert_eq!(
+        reason,
+        Some(Some(
+            rustbgpd_wire::notification::encode_shutdown_communication("maintenance")
+        ))
+    );
+    let managed = &mgr.peers[&key(addr)];
+    assert!(!managed.enabled);
+    assert_eq!(managed.admin_down.as_deref(), Some("maintenance"));
+}
