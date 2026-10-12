@@ -199,3 +199,64 @@ export_policy_chain = ["shared"]
         }
     }
 }
+
+/// A non-EVPN route carries no EVPN route type, so the evaluator matches
+/// neither `route.evpn-route-type ==` nor `!=` for it: those guards exclude
+/// every labeled and VPN family. Their negations match such a route and are
+/// refused.
+#[test]
+fn evpn_route_type_guards_follow_evaluator_semantics() {
+    let body = r#"
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+families = ["ipv4_unicast", "ipv4_labeled_unicast", "ipv6_labeled_unicast", "l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"]
+export_policy_chain = ["evpn"]
+"#;
+    let policy = |guard: &str| {
+        format!("policy evpn {{ term t {{ if {guard} {{ set next-hop self }} accept }} }}")
+    };
+    for guard in [
+        "route.evpn-route-type == 2",
+        "route.evpn-route-type != 2",
+        "route.evpn-route-type == 2 || route.family == ipv4-unicast",
+    ] {
+        load(&policy(guard), body).unwrap_or_else(|error| panic!("{guard}: {error}"));
+    }
+    for guard in [
+        "!(route.evpn-route-type == 2)",
+        "!(route.evpn-route-type != 2)",
+    ] {
+        let error = load(&policy(guard), body).expect_err(guard);
+        assert!(
+            error.contains("export policy \"evpn\" (t.1)"),
+            "{guard}: {error}"
+        );
+        assert!(error.contains("ipv4_labeled_unicast"), "{guard}: {error}");
+    }
+}
+
+/// A dynamic range inherits its group's families and export chain; the
+/// error names the range.
+#[test]
+fn set_next_hop_refusal_names_dynamic_range_binding() {
+    let body = format!(
+        r#"{}
+[peer_groups.rr]
+families = ["ipv4_labeled_unicast"]
+export_policy_chain = ["nh"]
+
+[[dynamic_neighbors]]
+prefix = "10.1.0.0/24"
+peer_group = "rr"
+remote_asn = 65002
+"#,
+        toml_set_next_hop("self")
+    );
+    let error = load(UNUSED_RPOL, &body).expect_err("dynamic range binding must fail");
+    assert!(
+        error.contains("dynamic_neighbors range 10.1.0.0/24 (peer_group \"rr\")"),
+        "{error}"
+    );
+    assert!(error.contains("ipv4_labeled_unicast"), "{error}");
+}
