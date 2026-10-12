@@ -2876,8 +2876,6 @@ fn tcp_ao_overlap_id_collision(
     None
 }
 
-/// Linux accepts `TCP_MAXSEG` in 88..=32767; reject the rest at load so a bad
-/// clamp is a config error, not a listener bind failure.
 /// rustbgpd sends at most 128 bytes of RFC 9003 shutdown communication (the
 /// interoperable length, RFC 9003 §3). The runtime
 /// `disable` truncates longer text; a configured reason is refused instead, so
@@ -2897,6 +2895,8 @@ fn validate_admin_down_reason(address: &str, reason: Option<&str>) -> Result<(),
     }
 }
 
+/// Linux accepts `TCP_MAXSEG` in 88..=32767; reject the rest at load so a bad
+/// clamp is a config error, not a listener bind failure.
 fn validate_tcp_mss(address: &str, mss: u16) -> Result<(), ConfigError> {
     if !(88..=32767).contains(&mss) {
         return Err(ConfigError::InvalidNeighborConfig {
