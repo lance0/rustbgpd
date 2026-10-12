@@ -871,28 +871,19 @@ fn main() -> ExitCode {
     for warning in &rendered.warnings {
         eprintln!("rs-config-render: warning: {warning}");
     }
-    for (rel_path, contents) in &rendered.files {
-        let path = cli.out_dir.join(rel_path);
-        if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            eprintln!("rs-config-render: cannot create {}: {e}", parent.display());
-            return Exit::OutputUnusable.into();
-        }
-        if let Err(e) = std::fs::write(&path, contents) {
-            eprintln!("rs-config-render: cannot write {}: {e}", path.display());
-            return Exit::OutputUnusable.into();
-        }
-    }
-    let receipt_path = cli.out_dir.join("render-receipt.json");
-    let receipt =
-        serde_json::to_string_pretty(&rendered.receipt).expect("receipt serialization cannot fail");
-    if let Err(e) = std::fs::write(&receipt_path, receipt + "\n") {
-        eprintln!(
-            "rs-config-render: cannot write {}: {e}",
-            receipt_path.display()
-        );
-        return Exit::OutputUnusable.into();
+    let receipt = serde_json::to_string_pretty(&rendered.receipt)
+        .expect("receipt serialization cannot fail")
+        + "\n";
+    // The receipt goes last, so an interrupted write leaves no receipt.
+    let files: Vec<(&str, &[u8])> = rendered
+        .files
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_bytes()))
+        .chain([("render-receipt.json", receipt.as_bytes())])
+        .collect();
+    if let Err(e) = rs_config_render::ixp_manager::write_private_tree(&cli.out_dir, &files) {
+        eprintln!("rs-config-render: {}: {e}", cli.out_dir.display());
+        return e.exit_code().into();
     }
     stdout_exit(write_stdout(|writer| {
         writeln!(

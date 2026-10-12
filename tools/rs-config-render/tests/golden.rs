@@ -3131,3 +3131,68 @@ fn unknown_client_options_fail_the_parse() {
         }
     }
 }
+
+#[test]
+/// Load-bearing: `config.toml` can carry MD5 keys, so arouteserver-mode output
+/// lands in a mode-0700 directory as mode-0600 files, and an existing output
+/// directory must be private and empty, as in IXP Manager mode.
+fn cli_output_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let mode = |path: &std::path::Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    let render = |context: &std::path::Path, out: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+            .arg("--context")
+            .arg(context)
+            .arg("--out-dir")
+            .arg(out)
+            .arg("--rtr-cache")
+            .arg("127.0.0.1:3323")
+            .output()
+            .unwrap()
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let context = temp.path().join("context.yml");
+    let mut value = healthy_value();
+    set_client(&mut value, 0, &["password"], "private-key".into());
+    std::fs::write(&context, to_yaml(&value)).unwrap();
+
+    let out = temp.path().join("out");
+    let output = render(&context, &out);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        std::fs::read_to_string(out.join("config.toml"))
+            .unwrap()
+            .contains("md5_password = \"private-key\"")
+    );
+    assert_eq!(mode(&out), 0o700);
+    for dir in ["policy", "datasets"] {
+        assert_eq!(mode(&out.join(dir)), 0o700, "{dir}");
+    }
+    for file in [
+        "config.toml",
+        "render-receipt.json",
+        "policy/rs-hygiene.rpol",
+        "datasets/client-as4242-1-origins.list",
+    ] {
+        assert_eq!(mode(&out.join(file)), 0o600, "{file}");
+    }
+
+    // A non-empty directory (a previous render) and a non-private empty one
+    // are refused before anything is written.
+    let output = render(&context, &out);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    let shared = temp.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = render(&context, &shared);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 0);
+}

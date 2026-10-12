@@ -18,3 +18,12 @@
   site that relied on any refused override now gets exit 2 until it is
   removed. `roles.enabled: false` remains a documented divergence: rendered
   sessions still advertise the route-server Role.
+- Because the rendered `config.toml` can now carry MD5 keys, arouteserver
+  mode writes its output the way IXP Manager mode does: `--out-dir` must be
+  absent or an empty, non-symlink mode-0700 directory, and every file is
+  created mode 0600. See the
+  [renderer README](../tools/rs-config-render/README.md).
+  **Operator-visible:** a refresh loop that re-renders into the previous
+  candidate directory now exits 8 without writing; remove the directory
+  before each render, as the
+  [cookbook loop](../docs/cookbook/ixp-filter-pipeline.md) does.

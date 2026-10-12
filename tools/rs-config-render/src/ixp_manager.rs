@@ -1383,6 +1383,22 @@ fn prepare_output(out: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Write `files` (relative path, contents) into `out`, which is created mode
+/// 0700 or must already be an empty mode-0700 directory; every file is created
+/// new with mode 0600 and every parent directory mode 0700. Rendered
+/// `config.toml` files can carry MD5 keys, so both input modes write this way.
+pub fn write_private_tree(out: &Path, files: &[(&str, &[u8])]) -> Result<(), Error> {
+    prepare_output(out)?;
+    for (relative, contents) in files {
+        let path = out.join(relative);
+        if let Some(parent) = path.parent() {
+            create_private_dir(parent).map_err(|_| Error::Output)?;
+        }
+        write_private(&path, contents).map_err(|_| Error::Output)?;
+    }
+    Ok(())
+}
+
 fn safe_version(output: &[u8]) -> Result<String, Error> {
     let text = std::str::from_utf8(output).map_err(|_| Error::CheckerUnavailable)?;
     let mut words = text
@@ -1459,14 +1475,12 @@ fn write_checked_candidate_for(
     let mut version_bytes = version.stdout;
     version_bytes.extend(version.stderr);
     let version = safe_version(&version_bytes)?;
-    prepare_output(out)?;
-    for (relative, contents) in &candidate.files {
-        let path = out.join(relative);
-        if let Some(parent) = path.parent() {
-            create_private_dir(parent).map_err(|_| Error::Output)?;
-        }
-        write_private(&path, contents.as_bytes()).map_err(|_| Error::Output)?;
-    }
+    let files: Vec<(&str, &[u8])> = candidate
+        .files
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_bytes()))
+        .collect();
+    write_private_tree(out, &files)?;
     let checked = match Command::new(checker)
         .arg("--check")
         .arg("--strict")

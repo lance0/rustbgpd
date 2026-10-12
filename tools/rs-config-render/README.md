@@ -24,6 +24,11 @@ explicit import chain and the declared transparent export chain (RFC 7947
 permit-all, plus `ebgp_requires_policy` so deleting it fails closed) — so
 the refresh loop can gate on warnings, not just on rejection.
 
+As in IXP Manager mode, `--out-dir` must be absent or an empty, non-symlink
+mode-0700 directory; it is created mode 0700 and every generated file mode
+0600, because `config.toml` can carry member MD5 keys. Anything else exits 8
+before writing. Remove the previous candidate before each render.
+
 [arouteserver]: https://github.com/pierky/arouteserver
 
 ## IXP Manager v7.4 manual candidate
@@ -481,6 +486,7 @@ transfers verbatim:
 #!/bin/sh -e
 # cron: refresh member filters (arouteserver caches govern data staleness)
 arouteserver template-context --output "$STATE/context.yml"
+rm -rf "$STATE/candidate"        # the output directory must be absent or empty
 rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
 rustbgpd --check --strict "$STATE/candidate/config.toml"
@@ -656,7 +662,8 @@ ARouteServer resolves every client option over the general one before the
 dump, so per-client values are read client-first:
 
 - `password` renders as the neighbor's `md5_password`. The generated
-  `config.toml` then carries the key, as the context does; protect both.
+  `config.toml` then carries the key, so the output is written private
+  (see above); keep the context file private too.
 - `roles.strict_mode` (client, else general) renders `strict_role = true`: an
   OPEN without a Role capability is refused. `roles.local_role` other than `rs`
   is refused. `roles.enabled: false`, ARouteServer's default, is a deliberate
@@ -727,7 +734,8 @@ and `EXPECTED_SECTION_NAMES` (`src/lib.rs`).
 
 ```text
 --context <PATH>       template-context output (YAML; JSON parses too)
---out-dir <DIR>        output directory
+--out-dir <DIR>        output directory: absent or an empty mode-0700
+                       directory; files are written mode 0600
 --rtr-cache <ADDR>     RTR cache host:port, repeatable; required when the
                        context enables RPKI origin validation (the context
                        carries no cache address)
