@@ -85,7 +85,7 @@ published wire crate, so depend on the wire version this release pairs with:
 ```toml
 [dependencies]
 rustbgpd-rpki = "0.6.0"
-rustbgpd-wire = "0.24.0"
+rustbgpd-wire = "0.25.0"
 ```
 
 To build against a source checkout instead, take both crates from the same
