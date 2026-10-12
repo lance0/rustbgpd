@@ -847,8 +847,8 @@ enum ConfigAction {
     ///
     /// Deliberately bounded structural importer: translates local AS,
     /// router-id, neighbors (address, remote AS, description), peer
-    /// groups, address families, hold timers, and max-prefix limits.
-    /// Routing POLICY IS NEVER translated — BIRD filters, FRR
+    /// groups, address families, hold timers, max-prefix limits, and
+    /// administrative-down state (`admin_down`). Routing POLICY IS NEVER translated — BIRD filters, FRR
     /// route-maps/prefix-lists, and GoBGP policy-definitions are listed,
     /// with source line numbers, in the import report (stderr; stdout
     /// with --json) for hand-translation to .rpol. Secrets are never

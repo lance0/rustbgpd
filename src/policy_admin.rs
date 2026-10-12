@@ -509,6 +509,10 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         remote_asn: raw.remote_asn,
         description: raw.description.clone(),
         peer_group: raw.peer_group.clone(),
+        // Runtime neighbor creation has no admin-state field; the peer
+        // starts enabled unless its peer group is configured down.
+        admin_down: None,
+        admin_down_reason: None,
         hold_time: raw.hold_time,
         min_hold_time: raw.min_hold_time,
         send_hold_time: raw.send_hold_time,
@@ -608,6 +612,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     remote_asn: cfg.remote_asn,
                     description: Some(cfg.description.clone()),
                     peer_group: cfg.peer_group.clone(),
+                    admin_down: cfg.admin_down.is_some().then_some(true),
+                    admin_down_reason: cfg.admin_down.clone().filter(|reason| !reason.is_empty()),
                     hold_time: cfg.hold_time,
                     min_hold_time: cfg.min_hold_time,
                     send_hold_time: cfg.send_hold_time,
@@ -1335,6 +1341,8 @@ peer_group = "fabric"
         address: IpAddr,
     ) -> rustbgpd_api::peer_types::PeerManagerNeighborConfig {
         rustbgpd_api::peer_types::PeerManagerNeighborConfig {
+            admin_down: None,
+            restore_admin_enabled: None,
             min_hold_time: Some(30),
             address,
             interface: None,
@@ -1531,6 +1539,8 @@ peer_group = "fabric"
         config.peer_groups.insert(
             "tunnel".to_string(),
             PeerGroupConfig {
+                admin_down: None,
+                admin_down_reason: None,
                 hold_time: Some(90),
                 families: vec!["ipv4_unicast".into(), "ipv6_unicast".into()],
                 route_server_client: Some(true),

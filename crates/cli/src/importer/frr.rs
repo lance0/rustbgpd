@@ -344,6 +344,11 @@ fn neighbor_line(model: &mut Model, line: usize, text: &str, rest: &str, af: Opt
             }
         }
         ["password", ..] => entry(model, &peer, line).auth(),
+        // `shutdown rtt ...` is a conditional shutdown, not an admin state.
+        ["shutdown"] => entry(model, &peer, line).admin_down(None),
+        ["shutdown", "message", message @ ..] if !message.is_empty() => {
+            entry(model, &peer, line).admin_down(Some(message.join(" ")));
+        }
         ["activate"] => match af {
             Some(Af::V4) => entry(model, &peer, line).family("ipv4_unicast"),
             Some(Af::V6) => entry(model, &peer, line).family("ipv6_unicast"),
@@ -409,6 +414,14 @@ impl Entry<'_> {
             Entry::Group(g) => g.hold_time = Some(hold),
             Entry::Neighbor(n) => n.hold_time = Some(hold),
         }
+    }
+    fn admin_down(self, reason: Option<String>) {
+        let (admin_down, admin_down_reason) = match self {
+            Entry::Group(g) => (&mut g.admin_down, &mut g.admin_down_reason),
+            Entry::Neighbor(n) => (&mut n.admin_down, &mut n.admin_down_reason),
+        };
+        *admin_down = Some(true);
+        *admin_down_reason = reason;
     }
     fn auth(self) {
         match self {

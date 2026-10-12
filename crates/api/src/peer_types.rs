@@ -2072,6 +2072,15 @@ pub struct PeerManagerNeighborConfig {
     pub description: String,
     /// Optional peer-group reference used to derive defaults.
     pub peer_group: Option<String>,
+    /// Config-owned administrative-down state: `Some(reason)` adds the peer
+    /// disabled (an empty reason sends no RFC 9003 shutdown communication);
+    /// `None` adds it enabled.
+    pub admin_down: Option<String>,
+    /// Set only on a captured rollback prior: the administrative state the
+    /// peer had when the prior was captured. Replaying the prior restores
+    /// this state instead of applying the `admin_down` change rule, so a
+    /// compensated reload leaves the runtime enable/disable toggle as it was.
+    pub restore_admin_enabled: Option<bool>,
     /// Override hold time (None = use default).
     pub hold_time: Option<u16>,
     /// Minimum hold time accepted from the peer.

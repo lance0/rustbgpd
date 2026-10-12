@@ -1143,3 +1143,161 @@ fn run_import_writes_config_and_exits_2_on_skips() {
     let written = std::fs::read_to_string(&out).expect("config written");
     assert_eq!(written, include_str!("fixtures/import/expected-frr.toml"));
 }
+
+// ---------------------------------------------------------------------------
+// Administrative down: source admin state maps to `admin_down`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bird_disabled_maps_to_admin_down() {
+    let source = "router id 192.0.2.10;\n\
+                  template bgp parked { local as 64500; disabled; }\n\
+                  protocol bgp quarantined from parked { neighbor 192.0.2.1 as 64496; }\n\
+                  protocol bgp back from parked { neighbor 192.0.2.2 as 64497; disabled no; }\n\
+                  protocol bgp live { local as 64500; neighbor 192.0.2.3 as 64498; \
+                  disabled off; }\n\
+                  protocol bgp down { local as 64500; neighbor 192.0.2.4 as 64499; \
+                  disabled yes; }\n";
+    let imported = import_source(SourceFormat::Bird, "disabled.conf", source).expect("translates");
+    let toml = &imported.config_toml;
+    assert!(
+        toml.contains("[peer_groups.\"parked\"]\nadmin_down = true\n"),
+        "{toml}"
+    );
+    assert!(
+        toml.contains("address = \"192.0.2.2\"\nremote_asn = 64497\npeer_group = \"parked\"\nadmin_down = false\n"),
+        "{toml}"
+    );
+    assert!(
+        toml.contains("address = \"192.0.2.3\"\nremote_asn = 64498\nadmin_down = false\n"),
+        "{toml}"
+    );
+    assert!(
+        toml.contains("address = \"192.0.2.4\"\nremote_asn = 64499\nadmin_down = true\n"),
+        "{toml}"
+    );
+    assert!(
+        imported
+            .report
+            .skipped
+            .iter()
+            .all(|skip| !skip.stanza.contains("disabled")),
+        "{:?}",
+        imported.report.skipped
+    );
+}
+
+#[test]
+fn frr_neighbor_shutdown_maps_to_admin_down_with_message() {
+    let source = "router bgp 64500\n \
+                  bgp router-id 192.0.2.10\n \
+                  neighbor PARKED peer-group\n \
+                  neighbor PARKED remote-as 64496\n \
+                  neighbor PARKED shutdown\n \
+                  neighbor 192.0.2.1 peer-group PARKED\n \
+                  neighbor 192.0.2.2 remote-as 64497\n \
+                  neighbor 192.0.2.2 shutdown message abuse report 4711\n \
+                  neighbor 192.0.2.3 remote-as 64498\n \
+                  neighbor 192.0.2.3 shutdown rtt 100\n\
+                  !\n";
+    let imported =
+        import_source(SourceFormat::Frr, "frr-shutdown.conf", source).expect("translates");
+    let toml = &imported.config_toml;
+    assert!(
+        toml.contains("[peer_groups.\"PARKED\"]\nadmin_down = true\n"),
+        "{toml}"
+    );
+    assert!(
+        toml.contains(
+            "address = \"192.0.2.2\"\nremote_asn = 64497\nadmin_down = true\n\
+             admin_down_reason = \"abuse report 4711\"\n"
+        ),
+        "{toml}"
+    );
+    assert!(
+        !toml.contains("address = \"192.0.2.3\"\nremote_asn = 64498\nadmin_down"),
+        "an RTT-conditional shutdown is not an admin state: {toml}"
+    );
+    let skips = skip_lines(&imported.report);
+    assert_eq!(
+        skips,
+        vec![(Some(10), "neighbor 192.0.2.3 shutdown rtt 100".to_owned())],
+        "only the conditional form is reported"
+    );
+}
+
+#[test]
+fn frr_overlong_shutdown_message_is_emitted_with_a_warning() {
+    let message = "x".repeat(129);
+    let source = format!(
+        "router bgp 64500\n bgp router-id 192.0.2.10\n neighbor 192.0.2.2 remote-as 64497\n \
+         neighbor 192.0.2.2 shutdown message {message}\n!\n"
+    );
+    let imported = import_source(SourceFormat::Frr, "frr.conf", &source).expect("translates");
+    assert!(imported.config_toml.contains(&message));
+    assert!(
+        imported
+            .report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("192.0.2.2") && warning.contains("admin_down_reason")),
+        "{:?}",
+        imported.report.warnings
+    );
+    assert_eq!(imported.report.exit_code, 2);
+}
+
+#[test]
+fn gobgp_admin_down_maps_to_admin_down() {
+    let source = r#"
+[global.config]
+as = 64500
+router-id = "192.0.2.10"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.1"
+peer-as = 64496
+admin-down = true
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.2"
+peer-as = 64497
+admin-down = false
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.3"
+peer-as = 64498
+admin-down = "yes"
+"#;
+    let imported = import_source(SourceFormat::Gobgp, "gobgp.toml", source).expect("translates");
+    let toml = &imported.config_toml;
+    assert!(
+        toml.contains("address = \"192.0.2.1\"\nremote_asn = 64496\nadmin_down = true\n"),
+        "{toml}"
+    );
+    assert!(
+        toml.contains("address = \"192.0.2.2\"\nremote_asn = 64497\nadmin_down = false\n"),
+        "{toml}"
+    );
+    assert!(
+        !toml.contains("address = \"192.0.2.3\"\nremote_asn = 64498\nadmin_down"),
+        "{toml}"
+    );
+    assert!(
+        imported.report.skipped.is_empty(),
+        "{:?}",
+        imported.report.skipped
+    );
+    assert!(
+        imported
+            .report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("neighbors[2]") && warning.contains("admin-down")),
+        "{:?}",
+        imported.report.warnings
+    );
+}

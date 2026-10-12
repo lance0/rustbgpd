@@ -306,6 +306,10 @@ struct ManagedPeerState {
     description: String,
     peer_group: Option<String>,
     enabled: bool,
+    /// Config-owned administrative-down state the peer was added or last
+    /// reloaded with. Reload compares it with the candidate: only a change
+    /// overrides the runtime `enabled` toggle.
+    admin_down: Option<String>,
     hold_time: Option<u16>,
     max_prefixes: Option<u32>,
     /// Manager-owned max-prefix restart policy. Session tasks only report the

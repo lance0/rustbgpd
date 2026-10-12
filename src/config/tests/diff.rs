@@ -1049,6 +1049,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
     new.peer_groups.insert(
         "new-group".to_string(),
         PeerGroupConfig {
+            admin_down: None,
+            admin_down_reason: None,
             tcp_mss: None,
             min_hold_time: None,
             hold_time: Some(60),
@@ -1104,6 +1106,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         },
     );
     new.neighbors.push(Neighbor {
+        admin_down: None,
+        admin_down_reason: None,
         tcp_mss: None,
         min_hold_time: None,
         address: "10.0.0.3".into(),
@@ -1174,6 +1178,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         log_level: None,
     });
     new.neighbors.push(Neighbor {
+        admin_down: None,
+        admin_down_reason: None,
         tcp_mss: None,
         min_hold_time: None,
         address: "10.0.0.4".into(),
@@ -1253,6 +1259,8 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
     let old = parse(valid_toml()).unwrap();
     let mut new = old.clone();
     new.neighbors.push(Neighbor {
+        admin_down: None,
+        admin_down_reason: None,
         tcp_mss: None,
         min_hold_time: None,
         address: "10.0.0.3".into(),

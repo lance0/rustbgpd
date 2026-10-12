@@ -152,7 +152,7 @@ async fn roster_follows_replacement_deletion_and_rebinding() {
     assert!(datasets.datasets()[0].path.ends_with("customers.list"));
 
     // Peer deletion.
-    mgr.delete_peer_checked(key(peer), false, None, false, None)
+    mgr.delete_peer_checked(key(peer), false, None, false, None, None)
         .await
         .unwrap();
     mgr.assert_import_roster_projection();

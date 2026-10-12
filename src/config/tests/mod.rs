@@ -881,6 +881,8 @@ remote_asn = 65003
 
 fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
     Neighbor {
+        admin_down: None,
+        admin_down_reason: None,
         tcp_mss: None,
         min_hold_time: None,
         address: addr.to_string(),
@@ -2034,6 +2036,8 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "remote_asn",
     "description",
     "peer_group",
+    "admin_down",
+    "admin_down_reason",
     "hold_time",
     "min_hold_time",
     "slow_peer_threshold_pct",
@@ -2078,6 +2082,8 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
 /// minus the identity triple (`address`, `interface`, `remote_asn`) and
 /// TCP-AO.
 const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
+    "admin_down",
+    "admin_down_reason",
     "route_flap_dampening",
     "hold_time",
     "min_hold_time",

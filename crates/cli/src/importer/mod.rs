@@ -4,8 +4,8 @@
 //!
 //! The importer translates only the structural subset every BGP daemon
 //! shares: local AS, router-id, neighbors (address, remote AS,
-//! description), peer groups, address families, hold timers, and
-//! max-prefix limits. It never guesses at policy: BIRD filters, FRR
+//! description), peer groups, address families, hold timers,
+//! max-prefix limits, and administrative-down state. It never guesses at policy: BIRD filters, FRR
 //! route-maps/prefix-lists, and `GoBGP` policy-definitions are listed —
 //! with source line numbers — in the import report for hand-translation
 //! to `.rpol`. Secrets are never imported: MD5/auth *presence* is
@@ -94,6 +94,10 @@ pub struct Group {
     pub max_prefixes_ipv6: Option<u32>,
     /// Source configures MD5/auth on the group. Never carries the secret.
     pub auth_present: bool,
+    /// Source keeps the group's sessions administratively down.
+    pub admin_down: Option<bool>,
+    /// Shutdown message configured with the administrative down.
+    pub admin_down_reason: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -110,6 +114,11 @@ pub struct Neighbor {
     pub max_prefixes_ipv6: Option<u32>,
     /// Source configures MD5/auth for this session. Never carries the secret.
     pub auth_present: bool,
+    /// Source keeps this session administratively down (BIRD `disabled`,
+    /// FRR `neighbor X shutdown`, `GoBGP` `admin-down`).
+    pub admin_down: Option<bool>,
+    /// Shutdown message configured with the administrative down.
+    pub admin_down_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -477,6 +486,36 @@ fn finish(
         "192.0.2.1".to_owned()
     });
 
+    let long_reasons = model
+        .groups
+        .iter()
+        .map(|group| {
+            (
+                format!("peer group {}", group.name),
+                &group.admin_down_reason,
+            )
+        })
+        .chain(neighbors.iter().map(|neighbor| {
+            (
+                format!("neighbor {}", neighbor.address),
+                &neighbor.admin_down_reason,
+            )
+        }))
+        .filter_map(|(scope, reason)| {
+            reason
+                .as_ref()
+                .filter(|reason| reason.len() > 128)
+                .map(|reason| (scope, reason.len()))
+        })
+        .collect::<Vec<_>>();
+    for (scope, len) in long_reasons {
+        model.warnings.push(format!(
+            "{scope}: shutdown message is {len} bytes; emitted verbatim as \
+             admin_down_reason — `rustbgpd --check` rejects more than 128 bytes until \
+             it is shortened"
+        ));
+    }
+
     for neighbor in &neighbors {
         if neighbor.auth_present {
             model.warnings.push(format!(
@@ -570,6 +609,15 @@ fn write_families(out: &mut String, families: &[String]) {
     let _ = writeln!(out, "families = [{list}]");
 }
 
+fn write_admin_down(out: &mut String, admin_down: Option<bool>, reason: Option<&str>) {
+    if let Some(admin_down) = admin_down {
+        let _ = writeln!(out, "admin_down = {admin_down}");
+    }
+    if let Some(reason) = reason {
+        let _ = writeln!(out, "admin_down_reason = \"{}\"", toml_escape(reason));
+    }
+}
+
 const AUTH_COMMENT: &str = "# The source configures TCP MD5/auth here. Secrets are never \
                             imported —\n# set the real secret before deploying:\n\
                             # md5_password = \"<set manually>\"\n";
@@ -636,6 +684,11 @@ fn emit_toml(
 
     for group in groups {
         let _ = write!(out, "\n[peer_groups.\"{}\"]\n", toml_escape(&group.name));
+        write_admin_down(
+            &mut out,
+            group.admin_down,
+            group.admin_down_reason.as_deref(),
+        );
         if let Some(hold) = group.hold_time {
             let _ = writeln!(out, "hold_time = {hold}");
         }
@@ -664,6 +717,11 @@ fn emit_toml(
         if let Some(group) = &neighbor.peer_group {
             let _ = writeln!(out, "peer_group = \"{}\"", toml_escape(group));
         }
+        write_admin_down(
+            &mut out,
+            neighbor.admin_down,
+            neighbor.admin_down_reason.as_deref(),
+        );
         if let Some(hold) = neighbor.hold_time {
             let _ = writeln!(out, "hold_time = {hold}");
         }

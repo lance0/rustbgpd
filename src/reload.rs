@@ -21,7 +21,6 @@ use rustbgpd_api::peer_types::{
     ConfigPersistCommitOutcome, ConfiguredOwnerPublicationOperation,
     ConfiguredOwnerPublicationReceipt,
 };
-use rustbgpd_policy::PolicyChain;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{error, info, warn};
 
@@ -204,20 +203,18 @@ pub(crate) async fn apply_outbound_prefix_limits_if_changed(
 
 /// Build a `PeerManagerNeighborConfig` from transport config components.
 pub(crate) fn build_peer_mgr_config(
-    tc: &rustbgpd_transport::TransportConfig,
-    max_prefix_restart_seconds: Option<u32>,
-    label: &str,
-    import: Option<&PolicyChain>,
-    export: Option<&PolicyChain>,
-    peer_group: Option<String>,
+    resolved: &config::ResolvedNeighbor,
 ) -> PeerManagerNeighborConfig {
+    let tc = &resolved.transport_config;
     PeerManagerNeighborConfig {
         address: tc.remote_addr.ip(),
         interface: tc.peer_interface.clone(),
         scope_id: tc.peer_scope_id,
         remote_asn: tc.peer.remote_asn,
-        description: label.to_string(),
-        peer_group,
+        description: resolved.label.clone(),
+        peer_group: resolved.peer_group.clone(),
+        admin_down: resolved.admin_down.clone(),
+        restore_admin_enabled: None,
         hold_time: Some(tc.peer.hold_time),
         min_hold_time: tc.peer.min_hold_time,
         send_hold_time: Some(tc.peer.send_hold_time),
@@ -228,7 +225,7 @@ pub(crate) fn build_peer_mgr_config(
         max_prefixes_received_ipv6: tc.max_prefixes_received_ipv6,
         max_prefix_action: tc.max_prefix_action,
         max_prefix_warning_percent: tc.max_prefix_warning_percent,
-        max_prefix_restart_seconds,
+        max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
         md5_password: tc.md5_password.clone(),
         tcp_ao: tc.tcp_ao.clone(),
         tcp_mss: tc.tcp_mss,
@@ -264,8 +261,8 @@ pub(crate) fn build_peer_mgr_config(
         prefix_orf_receive: tc.peer.prefix_orf_receive,
         disable_ipv4_unicast: tc.peer.disable_ipv4_unicast,
         link_local_next_hop: tc.peer.link_local_next_hop,
-        import_policy: import.cloned(),
-        export_policy: export.cloned(),
+        import_policy: resolved.import_policy.clone(),
+        export_policy: resolved.export_policy.clone(),
     }
 }
 
@@ -3862,16 +3859,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
                 .filter_map(|n| {
                     peer_map
                         .get(&(n.address.clone(), n.interface.clone()))
-                        .map(|neighbor| {
-                            build_peer_mgr_config(
-                                &neighbor.transport_config,
-                                neighbor.max_prefix_restart_seconds,
-                                &neighbor.label,
-                                neighbor.import_policy.as_ref(),
-                                neighbor.export_policy.as_ref(),
-                                neighbor.peer_group.clone(),
-                            )
-                        })
+                        .map(build_peer_mgr_config)
                 })
                 .collect()
         };
@@ -3883,14 +3871,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         // deletes anything, and the stale snapshot entry makes the next
         // SIGHUP re-detect and retry the same in-place update.
         for (n, neighbor) in hot_changed.into_iter().zip(hot_configs) {
-            let cfg = build_peer_mgr_config(
-                &neighbor.transport_config,
-                neighbor.max_prefix_restart_seconds,
-                &neighbor.label,
-                neighbor.import_policy.as_ref(),
-                neighbor.export_policy.as_ref(),
-                neighbor.peer_group.clone(),
-            );
+            let cfg = build_peer_mgr_config(&neighbor);
             if let Err(failure) = hot_peer_step(peer_mgr_tx, &mut progress, cfg).await {
                 return owned_step_failure(
                     &progress,
@@ -7778,19 +7759,7 @@ hold_time = 90
         let config = load_config_from_toml("hot-reply-loss", baseline_toml());
         let resolved = config.resolved_neighbors().unwrap().remove(0);
         assert!(matches!(
-            hot_peer_step(
-                &tx,
-                &mut progress,
-                build_peer_mgr_config(
-                    &resolved.transport_config,
-                    None,
-                    &resolved.label,
-                    resolved.import_policy.as_ref(),
-                    resolved.export_policy.as_ref(),
-                    None,
-                ),
-            )
-            .await,
+            hot_peer_step(&tx, &mut progress, build_peer_mgr_config(&resolved),).await,
             Err(OwnedStepFailure::Fenced {
                 reason: RuntimeConfigFenceReason::AcknowledgementLost,
                 ..
@@ -12665,6 +12634,8 @@ remote_asn = 65002
         event_tx
             .send(ConfigEvent::NeighborAdded {
                 config: PeerManagerNeighborConfig {
+                    admin_down: None,
+                    restore_admin_enabled: None,
                     min_hold_time: None,
                     address: "10.0.0.9".parse().unwrap(),
                     interface: None,
@@ -12785,6 +12756,8 @@ remote_asn = 65002
         event_tx
             .send(ConfigEvent::NeighborAdded {
                 config: PeerManagerNeighborConfig {
+                    admin_down: None,
+                    restore_admin_enabled: None,
                     min_hold_time: None,
                     address: "10.0.0.9".parse().unwrap(),
                     interface: None,
