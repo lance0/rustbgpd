@@ -438,6 +438,9 @@ struct PendingInbound {
     session_id: u64,
 }
 
+#[cfg(test)]
+type CommandHook = Arc<dyn Fn(&PeerManagerCommand) + Send + Sync>;
+
 /// Manages the lifecycle of all peer sessions.
 ///
 /// Runs as a single tokio task, receiving commands via an mpsc channel.
@@ -635,6 +638,9 @@ pub struct PeerManager {
     /// mid-cohort failure and rollback contract can be exercised.
     #[cfg(test)]
     inject_hot_update_failures: std::collections::BTreeMap<PeerKey, u32>,
+    /// Runs synchronously at the start of every dispatched command.
+    #[cfg(test)]
+    test_command_hook: Option<CommandHook>,
 }
 
 impl PeerManager {
@@ -983,6 +989,10 @@ impl PeerManager {
         }
     }
 
+    /// Answer a readiness query, then yield. The reply wakes the probe's task
+    /// into this worker's LIFO slot, which other workers cannot steal; without
+    /// the yield it waits until the actor next returns `Pending`, which a
+    /// queue of ready commands can defer for Tokio's whole cooperative budget.
     async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::Ping { reply } => {
@@ -992,6 +1002,7 @@ impl PeerManager {
                 self.answer_list_peers(reply).await;
             }
         }
+        tokio::task::yield_now().await;
     }
 
     /// Drive one owned step while servicing at most one read-only readiness
@@ -1227,6 +1238,8 @@ impl PeerManager {
             dataset_generations_at_peer_construction: None,
             #[cfg(test)]
             inject_hot_update_failures: std::collections::BTreeMap::new(),
+            #[cfg(test)]
+            test_command_hook: None,
         }
     }
 
@@ -1433,6 +1446,10 @@ impl PeerManager {
         reason = "command dispatch preserves one exhaustive match over the public actor protocol"
     )]
     async fn dispatch_command(&mut self, cmd: PeerManagerCommand) -> ControlFlow<()> {
+        #[cfg(test)]
+        if let Some(hook) = &self.test_command_hook {
+            hook(&cmd);
+        }
         self.operator_read_seam = OperatorReadSeam::Unfenced;
         match cmd {
             PeerManagerCommand::EnablePeerOwned { peer, reply } => {
@@ -2452,6 +2469,8 @@ impl PeerManager {
                     match query {
                         Some(PeerManagerReadinessQuery::ListPeers { reply }) => {
                             self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply }).await;
+                            // Same LIFO-slot hand-off as `handle_readiness_query`.
+                            tokio::task::yield_now().await;
                         }
                         Some(query) => self.handle_readiness_query(query).await,
                         None => self.readiness_rx = None,

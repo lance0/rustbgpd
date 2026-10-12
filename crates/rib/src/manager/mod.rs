@@ -521,6 +521,9 @@ struct VpnLabeledStagingContext<'a> {
     force: bool,
 }
 
+#[cfg(test)]
+type PrimaryUpdateHook = Arc<dyn Fn(&RibUpdate) + Send + Sync>;
+
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
@@ -900,6 +903,9 @@ pub struct RibManager {
     replacement_readiness: Option<Arc<ReplacementReadinessContext>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    /// Runs synchronously at the start of every applied primary update.
+    #[cfg(test)]
+    test_primary_update_hook: Option<PrimaryUpdateHook>,
     #[cfg(test)]
     replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
@@ -2040,6 +2046,8 @@ impl RibManager {
             #[cfg(test)]
             replacement_readiness_test_hook: None,
             #[cfg(test)]
+            test_primary_update_hook: None,
+            #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
             flowspec_validation: flowspec_validation::ValidationState::default(),
@@ -2705,6 +2713,17 @@ impl RibManager {
         }
     }
 
+    /// Answer a readiness probe from the actor loop, then yield. The reply
+    /// wakes the probe's task into this worker's LIFO slot, which other
+    /// workers cannot steal. Without the yield that task waits until the actor
+    /// next returns `Pending`; back-to-back queued updates (a mass GR entry)
+    /// can defer that for Tokio's whole cooperative budget, about 200 ms at
+    /// 200 peers.
+    async fn serve_readiness_query(&mut self, query: RibReadinessQuery) {
+        self.handle_readiness_query(query, None);
+        tokio::task::yield_now().await;
+    }
+
     /// Service a bounded number of type-narrow readiness probes at an actor
     /// seam without admitting any ordinary query or mutation.
     fn drain_readiness_queries(&mut self, policy_transition_elapsed: Option<std::time::Duration>) {
@@ -3004,6 +3023,10 @@ impl RibManager {
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
     fn handle_update(&mut self, update: RibUpdate) {
+        #[cfg(test)]
+        if let Some(hook) = &self.test_primary_update_hook {
+            hook(&update);
+        }
         self.dampening_history.arm_owner_retirement();
         assert!(
             !(self.test_panic_on_peer_up.is_some() && matches!(&update, RibUpdate::PeerUp { .. })),
@@ -5144,7 +5167,7 @@ impl RibManager {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
                         match readiness {
-                            Some(query) => self.handle_readiness_query(query, None),
+                            Some(query) => self.serve_readiness_query(query).await,
                             None => self.readiness_rx = None,
                         }
                     }
@@ -5242,7 +5265,7 @@ impl RibManager {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
                         match readiness {
-                            Some(query) => self.handle_readiness_query(query, None),
+                            Some(query) => self.serve_readiness_query(query).await,
                             None => self.readiness_rx = None,
                         }
                     }
