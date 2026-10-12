@@ -117,14 +117,16 @@ def nlri_key(encoded):
 
 
 def validate_attributes(attrs):
-    for code in (14, 15):
+    for code in (9, 10, 14, 15):
         if code in attrs:
-            need(attrs[code][0] in (0x80, 0x90), "MP attribute flags must be optional and nontransitive")
+            need(attrs[code][0] in (0x80, 0x90), f"attribute {code} flags must be optional and nontransitive")
+    for code in (8, 16, 22):
+        if code in attrs:
+            # Partial and extended-length bits are legal for optional
+            # transitive attributes; reserved bits are not.
+            need(attrs[code][0] in (0xC0, 0xD0, 0xE0, 0xF0), f"attribute {code} flags must be optional and transitive")
     if 8 in attrs:
-        flags, value = attrs[8]
-        # Partial and extended-length bits are legal for optional transitive
-        # communities; reserved bits and malformed values are not.
-        need(flags in (0xC0, 0xD0, 0xE0, 0xF0), "COMMUNITIES flags differ")
+        _, value = attrs[8]
         need(bool(value) and len(value) % 4 == 0, "COMMUNITIES length must be a positive multiple of four")
 
 

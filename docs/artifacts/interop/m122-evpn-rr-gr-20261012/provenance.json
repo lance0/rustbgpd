@@ -1,4 +1,18 @@
 {
+  "complete_attribute_flags_replay": {
+    "checked_flags_attributes": [
+      8,
+      9,
+      10,
+      14,
+      15,
+      16,
+      22
+    ],
+    "focused_regressions": 26,
+    "oracle_sha256": "b4a513981baf265e73459126d07aa40d6b624a3fe7b57f16fe782e1469b2630d",
+    "result": "pass"
+  },
   "gobgp_source_commit": "da824d99912e02124b53741245ee4186c381adcc",
   "gobgp_version": "4.10.0",
   "harness_dirty": true,

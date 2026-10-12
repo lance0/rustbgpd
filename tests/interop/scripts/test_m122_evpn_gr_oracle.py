@@ -219,6 +219,30 @@ class OracleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             oracle.analyze_wire(lines)
 
+    def test_flags_on_every_exact_evidence_attribute(self):
+        source = ipaddress.IPv4Address(oracle.SOURCE).packed
+        cases = [(16, 1, False, oracle.RT.to_bytes(8, "big") + oracle.VXLAN.to_bytes(8, "big")),
+                 (22, 3, False, b"\x00\x06" + oracle.LABEL.to_bytes(3, "big") + source),
+                 (9, 1, True, source), (10, 1, True, ipaddress.IPv4Address(oracle.RR).packed)]
+        for code, route_type, reflected, value in cases:
+            original = announce(route_type, 1, reflected)
+            legal = (0x80, 0x90) if code in (9, 10) else (0xC0, 0xD0, 0xE0, 0xF0)
+            invalid = (0x00, 0x40, 0xA0, 0xC0, 0x81) if code in (9, 10) else (0x00, 0x40, 0x80, 0xA0, 0xC1)
+            for flags in legal + invalid:
+                with self.subTest(code=code, flags=flags):
+                    replacement = attr(code, value, flags=flags, extended=bool(flags & 0x10))
+                    attrs = original[23:].replace(attr(code, value), replacement, 1)
+                    changed = message(2, update_body(attrs))
+                    lines = fixture()
+                    index = 2 if reflected else 0
+                    self.assertIn(original.hex(), lines[index])
+                    lines[index] = lines[index].replace(original.hex(), changed.hex(), 1)
+                    if flags in invalid:
+                        with self.assertRaisesRegex(ValueError, f"attribute {code} flags"):
+                            oracle.analyze_wire(lines)
+                    else:
+                        oracle.analyze_wire(lines)
+
     def test_restart_cannot_fill_missing_initial_route(self):
         lines = fixture()
         lines[0] = lines[0].replace(announce(5, 1).hex(), "", 1)

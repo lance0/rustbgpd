@@ -36,6 +36,10 @@ including fragmented and out-of-order segments. Its oracle hash and ordered
 witnesses are recorded in `ordered_wire_replay` separately from the original
 executed harness hashes.
 
+The final flag-validation replay checks every attribute used as exact wire
+evidence: 8, 9, 10, 14, 15, 16 and 22. Its result and new oracle hash are in
+`complete_attribute_flags_replay`, preserving all earlier hashes.
+
 A separate live peer admission preceded the new leg. In the M122 topology,
 both directions of both sessions were admitted again from captured OPENs:
 MP capability 1 contains `00190046` (AFI 25, SAFI 70), GR capability 64
