@@ -116,6 +116,7 @@ class EvpnReflectorRoleTests(unittest.TestCase):
         cls.definitions = checker.parse_proto_definitions(proto)
         metrics_path = checker.ROOT / cls.inventory["metrics"]["source"]
         cls.metric_source = checker.strip_rust_comments(metrics_path.read_text())
+        cls.emission_sources = checker.production_rust_sources(checker.ROOT)
 
     def evpn_entry(self, inventory):
         return next(
@@ -149,7 +150,7 @@ class EvpnReflectorRoleTests(unittest.TestCase):
 
     def test_live_inventory_passes(self):
         self.check()
-        checker.check_metrics(self.inventory, self.metric_source)
+        checker.check_metrics(self.inventory, self.metric_source, self.emission_sources)
 
     def test_deferred_unpaged_loc_rib_rpc_cannot_join_the_role(self):
         inventory = copy.deepcopy(self.inventory)
@@ -164,7 +165,7 @@ class EvpnReflectorRoleTests(unittest.TestCase):
             with self.subTest(old=old):
                 definitions = self.edited("EvpnRouteEntry", old, new)
                 self.rejected(
-                    lambda: self.check(definitions=definitions),
+                    lambda definitions=definitions: self.check(definitions=definitions),
                     "stable protobuf message graph changed for RibService",
                 )
 
@@ -212,7 +213,55 @@ class EvpnReflectorRoleTests(unittest.TestCase):
                 if labels is not None:
                     series = inventory["metrics"]["scoped_rr_only_series"]
                     next(s for s in series if s["name"] == "bgp_rib_prefixes")["labels"] = labels
-                self.rejected(lambda: checker.check_metrics(inventory, source), expected)
+                self.rejected(
+                    lambda inventory=inventory, source=source: checker.check_metrics(
+                        inventory, source, self.emission_sources
+                    ),
+                    expected,
+                )
+
+    def emitted_by(self, path, old, new):
+        sources = dict(self.emission_sources)
+        self.assertEqual(sources[path].count(old), 1, old)
+        sources[path] = sources[path].replace(old, new)
+        return sources
+
+    def test_pinned_label_value_must_be_emitted(self):
+        # A misspelled inventory value has no emitting call site.
+        inventory = copy.deepcopy(self.inventory)
+        series = inventory["metrics"]["scoped_rr_only_series"]
+        next(s for s in series if s["name"] == "bgp_rib_loc_prefixes")["label_values"] = {
+            "afi_safi": ["evpnn"]
+        }
+        self.rejected(
+            lambda: checker.check_metrics(inventory, self.metric_source, self.emission_sources),
+            "pinned metric bgp_rib_loc_prefixes label afi_safi values ['evpnn']",
+        )
+
+    def test_changed_emission_fails_while_inventory_stays(self):
+        cases = [
+            (
+                "crates/rib/src/manager/distribution/evpn.rs",
+                '.set_loc_rib_prefixes("evpn"',
+                '.set_loc_rib_prefixes("l2vpn_evpn"',
+                "pinned metric bgp_rib_loc_prefixes label afi_safi values ['evpn']",
+            ),
+            (
+                "crates/rib/src/manager/helpers.rs",
+                '(Afi::L2Vpn, Safi::Evpn) => "l2vpn_evpn"',
+                '(Afi::L2Vpn, Safi::Evpn) => "evpn"',
+                "pinned metric bgp_route_refresh_stale_entries label afi_safi values ['l2vpn_evpn']",
+            ),
+        ]
+        for path, old, new, expected in cases:
+            with self.subTest(expected=expected):
+                sources = self.emitted_by(path, old, new)
+                self.rejected(
+                    lambda sources=sources: checker.check_metrics(
+                        self.inventory, self.metric_source, sources
+                    ),
+                    expected,
+                )
 
 
 if __name__ == "__main__":

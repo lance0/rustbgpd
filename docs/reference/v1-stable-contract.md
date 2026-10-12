@@ -162,8 +162,10 @@ graph's review tripwire, which reaches `EvpnRouteEntry` through the alpha
 `stable_request_values` records the 1–5 call profile and rejects any method
 that takes a different request message. A digest cannot verify a value
 restriction: the daemon still answers type 0 and 6 calls, as alpha behavior.
-`evpn_peer_page_json_matches_inventory_floor` executes the CLI floor, and the
-metric floor is checked against the metric definitions.
+`evpn_peer_page_json_matches_inventory_floor` executes the CLI floor. The
+metric floor is checked against the metric definitions, and each pinned label
+value must be passed by a production call site of that metric's setter, either
+as a literal or through a label function's match arm.
 
 Evidence is functional, on small topologies:
 [M122](../artifacts/interop/m122-evpn-rr-gr-20261012/README.md) retains,
@@ -270,7 +272,8 @@ covered by semantic rules rather than a promise that no new metric, event kind,
 or optional field will appear. Consumers must ignore unknown additive fields
 and series. The `route-reflector-evpn` role additionally enumerates its
 series under `metrics.scoped_rr_only_series`, whose names, types and label sets
-the checker compares with the metric definitions.
+the checker compares with the metric definitions, and whose pinned label values
+it requires at a production emission site.
 
 ## Compatibility rules
 

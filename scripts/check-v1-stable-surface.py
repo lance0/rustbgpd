@@ -866,7 +866,142 @@ def metric_definition(source: str, name: str) -> tuple[str, list[str]] | None:
     return kind, re.findall(r"\"([^\"]+)\"", labels.group(1))
 
 
-def check_metrics(inventory: dict, source: str | None = None) -> None:
+def production_rust_sources(root: Path) -> dict[str, str]:
+    """Comment-stripped non-test Rust sources that can emit metric labels."""
+    sources = {}
+    for path in sorted([*root.glob("src/**/*.rs"), *root.glob("crates/*/src/**/*.rs")]):
+        relative = path.relative_to(root)
+        if "tests" in relative.parts or path.stem == "tests" or path.stem.endswith("_tests"):
+            continue
+        sources[str(relative)] = strip_cfg_test_items(strip_rust_comments(path.read_text()))
+    return sources
+
+
+CFG_TEST_ITEM_RE = re.compile(
+    r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?"
+    r"(?:mod|fn|impl)\b[^{;]*\{"
+)
+
+
+def strip_cfg_test_items(text: str) -> str:
+    """Drop `#[cfg(test)]` modules, functions and impls, brace-matched.
+
+    ponytail: other cfg(test) items (fields, statements) stay; they do not
+    call metric setters today.
+    """
+    while match := CFG_TEST_ITEM_RE.search(text):
+        depth, end = 1, match.end()
+        while end < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[end], 0)
+            end += 1
+        text = text[: match.start()] + text[end:]
+    return text
+
+
+def call_arguments(text: str, start: int) -> list[str] | None:
+    """Top-level arguments of the call whose `(` ends just before `start`."""
+    depth, cursor, index, arguments, in_string = 0, start, start, [], False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                arguments.append(text[cursor:index].strip())
+                return [argument for argument in arguments if argument]
+            depth -= 1
+        elif char == "," and depth == 0:
+            arguments.append(text[cursor:index].strip())
+            cursor = index + 1
+        index += 1
+    return None
+
+
+def label_function_values(sources: dict[str, str], function: str) -> set[str]:
+    """String literals a label function returns from its match arms."""
+    values: set[str] = set()
+    for text in sources.values():
+        for match in re.finditer(rf"\bfn\s+{re.escape(function)}\s*\([^)]*\)[^{{]*\{{", text):
+            depth, end = 1, match.end()
+            while end < len(text) and depth:
+                depth += {"{": 1, "}": -1}.get(text[end], 0)
+                end += 1
+            body = text[match.end() : end]
+            values.update(re.findall(r"=>\s*\"([^\"]+)\"", body))
+    return values
+
+
+def emitted_label_values(
+    metric_source: str, sources: dict[str, str], name: str, label: str, defined_labels: list[str]
+) -> set[str]:
+    """Label values a production call site passes literally, or through a label function.
+
+    Only the setter's argument in that label's position counts: a literal there,
+    or the match-arm literals of the function it calls directly or binds with
+    `let`. Unrelated nearby strings are not evidence.
+    """
+    binding = re.search(
+        rf"let\s+(\w+)\s*=\s*\w+::new\(\s*(?:Histogram)?Opts::new\(\s*\"{re.escape(name)}\"",
+        metric_source,
+    )
+    if binding is None:
+        return set()
+    position = defined_labels.index(label)
+    values: set[str] = set()
+    setters: list[tuple[str, int]] = []
+    pattern = rf"\.{re.escape(binding.group(1))}\s*\.with_label_values\(\s*&\[([^\]]*)\]"
+    for use in re.finditer(pattern, metric_source):
+        elements = [element.strip() for element in use.group(1).split(",") if element.strip()]
+        if len(elements) != len(defined_labels):
+            continue
+        element = elements[position]
+        if element.startswith('"'):
+            values.add(element.strip('"'))
+            continue
+        functions = list(
+            re.finditer(r"\bfn\s+(\w+)\s*\(([^)]*)\)", metric_source[: use.start()])
+        )
+        if not functions:
+            continue
+        setter = functions[-1]
+        parameters = [
+            part.split(":", 1)[0].strip()
+            for part in setter.group(2).split(",")
+            if part.strip() and "self" not in part
+        ]
+        if element in parameters:
+            setters.append((setter.group(1), parameters.index(element)))
+    for setter, index in setters:
+        for text in sources.values():
+            for call in re.finditer(rf"\.\s*{re.escape(setter)}\s*\(", text):
+                arguments = call_arguments(text, call.end())
+                if arguments is None or len(arguments) <= index:
+                    continue
+                argument = arguments[index]
+                literal = re.fullmatch(r"\"([^\"]+)\"", argument)
+                if literal:
+                    values.add(literal.group(1))
+                    continue
+                direct = re.fullmatch(r"(\w+)\(.*\)", argument, flags=re.DOTALL)
+                bound = re.search(
+                    rf"\blet\s+{re.escape(argument)}\s*=\s*(\w+)\(", text[: call.start()]
+                ) if re.fullmatch(r"\w+", argument) else None
+                function = (direct or bound).group(1) if (direct or bound) else None
+                if function:
+                    values.update(label_function_values(sources, function))
+    return values
+
+
+def check_metrics(
+    inventory: dict, source: str | None = None, emission_sources: dict[str, str] | None = None
+) -> None:
     section = inventory.get("metrics")
     if not isinstance(section, dict) or set(section) != {"source", "scoped_rr_only_series"}:
         fail("metrics must be an object with exactly 'source' and 'scoped_rr_only_series'")
@@ -907,6 +1042,15 @@ def check_metrics(inventory: dict, source: str | None = None) -> None:
             if not isinstance(values, list) or not values:
                 fail(f"{label}.label_values.{key} must pin at least one value")
             require_sorted_unique(values, f"{label}.label_values.{key}")
+            if emission_sources is None:
+                emission_sources = production_rust_sources(ROOT)
+            emitted = emitted_label_values(source, emission_sources, name, key, defined_labels)
+            missing = [value for value in values if value not in emitted]
+            if missing:
+                fail(
+                    f"pinned metric {name} label {key} values {missing} have no production "
+                    "call site or label function emitting them"
+                )
 
 
 def semantic_toml_sha256(path: Path) -> str:
