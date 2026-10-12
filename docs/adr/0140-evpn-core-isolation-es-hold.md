@@ -38,8 +38,15 @@ rustbgpd has no defence today:
   and an ES startup delay, both implemented with protodown.
 
 The fix must make the CE take the isolated PE's member out of its
-aggregator, from the PE side, without leaving a CE link down after the
-condition clears or the daemon dies.
+aggregator, from the PE side. It must not leave a CE link down after the
+condition clears. When the daemon exits, the links it took down must have a
+defined release path:
+
+- in-process on clean shutdown;
+- out-of-process from the supervisor's stop hook after any exit;
+- at the next start when neither of those ran.
+
+Decision 6 states exactly which guarantee holds in each case.
 
 ### Primary sources: Linux protodown
 
@@ -191,7 +198,14 @@ backstop_seconds = 180         # default 180, 1..=3600
 
 The table is accepted only when `[[ethernet_segments]]` has at least one
 bound segment and the EVPN dataplane runs on Linux. Validation rejects a
-`backstop_seconds` below `hold_after_sync_seconds`. Runtime reload may
+`backstop_seconds` below `hold_after_sync_seconds`.
+
+While the feature is enabled, each `interface` may be bound by only one
+segment. Today two explicit-ESI segments may bind the same interface; with
+the feature on, validation rejects that and names both segments. With two
+segments on one link, isolating one ES would also disconnect the other,
+which might be `suppressed_no_peer`, and a per-interface state could not
+represent both. This record does not define per-interface aggregation. Runtime reload may
 toggle `enabled`, edit the lists and change the timers. Disabling the
 feature releases every held link at once (decision 6).
 
@@ -300,23 +314,43 @@ The contract:
   unmanaged. The operator guide must state both.
 
 **Fresh state checks before acting.** Immediately before each admin-down or
-admin-up, rustbgpd re-reads the link. It writes only if the link's name,
-ifindex and current master still match the binding, and its admin state
-differs from the target.
+admin-up, rustbgpd re-reads the link. It writes only if the link still
+matches the identity in decision 6 and its admin state differs from the
+target.
 
-- A member already admin-down when a hold begins is left out of the receipt
-  and is not raised on release. This is best effort within the contract,
-  not a guarantee against other writers.
+**Level-triggered member discovery while a hold is in place.** A bond can
+gain a member during the hold. That includes a held member that left the
+bond and was enslaved again. A newly enslaved member starts admin-up and
+rejoins LACP, so the CE would hash into the isolated PE again.
+
+- While a hold is in place, rustbgpd recomputes the bound bond's member set
+  from current kernel state. It does so on every `RTNLGRP_LINK` event that
+  adds a link, changes a link's master or changes admin state, and on every
+  poll-backstop pass.
+- Each current member is classified:
+  - **In the receipt, identity matches, admin-down:** held.
+  - **In the receipt, admin-up:** `overridden` (below).
+  - **Not in the receipt, admin-up, not previously overridden:** new. The
+    receipt entry is written and fsynced first, and the member is then taken
+    down.
+  - **Not in the receipt, admin-down:** left alone and not recorded.
+- A member already admin-down when a hold begins is therefore left out of
+  the receipt and is not raised on release. This is best effort within the
+  contract, not a guarantee against other writers.
 - A held member seen admin-up during the hold breaks the contract. rustbgpd
   does not take it down again, which would fight another manager. It reports
-  `overridden` and removes the member from the receipt.
+  `overridden` and removes the member from the receipt. It also remembers
+  the override in memory until the hold ends, so the discovery pass does not
+  treat the member as new.
 
 **Residual race.** Re-reading the link and writing `RTM_SETLINK` are two
 separate operations, so a foreign write between them goes undetected. The
 next link event or poll then shows the result. Under the contract, nothing
 legitimate writes in that window. Outside it, rustbgpd cannot tell an
 operator's admin-down of an owned member from its own, and release raises
-that member. Decision 6 covers the crash windows.
+that member. Discovery has the same window: a member enslaved between two
+passes carries traffic until the next event or poll. Decision 6 covers the
+crash windows.
 
 ### 4. Safety rule: never isolate a CE that has no other ES member
 
@@ -392,54 +426,124 @@ before the PE attracts remote traffic, never after.
 
 A startup hold takes down links that are up at boot. On a planned graceful
 restart, this moves all of the CE's traffic to the other ES member until
-release. When EVPN syncs within the backstop, the CE therefore does not use
-this PE before End-of-RIB, which is the intended outcome. This decision does
-not include a GR-aware exemption.
+release. This decision does not include a GR-aware exemption.
+
+**Planned-restart gap.** Clean shutdown releases held links (decision 6),
+and links that were not held are already up. The CE may therefore hash
+into this PE during two windows:
+
+- after the old daemon has shut down, until the new daemon arms its startup
+  hold;
+- during a supervisor restart delay, such as systemd's `RestartSec`.
+
+In those windows the PE forwards only on whatever kernel state remains. The
+guarantee is therefore narrower: from the moment the startup hold arms, and
+while EVPN syncs within the backstop, the CE does not use this PE before
+End-of-RIB.
+
+A handoff in which a clean shutdown followed by a restart leaves links held
+was rejected. It needs a durable "restart follows" marker, and a stale
+marker would leave links down after a stop that was not followed by a
+start, which is the failure decision 6 exists to prevent.
 
 ### 6. Crash and reconcile safety
 
-- **Receipt.** Before each admin-down, rustbgpd writes and fsyncs
-  `<runtime_state_dir>/evpn-core-isolation-owned.json`. The receipt records
-  **intent**, not proof that the write completed. Each entry holds:
-  - the kernel boot ID (`/proc/sys/kernel/random/boot_id`);
-  - the identity of the daemon's network namespace (namespace inode and
-    device);
-  - the binding identity: the segment's configured `esi` text and bound
-    interface name;
-  - the member's name and ifindex.
+**Receipt.** Before each admin-down, rustbgpd writes and fsyncs
+`<runtime_state_dir>/evpn-core-isolation-owned.json`. The receipt records
+**intent**, not proof that the write completed. If it cannot be written,
+rustbgpd does not act and reports `action_failed`. Entries are removed
+after a successful admin-up. This follows ADR-0079: admin state has no
+kernel marker, so ownership needs an exact-value receipt. While running, the
+daemon holds an exclusive advisory lock on the receipt.
 
-  Entries are removed after a successful admin-up. If the receipt cannot be
-  written, rustbgpd does not act and reports `action_failed`. This follows
-  ADR-0079: admin state has no kernel marker, so ownership needs an
-  exact-value receipt.
-- **Identity guards on reconcile.** rustbgpd acts on an entry only if all
-  of these match: the boot ID, the namespace, and the member's recorded
-  name and ifindex under the same binding.
-  - A different boot ID means the kernel state is new, so the entry is
-    discarded.
-  - A different namespace, ifindex or binding means the entry describes
-    another object. The entry is discarded and the link is not touched.
-- **Crash between fsync and the kernel write.** The receipt names a member
-  that was never taken down. At reconcile that member is admin-up, so the
-  entry is discarded. If the startup hold applies, the member is taken down
-  again, after a fresh receipt write.
-- **Clean shutdown** closes the EVPN sessions, releases every held link,
-  then removes the receipt. A stopped daemon does not leave down any CE
-  link that it took down.
-- **Unclean exit, then restart.** The receipt is read before the startup
-  hold arms. Entries that pass the identity guards and are still admin-down
-  are adopted into the startup hold, and decision 5 releases them. Such an
-  entry is brought up at once if its segment is no longer bound or the
-  feature is disabled.
-- **Unclean exit with no restart.** The links stay down until an operator
-  raises them. The receipt is plain JSON that names them, and the operator
-  guide gives the `ip link set <member> up` recovery. The shipped systemd
-  unit restarts on failure. An `ExecStopPost=` helper that releases links
-  from the receipt is a possible follow-up, not part of this decision.
-- **Runtime changes.** Removing a binding, rebinding to another link,
-  removing the ES, or disabling the feature releases the affected links
-  through the same path. The ADR-0084 operator drain does not change the
-  hold.
+**Incarnation identity.** `name` and `ifindex` are not durable: the kernel
+reuses ifindex values, and a link can be renamed. ADR-0085 already resolves
+bindings by name for this reason. Each receipt entry records everything
+netlink exposes that distinguishes one link incarnation from another:
+
+- the kernel boot ID (`/proc/sys/kernel/random/boot_id`);
+- the identity of the daemon's network namespace (namespace inode and
+  device);
+- the binding identity: the segment's configured `esi` text and the bound
+  interface name;
+- the member's ifindex and name;
+- the member's permanent MAC: `IFLA_BOND_SLAVE_PERM_HWADDR` for a bond
+  member, and `IFLA_PERM_ADDRESS` when the kernel reports one (it omits an
+  all-zero address, as on a veth). An absent attribute is recorded as
+  absent;
+- the member's assigned MAC (`IFLA_ADDRESS`);
+- the master bond's ifindex and name.
+
+**Safe rule.**
+
+- A receipt entry is raised only if every recorded field matches the link's
+  current state exactly, exactly one link matches, and the link is still
+  admin-down.
+- A different boot ID means the host rebooted and the kernel state is new.
+  The entry is discarded and nothing is touched.
+- On any other mismatch or ambiguity, rustbgpd **never raises the link**.
+  That covers a changed name, ifindex, MAC or master, a missing link, more
+  than one candidate, or a link that cannot be read.
+  - The entry is kept.
+  - The binding's state becomes `ownership_ambiguous` in the metric, and
+    `rbgp doctor` reports it as `fail`.
+  - The operator resolves it by raising the link by hand and clearing the
+    entry.
+- A renamed owned link is ambiguous under this rule. It is left down and
+  reported, not raised under its new name. A member that left the bond
+  while held is handled the same way.
+
+**Crash between fsync and the kernel write.** The receipt names a member
+that was never taken down. At reconcile that member is admin-up. The entry
+is discarded, because there is nothing to raise. If the startup hold applies,
+the member is taken down again after a fresh receipt write.
+
+**Release paths, and what each one guarantees.**
+
+- **Clean shutdown.** The daemon closes the EVPN sessions, releases every
+  held link through the fresh checks, and then removes the receipt.
+- **Out-of-process release after any exit.**
+  - `rustbgpd --release-core-isolation <config>` is a one-shot mode beside
+    `--check` and `--diff`. It reads `runtime_state_dir` from the config,
+    or uses the default when the config cannot be parsed. It takes the
+    receipt lock without blocking and exits non-zero without acting if a
+    live daemon holds it. Otherwise it applies the incarnation guards and
+    safe rule above, raises only the members whose guards all match,
+    rewrites the receipt with whatever remains, and exits 0 when nothing is
+    held.
+  - The shipped systemd unit runs it as
+    `ExecStopPost=/usr/local/bin/rustbgpd --release-core-isolation /etc/rustbgpd/config.toml`.
+    systemd runs `ExecStopPost=` after the service stops, after an
+    unexpected exit, and after a failed start. It therefore also runs when
+    `StartLimitBurst` stops further restarts.
+  - The helper needs `CAP_NET_ADMIN`. The unit's capability set applies to
+    it, and EVPN deployments already grant that capability. With no receipt
+    it does nothing.
+  - Supervisors without a stop hook, such as plain containers, runit or
+    OpenRC without a `stop_post`, must run the same command after the
+    daemon exits. The operator guide documents this.
+- **Next start.** The receipt is read before the startup hold arms.
+  - Entries that pass every guard and are still admin-down are adopted into
+    the startup hold, and decision 5 releases them.
+  - Such an entry is raised at once if its segment is no longer bound or the
+    feature is disabled.
+  - Other entries follow the safe rule.
+- **What remains.** Sometimes neither the stop hook nor a restart runs. The
+  supervisor may have no hook configured, the helper may fail, or systemd
+  itself may be killed. The CE links then stay down until the next start
+  reconciles them, or an operator runs the release command or raises them
+  by hand. A host crash is not in this set, because the reboot discards the
+  entries by boot ID.
+
+The guarantee is therefore exactly this. A daemon exit leaves no CE link
+down that rustbgpd took down when one of these runs: a clean shutdown, the
+stop-hook release, or a later start. The exception is links that the safe
+rule leaves down as `ownership_ambiguous`, and those are reported.
+
+**Runtime changes.** Removing a binding, rebinding to another link,
+removing the ES, or disabling the feature releases the affected links
+through the same guarded path. The ADR-0084 operator drain does not change
+the hold.
 
 ### 7. Observability
 
@@ -454,6 +558,8 @@ not include a GR-aware exemption.
     `released` once sync is observed)
   - `suppressed_no_peer` (decision 4 stopped an isolation)
   - `overridden`
+  - `ownership_ambiguous` (decision 6: a receipt entry that the safe rule
+    will not raise)
   - `action_failed`
   - `disabled`
 - `evpn_core_isolated{signal}`: 0 or 1, with `signal` ∈ {`sessions`,
@@ -464,7 +570,7 @@ not include a GR-aware exemption.
   bound ES while the feature is enabled, built like the auto-lacp check.
   - `warn` for `isolated`, `backstop_released`, `suppressed_no_peer` or
     `overridden`.
-  - `fail` for `action_failed`.
+  - `fail` for `action_failed` and `ownership_ambiguous`.
   - It also warns when every configured uplink lacks carrier while
     sessions are Established, which points to a wrong `uplinks` list.
 
@@ -478,14 +584,25 @@ Each regression must fail when the action is removed:
   - backstop release before sync, with its warning state;
   - GR-stale non-isolation;
   - the peer latch across the last-session-down flush;
-  - override handling.
+  - override handling, including no re-down by the discovery pass;
+  - validation rejecting two segments that bind one interface while the
+    feature is enabled.
 - Netns tests (privileged runner):
   - member admin-down and admin-up on a bond and on a veth;
   - receipt write-ahead;
   - adoption after a simulated crash;
-  - an entry discarded for a recreated link (new ifindex) and for a foreign
-    boot ID;
-  - release of a receipt-only link once its binding is removed.
+  - an entry discarded for a foreign boot ID;
+  - `ownership_ambiguous`, with the link left down, for:
+    - a recreated link (new ifindex or permanent MAC);
+    - a renamed owned link;
+    - a member removed from the bond;
+  - release of a receipt-only link once its binding is removed;
+  - a member enslaved while isolated: its receipt entry is written before
+    it is taken down, and it is raised on release;
+  - `--release-core-isolation`:
+    - refuses while the daemon holds the lock;
+    - after a simulated crash, raises exactly the guarded members and leaves
+      ambiguous ones down.
 - Interop in the existing FRR all-active topology:
   - Cut rustbgpd's underlay. The CE drops its member from the aggregator,
     and remote↔CE traffic continues through FRR with bounded loss.
@@ -528,8 +645,12 @@ The four questions this record left open were decided on 2026-10-12.
   marker. The residual race in decision 3 remains.
 - Reusing ADR-0085's link drain means isolation and release need no new
   drain reason. Origination order follows the tested link-recovery path.
-- A planned restart now moves CE traffic to the other ES member for the
-  startup hold.
+- A planned restart moves CE traffic to the other ES member for the
+  startup hold. Between the old daemon's shutdown and the new daemon's
+  startup hold, the CE may still hash into this PE (decision 5).
+- The `ExecStopPost=` release adds a step to the shipped unit. Deployments
+  under other supervisors need the equivalent hook, or they rely on the next
+  start to release the links.
 - Stock-Linux FRR peers do not provide the reverse protection. If the FRR
   member is isolated, its protodown write fails and the CE keeps hashing
   into it. Operators of mixed deployments should know this.
@@ -548,4 +669,5 @@ The four questions this record left open were decided on 2026-10-12.
 - FRR 10.7.1: `zebra/zebra_evpn_mh.c`, `zebra/interface.c`,
   `zebra/if_netlink.c`, and `doc/user/bgp.rst` (EVPN-MH uplink tracking
   and startup delay).
-- systemd `systemd.network(5)`, `ActivationPolicy=`.
+- systemd `systemd.network(5)` (`ActivationPolicy=`) and `systemd.service(5)`
+  (`ExecStopPost=`).
