@@ -37,11 +37,9 @@ impl ReplacementSummaries {
                 trace.emit("summary");
             }
             match query {
-                // The frozen view captured no stale counts.
                 RibSummaryQuery::NeighborRibSnapshots {
                     peers,
                     comparison,
-                    stale_counts: _,
                     include_retained,
                     reply,
                 } => {
@@ -238,7 +236,7 @@ impl RibManager {
         }
         let mut neighbors = HashMap::with_capacity(peers.len());
         for peer in peers {
-            neighbors.insert(peer, self.neighbor_rib_snapshot(peer, false));
+            neighbors.insert(peer, self.neighbor_rib_snapshot(peer));
             self.replacement_checkpoint(false);
         }
         let unknown_outbound = PeerOutboundState {
@@ -325,7 +323,6 @@ mod tests {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
-                stale_counts: false,
                 include_retained: false,
             })
             .unwrap();
@@ -403,7 +400,7 @@ mod tests {
                 }],
             });
         let expected_neighbors =
-            [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer, false));
+            [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer));
         manager.with_replacement_summary_reads("restore", |manager| {
             // Mutating these canonical inputs cannot change the captured values.
             manager.selection_deferral = None;
@@ -412,7 +409,6 @@ mod tests {
                 peers: vec![unknown, waiter, unknown],
                 comparison: Some((unknown, waiter)),
                 reply,
-                stale_counts: false,
                 include_retained: false,
             })
             .unwrap();
@@ -422,7 +418,6 @@ mod tests {
                 peers: vec![unknown],
                 comparison: None,
                 reply: canceled_reply,
-                stale_counts: false,
                 include_retained: false,
             })
             .unwrap();
@@ -442,7 +437,6 @@ mod tests {
             peers: Vec::new(),
             comparison: None,
             reply,
-            stale_counts: false,
             include_retained: false,
         })
         .unwrap();
@@ -544,7 +538,6 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
-                    stale_counts: false,
                     include_retained: false,
                 })
                 .unwrap();
@@ -614,7 +607,6 @@ mod tests {
                             peers: Vec::new(),
                             comparison: None,
                             reply,
-                            stale_counts: false,
                             include_retained: false,
                         })
                         .unwrap();
@@ -686,7 +678,6 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
-                    stale_counts: false,
                     include_retained: false,
                 })
                 .unwrap();
@@ -783,7 +774,6 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
-                    stale_counts: false,
                     include_retained: false,
                 })
                 .unwrap();
@@ -920,7 +910,6 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
-                    stale_counts: false,
                     include_retained: false,
                 })
                 .unwrap();

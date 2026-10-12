@@ -60,11 +60,6 @@ pub enum RibSummaryQuery {
         peers: Vec<IpAddr>,
         /// Optional update-group comparison.
         comparison: Option<(IpAddr, IpAddr)>,
-        /// Count each retained family's stale routes. Counting scans the
-        /// peer's Adj-RIB-In, so only a single-neighbor read sets this;
-        /// list and doctor reads leave it false. Honored only for a
-        /// one-peer request.
-        stale_counts: bool,
         /// Also return a row for every peer the RIB retains GR/LLGR stale
         /// routes for that `peers` does not name (a down dynamic neighbor
         /// has left the neighbor inventory). Bounded by the retained-peer
@@ -81,13 +76,11 @@ impl From<RibSummaryQuery> for RibUpdate {
             RibSummaryQuery::NeighborRibSnapshots {
                 peers,
                 comparison,
-                stale_counts,
                 include_retained,
                 reply,
             } => Self::QueryNeighborRibSnapshots {
                 peers,
                 comparison,
-                stale_counts,
                 include_retained,
                 reply,
             },
@@ -1880,10 +1873,9 @@ pub struct GrRetentionFamilyState {
     /// negotiated) or the LLGR sweep, whichever is first. `None` when no
     /// deadline is armed.
     pub remaining_secs: Option<u64>,
-    /// Routes of this family still held GR- or LLGR-stale. Counted only for
-    /// a single-peer query, because counting scans the peer's Adj-RIB-In;
-    /// `None` in multi-peer responses and the replacement summary view.
-    pub stale_routes: Option<u64>,
+    /// Routes of this family still held GR- or LLGR-stale, from the
+    /// Adj-RIB-In's maintained counters (no route scan).
+    pub stale_routes: u64,
 }
 
 /// One actor-turn response for `NeighborService`'s RIB-owned state.
@@ -2734,11 +2726,6 @@ pub enum RibUpdate {
         peers: Vec<IpAddr>,
         /// Optional `(primary, comparison)` update-group comparison.
         comparison: Option<(IpAddr, IpAddr)>,
-        /// Count each retained family's stale routes. Counting scans the
-        /// peer's Adj-RIB-In, so only a single-neighbor read sets this;
-        /// list and doctor reads leave it false. Honored only for a
-        /// one-peer request.
-        stale_counts: bool,
         /// Also return a row for every peer the RIB retains GR/LLGR stale
         /// routes for that `peers` does not name (a down dynamic neighbor
         /// has left the neighbor inventory). Bounded by the retained-peer

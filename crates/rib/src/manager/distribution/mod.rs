@@ -5446,6 +5446,7 @@ impl RibManager {
         };
 
         let peer = pending.peer();
+        let stale_before = self.retained_stale_count(peer);
         // Include chunk construction as well as processing, separately from
         // the drained-batch distribution and rejection retirement below.
         let chunk_started = std::time::Instant::now();
@@ -5526,6 +5527,11 @@ impl RibManager {
                 }
             }
         }
+
+        // A re-advertised or withdrawn stale route lowers the peer's count.
+        self.republish_gr_stale_routes_if_moved(peer, stale_before);
+        #[cfg(test)]
+        self.assert_stale_counters_match_scan();
 
         // Measured before the drained-batch tail so ingest is attributable
         // separately from the coalesced outbound pass it triggers.

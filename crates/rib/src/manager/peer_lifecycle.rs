@@ -489,8 +489,14 @@ impl RibManager {
         }
         // Per-family LLGR deadlines can outlive both maps above (they
         // survive re-establishment while routes remain LLGR-stale); a full
-        // teardown ends retention outright.
-        self.llgr_stale_deadlines.retain(|&(p, _, _)| p != peer);
+        // teardown ends retention outright, and with it the retention
+        // series those deadlines kept active.
+        if self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer) {
+            self.llgr_stale_deadlines.retain(|&(p, _, _)| p != peer);
+            let peer_label = peer.to_string();
+            self.metrics.set_gr_active(&peer_label, false);
+            self.metrics.set_gr_stale_routes(&peer_label, 0);
+        }
 
         self.clear_peer_adj_rib_in(peer);
 

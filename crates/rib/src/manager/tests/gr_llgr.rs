@@ -2766,6 +2766,83 @@ async fn partial_gr_stale_gauge_counts_both_phases_through_reconnect() {
     }
 }
 
+fn received(source: IpAddr, announced: Vec<Route>, withdrawn: Vec<(Prefix, u32)>) -> RibUpdate {
+    RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    }
+}
+
+/// While a reconnected peer re-advertises before End-of-RIB,
+/// `bgp_gr_stale_routes` and the retention row follow the maintained
+/// counters: a re-advertised stale route stops counting, and so does a
+/// withdrawn one. A gauge set only at retention transitions keeps reading 2
+/// until End-of-RIB.
+#[tokio::test(start_paused = true)]
+async fn gr_stale_gauge_falls_as_routes_are_readvertised_before_eor() {
+    let stale_rows = |manager: &RibManager, peer| -> Vec<u64> {
+        manager
+            .gr_retention_snapshot(peer)
+            .iter()
+            .map(|row| row.stale_routes)
+            .collect()
+    };
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    manager.handle_update(gr_with_llgr(
+        source,
+        120,
+        vec![V4_UNICAST, V6_UNICAST],
+        vec![],
+        0,
+    ));
+    assert_eq!(gr_gauges(&manager, source), (1.0, 2.0));
+    let _new_rx = reconnect_with_capabilities(&mut manager, source, &[V4_UNICAST, V6_UNICAST], &[]);
+    assert_eq!(gr_gauges(&manager, source), (1.0, 2.0));
+    assert_eq!(stale_rows(&manager, source), vec![1, 1]);
+
+    manager.handle_update(received(
+        source,
+        vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 1),
+        )],
+        vec![],
+    ));
+    drain_route_chunks(&mut manager);
+    assert!(
+        !adj_route(&manager, source, retention_v4_prefix())
+            .unwrap()
+            .is_stale
+    );
+    assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+    assert_eq!(stale_rows(&manager, source), vec![0, 1]);
+
+    manager.handle_update(received(source, vec![], vec![(retention_v6_prefix(), 0)]));
+    drain_route_chunks(&mut manager);
+    assert_eq!(gr_gauges(&manager, source), (1.0, 0.0));
+    assert_eq!(stale_rows(&manager, source), vec![0, 0]);
+
+    for safi_family in [V4_UNICAST, V6_UNICAST] {
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: source,
+            session_id: 0,
+            afi: safi_family.0,
+            safi: safi_family.1,
+        });
+    }
+    assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
+}
+
 /// A second restart can leave GR and LLGR paths under the same prefix.
 /// End-of-RIB must remove both kinds by path ID while retaining the refreshed
 /// path, resolving only its family, and distributing the lost prefixes.
@@ -3374,7 +3451,6 @@ async fn gr_retention_rows(
         peers: vec![peer],
         comparison: None,
         reply,
-        stale_counts: true,
         include_retained: false,
     })
     .await
@@ -3393,7 +3469,7 @@ fn assert_retention(
     assert_eq!((rows[0].afi, rows[0].safi), (Afi::Ipv4, Safi::Unicast));
     assert_eq!(rows[0].phase, phase, "{rows:?}");
     assert_eq!(rows[0].remaining_secs, Some(remaining_secs), "{rows:?}");
-    assert_eq!(rows[0].stale_routes, Some(2));
+    assert_eq!(rows[0].stale_routes, 2);
 }
 
 /// The neighbor snapshot's retention row follows the RIB's own deadlines
@@ -3437,14 +3513,13 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
         .await
         .unwrap();
     assert_retention(&gr_retention_rows(&tx, source).await, GrRestart, 120);
-    // A list read (neighbor list, doctor) keeps the phase and deadline but
-    // never scans the Adj-RIB-In for counts.
+    // A list read (neighbor list, doctor) carries the same row, counts
+    // included: they come from maintained counters, not a scan.
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryNeighborRibSnapshots {
         peers: vec![source, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
         comparison: None,
         reply,
-        stale_counts: false,
         include_retained: false,
     })
     .await
@@ -3453,22 +3528,8 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
     assert_eq!(listed[0].gr_retention.len(), 1);
     assert_eq!(listed[0].gr_retention[0].phase, GrRestart);
     assert_eq!(listed[0].gr_retention[0].remaining_secs, Some(120));
-    assert_eq!(listed[0].gr_retention[0].stale_routes, None);
+    assert_eq!(listed[0].gr_retention[0].stale_routes, 2);
     assert_eq!(listed[1].gr_retention, Vec::new());
-    // A list read on a one-peer daemon asks for no count, and gets none.
-    let (reply, response) = oneshot::channel();
-    tx.send(RibUpdate::QueryNeighborRibSnapshots {
-        peers: vec![source],
-        comparison: None,
-        reply,
-        stale_counts: false,
-        include_retained: false,
-    })
-    .await
-    .unwrap();
-    let listed = response.await.unwrap().snapshots;
-    assert_eq!(listed[0].gr_retention.len(), 1);
-    assert_eq!(listed[0].gr_retention[0].stale_routes, None);
     tokio::time::advance(Duration::from_secs(30)).await;
     tokio::task::yield_now().await;
     assert_retention(&gr_retention_rows(&tx, source).await, GrRestart, 90);
@@ -3508,7 +3569,6 @@ async fn retained_query(
         peers,
         comparison: None,
         reply,
-        stale_counts: false,
         include_retained,
     })
     .await
@@ -3564,7 +3624,7 @@ async fn include_retained_reports_unlisted_peer_until_sweep() {
     assert_eq!(row.gr_retention.len(), 1);
     assert_eq!(row.gr_retention[0].phase, GrRestart);
     assert_eq!(row.gr_retention[0].remaining_secs, Some(120));
-    assert_eq!(row.gr_retention[0].stale_routes, None);
+    assert_eq!(row.gr_retention[0].stale_routes, 1);
     // A requested peer is never repeated as a retained row.
     let response = retained_query(&tx, vec![source, listed], true).await;
     assert_eq!(response.snapshots[0].gr_retention.len(), 1);
@@ -3615,7 +3675,7 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
     });
     drain_route_chunks(&mut manager);
     manager.handle_update(gr_with_llgr(peer, 120, ipv4_sendable(), vec![], 0));
-    let expected = manager.neighbor_rib_snapshot(peer, false);
+    let expected = manager.neighbor_rib_snapshot(peer);
     assert_eq!(expected.gr_retention.len(), 1);
     assert_eq!(
         expected.gr_retention[0].phase,
@@ -3629,7 +3689,6 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
                 peers: vec![peer],
                 comparison: None,
                 reply,
-                stale_counts: false,
                 include_retained: false,
             })
             .unwrap();
@@ -3646,7 +3705,6 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
-                stale_counts: false,
                 include_retained: true,
             })
             .unwrap();
@@ -3672,13 +3730,13 @@ async fn retention_row_reports_llgr_deadline_outside_family_maps() {
         (other, Afi::Ipv4, Safi::Unicast),
         now + Duration::from_secs(50),
     );
-    let rows = manager.gr_retention_snapshot(peer, false);
+    let rows = manager.gr_retention_snapshot(peer);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!((rows[0].afi, rows[0].safi), (Afi::Ipv6, Safi::Unicast));
     assert_eq!(rows[0].phase, crate::update::GrRetentionPhase::Llgr);
     assert_eq!(rows[0].remaining_secs, Some(100));
     assert_eq!(
-        manager.gr_retention_snapshot(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), false),
+        manager.gr_retention_snapshot(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
         Vec::new()
     );
 }
