@@ -8,5 +8,5 @@
   from an empty token after `ABORTED`. Whole-table `ListEvpnRoutes` /
   `rbgp evpn`, type 0 or 6 peer-view calls, EVPN explain and events keep
   working as alpha surfaces. The EVPN table gauges count the whole table,
-  including any Type 6 routes, and `bgp_gr_stale_routes` can overstate stale
-  routes until End-of-RIB or the stale sweep.
+  including any Type 6 routes, and `bgp_gr_stale_routes` sums stale routes
+  across all families rather than counting EVPN alone.
