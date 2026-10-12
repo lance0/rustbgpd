@@ -959,6 +959,7 @@ impl PeerManager {
         peer: PeerKey,
         next_tcp_ao: Option<&TcpAoKeyring>,
         next_discard_path_attributes: &[u8],
+        stop_reason: Option<bytes::Bytes>,
     ) -> Result<(), PeerLifecycleError> {
         self.delete_peer_checked(
             peer,
@@ -966,7 +967,7 @@ impl PeerManager {
             next_tcp_ao,
             false,
             Some(next_discard_path_attributes),
-            None,
+            stop_reason,
         )
         .await
         .map(|_| ())
@@ -1048,10 +1049,7 @@ impl PeerManager {
                 config.tcp_ao.as_ref(),
                 false,
                 Some(&config.discard_path_attributes),
-                // Taking the peer down sends the configured reason, as disable does.
-                (was_enabled && !enabled)
-                    .then(|| admin_down_shutdown_communication(&config))
-                    .flatten(),
+                replacement_stop_reason(was_enabled, enabled, &config),
             )
             .await?;
         if let Err(add_error) = self.add_peer_with_admin_state(config, false, enabled).await {
@@ -1740,14 +1738,14 @@ impl PeerManager {
         let candidate =
             rollback_config.map(|prior| Box::new(self.replace_current_config(prior.clone())));
         let restored = async {
-            if self.peers.contains_key(&peer) {
+            if let Some(current_enabled) = self.peers.get(&peer).map(|managed| managed.enabled) {
                 self.delete_peer_checked(
                     peer.clone(),
                     false,
                     previous.tcp_ao.as_ref(),
                     false,
                     Some(&previous.discard_path_attributes),
-                    None,
+                    replacement_stop_reason(current_enabled, was_enabled, &previous),
                 )
                 .await?;
             }
@@ -2544,6 +2542,18 @@ pub(super) fn config_admin_enable(
     }
     let next_down = next.admin_down.is_some();
     (managed.admin_down.is_some() != next_down).then_some(!next_down)
+}
+
+/// The shutdown communication for a replacement's teardown: the configured
+/// reason when the replacement takes an enabled peer down, as disable sends.
+pub(super) fn replacement_stop_reason(
+    enabled: bool,
+    next_enabled: bool,
+    next: &PeerManagerNeighborConfig,
+) -> Option<bytes::Bytes> {
+    (enabled && !next_enabled)
+        .then(|| admin_down_shutdown_communication(next))
+        .flatten()
 }
 
 /// The RFC 9003 shutdown communication a config-driven disable sends.

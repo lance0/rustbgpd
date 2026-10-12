@@ -224,3 +224,36 @@ async fn config_admin_down_replacement_sends_the_configured_reason() {
     assert_eq!(managed.hold_time, Some(30));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
 }
+
+/// The sequential reload route rebuilds through `reconcile_peers`. A rebuild
+/// that also sets the key (here with a GTSM change, which keeps a candidate
+/// on that route) closes the session with the configured reason too.
+#[tokio::test]
+async fn sequential_rebuild_that_sets_admin_down_sends_the_configured_reason() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let (handle, starts, mut stops) = recording_admin_handle();
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let mut next = forward_config(&mgr, addr);
+    next.admin_down = Some("gtsm rollout".to_string());
+    next.ttl_security_hops = std::num::NonZeroU8::new(1);
+
+    let outcome = mgr
+        .reconcile_peers(Vec::new(), Vec::new(), vec![next])
+        .await;
+
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    assert_eq!(
+        stops.recv().await.expect("old session receives Stop"),
+        Some(rustbgpd_wire::notification::encode_shutdown_communication(
+            "gtsm rollout"
+        ))
+    );
+    let managed = &mgr.peers[&key(addr)];
+    assert!(!managed.enabled);
+    assert_eq!(
+        managed.transport_config.ttl_security_hops,
+        std::num::NonZeroU8::new(1)
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+}
