@@ -300,7 +300,7 @@ fn snapshot_with(
 /// own members are held down) keeps the hold.
 #[tokio::test(start_paused = true)]
 async fn identity_change_drops_the_peer_latch_and_the_hold() {
-    let isolated = |next: Arc<CoreIsolationSnapshot>| {
+    let isolated = |steps: Vec<Arc<CoreIsolationSnapshot>>| {
         let (rib_tx, _rib_rx) = mpsc::channel(1);
         let mut controller = Controller::new(CoreIsolationDeps {
             rib_tx,
@@ -315,7 +315,9 @@ async fn identity_change_drops_the_peer_latch_and_the_hold() {
         planner.observe(&b, &core_up(true, &["10.0.0.2"]), Instant::now());
         planner.observe(&b, &core_lost(), Instant::now());
         assert_eq!(planner.decision("bond0"), HoldDecision::Hold("isolated"));
-        controller.apply_config(next);
+        for next in steps {
+            controller.apply_config(next);
+        }
         let planner = controller.planner.as_mut().unwrap();
         let decision = planner.decision("bond0");
         // Still isolated: without a fresh Type 4 it is never re-held.
@@ -323,22 +325,133 @@ async fn identity_change_drops_the_peer_latch_and_the_hold() {
         assert_eq!(planner.decision("bond0"), decision);
         decision
     };
-    for next in [
-        snapshot_with("00:00:00:00:00:00:00:00:00:07", Some(esi(7)), "10.0.0.1"),
-        snapshot_with("auto-lacp", Some(esi(9)), "10.0.0.1"),
-        snapshot_with("auto-lacp", Some(esi(1)), "10.0.0.5"),
+    let unresolved = || snapshot_with("auto-lacp", None, "10.0.0.1");
+    for steps in [
+        vec![snapshot_with(
+            "00:00:00:00:00:00:00:00:00:07",
+            Some(esi(7)),
+            "10.0.0.1",
+        )],
+        vec![snapshot_with("auto-lacp", Some(esi(9)), "10.0.0.1")],
+        vec![snapshot_with("auto-lacp", Some(esi(1)), "10.0.0.5")],
+        // A CE replaced behind the bond: unresolved, then a different ESI.
+        vec![
+            unresolved(),
+            snapshot_with("auto-lacp", Some(esi(9)), "10.0.0.1"),
+        ],
     ] {
         assert_eq!(
-            isolated(next),
+            isolated(steps),
             HoldDecision::Release("suppressed_no_peer"),
             "a new segment identity must not inherit the old peer latch"
         );
     }
+    for steps in [
+        vec![unresolved()],
+        vec![
+            unresolved(),
+            snapshot_with("auto-lacp", Some(esi(1)), "10.0.0.1"),
+        ],
+    ] {
+        assert_eq!(
+            isolated(steps),
+            HoldDecision::Hold("isolated"),
+            "an auto-lacp ESI lost to our own hold, or regained unchanged, is the same segment"
+        );
+    }
+}
+
+/// A peer counts only if seen while the core was up by both signals.
+/// Synced sessions behind dead uplinks latch nothing, so after the startup
+/// backstop the next isolation does not take the links down again. A later
+/// legitimate hold is not suppressed by the backstop.
+#[tokio::test(start_paused = true)]
+async fn uplink_isolation_latches_no_peer_across_the_startup_backstop() {
+    let b = bindings(&["bond0"]);
+    let uplinks_dead = Observation {
+        uplinks_down: true,
+        ..core_up(true, &["10.0.0.2"])
+    };
+    let mut planner = HoldPlanner::startup(&settings(10, 180), Instant::now());
+    planner.observe(&b, &uplinks_dead, Instant::now());
+    tokio::time::advance(Duration::from_secs(180)).await;
+    planner.observe(&b, &uplinks_dead, Instant::now());
     assert_eq!(
-        isolated(snapshot_with("auto-lacp", None, "10.0.0.1")),
-        HoldDecision::Hold("isolated"),
-        "an auto-lacp ESI lost to our own hold is not a new identity"
+        planner.decision("bond0"),
+        HoldDecision::Release("backstop_released")
     );
+    planner.observe(&b, &uplinks_dead, Instant::now());
+    assert_eq!(
+        planner.decision("bond0"),
+        HoldDecision::Release("suppressed_no_peer"),
+        "a peer seen behind dead uplinks must not re-hold the links after the backstop"
+    );
+
+    // Uplinks back and synced: the peer latches; losing the uplinks again
+    // is a real isolation and holds.
+    planner.observe(&b, &core_up(true, &["10.0.0.2"]), Instant::now());
+    planner.observe(&b, &uplinks_dead, Instant::now());
+    assert_eq!(planner.decision("bond0"), HoldDecision::Hold("isolated"));
+}
+
+/// Failures outrank `disabled`: a release that fails after the table is
+/// disabled, or after the binding is removed, stays visible.
+#[test]
+fn release_failure_after_disable_is_reported_not_disabled() {
+    let metrics = BgpMetrics::with_registry(prometheus::Registry::new());
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let mut controller = Controller::new(CoreIsolationDeps {
+        rib_tx,
+        metrics: metrics.clone(),
+        directory: None,
+        start: Instant::now(),
+    });
+    let active = |interface: &str| -> Vec<String> {
+        metrics
+            .registry()
+            .gather()
+            .iter()
+            .filter(|f| f.name() == "evpn_es_core_isolation_state")
+            .flat_map(|f| f.get_metric().to_vec())
+            .filter(|m| {
+                (m.get_gauge().get_value() - 1.0).abs() < f64::EPSILON
+                    && m.get_label()
+                        .iter()
+                        .any(|l| l.name() == "interface" && l.value() == interface)
+            })
+            .flat_map(|m| {
+                m.get_label()
+                    .iter()
+                    .filter(|l| l.name() == "state")
+                    .map(|l| l.value().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let mut disabled = snapshot("bond0", Some(esi(1)));
+    disabled.settings.as_mut().unwrap().enabled = false;
+    controller.apply_config(Arc::new(disabled.clone()));
+    controller.publish_states();
+    assert_eq!(active("bond0"), ["disabled"]);
+
+    controller.runtime.get_mut("bond0").unwrap().action_failed = true;
+    controller.publish_states();
+    assert_eq!(active("bond0"), ["action_failed"]);
+
+    // The binding leaves the config while one of its releases fails.
+    let mut unbound = disabled;
+    unbound.bindings.clear();
+    controller.apply_config(Arc::new(unbound));
+    controller
+        .runtime
+        .entry("bond0".to_string())
+        .or_default()
+        .action_failed = true;
+    controller.publish_states();
+    assert_eq!(active("bond0"), ["action_failed"]);
+    controller.runtime.get_mut("bond0").unwrap().action_failed = false;
+    controller.publish_states();
+    assert!(active("bond0").is_empty(), "series go once nothing fails");
 }
 
 /// Disabling or removing the table clears the signal gauge, and an

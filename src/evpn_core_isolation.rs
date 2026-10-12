@@ -175,7 +175,11 @@ impl HoldPlanner {
         self.held.retain(|b| bindings.contains(b));
         self.suppressed.retain(|b| bindings.contains(b));
         self.peers.retain(|b, _| bindings.contains(b));
+        let isolated = observation.isolated();
+        // A peer counts only if seen while the core was up by both signals
+        // and EVPN was synced (ADR-0140 decision 4 and its amendment).
         if observation.sessions.synced
+            && !isolated
             && let Some(peers) = &observation.peers
         {
             for (binding, set) in peers {
@@ -184,7 +188,6 @@ impl HoldPlanner {
                 }
             }
         }
-        let isolated = observation.isolated();
         if isolated || !observation.sessions.synced {
             self.synced_since = None;
         } else {
@@ -422,6 +425,10 @@ pub(crate) struct Controller {
     runtime: BTreeMap<String, BindingRuntime>,
     last_sessions: Option<EvpnSessionsSync>,
     store_error: Option<String>,
+    /// Last resolved ESI per bound interface, kept across an `auto-lacp`
+    /// bond going unresolved, so a CE replaced behind it is still seen as a
+    /// new segment identity.
+    resolved: BTreeMap<String, rustbgpd_wire::EthernetSegmentIdentifier>,
 }
 
 impl Controller {
@@ -441,6 +448,7 @@ impl Controller {
             runtime: BTreeMap::new(),
             last_sessions: None,
             store_error: None,
+            resolved: BTreeMap::new(),
         }
     }
 
@@ -488,10 +496,25 @@ impl Controller {
 
     fn apply_config(&mut self, snapshot: CoreIsolationConfig) {
         let previous = std::mem::replace(&mut self.snapshot, snapshot);
+        self.resolved
+            .retain(|interface, _| self.snapshot.bindings.contains_key(interface));
         for (interface, old) in &previous.bindings {
-            if let Some(new) = self.snapshot.bindings.get(interface)
-                && identity_changed(old, new)
+            let Some(new) = self.snapshot.bindings.get(interface) else {
+                continue;
+            };
+            let mut changed = identity_changed(old, new);
+            if changed {
+                self.resolved.remove(interface);
+            }
+            if let Some(esi) = new.esi
+                && self
+                    .resolved
+                    .insert(interface.clone(), esi)
+                    .is_some_and(|last| last != esi)
             {
+                changed = true;
+            }
+            if changed {
                 info!(
                     reason = "binding_changed",
                     interface = %interface,
@@ -504,6 +527,11 @@ impl Controller {
                 if let Some(runtime) = self.runtime.get_mut(interface) {
                     runtime.overridden.clear();
                 }
+            }
+        }
+        for (interface, binding) in &self.snapshot.bindings {
+            if let Some(esi) = binding.esi {
+                self.resolved.entry(interface.clone()).or_insert(esi);
             }
         }
         if self.enabled().is_none() {
@@ -546,6 +574,8 @@ impl Controller {
                 .as_ref()
                 .is_some_and(ReceiptStore::receipt_exists);
         if !wanted {
+            // Nothing to own, so nothing can be failing.
+            self.store_error = None;
             return false;
         }
         let result = (|| -> Result<(), String> {
@@ -784,10 +814,13 @@ impl Controller {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // Every pass re-derives failures, enabled or not: a release that
+        // fails after a disable must stay visible.
+        for runtime in self.runtime.values_mut() {
+            runtime.action_failed = false;
+        }
         if enabled {
             for (interface, binding) in &bindings {
-                let runtime = self.runtime.entry(interface.clone()).or_default();
-                runtime.action_failed = false;
                 if held.contains(interface) {
                     self.hold_pass(interface, binding, links).await;
                 } else {
@@ -1030,16 +1063,36 @@ impl Controller {
         }
         let enabled = self.enabled().is_some();
         let store_failed = self.store_error.is_some();
-        let interfaces: Vec<String> = self.snapshot.bindings.keys().cloned().collect();
+        // A binding that left the config is still reported while one of its
+        // receipt entries is failing; otherwise its series go.
+        let gone: Vec<(String, bool)> = self
+            .runtime
+            .iter()
+            .filter(|(interface, _)| !self.snapshot.bindings.contains_key(*interface))
+            .map(|(interface, r)| (interface.clone(), r.ambiguous || r.action_failed))
+            .collect();
+        let mut interfaces: Vec<String> = self.snapshot.bindings.keys().cloned().collect();
+        for (interface, failing) in gone {
+            if failing {
+                interfaces.push(interface);
+            } else {
+                self.runtime.remove(&interface);
+                self.deps
+                    .metrics
+                    .remove_evpn_es_core_isolation_state(&interface);
+            }
+        }
         for interface in interfaces {
             let decision = self.planner.as_ref().map(|p| p.decision(&interface));
             let runtime = self.runtime.entry(interface.clone()).or_default();
+            // Failures outrank `disabled`: disabling must not hide a link
+            // a failed release left down.
             let state = if runtime.ambiguous {
                 "ownership_ambiguous"
-            } else if !enabled {
-                "disabled"
             } else if runtime.action_failed || store_failed {
                 "action_failed"
+            } else if !enabled {
+                "disabled"
             } else if runtime.uplink_overlap {
                 "uplink_overlap"
             } else if !runtime.overridden.is_empty() {
@@ -1160,14 +1213,14 @@ pub(crate) fn discover(
         .collect()
 }
 
-/// Whether a binding now names a different segment: another configured
-/// ESI or originator, or another resolved ESI (a replaced CE behind an
-/// `auto-lacp` bond). An `auto-lacp` ESI that is merely unresolved, as it
-/// is while its own members are held down, is not a change.
+/// Whether a binding's configured identity changed: another configured
+/// `esi` or originator. A changed resolved ESI is compared against the
+/// last resolved value in `apply_config`, because an `auto-lacp` ESI that
+/// is merely unresolved, as it is while its own members are held down, is
+/// not a change, but a different ESI resolved afterwards (a replaced CE)
+/// is.
 fn identity_changed(old: &CoreIsolationBinding, new: &CoreIsolationBinding) -> bool {
-    old.esi_text != new.esi_text
-        || old.originator_ip != new.originator_ip
-        || matches!((old.esi, new.esi), (Some(a), Some(b)) if a != b)
+    old.esi_text != new.esi_text || old.originator_ip != new.originator_ip
 }
 
 fn classify_entry(entry: &OwnedLink, host: &HostIdentity, links: &[AdminLinkState]) -> Guard {

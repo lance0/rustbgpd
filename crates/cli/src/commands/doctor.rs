@@ -1637,11 +1637,13 @@ fn evpn_core_isolation_checks(document: &toml::Value, metrics: Option<&str>) -> 
         .and_then(|t| t.get("enabled"))
         .and_then(toml::Value::as_bool)
         .unwrap_or(false);
-    if !enabled {
-        return Vec::new();
-    }
     let states = state_set(metrics.unwrap_or_default(), "evpn_es_core_isolation_state");
-    let mut checks: Vec<Check> = config_rows(document, &["ethernet_segments"])
+    let bound = if enabled {
+        config_rows(document, &["ethernet_segments"])
+    } else {
+        &[]
+    };
+    let mut checks: Vec<Check> = bound
         .iter()
         .filter_map(|row| row.get("interface").and_then(toml::Value::as_str))
         .collect::<BTreeSet<_>>()
@@ -1678,6 +1680,35 @@ fn evpn_core_isolation_checks(document: &toml::Value, metrics: Option<&str>) -> 
             }
         })
         .collect();
+    // A failure outlives the table: a release that failed after a disable or
+    // an unbind still leaves a link down, so it is reported for any
+    // interface, configured or not.
+    let covered: BTreeSet<String> = checks.iter().map(|c| c.name.clone()).collect();
+    let failing: BTreeMap<&String, &BTreeSet<String>> = states.iter().collect();
+    for (interface, set) in failing {
+        let name = format!("evpn.es.{interface}.core_isolation");
+        if covered.contains(&name) {
+            continue;
+        }
+        if let [state] = set
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            let (status, detail) = core_isolation_status(state, interface);
+            if status == CheckStatus::Fail {
+                checks.push(Check {
+                    name,
+                    status,
+                    detail,
+                });
+            }
+        }
+    }
+    if !enabled {
+        return checks;
+    }
     let signal = |name: &str| {
         metrics.and_then(|text| {
             text.lines()
@@ -5600,6 +5631,22 @@ paths = ["x"]
             assert!(checks[0].detail.starts_with(state), "{}", checks[0].detail);
         }
         assert!(evpn_core_isolation_checks(&document(false), Some(&row("isolated"))).is_empty());
+        assert!(evpn_core_isolation_checks(&document(false), Some(&row("disabled"))).is_empty());
+        // Disabling must not hide a failed release, nor must unbinding.
+        for state in ["action_failed", "ownership_ambiguous"] {
+            let checks = evpn_core_isolation_checks(&document(false), Some(&row(state)));
+            assert_eq!(checks.len(), 1, "{state}");
+            assert_eq!(checks[0].name, "evpn.es.bond0.core_isolation");
+            assert_eq!(checks[0].status, CheckStatus::Fail);
+        }
+        let gone = "evpn_es_core_isolation_state{interface=\"old0\",state=\"action_failed\"} 1\n";
+        let checks = evpn_core_isolation_checks(
+            &document(true),
+            Some(&format!("{}{gone}", row("released"))),
+        );
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[1].name, "evpn.es.old0.core_isolation");
+        assert_eq!(checks[1].status, CheckStatus::Fail);
         let unknown = evpn_core_isolation_checks(&document(true), Some(""));
         assert_eq!(unknown[0].status, CheckStatus::Warn);
 

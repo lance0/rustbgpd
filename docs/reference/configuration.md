@@ -4806,9 +4806,14 @@ set per bound interface: `released`, `startup_hold`, `isolated`, `recovering`,
 `uplink_overlap`, `action_failed` or `disabled`.
 `evpn_core_isolated{signal}` is 1 while the `sessions` or `uplinks` signal
 holds. Each transition is logged once with its state as the reason code.
+`action_failed` and `ownership_ambiguous` outrank `disabled`, and an interface
+whose binding was removed keeps its series while one of its releases is
+failing, so a disable or unbind that could not raise a link stays visible.
 `rbgp doctor` reports `evpn.es.<interface>.core_isolation` for each bound
-segment while the table is enabled, and `evpn.core_isolation.uplinks` when
-every uplink lacks carrier while EVPN sessions are up.
+segment while the table is enabled, reports those two failure states for any
+interface whatever the table's state, and reports
+`evpn.core_isolation.uplinks` when every uplink lacks carrier while EVPN
+sessions are up.
 
 Stock-Linux FRR peers do not provide the reverse protection: FRR's protodown
 write fails on bond members, so an isolated FRR PE keeps attracting CE traffic.
