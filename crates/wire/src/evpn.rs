@@ -410,7 +410,7 @@ impl fmt::Display for EvpnIpPrefixValue {
 pub struct EvpnEadPerEs {
     /// Route Distinguisher.
     pub rd: RouteDistinguisher,
-    /// Ethernet Segment Identifier (must be non-zero).
+    /// Ethernet Segment Identifier (normally non-zero; zero is decoded).
     pub esi: EthernetSegmentIdentifier,
     /// Ethernet Tag (must be `MAX_ET` for per-ES).
     pub ethernet_tag: EthernetTagId,
@@ -426,7 +426,7 @@ pub struct EvpnEadPerEs {
 pub struct EvpnEadPerEvi {
     /// Route Distinguisher.
     pub rd: RouteDistinguisher,
-    /// Ethernet Segment Identifier (must be non-zero).
+    /// Ethernet Segment Identifier (ZERO for a single-homed VPWS CE, RFC 8214).
     pub esi: EthernetSegmentIdentifier,
     /// Ethernet Tag identifying the EVI / bridge domain.
     pub ethernet_tag: EthernetTagId,
@@ -469,7 +469,8 @@ pub struct EvpnImet {
 pub struct EvpnEs {
     /// Route Distinguisher.
     pub rd: RouteDistinguisher,
-    /// Ethernet Segment Identifier (must be non-zero).
+    /// Ethernet Segment Identifier. Must be non-zero in an announcement;
+    /// [`validate_evpn_announcements`] rejects zero.
     pub esi: EthernetSegmentIdentifier,
     /// Originator Router IP. Wire length is 4 or 16 bytes.
     pub originator_ip: IpAddr,
@@ -561,11 +562,21 @@ impl EvpnSmet {
 ///
 /// # Errors
 ///
-/// Returns the first invalid Type 6 announcement profile.
+/// Returns the first invalid Type 6 announcement profile or zero-ESI Type 4
+/// announcement.
 pub fn validate_evpn_announcements(routes: &[EvpnRoute]) -> Result<(), DecodeError> {
     for route in routes {
-        if let EvpnRoute::Smet(smet) = route {
-            smet.validate_announcement()?;
+        match route {
+            EvpnRoute::Smet(smet) => smet.validate_announcement()?,
+            // RFC 7432 §§5, 8.1: an ES route identifies a multihomed
+            // segment, whose ESI is non-zero.
+            EvpnRoute::Es(es) if es.esi.is_zero() => {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: "EVPN Type 4 ES route with all-zero ESI (RFC 7432 §8.1.1)".into(),
+                });
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -861,15 +872,10 @@ fn decode_type1(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
         });
     }
     let rd = decode_rd(&payload[0..8])?;
+    // ESI 0 is valid: RFC 8214 §4 sends it in a single-homed VPWS per-EVI
+    // A-D route, and RFC 7432 §8.2.1 only calls a per-ES A-D route for
+    // ESI 0 "not needed".
     let esi = decode_esi(&payload[8..18])?;
-    // RFC 7432 §7.1: EAD routes (per-ES and per-EVI) carry a non-zero ESI
-    // identifying the Ethernet Segment. Reject ESI=0 at the wire boundary.
-    if esi.is_zero() {
-        return Err(DecodeError::MalformedField {
-            message_type: "UPDATE",
-            detail: "EVPN Type 1 EAD route with all-zero ESI (RFC 7432 §7.1)".into(),
-        });
-    }
     let ethernet_tag = decode_ethernet_tag(&payload[18..22])?;
     let label = decode_mpls_label(&payload[22..25])?;
     if ethernet_tag.is_max_et() {
@@ -1037,14 +1043,9 @@ fn decode_type4(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
         });
     }
     let rd = decode_rd(&payload[0..8])?;
+    // A zero ESI is meaningless here but keeps the key extractable; the
+    // announcement check in `validate_evpn_announcements` rejects it.
     let esi = decode_esi(&payload[8..18])?;
-    // RFC 7432 §7.4: ES routes carry a non-zero ESI identifying the segment.
-    if esi.is_zero() {
-        return Err(DecodeError::MalformedField {
-            message_type: "UPDATE",
-            detail: "EVPN Type 4 ES route with all-zero ESI (RFC 7432 §7.4)".into(),
-        });
-    }
     let ip_len_bits = payload[18];
     let ip_bytes = match ip_len_bits {
         32 => 4,
@@ -1216,7 +1217,8 @@ fn decode_type6(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
 /// Truncation and per-type malformed payloads still error.
 ///
 /// This is structural decoding, shared by announcements and withdrawals.
-/// Canonical Type 6 flags are retained even when invalid for announcement.
+/// Canonical Type 6 flags and zero-ESI Type 4 keys are retained even when
+/// invalid for announcement.
 /// Announcement callers must also use [`validate_evpn_announcements`] (or
 /// the revised UPDATE parser) and retain decoded keys for error recovery.
 ///
@@ -2054,34 +2056,57 @@ mod tests {
         assert!(decode_evpn_nlri(&bytes).is_err());
     }
 
-    /// Regression: RFC 7432 §7.1 — Type 1 EAD with all-zero ESI is malformed.
+    /// RFC 8214 §4: a single-homed VPWS per-EVI A-D route carries ESI 0;
+    /// RFC 7432 §8.2.1 calls a per-ES A-D route for ESI 0 only "not needed".
+    /// Both decode, keep their per-EVI/per-ES identity, and pass the
+    /// announcement check.
     #[test]
-    fn decode_type1_rejects_zero_esi() {
-        let mut bytes = vec![1u8, 25];
-        bytes.extend_from_slice(&[0u8; 8]); // RD
-        bytes.extend_from_slice(&[0u8; 10]); // ESI = ZERO
-        bytes.extend_from_slice(&[0xFF; 4]); // ethernet_tag MAX_ET
-        bytes.extend_from_slice(&[0, 0, 0]); // label
-        let err = decode_evpn_nlri(&bytes).unwrap_err();
-        let DecodeError::MalformedField { detail, .. } = err else {
-            panic!("expected MalformedField");
-        };
-        assert!(detail.contains("Type 1"), "unexpected detail: {detail}");
+    fn decode_type1_accepts_zero_esi_per_evi_and_per_es() {
+        for (tag, per_es) in [([0, 0, 0, 100], false), ([0xFF; 4], true)] {
+            let mut bytes = vec![1u8, 25];
+            bytes.extend_from_slice(&[0u8; 8]); // RD
+            bytes.extend_from_slice(&[0u8; 10]); // ESI = ZERO
+            bytes.extend_from_slice(&tag);
+            bytes.extend_from_slice(&[0, 0x06, 0x41]); // label
+            let routes = decode_evpn_nlri(&bytes).unwrap();
+            assert_eq!(routes.len(), 1);
+            match &routes[0] {
+                EvpnRoute::EadPerEs(r) if per_es => assert!(r.esi.is_zero()),
+                EvpnRoute::EadPerEvi(r) if !per_es => assert!(r.esi.is_zero()),
+                other => panic!("wrong Type 1 identity: {other:?}"),
+            }
+            validate_evpn_announcements(&routes).unwrap();
+            let mut encoded = Vec::new();
+            encode_evpn_nlri(&routes, &mut encoded).unwrap();
+            assert_eq!(encoded, bytes);
+        }
     }
 
-    /// Regression: RFC 7432 §7.4 — Type 4 ES with all-zero ESI is malformed.
+    /// RFC 7432 §§5, 8.1.1: a Type 4 ES route names a multihomed segment, so
+    /// ESI 0 is meaningless. It decodes structurally (the key stays usable
+    /// for withdrawal and RFC 7606 treat-as-withdraw) but fails the
+    /// announcement check; a non-zero ESI passes.
     #[test]
-    fn decode_type4_rejects_zero_esi() {
+    fn decode_type4_zero_esi_fails_only_announcement_validation() {
         let mut bytes = vec![4u8, 23];
         bytes.extend_from_slice(&[0u8; 8]); // RD
         bytes.extend_from_slice(&[0u8; 10]); // ESI = ZERO
         bytes.push(32); // IP len bits = IPv4
         bytes.extend_from_slice(&[10, 0, 0, 1]); // originator IP
-        let err = decode_evpn_nlri(&bytes).unwrap_err();
-        let DecodeError::MalformedField { detail, .. } = err else {
+        let routes = decode_evpn_nlri(&bytes).unwrap();
+        let EvpnRoute::Es(es) = &routes[0] else {
+            panic!("expected Type 4");
+        };
+        assert!(es.esi.is_zero());
+        let DecodeError::MalformedField { detail, .. } =
+            validate_evpn_announcements(&routes).unwrap_err()
+        else {
             panic!("expected MalformedField");
         };
         assert!(detail.contains("Type 4"), "unexpected detail: {detail}");
+
+        bytes[10] = 1; // first ESI octet: Type 1 ESI, non-zero
+        validate_evpn_announcements(&decode_evpn_nlri(&bytes).unwrap()).unwrap();
     }
 
     #[test]

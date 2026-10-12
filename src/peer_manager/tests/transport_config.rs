@@ -261,6 +261,16 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefixes_family: rustbgpd_transport::FamilyPrefixLimits([
+            Some(11),
+            None,
+            Some(13),
+            None,
+            Some(15),
+            None,
+            None,
+            Some(18),
+        ]),
         max_prefix_action: rustbgpd_transport::MaxPrefixAction::Shutdown,
         max_prefix_warning_percent: None,
         max_prefix_restart_seconds: Some(30),
@@ -327,6 +337,7 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefixes_ipv6,
         max_prefixes_received_ipv4,
         max_prefixes_received_ipv6,
+        max_prefixes_family,
         max_prefix_action,
         max_prefix_warning_percent,
         max_prefix_restart_seconds: _max_prefix_restart_seconds,
@@ -388,6 +399,10 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(
         t.max_prefixes_received_ipv6, *max_prefixes_received_ipv6,
         "max_prefixes_received_ipv6"
+    );
+    assert_eq!(
+        t.max_prefixes_family, *max_prefixes_family,
+        "max_prefixes_family"
     );
     assert_eq!(t.max_prefix_action, *max_prefix_action, "max_prefix_action");
     assert_eq!(

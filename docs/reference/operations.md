@@ -1304,9 +1304,10 @@ synchronous actor work: a clone already running cannot be interrupted.
 ### Peer max-prefix exceeded
 
 When a peer exceeds `max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
-or the pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6`
-bounds, the daemon sends a NOTIFICATION and tears down the
-session. Without negotiated Notification GR this is Cease/1 (Maximum Number of
+the pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6`
+bounds, or a non-unicast `max_prefixes_<family>` bound (VPN, labeled unicast,
+EVPN, FlowSpec, RT-Constrain), the daemon sends a NOTIFICATION and tears down
+the session. Without negotiated Notification GR this is Cease/1 (Maximum Number of
 Prefixes Reached). With the RFC 8538 N-bit, the daemon sends outer Cease/9
 (Hard Reset) whose data encapsulates the same Cease/1 reason and RFC 4486 data,
 preventing the over-limit routes from being retained as stale. By default the
@@ -1422,16 +1423,21 @@ rather than derived from placeholder zero counts.
 Prometheus exposes the same live actor authority as
 `bgp_max_prefix_usage`, `bgp_max_prefix_limit`, and
 `bgp_max_prefix_headroom`, keyed by `peer` and bounded `scope`
-(`aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or
-`ipv6_unicast_received`). Usage is the session
+(`aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
+`ipv6_unicast_received`, or a non-unicast family label: `l3vpn_ipv4_unicast`,
+`l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`,
+`l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`). Usage is the session
 actor's enforcement count, not an alias for `bgp_rib_prefixes`: in particular,
 unicast Add-Path IDs collapse to one unique prefix while the aggregate also
 includes max-prefix-counted non-unicast identities. Limit and headroom series
 exist only for finite configured bounds. The two `*_received` scopes report
 the pre-policy count bounded by `max_prefixes_received_*` (announced prefixes,
 accepted or rejected) and exist — usage included — only while that bound is
-configured, because rejected identities are not tracked otherwise. All
-capacity families are
+configured, because rejected identities are not tracked otherwise. A
+non-unicast family scope exists only while its `max_prefixes_<family>` bound
+is configured; its usage counts unique accepted routes with Add-Path paths
+collapsed, while the aggregate keeps counting VPN and labeled-unicast Add-Path
+paths separately. All capacity families are
 removed when the session goes down and republished from fresh actor state on
 reconnect; GR-retained RIB rows therefore never appear as live session usage.
 
@@ -1668,7 +1674,7 @@ exactly under the floods these drops account for.
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
 | `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, or `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait) |
-| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`; series are absent while the session is down, and the `*_received` scopes are absent while their `max_prefixes_received_*` bound is unset |
+| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, `ipv6_unicast_received`, or a non-unicast family (`l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`); series are absent while the session is down, and the `*_received` and non-unicast family scopes are absent while their bound is unset |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
 | `bgp_max_prefix_blocking{peer,scope}` | 1 while a `max_prefix_action = "block"` episode is open for a finite scope — net-new prefixes are being withheld until usage falls back under the bound; present for every finite scope, reaped with the other capacity series |
@@ -2487,7 +2493,7 @@ counters, using a 15-minute increase window:
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_gr_active_peers` | Peers currently in GR stale-route state |
-| `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale) |
+| `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale); falls as the peer re-advertises or withdraws them before End-of-RIB |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
 | `bgp_selection_deferral_active{afi_safi}` | Planned-restart family convergence/release gate (1 = active); it remains active while collision failback waits for EoRR even after route selection is staged |
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking family convergence/release, including an `awaiting_refresh` survivor after route selection is staged |
@@ -2538,10 +2544,10 @@ running; `gr_awaiting_eor`: re-established, waiting for End-of-RIB before
 `gr_stale_routes_time` expires; `llgr`: long-lived stale), the time remaining
 until the RIB's next deadline for that family (GR expiry sweeps the routes or
 promotes them to LLGR; LLGR expiry sweeps them), and the stale-route count.
-The count is reported for a single neighbor only: `rbgp neighbor` without an
-address and `rbgp doctor` omit it, so a neighbor list during a mass restart
-event does not scan every peer's received routes. The row disappears once
-nothing is retained. A dynamic neighbor leaves the neighbor inventory when its
+The count comes from counters the RIB maintains per family, so the neighbor
+list (`rbgp neighbor`, `--json` included) and `rbgp doctor` report it too
+without scanning any peer's received routes during a mass restart event. The
+row disappears once nothing is retained. A dynamic neighbor leaves the neighbor inventory when its
 session goes idle; while the RIB still retains its routes it stays listed as a
 retention-only row (source `retention only (no session or configuration)`,
 `"retention_only": true` in JSON) with the same retention rows, and
@@ -2549,7 +2555,7 @@ retention-only row (source `retention only (no session or configuration)`,
 check for such a row. `llgr_stale_time` can hold a
 route for up to about 194 days by design, so `rbgp doctor` reports each
 family in the `llgr` phase as a `peer.<scoped-address>.llgr_retention.<family>`
-warning that names the time left, not as a failure.
+warning that names the stale-route count and the time left, not as a failure.
 
 The `active` and `waiters` gauges, plus ordinary `all_eor`,
 `collision_refresh`, and `all_excluded` releases, are dashboard context rather
@@ -2885,7 +2891,8 @@ retain their `%interface` scope in both check names and details.
 eBGP peer with no effective inbound prefix bound after peer-group inheritance.
 It names the peer and the five keys that can set a bound: `max_prefixes`,
 `max_prefixes_ipv4`, `max_prefixes_ipv6`, `max_prefixes_received_ipv4`, and
-`max_prefixes_received_ipv6`. Static, API-added, and accepted dynamic peers
+`max_prefixes_received_ipv6`. A non-unicast `max_prefixes_<family>` bound
+alone does not satisfy the check. Static, API-added, and accepted dynamic peers
 are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
 are excluded; the check also requires the daemon's global ASN and peer
 configuration to be available. This advisory warning retains exit status 0.

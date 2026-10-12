@@ -218,7 +218,8 @@ pub struct PolicyEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundPrefixLimitState {
     /// `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
-    /// or `ipv6_unicast_received`.
+    /// `ipv6_unicast_received`, or a non-unicast family label such as
+    /// `l3vpn_ipv4_unicast`.
     pub scope: String,
     /// The session actor's enforcement count for the scope.
     pub usage: u64,
@@ -2099,6 +2100,8 @@ pub struct PeerManagerNeighborConfig {
     pub max_prefixes_received_ipv4: Option<u32>,
     /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
     pub max_prefixes_received_ipv6: Option<u32>,
+    /// Non-unicast per-family accepted bounds (`max_prefixes_<family>`).
+    pub max_prefixes_family: rustbgpd_transport::FamilyPrefixLimits,
     /// Response to a crossed inbound max-prefix bound (ADR-0108 amendment).
     pub max_prefix_action: rustbgpd_transport::MaxPrefixAction,
     /// Warning threshold percentage of every finite bound (1..=100).
@@ -2358,6 +2361,10 @@ impl ConfigPersistAck {
 ///
 /// The binary crate converts these into config file mutations.
 /// Kept simple — only the data the neighbor service already has.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "config persistence events are rare control-plane messages; boxing the neighbor definition would churn every constructor and match for no hot-path gain"
+)]
 pub enum ConfigEvent {
     /// The `[[fib_tables]]` set was replaced at runtime (gRPC FIB-table CRUD).
     /// Carries the full accepted table set the FIB reconciler acknowledged, so

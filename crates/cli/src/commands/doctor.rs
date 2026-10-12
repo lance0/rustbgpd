@@ -994,8 +994,11 @@ fn llgr_retention_checks(
             name: format!("peer.{identity}.llgr_retention.{}", row.family),
             status: CheckStatus::Warn,
             detail: format!(
-                "peer {identity} family {} is in the LLGR stale phase; sweep in {}",
+                "peer {identity} family {} is in the LLGR stale phase{}; sweep in {}",
                 row.family,
+                row.stale_routes
+                    .map(|n| format!(" holding {n} stale route{}", if n == 1 { "" } else { "s" }))
+                    .unwrap_or_default(),
                 super::neighbor::retention_remaining_label(row.remaining_seconds)
             ),
         })
@@ -1014,7 +1017,17 @@ fn inbound_prefix_bound_check(
         || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
-        || !neighbor.inbound_prefix_limits.is_empty()
+        || neighbor.inbound_prefix_limits.iter().any(|row| {
+            // Non-unicast family scopes bound only their own family.
+            matches!(
+                row.scope.as_str(),
+                "aggregate"
+                    | "ipv4_unicast"
+                    | "ipv6_unicast"
+                    | "ipv4_unicast_received"
+                    | "ipv6_unicast_received"
+            )
+        })
         || neighbor.effective_max_prefixes.is_some()
         || neighbor.effective_max_prefixes_ipv4.is_some()
         || neighbor.effective_max_prefixes_ipv6.is_some()
@@ -3572,10 +3585,7 @@ async fn run_with_deadlines(
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
                                 ),
-                                gr_retention: super::neighbor::json_gr_retention(
-                                    &n.gr_retention,
-                                    false,
-                                ),
+                                gr_retention: super::neighbor::json_gr_retention(&n.gr_retention),
                                 gr_retention_available: n.gr_retention_available,
                             },
                             identity,
@@ -4799,6 +4809,17 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             }];
             assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
         }
+        // A non-unicast family bound (for example `max_prefixes_rtc`) leaves
+        // the unicast feed and the aggregate unbounded: the warning stays.
+        let mut family_only = peer.clone();
+        family_only.inbound_prefix_limits = vec![crate::proto::InboundPrefixLimitState {
+            scope: "rtc".to_string(),
+            limit: 10,
+            ..Default::default()
+        }];
+        let check = inbound_prefix_bound_check("10.0.0.2", &family_only, Some(65001))
+            .expect("a family-only bound must not satisfy the unicast check");
+        assert_eq!(check.status, CheckStatus::Warn);
         for case in 0..4 {
             let mut bounded = peer.clone();
             match case {
@@ -7284,6 +7305,33 @@ paths = ["x"]
         assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 1);
     }
 
+    /// The LLGR warning names the count with the right number, and omits it
+    /// for a daemon that does not report one.
+    #[test]
+    fn llgr_retention_detail_counts_stale_routes() {
+        let row = |stale_routes| crate::proto::GracefulRestartRetentionState {
+            family: "ipv4_unicast".to_string(),
+            phase: "llgr".to_string(),
+            remaining_seconds: Some(60),
+            stale_routes,
+        };
+        let detail = |stale_routes| {
+            llgr_retention_checks("192.0.2.2", &[row(stale_routes)])
+                .remove(0)
+                .detail
+        };
+        let prefix = "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase";
+        assert_eq!(
+            detail(Some(1)),
+            format!("{prefix} holding 1 stale route; sweep in 00:01:00")
+        );
+        assert_eq!(
+            detail(Some(2)),
+            format!("{prefix} holding 2 stale routes; sweep in 00:01:00")
+        );
+        assert_eq!(detail(None), format!("{prefix}; sweep in 00:01:00"));
+    }
+
     /// A family held in the LLGR phase is a configured outcome: doctor warns
     /// with the time left and the exit code stays green. A GR-phase family
     /// raises no retention check. Dropping the check loses the warning;
@@ -7305,7 +7353,7 @@ paths = ["x"]
                 family: "ipv4_unicast".to_string(),
                 phase: "llgr".to_string(),
                 remaining_seconds: Some(16_416_000),
-                stale_routes: None,
+                stale_routes: Some(42),
             },
             rustbgpd_api::proto::GracefulRestartRetentionState {
                 family: "ipv6_unicast".to_string(),
@@ -7324,7 +7372,7 @@ paths = ["x"]
         assert_eq!(check["status"], "warn");
         assert_eq!(
             check["detail"],
-            "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase; sweep in 190d 0h"
+            "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase holding 42 stale routes; sweep in 190d 0h"
         );
         assert!(!manifest["checks"].as_array().unwrap().iter().any(|check| {
             check["name"]

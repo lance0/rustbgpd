@@ -9,5 +9,5 @@
   retention ends. `rbgp doctor` runs only the retention check for such a
   row, and `rbgp diff advertised` refuses it as not configured. The
   `rbgp neighbor --json` list now also carries the optional `gr_retention`
-  rows, without stale-route counts, and `gr_retention_available`. See
+  rows, with stale-route counts, and `gr_retention_available`. See
   [Graceful Restart](../docs/reference/operations.md#graceful-restart).

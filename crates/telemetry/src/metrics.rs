@@ -4831,8 +4831,9 @@ impl BgpMetrics {
 
     /// Publish one authoritative max-prefix accounting scope.
     ///
-    /// `scope` is deliberately bounded to the aggregate and the two unicast
-    /// families whose independent limits are enforced by the session actor.
+    /// `scope` is deliberately bounded to the aggregate and the families
+    /// whose independent limits are enforced by the session actor: unicast
+    /// (accepted and received) and the non-unicast per-family bounds.
     /// An unlimited scope keeps its usage series but removes limit, headroom,
     /// and blocking instead of manufacturing a misleading zero.
     pub fn set_max_prefix_capacity(
@@ -4849,6 +4850,14 @@ impl BgpMetrics {
                 | "ipv6_unicast"
                 | "ipv4_unicast_received"
                 | "ipv6_unicast_received"
+                | "l3vpn_ipv4_unicast"
+                | "l3vpn_ipv6_unicast"
+                | "ipv4_labeled_unicast"
+                | "ipv6_labeled_unicast"
+                | "l2vpn_evpn"
+                | "ipv4_flowspec"
+                | "ipv6_flowspec"
+                | "rtc"
         ));
         let labels = [peer, scope];
         let usage = i64::try_from(usage).unwrap_or(i64::MAX);

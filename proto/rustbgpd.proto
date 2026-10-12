@@ -799,10 +799,12 @@ message GracefulRestartRetentionState {
   // negotiated) or the LLGR sweep, whichever comes first. Absent when no
   // deadline is armed.
   optional uint64 remaining_seconds = 3;
-  // Routes of this family still held GR- or LLGR-stale. Counting scans the
-  // peer's Adj-RIB-In, so only GetNeighborState reports it; absent from
-  // ListNeighbors and from older daemons. Zero while End-of-RIB is still
-  // awaited after every stale route was re-advertised.
+  // Routes of this family still held GR- or LLGR-stale, from counters the
+  // RIB maintains as routes are marked, re-advertised, withdrawn and swept.
+  // Reported by both ListNeighbors and GetNeighborState; absent from older
+  // daemons, and from ListNeighbors on daemons that counted only for a
+  // single neighbor. Zero while End-of-RIB is still awaited after every
+  // stale route was re-advertised.
   optional uint64 stale_routes = 4;
 }
 
@@ -871,8 +873,10 @@ message OutboundPrefixLimitState {
 // One finite inbound max-prefix bound's live capacity for a neighbor
 // (ADR-0108 amendment).
 message InboundPrefixLimitState {
-  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received", or
-  // "ipv6_unicast_received".
+  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received",
+  // "ipv6_unicast_received", or a non-unicast family label ("l3vpn_ipv4_unicast",
+  // "l3vpn_ipv6_unicast", "ipv4_labeled_unicast", "ipv6_labeled_unicast",
+  // "l2vpn_evpn", "ipv4_flowspec", "ipv6_flowspec", "rtc").
   string scope = 1;
   // The session actor's enforcement count for the scope.
   uint64 usage = 2;

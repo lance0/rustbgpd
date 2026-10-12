@@ -72,7 +72,6 @@ async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) 
             peers: Vec::new(),
             comparison: None,
             reply,
-            stale_counts: false,
             include_retained: false,
         })
         .unwrap();
@@ -228,7 +227,6 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
             peers: Vec::new(),
             comparison: None,
             reply,
-            stale_counts: false,
             include_retained: false,
         })
         .unwrap();

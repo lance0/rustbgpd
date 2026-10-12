@@ -3058,11 +3058,52 @@ impl RibManager {
     }
 
     /// Process a single `RibUpdate` message.
+    ///
+    /// The typed-family receipts, `PeerUp` and the refresh boundaries change
+    /// a peer's stale routes in this turn without publishing
+    /// `bgp_gr_stale_routes` themselves, so the gauge is republished here
+    /// when the count moved. Unicast, `FlowSpec` and EVPN receipts are
+    /// queued and republish per chunk (`process_next_route_chunk`). GR
+    /// entry, the timer sweeps, End-of-RIB and teardown publish at their
+    /// own sites.
+    fn handle_update(&mut self, update: RibUpdate) {
+        let receipt_peer = match &update {
+            RibUpdate::BgpLsRoutesReceived { peer, .. }
+            | RibUpdate::VpnRoutesReceived { peer, .. }
+            | RibUpdate::LabeledRoutesReceived { peer, .. }
+            | RibUpdate::RtcRoutesReceived { peer, .. }
+            | RibUpdate::PeerUp { peer, .. }
+            | RibUpdate::EndRouteRefresh { peer, .. }
+            | RibUpdate::RouteRefreshTimeout { peer, .. } => Some(*peer),
+            _ => None,
+        };
+        let before = receipt_peer.map(|peer| (peer, self.retained_stale_count(peer)));
+        self.dispatch_update(update);
+        if let Some((peer, before)) = before {
+            self.republish_gr_stale_routes_if_moved(peer, before);
+        }
+        #[cfg(test)]
+        self.assert_stale_counters_match_scan();
+    }
+
+    /// Test-only oracle: every Adj-RIB-In's maintained stale counters equal
+    /// a full scan of its tables.
+    #[cfg(test)]
+    pub(super) fn assert_stale_counters_match_scan(&self) {
+        for (peer, rib) in &self.ribs {
+            assert_eq!(
+                rib.maintained_stale_route_counts(),
+                rib.scanned_stale_route_counts(),
+                "maintained stale counters diverged from a scan for {peer}"
+            );
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
-    fn handle_update(&mut self, update: RibUpdate) {
+    fn dispatch_update(&mut self, update: RibUpdate) {
         #[cfg(test)]
         if let Some(hook) = &self.test_primary_update_hook {
             hook(&update);
@@ -3591,14 +3632,12 @@ impl RibManager {
             RibUpdate::QueryNeighborRibSnapshots {
                 peers,
                 comparison,
-                stale_counts,
                 include_retained,
                 reply,
             } => {
                 self.handle_query_neighbor_rib_snapshots(
                     peers,
                     comparison,
-                    stale_counts,
                     include_retained,
                     reply,
                 );

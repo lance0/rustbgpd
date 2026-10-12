@@ -1156,7 +1156,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1384 bytes |
+| `AdjRibIn` | 1552 bytes |
 | `LocRib` | 1064 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
@@ -1171,7 +1171,7 @@ interned globally, across all peers, so the per-route impact is amortized to
 near zero (see below), but the enum size sets the per-unique-attribute-set
 heap cost.
 
-`AdjRibIn` (1032 → 1384 bytes) and `LocRib` (96 → 1064 bytes) grew the same
+`AdjRibIn` (1032 → 1384 bytes, before the stale counters below) and `LocRib` (96 → 1064 bytes) grew the same
 way — each struct picked up a route map and/or secondary index per added RIB
 family (VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS, FlowSpec; the last
 24 bytes of `LocRib` are the EVPN Type 4 key index that keeps the
@@ -1180,10 +1180,16 @@ core-isolation read off the full EVPN table; see
 via `std::mem::size_of` against the current struct definitions; these two
 rows aren't in the allocator-tracked harness JSON.
 
-The final 48 bytes of `AdjRibIn` are two inline, allocation-free
+Of the 1384 bytes, 48 are two inline, allocation-free
 `RpkiValidationCounts` values, one for each unicast family. They keep the
 exact RPKI post-policy BMP counters on the route mutation path instead of
 requiring a periodic route-table scan.
+
+The last 168 bytes (1384 → 1552) are seven empty `Vec` headers, one per route
+table, holding per-family GR/LLGR stale-route counters. They allocate only
+when a table first holds a stale route, and they let neighbor reads and
+`bgp_gr_stale_routes` report retained counts without scanning the peer's
+routes.
 
 `Route` fell from 136 to 112 bytes when it stopped carrying two per-session
 values inline: the receive time became a 4-byte whole-second monotonic stamp
@@ -1537,7 +1543,9 @@ doctor and management-correctness gates) and the
 [2026-10-04 run](soaks/soak-rs-flagship-24h-2026-10-04.md) on the v0.74.0
 tag (peak 564.7 MB, 5th–95th percentile 458.8–478.5 MB) and the
 [2026-10-06 run](soaks/soak-rs-flagship-24h-2026-10-06.md) on the v0.75.0
-tag (peak 641.2 MB in a reload window, 5th–95th percentile 453.0–481.0 MB). The
+tag (peak 641.2 MB in a reload window, 5th–95th percentile 453.0–481.0 MB) and the
+[2026-10-11 run](soaks/soak-rs-flagship-24h-2026-10-11.md) on the v0.76.0
+tag (peak 601.3 MB in a reload window, 5th–95th percentile 455.3–475.8 MB). The
 [2026-09-28 route-reflector run](soaks/soak-rr-flagship-24h-2026-09-28.md) on
 the v0.73.0 tag, on the same virtualized host shape, passed its RSS gates
 (hold band 237.7–254.6 MB, peak 427.6 MB in the terminal refresh). Different hosts

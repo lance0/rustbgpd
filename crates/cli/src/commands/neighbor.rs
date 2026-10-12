@@ -89,23 +89,21 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         ),
         route_reflector_client: n.route_reflector_client,
         description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
-        gr_retention: json_gr_retention(&n.gr_retention, false),
+        gr_retention: json_gr_retention(&n.gr_retention),
         gr_retention_available: n.gr_retention_available,
     }
 }
 
-/// Retention rows for JSON. A list projection passes `with_counts: false`
-/// and never carries `stale_routes`, whatever the daemon sent.
+/// Retention rows for JSON, in the list, detail and doctor-bundle views.
 pub(crate) fn json_gr_retention(
     rows: &[crate::proto::GracefulRestartRetentionState],
-    with_counts: bool,
 ) -> Vec<JsonGrRetentionFamily> {
     rows.iter()
         .map(|row| JsonGrRetentionFamily {
             family: row.family.clone(),
             phase: row.phase.clone(),
             remaining_seconds: row.remaining_seconds,
-            stale_routes: row.stale_routes.filter(|_| with_counts),
+            stale_routes: row.stale_routes,
         })
         .collect()
 }
@@ -481,7 +479,7 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
                 reason: row.reason.clone(),
             })
             .collect(),
-        gr_retention: json_gr_retention(&n.gr_retention, true),
+        gr_retention: json_gr_retention(&n.gr_retention),
         gr_retention_available: n.gr_retention_available,
     }
 }
@@ -1857,8 +1855,9 @@ mod tests {
     }
 
     /// The list JSON carries the retention rows the list RPC already returns,
-    /// in the detail view's shape, with no stale count (a list never counts).
-    /// Availability is presence-aware: an older daemon omits both fields.
+    /// in the detail view's shape, stale count included. Availability is
+    /// presence-aware: an older daemon omits both fields, and a daemon that
+    /// predates list counts omits `stale_routes`.
     #[test]
     fn neighbor_list_json_carries_gr_retention_rows() {
         let mut state = crate::proto::NeighborState {
@@ -1867,7 +1866,6 @@ mod tests {
                 family: "ipv4_unicast".to_string(),
                 phase: "gr_restart".to_string(),
                 remaining_seconds: Some(100),
-                // A populated count must still never reach list JSON.
                 stale_routes: Some(7),
             }],
             ..Default::default()
@@ -1876,9 +1874,17 @@ mod tests {
         assert_eq!(
             value["gr_retention"],
             serde_json::json!([
-                {"family": "ipv4_unicast", "phase": "gr_restart", "remaining_seconds": 100}
+                {
+                    "family": "ipv4_unicast",
+                    "phase": "gr_restart",
+                    "remaining_seconds": 100,
+                    "stale_routes": 7
+                }
             ])
         );
+        state.gr_retention[0].stale_routes = None;
+        let value = serde_json::to_value(json_neighbor(&state)).unwrap();
+        assert!(value["gr_retention"][0].get("stale_routes").is_none());
         assert_eq!(value["gr_retention_available"], true);
 
         state.gr_retention.clear();

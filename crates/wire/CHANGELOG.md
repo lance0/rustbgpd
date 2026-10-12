@@ -3,6 +3,19 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- `decode_evpn_nlri` (and the UPDATE parsers built on it) now accepts an
+  all-zero ESI in EVPN Type 1 and Type 4 routes instead of returning an
+  error. A single-homed VPWS per-EVI Ethernet A-D route carries ESI 0
+  (RFC 8214 §4), and RFC 7432 §8.2.1 does not prohibit it on a per-ES route.
+  `validate_evpn_announcements` now rejects a zero-ESI Type 4 announcement
+  (RFC 7432 §8.1.1), so `UpdateMessage::parse_revised` reports it as a
+  treat-as-withdraw `MalformedAttribute` rather than a session-reset error.
+  Withdrawals and the legacy `parse` path decode it structurally. No public
+  item or signature changes. This is a decode-behavior change, so under the
+  crate's semver policy it ships in the next minor release, not a patch.
+
 ## 0.24.0 - 2026-10-11
 
 - `is_dataplane_route_type` now returns `true` for Type 3 (IMET). Received

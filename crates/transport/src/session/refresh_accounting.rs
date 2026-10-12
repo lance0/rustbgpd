@@ -263,7 +263,7 @@ impl PeerSession {
             }
             RefreshStaleIdentities::FlowSpec(keys) => {
                 for key in keys {
-                    self.known_flowspec.remove(&key);
+                    self.forget_flowspec(&key);
                 }
             }
             RefreshStaleIdentities::Evpn(keys) => {
@@ -278,12 +278,12 @@ impl PeerSession {
             }
             RefreshStaleIdentities::Vpn(keys) => {
                 for key in keys {
-                    self.known_vpn.remove(&key);
+                    self.forget_vpn(&key);
                 }
             }
             RefreshStaleIdentities::Labeled(keys) => {
                 for key in keys {
-                    self.known_labeled.remove(&key);
+                    self.forget_labeled(&key);
                 }
             }
             RefreshStaleIdentities::Rtc(keys) => {

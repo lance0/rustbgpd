@@ -2714,34 +2714,7 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<usize>,
     ) {
         let retained = self.ribs.get(&peer).map_or(0, |rib| {
-            let stale = |stale: bool, llgr_stale: bool| stale || llgr_stale;
-            rib.iter()
-                .filter(|r| stale(r.is_stale, r.is_llgr_stale))
-                .count()
-                + rib
-                    .iter_flowspec()
-                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
-                    .count()
-                + rib
-                    .iter_evpn()
-                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
-                    .count()
-                + rib
-                    .iter_vpn()
-                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
-                    .count()
-                + rib
-                    .iter_labeled()
-                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
-                    .count()
-                + rib
-                    .iter_bgpls()
-                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
-                    .count()
-                + rib
-                    .iter_rtc()
-                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
-                    .count()
+            usize::try_from(rib.retained_stale_count()).unwrap_or(usize::MAX)
         });
         let _ = reply.send(retained);
     }
@@ -2800,14 +2773,9 @@ impl RibManager {
         &self,
         peers: Vec<IpAddr>,
         comparison: Option<(IpAddr, IpAddr)>,
-        stale_counts: bool,
         include_retained: bool,
         reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     ) {
-        // Stale counts scan a peer's Adj-RIB-In: only an explicit
-        // single-neighbor read asks, and the scan never covers more than one
-        // peer per actor turn.
-        let with_stale_counts = stale_counts && peers.len() == 1;
         let retained_candidates = if include_retained {
             self.gr_retention_peers()
         } else {
@@ -2818,15 +2786,11 @@ impl RibManager {
             peers,
             comparison,
             retained_candidates,
-            |peer| self.neighbor_rib_snapshot(peer, with_stale_counts),
+            |peer| self.neighbor_rib_snapshot(peer),
             |primary, comparison| self.update_group_comparison(primary, comparison),
         );
     }
-    pub(super) fn neighbor_rib_snapshot(
-        &self,
-        peer: IpAddr,
-        with_stale_counts: bool,
-    ) -> NeighborRibSnapshot {
+    pub(super) fn neighbor_rib_snapshot(&self, peer: IpAddr) -> NeighborRibSnapshot {
         NeighborRibSnapshot {
             peer,
             advertised_count: self
@@ -2839,7 +2803,7 @@ impl RibManager {
                 .unwrap_or_default(),
             outbound: self.peer_outbound_state(peer),
             remote_asn: self.peer_asn.get(&peer).copied(),
-            gr_retention: self.gr_retention_snapshot(peer, with_stale_counts),
+            gr_retention: self.gr_retention_snapshot(peer),
         }
     }
 

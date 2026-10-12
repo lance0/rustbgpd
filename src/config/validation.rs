@@ -1668,8 +1668,9 @@ impl Config {
         validate_bfd(self)?;
         // Every named chain (global, group, neighbor) already went through
         // `resolve_chain_with_store` above, which charges the same node budget, so only
-        // the inherited effective chains remain to be bounded here.
-        self.validate_effective_policy_chain_nodes()?;
+        // the inherited effective chains remain to be bounded here. The same pass
+        // checks each effective export chain against its binding's families.
+        self.validate_effective_policy_chains(true)?;
 
         Ok(())
     }
@@ -3080,7 +3081,7 @@ fn validate_max_prefix_modes(
         return Err(ConfigError::InvalidNeighborConfig {
             address: subject.to_string(),
             field: "max_prefix_action".to_string(),
-            reason: "\"block\" applies to the per-family unicast bounds only; unset the aggregate \
+            reason: "\"block\" applies to the per-family bounds only; unset the aggregate \
                      max_prefixes"
                 .to_string(),
         });

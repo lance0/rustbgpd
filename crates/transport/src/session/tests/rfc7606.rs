@@ -111,6 +111,93 @@ async fn smet_invalid_flags_withdraw_all_update_siblings_and_recover() {
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
 
+/// RFC 8214 §4: a single-homed VPWS per-EVI Ethernet A-D route carries
+/// ESI 0 and is accepted. A zero-ESI Type 4 (RFC 7432 §8.1.1) withdraws its
+/// whole UPDATE per RFC 7606. Neither resets the session, and the Type 1 is
+/// later withdrawn through `MP_UNREACH_NLRI`.
+#[tokio::test]
+async fn zero_esi_evpn_routes_never_reset_the_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
+    rfc7606_drain(&mut rib_rx);
+    let rd: rustbgpd_wire::RouteDistinguisher = "65000:100".parse().unwrap();
+    let vpws = EvpnRoute::EadPerEvi(rustbgpd_wire::EvpnEadPerEvi {
+        rd,
+        esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+        label: rustbgpd_wire::MplsLabel::new(100),
+    });
+    let es = EvpnRoute::Es(rustbgpd_wire::EvpnEs {
+        rd,
+        esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+        originator_ip: "192.0.2.10".parse().unwrap(),
+    });
+
+    session
+        .process_update(smet_update(vec![vpws.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("zero-ESI per-EVI A-D announcement")
+    };
+    assert_eq!(evpn_announced.len(), 1);
+    assert_eq!(evpn_announced[0].route, vpws);
+    assert!(session.known_evpn.contains(&vpws.key()));
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "none");
+
+    session
+        .process_update(smet_update(vec![es.clone(), vpws.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("UPDATE-wide withdrawal")
+    };
+    // The zero-ESI Type 4 was never accepted, so only its sibling withdraws.
+    assert!(evpn_announced.is_empty());
+    assert_eq!(evpn_withdrawn, vec![vpws.key()]);
+    assert!(session.known_evpn.is_empty());
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+
+    session
+        .process_update(smet_update(vec![vpws.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("re-announcement")
+    };
+    assert_eq!(evpn_announced.len(), 1);
+    let withdrawal = session
+        .publish_export_profile()
+        .probe_withdrawal(ExportWithdrawal::Evpn(&vpws.key()))
+        .unwrap()
+        .message;
+    session.process_update(withdrawal).await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("zero-ESI per-EVI A-D withdrawal")
+    };
+    assert!(evpn_announced.is_empty());
+    assert_eq!(evpn_withdrawn, vec![vpws.key()]);
+    assert!(session.known_evpn.is_empty());
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
 #[tokio::test]
 async fn smet_noncanonical_payload_resets_session_in_both_directions() {
     for withdrawn in [false, true] {

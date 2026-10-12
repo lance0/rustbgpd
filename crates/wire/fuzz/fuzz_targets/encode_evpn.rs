@@ -66,11 +66,8 @@ fn build_route(c: &mut ByteCursor<'_>) -> Option<EvpnRoute> {
     let rd = RouteDistinguisher::new(rd_bytes);
     match kind % 7 {
         0 => {
-            // Type 1 EAD per-ES — non-zero ESI, MAX_ET tag forced on encode
-            let mut esi: [u8; 10] = c.take(10)?.try_into().ok()?;
-            if esi.iter().all(|&b| b == 0) {
-                esi[0] = 1;
-            }
+            // Type 1 EAD per-ES — any ESI (zero included), MAX_ET tag
+            let esi: [u8; 10] = c.take(10)?.try_into().ok()?;
             let label = MplsLabel::new(c.take_u32()? & 0x00FF_FFFF);
             Some(EvpnRoute::EadPerEs(EvpnEadPerEs {
                 rd,
@@ -80,11 +77,8 @@ fn build_route(c: &mut ByteCursor<'_>) -> Option<EvpnRoute> {
             }))
         }
         1 => {
-            // Type 1 EAD per-EVI — non-zero ESI, non-MAX_ET tag
-            let mut esi: [u8; 10] = c.take(10)?.try_into().ok()?;
-            if esi.iter().all(|&b| b == 0) {
-                esi[0] = 1;
-            }
+            // Type 1 EAD per-EVI — any ESI (zero for single-homed VPWS), non-MAX_ET tag
+            let esi: [u8; 10] = c.take(10)?.try_into().ok()?;
             let mut tag = c.take_u32()?;
             if tag == EthernetTagId::MAX_ET.0 {
                 tag = 0;
@@ -147,11 +141,8 @@ fn build_route(c: &mut ByteCursor<'_>) -> Option<EvpnRoute> {
             }))
         }
         4 => {
-            // Type 4 ES — non-zero ESI
-            let mut esi: [u8; 10] = c.take(10)?.try_into().ok()?;
-            if esi.iter().all(|&b| b == 0) {
-                esi[0] = 1;
-            }
+            // Type 4 ES — any ESI; zero fails only announcement validation
+            let esi: [u8; 10] = c.take(10)?.try_into().ok()?;
             let ip = if c.take_byte()? & 1 == 1 {
                 let o: [u8; 4] = c.take(4)?.try_into().ok()?;
                 IpAddr::V4(Ipv4Addr::from(o))

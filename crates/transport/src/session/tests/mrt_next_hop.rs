@@ -426,9 +426,11 @@ async fn import_ipv4_next_hop_on_an_ipv6_route_is_not_exported_beside_mp_reach()
 }
 
 /// The BMP Loc-RIB VPN announcement carries the VPN next hop in
-/// `MP_REACH_NLRI` only.
+/// `MP_REACH_NLRI` only. Import applies no next-hop action to a VPN route,
+/// so the imported route stores no `NEXT_HOP`; one stored by any other
+/// source must still stay out of the announcement.
 #[tokio::test]
-async fn bmp_loc_rib_vpn_announce_skips_an_import_stored_next_hop() {
+async fn bmp_loc_rib_vpn_announce_skips_a_stored_next_hop() {
     let mp_next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
     let mut mp_reach = empty_mp_reach(Afi::Ipv4, Safi::MplsVpn, mp_next_hop);
     mp_reach.vpn_announced = vec![rustbgpd_wire::VpnNlriEntry {
@@ -442,9 +444,13 @@ async fn bmp_loc_rib_vpn_announce_skips_an_import_stored_next_hop() {
     let RibUpdate::VpnRoutesReceived { announced, .. } = import_mp_update(mp_reach).await else {
         panic!("expected VpnRoutesReceived");
     };
-    assert_eq!(next_hop_attributes(&announced[0].attributes), 1);
+    assert_eq!(next_hop_attributes(&announced[0].attributes), 0);
+    let mut route = announced[0].clone();
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::NextHop(IMPORT_NEXT_HOP));
+    });
 
-    let pdu = rustbgpd_rib::bmp_sync::synthesize_vpn_announce(&announced[0]).unwrap();
+    let pdu = rustbgpd_rib::bmp_sync::synthesize_vpn_announce(&route).unwrap();
     // The 19-byte BGP header precedes the UPDATE body.
     let mut body = pdu.slice(19..);
     let body_len = body.len();

@@ -1354,6 +1354,7 @@ impl PeerManager {
         transport.max_prefixes_ipv6 = config.max_prefixes_ipv6;
         transport.max_prefixes_received_ipv4 = config.max_prefixes_received_ipv4;
         transport.max_prefixes_received_ipv6 = config.max_prefixes_received_ipv6;
+        transport.max_prefixes_family = config.max_prefixes_family;
         transport.max_prefix_action = config.max_prefix_action;
         transport.max_prefix_warning_percent = config.max_prefix_warning_percent;
         transport.peer_group.clone_from(&config.peer_group);

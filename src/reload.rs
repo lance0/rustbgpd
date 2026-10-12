@@ -223,6 +223,7 @@ pub(crate) fn build_peer_mgr_config(
         max_prefixes_ipv6: tc.max_prefixes_ipv6,
         max_prefixes_received_ipv4: tc.max_prefixes_received_ipv4,
         max_prefixes_received_ipv6: tc.max_prefixes_received_ipv6,
+        max_prefixes_family: tc.max_prefixes_family,
         max_prefix_action: tc.max_prefix_action,
         max_prefix_warning_percent: tc.max_prefix_warning_percent,
         max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
@@ -4850,7 +4851,7 @@ log_format = "json"
         let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
-            (concat!("write_tier", "_test_config("), 34),
+            (concat!("write_tier", "_test_config("), 35),
             (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
@@ -10962,6 +10963,46 @@ hold_time = 90
         );
     }
 
+    /// A SIGHUP that adds export `set_next_hop` to a policy bound to a VPN
+    /// peer fails the candidate load (the `parse.preflight` clean no-effect
+    /// rejection), before any runtime actor is asked to change; the running
+    /// snapshot is untouched.
+    #[test]
+    fn reload_refuses_vpn_export_set_next_hop_at_candidate_load() {
+        let initial = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 90\nfamilies = [\"ipv4_unicast\", \"l3vpn_ipv4_unicast\"]\n\
+             export_policy_chain = [\"shared\"]",
+        ) + "\n[policy.definitions.shared]\ndefault_action = \"permit\"\n";
+        let current = load_config_from_toml("reload-vpn-nh-live", &initial);
+        let path = unique_temp_path("reload-vpn-nh-desired");
+        write_tier_test_config(
+            &path,
+            &format!(
+                "{initial}\n[[policy.definitions.shared.statements]]\naction = \"permit\"\n\
+                 match_as_path_length_ge = 0\nset_next_hop = \"self\"\n"
+            ),
+        );
+        let accepted = AcceptedConfigSnapshot::from_config_for_test(current.clone());
+        let Err(error) = AcceptedConfigSnapshot::load_for_reload(
+            &path,
+            &accepted,
+            &current.policy.dataset_bindings,
+        ) else {
+            panic!("labeled/VPN export set_next_hop must be refused");
+        };
+        std::fs::remove_file(&path).ok();
+        assert!(error.contains("l3vpn_ipv4_unicast"), "{error}");
+        assert!(error.contains("export policy \"shared\""), "{error}");
+        assert!(error.contains("neighbor 10.0.0.2"), "{error}");
+        assert!(
+            accepted.config_ref().policy.definitions["shared"]
+                .statements
+                .is_empty(),
+            "the running snapshot keeps its policy"
+        );
+    }
+
     #[tokio::test]
     async fn reload_bfd_attachment_uses_generation_without_bgp_replacement() {
         let initial = format!("{}\n[[bfd_profiles]]\nname = \"fast\"\n", baseline_toml());
@@ -12656,6 +12697,7 @@ remote_asn = 65002
                     max_prefixes_ipv6: None,
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefixes_family: rustbgpd_transport::FamilyPrefixLimits::default(),
                     max_prefix_action: rustbgpd_transport::MaxPrefixAction::Shutdown,
                     max_prefix_warning_percent: None,
                     max_prefix_restart_seconds: None,
@@ -12778,6 +12820,7 @@ remote_asn = 65002
                     max_prefixes_ipv6: None,
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefixes_family: rustbgpd_transport::FamilyPrefixLimits::default(),
                     max_prefix_action: rustbgpd_transport::MaxPrefixAction::Shutdown,
                     max_prefix_warning_percent: None,
                     max_prefix_restart_seconds: None,

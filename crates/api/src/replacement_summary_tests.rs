@@ -682,7 +682,7 @@ fn export_peer_up(
 /// A dynamic neighbor whose session went idle has left the peer manager's
 /// roster, while the RIB still retains its routes for graceful restart. Both
 /// neighbor reads still report it, marked retention-only, with its phase and
-/// remaining time; the single-neighbor read also counts its stale routes.
+/// remaining time and stale-route count.
 /// Once the GR timer sweeps the routes the row is gone and the address is
 /// not found again. Without the RIB's retained roster neither read sees it.
 #[tokio::test(start_paused = true)]
@@ -787,7 +787,7 @@ async fn down_dynamic_neighbor_retention_row_lasts_until_sweep() {
             family: "ipv4_unicast".to_string(),
             phase: "gr_restart".to_string(),
             remaining_seconds: Some(100),
-            stale_routes: None,
+            stale_routes: Some(3),
         }]
     );
     let single = get("192.0.2.9").await.unwrap().into_inner();
