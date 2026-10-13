@@ -2215,18 +2215,13 @@ async fn send_rtc_eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr) {
     .unwrap();
 }
 
-/// RFC 4684 §6 / RFC 4724 §4.1: a PE that restarts without its RT
-/// membership retained (here its GR capability omits SAFI 132) comes back
-/// with an empty membership. Its VPN End-of-RIB must wait for the PE's RT
-/// membership End-of-RIB, so the PE does not sweep its RR-learned VPN
-/// routes before the re-advertised ones arrive. RT-Constrain's own
-/// End-of-RIB is not held.
-#[tokio::test]
-async fn gr_restart_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
-
+/// Shared setup: a VPN route tagged RT 100 from a source, and a VPN + RTC
+/// peer that learned it, then dropped with a GR capability that covers VPN
+/// but not SAFI 132, so its RT interest is not retained and the next
+/// session starts with an empty membership. Returns the peer and the key.
+async fn rtc_peer_down_without_retained_rtc(
+    tx: &mpsc::Sender<RibUpdate>,
+) -> (Ipv4Addr, crate::route::VpnRibRouteKey) {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let key = route.key();
@@ -2240,11 +2235,11 @@ async fn gr_restart_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(tx, IpAddr::V4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
-    send_rtc_interest(&tx, target, &[100]).await;
-    send_rtc_eor(&tx, target).await;
-    rib_barrier(&tx).await;
+    send_rtc_interest(tx, target, &[100]).await;
+    send_rtc_eor(tx, target).await;
+    rib_barrier(tx).await;
     let announced = out_rx.try_recv().expect("VPN routes for the new interest");
     assert_eq!(announced.vpn_announce.len(), 1);
     let released = out_rx
@@ -2264,7 +2259,39 @@ async fn gr_restart_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
     })
     .await
     .unwrap();
+    (target, key)
+}
 
+/// Stage the re-establishing session's OPEN context: the RFC 4724 Restart
+/// State bit, and a GR capability that again omits SAFI 132.
+async fn stage_vpn_gr_context(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, restarting: bool) {
+    tx.send(RibUpdate::SetPeerGracefulRestartContext {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        peer_restart_state: restarting,
+        peer_gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_enhanced_refresh: false,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+}
+
+/// RFC 4684 §6 / RFC 4724 §4.2: a PE that re-establishes without the Restart
+/// State bit (it did not restart; it is the GR helper for this session and
+/// kept the routes we sent it) and without retained RT membership starts
+/// empty. Its VPN End-of-RIB must wait for its RT membership End-of-RIB, or
+/// it sweeps the VPN routes it kept from us before the re-advertised ones
+/// arrive. RT-Constrain's own End-of-RIB is not held.
+#[tokio::test]
+async fn gr_helper_peer_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let (target, key) = rtc_peer_down_without_retained_rtc(&tx).await;
+
+    stage_vpn_gr_context(&tx, target, false).await;
     let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
     let dump = out_rx.recv().await.unwrap();
     assert!(dump.vpn_announce.is_empty());
@@ -2296,6 +2323,42 @@ async fn gr_restart_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
         .expect("RT membership End-of-RIB releases the held VPN End-of-RIB");
     assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
     assert!(released.vpn_announce.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 4724 §4.1: a restarting PE (Restart State bit set) defers selection,
+/// and with it its own RT-Constrain routes and End-of-RIB, until it has every
+/// peer's End-of-RIB. Holding our VPN End-of-RIB for its RT membership would
+/// stall it to the cap and then trigger the same sweep, so a restarter
+/// without retained RT membership gets every End-of-RIB with the initial
+/// table. VPN routes still follow its interest when it arrives.
+#[tokio::test]
+async fn restarting_peer_without_retained_rtc_gets_vpn_eor_immediately() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let (target, key) = rtc_peer_down_without_retained_rtc(&tx).await;
+
+    stage_vpn_gr_context(&tx, target, true).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    rib_barrier(&tx).await;
+    let dump = out_rx.try_recv().expect("initial dump");
+    assert!(dump.vpn_announce.is_empty());
+    let eor = out_rx
+        .try_recv()
+        .expect("a restarting peer's End-of-RIB must not wait for its RT membership");
+    assert_eq!(
+        eor_set(&eor),
+        vpn_rtc_sendable().into_iter().collect(),
+        "a restarter's VPN End-of-RIB is not held for its RT membership"
+    );
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let reannounced = out_rx.recv().await.unwrap();
+    assert_eq!(reannounced.vpn_announce.len(), 1);
+    assert_eq!(reannounced.vpn_announce[0].key(), key);
 
     drop(tx);
     handle.await.unwrap();

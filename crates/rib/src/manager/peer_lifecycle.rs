@@ -1141,16 +1141,28 @@ impl RibManager {
             // RFC 4684 §6: with no interest known yet, the VPN/EVPN initial
             // update is not complete until the peer's RT membership is, so
             // their EoR waits for its RT-Constrain EoR (bounded by the
-            // cap). This covers a fresh session and a GR re-establish whose
-            // RTC routes were not retained (family absent from the new GR
-            // capability, removed above, or already expired). A restarter
-            // would otherwise sweep the VPN routes it kept from us before
-            // we re-send them. A membership re-derived from retained routes
-            // is already known: no hold.
+            // cap). A peer acting as GR helper for this session would
+            // otherwise sweep the VPN routes it kept from us (RFC 4724
+            // §4.2) before we re-send them. A membership re-derived from
+            // retained routes is already known: no hold.
+            //
+            // A peer whose OPEN sets the Restart State bit is exempt. RFC
+            // 4724 §4.1 has it defer route selection until it has every
+            // peer's EoR, and with it its own RTC routes and RTC EoR
+            // (GoBGP skips its RTC deferral for a restarting peer for this
+            // reason). Holding our VPN EoR would only stall it to the cap
+            // and then trigger the same sweep. Without the staged OPEN
+            // context the peer is treated as not restarting.
+            let peer_restarting = gr_context
+                .as_ref()
+                .is_some_and(|context| context.peer_restart_state);
             let rtc_gated_negotiated = sendable_families
                 .iter()
                 .any(|&family| Self::rtc_gated_family(family));
-            if rtc_gated_negotiated && membership == super::RtcMembership::default() {
+            if rtc_gated_negotiated
+                && !peer_restarting
+                && membership == super::RtcMembership::default()
+            {
                 self.rtc_eor_hold
                     .insert(peer, tokio::time::Instant::now() + super::RTC_EOR_HOLD_CAP);
             } else {

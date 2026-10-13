@@ -834,9 +834,11 @@ pub struct RibManager {
     /// `EoR` arrives or the [`RTC_EOR_HOLD_CAP`] deadline passes (RFC 4684
     /// §6). Armed at `PeerUp` when the session starts with an empty
     /// membership; a membership re-derived from GR-retained RTC routes is
-    /// already known and is not held. A GR restarter takes our `EoR` as the
-    /// signal to sweep the routes it kept from us, so an `EoR` sent before
-    /// its interest arrives withdraws VPN routes we are about to re-send.
+    /// already known and is not held. A peer acting as GR helper sweeps the
+    /// routes it kept from us on our `EoR`, so an `EoR` sent before its
+    /// interest arrives withdraws VPN routes we are about to re-send. A peer
+    /// with the Restart State bit set is never held: it withholds its own
+    /// RTC `EoR` until it has ours (RFC 4724 §4.1).
     rtc_eor_hold: graceful_restart::DeadlineMap<IpAddr>,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
