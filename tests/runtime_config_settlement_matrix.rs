@@ -1446,11 +1446,16 @@ const STAGE_HOLD_BUDGET: Duration = Duration::from_secs(3);
 const STAGE_CHECKPOINT: &str = "stage_before_ack";
 const STAGE_TIMED_OUT: &str =
     "config persistence did not stage the candidate in time; nothing was applied";
+const PRE_EFFECT_OBSERVED: &str = "settlement test control: pre-effect deadline observed";
 
 /// A persister that never acknowledges a stage leaves a mutation that
 /// provably changed nothing. The owner must refuse it as UNAVAILABLE at its
 /// pre-effect deadline, before the budget, so the daemon stays up and ready
 /// instead of fencing `budget_expired` and exiting 70.
+///
+/// The pre-effect timer and the budget are both wall clock, so a host stall
+/// across both legitimately fences first. That fence is accepted only with
+/// proof that the owner observed its pre-effect deadline after the budget.
 #[test]
 fn stalled_stage_acknowledgement_settles_clean_before_the_budget() {
     let _ = rbgp_binary();
@@ -1480,6 +1485,12 @@ fn stalled_stage_acknowledgement_settles_clean_before_the_budget() {
         .wait_for_receipt(STAGE_CHECKPOINT, daemon.pid(), &mut daemon);
     let output = request.wait_output(Duration::from_secs(15));
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains(STAGE_TIMED_OUT)
+        && daemon.log_has(FAIL_STOP_LINE, "\"fence_reason\":\"budget_expired\"")
+    {
+        assert_stall_fenced_past_pre_effect_deadline(&lab, &mut daemon);
+        return;
+    }
     let exited = daemon.process.try_wait();
     assert!(
         !output.status.success() && stderr.contains(STAGE_TIMED_OUT),
@@ -1521,6 +1532,36 @@ fn stalled_stage_acknowledgement_settles_clean_before_the_budget() {
     );
     daemon.sigterm();
     daemon.wait_exit(0, CLEAN_EXIT_LIMIT);
+}
+
+/// The stalled-stage row's one legitimate fence: the owner observed its
+/// expired pre-effect deadline at least a margin late, so the budget had
+/// already expired before it could refuse. Anything else, including no
+/// observation at all, means the pre-effect deadline was not honoured.
+fn assert_stall_fenced_past_pre_effect_deadline(lab: &Lab, daemon: &mut Daemon) {
+    daemon.wait_exit(70, CLEAN_EXIT_LIMIT);
+    let log = daemon.log();
+    let observed: Vec<u64> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| entry["fields"]["message"] == PRE_EFFECT_OBSERVED)
+        .filter_map(|entry| entry["fields"]["late_ms"].as_u64())
+        .collect();
+    // The pre-effect margin is the smaller of 30 s and a tenth of the budget.
+    let margin = STAGE_HOLD_BUDGET / 10;
+    assert!(
+        matches!(observed[..], [late] if Duration::from_millis(late) >= margin),
+        "fenced before the owner honoured its pre-effect deadline: observed \
+         lateness {observed:?} ms, margin {margin:?}\n{log}"
+    );
+    eprintln!(
+        "host stall: owner observed its pre-effect deadline {observed:?} ms late; fence accepted"
+    );
+    lab.assert_disk("matrix-peer-group", false);
+    lab.restart_and_assert_absent(
+        "peer-group",
+        &["--json", "peer-group", "get", "matrix-peer-group"],
+    );
 }
 
 #[test]
