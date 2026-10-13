@@ -1104,6 +1104,29 @@ be propagated (§3.2.1).
   capability ignores the S bit. rustbgpd does not, so a single label sent
   with S clear, which §2.2 forbids on transmission, is not read as the
   one-label form.
+  This interpretation is retained deliberately. The bytes
+  `30 00 06 40 cb 00 71` can encode either label 100 with S clear and
+  `203.0.113.0/24`, or two labels (100 and 831495) and `0.0.0.0/0`.
+  Both consume the declared length; a prefix-length heuristic cannot
+  distinguish them. Reading exactly one label would silently change the
+  legacy stack's route key and evade the multi-label export refusal.
+  A stack whose boundary cannot be located remains a session-reset error
+  under [RFC 7606 §3(j)](https://www.rfc-editor.org/rfc/rfc7606.html#section-3).
+  Byte fixtures pin both interpretations, real stacks, and MP announce/withdraw
+  errors with and without Add-Path for IPv4/IPv6 SAFI 4/128.
+- Pinned source comparison, rather than a live malformed-peer receipt:
+  [FRR 10.7.1 labeled-unicast](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_label.c#L425-L475)
+  walks to BOS, while its
+  [VPN parser](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_mplsvpn.c#L174-L196)
+  consumes one three-octet label regardless of S.
+  [GoBGP 4.10.0](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/packet/bgp/bgp.go#L1925-L1958)
+  walks to BOS except when a Prefix-SID attribute selects its single-label
+  interpretation; that exception applies to both LU and VPN.
+  [BIRD 3.3.3](https://github.com/CZ-NIC/bird/blob/v3.3.3/proto/bgp/packets.c#L1676-L1705)
+  and [BIRD 2.19.3](https://github.com/CZ-NIC/bird/blob/v2.19.3/proto/bgp/packets.c#L1641-L1660)
+  walk to BOS for both families. None of these pins negotiates the Multiple
+  Labels Capability. The differing parsers do not establish one interoperable
+  interpretation for an S-clear single label.
 - Export: a route with more than one label is withheld from every peer
   and counted in
   `bgp_exact_export_rejections_total{reason="multiple_labels_not_negotiated"}`.
