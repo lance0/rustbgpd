@@ -2888,12 +2888,19 @@ inbound scopes add no checks. Link-local identities
 retain their `%interface` scope in both check names and details.
 
 `peer.<scoped-address>.inbound_prefix_bound` is yellow for an established
-eBGP peer with no effective inbound prefix bound after peer-group inheritance.
-It names the peer and the five keys that can set a bound: `max_prefixes`,
-`max_prefixes_ipv4`, `max_prefixes_ipv6`, `max_prefixes_received_ipv4`, and
-`max_prefixes_received_ipv6`. A non-unicast `max_prefixes_<family>` bound
-alone does not satisfy the check. Static, API-added, and accepted dynamic peers
-are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
+eBGP peer when a negotiated family has no effective inbound prefix bound after
+peer-group inheritance. The aggregate `max_prefixes` covers every family.
+Otherwise each family in `negotiated_session.families` needs its own bound:
+`max_prefixes_ipv4` or `max_prefixes_received_ipv4` for IPv4 unicast,
+`max_prefixes_ipv6` or `max_prefixes_received_ipv6` for IPv6 unicast, and
+`max_prefixes_<family>` for the other families that have a per-family key.
+BGP-LS has no per-family key, so only the aggregate covers it. The detail names
+the peer and each unbounded family with the keys that would bound it. A bound
+on one family does not satisfy the check for another. When the daemon reports
+no negotiated families, any unicast bound satisfies the check, and the detail
+lists `max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
+`max_prefixes_received_ipv4`, and `max_prefixes_received_ipv6`. Static,
+API-added, and accepted dynamic peers are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
 are excluded; the check also requires the daemon's global ASN and peer
 configuration to be available. This advisory warning retains exit status 0.
 
