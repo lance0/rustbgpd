@@ -5598,7 +5598,7 @@ impl RibManager {
             .primary_lookahead
             .take()
             .expect("lookahead admitted above");
-        self.count_conditional_expiry_admission();
+        self.expiry_cutoffs.charge();
         self.handle_update(update);
         // A stale-session message is dropped without a batch: the window
         // settles now and the next queued message waits for the next turn.

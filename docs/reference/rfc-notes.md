@@ -1197,6 +1197,10 @@ families have received EoR, GR completes and state is cleaned up.
 
 **Timer expiry:** Remaining stale routes are swept as withdrawals. GR
 state is cleaned up. `bgp_gr_timer_expired_total` metric incremented.
+The GR, LLGR, enhanced route refresh window and selection-deferral timers
+fire after only the updates already queued when the deadline was first seen
+due (and the route batches they started); updates that arrive later cannot
+postpone them.
 
 ### End-of-RIB Detection
 
