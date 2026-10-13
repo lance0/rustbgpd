@@ -562,6 +562,9 @@ impl EvpnSmet {
 ///
 /// Keep the decoded routes on failure: RFC 7606 recovery needs every
 /// announcement key, including valid siblings. Do not apply to withdrawals.
+/// The RFC 9136 §3.2 rule for a Type 5 whose ESI, gateway IP, Router's MAC
+/// and label are all zero needs the UPDATE's extended communities, so only
+/// the revised UPDATE parser applies it.
 ///
 /// # Errors
 ///
@@ -593,6 +596,37 @@ pub fn validate_evpn_announcements(routes: &[EvpnRoute]) -> Result<(), DecodeErr
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// RFC 9136 §3.2: "A route where ESI, GW IP, MAC, and Label are all zero at
+/// the same time SHOULD be treat as withdraw." MAC is the EVPN Router's MAC
+/// Extended Community (RFC 9135 §8.1); absent counts as zero (Table 1 note),
+/// and, as in FRR, so does a present all-zero MAC. Label is the raw 3-octet
+/// field, so a non-zero VNI (RFC 8365) never matches.
+///
+/// Needs the UPDATE's extended communities, so it runs in the revised UPDATE
+/// parser, not in [`validate_evpn_announcements`]. Announcements only.
+pub(crate) fn validate_type5_has_overlay_or_label(
+    routes: &[EvpnRoute],
+    extended_communities: &[crate::ExtendedCommunity],
+) -> Result<(), DecodeError> {
+    let router_mac = extended_communities
+        .iter()
+        .find_map(|community| community.as_router_mac());
+    if router_mac.is_none_or(|mac| mac == [0; 6])
+        && routes.iter().any(|route| {
+            matches!(route, EvpnRoute::IpPrefix(r)
+                if r.esi.is_zero() && r.gateway.is_unspecified() && r.label.value() == 0)
+        })
+    {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "EVPN Type 5 route with zero ESI, gateway IP, Router's MAC and label \
+                     (RFC 9136 §3.2)"
+                .into(),
+        });
     }
     Ok(())
 }
