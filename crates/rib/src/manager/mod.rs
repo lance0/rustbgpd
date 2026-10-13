@@ -5252,6 +5252,13 @@ impl RibManager {
             let conditional_due = has_conditional_timer && conditional_sleep.deadline() <= now;
             if !conditional_due {
                 self.conditional_expiry_cutoff = None;
+            } else if self.conditional_expiry_cutoff.is_none() {
+                // Capture the ADR-0137 cutoff the moment the deadline is
+                // first seen due, before the RTC End-of-RIB branch below can
+                // drain: updates admitted there are charged to this cutoff
+                // too, so a message that arrives after the deadline is never
+                // counted as pre-deadline work.
+                self.conditional_expiry_cutoff = Some(self.primary_backlog());
             }
             let rtc_eor_due = has_rtc_eor_timer && rtc_eor_sleep.deadline() <= now;
             if !rtc_eor_due {
