@@ -840,6 +840,11 @@ pub struct RibManager {
     /// with the Restart State bit set is never held: it withholds its own
     /// RTC `EoR` until it has ours (RFC 4724 §4.1).
     rtc_eor_hold: graceful_restart::DeadlineMap<IpAddr>,
+    /// Held peers whose RT-Constrain `EoR` (or closing `EoRR`) arrived while
+    /// RT-Constrain selection was deferred. Membership is not rebuilt until
+    /// that deferral is staged or released, so the hold ends there, after
+    /// the rebuild has emitted the matching VPN/EVPN routes.
+    rtc_eor_hold_ready: HashSet<IpAddr>,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
     /// Route identities touched while their family's Loc-RIB was frozen.
@@ -2014,6 +2019,7 @@ impl RibManager {
             peer_orf_pending: HashMap::new(),
             gr_deferred_eor: HashMap::new(),
             rtc_eor_hold: graceful_restart::DeadlineMap::default(),
+            rtc_eor_hold_ready: HashSet::new(),
             selection_deferral: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
             selection_deferred_refresh: HashMap::new(),
@@ -2454,8 +2460,33 @@ impl RibManager {
     /// dirty peer keeps them pending: its resync flushes them after the
     /// routes it replays, preserving table-before-`EoR` order.
     fn release_rtc_eor_hold(&mut self, peer: IpAddr) {
+        self.rtc_eor_hold_ready.remove(&peer);
         if self.rtc_eor_hold.remove(&peer).is_some() && !self.dirty_peers.contains(&peer) {
             self.flush_pending_eor(peer);
+        }
+    }
+
+    /// `peer`'s RT membership is complete on the wire (its RT-Constrain
+    /// `EoR`, or an `EoRR` closing an active window). Release the hold now,
+    /// unless RT-Constrain selection is still deferred: membership is then
+    /// rebuilt only when the deferral is staged or released, and the hold
+    /// ends there instead, after the VPN/EVPN routes it admits.
+    fn rtc_membership_complete(&mut self, peer: IpAddr) {
+        if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
+            if self.rtc_eor_hold.contains_key(&peer) {
+                self.rtc_eor_hold_ready.insert(peer);
+            }
+        } else {
+            self.release_rtc_eor_hold(peer);
+        }
+    }
+
+    /// RT-Constrain selection was just staged or released and every
+    /// membership rebuilt: end the holds whose `EoR` already arrived.
+    fn release_ready_rtc_eor_holds(&mut self) {
+        let ready: Vec<IpAddr> = self.rtc_eor_hold_ready.drain().collect();
+        for peer in ready {
+            self.release_rtc_eor_hold(peer);
         }
     }
 
@@ -3084,6 +3115,12 @@ impl RibManager {
         if let Some(cutoff) = self.rtc_eor_expiry_cutoff.as_mut() {
             *cutoff = cutoff.saturating_sub(1);
         }
+    }
+
+    /// A due timer's admission cutoff is exhausted: coalescing paths must
+    /// not admit further primary updates ahead of its expiry.
+    fn expiry_cutoff_reached(&self) -> bool {
+        self.conditional_expiry_cutoff == Some(0) || self.rtc_eor_expiry_cutoff == Some(0)
     }
 
     /// Cancel-safe receive of the next primary update, the held lookahead
@@ -3855,13 +3892,6 @@ impl RibManager {
                     let selection_transition =
                         self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
                     self.handle_end_of_rib(peer, afi, safi);
-                    if (afi, safi) == crate::route::RtcRibRouteKey::afi_safi() {
-                        // Membership is complete: every RTC UPDATE before
-                        // this marker has been applied and its VPN/EVPN
-                        // corrective emit queued (or left to the dirty
-                        // resync, which flushes after the replay).
-                        self.release_rtc_eor_hold(peer);
-                    }
                     if (afi, safi) == (Afi::L2Vpn, Safi::Evpn)
                         && let Some(record) =
                             self.live_sessions.get_mut(&peer).and_then(|sessions| {
@@ -3875,6 +3905,16 @@ impl RibManager {
                             [transition],
                             "all current-session End-of-RIB markers received",
                         );
+                    }
+                    if (afi, safi) == crate::route::RtcRibRouteKey::afi_safi() {
+                        // Membership is complete: every RTC UPDATE before
+                        // this marker has been applied and its VPN/EVPN
+                        // corrective emit queued (or left to the dirty
+                        // resync, which flushes after the replay). Runs
+                        // after the selection transition above, which is
+                        // what rebuilds membership while RTC selection was
+                        // deferred.
+                        self.rtc_membership_complete(peer);
                     }
                 }
             }
@@ -3930,9 +3970,6 @@ impl RibManager {
                             .get(&peer)
                             .is_some_and(|families| families.contains(&(afi, safi)));
                     self.handle_end_route_refresh(peer, afi, safi);
-                    if rtc_refresh_completed {
-                        self.release_rtc_eor_hold(peer);
-                    }
                     if let Some(transition) =
                         self.selection_deferral_end_route_refresh(peer, session_id, (afi, safi))
                     {
@@ -3940,6 +3977,10 @@ impl RibManager {
                             [transition],
                             "collision-failback survivor refresh completed",
                         );
+                    }
+                    // After the transition, as on the EoR path.
+                    if rtc_refresh_completed {
+                        self.rtc_membership_complete(peer);
                     }
                 }
             }
@@ -5231,7 +5272,13 @@ impl RibManager {
                     Some(cutoff) => cutoff,
                     None => *self.rtc_eor_expiry_cutoff.insert(self.primary_backlog()),
                 };
-                if cutoff > 0 && self.drain_ready_updates().await {
+                // An admitted route batch finishes (chunks and its final
+                // distribution) first, so no route from an update queued
+                // before the cap lands behind the released EoR. Batches
+                // come only from admitted updates, so this stays bounded.
+                if (!self.pending_route_batches.is_empty() || cutoff > 0)
+                    && self.drain_ready_updates().await
+                {
                     continue;
                 }
                 self.rtc_eor_expiry_cutoff = None;

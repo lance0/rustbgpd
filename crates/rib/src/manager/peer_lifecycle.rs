@@ -761,6 +761,7 @@ impl RibManager {
         // So is the RFC 4684 §6 hold: its EoRs leave with `pending_eor`, and
         // `PeerUp` arms a fresh cap for the new session.
         self.rtc_eor_hold.remove(&peer);
+        self.rtc_eor_hold_ready.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
         self.selection_deferred_refresh.remove(&peer);
@@ -1156,6 +1157,8 @@ impl RibManager {
             let peer_restarting = gr_context
                 .as_ref()
                 .is_some_and(|context| context.peer_restart_state);
+            // A new session's hold never inherits an earlier EoR.
+            self.rtc_eor_hold_ready.remove(&peer);
             let rtc_gated_negotiated = sendable_families
                 .iter()
                 .any(|&family| Self::rtc_gated_family(family));
@@ -1176,6 +1179,7 @@ impl RibManager {
             // inherit its predecessor's filter (not-negotiated ⇒ unfiltered).
             self.set_rt_membership(peer, None);
             self.rtc_eor_hold.remove(&peer);
+            self.rtc_eor_hold_ready.remove(&peer);
         }
 
         // Classify only the startup-frozen waiter already present for this

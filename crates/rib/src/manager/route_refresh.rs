@@ -608,7 +608,7 @@ impl RibManager {
         let mut tags = None;
         let mut peers = vec![leader];
         for _ in 0..queued {
-            if self.conditional_expiry_cutoff == Some(0) {
+            if self.expiry_cutoff_reached() {
                 break;
             }
             if self.primary_lookahead.is_none() {

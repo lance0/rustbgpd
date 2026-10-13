@@ -5573,7 +5573,7 @@ impl RibManager {
         // The ingest-stall fault injection must see every message on its
         // own receive; coalescing would bypass the stall.
         if self.test_ingest_stall.is_some()
-            || self.conditional_expiry_cutoff == Some(0)
+            || self.expiry_cutoff_reached()
             || !self.pending_route_batches.is_empty()
             || window.messages >= limits.messages
             || window.routes >= limits.routes

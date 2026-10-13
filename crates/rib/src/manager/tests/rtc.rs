@@ -2625,3 +2625,179 @@ async fn stray_rtc_eorr_keeps_hold_and_window_eorr_releases_it() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Drain every outbound update already queued, after a barrier.
+async fn drain_outbound(
+    tx: &mpsc::Sender<RibUpdate>,
+    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> Vec<OutboundRouteUpdate> {
+    rib_barrier(tx).await;
+    let mut updates = Vec::new();
+    while let Ok(update) = out_rx.try_recv() {
+        updates.push(update);
+    }
+    updates
+}
+
+/// While RT-Constrain selection is deferred (RFC 4724 restarting speaker),
+/// received interest does not rebuild membership until the deferral is
+/// released. The peer's RT-Constrain End-of-RIB that completes the deferral
+/// must therefore release the held VPN End-of-RIB only after the release
+/// has rebuilt membership and emitted the VPN routes it admits.
+#[tokio::test(start_paused = true)]
+async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
+    // The selection-deferral roster binds only a stamped session.
+    const SESSION: u64 = 1;
+    let rtc = (Afi::Ipv4, Safi::RtConstrain);
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: Duration::from_hours(1),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: IpAddr::V4(target),
+                families: vec![rtc],
+            }],
+        });
+    let handle = tokio::spawn(manager.run());
+
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let route = make_vpn_rib_route_with_rts(source, 60, vec![rt(100)]);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::SetPeerGracefulRestartContext {
+        peer: IpAddr::V4(target),
+        session_id: SESSION,
+        peer_restart_state: false,
+        peer_gr_families: vec![rtc],
+        peer_enhanced_refresh: false,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: SESSION,
+        peer: IpAddr::V4(target),
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_rtc_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: SESSION,
+        peer: IpAddr::V4(target),
+        announced: vec![make_rtc_rib_route(target, 100, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let before = drain_outbound(&tx, &mut out_rx).await;
+    assert!(
+        before
+            .iter()
+            .all(|u| u.vpn_announce.is_empty() && !u.end_of_rib.contains(&VPN_FAMILIES[0])),
+        "nothing VPN may go out while RT-Constrain selection is deferred"
+    );
+
+    tx.send(RibUpdate::EndOfRib {
+        session_id: SESSION,
+        peer: IpAddr::V4(target),
+        afi: rtc.0,
+        safi: rtc.1,
+    })
+    .await
+    .unwrap();
+    let after = drain_outbound(&tx, &mut out_rx).await;
+    let announced_at = after
+        .iter()
+        .position(|u| u.vpn_announce.iter().any(|r| r.key() == key))
+        .expect("the released membership admits the VPN route");
+    let eor_at = after
+        .iter()
+        .position(|u| u.end_of_rib.contains(&VPN_FAMILIES[0]))
+        .expect("the RT-Constrain End-of-RIB releases the held VPN End-of-RIB");
+    assert!(
+        announced_at < eor_at,
+        "the VPN route (update {announced_at}) must precede its End-of-RIB (update {eor_at})"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A route batch admitted before the cap fell due is finished (every chunk
+/// and its distribution) before the held End-of-RIB is released, so none of
+/// its routes lands behind the marker.
+#[tokio::test(start_paused = true)]
+async fn rtc_eor_cap_waits_for_pre_cap_route_batch() {
+    const ROUTES: u32 = 2_500; // several ingest chunks
+    let evpn = (Afi::L2Vpn, Safi::Evpn);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut sendable = evpn_sendable();
+    sendable.push((Afi::Ipv4, Safi::RtConstrain));
+    let mut out_rx = families_peer_up(&tx, IpAddr::V4(target), sendable).await;
+    send_rtc_interest(&tx, target, &[100]).await;
+    drain_outbound(&tx, &mut out_rx).await;
+
+    // Queue the batch, then let the cap fall due before the actor runs.
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(src),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: (0..ROUTES)
+            .map(|tag| with_ext_communities(make_evpn_imet(src, tag), vec![rt(100)]))
+            .collect(),
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    tokio::time::advance(Duration::from_secs(60)).await;
+
+    let mut announced = 0;
+    loop {
+        let update = out_rx.recv().await.unwrap();
+        announced += update.evpn_announce.len();
+        if update.end_of_rib.contains(&evpn) {
+            break;
+        }
+    }
+    assert_eq!(
+        announced,
+        usize::try_from(ROUTES).unwrap(),
+        "every route of the pre-cap batch must precede the released EVPN End-of-RIB"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
