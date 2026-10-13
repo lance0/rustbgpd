@@ -157,7 +157,7 @@ main() {
     docker inspect "$FRR" "$RUSTBGPD" "$SINK" \
         | jq '[.[] | {name:.Name,image:.Image,configured_image:.Config.Image}]' >"$ARTIFACT_DIR/images.json"
     docker exec "$FRR" /usr/lib/frr/bgpd --version >"$ARTIFACT_DIR/frr-version.txt"
-    grep -q '^bgpd version 10\.7\.1' "$ARTIFACT_DIR/frr-version.txt"
+    grep -Eq '^bgpd version 10\.7\.1(_git)?$' "$ARTIFACT_DIR/frr-version.txt"
     docker exec "$SINK" gobgpd --version >"$ARTIFACT_DIR/gobgp-version.txt"
     grep -qx 'gobgpd version 3\.37\.0' "$ARTIFACT_DIR/gobgp-version.txt"
     docker exec "$RUSTBGPD" rustbgpd --version >"$ARTIFACT_DIR/rustbgpd-version.txt"
