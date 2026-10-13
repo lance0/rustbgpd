@@ -744,6 +744,9 @@ impl RibManager {
             );
         };
         checkpoint();
+        if !affected.is_empty() {
+            self.advance_table_pages();
+        }
         self.record_deferred_labeled(affected);
         let mut affected_nlri: HashSet<Prefix> = affected
             .iter()

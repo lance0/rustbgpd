@@ -62,7 +62,7 @@ not by itself make it v1-stable.
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ReplayOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture`, `ListConditionalAdvertisements` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, bounded invalid-validation disposition posture, and conditional-advertisement state |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListVpnRoutesPage`, `ListLabeledRoutesPage`, `ListRtcRoutesPage`, `ListEvpnRoutesPage`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
@@ -1835,8 +1835,8 @@ and empty `best_reason`; the CLI prints the retained candidates. A prefix with
 no retained candidates still returns `NOT_FOUND`. `only_path` means one
 eligible candidate, even if other retained candidates are ineligible. EVPN
 received views and exact explain likewise retain the received route and its
-eligibility reason. `ListVpnRoutes` exposes selected VPN routes only; no
-received-VPN query is available.
+eligibility reason. `ListVpnRoutes` exposes selected VPN routes only; the
+additive `ListVpnRoutesPage` provides received and advertised pages.
 
 ### Longest-prefix lookup in the global Loc-RIB
 
@@ -2118,6 +2118,72 @@ cannot supply the leftmost AS that RFC 9117 section 4.2 requires.
 Received means retained after import policy, not a historical record of every
 UPDATE. See [the feasibility decision](../adr/0135-flowspec-feasibility.md)
 for opt-in validation and convergence semantics.
+
+### Bounded VPN, labeled, RTC and EVPN best pages
+
+`ListVpnRoutesPage`, `ListLabeledRoutesPage` and `ListRtcRoutesPage` select
+`view = BEST` (0), `RECEIVED` (1) or `ADVERTISED` (2). Received and advertised
+require `peer_filter`: it names the source for accepted post-policy input,
+or the destination for local export state. Advertised rows keep the source
+peer in `peer_address`; they do not prove remote receipt. Best mode treats
+`peer_filter` as an optional selected-source filter. Unknown received or
+advertised neighbors return `NOT_FOUND`, while a known peer with no matching
+routes gets an empty page. Group-owned VPN advertised pages return
+`FAILED_PRECONDITION` while the destination is dirty or awaiting resync:
+shared staging cannot reconstruct that peer's last admitted announcements
+or undelivered withdrawals. Retry after export settles. The existing
+operator count projection retains its behavior; the new page never presents
+deferred desired rows as committed advertised routes.
+
+VPN and labeled pages accept `afi_safi` and exact CIDR `prefix_filter`.
+Host bits must be zero. VPN also accepts an exact typed `rd_filter`.
+The new VPN and EVPN best pages accept either structured RD text or
+`0x` plus 16 hexadecimal digits for the exact eight wire bytes. Use raw
+bytes to distinguish Type 0 and Type 2 encodings with the same small ASN.
+RTC uses native membership fields rather than IP prefixes or RDs:
+optional `origin_as_filter` and exact full `/96` `route_target_filter`
+(`RT:65000:1`, numeric ASN or IPv4 administrator), or `0x` plus 16 raw
+hexadecimal digits. Raw input must encode a Route Target extended community;
+it preserves the administrator encoding. Default and partial RTC
+memberships remain visible without that full-target filter.
+
+`ListEvpnRoutesPage` reads installed best routes. Its optional filters are
+`route_type_filter` (0 or 1–6), `peer_filter`, `rd_filter`, exact Type 2
+`mac_filter`, exact 10-byte `esi_filter`, and `vni_filter` (0–16777215).
+Filters combine with AND. Types without the selected MAC or ESI do not
+match. VNI means a VXLAN Encapsulation Extended Community (tunnel type 8)
+and either Type 2 label, the Type 1 per-EVI label, the Type 5 label, or
+Type 3's PMSI label field. An MPLS label with the same numeric value does
+not match.
+
+Every request takes `page_size` (0 defaults to 100; maximum 1000) and an
+opaque `page_token`. Responses carry `routes`, `total_count`,
+`next_page_token` and `page_version { epoch, generation }`. Only the page's
+rows are cloned, using O(page) temporary storage. These unordered family
+tables are scanned per page to compute filtered counts; pagination bounds
+allocation, not scan CPU. Tokens include scope, canonical filters, family,
+source and Add-Path identity. A table mutation returns `ABORTED`; restart
+with an empty token. Tokens are process-local and cannot survive a daemon
+restart. Changed scope/filter or malformed tokens return `INVALID_ARGUMENT`.
+
+These are additive, outside-v1 RPCs. Existing whole-table methods and EVPN
+per-peer request/response contracts are unchanged. Older servers return
+`UNIMPLEMENTED` for these page methods, avoiding a silent fallback to the
+wrong view. No v1 inventory promotion is implied.
+
+```bash
+rbgp rib vpn received 192.0.2.1 --rd 65000:100 --prefix 10.0.0.0/24 --limit 100
+rbgp rib labeled advertised 192.0.2.2 -a labeled-v4 --limit 100
+rbgp rib rtc received 192.0.2.1 --route-target RT:65000:100 --limit 100
+rbgp evpn best --mac 00:11:22:33:44:55 --vni 100 --limit 100
+```
+
+The new CLI pages print a JSON object with `view`, `neighbor` (nullable for
+unscoped best), `routes`, `total_count`, `next_page_token` and `page_version`.
+Existing unpaged list commands keep their JSON arrays. `--page-token`
+continues the selected page; `--page-size` aliases `--limit`. New per-peer
+views and filtered queries default to 100 rows and never request an old
+whole-table RPC.
 
 ### List EVPN routes
 

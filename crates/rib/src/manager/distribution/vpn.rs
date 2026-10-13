@@ -808,6 +808,9 @@ impl RibManager {
             super::super::replacement_readiness_checkpoint_at(&readiness, "selection_vpn", false);
         };
         checkpoint();
+        if !affected.is_empty() {
+            self.advance_table_pages();
+        }
         self.record_deferred_vpn(affected);
         let mut affected_nlri: HashSet<VpnRouteKey> = affected
             .iter()

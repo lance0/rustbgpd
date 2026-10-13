@@ -503,6 +503,26 @@ on another host can expose clock skew. `--age` cannot be combined with
 `--count`, rejected-route output, or either explain view. JSON is unchanged by
 the flag and always includes the raw `received_at_epoch_seconds` field.
 
+### Bounded family route pages
+
+The family RIB commands also expose bounded peer views and filtered pages:
+
+```bash
+rbgp rib vpn received 192.0.2.1 --rd 65000:100 --prefix 10.0.0.0/24 --limit 100
+rbgp rib labeled advertised 192.0.2.2 -a labeled-v4 --limit 100
+rbgp rib rtc received 192.0.2.1 --route-target RT:65000:100 --limit 100
+rbgp evpn best --mac 00:11:22:33:44:55 --esi 00:01:02:03:04:05:06:07:08:09 --vni 100
+```
+
+Pages default to 100 rows, accept `--page-token` and cap `--limit` at 1000.
+Restart with an empty token after a table-change error. JSON pages include
+view, neighbor, routes, total count, next token and version; existing unpaged
+commands keep their arrays. Received rows are retained accepted post-policy
+input; advertised rows are local export state and keep their source peer.
+These additions stay outside the current v1 inventory. See the
+[API reference](../../docs/reference/api.md#bounded-vpn-labeled-rtc-and-evpn-best-pages)
+for filter semantics and errors.
+
 ### EVPN
 
 ```bash

@@ -1765,6 +1765,26 @@ pub struct RoutePage {
     pub version: RoutePageVersion,
 }
 
+/// One bounded family page; only returned rows are cloned.
+#[derive(Debug, Clone, Default)]
+pub struct RibRowsPage<T> {
+    /// Rows ascending by NLRI, source peer and path identifier.
+    pub routes: Vec<T>,
+    /// Filtered scope count, independent of the cursor.
+    pub total: u64,
+    /// Whether another page exists.
+    pub has_more: bool,
+    /// Conservative scope mutation version.
+    pub version: RoutePageVersion,
+}
+
+/// VPN page identity, excluding mutable labels.
+pub type VpnRouteQueryKey = (rustbgpd_wire::VpnRouteKey, IpAddr, u32);
+/// Labeled-unicast page identity, excluding mutable labels.
+pub type LabeledRouteQueryKey = (Prefix, IpAddr, u32);
+/// RTC page identity, including partial membership prefixes.
+pub type RtcRouteQueryKey = (rustbgpd_wire::RtcNlri, IpAddr, u32);
+
 /// Identity ordering for EVPN pages, including the source peer for all-peer queries.
 pub type EvpnRouteQueryKey = (EvpnRouteKey, IpAddr);
 
@@ -3326,6 +3346,51 @@ pub enum RibUpdate {
         filter: Option<RibRowFilter<RtcRibRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<RtcRibRoute>>,
+    },
+    /// Query one bounded, version-fenced Vpn table page.
+    QueryVpnRoutesPage {
+        /// Accepted input, selected best, or local export table.
+        scope: RouteQueryScope,
+        /// Predicate applied before cloning.
+        filter: Option<RibRowFilter<VpnRibRoute>>,
+        /// Last NLRI/source/path identity returned.
+        after: Option<VpnRouteQueryKey>,
+        /// Required for continuation; absent for the first page.
+        expected_version: Option<RoutePageVersion>,
+        /// Clamped to 1..=1000.
+        page_size: usize,
+        /// Dropped receivers skip queued work.
+        reply: oneshot::Sender<Result<RibRowsPage<VpnRibRoute>, RoutePageError>>,
+    },
+    /// Query one bounded, version-fenced Labeled table page.
+    QueryLabeledRoutesPage {
+        /// Accepted input, selected best, or local export table.
+        scope: RouteQueryScope,
+        /// Predicate applied before cloning.
+        filter: Option<RibRowFilter<LabeledRibRoute>>,
+        /// Last NLRI/source/path identity returned.
+        after: Option<LabeledRouteQueryKey>,
+        /// Required for continuation; absent for the first page.
+        expected_version: Option<RoutePageVersion>,
+        /// Clamped to 1..=1000.
+        page_size: usize,
+        /// Dropped receivers skip queued work.
+        reply: oneshot::Sender<Result<RibRowsPage<LabeledRibRoute>, RoutePageError>>,
+    },
+    /// Query one bounded, version-fenced Rtc table page.
+    QueryRtcRoutesPage {
+        /// Accepted input, selected best, or local export table.
+        scope: RouteQueryScope,
+        /// Predicate applied before cloning.
+        filter: Option<RibRowFilter<RtcRibRoute>>,
+        /// Last NLRI/source/path identity returned.
+        after: Option<RtcRouteQueryKey>,
+        /// Required for continuation; absent for the first page.
+        expected_version: Option<RoutePageVersion>,
+        /// Clamped to 1..=1000.
+        page_size: usize,
+        /// Dropped receivers skip queued work.
+        reply: oneshot::Sender<Result<RibRowsPage<RtcRibRoute>, RoutePageError>>,
     },
     /// Query a snapshot of the RFC 9107 ORR topology graph, built on
     /// demand from every peer's BGP-LS Adj-RIB-In (NOT the Loc-RIB —

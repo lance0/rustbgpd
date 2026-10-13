@@ -2156,6 +2156,202 @@ pub async fn bgpls(
     print_bgpls_routes(&resp.routes, json)
 }
 
+fn family_page_json<T: serde::Serialize>(
+    rows: T,
+    view: i32,
+    peer: Option<&str>,
+    total: u64,
+    next: &str,
+    version: Option<&crate::proto::RoutePageVersion>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "view": match view { 1 => "received", 2 => "advertised", _ => "best" },
+        "neighbor": peer,
+        "routes": rows,
+        "total_count": total,
+        "next_page_token": next,
+        "page_version": version.map(|v| serde_json::json!({ "epoch": v.epoch, "generation": v.generation })),
+    })
+}
+
+fn print_family_page_footer(total: u64, next: &str) -> Result<(), CliError> {
+    outln!("Total matching rows: {total}")?;
+    if !next.is_empty() {
+        outln!("Next page token: {next}")?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "family-specific filters and page controls passed from CLI arguments"
+)]
+pub async fn vpn_page(
+    connection: Connection,
+    family: Option<&str>,
+    peer: Option<String>,
+    view: i32,
+    prefix: Option<String>,
+    rd: Option<String>,
+    page_size: u32,
+    page_token: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    if let Some(peer) = &peer {
+        bare_ip_rpc_address(peer)
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| CliError::Argument("neighbor must be an IP address".into()))?;
+    }
+    let mut client = connection.rib_listing_client();
+    let mut response = read_rpc(
+        "ListVpnRoutesPage",
+        client.list_vpn_routes_page(crate::proto::ListVpnRoutesPageRequest {
+            view,
+            peer_filter: peer
+                .as_deref()
+                .map(bare_ip_rpc_address)
+                .unwrap_or_default()
+                .to_string(),
+            page_size,
+            page_token: page_token.unwrap_or_default(),
+            afi_safi: parse_vpn_family(family)?,
+            prefix_filter: prefix.unwrap_or_default(),
+            rd_filter: rd.unwrap_or_default(),
+        }),
+    )
+    .await?
+    .into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
+    if json {
+        output::print_json_pretty(&family_page_json(
+            JsonVpnRoutes(&response.routes),
+            view,
+            peer.as_deref(),
+            response.total_count,
+            &response.next_page_token,
+            response.page_version.as_ref(),
+        ))?;
+    } else {
+        print_vpn_routes(&response.routes, false)?;
+        print_family_page_footer(response.total_count, &response.next_page_token)?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "family-specific filters and page controls passed from CLI arguments"
+)]
+pub async fn labeled_page(
+    connection: Connection,
+    family: Option<&str>,
+    peer: Option<String>,
+    view: i32,
+    prefix: Option<String>,
+    page_size: u32,
+    page_token: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    if let Some(peer) = &peer {
+        bare_ip_rpc_address(peer)
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| CliError::Argument("neighbor must be an IP address".into()))?;
+    }
+    let mut client = connection.rib_listing_client();
+    let mut response = read_rpc(
+        "ListLabeledRoutesPage",
+        client.list_labeled_routes_page(crate::proto::ListLabeledRoutesPageRequest {
+            view,
+            peer_filter: peer
+                .as_deref()
+                .map(bare_ip_rpc_address)
+                .unwrap_or_default()
+                .to_string(),
+            page_size,
+            page_token: page_token.unwrap_or_default(),
+            afi_safi: parse_labeled_family(family)?,
+            prefix_filter: prefix.unwrap_or_default(),
+        }),
+    )
+    .await?
+    .into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
+    if json {
+        output::print_json_pretty(&family_page_json(
+            JsonLabeledRoutes(&response.routes),
+            view,
+            peer.as_deref(),
+            response.total_count,
+            &response.next_page_token,
+            response.page_version.as_ref(),
+        ))?;
+    } else {
+        print_labeled_routes(&response.routes, false)?;
+        print_family_page_footer(response.total_count, &response.next_page_token)?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "family-specific filters and page controls passed from CLI arguments"
+)]
+pub async fn rtc_page(
+    connection: Connection,
+    peer: Option<String>,
+    view: i32,
+    origin_as: Option<u32>,
+    route_target: Option<String>,
+    page_size: u32,
+    page_token: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    if let Some(peer) = &peer {
+        bare_ip_rpc_address(peer)
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| CliError::Argument("neighbor must be an IP address".into()))?;
+    }
+    let mut client = connection.rib_listing_client();
+    let mut response = read_rpc(
+        "ListRtcRoutesPage",
+        client.list_rtc_routes_page(crate::proto::ListRtcRoutesPageRequest {
+            view,
+            peer_filter: peer
+                .as_deref()
+                .map(bare_ip_rpc_address)
+                .unwrap_or_default()
+                .to_string(),
+            page_size,
+            page_token: page_token.unwrap_or_default(),
+            origin_as_filter: origin_as,
+            route_target_filter: route_target.unwrap_or_default(),
+        }),
+    )
+    .await?
+    .into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
+    if json {
+        output::print_json_pretty(&family_page_json(
+            JsonRtcRoutes(&response.routes),
+            view,
+            peer.as_deref(),
+            response.total_count,
+            &response.next_page_token,
+            response.page_version.as_ref(),
+        ))?;
+    } else {
+        print_rtc_routes(&response.routes, false)?;
+        print_family_page_footer(response.total_count, &response.next_page_token)?;
+    }
+    Ok(())
+}
+
 pub async fn vpn(
     connection: Connection,
     family: Option<&str>,

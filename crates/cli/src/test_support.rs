@@ -194,6 +194,15 @@ pub(crate) struct MockState {
     pub(crate) list_bgpls_response: Mutex<Option<server_proto::ListBgpLsResponse>>,
     pub(crate) list_conditional_response:
         Mutex<Option<server_proto::ListConditionalAdvertisementsResponse>>,
+    pub(crate) family_page_error: Mutex<Option<(Code, String)>>,
+    pub(crate) last_list_vpn_page: Mutex<Option<server_proto::ListVpnRoutesPageRequest>>,
+    pub(crate) list_vpn_page_response: Mutex<server_proto::ListVpnRoutesPageResponse>,
+    pub(crate) last_list_labeled_page: Mutex<Option<server_proto::ListLabeledRoutesPageRequest>>,
+    pub(crate) list_labeled_page_response: Mutex<server_proto::ListLabeledRoutesPageResponse>,
+    pub(crate) last_list_rtc_page: Mutex<Option<server_proto::ListRtcRoutesPageRequest>>,
+    pub(crate) list_rtc_page_response: Mutex<server_proto::ListRtcRoutesPageResponse>,
+    pub(crate) last_list_evpn_page: Mutex<Option<server_proto::ListEvpnRoutesPageRequest>>,
+    pub(crate) list_evpn_page_response: Mutex<server_proto::ListEvpnRoutesPageResponse>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) list_vpn_response: Mutex<Option<server_proto::ListVpnRoutesResponse>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
@@ -2336,6 +2345,58 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 },
             ],
         }))
+    }
+
+    async fn list_vpn_routes_page(
+        &self,
+        request: Request<server_proto::ListVpnRoutesPageRequest>,
+    ) -> Result<Response<server_proto::ListVpnRoutesPageResponse>, Status> {
+        *self.state.last_list_vpn_page.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_vpn_page_response.lock().await.clone(),
+        ))
+    }
+
+    async fn list_labeled_routes_page(
+        &self,
+        request: Request<server_proto::ListLabeledRoutesPageRequest>,
+    ) -> Result<Response<server_proto::ListLabeledRoutesPageResponse>, Status> {
+        *self.state.last_list_labeled_page.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_labeled_page_response.lock().await.clone(),
+        ))
+    }
+
+    async fn list_rtc_routes_page(
+        &self,
+        request: Request<server_proto::ListRtcRoutesPageRequest>,
+    ) -> Result<Response<server_proto::ListRtcRoutesPageResponse>, Status> {
+        *self.state.last_list_rtc_page.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_rtc_page_response.lock().await.clone(),
+        ))
+    }
+
+    async fn list_evpn_routes_page(
+        &self,
+        request: Request<server_proto::ListEvpnRoutesPageRequest>,
+    ) -> Result<Response<server_proto::ListEvpnRoutesPageResponse>, Status> {
+        *self.state.last_list_evpn_page.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_evpn_page_response.lock().await.clone(),
+        ))
     }
 
     async fn list_topology_nodes(
