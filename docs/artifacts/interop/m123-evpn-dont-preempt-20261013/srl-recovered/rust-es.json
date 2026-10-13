@@ -1,0 +1,34 @@
+{
+  "segments": [
+    {
+      "ac_gate_interface": "",
+      "ac_gate_state": "",
+      "advertised_df_dont_preempt": true,
+      "advertised_df_preference": 200,
+      "df_algorithm": "highest-preference",
+      "df_dont_preempt": true,
+      "df_preference": 200,
+      "df_recovery_pending": false,
+      "df_recovery_remaining_ms": 0,
+      "drain_reasons": [],
+      "drained": false,
+      "esi": "00:01:23:00:00:00:00:00:00:01",
+      "fdb_nexthop_groups_count": 0,
+      "fdb_nexthop_ref_macs_count": 0,
+      "member_vnis": [
+        100
+      ],
+      "members": [
+        {
+          "bridge": "br100",
+          "bum_forwarding_action": "allow",
+          "df_role": "df",
+          "same_esi_bias_eligible": true,
+          "vni": 100
+        }
+      ],
+      "originator_ip": "10.0.123.1",
+      "redundancy_mode": "all-active"
+    }
+  ]
+}

@@ -143,6 +143,7 @@ proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 | M43 | TCP-AO dynamic `/24` queued-child deletion-foundation receipt plus two BIRD modes: uninterrupted SIGHUP add/select/deprecate/delete with a 100 ms route-continuity oracle, and SIGKILL/restart recovery after add-only, selection/deprecation `awaiting_peer`, and delete. Every restart requires BIRD disconnect, a new daemon PID, fresh `1/1` / `idle`, exact MKT inventory, mandatory TCP-AO, route/session recovery, and phase-correct Current/RNext; selection explicitly proves authenticated `degraded` `2/13` before the peer moves, then `healthy` `3/13` (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.3 |
 | M47 / M48 | ADR-0063 runtime EVPN tenant teardown (control plane / kernel L3 datapath) | FRR 10.7.1 |
 | M69 | RFC 9785 Highest-Preference DF election, cross-vendor | FRR 10.7.1 |
+| [M123](artifacts/interop/m123-evpn-dont-preempt-20261013/README.md) | RFC 9785 Don't-Preempt: restart without preemption, CE-link recovery inheritance, reference-PE withdrawal, and a DP-off preemption control, on an all-active ES behind a Linux LACP CE | SR Linux 25.10.1-399 |
 | M50 / M52 | ADR-0066 unicast multipath ECMP FIB install + multipath-relax | FRR 10.7.1 ×2 |
 | M51 | ADR-0067 single-hop BFD + RFC 5882 BGP coupling | FRR 10.7.1 |
 | M108 | RFC 5883 multihop BFD + RFC 5882 BGP coupling over routed loopbacks | FRR 10.7.1 |

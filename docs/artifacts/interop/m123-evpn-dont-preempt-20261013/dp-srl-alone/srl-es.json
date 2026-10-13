@@ -1,0 +1,57 @@
+{
+  "name": "es1",
+  "type": "none",
+  "admin-state": "enable",
+  "oper-state": "up",
+  "esi": "00:01:23:00:00:00:00:00:00:01",
+  "multi-homing-mode": "all-active",
+  "oper-multi-homing-mode": "all-active",
+  "interface": [
+    {
+      "ethernet-interface": "lag1"
+    }
+  ],
+  "df-election": {
+    "algorithm": {
+      "type": "preference",
+      "oper-type": "preference",
+      "preference-alg": {
+        "preference-value": 100,
+        "oper-preference-value": 100,
+        "oper-do-not-prempt": true,
+        "capabilities": {
+          "ac-df": "include",
+          "non-revertive": true
+        }
+      }
+    }
+  },
+  "routes": {
+    "next-hop": "use-system-ipv4-address",
+    "ethernet-segment": {
+      "originating-ip": "use-system-ipv4-address"
+    }
+  },
+  "association": {
+    "network-instance": [
+      {
+        "name": "bd100",
+        "bgp-instance": [
+          {
+            "instance": 1,
+            "designated-forwarder-role-last-change": "2026-10-13T13:36:11.515Z (16 seconds ago)",
+            "computed-designated-forwarder-candidates": {
+              "designated-forwarder-candidate": [
+                {
+                  "address": "192.0.2.2",
+                  "add-time": "2026-10-13T13:36:08.552Z (19 seconds ago)",
+                  "designated-forwarder": true
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

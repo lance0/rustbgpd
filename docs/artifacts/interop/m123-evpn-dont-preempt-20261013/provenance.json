@@ -1,0 +1,44 @@
+{
+  "started_utc": "2026-10-13T13:35:05Z",
+  "finished_utc": "2026-10-13T13:37:25Z",
+  "daemon_source_commit": "2ebe2e58fce2e12f5e618f3b262d90268425a6e1",
+  "daemon_rust_inputs_source_id": "e188b7b38647dbbcf19036312971a8d3f65e6501813d91c04c067ecbcd419911",
+  "daemon_image_id": "sha256:4ee26f7bb69c9b3147208dd6bafa39a11f36245194407fcc5c66c7528433ca4f",
+  "srl_image": "ghcr.io/nokia/srlinux:25.10.1@sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c",
+  "srl_image_id": "sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c",
+  "srl_version": "25.10.1-399-g90c1dbe35ef",
+  "containerlab_version": "0.74.3",
+  "kernel": "7.0.0-30-generic",
+  "binary_sha256": {
+    "rustbgpd": "41fc02d2f29164eef989414ad5d4f184a7ada6b813c93040b0f425d80b244e28",
+    "rbgp": "8dc5e88cdfe8f1f52e53027090634283fff4a8e8e23b4147203147c12fb8f243"
+  },
+  "exit_codes": {
+    "deploy": 0,
+    "runner": 0,
+    "replay": 0,
+    "destroy": 0
+  },
+  "summary": {
+    "passed": 20,
+    "failed": 0,
+    "phases": 11
+  },
+  "harness_sha256": {
+    "tests/interop/m123-evpn-dont-preempt-srlinux.clab.yml": "8c53d2d475ce4eb3cd7da0798e83d3f7f091ba82e65123280e273eed2f5563a5",
+    "tests/interop/configs/rustbgpd-m123-pe.toml": "10b08c55dc08d71404a272267f6fe1a8f1942f6907765ce3263ab17919b0e06f",
+    "tests/interop/configs/srl-m123-dont-preempt.cli": "0897b623b294bd145f43bae91894f50a15035de8dda4e5e3ee6f45dfe2dd2754",
+    "tests/interop/scripts/setup-m123-links.sh": "491190cfd605c50adfa99f1630336be7e696cc4b921f0bd0319321f85d5bd0dd",
+    "tests/interop/scripts/test-m123-evpn-dont-preempt-srlinux.sh": "2c3b1914e046f33f1e30b2f6969a66f6f068496c3395bee104de6af07f40efa4",
+    "tests/interop/scripts/m123_dont_preempt_oracle.py": "73bc92f8c35810e9d19cba80e4c55be49bfeb9ba8d6ea0f2b4e2df09925d3d21",
+    "tests/interop/scripts/start-rustbgpd.sh": "47bafe51af0a2d46eb9d085000bc3c49a66e4d1d978fb87c6e05b41d4841d8ad",
+    "tests/interop/scripts/test-lib.sh": "bae9f334ffa2b2ae65fb416ffd05e02813d100faad296f95830fb6e31bf5bcd2",
+    "tests/interop/scripts/source-id-guard.sh": "d4bddf6b1a72f09ab18041887559fe4b2fd9ce83c0a1b1afe6d5bc0de614835e",
+    "scripts/source-id.sh": "703efb7e015d4e98e18160486d1ef3bb1a1a542eb42ea6699358804924fca5d6"
+  },
+  "local_topology": "The committed topology with each node's image set to the locally built rustbgpd image and a CPU set added; no other change.",
+  "normalization": {
+    "run.log": "ANSI colors removed; other text unchanged.",
+    "mismatch.txt": "Per-phase oracle stderr from the last poll; empty on a passing phase and omitted."
+  }
+}

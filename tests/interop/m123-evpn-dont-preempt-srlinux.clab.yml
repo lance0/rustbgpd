@@ -1,0 +1,44 @@
+# M123: RFC 9785 Don't-Preempt between rustbgpd and SR Linux 25.10.1 on one
+# all-active Ethernet Segment, with a Linux CE bonding both PE links by LACP.
+# Run test-m123-evpn-dont-preempt-srlinux.sh after deploy; evidence lands in
+# /tmp/m123.
+name: m123-evpn-dont-preempt-srlinux
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m123-pe.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ./scripts/setup-m123-links.sh:/usr/local/bin/setup-links.sh:ro
+      exec:
+        - ip addr add 10.0.123.1/24 dev eth1
+        - ip link set eth1 up
+        - ip route add 192.0.2.2/32 via 10.0.123.2
+        - sh /usr/local/bin/setup-links.sh pe
+      env:
+        RUST_LOG: info,rustbgpd::evpn_segment=debug
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    srl:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:25.10.1@sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c
+      startup-config: ./configs/srl-m123-dont-preempt.cli
+
+    ce:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./scripts/setup-m123-links.sh:/usr/local/bin/setup-links.sh:ro
+      exec:
+        - sh /usr/local/bin/setup-links.sh ce
+
+  links:
+    - endpoints: ["srl:e1-1", "rustbgpd:eth1"]
+    - endpoints: ["rustbgpd:eth2", "ce:eth1"]
+    - endpoints: ["srl:e1-2", "ce:eth2"]

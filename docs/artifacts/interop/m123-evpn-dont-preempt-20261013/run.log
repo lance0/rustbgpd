@@ -1,0 +1,48 @@
+rustbgpd cpuset=0-31 image=rustbgpd:lan2112-dev sha256:4ee26f7bb69c9b3147208dd6bafa39a11f36245194407fcc5c66c7528433ca4f
+srl cpuset=0-31 image=ghcr.io/nokia/srlinux:25.10.1@sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c sha256:bc8112667b5a87bee5039ade65b504ac2ef35511210d0675db6c7b0754e8cc4c
+ce cpuset=0-31 image=rustbgpd:lan2112-dev sha256:4ee26f7bb69c9b3147208dd6bafa39a11f36245194407fcc5c66c7528433ca4f
+source-id: image sha256:4ee26f7bb69c9b3147208dd6bafa39a11f36245194407fcc5c66c7528433ca4f matches this tree (e188b7b38647dbbcf19036312971a8d3f65e6501813d91c04c067ecbcd419911)
+source-id: image sha256:4ee26f7bb69c9b3147208dd6bafa39a11f36245194407fcc5c66c7528433ca4f matches this tree (e188b7b38647dbbcf19036312971a8d3f65e6501813d91c04c067ecbcd419911)
+Software Version     : v25.10.1
+Build Number         : 399-g90c1dbe35ef
+[09:35:22 TEST] gRPC endpoint: 172.20.20.3:50051
+  [09:35:41] PASS srl-alone: SR Linux alone is DF over a two-port LACP bundle
+[09:35:41 TEST] Starting rustbgpd daemon...
+[09:35:41 TEST] rustbgpd is running (after 1s)
+[09:35:41 TEST] Waiting for gRPC to become available...
+  [09:35:41] PASS gRPC endpoint ready (attempt 1)
+[09:35:41 TEST] Waiting for SR Linux session to reach Established...
+  [09:35:41] PASS SR Linux session established (attempt 1)
+  [09:35:49] PASS dp-boot: booting rustbgpd inherits (100, DP=0); SR Linux stays DF
+[09:35:50 TEST] Starting rustbgpd daemon...
+[09:35:50 TEST] rustbgpd is running (after 1s)
+[09:35:50 TEST] Waiting for gRPC to become available...
+  [09:35:50] PASS gRPC endpoint ready (attempt 1)
+[09:35:50 TEST] Waiting for SR Linux session to reach Established...
+  [09:35:50] PASS SR Linux session established (attempt 1)
+  [09:35:58] PASS dp-restart: restarted rustbgpd inherits (100, DP=0); SR Linux stays DF
+  [09:36:01] PASS control-srl-alone: SR Linux alone is DF without DP
+[09:36:01 TEST] Starting rustbgpd daemon...
+[09:36:01 TEST] rustbgpd is running (after 1s)
+[09:36:01 TEST] Waiting for gRPC to become available...
+  [09:36:01] PASS gRPC endpoint ready (attempt 1)
+[09:36:01 TEST] Waiting for SR Linux session to reach Established...
+  [09:36:01] PASS SR Linux session established (attempt 1)
+  [09:36:07] PASS control-preempt: without DP, restarted rustbgpd preempts SR Linux
+  [09:36:29] PASS dp-srl-alone: SR Linux alone is DF with DP again
+[09:36:29 TEST] Starting rustbgpd daemon...
+[09:36:29 TEST] rustbgpd is running (after 1s)
+[09:36:29 TEST] Waiting for gRPC to become available...
+  [09:36:29] PASS gRPC endpoint ready (attempt 1)
+[09:36:29 TEST] Waiting for SR Linux session to reach Established...
+  [09:36:29] PASS SR Linux session established (attempt 1)
+  [09:36:36] PASS dp-restored: rustbgpd inherits again after the control cell
+  [09:36:53] PASS srl-withdrawn: survivor rustbgpd restores (200, DP=1) and is DF
+  [09:36:59] PASS srl-recovered: recovering SR Linux inherits (200, DP=0); rustbgpd keeps DF
+  [09:37:20] PASS rust-drained: survivor SR Linux restores (300, DP=1) and is DF
+  [09:37:25] PASS rust-undrained: lower-preference rustbgpd recovers with (200, DP=1); SR Linux stays DF
+  [09:37:25] PASS replayed every phase from its retained snapshot
+
+[09:37:25 TEST] Results: 20 passed, 0 failed
+leg rc=0
+destroy rc=0
