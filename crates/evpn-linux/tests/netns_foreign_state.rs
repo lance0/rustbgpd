@@ -144,14 +144,27 @@ async fn spawn_reconcile_actor() -> (
     (intent_tx, report_rx, shutdown, actor_join)
 }
 
+/// Wait for the first report at or past `generation`. Its
+/// `foreign_state_counters` are replaced by the sum over every report
+/// received while waiting. The counters are per pass, and a pass woken
+/// by a kernel event (for example the bridge's delayed operstate
+/// `RTM_NEWLINK` after setup) can observe the test's last kernel write
+/// before the pass for the next intent generation does.
 async fn wait_for_report_generation(
     report_rx: &mut mpsc::Receiver<rustbgpd_evpn::DataplaneReport>,
     generation: u64,
 ) -> rustbgpd_evpn::DataplaneReport {
+    let mut total = rustbgpd_evpn::ForeignStateCounters::default();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let report = report_rx.recv().await.expect("dataplane report channel");
+            let mut report = report_rx.recv().await.expect("dataplane report channel");
+            let pass = report.foreign_state_counters;
+            total.replaces_blocked += pass.replaces_blocked;
+            total.deletes_skipped += pass.deletes_skipped;
+            total.owned_relinquished += pass.owned_relinquished;
+            total.nhid_range_conflicts += pass.nhid_range_conflicts;
             if report.intent_generation >= generation {
+                report.foreign_state_counters = total;
                 return report;
             }
         }
@@ -607,20 +620,13 @@ async fn l2_foreign_takeover_row_survives_withdrawal_and_shutdown() {
     // 3. Re-reconcile with the MAC still desired — rustbgpd must NOT
     //    repair its row back over the foreign one.
     intent_tx.send(l2_intent(2, true)).unwrap();
-    let counters = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut total = (0, 0);
-        loop {
-            let report = report_rx.recv().await.expect("dataplane report channel");
-            total.0 += report.foreign_state_counters.owned_relinquished;
-            total.1 += report.foreign_state_counters.replaces_blocked;
-            if report.intent_generation >= 2 {
-                break total;
-            }
-        }
-    })
-    .await
-    .expect("timed out waiting for takeover report");
-    assert_eq!(counters, (1, 1));
+    let counters = wait_for_report_generation(&mut report_rx, 2)
+        .await
+        .foreign_state_counters;
+    assert_eq!(
+        (counters.owned_relinquished, counters.replaces_blocked),
+        (1, 1)
+    );
     let dump = shell("bridge", &["fdb", "show", "dev", "vxlan100"]);
     assert!(
         l2_rows_match(&dump, &mac, true),
@@ -763,7 +769,8 @@ async fn l2_owned_destination_drift_is_repaired_and_unmarked_rewrite_relinquishe
     assert_eq!(foreign, row, "foreign self row was rewritten");
 
     intent_tx.send(l2_intent(4, false)).unwrap();
-    wait_for_report_generation(&mut report_rx, 4).await;
+    let report = wait_for_report_generation(&mut report_rx, 4).await;
+    assert_eq!(report.foreign_state_counters.owned_relinquished, 0);
     assert_eq!(l2_self_row(&mac), foreign, "withdrawal");
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(10), actor_join)
