@@ -1902,8 +1902,18 @@ impl PeerSession {
         // Judge NLRI content from the raw attribute: the decoder may drop
         // every NLRI it carried (RFC 7606 §5.4 unsupported EVPN types,
         // RFC 9135 §9.1.1 zero-length-MAC Type 2), and NLRI that was encoded
-        // and parsed still makes treat-as-withdraw the right action.
-        let mp_reach_carries_nlri = raw_mp_reach_encodes_nlri(&update.path_attributes);
+        // and parsed still makes treat-as-withdraw the right action. A local
+        // replay has no raw form and nothing dropped: its MP_REACH carries
+        // exactly the retained NLRI.
+        let mp_reach_carries_nlri = update.map_or_else(
+            || {
+                parsed.attributes.iter().any(|a| match a {
+                    PathAttribute::MpReachNlri(mp) => mp_reach_announced_count(mp) != 0,
+                    _ => false,
+                })
+            },
+            |update| raw_mp_reach_encodes_nlri(&update.path_attributes),
+        );
         let has_body_nlri = !parsed.announced.is_empty();
         let has_nlri = has_body_nlri || has_mp_reach_attr;
         let mut validation_options = rustbgpd_wire::UpdateValidationOptions::default();
@@ -2138,17 +2148,21 @@ impl PeerSession {
             // unsupported types, RFC 9135 §9.1.1 zero-length MAC), so also
             // require the raw attribute to encode none (RFC 4724 §2): its
             // value is exactly the 3-octet AFI/SAFI. Other attributes the
-            // decoder ignored do not matter.
+            // decoder ignored do not matter. A local replay is never an
+            // End-of-RIB marker.
             if parsed.attributes.len() == 1
-                && raw_path_attribute(
-                    &update.path_attributes,
-                    rustbgpd_wire::constants::attr_type::MP_UNREACH_NLRI,
-                )
-                .is_some_and(|attr| {
-                    let extended =
-                        attr[0] & rustbgpd_wire::constants::attr_flags::EXTENDED_LENGTH != 0;
-                    attr.len() == if extended { 4 } else { 3 } + 3
-                })
+                && update
+                    .and_then(|update| {
+                        raw_path_attribute(
+                            &update.path_attributes,
+                            rustbgpd_wire::constants::attr_type::MP_UNREACH_NLRI,
+                        )
+                    })
+                    .is_some_and(|attr| {
+                        let extended =
+                            attr[0] & rustbgpd_wire::constants::attr_flags::EXTENDED_LENGTH != 0;
+                        attr.len() == if extended { 4 } else { 3 } + 3
+                    })
                 && let Some(PathAttribute::MpUnreachNlri(mp)) = parsed.attributes.first()
                 && self.negotiated_families().contains(&(mp.afi, mp.safi))
                 && (mp.afi, mp.safi) != (Afi::Ipv4, Safi::Unicast)
