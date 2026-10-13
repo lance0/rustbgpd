@@ -2736,6 +2736,15 @@ impl RibManager {
             self.replacement_checkpoint(true);
             return false;
         };
+        if !self.reserve_evpn_recovery_admission(
+            peer,
+            &mut batch.evpn_announce,
+            &mut batch.evpn_withdraw,
+        ) {
+            batch.retire_with(&mut || checkpoint());
+            super::retire_hash_set(&mut group_prior, &mut || checkpoint());
+            return false;
+        }
         // Validate the trust boundary before consuming any durable pending
         // state (OTC diagnostics or the rejected-route overlay). A failed
         // precommit leaves those structures intact for the retry.
@@ -3469,6 +3478,7 @@ impl RibManager {
             super::retire_hash_set(&mut vpn_seen, &mut || checkpoint());
         }
         let limited = self.outbound_prefix_limits.contains_key(&peer);
+        self.retain_evpn_recovery_withdrawals(peer, &mut evpn_withdraw);
         let capacity_filtered = self.enforce_outbound_prefix_limits(
             peer,
             grouped_unicast_count.is_some(),
@@ -3776,6 +3786,7 @@ impl RibManager {
                 admitted.insert(ExactExportKey::Vpn(route.key()));
             }
         }
+        self.admit_evpn_recovery_batch(peer, &evpn_announce, &evpn_withdraw);
         enqueue_outbound_update(
             permit,
             OutboundRouteUpdate {
@@ -6305,6 +6316,10 @@ impl RibManager {
             }
             let member_of = self.grouped_member_of(peer);
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
+            if self.evpn_recovery_reset_pending(peer) {
+                self.retry_evpn_recovery_reset(peer);
+                continue;
+            }
             let is_dirty = self.dirty_peers.contains(&peer);
             // `is_force` peers are dirty-equivalent for prefix enumeration AND
             // bypass the AdjRibOut equality suppression in the per-prefix

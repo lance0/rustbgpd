@@ -4674,11 +4674,18 @@ async fn run<T>(
     // Sessions carry their complete current effective export chain, including
     // global inheritance. A startup fallback here would restore an old chain
     // when a peer reconnects after the global chain was removed.
+    let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+    let recovery_peer_mgr_tx = peer_mgr_tx.clone();
     let (dampening_capacity_tx, dampening_capacity_rx) = mpsc::unbounded_channel();
     let mut rib_manager = RibManager::new(rib_rx, rib_query_rx, None, cluster_id, metrics.clone())
         .with_readiness_queries(rib_readiness_rx)
         .with_summary_queries(rib_summary_rx)
-        .with_dampening_capacity_notices(dampening_capacity_tx);
+        .with_dampening_capacity_notices(dampening_capacity_tx)
+        .with_evpn_recovery_reset_handler(Arc::new(move |request| {
+            recovery_peer_mgr_tx
+                .try_send(PeerManagerCommand::ResetEvpnRecoverySession { request })
+                .is_ok()
+        }));
     // GetPolicyStats reads the RIB's published export roster (ADR-0136)
     // instead of queueing on the RIB.
     let export_roster = rib_manager.export_roster();
@@ -4739,7 +4746,6 @@ async fn run<T>(
     let (validation_watch_tx, validation_watch_rx) =
         tokio::sync::watch::channel(rustbgpd_rpki::ValidationSnapshot::default());
 
-    let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let (peer_mgr_readiness_tx, peer_mgr_readiness_rx) =
         mpsc::channel::<PeerManagerReadinessQuery>(64);
     let (peer_mgr_operator_tx, peer_mgr_operator_rx) = mpsc::channel::<EnqueuedOperatorQuery>(64);

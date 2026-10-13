@@ -510,6 +510,12 @@ pub enum PeerCommand {
         /// Shutdown communication reason (pre-encoded), or None.
         reason: Option<Bytes>,
     },
+    /// Reset only the captured EVPN outbound connection. A reconnect changes
+    /// the token even when the session actor retains its generation ID.
+    ResetEvpnRecoverySession {
+        /// Connection token and bounded resource-exhaustion evidence.
+        request: rustbgpd_rib::EvpnRecoveryReset,
+    },
     /// Query the current session state.
     QueryState {
         /// Oneshot channel to receive the session state snapshot.

@@ -1889,6 +1889,7 @@ async fn run(row: &WaitSite) {
             let blocked = manager.peers.get_mut(&key(first)).unwrap();
             blocked.transport_config.dampening_admission = Some(admission);
             blocked.pending_inbound = Some(PendingInbound {
+                recovery_reset: None,
                 handle: candidate,
                 session_id: 99,
             });

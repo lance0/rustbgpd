@@ -630,6 +630,7 @@ async fn primary_max_prefix_breach_drains_pending_collision_candidate() {
     );
     let candidate = Arc::new(FakePeerCounters::default());
     mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
         handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
         session_id: 2,
     });
@@ -677,6 +678,7 @@ async fn peer_presence_retained_max_prefix_emits_no_removed() {
     let managed = mgr.peers.get_mut(&key(addr)).unwrap();
     managed.is_dynamic = true;
     managed.pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
         handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
         session_id: 2,
     });
@@ -741,6 +743,7 @@ async fn pending_candidate_max_prefix_breach_stops_primary_and_drains_candidate(
     );
     let candidate = Arc::new(FakePeerCounters::default());
     mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
         handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
         session_id: 2,
     });
@@ -1130,6 +1133,7 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
     );
     let candidate = Arc::new(FakePeerCounters::default());
     mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
         handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
         session_id: 2,
     });

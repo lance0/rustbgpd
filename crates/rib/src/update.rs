@@ -18,6 +18,48 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+/// Fixed causes for a bounded EVPN recovery-provenance refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvpnRecoveryExhaustionCause {
+    PeerLimit,
+    DaemonLimit,
+    AllocationFailure,
+}
+
+impl EvpnRecoveryExhaustionCause {
+    /// Stable metric/log vocabulary, without peer-derived labels.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PeerLimit => "peer_limit",
+            Self::DaemonLimit => "daemon_limit",
+            Self::AllocationFailure => "allocation_failure",
+        }
+    }
+}
+
+/// Ask the session lifecycle owner to reset exactly the exhausted generation.
+#[derive(Clone, Debug)]
+pub struct EvpnRecoveryReset {
+    pub peer: IpAddr,
+    pub session_id: u64,
+    /// The outbound channel changes on reconnect even when the actor ID stays
+    /// the same. The session validates this token when executing the reset.
+    pub outbound: mpsc::Sender<OutboundRouteUpdate>,
+    pub cause: EvpnRecoveryExhaustionCause,
+    /// The peer whose temporary metadata/key charge refused admission. This
+    /// can differ from the initiating peer during a shared metadata resize.
+    pub limiting_peer: Option<IpAddr>,
+    pub attempted_peer_bytes: usize,
+    pub attempted_daemon_bytes: usize,
+    pub peer_limit_bytes: usize,
+    pub daemon_limit_bytes: usize,
+}
+
+/// Nonblocking admission to the existing session lifecycle owner. A refused
+/// admission stays owned by the RIB and is retried; it is not a reset receipt.
+pub type EvpnRecoveryResetFn = Arc<dyn Fn(EvpnRecoveryReset) -> bool + Send + Sync>;
+
 /// Failure returned by the dedicated, type-narrow RIB readiness lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RibReadinessError {
@@ -1684,6 +1726,10 @@ pub struct RoutePageVersion {
 /// A route-page continuation could not be served safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoutePageError {
+    /// A group-owned advertised projection is still settling after missed
+    /// delivery. Callers must retry after recovery rather than read desired
+    /// state as admitted output.
+    ResyncInProgress,
     /// The requested scope class changed after the preceding page. Callers
     /// must restart from an empty token rather than risk skipped or duplicate
     /// rows.

@@ -52,6 +52,7 @@ mod peer_table;
 mod policy;
 mod queries;
 mod reconcile;
+mod recovery;
 mod rotation;
 pub(crate) use rotation::TCP_AO_AWAITING_PEER_PREFIX;
 mod snapshot;
@@ -440,6 +441,7 @@ impl PeerShutdownOutcome {
 struct PendingInbound {
     handle: PeerHandle,
     session_id: u64,
+    recovery_reset: Option<recovery::SessionRecoveryReset>,
 }
 
 #[cfg(test)]
@@ -470,6 +472,8 @@ pub struct PeerManager {
     /// Session lifecycle notifications are keyed by session id, and scoped
     /// link-local peers can share the same address on different interfaces.
     session_index: HashMap<u64, PeerKey>,
+    evpn_recovery_retry_at: Option<tokio::time::Instant>,
+    evpn_recovery_retry_cursor: u64,
     rx: mpsc::Receiver<PeerManagerCommand>,
     /// Dedicated read-only lane drained only at safe actor seams. Mutation
     /// commands remain on `rx` and therefore stay ordered behind a policy
@@ -1193,6 +1197,8 @@ impl PeerManager {
             next_max_prefix_latch_generation: 1,
             retiring_sessions: HashMap::new(),
             session_index: HashMap::new(),
+            evpn_recovery_retry_at: None,
+            evpn_recovery_retry_cursor: 0,
             rx,
             readiness_rx: None,
             operator_rx: None,
@@ -1316,7 +1322,11 @@ impl PeerManager {
     }
 
     pub(super) fn unregister_session(&mut self, session_id: u64) {
-        self.session_index.remove(&session_id);
+        if let Some(key) = self.session_index.remove(&session_id)
+            && let Some((_, slot)) = self.peers.recovery_session_mut(&key, session_id)
+        {
+            *slot = None;
+        }
     }
 
     /// `[rpki] local_revalidation`: RFC 9324 local re-evaluation instead of
@@ -1927,6 +1937,9 @@ impl PeerManager {
                 let result = self.reset_peer(peer, reason).await;
                 let _ = reply.send(result);
             }
+            PeerManagerCommand::ResetEvpnRecoverySession { request } => {
+                self.reset_evpn_recovery_session(request);
+            }
             PeerManagerCommand::SoftResetIn {
                 peer,
                 families,
@@ -2502,6 +2515,7 @@ impl PeerManager {
                 self.reconcile_conditional_advertisements().await;
             }
             let bfd_retry_at = self.bfd_retry_deadline();
+            let evpn_recovery_retry_at = self.evpn_recovery_retry_at;
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             tokio::select! {
@@ -2725,6 +2739,13 @@ impl PeerManager {
                         std::future::pending::<()>().await;
                     }
                 } => self.retry_bfd_commands(bfd_state_change_rx.as_ref()),
+                () = async {
+                    if let Some(deadline) = evpn_recovery_retry_at {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => self.retry_evpn_recovery_resets(),
                 change = async {
                     match bfd_state_change_rx.as_mut() {
                         Some(rx) => rx.recv().await,

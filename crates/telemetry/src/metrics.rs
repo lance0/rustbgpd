@@ -705,6 +705,7 @@ struct BgpMetricsInner {
     path_attribute_discarded: IntCounterVec,
     evpn_nlri_discarded: IntCounterVec,
     evpn_nlri_discarded_by_type: IntCounterVec,
+    evpn_recovery_provenance_exhausted: IntCounterVec,
     update_malformed: IntCounterVec,
     update_malformed_causes: IntCounterVec,
     otc_routes_blocked: IntCounterVec,
@@ -2035,6 +2036,18 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_recovery_provenance_exhausted = IntCounterVec::new(
+            Opts::new(
+                "bgp_evpn_recovery_provenance_exhausted_total",
+                "EVPN recovery-provenance reset requests accepted by the captured connection",
+            ),
+            &["cause"],
+        )
+        .expect("valid metric definition");
+        for cause in ["peer_limit", "daemon_limit", "allocation_failure"] {
+            evpn_recovery_provenance_exhausted.with_label_values(&[cause]);
+        }
+
         let update_malformed = IntCounterVec::new(
             Opts::new(
                 "bgp_update_malformed_total",
@@ -3265,6 +3278,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_nlri_discarded_by_type.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_recovery_provenance_exhausted.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_malformed.clone()))
             .expect("metric not already registered");
         registry
@@ -3689,6 +3705,7 @@ impl BgpMetrics {
             path_attribute_discarded,
             evpn_nlri_discarded,
             evpn_nlri_discarded_by_type,
+            evpn_recovery_provenance_exhausted,
             update_malformed,
             update_malformed_causes,
             otc_routes_blocked,
@@ -5474,6 +5491,17 @@ impl BgpMetrics {
             .evpn_nlri_discarded_by_type
             .with_label_values(&[peer, &route_type.to_string()])
             .inc_by(count);
+    }
+
+    /// Count a reset accepted by its captured EVPN connection, never a
+    /// queued, stale or refused request. The cause vocabulary is closed.
+    pub fn record_evpn_recovery_provenance_exhausted(&self, cause: &str) {
+        if matches!(cause, "peer_limit" | "daemon_limit" | "allocation_failure") {
+            self.0
+                .evpn_recovery_provenance_exhausted
+                .with_label_values(&[cause])
+                .inc();
+        }
     }
 
     /// Record a malformed UPDATE by the RFC 7606 disposition applied.
@@ -9274,6 +9302,32 @@ mod tests {
                 .with_label_values(&["10.0.0.1"])
                 .get();
         assert_eq!(val, 5);
+    }
+
+    #[test]
+    fn evpn_recovery_reset_counter_has_only_three_fixed_causes() {
+        let metrics = BgpMetrics::new();
+        metrics.record_evpn_recovery_provenance_exhausted("peer_limit");
+        metrics.record_evpn_recovery_provenance_exhausted("unknown");
+        let families = metrics.0.registry.gather();
+        let family = families
+            .iter()
+            .find(|family| family.name() == "bgp_evpn_recovery_provenance_exhausted_total")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 3);
+        for metric in family.get_metric() {
+            assert_eq!(metric.get_label().len(), 1);
+            assert_eq!(metric.get_label()[0].name(), "cause");
+            let cause = metric.get_label()[0].value();
+            assert!(matches!(
+                cause,
+                "peer_limit" | "daemon_limit" | "allocation_failure"
+            ));
+            assert_eq!(
+                metric.get_counter().get_value(),
+                if cause == "peer_limit" { 1.0 } else { 0.0 }
+            );
+        }
     }
 
     #[test]

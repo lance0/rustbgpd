@@ -87,6 +87,7 @@ async fn manager_shutdown_bounds_many_stalled_peers_by_concurrent_waves() {
         insert_test_managed_peer(&mut mgr, addr, primary, false);
         let pending = stalled_shutdown_peer_handle(dropped.clone()).await;
         mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+            recovery_reset: None,
             handle: pending,
             session_id: (index + peer_count + 1) as u64,
         });

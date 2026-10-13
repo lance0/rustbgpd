@@ -32,6 +32,7 @@ use crate::config::Config;
 pub(super) struct ManagedPeer {
     handle: PeerHandle,
     session_id: u64,
+    recovery_reset: Option<super::recovery::SessionRecoveryReset>,
     state: ManagedPeerState,
 }
 
@@ -40,6 +41,7 @@ impl ManagedPeer {
         Self {
             handle,
             session_id,
+            recovery_reset: None,
             state,
         }
     }
@@ -124,6 +126,41 @@ impl PeerTable {
             .map(|peer| (&peer.handle, &mut peer.state))
     }
 
+    /// Match one actor generation without disturbing its collision sibling.
+    pub(super) fn recovery_session_mut(
+        &mut self,
+        key: &PeerKey,
+        session_id: u64,
+    ) -> Option<(
+        &PeerHandle,
+        &mut Option<super::recovery::SessionRecoveryReset>,
+    )> {
+        let peer = self.peers.get_mut(key)?;
+        if peer.session_id == session_id {
+            return Some((&peer.handle, &mut peer.recovery_reset));
+        }
+        let pending = peer.state.pending_inbound.as_mut()?;
+        (pending.session_id == session_id).then_some((&pending.handle, &mut pending.recovery_reset))
+    }
+
+    pub(super) fn recovery_reset_sessions(&self) -> impl Iterator<Item = (u64, bool)> + '_ {
+        self.peers.values().flat_map(|peer| {
+            [
+                peer.recovery_reset
+                    .as_ref()
+                    .map(|reset| (peer.session_id, reset.queued)),
+                peer.state.pending_inbound.as_ref().and_then(|pending| {
+                    pending
+                        .recovery_reset
+                        .as_ref()
+                        .map(|reset| (pending.session_id, reset.queued))
+                }),
+            ]
+            .into_iter()
+            .flatten()
+        })
+    }
+
     pub(super) fn contains_key(&self, key: &PeerKey) -> bool {
         self.peers.contains_key(key)
     }
@@ -201,6 +238,7 @@ impl PeerTable {
             std::mem::replace(&mut peer.handle, handle),
             std::mem::replace(&mut peer.session_id, session_id),
         );
+        peer.recovery_reset = None;
         self.publish();
         Some(previous)
     }

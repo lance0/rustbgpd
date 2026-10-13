@@ -1107,6 +1107,12 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
+    /// Retry a resource-exhaustion reset only for its captured actor and
+    /// connection. Command admission is retained by the existing peer owner.
+    ResetEvpnRecoverySession {
+        /// Exact EVPN recovery owner and bounded exhaustion evidence.
+        request: rustbgpd_rib::EvpnRecoveryReset,
+    },
     /// Trigger a soft inbound reset (route refresh) for the given families.
     SoftResetIn {
         /// Peer identity.
