@@ -6,8 +6,8 @@ the membership-delta path), closed by the source-flip channel-full fix
 and the VPN scale receipt in this slice.
 **Date:** 2026-07-03
 
-A [proposed EVPN amendment](#amendment-2026-10-13-evpn-update-groups) follows
-the original record. It is not implemented; the accepted record below describes
+An [accepted EVPN amendment](#amendment-2026-10-13-evpn-update-groups) follows
+the original record. It is not implemented; the original record below describes
 the shipped unicast/VPN design.
 
 ## Context
@@ -195,8 +195,8 @@ numbers are 3-run medians from the close slice —
 
 ## Amendment (2026-10-13): EVPN update groups
 
-**Status:** Proposed — review and merge this amendment before implementation.
-The amendment would replace the EVPN exclusion in decision 1 and clarify the
+**Status:** Accepted — design only; implementation and qualification are pending.
+The amendment replaces the EVPN exclusion in decision 1 and clarifies the
 shared parity contract. Other family exclusions and the original dated results
 remain unchanged. This changes storage and distribution of existing EVPN routes,
 not their support classification: Types 1–5 reflection, Type 6, VTEP, IRB,
@@ -512,8 +512,21 @@ jemalloc and a daemon-only cgroup with no swap. Record allocated/live and peak/
 steady cgroup memory, group count, member metadata and dirty/regroup/encoding
 residues. The one-group per-receiver route-storage slope must collapse; distinct
 export profiles and heterogeneous RTC must not regress against the private path.
+
+Add a **mass-dirty cell at the soak shape**: force most or all group members
+dirty simultaneously, for example with a churn burst against throttled receivers.
+Prove the overlap with the observed simultaneous dirty-member count, then remove
+the throttle and verify every receiver converges under section F's recovery
+contract. Require **zero `recovery_provenance_exhausted` resets**. Report retained
+and peak recovery-provenance charge per peer and daemon-wide, including the
+temporary capacity charged in section E. Size or revise the provisional
+16 MiB / 256 MiB caps from this result with documented headroom before activation;
+ordinary backpressure must not introduce fleet-wide session resets absent from
+the matching per-peer control. A run that exceeds a cap and resets peers fails
+qualification rather than establishing an acceptable recovery envelope.
+
 Run convergence/readiness and soak-shape qualification on a quiet host. Correctness
 and quiet-host resource gates must pass before production activation. Publish
 the resulting operational envelope with its receipt, not an extrapolated or
 loaded-host speedup. No runtime code, measurement, inventory or promotion change
-is part of this proposed amendment.
+is part of this design amendment.
