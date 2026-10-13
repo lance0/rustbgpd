@@ -116,7 +116,7 @@ class CaptureOracleTests(unittest.TestCase):
         ]
         for pattern, change in cases:
             with self.subTest(pattern=pattern):
-                def mutate(name, afi, kind, attrs):
+                def mutate(name, afi, kind, attrs, change=change):
                     if name == "rr_to_sink" and afi == 1 and kind == "announce":
                         change(attrs)
                 with self.assertRaisesRegex(ValueError, pattern):
