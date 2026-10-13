@@ -2,7 +2,9 @@
 //! expiry waits only for the primary backlog queued when it first fell due
 //! (the ADR-0137 admission cutoff), not for the queue to go empty.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Waker};
 
 use super::*;
 
@@ -333,4 +335,90 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// A timer whose cutoff is exhausted fires before any other due timer
+/// admits another update. Selection deferral falls due with a small backlog
+/// and, while it is still draining, the GR timer (an earlier branch) falls
+/// due with a much larger one. The GR branch may admit only until the
+/// deferral's cutoff runs out; the deferral then expires before any update
+/// queued after its deadline is processed.
+#[tokio::test(start_paused = true)]
+async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
+    const BEFORE_DEFERRAL: usize = 4;
+    const AFTER_DEFERRAL: usize = 64;
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(128);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: Duration::from_secs(10),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                families: vec![(Afi::Ipv6, Safi::Unicast)],
+            }],
+        });
+    manager.handle_update(one_route());
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source(),
+        restart_time: 11,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    let query = |tx: &mpsc::Sender<RibUpdate>| {
+        let (reply, response) = oneshot::channel();
+        tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+        response
+    };
+    let deferral_expired = || {
+        counter_metric_value(
+            &metrics,
+            "bgp_selection_deferral_timeouts_total",
+            &[("afi_safi", "ipv6_unicast")],
+        ) > 0.5
+    };
+    let mut actor = Box::pin(manager.run());
+    let mut poll = || {
+        assert!(
+            actor
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    };
+
+    let _before: Vec<_> = (0..BEFORE_DEFERRAL).map(|_| query(&tx)).collect();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    // One actor turn: the deferral is seen due with a 4-update cutoff and
+    // admits the first of them.
+    poll();
+    assert!(!deferral_expired());
+
+    let mut after: Vec<_> = (0..AFTER_DEFERRAL).map(|_| query(&tx)).collect();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    // Each poll admits at most one update before the drain yields. The poll
+    // that fires the deferral may go on to admit one post-deadline update
+    // for the GR branch, so count what had run before that poll.
+    let mut answered_after = 0;
+    let mut answered_at_expiry = None;
+    for _ in 0..4 * (BEFORE_DEFERRAL + AFTER_DEFERRAL) {
+        let answered_before_poll = answered_after;
+        poll();
+        answered_after += after
+            .iter_mut()
+            .flat_map(oneshot::Receiver::try_recv)
+            .count();
+        if deferral_expired() {
+            answered_at_expiry = Some(answered_before_poll);
+            break;
+        }
+    }
+    let answered = answered_at_expiry.expect("the selection deferral never expired");
+    assert_eq!(
+        answered, 0,
+        "{answered} updates queued after the deferral deadline ran before it expired"
+    );
 }

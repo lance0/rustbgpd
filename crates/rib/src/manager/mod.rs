@@ -1147,6 +1147,14 @@ impl ExpiryCutoffs {
     fn any_exhausted(&self) -> bool {
         self.0.contains(&Some(0))
     }
+
+    /// Whether due `timer` must wait for another due timer whose cutoff is
+    /// already exhausted. Its branch is skipped until that timer has fired:
+    /// admitting more here would run post-deadline work ahead of the
+    /// exhausted timer and stretch its bound.
+    fn yields(&self, timer: ExpiryTimer) -> bool {
+        self.remaining(timer) > 0 && self.any_exhausted()
+    }
 }
 
 /// Upper bound on holding a peer's VPN/EVPN End-of-RIB while waiting for its
@@ -5320,7 +5328,11 @@ impl RibManager {
             // captured cutoffs, so an update that arrives after a deadline
             // is never counted as pre-deadline work and sustained ingress
             // cannot postpone any of these timers. The branch order below
-            // only decides which of several due timers fires first.
+            // decides which of several due timers drains first, but once
+            // any due timer's cutoff is exhausted, every timer that still
+            // has room yields (its branch is skipped) until the exhausted
+            // one has fired, so no branch admits post-deadline work ahead
+            // of another timer's expiry.
             let backlog = self.primary_backlog();
             for (timer, due) in [
                 (ExpiryTimer::RtcEor, rtc_eor_due),
@@ -5332,6 +5344,13 @@ impl RibManager {
             ] {
                 self.expiry_cutoffs.observe(timer, due, backlog);
             }
+            let cutoffs = &self.expiry_cutoffs;
+            let rtc_eor_due = rtc_eor_due && !cutoffs.yields(ExpiryTimer::RtcEor);
+            let conditional_due = conditional_due && !cutoffs.yields(ExpiryTimer::Conditional);
+            let gr_due = gr_due && !cutoffs.yields(ExpiryTimer::GrStale);
+            let llgr_due = llgr_due && !cutoffs.yields(ExpiryTimer::LlgrStale);
+            let refresh_due = refresh_due && !cutoffs.yields(ExpiryTimer::RefreshWindow);
+            let selection_due = selection_due && !cutoffs.yields(ExpiryTimer::SelectionDeferral);
             if rtc_eor_due {
                 // A queued RT-Constrain EoR releases the hold with its
                 // membership applied; let it win over the cap. RFC 4684 §6
