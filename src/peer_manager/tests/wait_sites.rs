@@ -1995,62 +1995,73 @@ fn wait_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
     sites
 }
 
-/// Functions that use `rib_tx` and a `oneshot` reply without a wait helper,
-/// with the reason each is safe. The run loop does not poll the readiness
-/// lane while a RIB reply is awaited bare, so `/readyz` goes unanswered for
-/// the whole round trip.
-const BARE_RIB_REPLY_FNS: &[(&str, &str)] = &[
+/// Functions with more `oneshot` reply channels than wait-helper calls, the
+/// number of unwrapped channels, and the reason each is safe. The run loop
+/// does not poll the readiness lane while a RIB reply is awaited bare, so
+/// `/readyz` goes unanswered for the whole round trip.
+const BARE_RIB_REPLY_FNS: &[(&str, usize, &str)] = &[
     (
         "configured_owners.rs::send_configured_owners",
+        1,
         "returns the round trip to its callers: configured_owner_publication wraps it, and the \
          startup publication runs once, against a freshly started RIB, before the run loop \
          serves any readiness query",
     ),
     (
         "dampening_control.rs::disable_dampening_capacity",
+        1,
         "its bare send is the reply-less PeerDown fence; its barrier reply goes through \
          rib_control, which serves readiness",
     ),
     (
         "snapshot.rs::query_bmp_peer_stats",
+        1,
         "admission and reply share one PEER_QUERY_TIMEOUT (100 ms) deadline, joined with the \
          other BMP tick probes, inside the 200 ms readiness deadline",
     ),
     (
         "snapshot.rs::query_bmp_loc_rib_stats",
+        1,
         "admission and reply share one PEER_QUERY_TIMEOUT (100 ms) deadline, joined with the \
          other BMP tick probes, inside the 200 ms readiness deadline",
     ),
 ];
 
-/// Functions that mention both `rib_tx` and `oneshot` but never call a wait
-/// helper: the textual shape of a RIB reply awaited bare.
-fn bare_rib_reply_fns(file: &str, source: &str) -> BTreeSet<String> {
-    let mut seen: BTreeMap<&str, [bool; 3]> = BTreeMap::new();
+/// Per function that mentions `rib_tx`, how many `oneshot::channel` replies
+/// it creates beyond its wait-helper calls: the textual shape of a RIB round
+/// trip awaited bare. This is a count, not a pairing. A function may hold
+/// more wrapped waits than RIB replies (capacity reservations, session
+/// probes, or two waits for one round trip), and each such spare wait can
+/// mask one bare round trip added to the same function.
+fn bare_rib_reply_fns(file: &str, source: &str) -> BTreeMap<String, usize> {
+    let mut seen: BTreeMap<&str, (bool, usize, usize)> = BTreeMap::new();
     for (current, line) in lines_by_fn(source) {
-        let facts = seen.entry(current).or_default();
-        facts[0] |= line.contains("rib_tx");
-        facts[1] |= line.contains("oneshot");
-        facts[2] |= line.contains("await_with_readiness");
+        let (rib, replies, waits) = seen.entry(current).or_default();
+        *rib |= line.contains("rib_tx");
+        *replies += line.matches("oneshot::channel").count();
+        *waits += line.matches("await_with_readiness").count();
     }
     seen.into_iter()
-        .filter(|(_, [rib, reply, wrapped])| *rib && *reply && !*wrapped)
-        .map(|(current, _)| format!("{file}::{current}"))
+        .filter(|(_, (rib, replies, waits))| *rib && replies > waits)
+        .map(|(current, (_, replies, waits))| (format!("{file}::{current}"), replies - waits))
         .collect()
 }
 
 /// A RIB reply awaited outside `await_with_readiness*` must be listed in
-/// `BARE_RIB_REPLY_FNS` with the reason it cannot hold `/readyz` past its
-/// deadline. Stale entries fail too, so the list cannot outlive its code.
+/// `BARE_RIB_REPLY_FNS`, with its count and the reason it cannot hold
+/// `/readyz` past its deadline. A second bare round trip in a listed or
+/// wrapped function raises its count unless a spare wrapped wait masks it
+/// (see [`bare_rib_reply_fns`]). Stale entries fail too, so the list cannot
+/// outlive its code.
 #[test]
 fn bare_rib_reply_awaits_are_listed_with_a_reason() {
-    let found: BTreeSet<String> = peer_manager_sources()
+    let found: BTreeMap<String, usize> = peer_manager_sources()
         .iter()
         .flat_map(|(file, source)| bare_rib_reply_fns(file, source))
         .collect();
-    let listed: BTreeSet<String> = BARE_RIB_REPLY_FNS
+    let listed: BTreeMap<String, usize> = BARE_RIB_REPLY_FNS
         .iter()
-        .map(|(site, _)| (*site).to_string())
+        .map(|(site, count, _)| ((*site).to_string(), *count))
         .collect();
     assert_eq!(
         found, listed,
