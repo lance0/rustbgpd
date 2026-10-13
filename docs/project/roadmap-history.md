@@ -450,6 +450,11 @@ host capability is available.
   reflection (incl. a multi-label stack and a v6 next-hop over the v4
   session), relabel implicit replace, multi-label withdraw with zero session
   flap, the GR window + EoR sweep, and no dataplane install against GoBGP.
+  Later note (2026-10-13): multi-label stacks are no longer reflected.
+  RFC 8277 §2.1/§3.2.1 forbid sending them without the Multiple Labels
+  Capability, which rustbgpd does not advertise, so M79 now asserts the
+  stack is stored on the RR and withheld from the client
+  ([RFC notes](../reference/rfc-notes.md#rfc-8277--label-stacks-on-labeled-unicast-and-vpn-routes)).
   **Explicit non-goal, stated up front: rustbgpd does not install MPLS labels
   in the dataplane** — these are BGP-carried families, not a step toward a full
   MPLS router (see Non-goals). The ADR also preserves the ORF Address-Prefix

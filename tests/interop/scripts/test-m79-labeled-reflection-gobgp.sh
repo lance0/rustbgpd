@@ -11,15 +11,25 @@
 #      one multi-label stack) and one IPv6 (v6 next-hop over the v4
 #      session). rustbgpd stores all three in its labeled RIB with label
 #      stack, next-hop, and family intact (rbgp rib labeled -j).
-#   3. rustbgpd reflects all three to the client with the label stack and
-#      next-hop preserved verbatim and RFC 4456 ORIGINATOR_ID (the PE's
-#      router-id) + CLUSTER_LIST (the RR's cluster-id) attached — asserted
-#      on the client's adj-in view.
+#   3. rustbgpd reflects the two single-label routes (v4 and v6 next-hop)
+#      to the client with the label and next-hop preserved verbatim and
+#      RFC 4456 ORIGINATOR_ID (the PE's router-id) + CLUSTER_LIST (the RR's
+#      cluster-id) attached — asserted on the client's adj-in view. The
+#      multi-label stack is withheld: RFC 8277 §2.1/§3.2.1 forbid sending
+#      more than one label to a peer that has not negotiated the Multiple
+#      Labels Capability (code 8), and rustbgpd never advertises it. The
+#      client's adj-in stays without that prefix across a bounded window,
+#      and bgp_exact_export_rejections_total{reason=
+#      "multiple_labels_not_negotiated"} advances for the client's
+#      ipv4_labeled_unicast series. With the export guard
+#      (refuse_multiple_labels) disabled, the absence, counter, and
+#      test 5 zero-UPDATE asserts all turn red.
 #   4. Relabel: the PE re-adds a prefix with a different label — implicit
 #      replace end to end (exactly one path with the new label on the RR
 #      and the client, no session flap).
-#   5. Withdrawal removes exactly that route from rustbgpd and the client
-#      with zero session flap; the other routes survive. GoBGP puts the
+#   5. Withdrawal of the multi-label route removes exactly that route from
+#      rustbgpd with zero session flap and no UPDATE toward the client,
+#      which never held it; the other routes survive. GoBGP puts the
 #      ORIGINAL multi-label stack in the withdraw NLRI rather than the
 #      RFC 8277 §2.4 compatibility field — the wire shape that reset the
 #      session pre-#651, so the no-flap assert is that fix's live
@@ -153,6 +163,33 @@ wait_gr_active() {
         sleep 2
     done
     fail "bgp_gr_active_peers never reached $want ($label), got $(gr_active_total)"
+    return 1
+}
+
+# RFC 8277 multi-label withholds toward the client's ipv4_labeled_unicast
+# series. The zero series exists from session setup, so a baseline read
+# before injection is meaningful.
+multi_label_rejections() {
+    prom_scrape "$RUSTBGPD" | awk -v peer="$CLIENT_ADDR" '
+        index($0, "bgp_exact_export_rejections_total{") == 1 \
+            && index($0, "family=\"ipv4_labeled_unicast\"") \
+            && index($0, "peer=\"" peer "\"") \
+            && index($0, "reason=\"multiple_labels_not_negotiated\"") {s += $2}
+        END {print s + 0}'
+}
+
+wait_multi_label_rejections_above() {
+    local baseline=${1:?} label=${2:?} now
+    log "Waiting for multiple_labels_not_negotiated rejections toward the client > $baseline ($label)..."
+    for i in $(seq 1 30); do
+        now=$(multi_label_rejections)
+        if [ "$now" -gt "$baseline" ]; then
+            ok "bgp_exact_export_rejections_total{peer=$CLIENT_ADDR,family=ipv4_labeled_unicast,reason=multiple_labels_not_negotiated} $baseline -> $now ($label, attempt $i)"
+            return 0
+        fi
+        sleep 2
+    done
+    fail "multiple_labels_not_negotiated rejections toward the client stayed at $(multi_label_rejections) (baseline $baseline, $label)"
     return 1
 }
 
@@ -338,6 +375,30 @@ wait_client_reflected() {
     return 1
 }
 
+# A withheld route has no arrival to wait for, so poll the client's adj-in
+# for the whole window and fail on the first sighting. Each read must also
+# show $witness (a route reflected in the same burst), so an empty or
+# failed adj-in read cannot pass as absence.
+assert_client_prefix_absent() {
+    local family=${1:?} pfx=${2:?} witness=${3:?} label=${4:?}
+    local attempts=${5:-5} adj_in
+    log "Checking client adj-in stays without $pfx for $((attempts * 2))s — $label..."
+    for i in $(seq 1 "$attempts"); do
+        adj_in=$(client_adj_in_json "$family" || true)
+        if jq -e --arg pfx "$pfx" 'has($pfx)' <<<"$adj_in" >/dev/null 2>&1; then
+            fail "client received withheld $pfx ($label, poll $i)"
+            jq . <<<"$adj_in" || true
+            return 1
+        fi
+        if ! jq -e --arg w "$witness" 'has($w)' <<<"$adj_in" >/dev/null 2>&1; then
+            fail "client adj-in read lacked witness $witness; absence of $pfx unproven ($label, poll $i)"
+            return 1
+        fi
+        sleep 2
+    done
+    ok "client adj-in never showed $pfx across $((attempts * 2))s while holding $witness ($label)"
+}
+
 wait_client_prefix_gone() {
     local family=${1:?} pfx=${2:?} label=${3:?}
     local attempts=${4:-30}
@@ -371,7 +432,10 @@ test_capabilities() {
 }
 
 test_labeled_reflection() {
-    log "Test 2: PE injects three labeled routes; RR stores + reflects verbatim"
+    log "Test 2: PE injects three labeled routes; RR stores all three, reflects the single-label ones verbatim"
+
+    local rejections_before
+    rejections_before=$(multi_label_rejections)
 
     gobgp "$GOBGP_PE" global rib add -a ipv4-labeled "$V4_PREFIX_A" "$LABEL_A" nexthop "$PE_ADDR"
     gobgp "$GOBGP_PE" global rib add -a ipv4-labeled "$V4_PREFIX_B" "$STACK_B" nexthop "$PE_ADDR"
@@ -382,8 +446,13 @@ test_labeled_reflection() {
     wait_labeled_row ipv6_labeled_unicast "$V6_PREFIX" "[$LABEL_V6]" "$V6_NEXTHOP" fresh "baseline (v6 next-hop)"
 
     wait_client_reflected ipv4-labeled "$V4_PREFIX_A" "[$LABEL_A]" "$PE_ADDR" "baseline"
-    wait_client_reflected ipv4-labeled "$V4_PREFIX_B" "[801,802]" "$PE_ADDR" "baseline (multi-label stack)"
     wait_client_reflected ipv6-labeled "$V6_PREFIX" "[$LABEL_V6]" "$V6_NEXTHOP" "baseline (v6 next-hop)"
+
+    # RFC 8277 §2.1/§3.2.1: no Multiple Labels Capability is negotiated
+    # (rustbgpd never advertises code 8), so the stack is withheld. The
+    # window starts after the routes injected around it have landed.
+    assert_client_prefix_absent ipv4-labeled "$V4_PREFIX_B" "$V4_PREFIX_A" "multi-label stack withheld"
+    wait_multi_label_rejections_above "$rejections_before" "multi-label stack withheld"
 }
 
 test_relabel_implicit_replace() {
@@ -420,14 +489,25 @@ test_withdrawal() {
     # reset the session pre-#651 (NOTIFICATION 3/10). The PE no-flap assert
     # below is the regression pin: the withdraw must decode and remove
     # exactly this route with the session staying Established.
-    local pe_flaps
+    local pe_flaps client_updates
     pe_flaps=$(flap_count "$PE_ADDR")
+    client_updates=$(updates_sent "$CLIENT_ADDR")
 
     gobgp "$GOBGP_PE" global rib del -a ipv4-labeled "$V4_PREFIX_B" "$STACK_B" nexthop "$PE_ADDR"
 
     wait_labeled_prefix_gone "$V4_PREFIX_B" "withdraw"
-    wait_client_prefix_gone ipv4-labeled "$V4_PREFIX_B" "withdraw"
     assert_no_flap "$PE_ADDR" "$pe_flaps" "multi-label withdraw/pe (#651 pin)"
+
+    # The client never held the withheld stack, so the withdraw has nothing
+    # to send it.
+    sleep 6
+    local updates_after
+    updates_after=$(updates_sent "$CLIENT_ADDR")
+    if [ "$updates_after" = "$client_updates" ]; then
+        ok "zero UPDATEs toward the client for the withheld route's withdraw (updates_sent $client_updates unchanged)"
+    else
+        fail "RR sent UPDATEs to the client for a route it never advertised ($client_updates -> $updates_after)"
+    fi
 
     if [ "$(labeled_prefix_count "$V4_PREFIX_A")" -eq 1 ] \
         && [ "$(labeled_prefix_count "$V6_PREFIX")" -eq 1 ]; then
