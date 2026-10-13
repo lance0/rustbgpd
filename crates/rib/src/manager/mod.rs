@@ -829,6 +829,15 @@ pub struct RibManager {
     /// keep the immediate `EoR`: a client that never sends ROUTE-REFRESH
     /// would otherwise never see `EoR` at all.
     gr_deferred_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Peers whose RT-Constrain-filtered families (VPN, EVPN) keep their
+    /// initial-table `EoR` in `pending_eor` until the peer's RT-Constrain
+    /// `EoR` arrives or the [`RTC_EOR_HOLD_CAP`] deadline passes (RFC 4684
+    /// §6). Armed at `PeerUp` when the session starts with an empty
+    /// membership; a membership re-derived from GR-retained RTC routes is
+    /// already known and is not held. A GR restarter takes our `EoR` as the
+    /// signal to sweep the routes it kept from us, so an `EoR` sent before
+    /// its interest arrives withdraws VPN routes we are about to re-send.
+    rtc_eor_hold: graceful_restart::DeadlineMap<IpAddr>,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
     /// Route identities touched while their family's Loc-RIB was frozen.
@@ -1075,6 +1084,12 @@ pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Durat
 /// arriving after it do not emit a record; the interval alone cannot
 /// establish whether a query was delayed by the commit.
 const POST_COMMIT_QUERY_TRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Upper bound on holding a peer's VPN/EVPN End-of-RIB while waiting for its
+/// RT-Constrain End-of-RIB. RFC 4684 §6: a speaker that delays VPN
+/// advertisement until that marker "MUST limit that delay to an upper bound.
+/// By default, a 60 second value should be used."
+const RTC_EOR_HOLD_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Actor work units accounted between a transition's terminal commit poll and
 /// the first general or summary query dispatched afterwards.
@@ -1991,6 +2006,7 @@ impl RibManager {
             peer_rt_membership: HashMap::new(),
             peer_orf_pending: HashMap::new(),
             gr_deferred_eor: HashMap::new(),
+            rtc_eor_hold: graceful_restart::DeadlineMap::default(),
             selection_deferral: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
             selection_deferred_refresh: HashMap::new(),
@@ -2411,6 +2427,50 @@ impl RibManager {
         self.selection_deferral
             .as_ref()
             .is_some_and(|state| state.is_gated(family))
+    }
+
+    /// Whether `family`'s pending `EoR` toward `peer` must stay queued: the
+    /// RFC 4724 convergence gate, or the RFC 4684 §6 hold on the families RT
+    /// membership filters while `peer`'s RT-Constrain `EoR` is outstanding.
+    pub(super) fn eor_held(&self, peer: IpAddr, family: (Afi, Safi)) -> bool {
+        self.selection_convergence_held(family)
+            || (self.rtc_eor_hold.contains_key(&peer) && Self::rtc_gated_family(family))
+    }
+
+    /// The families the RFC 4684 outbound membership gate filters.
+    pub(super) fn rtc_gated_family(family: (Afi, Safi)) -> bool {
+        family.1 == Safi::MplsVpn || family == (Afi::L2Vpn, Safi::Evpn)
+    }
+
+    /// End a peer's RFC 4684 §6 `EoR` hold and emit the held markers. A
+    /// dirty peer keeps them pending: its resync flushes them after the
+    /// routes it replays, preserving table-before-`EoR` order.
+    fn release_rtc_eor_hold(&mut self, peer: IpAddr) {
+        if self.rtc_eor_hold.remove(&peer).is_some() && !self.dirty_peers.contains(&peer) {
+            self.flush_pending_eor(peer);
+        }
+    }
+
+    fn next_rtc_eor_hold_deadline(&mut self) -> Option<tokio::time::Instant> {
+        self.rtc_eor_hold.min()
+    }
+
+    fn expire_rtc_eor_holds(&mut self) {
+        let now = tokio::time::Instant::now();
+        let expired: Vec<IpAddr> = self
+            .rtc_eor_hold
+            .iter()
+            .filter(|&(_, &deadline)| deadline <= now)
+            .map(|(&peer, _)| peer)
+            .collect();
+        for peer in expired {
+            info!(
+                %peer,
+                cap_secs = RTC_EOR_HOLD_CAP.as_secs(),
+                "no RT-Constrain End-of-RIB from peer within the cap — sending held VPN/EVPN End-of-RIB"
+            );
+            self.release_rtc_eor_hold(peer);
+        }
     }
 
     /// Emit an RFC 9069 Loc-RIB Route Monitoring event. `pdu = None`
@@ -3783,6 +3843,13 @@ impl RibManager {
                     let selection_transition =
                         self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
                     self.handle_end_of_rib(peer, afi, safi);
+                    if (afi, safi) == crate::route::RtcRibRouteKey::afi_safi() {
+                        // Membership is complete: every RTC UPDATE before
+                        // this marker has been applied and its VPN/EVPN
+                        // corrective emit queued (or left to the dirty
+                        // resync, which flushes after the replay).
+                        self.release_rtc_eor_hold(peer);
+                    }
                     if (afi, safi) == (Afi::L2Vpn, Safi::Evpn)
                         && let Some(record) =
                             self.live_sessions.get_mut(&peer).and_then(|sessions| {
@@ -3841,6 +3908,11 @@ impl RibManager {
             } => {
                 if !self.stale_session_message(peer, session_id, "EndRouteRefresh", Refresh) {
                     self.handle_end_route_refresh(peer, afi, safi);
+                    if (afi, safi) == crate::route::RtcRibRouteKey::afi_safi() {
+                        // A collision-failback survivor already sent its
+                        // EoR; its refreshed membership ends with EoRR.
+                        self.release_rtc_eor_hold(peer);
+                    }
                     if let Some(transition) =
                         self.selection_deferral_end_route_refresh(peer, session_id, (afi, safi))
                     {
@@ -4904,6 +4976,11 @@ impl RibManager {
         let refresh_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(refresh_sleep);
 
+        // RFC 4684 §6 VPN/EVPN End-of-RIB hold cap — reset each iteration to
+        // the nearest held peer's deadline.
+        let rtc_eor_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
+        tokio::pin!(rtc_eor_sleep);
+
         // RFC 4724 restarting-speaker selection-deferral timer. The roster
         // and deadline are frozen before this actor starts.
         let selection_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
@@ -5067,6 +5144,13 @@ impl RibManager {
                 false
             };
 
+            let has_rtc_eor_timer = if let Some(deadline) = self.next_rtc_eor_hold_deadline() {
+                rtc_eor_sleep.as_mut().reset(deadline);
+                true
+            } else {
+                false
+            };
+
             let has_selection_timer =
                 if let Some(deadline) = self.next_selection_deferral_deadline() {
                     selection_sleep.as_mut().reset(deadline);
@@ -5095,6 +5179,7 @@ impl RibManager {
                 || has_gr_timers
                 || has_llgr_timers
                 || has_refresh_timers
+                || has_rtc_eor_timer
                 || has_selection_timer
                 || has_conditional_timer;
 
@@ -5184,6 +5269,15 @@ impl RibManager {
                     continue;
                 }
                 self.expire_refresh_windows();
+                continue;
+            }
+            if has_rtc_eor_timer && rtc_eor_sleep.deadline() <= now {
+                // A queued RT-Constrain EoR releases the hold with its
+                // membership applied; let it win over the cap.
+                if self.drain_ready_updates().await {
+                    continue;
+                }
+                self.expire_rtc_eor_holds();
                 continue;
             }
             if has_selection_timer && selection_sleep.deadline() <= now {
@@ -5328,6 +5422,12 @@ impl RibManager {
                             continue;
                         }
                         self.expire_refresh_windows();
+                    }
+                    () = rtc_eor_sleep.as_mut(), if has_rtc_eor_timer => {
+                        if self.drain_ready_updates().await {
+                            continue;
+                        }
+                        self.expire_rtc_eor_holds();
                     }
                     () = selection_sleep.as_mut(), if has_selection_timer => {
                         if self.drain_ready_updates().await {

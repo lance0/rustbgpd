@@ -1973,7 +1973,7 @@ impl RibManager {
         };
         let (blocked, ready): (HashSet<_>, HashSet<_>) = families
             .into_iter()
-            .partition(|family| self.selection_convergence_held(*family));
+            .partition(|family| self.eor_held(peer, *family));
         if !blocked.is_empty() {
             self.pending_eor.entry(peer).or_default().extend(blocked);
         }

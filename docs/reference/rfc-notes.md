@@ -940,6 +940,25 @@ not add a neighbor-discovery monitor or make stale next hops reachable.
   extended communities never match, even against the default membership.
 - The outbound RT membership gate applies this to VPN and EVPN advertisements
   toward a peer that negotiated RT-Constrain.
+- §6 says "The exchange of VPN NLRI should follow the receipt of the
+  End-of-RIB markers" and that a speaker delaying VPN advertisement for that
+  marker "MUST limit that delay to an upper bound. By default, a 60 second
+  value should be used." A session that starts with an empty membership (a
+  new session, or a graceful-restart re-establish whose RT-Constrain routes
+  were not retained) sends VPN routes as the peer's interest arrives, but
+  holds the VPNv4, VPNv6 and EVPN End-of-RIB until the peer's RT-Constrain
+  End-of-RIB (or, after a collision failover, its RT-Constrain
+  End-of-Route-Refresh). The hold ends after 60 seconds without one; the cap
+  is fixed. A GR restarter therefore does not take our End-of-RIB as the
+  end of the initial update and sweep the VPN routes it kept from us before
+  its interest has been re-applied. RT-Constrain's own End-of-RIB and every
+  other family's are not held. When the membership is re-derived from
+  retained RT-Constrain routes, it is already known and nothing is held.
+- A peer that sends no RT-Constrain End-of-RIB receives the held markers at
+  the cap. GoBGP, for example, sends End-of-RIB only on sessions with
+  graceful restart enabled. A restarting speaker that waits for every peer's
+  End-of-RIB in every family before it advertises anything also waits until
+  the cap.
 
 ---
 
@@ -1174,7 +1193,10 @@ state is cleaned up. `bgp_gr_timer_expired_total` metric incremented.
 ### End-of-RIB Sending
 
 After sending the initial table to a new peer, EoR markers are sent for
-each negotiated family via `OutboundRouteUpdate.end_of_rib`.
+each negotiated family via `OutboundRouteUpdate.end_of_rib`. Toward a peer
+that negotiated RT-Constrain with an empty membership, the VPN and EVPN
+markers wait for the peer's RT-Constrain End-of-RIB for up to 60 seconds; see
+[RFC 4684](#rfc-4684--rt-constrain-membership-matching).
 
 ### Metrics
 

@@ -1664,6 +1664,10 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
         dumped.contains(&key_a) && dumped.contains(&key_b),
         "the initial dump must serve VPN routes from the GR-preserved membership, got {dumped:?}"
     );
+    // The retained membership is already known, so the VPN End-of-RIB is
+    // not held for the peer's RT membership End-of-RIB.
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(eor.end_of_rib, vpn_rtc_sendable());
 
     // The peer re-advertises interest in RT 100 only; RT 200 stays stale.
     send_rtc_interest(&tx, target, &[100]).await;
@@ -1912,8 +1916,9 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
         dump.evpn_announce.is_empty(),
         "empty RT membership must withhold every EVPN route"
     );
+    // RFC 4684 §6: the EVPN End-of-RIB waits for the peer's RT membership.
     let eor = next_update(&mut out_rx).await;
-    assert!(eor.end_of_rib.contains(&(Afi::L2Vpn, Safi::Evpn)));
+    assert_eq!(eor.end_of_rib, rtc_sendable());
 
     // The receiving leaf originates interest in another leaf's RT:
     // membership origin AS 65000 differs from RT administrator 65001.
@@ -2172,6 +2177,225 @@ async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release
         }
         assert_eq!(announced, vec![key_b], "{peer}");
     }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+const VPN_FAMILIES: [(Afi, Safi); 2] = [(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)];
+
+/// Round-trip a query through the actor: every update sent before it has
+/// been processed and its outbound messages enqueued.
+async fn rib_barrier(tx: &mpsc::Sender<RibUpdate>) {
+    query_rtc_routes(tx).await;
+}
+
+fn assert_no_outbound(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>, why: &str) {
+    if let Ok(update) = out_rx.try_recv() {
+        panic!(
+            "{why}: unexpected outbound update (end_of_rib {:?}, {} VPN announced)",
+            update.end_of_rib,
+            update.vpn_announce.len()
+        );
+    }
+}
+
+fn eor_set(update: &OutboundRouteUpdate) -> HashSet<(Afi, Safi)> {
+    update.end_of_rib.iter().copied().collect()
+}
+
+async fn send_rtc_eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr) {
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        afi: Afi::Ipv4,
+        safi: Safi::RtConstrain,
+    })
+    .await
+    .unwrap();
+}
+
+/// RFC 4684 §6 / RFC 4724 §4.1: a PE that restarts without its RT
+/// membership retained (here its GR capability omits SAFI 132) comes back
+/// with an empty membership. Its VPN End-of-RIB must wait for the PE's RT
+/// membership End-of-RIB, so the PE does not sweep its RR-learned VPN
+/// routes before the re-advertised ones arrive. RT-Constrain's own
+/// End-of-RIB is not held.
+#[tokio::test]
+async fn gr_restart_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
+    let key = route.key();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+    send_rtc_interest(&tx, target, &[100]).await;
+    send_rtc_eor(&tx, target).await;
+    rib_barrier(&tx).await;
+    let announced = out_rx.try_recv().expect("VPN routes for the new interest");
+    assert_eq!(announced.vpn_announce.len(), 1);
+    let released = out_rx
+        .try_recv()
+        .expect("RT membership End-of-RIB releases the held VPN End-of-RIB");
+    assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let dump = out_rx.recv().await.unwrap();
+    assert!(dump.vpn_announce.is_empty());
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(
+        eor.end_of_rib,
+        rtc_sendable(),
+        "only the RT-Constrain End-of-RIB may precede the peer's RT membership"
+    );
+    rib_barrier(&tx).await;
+    assert_no_outbound(&mut out_rx, "VPN End-of-RIB before any RT membership");
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let reannounced = out_rx.recv().await.unwrap();
+    assert_eq!(reannounced.vpn_announce.len(), 1);
+    assert_eq!(reannounced.vpn_announce[0].key(), key);
+    assert_eq!(reannounced.end_of_rib, Vec::new());
+    rib_barrier(&tx).await;
+    assert_no_outbound(
+        &mut out_rx,
+        "VPN End-of-RIB before the peer's RT membership End-of-RIB",
+    );
+
+    // The release is part of handling the marker, not the cap.
+    send_rtc_eor(&tx, target).await;
+    rib_barrier(&tx).await;
+    let released = out_rx
+        .try_recv()
+        .expect("RT membership End-of-RIB releases the held VPN End-of-RIB");
+    assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
+    assert!(released.vpn_announce.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer that never sends its RT membership End-of-RIB still receives the
+/// held VPN and EVPN End-of-RIB at the 60-second cap (RFC 4684 §6 "MUST
+/// limit that delay to an upper bound"). Families RT-Constrain does not
+/// gate are never held.
+#[tokio::test(start_paused = true)]
+async fn rtc_eor_hold_releases_vpn_and_evpn_at_cap() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut sendable = vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)];
+    sendable.extend(VPN_FAMILIES);
+    sendable.push((Afi::Ipv4, Safi::RtConstrain));
+    let mut out_rx = families_peer_up(&tx, IpAddr::V4(target), sendable).await;
+    let dump = out_rx.recv().await.unwrap();
+    assert!(dump.rtc_announce.iter().any(|r| r.nlri.is_default()));
+    let eor = out_rx.recv().await.unwrap();
+    assert_eq!(
+        eor_set(&eor),
+        [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::RtConstrain)]
+            .into_iter()
+            .collect(),
+        "unicast and RT-Constrain End-of-RIB are not held"
+    );
+
+    tokio::time::advance(Duration::from_secs(59)).await;
+    rib_barrier(&tx).await;
+    assert_no_outbound(&mut out_rx, "held End-of-RIB released before the cap");
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let released = out_rx.recv().await.unwrap();
+    let mut expected: HashSet<_> = VPN_FAMILIES.into_iter().collect();
+    expected.insert((Afi::L2Vpn, Safi::Evpn));
+    assert_eq!(eor_set(&released), expected);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A session reset during the hold clears it; the replacement session gets
+/// its own full cap rather than inheriting the old deadline, and an
+/// End-of-RIB from the old session cannot release the new one.
+#[tokio::test(start_paused = true)]
+async fn rtc_eor_hold_restarts_with_replacement_session() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    tx.send(RibUpdate::PeerDown {
+        peer: IpAddr::V4(target),
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 1,
+        peer: IpAddr::V4(target),
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_rtc_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+    // The departed session's RT membership End-of-RIB is stale.
+    send_rtc_eor(&tx, target).await;
+
+    tokio::time::advance(Duration::from_secs(59)).await;
+    rib_barrier(&tx).await;
+    assert_no_outbound(
+        &mut out_rx,
+        "the replacement session's hold must run its own full cap",
+    );
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let released = out_rx.recv().await.unwrap();
+    assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
 
     drop(tx);
     handle.await.unwrap();
