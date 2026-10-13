@@ -78,6 +78,8 @@ start_capture() {
         --mount "type=volume,src=$CAPTURE,dst=/capture" \
         "$CAPTURE_IMAGE" tshark -p -i any -f 'tcp port 179' -w /capture/m125.pcap >/dev/null
     CAPTURE_OWNED=1
+    docker inspect "$CAPTURE" \
+        | jq '[.[] | {name:.Name,image:.Image,configured_image:.Config.Image}]' >"$ARTIFACT_DIR/capture-image.json"
     docker start "$CAPTURE" >/dev/null
     wait_capture_ready "$CAPTURE" /capture/m125.pcap -
 }
