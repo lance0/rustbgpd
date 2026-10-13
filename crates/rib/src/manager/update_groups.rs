@@ -15,9 +15,9 @@
 //! with source peer preserved — the equality-suppression baseline),
 //! next-hop-override residue, withdrawal tombstones maintained only
 //! while ≥1 member is dirty, and the persistent group-verdict
-//! policy-denial set. Per-member state is O(1): membership id, dirty
-//! flag, and (transiently, across a regroup) a baseline snapshot of the
-//! member's previously advertised view. **No per-peer advertised
+//! policy-denial set. Clean per-member state is O(1): membership id and dirty
+//! flag. Recovery retains actually admitted keys; a regroup also retains a
+//! transient baseline snapshot of the old view. **No standing per-peer advertised
 //! unicast storage exists for grouped peers** — a member's advertised
 //! set is `group table − own-sourced entries` (plus, for a
 //! per-client-best group, the exception-lane substitution at each
@@ -493,9 +493,8 @@ impl RegroupBaseline {
     }
 }
 
-/// Extra (over-)withdraw keys a member must emit on its next resync:
-/// tombstones carried across a regroup by a member that was dirty when
-/// it moved. Over-withdraw is the safe direction.
+/// Candidate withdrawal keys carried across a dirty regroup. The member's
+/// actual admitted-key proof bounds which candidates may reach the wire.
 #[derive(Debug, Default)]
 pub(in crate::manager) struct ExtraWithdraws {
     pub(in crate::manager) unicast: HashSet<(Prefix, u32)>,
@@ -544,9 +543,8 @@ pub(in crate::manager) struct GroupRibOut {
     family_totals: [usize; 4],
     /// Keys withdrawn from the table since the first member went dirty;
     /// empty (and unmaintained) while no member is dirty. A dirty
-    /// member's resync withdraws `tombstones ∖ still-staged` — spurious
-    /// withdraws of never-advertised prefixes are RFC 4271 no-ops
-    /// (over-withdraw is the safe direction).
+    /// member's resync intersects candidates with its actually admitted keys
+    /// and withdraws only those no longer retained.
     pub(in crate::manager) tombstones: HashSet<(Prefix, u32)>,
     /// VPN sibling of `tombstones` (`path_id` fixed at 0).
     pub(in crate::manager) vpn_tombstones: HashSet<VpnRouteKey>,
@@ -1662,11 +1660,110 @@ impl RibManager {
             .is_some_and(|sender| sender.capacity() == 0)
     }
 
+    /// Capture before a desired-table, membership or RTC change can hide the
+    /// actual admitted view. A later dirty pass must retain this first proof.
+    pub(in crate::manager) fn capture_group_admitted_keys(&mut self, peer: IpAddr) -> bool {
+        if self.pending_group_admitted.contains_key(&peer) || self.outbound_channel_gone(peer) {
+            return false;
+        }
+        let readiness = self.replacement_readiness.clone();
+        let mut keys = HashSet::new();
+        let mut record = |key| {
+            super::replacement_readiness_checkpoint(&readiness, false);
+            if keys.len() == keys.capacity() {
+                super::replacement_readiness_checkpoint(&readiness, true);
+                keys.reserve(1);
+                super::replacement_readiness_checkpoint(&readiness, true);
+            }
+            keys.insert(key);
+        };
+        if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+            for &(prefix, path_id) in base.unicast.keys() {
+                record(ExactExportKey::Unicast(prefix, path_id));
+            }
+            for &nlri_key in base.vpn.keys() {
+                record(ExactExportKey::Vpn(VpnRibRouteKey {
+                    nlri_key,
+                    path_id: 0,
+                }));
+            }
+        } else if let Some(gid) = self.grouped_member_of(peer) {
+            if let Some(group) = self.group_ribs.get(&gid) {
+                let rs_control = self
+                    .peer_rs_control
+                    .get(&peer)
+                    .copied()
+                    .zip(self.peer_asn.get(&peer).copied());
+                if let Some(routes) = self.grouped_advertised_routes_iter(peer) {
+                    for route in routes {
+                        let Some(entry) = group.adv_entry(peer, &route.prefix, route.path_id)
+                        else {
+                            continue;
+                        };
+                        let (communities, large_communities) =
+                            group.source_control_for_route(entry.route, entry.source_attrs);
+                        if !super::distribution::rs_control::rs_control_suppressed(
+                            communities,
+                            large_communities,
+                            rs_control,
+                        ) {
+                            record(ExactExportKey::Unicast(route.prefix, route.path_id));
+                        }
+                    }
+                }
+                if group.stages_vpn() {
+                    let filter = self.member_rt_filter(peer);
+                    let rejected = self.peer_unexportable.get(&peer);
+                    for route in group.table.iter_vpn() {
+                        super::replacement_readiness_checkpoint(&readiness, false);
+                        let key = ExactExportKey::Vpn(route.key());
+                        if route.peer != peer
+                            && rt_passes(filter.as_ref(), route)
+                            && !rejected.is_some_and(|keys| keys.contains(&key))
+                        {
+                            record(key);
+                        }
+                    }
+                }
+            }
+        } else if let Some(rib) = self.adj_ribs_out.get(&peer) {
+            for route in rib.iter() {
+                record(ExactExportKey::Unicast(route.prefix, route.path_id));
+            }
+            for route in rib.iter_vpn() {
+                record(ExactExportKey::Vpn(route.key()));
+            }
+        }
+        self.pending_group_admitted.insert(peer, keys);
+        true
+    }
+
+    pub(in crate::manager) fn release_group_admitted_keys(&mut self, peer: IpAddr) {
+        if let Some(mut keys) = self.pending_group_admitted.remove(&peer) {
+            let readiness = self.replacement_readiness.clone();
+            super::retire_hash_set(&mut keys, &mut || {
+                super::replacement_readiness_checkpoint(&readiness, false);
+            });
+        }
+    }
+
+    /// A full channel may drain before the ordinary delta is admitted. Such
+    /// speculative capture must neither mark the peer dirty nor outlive a pass.
+    pub(in crate::manager) fn release_speculative_group_admitted_keys(&mut self, peers: &[IpAddr]) {
+        for &peer in peers {
+            if !self.dirty_peers.contains(&peer)
+                && !self.pending_regroup_baseline.contains_key(&peer)
+            {
+                self.release_group_admitted_keys(peer);
+            }
+        }
+    }
+
     /// Record that `peer` missed this distribution pass because its
     /// outbound update was not sent: keep the peer dirty. A grouped member
     /// also records the pass's withdrawals as tombstones, and its
-    /// member-scoped withdraws as extra-withdraw residue, so its resync
-    /// can (over-)withdraw them.
+    /// member-scoped withdraws as candidate withdrawal residue, so its resync
+    /// can heal only candidates covered by its actual admitted-key proof.
     pub(in crate::manager) fn defer_unsent_outbound_pass(
         &mut self,
         peer: IpAddr,
@@ -1706,6 +1803,7 @@ impl RibManager {
     /// `PeerDown` path; this only stops the retry.
     pub(in crate::manager) fn drop_gone_dirty_peer(&mut self, peer: IpAddr) {
         self.dirty_peers.remove(&peer);
+        self.release_group_admitted_keys(peer);
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)
         {
@@ -1858,6 +1956,9 @@ impl RibManager {
             self.drop_gone_dirty_peer(peer);
             return false;
         }
+        if self.grouped_member_of(peer).is_some() {
+            self.capture_group_admitted_keys(peer);
+        }
         self.dirty_peers.insert(peer);
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)
@@ -1898,6 +1999,7 @@ impl RibManager {
     /// Callers must have emitted the pending extra withdraws (or shown
     /// them empty/retained) before calling: this drops them.
     pub(in crate::manager) fn clear_grouped_member_synced(&mut self, peer: IpAddr) {
+        self.release_group_admitted_keys(peer);
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "retirement", false);
@@ -1980,7 +2082,7 @@ impl RibManager {
         // A dirty member cannot take the wire delta (its advertised
         // state is behind); its pending resync announces the Φ-passing
         // table under CURRENT Φ, so only the keys LEAVING Φ need a
-        // record — they ride the existing extra-(over-)withdraw residue
+        // record — they ride the existing candidate withdrawal residue
         // (exact heal, no blanket over-withdraw; the resync's
         // `member_retains` guard drops any key that re-enters Φ before
         // it runs).
@@ -2075,7 +2177,7 @@ impl RibManager {
             warn!(%peer, "outbound channel full — RTC membership delta deferred to resync");
             // The v1 dirty machinery takes over: the member's resync
             // announces the Φ-passing table; the narrow's withdraws
-            // ride the extra-withdraw residue.
+            // ride the candidate withdrawal residue.
             self.mark_outbound_dirty(peer);
             // An announce-only delta has no withdraw duty to carry: never
             // create an empty residue entry (readers check the key).

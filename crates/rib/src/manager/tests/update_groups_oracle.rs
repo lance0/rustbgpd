@@ -1,33 +1,14 @@
-//! Differential oracle for update-group staging (design risk 1).
+//! Differential RIB-level oracle for shared update-group distribution.
 //!
-//! Every scenario runs twice through the REAL manager task: once with
-//! grouping live and once with the `test_force_ungrouped` hook putting
-//! every peer on the per-peer path — the correctness oracle. The
-//! per-peer outbound streams must be IDENTICAL message for message
-//! (announces normalized by sort; intra-message ordering is `HashSet`
-//! iteration order and deliberately not part of the contract).
+//! Every scenario runs the real manager with grouping and with the private
+//! fallback. Compare ordered per-session/receiver/family/key events and final
+//! admitted state; batch boundaries and cross-key order are unconstrained.
+//! Explicit peer-scoped recovery intervals use end-state comparison, but every
+//! withdrawal must remove a currently admitted key in every interval. Clean
+//! promotion, refresh and regroup have no recovery exemption.
 //!
-//! The one scenario compared by FINAL ADVERTISED STATE instead of exact
-//! streams is the dirty-member resync: a grouped member keeps no
-//! per-peer advertised record, so its resync deliberately over-emits
-//! (full-table announce + tombstone over-withdraw — the safe
-//! direction) where the per-peer path diffs against Adj-RIB-Out. The
-//! folded end state must still be identical.
-//!
-//! The `oracle_pcb_*` scenarios are the ADR-0126 grouping equivalence
-//! proof for per-client-best fleets under overlapping announcements:
-//! since the Phase 3 classifier flip the normal side classifies these
-//! peers into a per-client-best group while the forced side stays on
-//! the per-peer path — the streams they pinned before the flip are now
-//! compared grouped-vs-ungrouped for real. One scenario is compared by
-//! folded state instead of exact streams:
-//! `oracle_pcb_best_source_withdraw_promotes_runner_up`, because the
-//! grouped side's promotion handling (the winner's source flipping
-//! into the former runner-up's slot) is an as-built over-announce
-//! class — the promoted winner is re-announced to the member that
-//! already held it as the runner-up substitution (the withdrawn
-//! winner's source), an idempotent implicit replace the per-peer
-//! path equality-suppresses.
+//! These normalized RIB values are not final encoded-byte evidence. Transport
+//! checks own preparation, packet encoding and final wire-order qualification.
 
 use std::collections::BTreeMap;
 
@@ -272,28 +253,57 @@ pub(super) type NormAnnounce = (
 );
 
 /// One normalized VPN announce: (RD+prefix key, full NLRI incl. label
-/// stack, next hop, source peer, attributes). Keys/NLRI are `Debug`
+/// stack, next hop, source peer, attributes, AFI, path id). Keys/NLRI are `Debug`
 /// strings — `VpnRouteKey` has no `Display` and only sort stability
 /// matters here.
-pub(super) type NormVpnAnnounce = (String, String, IpAddr, IpAddr, Vec<PathAttribute>);
+pub(super) type NormVpnAnnounce = (String, String, IpAddr, IpAddr, Vec<PathAttribute>, u16, u32);
 
-#[derive(Debug, PartialEq, Clone)]
+pub(super) type NormEvpnAnnounce = (
+    String,
+    rustbgpd_wire::EvpnRoute,
+    IpAddr,
+    Option<std::net::Ipv6Addr>,
+    IpAddr,
+    Ipv4Addr,
+    RouteOrigin,
+    Vec<PathAttribute>,
+);
+
+/// The closed recovery list from ADR-0099 section F, stated at each schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RecoveryPath {
+    QueueDeferral,
+    InterruptedRegroup,
+    SessionRestart,
+    PartialEncoderFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RecoveryBoundary {
+    Begin(RecoveryPath),
+    End,
+}
+
+#[derive(Debug, Default, PartialEq, Clone)]
 pub(super) struct NormMsg {
-    /// A new transport generation replaced the prior connection for this
-    /// peer. Wire state is connection-scoped, so folding must discard the
-    /// predecessor session's advertisements before consuming the new dump.
+    /// A transport incarnation started, including the first registration.
+    /// Admitted state is connection-scoped, so discard the predecessor's
+    /// advertisements before consuming a new dump.
     pub(super) session_start: Option<u64>,
     pub(super) announce: Vec<NormAnnounce>,
     pub(super) withdraw: Vec<(Prefix, u32)>,
     pub(super) end_of_rib: Vec<(Afi, Safi)>,
     pub(super) refresh_markers: Vec<(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype)>,
     pub(super) vpn_announce: Vec<NormVpnAnnounce>,
-    pub(super) vpn_withdraw: Vec<(String, u32)>,
+    pub(super) vpn_withdraw: Vec<(String, u32, u16)>,
+    pub(super) evpn_announce: Vec<NormEvpnAnnounce>,
+    pub(super) evpn_withdraw: Vec<String>,
+    pub(super) recovery: Option<RecoveryBoundary>,
 }
 
 pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
-    // Transport drops the receiving member's own routes from a shared payload
-    // before encoding; the normalized stream is what reaches the wire.
+    // Model source exclusion before comparing RIB events. Attribute preparation
+    // and encoded bytes are checked separately by the transport oracle.
     let mut announce: Vec<_> = update
         .announce
         .iter()
@@ -327,16 +337,47 @@ pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
                 r.next_hop,
                 r.peer,
                 r.attributes.to_vec(),
+                r.afi_safi().0 as u16,
+                r.path_id,
             )
         })
         .collect();
     vpn_announce.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut vpn_withdraw: Vec<(String, u32)> = update
+    let mut vpn_withdraw: Vec<_> = update
         .vpn_withdraw
         .iter()
-        .map(|key| (format!("{:?}", key.nlri_key), key.path_id))
+        .map(|key| {
+            let afi = match key.nlri_key.prefix {
+                VpnPrefix::V4 { .. } => Afi::Ipv4,
+                VpnPrefix::V6 { .. } => Afi::Ipv6,
+            };
+            (format!("{:?}", key.nlri_key), key.path_id, afi as u16)
+        })
         .collect();
     vpn_withdraw.sort();
+    let mut evpn_announce: Vec<_> = update
+        .evpn_announce
+        .iter()
+        .map(|route| {
+            (
+                format!("{:?}", route.key()),
+                route.route.clone(),
+                route.next_hop,
+                route.link_local_next_hop,
+                route.peer,
+                route.peer_router_id,
+                route.origin_type,
+                route.attributes.to_vec(),
+            )
+        })
+        .collect();
+    evpn_announce.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut evpn_withdraw: Vec<_> = update
+        .evpn_withdraw
+        .iter()
+        .map(|key| format!("{key:?}"))
+        .collect();
+    evpn_withdraw.sort();
     NormMsg {
         session_start: None,
         announce,
@@ -345,10 +386,716 @@ pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
         refresh_markers: update.refresh_markers.clone(),
         vpn_announce,
         vpn_withdraw,
+        evpn_announce,
+        evpn_withdraw,
+        recovery: None,
     }
 }
 
 pub(super) type Streams = BTreeMap<IpAddr, Vec<NormMsg>>;
+
+type Family = (u16, u8);
+
+/// Incarnation also distinguishes fixture reconnects that reuse a session id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SessionKey {
+    peer: IpAddr,
+    incarnation: usize,
+    id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct EventKey {
+    family: Family,
+    nlri: String,
+    path_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Announced {
+    Unicast(NormAnnounce),
+    Vpn(NormVpnAnnounce),
+    Evpn(NormEvpnAnnounce),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum KeyEvent {
+    Announce(Announced),
+    Withdraw,
+}
+
+type Admitted = BTreeMap<EventKey, Announced>;
+
+#[derive(Debug, PartialEq)]
+struct Marker {
+    /// BoRR/EoRR retain their wire subtype; `EoR` has a separate value.
+    kind: u16,
+    /// Recovery End advances this operation boundary; an old terminal never
+    /// seals a later ordinary operation or a newly named retry.
+    epoch: usize,
+    recovery: Option<RecoveryPath>,
+    admitted: Admitted,
+    /// Progress binds a normal marker to the same per-key event prefix,
+    /// without constraining unrelated keys or packet packing.
+    progress: BTreeMap<EventKey, usize>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct Trace {
+    events: BTreeMap<(SessionKey, usize, EventKey), Vec<KeyEvent>>,
+    markers: BTreeMap<(SessionKey, Family), Vec<Marker>>,
+    recovery: BTreeMap<SessionKey, Vec<(RecoveryBoundary, Admitted)>>,
+    terminal: BTreeMap<SessionKey, Admitted>,
+}
+
+fn unicast_key(prefix: Prefix, path_id: u32) -> EventKey {
+    EventKey {
+        family: (
+            match prefix {
+                Prefix::V4(_) => Afi::Ipv4,
+                Prefix::V6(_) => Afi::Ipv6,
+            } as u16,
+            Safi::Unicast as u8,
+        ),
+        nlri: prefix.to_string(),
+        path_id,
+    }
+}
+
+fn vpn_event_key(nlri: &str, path_id: u32, afi: u16) -> EventKey {
+    EventKey {
+        family: (afi, Safi::MplsVpn as u8),
+        nlri: nlri.to_owned(),
+        path_id,
+    }
+}
+
+fn evpn_event_key(nlri: &str) -> EventKey {
+    EventKey {
+        family: (Afi::L2Vpn as u16, Safi::Evpn as u8),
+        nlri: nlri.to_owned(),
+        path_id: 0,
+    }
+}
+
+fn recovery_family_completed(
+    trace: &Trace,
+    session: SessionKey,
+    epoch: usize,
+    family: Family,
+) -> bool {
+    trace
+        .markers
+        .get(&(session, family))
+        .is_some_and(|markers| {
+            markers.iter().any(|marker| {
+                marker.epoch == epoch
+                    && marker.recovery.is_some()
+                    && (marker.kind == 256
+                        || marker.kind
+                            == u16::from(rustbgpd_wire::RouteRefreshSubtype::EoRR.as_u8()))
+            })
+        })
+}
+
+/// Apply events in transport phase order. Every removal is checked before any
+/// recovery relaxation; a replay can never manufacture withdrawal duty.
+fn record_event(
+    trace: &mut Trace,
+    session: SessionKey,
+    epoch: usize,
+    recovering: Option<RecoveryPath>,
+    admitted: &mut Admitted,
+    key: EventKey,
+    event: KeyEvent,
+) {
+    assert!(
+        recovering.is_none() || !recovery_family_completed(trace, session, epoch, key.family),
+        "covered recovery event after terminal in {session:?}, epoch={epoch}: {key:?}"
+    );
+    match &event {
+        KeyEvent::Announce(value) => {
+            admitted.insert(key.clone(), value.clone());
+        }
+        KeyEvent::Withdraw => {
+            assert!(
+                admitted.remove(&key).is_some(),
+                "spurious withdrawal in {session:?}, recovery={recovering:?}: {key:?}"
+            );
+        }
+    }
+    if recovering.is_none() {
+        trace
+            .events
+            .entry((session, epoch, key))
+            .or_default()
+            .push(event);
+    }
+}
+
+fn record_marker(
+    trace: &mut Trace,
+    session: SessionKey,
+    epoch: usize,
+    recovering: Option<RecoveryPath>,
+    admitted: &Admitted,
+    family: Family,
+    kind: u16,
+) {
+    if recovering.is_some() && kind == u16::from(rustbgpd_wire::RouteRefreshSubtype::BoRR.as_u8()) {
+        assert!(
+            !recovery_family_completed(trace, session, epoch, family),
+            "BoRR restarts completed recovery in {session:?}, epoch={epoch}, family={family:?}"
+        );
+    }
+    let progress = if recovering.is_some() {
+        BTreeMap::new()
+    } else {
+        trace
+            .events
+            .iter()
+            .filter(|((s, e, key), _)| *s == session && *e == epoch && key.family == family)
+            .map(|((_, _, key), events)| (key.clone(), events.len()))
+            .collect()
+    };
+    trace
+        .markers
+        .entry((session, family))
+        .or_default()
+        .push(Marker {
+            kind,
+            epoch,
+            recovery: recovering,
+            admitted: admitted
+                .iter()
+                .filter(|(key, _)| key.family == family)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            progress,
+        });
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered interpreter checks session, recovery, family events and marker coverage together"
+)]
+fn trace(streams: &Streams) -> Trace {
+    let mut result = Trace::default();
+    for (peer, messages) in streams {
+        let mut session = SessionKey {
+            peer: *peer,
+            incarnation: 0,
+            id: 0,
+        };
+        let mut admitted = Admitted::new();
+        let mut recovering = None;
+        let mut epoch = 0;
+        for message in messages {
+            if let Some(id) = message.session_start {
+                assert!(
+                    recovering.is_none(),
+                    "session change inside unfinished recovery"
+                );
+                if session.incarnation != 0 {
+                    result
+                        .terminal
+                        .insert(session, std::mem::take(&mut admitted));
+                } else {
+                    assert!(
+                        admitted.is_empty(),
+                        "initial session marker follows route events"
+                    );
+                }
+                session = SessionKey {
+                    peer: *peer,
+                    incarnation: session.incarnation + 1,
+                    id,
+                };
+                epoch = 0;
+            }
+            if let Some(boundary) = message.recovery {
+                match boundary {
+                    RecoveryBoundary::Begin(path) => {
+                        assert!(recovering.replace(path).is_none(), "nested recovery");
+                    }
+                    RecoveryBoundary::End => {
+                        assert!(recovering.take().is_some(), "recovery ended without begin");
+                        epoch += 1;
+                    }
+                }
+                result
+                    .recovery
+                    .entry(session)
+                    .or_default()
+                    .push((boundary, admitted.clone()));
+            }
+            // BoRR precedes covered routes. EoRR and EoR follow them.
+            for (afi, safi, subtype) in &message.refresh_markers {
+                if *subtype == rustbgpd_wire::RouteRefreshSubtype::BoRR {
+                    record_marker(
+                        &mut result,
+                        session,
+                        epoch,
+                        recovering,
+                        &admitted,
+                        (*afi as u16, *safi as u8),
+                        u16::from(subtype.as_u8()),
+                    );
+                }
+            }
+            for (prefix, path_id) in &message.withdraw {
+                record_event(
+                    &mut result,
+                    session,
+                    epoch,
+                    recovering,
+                    &mut admitted,
+                    unicast_key(*prefix, *path_id),
+                    KeyEvent::Withdraw,
+                );
+            }
+            for route in &message.announce {
+                record_event(
+                    &mut result,
+                    session,
+                    epoch,
+                    recovering,
+                    &mut admitted,
+                    unicast_key(route.0, route.1),
+                    KeyEvent::Announce(Announced::Unicast(route.clone())),
+                );
+            }
+            for key in &message.evpn_withdraw {
+                record_event(
+                    &mut result,
+                    session,
+                    epoch,
+                    recovering,
+                    &mut admitted,
+                    evpn_event_key(key),
+                    KeyEvent::Withdraw,
+                );
+            }
+            for (key, path_id, afi) in &message.vpn_withdraw {
+                record_event(
+                    &mut result,
+                    session,
+                    epoch,
+                    recovering,
+                    &mut admitted,
+                    vpn_event_key(key, *path_id, *afi),
+                    KeyEvent::Withdraw,
+                );
+            }
+            for route in &message.evpn_announce {
+                record_event(
+                    &mut result,
+                    session,
+                    epoch,
+                    recovering,
+                    &mut admitted,
+                    evpn_event_key(&route.0),
+                    KeyEvent::Announce(Announced::Evpn(route.clone())),
+                );
+            }
+            for route in &message.vpn_announce {
+                record_event(
+                    &mut result,
+                    session,
+                    epoch,
+                    recovering,
+                    &mut admitted,
+                    vpn_event_key(&route.0, route.6, route.5),
+                    KeyEvent::Announce(Announced::Vpn(route.clone())),
+                );
+            }
+            for (afi, safi, subtype) in &message.refresh_markers {
+                if *subtype != rustbgpd_wire::RouteRefreshSubtype::BoRR {
+                    record_marker(
+                        &mut result,
+                        session,
+                        epoch,
+                        recovering,
+                        &admitted,
+                        (*afi as u16, *safi as u8),
+                        u16::from(subtype.as_u8()),
+                    );
+                }
+            }
+            for (afi, safi) in &message.end_of_rib {
+                record_marker(
+                    &mut result,
+                    session,
+                    epoch,
+                    recovering,
+                    &admitted,
+                    (*afi as u16, *safi as u8),
+                    256,
+                );
+            }
+        }
+        assert!(recovering.is_none(), "unfinished recovery for {peer}");
+        result.terminal.insert(session, admitted);
+    }
+    result
+}
+
+pub(super) fn assert_route_parity(grouped: &Streams, private: &Streams) {
+    assert_eq!(
+        trace(grouped),
+        trace(private),
+        "per-key events, barriers and admitted state differ"
+    );
+}
+
+fn one_receiver(messages: Vec<NormMsg>) -> Streams {
+    let mut stamped = vec![NormMsg {
+        session_start: Some(SESSION),
+        ..Default::default()
+    }];
+    stamped.extend(messages);
+    [(IpAddr::V4(C), stamped)].into_iter().collect()
+}
+
+/// Real outbound values exercise each family, including full VPN label data
+/// and EVPN route data. A test-only textual key is never a payload stand-in.
+fn family_messages() -> Vec<(NormMsg, NormMsg)> {
+    let unicast = ibgp_route(pfx(40, 0), A, 100, vec![]);
+    let vpn = vpn_route(vpn_nlri(40, 16000), A, 100, vec![]);
+    let evpn = make_evpn_imet(A, 40);
+    vec![
+        (
+            normalize(&OutboundRouteUpdate {
+                announce: vec![unicast.clone()].into(),
+                ..Default::default()
+            }),
+            normalize(&OutboundRouteUpdate {
+                withdraw: vec![(unicast.prefix, unicast.path_id)],
+                ..Default::default()
+            }),
+        ),
+        (
+            normalize(&OutboundRouteUpdate {
+                vpn_announce: vec![vpn.clone()],
+                ..Default::default()
+            }),
+            normalize(&OutboundRouteUpdate {
+                vpn_withdraw: vec![vpn.key()],
+                ..Default::default()
+            }),
+        ),
+        (
+            normalize(&OutboundRouteUpdate {
+                evpn_announce: vec![evpn.clone()],
+                ..Default::default()
+            }),
+            normalize(&OutboundRouteUpdate {
+                evpn_withdraw: vec![evpn.key()],
+                ..Default::default()
+            }),
+        ),
+    ]
+}
+
+#[test]
+fn per_key_trace_accepts_cross_key_order_and_packing() {
+    let first = ibgp_route(pfx(40, 0), A, 100, vec![]);
+    let second = ibgp_route(pfx(41, 0), A, 100, vec![]);
+    let packed = one_receiver(vec![normalize(&OutboundRouteUpdate {
+        announce: vec![first.clone(), second.clone()].into(),
+        ..Default::default()
+    })]);
+    let reordered = one_receiver(vec![
+        normalize(&OutboundRouteUpdate {
+            announce: vec![second].into(),
+            ..Default::default()
+        }),
+        normalize(&OutboundRouteUpdate {
+            announce: vec![first].into(),
+            ..Default::default()
+        }),
+    ]);
+    assert_route_parity(&packed, &reordered);
+}
+
+#[test]
+fn per_key_trace_rejects_extra_or_transient_normal_events_for_every_family() {
+    for (announce, withdraw) in family_messages() {
+        let baseline = one_receiver(vec![announce.clone()]);
+        for changed in [
+            vec![announce.clone(), announce.clone()],
+            vec![announce.clone(), withdraw.clone(), announce.clone()],
+        ] {
+            let changed = one_receiver(changed);
+            assert!(std::panic::catch_unwind(|| assert_route_parity(&baseline, &changed)).is_err());
+        }
+    }
+}
+
+#[test]
+fn per_key_trace_rejects_unknown_duplicate_and_previous_session_withdrawals() {
+    for (announce, withdraw) in family_messages() {
+        for invalid in [
+            vec![withdraw.clone()],
+            vec![announce.clone(), withdraw.clone(), withdraw.clone()],
+            vec![
+                announce.clone(),
+                NormMsg {
+                    session_start: Some(SESSION),
+                    ..Default::default()
+                },
+                withdraw.clone(),
+            ],
+        ] {
+            assert!(std::panic::catch_unwind(|| trace(&one_receiver(invalid))).is_err());
+        }
+    }
+    // VPN Add-Path identity remains part of the exact withdrawal key.
+    let (announce, mut wrong_path) = family_messages().remove(1);
+    wrong_path.vpn_withdraw[0].1 = 99;
+    assert!(std::panic::catch_unwind(|| trace(&one_receiver(vec![announce, wrong_path]))).is_err());
+}
+
+#[test]
+fn per_key_trace_recovery_is_explicit_and_never_relaxes_withdrawal_presence() {
+    for path in [
+        RecoveryPath::QueueDeferral,
+        RecoveryPath::InterruptedRegroup,
+        RecoveryPath::SessionRestart,
+        RecoveryPath::PartialEncoderFallback,
+    ] {
+        for (announce, withdraw) in family_messages() {
+            let begin = NormMsg {
+                recovery: Some(RecoveryBoundary::Begin(path)),
+                ..Default::default()
+            };
+            let end = NormMsg {
+                recovery: Some(RecoveryBoundary::End),
+                ..Default::default()
+            };
+            let baseline = one_receiver(vec![announce.clone(), begin.clone(), end.clone()]);
+            let replay = one_receiver(vec![
+                announce.clone(),
+                begin.clone(),
+                announce.clone(),
+                end.clone(),
+            ]);
+            assert_route_parity(&baseline, &replay);
+            let invalid = one_receiver(vec![begin.clone(), withdraw, end.clone()]);
+            assert!(std::panic::catch_unwind(|| trace(&invalid)).is_err());
+            let unclosed = one_receiver(vec![begin.clone(), announce.clone()]);
+            assert!(std::panic::catch_unwind(|| trace(&unclosed)).is_err());
+            let double_end = one_receiver(vec![begin, announce, end.clone(), end]);
+            assert!(std::panic::catch_unwind(|| trace(&double_end)).is_err());
+        }
+    }
+}
+
+#[test]
+fn per_key_trace_preserves_eor_coverage_and_refresh_barriers() {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let (announce, _) = family_messages().remove(0);
+    let eor = NormMsg {
+        end_of_rib: vec![family],
+        ..Default::default()
+    };
+    let baseline = one_receiver(vec![announce.clone(), eor.clone()]);
+    let early = one_receiver(vec![eor.clone(), announce.clone()]);
+    assert!(std::panic::catch_unwind(|| assert_route_parity(&baseline, &early)).is_err());
+    let marker = |subtype| NormMsg {
+        refresh_markers: vec![(family.0, family.1, subtype)],
+        ..Default::default()
+    };
+    let begin = marker(rustbgpd_wire::RouteRefreshSubtype::BoRR);
+    let end = marker(rustbgpd_wire::RouteRefreshSubtype::EoRR);
+    let covered = one_receiver(vec![begin.clone(), announce.clone(), end.clone()]);
+    let outside = one_receiver(vec![announce.clone(), begin, end]);
+    assert!(std::panic::catch_unwind(|| assert_route_parity(&covered, &outside)).is_err());
+    // Equal marker state is insufficient: an idempotent replay before versus
+    // after EoR must still have the same per-key coverage boundary.
+    let late_replay = one_receiver(vec![announce.clone(), eor.clone(), announce.clone()]);
+    let early_replay = one_receiver(vec![announce.clone(), announce, eor.clone()]);
+    assert!(std::panic::catch_unwind(|| assert_route_parity(&late_replay, &early_replay)).is_err());
+}
+
+#[test]
+fn per_key_trace_recovery_rejects_replay_after_terminal() {
+    for ((announce, _), family) in family_messages().into_iter().zip([
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::L2Vpn, Safi::Evpn),
+    ]) {
+        for enhanced in [false, true] {
+            let begin = NormMsg {
+                recovery: Some(RecoveryBoundary::Begin(
+                    RecoveryPath::PartialEncoderFallback,
+                )),
+                ..Default::default()
+            };
+            let end = NormMsg {
+                recovery: Some(RecoveryBoundary::End),
+                ..Default::default()
+            };
+            let terminal = if enhanced {
+                NormMsg {
+                    refresh_markers: vec![(
+                        family.0,
+                        family.1,
+                        rustbgpd_wire::RouteRefreshSubtype::EoRR,
+                    )],
+                    ..Default::default()
+                }
+            } else {
+                NormMsg {
+                    end_of_rib: vec![family],
+                    ..Default::default()
+                }
+            };
+            let covered = one_receiver(vec![
+                announce.clone(),
+                begin.clone(),
+                announce.clone(),
+                terminal.clone(),
+                end.clone(),
+            ]);
+            let premature = one_receiver(vec![
+                announce.clone(),
+                begin,
+                terminal,
+                announce.clone(),
+                end,
+            ]);
+            assert!(
+                std::panic::catch_unwind(|| assert_route_parity(&covered, &premature)).is_err(),
+                "idempotent recovery replay after terminal must fail: {family:?}, enhanced={enhanced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn per_key_trace_recovery_borr_cannot_restart_completed_family() {
+    let (announce, _) = family_messages().remove(0);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let stream = one_receiver(vec![
+        announce.clone(),
+        NormMsg {
+            recovery: Some(RecoveryBoundary::Begin(
+                RecoveryPath::PartialEncoderFallback,
+            )),
+            ..Default::default()
+        },
+        announce.clone(),
+        NormMsg {
+            end_of_rib: vec![family],
+            ..Default::default()
+        },
+        NormMsg {
+            refresh_markers: vec![(family.0, family.1, rustbgpd_wire::RouteRefreshSubtype::BoRR)],
+            ..Default::default()
+        },
+        announce,
+        NormMsg {
+            recovery: Some(RecoveryBoundary::End),
+            ..Default::default()
+        },
+    ]);
+    assert!(
+        std::panic::catch_unwind(|| trace(&stream)).is_err(),
+        "BoRR cannot restart terminal phases inside the same recovery operation"
+    );
+}
+
+#[test]
+fn per_key_trace_recovery_allows_preterminal_retries_and_later_operations() {
+    for ((announce, _), family) in family_messages().into_iter().zip([
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::L2Vpn, Safi::Evpn),
+    ]) {
+        for enhanced in [false, true] {
+            let begin = NormMsg {
+                recovery: Some(RecoveryBoundary::Begin(
+                    RecoveryPath::PartialEncoderFallback,
+                )),
+                ..Default::default()
+            };
+            let end = NormMsg {
+                recovery: Some(RecoveryBoundary::End),
+                ..Default::default()
+            };
+            let terminal = if enhanced {
+                NormMsg {
+                    refresh_markers: vec![(
+                        family.0,
+                        family.1,
+                        rustbgpd_wire::RouteRefreshSubtype::EoRR,
+                    )],
+                    ..Default::default()
+                }
+            } else {
+                NormMsg {
+                    end_of_rib: vec![family],
+                    ..Default::default()
+                }
+            };
+            let stream = |retries| {
+                // A preceding normal terminal in the same numeric epoch does
+                // not complete a recovery operation that has not begun yet.
+                let mut messages = vec![announce.clone(), terminal.clone(), begin.clone()];
+                messages.extend(std::iter::repeat_n(announce.clone(), retries));
+                messages.extend([terminal.clone(), end.clone()]);
+                // Separate normal work may emit the same key after End.
+                messages.extend([announce.clone(), terminal.clone()]);
+                // A later named retry is also a separate operation.
+                messages.extend([
+                    begin.clone(),
+                    announce.clone(),
+                    terminal.clone(),
+                    end.clone(),
+                ]);
+                one_receiver(messages)
+            };
+            assert_route_parity(&stream(1), &stream(3));
+        }
+    }
+}
+
+#[test]
+fn per_key_trace_recovery_completion_is_family_scoped() {
+    let mut families = family_messages();
+    let (unicast, _) = families.remove(0);
+    let (vpn, _) = families.remove(0);
+    let stream = |retries| {
+        let mut messages = vec![
+            unicast.clone(),
+            vpn.clone(),
+            NormMsg {
+                recovery: Some(RecoveryBoundary::Begin(RecoveryPath::QueueDeferral)),
+                ..Default::default()
+            },
+            unicast.clone(),
+            NormMsg {
+                end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+                ..Default::default()
+            },
+        ];
+        // VPN remains covered by its own later terminal after unicast finishes.
+        messages.extend(std::iter::repeat_n(vpn.clone(), retries));
+        messages.extend([
+            NormMsg {
+                end_of_rib: vec![(Afi::Ipv4, Safi::MplsVpn)],
+                ..Default::default()
+            },
+            NormMsg {
+                recovery: Some(RecoveryBoundary::End),
+                ..Default::default()
+            },
+        ]);
+        one_receiver(messages)
+    };
+    assert_route_parity(&stream(1), &stream(3));
+}
 
 /// `normalize` models transport's own-source exclusion: the excluded
 /// member's routes vanish, and every surviving route keeps the next-hop
@@ -404,8 +1151,7 @@ fn normalize_excludes_own_source_and_keeps_overrides_aligned() {
     );
 }
 
-/// Fold a stream into the final advertised state (announce replaces,
-/// withdraw removes; unknown withdraws are RFC 4271 no-ops).
+/// Fold admitted unicast state, rejecting unknown or duplicate withdrawals.
 /// (next hop, source peer, attributes, nh-override).
 pub(super) type FoldedEntry = (IpAddr, IpAddr, Vec<PathAttribute>, Option<NextHopAction>);
 pub(super) type FoldedState = BTreeMap<IpAddr, HashMap<(Prefix, u32), FoldedEntry>>;
@@ -419,7 +1165,10 @@ pub(super) fn fold(streams: &Streams) -> FoldedState {
                 table.clear();
             }
             for (prefix, path_id) in &msg.withdraw {
-                table.remove(&(*prefix, *path_id));
+                assert!(
+                    table.remove(&(*prefix, *path_id)).is_some(),
+                    "spurious unicast withdrawal for {peer}: {prefix}, path {path_id}"
+                );
             }
             for (prefix, path_id, nh, src, attrs, nh_override) in &msg.announce {
                 table.insert(
@@ -445,10 +1194,21 @@ pub(super) fn fold_vpn(streams: &Streams) -> FoldedVpnState {
             if msg.session_start.is_some() {
                 table.clear();
             }
-            for (key, _) in &msg.vpn_withdraw {
-                table.remove(key);
+            for (key, path, _) in &msg.vpn_withdraw {
+                assert_eq!(
+                    *path, 0,
+                    "VPN oracle scenarios use single-best path identity"
+                );
+                assert!(
+                    table.remove(key).is_some(),
+                    "spurious VPN withdrawal for {peer}: {key}"
+                );
             }
-            for (key, nlri, nh, src, attrs) in &msg.vpn_announce {
+            for (key, nlri, nh, src, attrs, _, path) in &msg.vpn_announce {
+                assert_eq!(
+                    *path, 0,
+                    "VPN folded scenarios use single-best path identity"
+                );
                 table.insert(key.clone(), (nlri.clone(), *nh, *src, attrs.clone()));
             }
         }
@@ -664,21 +1424,16 @@ impl Oracle {
         // A re-registration (e.g. GR re-establish) replaces the
         // receiver; drain the predecessor first so its messages stay in
         // the collected stream.
+        let msgs = self.collected.entry(IpAddr::V4(peer)).or_default();
         if let Some(mut old_rx) = self.outs.insert(IpAddr::V4(peer), out_rx) {
-            let msgs = self.collected.entry(IpAddr::V4(peer)).or_default();
             while let Ok(update) = old_rx.try_recv() {
                 msgs.push(normalize(&update));
             }
-            msgs.push(NormMsg {
-                session_start: Some(session_id),
-                announce: vec![],
-                withdraw: vec![],
-                end_of_rib: vec![],
-                refresh_markers: vec![],
-                vpn_announce: vec![],
-                vpn_withdraw: vec![],
-            });
         }
+        msgs.push(NormMsg {
+            session_start: Some(session_id),
+            ..NormMsg::default()
+        });
         self.quiesce().await;
     }
 
@@ -1059,6 +1814,48 @@ impl Oracle {
         update
     }
 
+    /// The queued pre-failure update is still a normal admission. Only this
+    /// named peer's subsequent targeted retry uses the recovery exception.
+    pub(super) async fn drain_before_recovery(
+        &mut self,
+        peer: Ipv4Addr,
+        path: RecoveryPath,
+    ) -> OutboundRouteUpdate {
+        let update = self.drain_one(peer).await;
+        self.begin_recovery(peer, path);
+        update
+    }
+
+    /// Record a named interval without changing admission or channel capacity.
+    pub(super) fn begin_recovery(&mut self, peer: Ipv4Addr, path: RecoveryPath) {
+        self.collected
+            .entry(IpAddr::V4(peer))
+            .or_default()
+            .push(NormMsg {
+                recovery: Some(RecoveryBoundary::Begin(path)),
+                ..Default::default()
+            });
+    }
+
+    /// Record settlement after the schedule has drained its admitted updates.
+    pub(super) fn close_recovery(&mut self, peer: Ipv4Addr) {
+        self.collected
+            .entry(IpAddr::V4(peer))
+            .or_default()
+            .push(NormMsg {
+                recovery: Some(RecoveryBoundary::End),
+                ..Default::default()
+            });
+    }
+
+    /// Close an explicitly scheduled retry after its actor barrier and retain
+    /// all admitted messages before comparing the recovered state.
+    pub(super) async fn end_recovery(&mut self, peer: Ipv4Addr) {
+        self.quiesce().await;
+        self.drain_collected();
+        self.close_recovery(peer);
+    }
+
     /// After a FIFO barrier, drain only one peer's currently available
     /// messages. Each update is normalized once and retained in the full
     /// collected history as well as returned to the operation-level oracle.
@@ -1097,6 +1894,20 @@ impl Oracle {
         reply_rx.await.unwrap()
     }
 
+    /// Actor-ordered dirty state for one peer, without changing its queue or
+    /// route view. Fault schedules use this to mark only actual deferrals.
+    pub(super) async fn peer_outbound_dirty(&mut self, peer: Ipv4Addr) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::TestQueryPeerOutboundDirty {
+                peer: IpAddr::V4(peer),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
     pub(super) async fn finish(mut self) -> Streams {
         self.quiesce().await;
         self.drain_collected();
@@ -1105,6 +1916,8 @@ impl Oracle {
         }
         drop(self.tx);
         self.handle.await.unwrap();
+        // Validate every key removal even before a differential comparison.
+        let _ = trace(&self.collected);
         self.collected
     }
 }
@@ -1406,7 +2219,7 @@ async fn runtime_group_key_ignores_non_staging_families() {
     oracle.finish().await;
 }
 
-/// The kitchen-sink exact-stream scenario: initial dump, best change,
+/// The kitchen-sink per-key sequence scenario: initial dump, best change,
 /// best withdraw, split horizon (source inside the group), source-flip
 /// X→Y→X, policy-modified attributes, next-hop-override flags,
 /// RR-client vs non-client groups, eBGP LLGR suppression, member join
@@ -1501,10 +2314,7 @@ async fn oracle_streams_identical_across_rr_mix() {
             .await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
-    assert_eq!(
-        grouped, ungrouped,
-        "grouped and per-peer outbound streams must be identical"
-    );
+    assert_route_parity(&grouped, &ungrouped);
     // Sanity: the scenario actually produced traffic.
     assert!(
         grouped.values().any(|msgs| !msgs.is_empty()),
@@ -1513,10 +2323,8 @@ async fn oracle_streams_identical_across_rr_mix() {
 }
 
 /// Dirty-member resync (channel-full → tombstones → timer resync).
-/// Streams intentionally differ (the grouped resync over-emits — the
-/// safe direction); the folded final advertised state must be
-/// identical, and the withdraw of the prefix that went away while
-/// dirty must reach the wire on both paths.
+/// Only C’s scheduled retry may replay announcements. Every withdrawal must
+/// remove a key C actually admitted, and the recovered state must match.
 #[tokio::test]
 async fn oracle_dirty_resync_converges_to_identical_state() {
     tokio::time::pause();
@@ -1540,18 +2348,22 @@ async fn oracle_dirty_resync_converges_to_identical_state() {
         o.routes(A, vec![], vec![pfx(1, 0)]).await;
 
         // Free the channel and let the resync timer fire.
-        let first = o.drain_one(C).await;
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    // The dirty member must have (over-)withdrawn the tombstoned p1 on
+    // The dirty member must have withdrawn the previously admitted p1 on
     // the grouped path: its folded table must not contain p1 (fold
     // starts after the pre-drained p1 announce, so a leftover p1 key
     // could only come from a resync bug).
@@ -1566,6 +2378,156 @@ async fn oracle_dirty_resync_converges_to_identical_state() {
     assert!(
         c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)),
         "the update lost to the full channel must be recovered by the resync"
+    );
+}
+
+/// A group tombstone for an announce missed during deferral carries no
+/// withdrawal duty for that receiver. The admitted p1 remains untouched.
+#[tokio::test]
+async fn oracle_dirty_missed_announce_then_withdraw_has_no_unknown_tombstone() {
+    tokio::time::pause();
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(B, false, true, None, 64).await;
+        o.peer_up(C, false, true, None, 1).await;
+        let eor = o.drain_one(C).await;
+        assert_ne!(eor.end_of_rib, Vec::<(Afi, Safi)>::new());
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+            .await;
+        o.routes(A, vec![], vec![pfx(2, 0)]).await;
+        let pending = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
+        assert_eq!(pending.announce.len(), 1);
+        assert_eq!(pending.announce[0].prefix, Prefix::V4(pfx(1, 0)));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.end_recovery(C).await;
+    };
+    let (grouped, private) =
+        run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
+    assert_route_parity(&grouped, &private);
+    let c = &grouped[&IpAddr::V4(C)];
+    assert!(c.iter().all(|message| message.withdraw.is_empty()));
+    assert!(fold(&grouped)[&IpAddr::V4(C)].contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
+}
+
+/// C never receives its own p2. D did admit p2. Both become dirty, so the
+/// shared tombstone must withdraw p2 only from D, never fan it out to C.
+#[tokio::test]
+async fn oracle_dirty_source_excluded_sibling_has_no_shared_tombstone_withdraw() {
+    tokio::time::pause();
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(C, false, true, None, 1).await;
+        o.peer_up(D, false, true, None, 1).await;
+        assert_ne!(o.drain_one(C).await.end_of_rib, Vec::<(Afi, Safi)>::new());
+        assert_ne!(o.drain_one(D).await.end_of_rib, Vec::<(Afi, Safi)>::new());
+        o.routes(C, vec![ibgp_route(pfx(2, 0), C, 100, vec![])], vec![])
+            .await;
+        let admitted = o.drain_one(D).await;
+        assert_eq!(admitted.announce[0].prefix, Prefix::V4(pfx(2, 0)));
+        // p1 fills both channels. p3 then fails for both members.
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        o.routes(A, vec![ibgp_route(pfx(3, 0), A, 100, vec![])], vec![])
+            .await;
+        o.routes(C, vec![], vec![pfx(2, 0)]).await;
+        for peer in [C, D] {
+            let pending = o
+                .drain_before_recovery(peer, RecoveryPath::QueueDeferral)
+                .await;
+            assert_eq!(pending.announce[0].prefix, Prefix::V4(pfx(1, 0)));
+        }
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.end_recovery(C).await;
+        o.end_recovery(D).await;
+    };
+    let (grouped, private) =
+        run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
+    assert_route_parity(&grouped, &private);
+    let key = (Prefix::V4(pfx(2, 0)), 0);
+    assert!(
+        grouped[&IpAddr::V4(C)]
+            .iter()
+            .all(|message| !message.withdraw.contains(&key))
+    );
+    assert_eq!(
+        grouped[&IpAddr::V4(D)]
+            .iter()
+            .flat_map(|message| &message.withdraw)
+            .filter(|withdraw| **withdraw == key)
+            .count(),
+        1
+    );
+}
+
+/// RT2 is admitted only by D. A dirty RT1-only sibling must not inherit
+/// D's withdrawal duty when the shared table removes that RT2 route.
+#[tokio::test]
+async fn oracle_dirty_rtc_excluded_sibling_has_no_shared_tombstone_withdraw() {
+    tokio::time::pause();
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up_families(A, false, true, None, 64, vpn_sendable())
+            .await;
+        o.peer_up_families(C, false, true, None, 2, vpn_rtc_sendable())
+            .await;
+        o.peer_up_families(D, false, true, None, 64, vpn_rtc_sendable())
+            .await;
+        let dump = o.drain_one(C).await;
+        assert!(dump.vpn_announce.is_empty());
+        assert_ne!(o.drain_one(C).await.end_of_rib, Vec::<(Afi, Safi)>::new());
+        o.rtc_routes(C, vec![rtc_interest(C, 1)]).await;
+        o.rtc_routes(D, vec![rtc_default(D)]).await;
+        o.vpn_routes(
+            A,
+            vec![vpn_route(vpn_nlri(2, 200), A, 100, vec![rt_ec(2)])],
+            vec![],
+        )
+        .await;
+        // Two RT1 announcements fill C's two slots; id4 is missed.
+        for id in [1, 3, 4] {
+            o.vpn_routes(
+                A,
+                vec![vpn_route(
+                    vpn_nlri(id, u32::from(id) * 100),
+                    A,
+                    100,
+                    vec![rt_ec(1)],
+                )],
+                vec![],
+            )
+            .await;
+        }
+        o.vpn_routes(A, vec![], vec![vpn_key(2, 200)]).await;
+        let first = o.drain_one(C).await;
+        assert_eq!(first.vpn_announce[0].key(), vpn_key(1, 100));
+        let second = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
+        assert_eq!(second.vpn_announce[0].key(), vpn_key(3, 300));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.end_recovery(C).await;
+        o.check_vpn_invariant("RT-excluded sibling recovered").await;
+    };
+    let (grouped, private) =
+        run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
+    assert_route_parity(&grouped, &private);
+    let key = format!("{:?}", vpn_nlri(2, 200).key());
+    assert!(grouped[&IpAddr::V4(C)].iter().all(|message| {
+        message
+            .vpn_withdraw
+            .iter()
+            .all(|withdraw| withdraw.0 != key)
+    }));
+    assert_eq!(
+        grouped[&IpAddr::V4(D)]
+            .iter()
+            .flat_map(|message| &message.vpn_withdraw)
+            .filter(|withdraw| withdraw.0 == key)
+            .count(),
+        1
     );
 }
 
@@ -1602,12 +2564,16 @@ async fn oracle_deferred_force_then_churn_converges_to_identical_state() {
         )
         .await;
 
-        let first = o.drain_one(C).await;
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -1650,12 +2616,16 @@ async fn oracle_source_flip_withdraw_lost_to_full_channel_recovers() {
             .await;
 
         // Free the channel and let the resync timer fire.
-        let first = o.drain_one(C).await;
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -1698,7 +2668,9 @@ async fn oracle_source_flip_onto_already_dirty_member_withdraws_stale_route() {
             .await;
         // Free the channel: the flip pass's resync will SUCCEED, so a
         // withdraw not recorded by staging time is lost for good.
-        let first = o.drain_one(C).await;
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
 
         // Source flip ONTO the already-dirty member: C's own route
@@ -1710,8 +2682,10 @@ async fn oracle_source_flip_onto_already_dirty_member_withdraws_stale_route() {
 
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -1766,11 +2740,14 @@ async fn oracle_regroup_while_dirty_after_source_flip_withdraws_stale_route() {
             .await;
 
         // Free the channel and let the resync timer fire.
-        o.drain_one(C).await;
+        o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
+            .await;
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -1818,12 +2795,16 @@ async fn oracle_source_flip_back_before_resync_keeps_route_without_spurious_with
         o.routes(C, vec![], vec![pfx(1, 0)]).await;
 
         // Free the channel and let the resync timer fire.
-        let first = o.drain_one(C).await;
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -1898,11 +2879,14 @@ async fn oracle_second_regroup_while_dirty_unions_baseline_no_leak() {
             .await;
 
         // Free the channel and let the resync timer fire.
-        o.drain_one(C).await;
+        o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
+            .await;
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     let c_final = fold(&grouped)
         .get(&IpAddr::V4(C))
         .cloned()
@@ -1966,11 +2950,14 @@ async fn oracle_announce_missed_while_dirty_heals_across_regroup() {
             .await;
 
         // Free the channel and let the resync timer fire.
-        o.drain_one(C).await;
+        o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
+            .await;
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -2019,11 +3006,14 @@ async fn oracle_announce_missed_while_dirty_heals_across_move_to_per_peer_path()
         o.replace_policy(C, Some(peer_context_permit_chain())).await;
 
         // Free the channel and let the resync timer fire.
-        o.drain_one(C).await;
+        o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
+            .await;
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -2066,6 +3056,7 @@ async fn oracle_clean_member_regroup_suppresses_unchanged_announces() {
             .await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -2126,8 +3117,7 @@ pub(super) fn peer_context_permit_chain() -> PolicyChain {
 
 /// A grouped member that goes dirty, misses a withdraw (recorded as a
 /// group tombstone), and then moves to the per-peer path (its chain
-/// becomes peer-context-dependent) carries the tombstone as extra
-/// (over-)withdraw residue. The withdrawn key is in neither the
+/// becomes peer-context-dependent) carries its admitted withdrawal duty. The withdrawn key is in neither the
 /// Loc-RIB nor the Adj-RIB-Out seeded from the regroup baseline, so
 /// the residue is the ONLY record of the stale route — the per-peer
 /// resync must emit its withdraw, or the route strands on the wire
@@ -2163,11 +3153,14 @@ async fn oracle_dirty_leaver_extras_withdraw_on_per_peer_path() {
         o.replace_policy(C, Some(peer_context_permit_chain())).await;
 
         // Free the channel and let the resync timer fire.
-        o.drain_one(C).await;
+        o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
+            .await;
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -2230,11 +3223,14 @@ async fn oracle_regroup_while_dirty_empty_enumeration_emits_residue_withdraws() 
             .await;
 
         // Free the channel and let the resync timer fire.
-        o.drain_one(C).await;
+        o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
+            .await;
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -2278,7 +3274,7 @@ async fn oracle_nh_override_survives_group_join_replay() {
     };
     let (grouped, ungrouped) =
         run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
-    assert_eq!(grouped, ungrouped);
+    assert_route_parity(&grouped, &ungrouped);
     // Belt and braces: E's dump carries the override flag on both paths.
     let e_msgs = &grouped[&IpAddr::V4(E)];
     let announced_with_flag = e_msgs.iter().flat_map(|m| &m.announce).any(|entry| {
@@ -2293,13 +3289,13 @@ async fn oracle_nh_override_survives_group_join_replay() {
     );
 }
 
-/// The VPN kitchen-sink exact-stream scenario (update-groups v2 slice
+/// The VPN kitchen-sink per-key sequence scenario (update-groups v2 slice
 /// 1): initial VPN dump, flood, source-flip X→Y→X, same-peer relabel
 /// (ADR-0077 re-advertise), attr mutate, withdraw, split horizon
 /// (source inside the group), late joiner replay, RFC 7313 VPN route
 /// refresh, member leave, regroup on policy change (content-equal
 /// reinstall AND a genuine deny), and a GShut-style forced refresh —
-/// grouped vs forced-ungrouped per-peer VPN streams must be identical.
+/// grouped vs private per-key VPN event sequences must be identical.
 #[tokio::test]
 async fn oracle_vpn_streams_identical_across_group_lifecycle() {
     let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
@@ -2387,10 +3383,7 @@ async fn oracle_vpn_streams_identical_across_group_lifecycle() {
         o.refresh_outbound(D).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
-    assert_eq!(
-        grouped, ungrouped,
-        "grouped and per-peer outbound VPN streams must be identical"
-    );
+    assert_route_parity(&grouped, &ungrouped);
     assert!(
         grouped
             .values()
@@ -2400,10 +3393,9 @@ async fn oracle_vpn_streams_identical_across_group_lifecycle() {
 }
 
 /// VPN dirty-member resync (channel-full → VPN tombstones → timer
-/// resync): streams intentionally differ (the grouped resync over-emits
-/// — the safe direction); the folded final advertised VPN state must be
-/// identical, the withdraw of the identity that went away while dirty
-/// must reach the wire, and the jammed announce must be recovered.
+/// resync): only C's named retry may replay announcements. Every withdrawal
+/// needs prior admission, recovered state must match, and the missed announce
+/// must reach the wire.
 #[tokio::test]
 async fn oracle_vpn_dirty_resync_converges_to_identical_state() {
     tokio::time::pause();
@@ -2430,7 +3422,9 @@ async fn oracle_vpn_dirty_resync_converges_to_identical_state() {
         o.vpn_routes(A, vec![], vec![vpn_key(1, 100)]).await;
 
         // Free the channel and let the resync timer fire.
-        let first = o.drain_one(C).await;
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(
             first.vpn_announce.len(),
             1,
@@ -2438,8 +3432,10 @@ async fn oracle_vpn_dirty_resync_converges_to_identical_state() {
         );
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold_vpn(&grouped),
         fold_vpn(&ungrouped),
@@ -2492,7 +3488,9 @@ async fn oracle_vpn_source_flip_withdraw_lost_to_full_channel_recovers() {
             .await;
 
         // Free the channel and let the resync timer fire.
-        let first = o.drain_one(C).await;
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(
             first.vpn_announce.len(),
             1,
@@ -2502,8 +3500,10 @@ async fn oracle_vpn_source_flip_withdraw_lost_to_full_channel_recovers() {
         // The adv(m) invariant recomputed from manager state must match
         // the folded emitted streams once the resync has run.
         o.check_vpn_invariant("post source-flip resync").await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold_vpn(&grouped),
         fold_vpn(&ungrouped),
@@ -2559,10 +3559,7 @@ async fn oracle_rtc_negotiated_vpn_filtered_at_emit() {
             .await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
-    assert_eq!(
-        grouped, ungrouped,
-        "RTC-negotiated peers' Φ-filtered group emit must match the per-peer path"
-    );
+    assert_route_parity(&grouped, &ungrouped);
     let vpn_count = |streams: &Streams, peer: Ipv4Addr| {
         streams[&IpAddr::V4(peer)]
             .iter()
@@ -2610,7 +3607,7 @@ async fn oracle_plain_ibgp_split_horizon_identical() {
         o.routes(E, vec![ebgp], vec![]).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
-    assert_eq!(grouped, ungrouped);
+    assert_route_parity(&grouped, &ungrouped);
 }
 
 // ---------------------------------------------------------------------
@@ -2770,10 +3767,7 @@ async fn oracle_rtc_churn_streams_identical() {
             .await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
-    assert_eq!(
-        grouped, ungrouped,
-        "grouped Φ-filtered emit and per-peer RTC streams must be identical"
-    );
+    assert_route_parity(&grouped, &ungrouped);
     assert!(
         grouped
             .values()
@@ -2784,8 +3778,8 @@ async fn oracle_rtc_churn_streams_identical() {
 
 /// Membership change WHILE dirty (design §2.3): the grouped path skips
 /// the delta walk (Φ updated; the pending resync emits against current
-/// Φ, over-withdrawing Φ-failing keys — the backstop term). Streams
-/// legitimately differ; the folded final VPN state must converge, the
+/// Φ, withdrawing only Φ-failing keys C previously admitted). Within the
+/// named retry interval announcements may replay; final VPN state must converge, the
 /// Φ-failing key must be withdrawn, and the jammed announce recovered.
 #[tokio::test]
 async fn oracle_rtc_membership_change_while_dirty_converges() {
@@ -2845,13 +3839,17 @@ async fn oracle_rtc_membership_change_while_dirty_converges() {
             2,
             "ids 1+2 were delivered before the jam"
         );
-        let second = o.drain_one(C).await;
+        let second = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(second.vpn_announce.len(), 1, "id 3 was delivered too");
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
         o.check_vpn_invariant("post-resync").await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold_vpn(&grouped),
         fold_vpn(&ungrouped),
@@ -3219,10 +4217,7 @@ async fn oracle_pcb_steady_state_overlap_substitutes_runner_up() {
         o.routes(C, vec![ranked(pfx(2, 0), C, 2)], vec![]).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
-    assert_eq!(
-        grouped, ungrouped,
-        "per-client-best streams must be identical on both oracle sides"
-    );
+    assert_route_parity(&grouped, &ungrouped);
     let folded = fold(&grouped);
     // p1: A (source of the best) gets the runner-up; B and C get the best.
     assert_eq!(folded_src(&folded, A, pfx(1, 0)), Some(IpAddr::V4(B)));
@@ -3239,13 +4234,8 @@ async fn oracle_pcb_steady_state_overlap_substitutes_runner_up() {
 /// an implicit replace; everyone else converges on the promoted
 /// winner. No withdraw ever reaches any wire.
 ///
-/// Folded-state comparison (the dirty-resync pattern), per the module
-/// doc: the grouped side's source-flip arm re-announces the promoted
-/// winner toward the withdrawn winner's source — which already held
-/// that route as the lane substitution — where the per-peer path
-/// equality-suppresses against its Adj-RIB-Out. An idempotent
-/// over-announce (RFC 4271 implicit replace), so the folded end state
-/// must still be identical.
+/// A clean winner promotion must suppress an unchanged runner-up already
+/// advertised to the former winner's source; it has no recovery exemption.
 #[tokio::test]
 async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
     let scenario = async |o: &mut Oracle| {
@@ -3259,6 +4249,10 @@ async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
         o.routes(A, vec![], vec![pfx(1, 0)]).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
+    assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B)]);
+    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A), IpAddr::V4(C)]);
+    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A), IpAddr::V4(B)]);
     let folded = fold(&grouped);
     assert_eq!(
         folded,
@@ -3281,6 +4275,32 @@ async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
             "promotion is an implicit replace at path_id 0 — never withdraw+announce"
         );
     }
+}
+
+/// A new winner's source already holds the standing route it now receives as
+/// a substitution. Clean promotion must not reannounce that unchanged value.
+#[tokio::test]
+async fn oracle_pcb_new_winner_keeps_unchanged_runner_up_without_reannounce() {
+    let scenario = async |o: &mut Oracle| {
+        pcb_peer_up(o, A, None, 64).await;
+        pcb_peer_up(o, B, None, 64).await;
+        pcb_peer_up(o, C, None, 64).await;
+        o.routes(A, vec![ranked(pfx(1, 0), A, 2)], vec![]).await;
+        o.routes(B, vec![ranked(pfx(1, 0), B, 3)], vec![]).await;
+        o.routes(C, vec![ranked(pfx(1, 0), C, 4)], vec![]).await;
+        o.routes(B, vec![ranked(pfx(1, 0), B, 1)], vec![]).await;
+    };
+    let (grouped, private) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_route_parity(&grouped, &private);
+    assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B), IpAddr::V4(B)]);
+    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A)]);
+    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A), IpAddr::V4(B)]);
+    assert!(
+        grouped
+            .values()
+            .flatten()
+            .all(|message| message.withdraw.is_empty())
+    );
 }
 
 /// Divergence 2: the shared export chain denies the Loc-RIB best, so
@@ -3309,10 +4329,7 @@ async fn oracle_pcb_filtered_best_delivers_first_permitted_candidate() {
         o.routes(C, vec![ranked(pfx(1, 0), C, 3)], vec![]).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
-    assert_eq!(
-        grouped, ungrouped,
-        "per-client-best streams must be identical on both oracle sides"
-    );
+    assert_route_parity(&grouped, &ungrouped);
     let folded = fold(&grouped);
     // The permitted winner is B's route; B itself walks on to C's.
     assert_eq!(folded_src(&folded, A, pfx(1, 0)), Some(IpAddr::V4(B)));
@@ -3344,10 +4361,7 @@ async fn oracle_pcb_lane_only_churn_reaches_only_the_best_source() {
         o.routes(B, vec![], vec![pfx(1, 0)]).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
-    assert_eq!(
-        grouped, ungrouped,
-        "per-client-best streams must be identical on both oracle sides"
-    );
+    assert_route_parity(&grouped, &ungrouped);
     // A (source of the standing best) sees every lane delta: the
     // initial substitution, the attribute churn, the refill from C.
     assert_eq!(
@@ -3371,7 +4385,7 @@ async fn oracle_pcb_lane_only_churn_reaches_only_the_best_source() {
 /// the jammed member misses both an overlapped announce and the
 /// winner's withdrawal-driven promotion; the timer resync must deliver
 /// the promoted runner-up and the recovered announce. Folded-state
-/// comparison (resync over-emission is stream-visible by design).
+/// comparison applies only inside C’s explicitly scheduled retry interval.
 #[tokio::test]
 async fn oracle_pcb_dirty_resync_with_overlap_converges() {
     tokio::time::pause();
@@ -3399,12 +4413,16 @@ async fn oracle_pcb_dirty_resync_with_overlap_converges() {
         o.routes(A, vec![], vec![pfx(1, 0)]).await;
 
         // Free the channel and let the resync timer fire.
-        let first = o.drain_one(C).await;
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
         assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
         tokio::time::advance(Duration::from_secs(2)).await;
         o.quiesce().await;
+        o.end_recovery(C).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -3437,10 +4455,7 @@ async fn oracle_pcb_route_refresh_replays_runner_up_substitution() {
         o.route_refresh(C, Afi::Ipv4, Safi::Unicast).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
-    assert_eq!(
-        grouped, ungrouped,
-        "per-client-best streams must be identical on both oracle sides"
-    );
+    assert_route_parity(&grouped, &ungrouped);
     // A: the initial substitution, then the refresh replay of the SAME
     // substituted runner-up (never A's own winner).
     assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B), IpAddr::V4(B)]);
@@ -3525,7 +4540,7 @@ async fn oracle_queued_refresh_cohort_matches_private_replays() {
         };
         let (grouped, ungrouped) =
             run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
-        assert_eq!(grouped, ungrouped, "features={features:?}");
+        assert_route_parity(&grouped, &ungrouped);
         for peer in [A, B, C] {
             assert!(
                 grouped[&IpAddr::V4(peer)]

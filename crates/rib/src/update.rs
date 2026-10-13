@@ -2795,6 +2795,14 @@ pub enum RibUpdate {
         /// residue, respectively.
         reply: oneshot::Sender<(usize, usize, usize, usize, usize, usize)>,
     },
+    /// TEST ONLY: distinguish a scheduled recovery from an ordinary queue drain.
+    #[cfg(test)]
+    TestQueryPeerOutboundDirty {
+        /// The target peer.
+        peer: IpAddr,
+        /// Whether the peer has a deferred outbound update.
+        reply: oneshot::Sender<bool>,
+    },
     /// TEST ONLY: evidence that the clean policy transition scales with plans
     /// and compatible wire cohorts rather than members.
     #[cfg(test)]

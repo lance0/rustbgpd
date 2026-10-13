@@ -470,6 +470,7 @@ fn lazy_clean_group_prior_defers_only_for_a_resolved_eligible_stage() {
             path_id: route.path_id,
             new: Some((route.clone(), None)),
             old_source: Some(source),
+            prior: None,
             policy_label: None,
             source_attrs: None,
             lane: None,
@@ -1159,6 +1160,7 @@ fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() 
         path_id: route.path_id,
         new: Some((route.clone(), None)),
         old_source: Some(source),
+        prior: None,
         policy_label: None,
         source_attrs: None,
         lane: None,
@@ -1196,22 +1198,58 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
     let limited_encoder = ReusableExactExportEncoder::with_limits(44, 88, 8_192, 4_096);
     let mut manager = test_manager();
     let mut source_rx = register_exact_target(&mut manager, source, source_encoder.clone());
-    let mut limited_rx = register_exact_target(&mut manager, limited, limited_encoder.clone());
+    let mut limited_rx =
+        register_exact_target(&mut manager, limited, MockExactExportEncoder::accepting(1));
     let route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 0), 24),
         Ipv4Addr::new(198, 51, 100, 43),
     );
     let key = ExactExportKey::Unicast(route.prefix, route.path_id);
     let route_identity = (route.prefix, route.path_id);
-    let deltas = [crate::manager::update_groups::GroupDelta {
-        prefix: route.prefix,
-        path_id: route.path_id,
-        new: Some((route.clone(), None)),
-        old_source: Some(source),
-        policy_label: None,
-        source_attrs: None,
-        lane: None,
-    }];
+    let mut old_route = route.clone();
+    AttrSet::edit(&mut old_route.attributes, |attrs| {
+        attrs.push(rustbgpd_wire::PathAttribute::Med(1));
+    });
+    assert!(commit_batch(
+        &mut manager,
+        limited,
+        ExactBatch {
+            announce: vec![old_route.clone()],
+            ..ExactBatch::default()
+        },
+    ));
+    assert_eq!(limited_rx.try_recv().unwrap().announce.len(), 1);
+    manager
+        .peer_export_encoders
+        .insert(limited, limited_encoder.clone());
+    let prefixes = HashSet::from([route.prefix]);
+    let mut memo = crate::manager::distribution::ExportMemo::default();
+    manager
+        .peer_sendable_families
+        .insert(limited, vec![(Afi::Ipv4, Safi::Unicast)]);
+    manager
+        .loc_rib
+        .recompute(old_route.prefix, std::iter::once(&old_route));
+    manager.ensure_group_table(7, limited);
+    manager
+        .loc_rib
+        .recompute(route.prefix, std::iter::once(&route));
+    let deltas = manager
+        .stage_update_groups(&prefixes, &prefixes, &mut memo)
+        .remove(&7)
+        .unwrap()
+        .deltas;
+    assert!(crate::manager::helpers::routes_equal(
+        deltas[0]
+            .prior
+            .as_ref()
+            .unwrap()
+            .adv_entry(limited)
+            .unwrap()
+            .route,
+        &old_route,
+    ));
+    manager.adj_ribs_out.remove(&limited);
     let announce: Arc<Vec<Route>> = vec![route].into();
     let next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>> = vec![None].into();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
@@ -1225,6 +1263,10 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
         &mut cache,
     ));
     assert_eq!(source_rx.try_recv().unwrap().announce.len(), 1);
+    assert!(
+        !manager.adj_ribs_out.contains_key(&limited),
+        "the owed withdrawal must depend on the lazy group prior, not a private fallback"
+    );
     assert!(commit_shared_unicast_with_precommit(
         &mut manager,
         limited,
@@ -1273,6 +1315,7 @@ fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
         path_id: route.path_id,
         new: Some((route.clone(), None)),
         old_source: Some(source),
+        prior: None,
         policy_label: None,
         source_attrs: None,
         lane: None,

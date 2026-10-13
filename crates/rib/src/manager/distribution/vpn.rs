@@ -895,6 +895,20 @@ impl RibManager {
         // the RT-pass source-flip matrix (Φ applied at emit for RTC
         // groups); ungrouped peers take the per-peer staging path exactly
         // as before.
+        let blocked: Vec<_> = self
+            .outbound_peers
+            .keys()
+            .copied()
+            .filter(|peer| {
+                self.grouped_member_of(*peer).is_some() && self.outbound_channel_full(*peer)
+            })
+            .collect();
+        let mut speculative_group_admitted = Vec::new();
+        for peer in blocked {
+            if self.capture_group_admitted_keys(peer) {
+                speculative_group_admitted.push(peer);
+            }
+        }
         let vpn_group_stage = self.stage_vpn_update_groups(&changed_keys);
 
         let peers: Vec<IpAddr> = self
@@ -980,7 +994,7 @@ impl RibManager {
                     }
                     // The member missed this pass's withdrawals: record
                     // them as VPN tombstones so its resync can
-                    // (over-)withdraw them.
+                    // heal only actually admitted identities.
                     if let Some(group) = self.group_ribs.get_mut(&gid) {
                         group.vpn_tombstones.extend(
                             stage
@@ -1117,6 +1131,7 @@ impl RibManager {
                 warn!(%peer, "outbound channel full — VPN update deferred");
             }
         }
+        self.release_speculative_group_admitted_keys(&speculative_group_admitted);
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
         super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
     }
