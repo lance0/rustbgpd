@@ -160,6 +160,7 @@ impl RibManager {
                 &mut || checkpoint.borrow_mut()(),
             )
         } else {
+            let filter = self.member_rt_filter(peer);
             let group = &self.group_ribs[&gid];
             // A synthetic flag cannot make an incomplete ownership transfer
             // authoritative: private bodies or missing received metadata mean
@@ -176,7 +177,7 @@ impl RibManager {
                         .evpn_member_projection_with_checkpoint(
                             peer,
                             self.cluster_id,
-                            self.peer_rt_membership.get(&peer),
+                            filter.as_ref(),
                             self.peer_unexportable.get(&peer),
                             || checkpoint.borrow_mut()(),
                         )

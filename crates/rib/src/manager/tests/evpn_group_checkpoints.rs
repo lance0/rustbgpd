@@ -1,4 +1,4 @@
-use super::evpn_group_storage::{fixture, received, stage};
+use super::evpn_group_storage::{fixture, fixture_with_rtc, received, stage};
 use super::*;
 use crate::update::ExactExportKey;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -71,7 +71,7 @@ fn evpn_projection_checkpoints_wholly_excluded_rtc_source_and_rejection_rows() {
 
 #[test]
 fn evpn_shared_empty_capture_threads_real_checkpoints_through_both_walks() {
-    let (mut manager, member, gid, _output) = fixture();
+    let (mut manager, member, gid, _output) = fixture_with_rtc(true);
     let routes = install_routes(&mut manager, gid, 7);
     manager
         .peer_rt_membership

@@ -11,6 +11,17 @@ pub(super) fn fixture() -> (
     usize,
     mpsc::Receiver<OutboundRouteUpdate>,
 ) {
+    fixture_with_rtc(false)
+}
+
+pub(super) fn fixture_with_rtc(
+    rtc: bool,
+) -> (
+    RibManager,
+    IpAddr,
+    usize,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(
         rx,
@@ -21,7 +32,7 @@ pub(super) fn fixture() -> (
     );
     let member: IpAddr = Ipv4Addr::new(192, 0, 2, 30).into();
     let (sender, mut output) = mpsc::channel(8);
-    register(&mut manager, member, sender);
+    register_with_rtc(&mut manager, member, sender, rtc);
     while output.try_recv().is_ok() {}
     let gid = manager.grouped_member_of(member).unwrap();
     assert!(!manager.group_ribs[&gid].owns_evpn);
@@ -31,6 +42,19 @@ pub(super) fn fixture() -> (
 }
 
 fn register(manager: &mut RibManager, peer: IpAddr, sender: mpsc::Sender<OutboundRouteUpdate>) {
+    register_with_rtc(manager, peer, sender, false);
+}
+
+fn register_with_rtc(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    sender: mpsc::Sender<OutboundRouteUpdate>,
+    rtc: bool,
+) {
+    let mut sendable_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)];
+    if rtc {
+        sendable_families.push((Afi::Ipv4, Safi::RtConstrain));
+    }
     manager.handle_update(RibUpdate::PeerUp {
         peer,
         session_id: 7,
@@ -38,7 +62,7 @@ fn register(manager: &mut RibManager, peer: IpAddr, sender: mpsc::Sender<Outboun
         peer_router_id: Ipv4Addr::new(192, 0, 2, 30),
         outbound_tx: sender,
         export_policy: None,
-        sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)],
+        sendable_families,
         is_ebgp: false,
         route_reflector_client: true,
         orr_vantage: None,
@@ -373,7 +397,7 @@ fn exact_export_overlay_filters_admitted_views_but_changed_candidates_are_reprob
 
 #[test]
 fn first_full_capture_precedes_staging_and_survives_rtc_change_and_repeated_regroup() {
-    let (mut manager, member, gid, _output) = fixture();
+    let (mut manager, member, gid, _output) = fixture_with_rtc(true);
     let old = received(100);
     stage(&mut manager, gid, &old);
     manager.peer_rt_membership.insert(member, membership(100));
@@ -411,6 +435,42 @@ fn first_full_capture_precedes_staging_and_survives_rtc_change_and_repeated_regr
         manager.evpn_recovery.proof(owner).unwrap(),
         Some([old.key()].as_slice())
     );
+}
+
+#[test]
+fn shared_capture_with_negotiated_rtc_and_missing_membership_is_strict_empty() {
+    let (mut manager, member, gid, _output) = fixture_with_rtc(true);
+    assert!(manager.peer_sendable_families[&member].contains(&(Afi::Ipv4, Safi::RtConstrain)));
+    manager.peer_rt_membership.remove(&member);
+    let old = received(100);
+    stage(&mut manager, gid, &old);
+    assert_eq!(manager.group_ribs[&gid].table.evpn_len(), 1);
+    assert!(!manager.peer_rt_membership.contains_key(&member));
+    assert!(manager.capture_shared_evpn_admitted(member));
+    let owner = manager.evpn_recovery_handle(member).unwrap();
+    assert!(!manager.evpn_recovery.is_dormant(owner));
+    assert_eq!(
+        manager.evpn_recovery.proof(owner).unwrap(),
+        Some([].as_slice())
+    );
+}
+
+#[test]
+fn shared_capture_without_negotiated_rtc_ignores_empty_and_stale_membership() {
+    for stale in [RtcMembership::default(), membership(200)] {
+        let (mut manager, member, gid, _output) = fixture();
+        assert!(!manager.peer_sendable_families[&member].contains(&(Afi::Ipv4, Safi::RtConstrain)));
+        let old = received(100);
+        stage(&mut manager, gid, &old);
+        manager.peer_rt_membership.insert(member, stale);
+        assert!(manager.capture_shared_evpn_admitted(member));
+        let owner = manager.evpn_recovery_handle(member).unwrap();
+        assert!(!manager.evpn_recovery.is_dormant(owner));
+        assert_eq!(
+            manager.evpn_recovery.proof(owner).unwrap(),
+            Some([old.key()].as_slice())
+        );
+    }
 }
 
 #[test]
