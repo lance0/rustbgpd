@@ -78,11 +78,12 @@ name: Interop
 #     so per-cluster optimal routes survive the second reflection
 #     hop.
 #   - M79 (~90 s test): labeled-unicast route reflection (RFC 8277,
-#     SAFI 4) — GoBGP PE injects IPv4 + IPv6 labeled routes
-#     (including a multi-label stack), rustbgpd reflects with label
-#     stack/next-hop preserved verbatim + ORIGINATOR_ID/CLUSTER_LIST,
-#     relabel is an implicit replace, withdrawal uses the §2.4
-#     compatibility field, a kill -9 GR window preserves the routes
+#     SAFI 4) — GoBGP PE injects IPv4 + IPv6 labeled routes,
+#     rustbgpd reflects the single-label ones with label/next-hop
+#     preserved verbatim + ORIGINATOR_ID/CLUSTER_LIST and stores but
+#     withholds a multi-label stack (no Multiple Labels Capability),
+#     relabel is an implicit replace, a stack-echo withdraw keeps the
+#     session up, a kill -9 GR window preserves the routes
 #     stale with zero client-facing UPDATEs, and the relaunched
 #     PE's End-of-RIB sweeps exactly the not-re-advertised route.
 #
