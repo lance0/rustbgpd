@@ -1896,7 +1896,11 @@ carries inactive (absent), unlimited (zero), or finite.
     IPv4 (34 bytes) from IPv6 (58 bytes) — prefix-length byte alone
     cannot distinguish since 32 is valid for both. An announcement with
     both a non-zero ESI and a non-zero GW IP is treat-as-withdraw
-    (RFC 9136 §3.2).
+    (RFC 9136 §3.2). So is an announcement whose ESI, GW IP, Router's MAC
+    and label are all zero (also RFC 9136 §3.2). The Router's MAC is the
+    EVPN Router's MAC Extended Community (RFC 9135 §8.1); absent or
+    all-zero counts as zero. The label is the raw 3-octet field, so any
+    non-zero MPLS label or VNI keeps the route.
 - Route Distinguisher (RFC 4364) displays as `<asn16>:<u32>` (Type 0),
   `<ipv4>:<u16>` (Type 1), `<asn32>:<u16>` (Type 2). Unknown RD types
   fall back to hex.

@@ -3,6 +3,20 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- `UpdateMessage::parse_revised` (and `parse_revised_observed*`) now report
+  an EVPN Type 5 announcement whose ESI, gateway IP, Router's MAC and label
+  are all zero as an RFC 7606 treat-as-withdraw `MalformedAttribute` on
+  `MP_REACH_NLRI` (RFC 9136 §3.2) instead of accepting it. The Router's MAC
+  is the first EVPN Router's MAC Extended Community (type 0x06, subtype
+  0x03); absent or all-zero counts as zero. The label is the raw 3-octet
+  field, so any non-zero label or VNI is accepted. The route stays in
+  `evpn_announced` for the UPDATE-wide withdrawal, and withdrawals still
+  decode it. `validate_evpn_announcements` is unchanged because it sees
+  only the NLRI. No public item or signature changes. This is a validation
+  behavior change and ships in the next minor release.
+
 ## 0.25.0 - 2026-10-12
 
 - `decode_evpn_nlri` (and the UPDATE parsers built on it) now accepts an

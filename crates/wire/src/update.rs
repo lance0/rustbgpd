@@ -1248,6 +1248,93 @@ mod tests {
         }
     }
 
+    /// RFC 9136 §3.2: "A route where ESI, GW IP, MAC, and Label are all zero
+    /// at the same time SHOULD be treat as withdraw", where MAC is the EVPN
+    /// Router's MAC Extended Community (type 0x06, subtype 0x03). Absent, or
+    /// present with an all-zero MAC (as FRR reads it), counts as zero; the
+    /// community may precede or follow `MP_REACH_NLRI`. A non-zero Router's
+    /// MAC or any non-zero label octet (a VNI per RFC 8365) is accepted, and
+    /// a withdrawal decodes normally. Both address families.
+    #[test]
+    fn parse_revised_type5_all_zero_overlay_and_label_is_treat_as_withdraw() {
+        const RMAC: [u8; 2] = [0x06, 0x03];
+        const ROUTE_TARGET: [u8; 8] = [0x00, 0x02, 0xfd, 0xe8, 0, 0, 0, 100];
+        let mut v4 = vec![5, 34];
+        v4.extend(EVPN_RD);
+        v4.extend([0; 10]); // ESI 0
+        v4.extend([0, 0, 0, 0, 24, 10, 0, 0, 0]); // tag 0, 10.0.0.0/24
+        v4.extend([0; 4 + 3]); // GW IP 0, label 0
+        let mut v6 = vec![5, 58];
+        v6.extend(EVPN_RD);
+        v6.extend([0; 10]); // ESI 0
+        v6.extend([0, 0, 0, 0, 64, 0x20, 0x01, 0x0d, 0xb8]); // tag 0, 2001:db8::/64
+        v6.extend([0; 12 + 16 + 3]); // rest of prefix, GW IP 0, label 0
+        let ext = |communities: &[[u8; 8]]| {
+            let mut attr = vec![0xc0, 16, u8::try_from(communities.len() * 8).unwrap()];
+            attr.extend(communities.concat());
+            attr
+        };
+        let rmac = |mac: [u8; 6]| [RMAC.as_slice(), mac.as_slice()].concat();
+        let with = |msg: UpdateMessage, attr: &[u8], before: bool| {
+            let mp = msg.path_attributes.to_vec();
+            let attrs = if before {
+                [attr, mp.as_slice()].concat()
+            } else {
+                [mp.as_slice(), attr].concat()
+            };
+            UpdateMessage {
+                path_attributes: Bytes::from(attrs),
+                ..msg
+            }
+        };
+        let assert_withdraw = |msg: &UpdateMessage| {
+            let parsed = msg
+                .parse_revised(true, false, false, &[])
+                .expect("all-zero Type 5 must not be session-reset");
+            assert_eq!(parsed.malformed.len(), 1, "{:?}", parsed.malformed);
+            assert_eq!(parsed.malformed[0].type_code, 14);
+            assert_eq!(
+                parsed.malformed[0].disposition,
+                crate::ErrorDisposition::TreatAsWithdraw
+            );
+            let mp = parsed
+                .update
+                .attributes
+                .iter()
+                .find_map(|attr| match attr {
+                    PathAttribute::MpReachNlri(mp) => Some(mp),
+                    _ => None,
+                })
+                .expect("MP_REACH retained");
+            assert_eq!(mp.evpn_announced.len(), 1);
+        };
+        let assert_clean = |msg: &UpdateMessage| {
+            let parsed = msg.parse_revised(true, false, false, &[]).unwrap();
+            assert_eq!(parsed.malformed, Vec::new());
+        };
+        for type5 in [v4, v6] {
+            let label_at = type5.len() - 3;
+            assert_withdraw(&evpn_update(true, &type5));
+            for before in [true, false] {
+                let zero_rmac = ext(&[ROUTE_TARGET, rmac([0; 6]).try_into().unwrap()]);
+                assert_withdraw(&with(evpn_update(true, &type5), &zero_rmac, before));
+                let rt_only = ext(&[ROUTE_TARGET]);
+                assert_withdraw(&with(evpn_update(true, &type5), &rt_only, before));
+                let rmac_set = ext(&[
+                    ROUTE_TARGET,
+                    rmac([0x02, 0, 0, 0, 0, 1]).try_into().unwrap(),
+                ]);
+                assert_clean(&with(evpn_update(true, &type5), &rmac_set, before));
+            }
+            for label in [[0, 0, 1], [0, 0x06, 0x40], [1, 0, 0]] {
+                let mut labelled = type5.clone();
+                labelled[label_at..].copy_from_slice(&label);
+                assert_clean(&evpn_update(true, &labelled));
+            }
+            assert_clean(&evpn_update(false, &type5));
+        }
+    }
+
     #[test]
     fn revised_fatal_context_preserves_type_and_notification_data() {
         for (attributes, nlri, type_code) in [
