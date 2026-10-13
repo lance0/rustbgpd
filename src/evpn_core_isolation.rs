@@ -756,8 +756,8 @@ impl Controller {
                     reason = "uplink_overlap",
                     interface = %binding,
                     uplinks = ?overlapping,
-                    "core-isolation uplink is, or is enslaved under, a bound interface; it is \
-                     excluded from the uplink signal"
+                    "core-isolation uplink is, is enslaved under, or is stacked on a bound \
+                     interface; it is excluded from the uplink signal"
                 );
             }
             runtime.uplink_overlap = !overlapping.is_empty();
@@ -1342,9 +1342,14 @@ fn classify_entry(entry: &OwnedLink, host: &HostIdentity, links: &[AdminLinkStat
     receipt::classify(entry, host, links)
 }
 
+/// Lower-device hops followed from an uplink: the kernel's own stacking
+/// limit (`MAX_NEST_DEV`). It also ends a veth pair's `IFLA_LINK` cycle.
+const MAX_UPLINK_LOWER_HOPS: usize = 8;
+
 /// ADR-0140 decision 2: whether every effective uplink lacks carrier,
-/// and the (uplink, binding) pairs excluded because the uplink is a
-/// bound link, a member of a bound bond, or an owned member.
+/// and the (uplink, binding) pairs excluded because the uplink, or a
+/// lower device it is stacked on (`IFLA_LINK`, such as the bond under a
+/// VLAN), is a bound link, a member of a bound bond, or an owned member.
 fn uplink_signal(
     uplinks: &[String],
     snapshot: &CoreIsolationSnapshot,
@@ -1355,28 +1360,46 @@ fn uplink_signal(
     let mut effective = Vec::new();
     for uplink in uplinks {
         let link = links.iter().find(|l| &l.name == uplink);
-        let bound_master = link
-            .and_then(|l| l.master)
-            .and_then(|m| links.iter().find(|l| l.ifindex == m))
-            .filter(|m| snapshot.bindings.contains_key(&m.name))
-            .map(|m| m.name.clone());
-        let owner = if snapshot.bindings.contains_key(uplink) {
-            Some(uplink.clone())
-        } else if let Some(bond) = bound_master {
-            Some(bond)
-        } else {
-            receipt
-                .iter()
-                .find(|e| &e.link.name == uplink)
-                .map(|e| e.binding.clone())
-        };
-        match owner {
+        match uplink_owner(uplink, link, snapshot, links, receipt) {
             Some(binding) => overlaps.push((uplink.clone(), binding)),
             None => effective.push(link.is_some_and(|l| l.carrier)),
         }
     }
     let down = !effective.is_empty() && effective.iter().all(|up| !up);
     (down, overlaps)
+}
+
+/// The binding whose hold can take `uplink`'s carrier away, walking its
+/// lower devices. A lower device missing from the dump (deleted, or in
+/// another namespace) ends the walk as not overlapping, as an unreadable
+/// master does: the hold cannot take down a link it cannot see, so that
+/// carrier loss is not the hold's doing.
+fn uplink_owner<'a>(
+    uplink: &'a str,
+    mut link: Option<&'a AdminLinkState>,
+    snapshot: &CoreIsolationSnapshot,
+    links: &'a [AdminLinkState],
+    receipt: &[OwnedLink],
+) -> Option<String> {
+    let mut name = uplink;
+    for _ in 0..=MAX_UPLINK_LOWER_HOPS {
+        let bound_master = link
+            .and_then(|l| l.master)
+            .and_then(|m| links.iter().find(|l| l.ifindex == m))
+            .filter(|m| snapshot.bindings.contains_key(&m.name));
+        if snapshot.bindings.contains_key(name) {
+            return Some(name.to_string());
+        } else if let Some(bond) = bound_master {
+            return Some(bond.name.clone());
+        } else if let Some(entry) = receipt.iter().find(|e| e.link.name == name) {
+            return Some(entry.binding.clone());
+        }
+        let lower = link?.lower?;
+        let next = links.iter().find(|l| l.ifindex == lower)?;
+        name = &next.name;
+        link = Some(next);
+    }
+    None
 }
 
 /// Remote ES peers per bound interface: Type 4 routes for the binding's

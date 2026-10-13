@@ -578,6 +578,7 @@ fn link(ifindex: u32, name: &str, master: Option<u32>, admin_up: bool) -> AdminL
         carrier: admin_up,
         is_bond: name.starts_with("bond"),
         master,
+        lower: None,
         address: Some(vec![2, 0, 0, 0, 0, 1]),
         perm_address: None,
         bond_perm_hwaddr: master.map(|_| vec![2, 0, 0, 0, 1, u8::try_from(ifindex).unwrap()]),
@@ -642,6 +643,52 @@ fn uplink_under_a_bound_bond_is_excluded_so_isolation_can_release() {
     let mut up = links.clone();
     up[2].carrier = true;
     assert!(!uplink_signal(&uplinks, &snap, &up, &[]).0);
+}
+
+/// `link` stacked on `lower` (`IFLA_LINK`), such as a VLAN.
+fn stacked(ifindex: u32, name: &str, lower: u32) -> AdminLinkState {
+    AdminLinkState {
+        lower: Some(lower),
+        ..link(ifindex, name, None, false)
+    }
+}
+
+#[test]
+fn uplink_stacked_on_a_bound_bond_is_excluded_so_isolation_can_release() {
+    let snap = snapshot("bond0", Some(esi(1)));
+    // The hold took bond0's members down, so bond0 and every VLAN on it
+    // lost carrier.
+    let mut links = vec![
+        link(3, "bond0", None, false),
+        link(7, "m0", Some(3), false),
+        stacked(20, "bond0.100", 3),
+        // QinQ: two hops down to the bound bond.
+        stacked(21, "bond0.100.5", 20),
+        // On a member of the bound bond: excluded through its master.
+        stacked(22, "m0.200", 7),
+        // A lower device that is gone, and a veth pair's IFLA_LINK cycle.
+        stacked(23, "gone.300", 99),
+        stacked(30, "v0", 31),
+        stacked(31, "v1", 30),
+    ];
+    let (down, overlaps) = uplink_signal(&["bond0.100".to_string()], &snap, &links, &[]);
+    assert!(!down, "our own hold must not keep the PE isolated");
+    assert_eq!(
+        overlaps,
+        vec![("bond0.100".to_string(), "bond0".to_string())]
+    );
+    for uplink in ["bond0.100.5", "m0.200"] {
+        let (_, overlaps) = uplink_signal(&[uplink.to_string()], &snap, &links, &[]);
+        assert_eq!(overlaps, vec![(uplink.to_string(), "bond0".to_string())]);
+    }
+
+    // A broken or cyclic chain is not an overlap: the uplink stays in the
+    // signal with its own carrier.
+    let uplinks = ["gone.300".to_string(), "v0".to_string()];
+    let (down, overlaps) = uplink_signal(&uplinks, &snap, &links, &[]);
+    assert!(down && overlaps.is_empty());
+    links[6].carrier = true;
+    assert!(!uplink_signal(&uplinks, &snap, &links, &[]).0);
 }
 
 #[test]

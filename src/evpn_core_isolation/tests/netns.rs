@@ -480,3 +480,51 @@ async fn netns_bound_veth_is_released_when_its_binding_is_removed() {
     wait_for("receipt cleared", || receipt_names(dir.path()).is_empty()).await;
     rig.handle.release().await;
 }
+
+/// A VLAN on the bound bond, configured as the only uplink, loses carrier
+/// when the hold downs the members. The kernel's `IFLA_LINK` names the
+/// bond, so the uplink is excluded as `uplink_overlap` and the startup
+/// hold still releases instead of reading the VLAN as an isolated core.
+#[tokio::test]
+async fn netns_vlan_on_bound_bond_uplink_is_excluded_and_releases() {
+    if !netns_gate() || !inner_pass("netns_vlan_on_bound_bond_uplink_is_excluded_and_releases") {
+        return;
+    }
+    bond_with_members(2);
+    ip(&[
+        "link",
+        "add",
+        "link",
+        "bond0",
+        "name",
+        "bond0.100",
+        "type",
+        "vlan",
+        "id",
+        "100",
+    ]);
+    ip(&["link", "set", "bond0.100", "up"]);
+    let dir = private_dir();
+    let (rib_tx, _rib) = scripted_rib(EvpnSessionsSync {
+        established: 1,
+        stale: 0,
+        synced: true,
+    });
+    let mut snapshot = binding_snapshot(&["bond0"], 2, 600);
+    Arc::get_mut(&mut snapshot)
+        .unwrap()
+        .settings
+        .as_mut()
+        .unwrap()
+        .uplinks = vec!["bond0.100".to_string()];
+    let rig = start(dir.path(), rib_tx, snapshot);
+
+    wait_for("startup hold", || !admin_up("m0") && !admin_up("m1")).await;
+    wait_for("uplink_overlap state", || {
+        state(&rig.metrics, "bond0").as_deref() == Some("uplink_overlap")
+    })
+    .await;
+    wait_for("startup release", || admin_up("m0") && admin_up("m1")).await;
+    wait_for("receipt cleared", || receipt_names(dir.path()).is_empty()).await;
+    rig.handle.release().await;
+}

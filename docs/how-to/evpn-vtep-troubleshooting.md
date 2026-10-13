@@ -621,7 +621,7 @@ transition with the state as `reason`.
 | `suppressed_no_peer` | Isolated, but no remote PE advertised this ESI while the core was up, so the links stay up |
 | `overridden` | Another writer raised a held member. Check systemd-networkd (`ActivationPolicy=manual` for members), NetworkManager, and manual `ip link` use |
 | `ownership_ambiguous` | A receipt entry no longer matches its link (renamed, recreated, removed from the bond, or in another namespace). The link is left down. Raise it (or delete it) by hand. The entry is dropped once nothing it names is left down: by the stop hook (`rustbgpd --release-core-isolation --runtime-state-dir DIR`, with the daemon stopped) or at the next start. An entry whose link still exists and is down is kept |
-| `uplink_overlap` | An `uplinks` entry is a bound link or is enslaved under a bound bond; it is excluded from the signal. Fix the list |
+| `uplink_overlap` | An `uplinks` entry is a bound link, is enslaved under a bound bond, or is stacked on one (such as a VLAN on the bound bond); it is excluded from the signal. Fix the list |
 | `action_failed` | An admin-state write or receipt publication failed, or the runtime-state directory or its lock is unavailable; see the daemon log |
 
 Links that stay down after the daemon exited are released by the stop hook
