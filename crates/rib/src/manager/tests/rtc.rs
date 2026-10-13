@@ -2463,3 +2463,108 @@ async fn rtc_eor_hold_restarts_with_replacement_session() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// RFC 4684 §6 requires the delay to be bounded. A primary queue that is
+/// refilled as fast as the actor drains it must not postpone the cap: once
+/// it is due, only the backlog queued at that moment (at most the channel
+/// capacity) runs before the held End-of-RIB is released.
+#[tokio::test(start_paused = true)]
+async fn rtc_eor_hold_cap_is_bounded_under_sustained_ingress() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    // Keep the primary queue full: each send waits for a free slot, so a
+    // new update arrives for every one the actor takes.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let feeder = tokio::spawn({
+        let tx = tx.clone();
+        let stop = Arc::clone(&stop);
+        async move {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let (reply, _ignored) = oneshot::channel();
+                if tx
+                    .send(RibUpdate::QueryLocRibCount { reply })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    });
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_secs(60)).await;
+    // Far more actor turns than the 64-slot backlog the cutoff admits.
+    let mut released = None;
+    for _ in 0..20_000 {
+        if let Ok(update) = out_rx.try_recv() {
+            released = Some(update);
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    feeder.await.unwrap();
+    let released = released.expect("the cap must fire while ingress continues");
+    assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Only an RT-Constrain End-of-Route-Refresh that closes an active refresh
+/// window proves the membership complete. A stray `EoRR` (no `BoRR`) leaves the
+/// hold in place; one closing a real window releases it.
+#[tokio::test]
+async fn stray_rtc_eorr_keeps_hold_and_window_eorr_releases_it() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+    let rtc = (Afi::Ipv4, Safi::RtConstrain);
+
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer: IpAddr::V4(target),
+        session_id: 0,
+        afi: rtc.0,
+        safi: rtc.1,
+    })
+    .await
+    .unwrap();
+    rib_barrier(&tx).await;
+    assert_no_outbound(&mut out_rx, "a stray RT-Constrain EoRR released the hold");
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        peer: IpAddr::V4(target),
+        session_id: 0,
+        afi: rtc.0,
+        safi: rtc.1,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer: IpAddr::V4(target),
+        session_id: 0,
+        afi: rtc.0,
+        safi: rtc.1,
+    })
+    .await
+    .unwrap();
+    rib_barrier(&tx).await;
+    let released = out_rx
+        .try_recv()
+        .expect("an EoRR closing an RT-Constrain refresh window releases the hold");
+    assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
+
+    drop(tx);
+    handle.await.unwrap();
+}

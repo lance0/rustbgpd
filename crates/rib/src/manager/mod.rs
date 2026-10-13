@@ -999,6 +999,11 @@ pub struct RibManager {
     /// when expiry was first seen. Every admission counts, including one a
     /// distribution window coalesces, and a window does not extend past it.
     conditional_expiry_cutoff: Option<usize>,
+    /// The same admission cutoff for a due RFC 4684 §6 `EoR` hold cap: the
+    /// primary backlog when the cap was first seen due. Only that work may
+    /// run before the held markers are released, so sustained ingress
+    /// cannot postpone the cap indefinitely.
+    rtc_eor_expiry_cutoff: Option<usize>,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
@@ -2080,6 +2085,7 @@ impl RibManager {
             distribution_window: distribution::DistributionWindow::default(),
             distribution_window_limits: distribution::DistributionWindowLimits::default(),
             conditional_expiry_cutoff: None,
+            rtc_eor_expiry_cutoff: None,
             primary_lookahead: None,
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
@@ -3069,9 +3075,13 @@ impl RibManager {
         update
     }
 
-    /// Charge one primary admission against a due settle deadline's cutoff.
+    /// Charge one primary admission against a due settle deadline's cutoff,
+    /// and against a due RTC `EoR` hold cap's cutoff.
     fn count_conditional_expiry_admission(&mut self) {
         if let Some(cutoff) = self.conditional_expiry_cutoff.as_mut() {
+            *cutoff = cutoff.saturating_sub(1);
+        }
+        if let Some(cutoff) = self.rtc_eor_expiry_cutoff.as_mut() {
             *cutoff = cutoff.saturating_sub(1);
         }
     }
@@ -3909,10 +3919,18 @@ impl RibManager {
                 safi,
             } => {
                 if !self.stale_session_message(peer, session_id, "EndRouteRefresh", Refresh) {
+                    // A collision-failback survivor already sent its EoR;
+                    // its refreshed membership ends with the EoRR that
+                    // closes an active RTC refresh window. A stray or
+                    // duplicate EoRR (ignored below) proves nothing.
+                    let rtc_refresh_completed = (afi, safi)
+                        == crate::route::RtcRibRouteKey::afi_safi()
+                        && self
+                            .refresh_in_progress
+                            .get(&peer)
+                            .is_some_and(|families| families.contains(&(afi, safi)));
                     self.handle_end_route_refresh(peer, afi, safi);
-                    if (afi, safi) == crate::route::RtcRibRouteKey::afi_safi() {
-                        // A collision-failback survivor already sent its
-                        // EoR; its refreshed membership ends with EoRR.
+                    if rtc_refresh_completed {
                         self.release_rtc_eor_hold(peer);
                     }
                     if let Some(transition) =
@@ -5273,12 +5291,25 @@ impl RibManager {
                 self.expire_refresh_windows();
                 continue;
             }
-            if has_rtc_eor_timer && rtc_eor_sleep.deadline() <= now {
+            let rtc_eor_due = has_rtc_eor_timer && rtc_eor_sleep.deadline() <= now;
+            if !rtc_eor_due {
+                self.rtc_eor_expiry_cutoff = None;
+            }
+            if rtc_eor_due {
                 // A queued RT-Constrain EoR releases the hold with its
-                // membership applied; let it win over the cap.
-                if self.drain_ready_updates().await {
+                // membership applied; let it win over the cap. RFC 4684 §6
+                // requires the delay to be bounded, so only the primary
+                // updates already queued when the cap was first seen may
+                // run first (the ADR-0137 cutoff shape above); later
+                // arrivals cannot postpone the cap.
+                let cutoff = match self.rtc_eor_expiry_cutoff {
+                    Some(cutoff) => cutoff,
+                    None => *self.rtc_eor_expiry_cutoff.insert(self.primary_backlog()),
+                };
+                if cutoff > 0 && self.drain_ready_updates().await {
                     continue;
                 }
+                self.rtc_eor_expiry_cutoff = None;
                 self.expire_rtc_eor_holds();
                 continue;
             }
@@ -5425,12 +5456,9 @@ impl RibManager {
                         }
                         self.expire_refresh_windows();
                     }
-                    () = rtc_eor_sleep.as_mut(), if has_rtc_eor_timer => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        self.expire_rtc_eor_holds();
-                    }
+                    // Expiry is applied by the due check above, under its
+                    // admission cutoff.
+                    () = rtc_eor_sleep.as_mut(), if has_rtc_eor_timer => {}
                     () = selection_sleep.as_mut(), if has_selection_timer => {
                         if self.drain_ready_updates().await {
                             continue;

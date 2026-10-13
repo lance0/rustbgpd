@@ -947,8 +947,11 @@ not add a neighbor-discovery monitor or make stale next hops reachable.
   new session, or a re-establish whose RT-Constrain routes were not
   retained) sends VPN routes as the peer's interest arrives, but holds the
   VPNv4, VPNv6 and EVPN End-of-RIB until the peer's RT-Constrain End-of-RIB
-  (or, after a collision failover, its RT-Constrain End-of-Route-Refresh).
-  The hold ends after 60 seconds without one; the cap is fixed. A peer
+  (or, after a collision failover, the RT-Constrain End-of-Route-Refresh
+  that closes an active refresh). The hold ends after 60 seconds without
+  one; the cap is fixed. Once the cap is due, only the inbound updates
+  already queued at that moment are processed ahead of the release, so
+  continuing traffic cannot extend it. A peer
   acting as graceful-restart helper for the session therefore does not take
   our End-of-RIB as the end of the initial update and sweep the VPN routes
   it kept from us (RFC 4724 §4.2) before its interest has been re-applied.
