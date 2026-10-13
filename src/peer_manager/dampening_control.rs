@@ -112,11 +112,15 @@ impl PeerManager {
             pending.handle.abort_for_transport_safety_and_wait().await;
             self.unregister_session(session_id);
             if self
-                .rib_tx
-                .send(RibUpdate::PeerDown {
-                    peer: peer.address,
-                    session_id,
-                })
+                .send_rib_update(
+                    RibUpdate::PeerDown {
+                        peer: peer.address,
+                        session_id,
+                    },
+                    OperatorReadAdmission::Fenced {
+                        reason: "the dampening source is mid-transition",
+                    },
+                )
                 .await
                 .is_err()
             {

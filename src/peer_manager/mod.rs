@@ -1111,6 +1111,24 @@ impl PeerManager {
         }
     }
 
+    /// Readiness-aware mailbox admission: queue one RIB update on the primary
+    /// lane, serving readiness while that lane is full. This covers only the
+    /// admission wait; a caller whose update carries a reply awaits it
+    /// separately. The update keeps the RIB's peer or export state in step
+    /// with this actor, so it is never dropped for time: the send waits for
+    /// capacity for as long as the RIB runs, and fails only once the RIB has
+    /// exited.
+    async fn send_rib_update(
+        &mut self,
+        update: RibUpdate,
+        admission: OperatorReadAdmission,
+    ) -> Result<(), ()> {
+        let rib_tx = self.rib_tx.clone();
+        self.await_with_readiness(async move { rib_tx.send(update).await }, admission)
+            .await
+            .map_err(drop)
+    }
+
     async fn receive_readiness_query(
         readiness_rx: &mut Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
     ) -> Option<PeerManagerReadinessQuery> {

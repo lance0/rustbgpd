@@ -212,6 +212,15 @@ impl CapacityFixture {
     }
 }
 
+/// An admission that a real RIB blocked for source capacity. Only the RIB can
+/// set the block, so other suites borrow it from here.
+pub(super) async fn capacity_blocked_admission() -> DampeningAdmission {
+    let mut fixture = CapacityFixture::new().await;
+    fixture.exhaust().await;
+    fixture.rib_task.abort();
+    fixture.admission
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
