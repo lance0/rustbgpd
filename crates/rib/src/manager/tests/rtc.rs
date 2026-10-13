@@ -2478,8 +2478,68 @@ async fn rtc_eor_hold_cap_is_bounded_under_sustained_ingress() {
     let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
-    // Keep the primary queue full: each send waits for a free slot, so a
-    // new update arrives for every one the actor takes.
+    let released = held_eor_under_sustained_ingress(&tx, &mut out_rx).await;
+    assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The cap stays bounded when another timer is also due and draining. An
+/// expired GR stale deadline is checked earlier in the actor loop and drains
+/// one update per turn while it stays due; under sustained ingress it never
+/// stops being due, so the RTC cutoff must be captured and consumed ahead of
+/// it.
+#[tokio::test(start_paused = true)]
+async fn rtc_eor_hold_cap_is_bounded_while_gr_timer_is_due() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    // A GR helper deadline that falls due before the cap: VPN routes from a
+    // peer that went down with a 2-second restart time.
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![make_vpn_rib_route_with_rts(source, 60, vec![rt(100)])],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        restart_time: 2,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
+
+    let released = held_eor_under_sustained_ingress(&tx, &mut out_rx).await;
+    assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Keep the primary queue refilled, move past the 60-second cap, and return
+/// the first outbound update carrying End-of-RIB within a bounded number of
+/// turns: far more than the 64-slot backlog the cutoff admits.
+async fn held_eor_under_sustained_ingress(
+    tx: &mpsc::Sender<RibUpdate>,
+    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> OutboundRouteUpdate {
+    // Each send waits for a free slot, so a new update arrives for every
+    // one the actor takes.
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let feeder = tokio::spawn({
         let tx = tx.clone();
@@ -2500,10 +2560,11 @@ async fn rtc_eor_hold_cap_is_bounded_under_sustained_ingress() {
     tokio::task::yield_now().await;
 
     tokio::time::advance(Duration::from_secs(60)).await;
-    // Far more actor turns than the 64-slot backlog the cutoff admits.
     let mut released = None;
     for _ in 0..20_000 {
-        if let Ok(update) = out_rx.try_recv() {
+        if let Ok(update) = out_rx.try_recv()
+            && !update.end_of_rib.is_empty()
+        {
             released = Some(update);
             break;
         }
@@ -2511,11 +2572,7 @@ async fn rtc_eor_hold_cap_is_bounded_under_sustained_ingress() {
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     feeder.await.unwrap();
-    let released = released.expect("the cap must fire while ingress continues");
-    assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
-
-    drop(tx);
-    handle.await.unwrap();
+    released.expect("the cap must fire while ingress continues")
 }
 
 /// Only an RT-Constrain End-of-Route-Refresh that closes an active refresh

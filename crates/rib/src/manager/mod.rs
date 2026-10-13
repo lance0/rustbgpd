@@ -5212,6 +5212,32 @@ impl RibManager {
             if !conditional_due {
                 self.conditional_expiry_cutoff = None;
             }
+            let rtc_eor_due = has_rtc_eor_timer && rtc_eor_sleep.deadline() <= now;
+            if !rtc_eor_due {
+                self.rtc_eor_expiry_cutoff = None;
+            }
+            if rtc_eor_due {
+                // A queued RT-Constrain EoR releases the hold with its
+                // membership applied; let it win over the cap. RFC 4684 §6
+                // requires the delay to be bounded, so only the primary
+                // updates already queued when the cap was first seen may
+                // run first (the ADR-0137 cutoff shape below); later
+                // arrivals cannot postpone the cap. This check precedes
+                // every other timer branch: those drain one update and
+                // `continue` while their own expired deadline stays due,
+                // which under sustained ingress would otherwise keep this
+                // cutoff from ever being captured or consumed.
+                let cutoff = match self.rtc_eor_expiry_cutoff {
+                    Some(cutoff) => cutoff,
+                    None => *self.rtc_eor_expiry_cutoff.insert(self.primary_backlog()),
+                };
+                if cutoff > 0 && self.drain_ready_updates().await {
+                    continue;
+                }
+                self.rtc_eor_expiry_cutoff = None;
+                self.expire_rtc_eor_holds();
+                continue;
+            }
             if has_attr_gc_timer && attr_gc_sleep.deadline() <= now {
                 self.gc_attr_intern_on_timer();
                 continue;
@@ -5246,7 +5272,9 @@ impl RibManager {
                 // observation flush precedes it. Later traffic cannot defer
                 // the timer: the cutoff is captured once per expiry and
                 // charged for every admission, and this check precedes the
-                // other timers, whose drains are unbounded under traffic.
+                // other timers, whose drains are unbounded under traffic
+                // (only the RTC End-of-RIB cap, bounded by its own cutoff,
+                // runs first).
                 let cutoff = match self.conditional_expiry_cutoff {
                     Some(cutoff) => cutoff,
                     None => *self
@@ -5289,28 +5317,6 @@ impl RibManager {
                     continue;
                 }
                 self.expire_refresh_windows();
-                continue;
-            }
-            let rtc_eor_due = has_rtc_eor_timer && rtc_eor_sleep.deadline() <= now;
-            if !rtc_eor_due {
-                self.rtc_eor_expiry_cutoff = None;
-            }
-            if rtc_eor_due {
-                // A queued RT-Constrain EoR releases the hold with its
-                // membership applied; let it win over the cap. RFC 4684 §6
-                // requires the delay to be bounded, so only the primary
-                // updates already queued when the cap was first seen may
-                // run first (the ADR-0137 cutoff shape above); later
-                // arrivals cannot postpone the cap.
-                let cutoff = match self.rtc_eor_expiry_cutoff {
-                    Some(cutoff) => cutoff,
-                    None => *self.rtc_eor_expiry_cutoff.insert(self.primary_backlog()),
-                };
-                if cutoff > 0 && self.drain_ready_updates().await {
-                    continue;
-                }
-                self.rtc_eor_expiry_cutoff = None;
-                self.expire_rtc_eor_holds();
                 continue;
             }
             if has_selection_timer && selection_sleep.deadline() <= now {
