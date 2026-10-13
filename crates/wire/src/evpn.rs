@@ -562,9 +562,9 @@ impl EvpnSmet {
 ///
 /// Keep the decoded routes on failure: RFC 7606 recovery needs every
 /// announcement key, including valid siblings. Do not apply to withdrawals.
-/// The RFC 9136 §3.2 rule for a Type 5 whose ESI, gateway IP, Router's MAC
-/// and label are all zero needs the UPDATE's extended communities, so only
-/// the revised UPDATE parser applies it.
+/// The RFC 9136 §3.2 Type 5 rules on an invalid Router's MAC, and on a zero
+/// ESI, gateway IP, Router's MAC and label, need the UPDATE's extended
+/// communities, so only the revised UPDATE parser applies them.
 ///
 /// # Errors
 ///
@@ -600,35 +600,51 @@ pub fn validate_evpn_announcements(routes: &[EvpnRoute]) -> Result<(), DecodeErr
     Ok(())
 }
 
-/// RFC 9136 §3.2: "A route where ESI, GW IP, MAC, and Label are all zero at
-/// the same time SHOULD be treat as withdraw." MAC is the EVPN Router's MAC
-/// Extended Community (RFC 9135 §8.1); absent counts as zero (Table 1 note),
-/// and, as in FRR, so does a present all-zero MAC. Label is the raw 3-octet
-/// field, so a non-zero VNI (RFC 8365) never matches.
+/// RFC 9136 §3.2 rules that need the EVPN Router's MAC Extended Community
+/// (RFC 9135 §8.1). Only the first Router's MAC counts (RFC 9135 §8.1).
+///
+/// - Table 1 note: a "Non-Zero" MAC must be a valid MAC; "Examples of
+///   invalid MAC addresses are broadcast or multicast MAC addresses. The
+///   route MUST be treat as withdraw in case of an invalid MAC address."
+///   The note qualifies the MAC column of every Table 1 row, so, as in FRR,
+///   it applies to any Type 5 announcement, not only when the MAC is the
+///   Overlay Index.
+/// - "A route where ESI, GW IP, MAC, and Label are all zero at the same time
+///   SHOULD be treat as withdraw." Absent counts as zero (Table 1 note), and,
+///   as in FRR, so does a present all-zero MAC. Label is the raw 3-octet
+///   field, so a non-zero VNI (RFC 8365) never matches.
 ///
 /// Needs the UPDATE's extended communities, so it runs in the revised UPDATE
 /// parser, not in [`validate_evpn_announcements`]. Announcements only.
-pub(crate) fn validate_type5_has_overlay_or_label(
+pub(crate) fn validate_type5_router_mac(
     routes: &[EvpnRoute],
     extended_communities: &[crate::ExtendedCommunity],
 ) -> Result<(), DecodeError> {
     let router_mac = extended_communities
         .iter()
-        .find_map(|community| community.as_router_mac());
-    if router_mac.is_none_or(|mac| mac == [0; 6])
+        .find_map(|community| community.as_router_mac())
+        .unwrap_or([0; 6]);
+    // The I/G bit marks a group address; broadcast has it set too.
+    let detail = if router_mac[0] & 0x01 != 0
+        && routes
+            .iter()
+            .any(|route| matches!(route, EvpnRoute::IpPrefix(_)))
+    {
+        "EVPN Type 5 route with a multicast or broadcast Router's MAC (RFC 9136 §3.2)"
+    } else if router_mac == [0; 6]
         && routes.iter().any(|route| {
             matches!(route, EvpnRoute::IpPrefix(r)
                 if r.esi.is_zero() && r.gateway.is_unspecified() && r.label.value() == 0)
         })
     {
-        return Err(DecodeError::MalformedField {
-            message_type: "UPDATE",
-            detail: "EVPN Type 5 route with zero ESI, gateway IP, Router's MAC and label \
-                     (RFC 9136 §3.2)"
-                .into(),
-        });
-    }
-    Ok(())
+        "EVPN Type 5 route with zero ESI, gateway IP, Router's MAC and label (RFC 9136 §3.2)"
+    } else {
+        return Ok(());
+    };
+    Err(DecodeError::MalformedField {
+        message_type: "UPDATE",
+        detail: detail.into(),
+    })
 }
 
 // ---------------------------------------------------------------------------

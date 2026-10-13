@@ -1371,8 +1371,9 @@ pub(crate) fn decode_path_attributes_revised_observed(
             }
         }
     }
-    // RFC 9136 §3.2 all-zero Type 5: the Router's MAC Extended Community may
-    // follow MP_REACH_NLRI, so check once every attribute is decoded. Like
+    // RFC 9136 §3.2 Type 5 Router's MAC rules: the Router's MAC Extended
+    // Community may follow MP_REACH_NLRI, so check once every attribute is
+    // decoded. Like
     // the per-attribute EVPN checks above, the routes stay extractable for
     // the UPDATE-wide withdrawal; skip if MP_REACH is already reported.
     if !malformed
@@ -1381,7 +1382,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
         && let Some(PathAttribute::MpReachNlri(mp)) = attrs
             .iter()
             .find(|attr| matches!(attr, PathAttribute::MpReachNlri(_)))
-        && let Err(error) = crate::evpn::validate_type5_has_overlay_or_label(
+        && let Err(error) = crate::evpn::validate_type5_router_mac(
             &mp.evpn_announced,
             attrs
                 .iter()

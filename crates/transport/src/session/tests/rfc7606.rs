@@ -517,6 +517,85 @@ async fn type5_all_zero_overlay_and_label_is_treat_as_withdraw() {
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
 
+/// RFC 9136 Table 1 note: a Router's MAC that is not a valid MAC, such as
+/// broadcast or multicast, "MUST be treat as withdraw", whatever the Type 5's
+/// ESI, GW IP or label. A unicast Router's MAC, globally or locally
+/// administered, is accepted, and the note does not reach a Type 2. The
+/// invalid UPDATE withdraws the previously accepted Type 5 and its sibling;
+/// the session stays up.
+#[tokio::test]
+async fn type5_invalid_router_mac_is_treat_as_withdraw() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+    negotiated
+        .negotiated_families
+        .push((Afi::L2Vpn, Safi::Evpn));
+    session.negotiated = Some(Arc::new(negotiated));
+    rfc7606_drain(&mut rib_rx);
+    let type5 = EvpnRoute::IpPrefix(rustbgpd_wire::EvpnIpPrefixRoute {
+        rd: "65000:100".parse().unwrap(),
+        esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: rustbgpd_wire::EthernetTagId(0),
+        prefix: rustbgpd_wire::EvpnIpPrefixValue::V4(Ipv4Prefix::new(
+            Ipv4Addr::new(10, 0, 0, 0),
+            24,
+        )),
+        gateway: "0.0.0.0".parse().unwrap(),
+        label: rustbgpd_wire::MplsLabel::new(100),
+    });
+    let sibling = evpn_test_macip([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    // EXTENDED_COMMUNITIES carrying the given Router's MAC.
+    let router_mac = |update: UpdateMessage, mac: [u8; 6]| {
+        let mut attrs = update.path_attributes.to_vec();
+        attrs.extend([0xc0, 16, 8, 0x06, 0x03]);
+        attrs.extend(mac);
+        UpdateMessage {
+            path_attributes: Bytes::from(attrs),
+            ..update
+        }
+    };
+
+    for mac in [[0x02, 0, 0, 0, 0, 1], [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]] {
+        let update = smet_update(vec![type5.clone(), sibling.clone()]);
+        session.process_update(router_mac(update, mac)).await;
+        let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("unicast Router's MAC announcement")
+        };
+        assert_eq!(evpn_announced.len(), 2);
+    }
+    let update = smet_update(vec![sibling.clone()]);
+    session.process_update(router_mac(update, [0xff; 6])).await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("Type 2 announcement")
+    };
+    assert_eq!(evpn_announced.len(), 1);
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 0);
+
+    let update = smet_update(vec![type5.clone(), sibling.clone()]);
+    session
+        .process_update(router_mac(update, [0x01, 0x00, 0x5e, 0, 0, 1]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        mut evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("UPDATE-wide withdrawal")
+    };
+    assert!(evpn_announced.is_empty());
+    evpn_withdrawn.sort();
+    let mut expected = vec![type5.key(), sibling.key()];
+    expected.sort();
+    assert_eq!(evpn_withdrawn, expected);
+    assert!(session.known_evpn.is_empty());
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
 #[tokio::test]
 async fn smet_noncanonical_payload_resets_session_in_both_directions() {
     for withdrawn in [false, true] {

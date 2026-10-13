@@ -1255,8 +1255,20 @@ mod tests {
     /// community may precede or follow `MP_REACH_NLRI`. A non-zero Router's
     /// MAC or any non-zero label octet (a VNI per RFC 8365) is accepted, and
     /// a withdrawal decodes normally. Both address families.
+    ///
+    /// RFC 9136 Table 1 note: "The route MUST be treat as withdraw in case of
+    /// an invalid MAC address", such as a broadcast or multicast Router's
+    /// MAC. That applies to every Type 5 announcement, whatever its ESI, GW
+    /// IP and label; a unicast MAC, globally or locally administered, is
+    /// accepted. Only the first Router's MAC counts (RFC 9135 §8.1), and the
+    /// note does not reach a Type 2.
     #[test]
-    fn parse_revised_type5_all_zero_overlay_and_label_is_treat_as_withdraw() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one byte-level matrix pins both Router's MAC rules across families, \
+                  overlay indexes, labels and attribute order"
+    )]
+    fn parse_revised_type5_zero_or_invalid_router_mac_is_treat_as_withdraw() {
         const RMAC: [u8; 2] = [0x06, 0x03];
         const ROUTE_TARGET: [u8; 8] = [0x00, 0x02, 0xfd, 0xe8, 0, 0, 0, 100];
         let mut v4 = vec![5, 34];
@@ -1274,7 +1286,12 @@ mod tests {
             attr.extend(communities.concat());
             attr
         };
-        let rmac = |mac: [u8; 6]| [RMAC.as_slice(), mac.as_slice()].concat();
+        let rmac = |mac: [u8; 6]| -> [u8; 8] {
+            [RMAC.as_slice(), mac.as_slice()]
+                .concat()
+                .try_into()
+                .unwrap()
+        };
         let with = |msg: UpdateMessage, attr: &[u8], before: bool| {
             let mp = msg.path_attributes.to_vec();
             let attrs = if before {
@@ -1290,7 +1307,7 @@ mod tests {
         let assert_withdraw = |msg: &UpdateMessage| {
             let parsed = msg
                 .parse_revised(true, false, false, &[])
-                .expect("all-zero Type 5 must not be session-reset");
+                .expect("Type 5 Router's MAC rules must not be session-reset");
             assert_eq!(parsed.malformed.len(), 1, "{:?}", parsed.malformed);
             assert_eq!(parsed.malformed[0].type_code, 14);
             assert_eq!(
@@ -1312,18 +1329,16 @@ mod tests {
             let parsed = msg.parse_revised(true, false, false, &[]).unwrap();
             assert_eq!(parsed.malformed, Vec::new());
         };
+        let broadcast = ext(&[ROUTE_TARGET, rmac([0xff; 6])]);
         for type5 in [v4, v6] {
             let label_at = type5.len() - 3;
             assert_withdraw(&evpn_update(true, &type5));
             for before in [true, false] {
-                let zero_rmac = ext(&[ROUTE_TARGET, rmac([0; 6]).try_into().unwrap()]);
+                let zero_rmac = ext(&[ROUTE_TARGET, rmac([0; 6])]);
                 assert_withdraw(&with(evpn_update(true, &type5), &zero_rmac, before));
                 let rt_only = ext(&[ROUTE_TARGET]);
                 assert_withdraw(&with(evpn_update(true, &type5), &rt_only, before));
-                let rmac_set = ext(&[
-                    ROUTE_TARGET,
-                    rmac([0x02, 0, 0, 0, 0, 1]).try_into().unwrap(),
-                ]);
+                let rmac_set = ext(&[ROUTE_TARGET, rmac([0x02, 0, 0, 0, 0, 1])]);
                 assert_clean(&with(evpn_update(true, &type5), &rmac_set, before));
             }
             for label in [[0, 0, 1], [0, 0x06, 0x40], [1, 0, 0]] {
@@ -1332,7 +1347,36 @@ mod tests {
                 assert_clean(&evpn_update(true, &labelled));
             }
             assert_clean(&evpn_update(false, &type5));
+
+            let mut labelled = type5.clone();
+            labelled[label_at..].copy_from_slice(&[0, 0x06, 0x40]);
+            let mut esi = labelled.clone();
+            esi[19] = 1; // ESI type 0, non-zero value
+            for route in [&type5, &labelled, &esi] {
+                for before in [true, false] {
+                    for mac in [
+                        [0xff; 6],
+                        [0x01, 0x00, 0x5e, 0, 0, 1],
+                        [0x33, 0x33, 0, 0, 0, 1],
+                        [0x03, 0, 0, 0, 0, 1], // locally administered multicast
+                    ] {
+                        let invalid = ext(&[ROUTE_TARGET, rmac(mac)]);
+                        assert_withdraw(&with(evpn_update(true, route), &invalid, before));
+                    }
+                    for mac in [
+                        [0x02, 0, 0, 0, 0, 1], // locally administered unicast
+                        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+                    ] {
+                        let unicast = ext(&[ROUTE_TARGET, rmac(mac)]);
+                        assert_clean(&with(evpn_update(true, route), &unicast, before));
+                    }
+                }
+            }
+            let first_unicast = ext(&[rmac([0x02, 0, 0, 0, 0, 1]), rmac([0xff; 6])]);
+            assert_clean(&with(evpn_update(true, &labelled), &first_unicast, false));
+            assert_clean(&with(evpn_update(false, &labelled), &broadcast, false));
         }
+        assert_clean(&with(evpn_update(true, &type2(48)), &broadcast, false));
     }
 
     #[test]
