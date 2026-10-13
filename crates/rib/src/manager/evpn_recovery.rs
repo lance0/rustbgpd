@@ -145,8 +145,9 @@ impl RibManager {
             Ok(true) => {}
         }
         let readiness = self.replacement_readiness.clone();
-        let mut checkpoint =
-            || super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", false);
+        let checkpoint = std::cell::RefCell::new(|| {
+            super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", false);
+        });
         let captured = if private {
             capture_admitted_keys(
                 &mut self.evpn_recovery,
@@ -156,14 +157,14 @@ impl RibManager {
                     .into_iter()
                     .flat_map(crate::adj_rib_out::AdjRibOut::iter_evpn)
                     .map(EvpnRibRoute::key),
-                &mut checkpoint,
+                &mut || checkpoint.borrow_mut()(),
             )
         } else {
             let group = &self.group_ribs[&gid];
             // A synthetic flag cannot make an incomplete ownership transfer
             // authoritative: private bodies or missing received metadata mean
             // the old shared projection is unknown, not an empty admission.
-            group.evpn_projection_complete()
+            group.evpn_projection_complete_with_checkpoint(&mut || checkpoint.borrow_mut()())
                 && self
                     .adj_ribs_out
                     .get(&peer)
@@ -172,14 +173,15 @@ impl RibManager {
                     &mut self.evpn_recovery,
                     handle,
                     group
-                        .evpn_member_projection(
+                        .evpn_member_projection_with_checkpoint(
                             peer,
                             self.cluster_id,
                             self.peer_rt_membership.get(&peer),
                             self.peer_unexportable.get(&peer),
+                            || checkpoint.borrow_mut()(),
                         )
                         .map(EvpnRibRoute::key),
-                    &mut checkpoint,
+                    &mut || checkpoint.borrow_mut()(),
                 )
         };
         if !captured {

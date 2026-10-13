@@ -5,7 +5,7 @@ use crate::manager::helpers::evpn_routes_equal;
 use crate::manager::update_groups::{EvpnGroupStageOutput, emit_evpn_group_deltas_for_member};
 use crate::update::ExactExportKey;
 
-fn fixture() -> (
+pub(super) fn fixture() -> (
     RibManager,
     IpAddr,
     usize,
@@ -51,7 +51,11 @@ fn register(manager: &mut RibManager, peer: IpAddr, sender: mpsc::Sender<Outboun
     });
 }
 
-fn stage(manager: &mut RibManager, gid: usize, route: &EvpnRibRoute) -> EvpnGroupStageOutput {
+pub(super) fn stage(
+    manager: &mut RibManager,
+    gid: usize,
+    route: &EvpnRibRoute,
+) -> EvpnGroupStageOutput {
     manager
         .loc_rib
         .recompute_evpn(route.key(), [route].into_iter());
@@ -85,6 +89,48 @@ fn rt(value: u16) -> ExtendedCommunity {
     ExtendedCommunity::new(0x0002_FDE9_0000_0000 | u64::from(value))
 }
 
+fn private_events(
+    manager: &RibManager,
+    gid: usize,
+    key: rustbgpd_wire::EvpnRouteKey,
+    member: IpAddr,
+    private: &crate::adj_rib_out::AdjRibOut,
+    membership: Option<&RtcMembership>,
+) -> (Vec<EvpnRibRoute>, Vec<rustbgpd_wire::EvpnRouteKey>) {
+    let group = &manager.group_ribs[&gid];
+    let mut stats = NeighborPolicyStats::default();
+    let metrics = BgpMetrics::new();
+    let label = member.to_string();
+    let mut announce = Vec::new();
+    let mut withdraw = Vec::new();
+    RibManager::stage_evpn_routes(
+        &manager.loc_rib,
+        private,
+        &manager.peer_is_rr_client,
+        &HashSet::from([key]),
+        &mut crate::manager::distribution::ExportTarget::Peer {
+            peer: member,
+            peer_asn: Some(65000),
+            peer_group: None,
+            metrics: &metrics,
+            policy_stats: &mut stats,
+            peer_label: &label,
+        },
+        group.is_ebgp,
+        group.interpret_rfc1997,
+        group.is_rr_client,
+        manager.cluster_id,
+        Some(&group.sendable),
+        Some(&group.llgr),
+        group.export_chain.as_ref(),
+        membership,
+        &mut announce,
+        &mut withdraw,
+        false,
+    );
+    (announce, withdraw)
+}
+
 fn membership(value: u16) -> RtcMembership {
     RtcMembership {
         has_default: false,
@@ -92,7 +138,7 @@ fn membership(value: u16) -> RtcMembership {
     }
 }
 
-fn received(value: u16) -> EvpnRibRoute {
+pub(super) fn received(value: u16) -> EvpnRibRoute {
     let mut route = make_evpn_imet(Ipv4Addr::new(192, 0, 2, 10), 1);
     route.attributes = AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![rt(value)])]);
     route
@@ -368,6 +414,90 @@ fn first_full_capture_precedes_staging_and_survives_rtc_change_and_repeated_regr
 }
 
 #[test]
+fn rejected_metadata_only_update_matches_private_reprobe_and_delivery() {
+    let (mut manager, member, gid, mut output) = fixture();
+    assert!(manager.capture_shared_evpn_admitted(member));
+    let original = received(100);
+    let initial = stage(&mut manager, gid, &original);
+    let encoder = MockExactExportEncoder::accepting(1);
+    encoder.set_profile(2, [ExactExportKey::Evpn(original.key())]);
+    manager.peer_export_encoders.insert(member, encoder.clone());
+    assert!(manager.try_send_and_commit_outbound_update(
+        member,
+        OutboundCommitBatch {
+            evpn_announce: events(&manager, gid, &initial, member, None, None).0,
+            ..OutboundCommitBatch::default()
+        }
+    ));
+    while let Ok(update) = output.try_recv() {
+        assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
+    }
+    assert!(manager.peer_unexportable[&member].contains(&ExactExportKey::Evpn(original.key())));
+    assert!(
+        manager.adj_ribs_out[&member]
+            .get_evpn(&original.key())
+            .is_none()
+    );
+
+    let mut updated = original.clone();
+    updated.peer_router_id = Ipv4Addr::new(198, 51, 100, 10);
+    assert!(evpn_routes_equal(&original, &updated));
+    let staged = stage(&mut manager, gid, &updated);
+    let actual = events(
+        &manager,
+        gid,
+        &staged,
+        member,
+        None,
+        manager.peer_unexportable.get(&member),
+    );
+    let expected = private_events(
+        &manager,
+        gid,
+        updated.key(),
+        member,
+        &manager.adj_ribs_out[&member],
+        None,
+    );
+    assert_eq!(
+        expected.0.len(),
+        1,
+        "private admission has no old slot to suppress"
+    );
+    assert_eq!(actual.0.len(), expected.0.len());
+    assert!(evpn_routes_equal(&actual.0[0], &expected.0[0]));
+    assert_eq!(actual.0[0].peer_router_id, updated.peer_router_id);
+    assert_eq!(actual.1, expected.1);
+
+    encoder.set_profile(3, []);
+    assert!(manager.try_send_and_commit_outbound_update(
+        member,
+        OutboundCommitBatch {
+            evpn_announce: actual.0,
+            evpn_withdraw: actual.1,
+            ..OutboundCommitBatch::default()
+        }
+    ));
+    let admitted = output.try_recv().unwrap();
+    assert_eq!(admitted.evpn_announce.len(), 1);
+    assert_eq!(
+        admitted.evpn_announce[0].peer_router_id,
+        updated.peer_router_id
+    );
+    assert_eq!(
+        admitted.evpn_withdraw,
+        [] as [rustbgpd_wire::EvpnRouteKey; 0]
+    );
+    assert!(output.try_recv().is_err());
+    assert!(
+        manager
+            .peer_unexportable
+            .get(&member)
+            .is_none_or(|overlay| { !overlay.contains(&ExactExportKey::Evpn(updated.key())) })
+    );
+}
+
+#[test]
 fn private_capture_reads_only_actual_admitted_keys_without_settling_the_shared_feed() {
     let (mut manager, member, _gid, _output) = fixture();
     let old = received(100);
@@ -429,37 +559,8 @@ fn per_key_events_and_end_state_match_the_private_export_tail() {
     for route in [received(100), received(200), third.clone(), own, third] {
         let staged = stage(&mut manager, gid, &route);
         let actual = events(&manager, gid, &staged, member, Some(&filter), None);
-        let group = &manager.group_ribs[&gid];
-        let mut stats = NeighborPolicyStats::default();
-        let metrics = BgpMetrics::new();
-        let label = member.to_string();
-        let mut announce = Vec::new();
-        let mut withdraw = Vec::new();
-        RibManager::stage_evpn_routes(
-            &manager.loc_rib,
-            &private,
-            &manager.peer_is_rr_client,
-            &HashSet::from([route.key()]),
-            &mut crate::manager::distribution::ExportTarget::Peer {
-                peer: member,
-                peer_asn: Some(65000),
-                peer_group: None,
-                metrics: &metrics,
-                policy_stats: &mut stats,
-                peer_label: &label,
-            },
-            group.is_ebgp,
-            group.interpret_rfc1997,
-            group.is_rr_client,
-            manager.cluster_id,
-            Some(&group.sendable),
-            Some(&group.llgr),
-            group.export_chain.as_ref(),
-            Some(&filter),
-            &mut announce,
-            &mut withdraw,
-            false,
-        );
+        let (announce, withdraw) =
+            private_events(&manager, gid, route.key(), member, &private, Some(&filter));
         assert_eq!(
             actual.1, withdraw,
             "same-key withdrawals must match each pass"

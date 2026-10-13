@@ -2787,6 +2787,7 @@ impl GroupRibOut {
     }
 
     /// Borrow the admitted clean-member projection; RTC reads received input.
+    #[cfg(test)]
     pub(in crate::manager) fn evpn_member_projection<'a>(
         &'a self,
         member: IpAddr,
@@ -2794,19 +2795,60 @@ impl GroupRibOut {
         membership: Option<&'a RtcMembership>,
         rejected: Option<&'a HashSet<ExactExportKey>>,
     ) -> impl Iterator<Item = &'a EvpnRibRoute> + 'a {
-        self.table.iter_evpn().filter(move |route| {
-            self.evpn_inputs.get(&route.key()).is_some_and(|input| {
-                input.eligible(route, member, self, cluster_id, membership, rejected)
-            })
-        })
+        self.evpn_member_projection_with_checkpoint(member, cluster_id, membership, rejected, || {})
     }
 
+    /// Checkpoint every visited table row, including rows excluded by the
+    /// received-input, source, RTC or exact-rejection projection.
+    pub(in crate::manager) fn evpn_member_projection_with_checkpoint<'a>(
+        &'a self,
+        member: IpAddr,
+        cluster_id: Option<std::net::Ipv4Addr>,
+        membership: Option<&'a RtcMembership>,
+        rejected: Option<&'a HashSet<ExactExportKey>>,
+        mut checkpoint: impl FnMut() + 'a,
+    ) -> impl Iterator<Item = &'a EvpnRibRoute> + 'a {
+        self.table
+            .iter_evpn()
+            .inspect(move |_| checkpoint())
+            .filter(move |route| {
+                self.evpn_inputs.get(&route.key()).is_some_and(|input| {
+                    input.eligible(route, member, self, cluster_id, membership, rejected)
+                })
+            })
+    }
+
+    #[cfg(test)]
     pub(in crate::manager) fn evpn_projection_complete(&self) -> bool {
+        self.evpn_projection_complete_with_checkpoint(&mut || {})
+    }
+
+    pub(in crate::manager) fn evpn_projection_complete_with_checkpoint(
+        &self,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
         self.table.evpn_len() == self.evpn_inputs.len()
             && self
                 .table
                 .iter_evpn()
+                .inspect(|_| checkpoint())
                 .all(|route| self.evpn_inputs.contains_key(&route.key()))
+    }
+
+    /// This pass replaces its keys' denial records without skipping readiness
+    /// while inspecting retained rows or inserting new denials.
+    pub(in crate::manager) fn replace_evpn_denials_with_checkpoint(
+        &mut self,
+        keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        denials: impl IntoIterator<Item = (rustbgpd_wire::EvpnRouteKey, VpnDenialRecord)>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        self.evpn_policy_denied.retain(|key, _| {
+            checkpoint();
+            !keys.contains(key)
+        });
+        self.evpn_policy_denied
+            .extend(denials.into_iter().inspect(|_| checkpoint()));
     }
 
     pub(in crate::manager) fn apply_evpn_delta(&mut self, delta: &EvpnGroupDelta) {

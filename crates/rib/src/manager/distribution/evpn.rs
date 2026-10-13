@@ -987,10 +987,7 @@ impl RibManager {
             checkpoint();
             group.apply_evpn_delta(delta);
         }
-        group
-            .evpn_policy_denied
-            .retain(|key, _| !keys.contains(key));
-        group.evpn_policy_denied.extend(denials);
+        group.replace_evpn_denials_with_checkpoint(keys, denials, &mut checkpoint);
         out
     }
 }
