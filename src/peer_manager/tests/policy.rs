@@ -2669,7 +2669,8 @@ async fn local_revalidation_refreshes_only_incomplete_sessions() {
 /// An import change whose Route Refresh failed leaves `pending_refresh` set:
 /// routes already received were never re-evaluated under the new chain, so
 /// the session's retained input is not authoritative for it. A later cache
-/// delta must fall back to Route Refresh instead of answering locally.
+/// delta must fall back to Route Refresh instead of answering locally. That
+/// full refresh discharges the unfired one, so the next delta is local again.
 #[tokio::test]
 async fn local_revalidation_refreshes_a_peer_with_an_unfired_policy_refresh() {
     use rustbgpd_transport::{ImportRevalidation, PeerCommandError};
@@ -2743,5 +2744,18 @@ async fn local_revalidation_refreshes_a_peer_with_an_unfired_policy_refresh() {
         "the delta falls back to Route Refresh for every family"
     );
     assert_validation_import_refresh_metric(&mgr, "rpki", "revalidated_locally", 0.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "fallback_refresh", 1.0);
+    assert!(!mgr.peers[&key(addr)].pending_refresh);
+
+    mgr.revalidate_import_validation_dependents(rustbgpd_transport::ValidationDelta::Rpki(None))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *refreshed.lock().unwrap(),
+        mgr.peers[&key(addr)].transport_config.peer.families,
+        "the second delta sends no ROUTE-REFRESH"
+    );
+    assert_validation_import_refresh_metric(&mgr, "rpki", "revalidated_locally", 1.0);
     assert_validation_import_refresh_metric(&mgr, "rpki", "fallback_refresh", 1.0);
 }

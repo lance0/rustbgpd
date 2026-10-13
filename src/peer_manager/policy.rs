@@ -2935,11 +2935,20 @@ impl PeerManager {
                     Vec::new()
                 }
             };
+            // An empty list refreshes every negotiated family: like the
+            // import-policy path, an acknowledged full refresh discharges an
+            // unfired policy refresh, so later deltas answer locally again.
+            let full = refresh_families.is_empty();
             match self
                 .refresh_validation_dependent(peer_key, refresh_families, dependency)
                 .await
             {
-                Ok(()) => refreshed += 1,
+                Ok(()) => {
+                    refreshed += 1;
+                    if full && let Some(managed) = self.peers.get_mut(peer_key) {
+                        managed.pending_refresh = false;
+                    }
+                }
                 Err(error) => failures.push(error),
             }
         }
