@@ -248,6 +248,26 @@ pub mod settlement_test_control {
             .map(|control| control.settings.budget)
     }
 
+    /// Log how late an owner observed its expired pre-effect deadline.
+    ///
+    /// Two wall clocks bound a stalled pre-effect wait: the owner's timer
+    /// at the pre-effect deadline, and the watchdog at the budget. A host
+    /// stall across both lets the watchdog fence first, which is correct.
+    /// Observed lateness of at least the pre-effect margin proves the budget
+    /// had expired before the owner could act. Without it, a fence means the
+    /// pre-effect deadline was not honoured.
+    pub fn pre_effect_deadline_observed(late: Duration) {
+        if ControlDirectory::from_environment(false)
+            .unwrap_or_else(|error| panic!("settlement_test_control error: {error}"))
+            .is_some()
+        {
+            tracing::info!(
+                late_ms = u64::try_from(late.as_millis()).unwrap_or(u64::MAX),
+                "settlement test control: pre-effect deadline observed"
+            );
+        }
+    }
+
     pub async fn hold(checkpoint: Checkpoint) {
         let Some(control) = ControlDirectory::from_environment(false)
             .unwrap_or_else(|error| panic!("settlement_test_control error: {error}"))
@@ -636,7 +656,16 @@ pub async fn before_pre_effect_deadline<F: std::future::Future>(
     wait: F,
 ) -> Option<F::Output> {
     match deadline {
-        Some(deadline) => tokio::time::timeout_at(deadline, wait).await.ok(),
+        Some(deadline) => {
+            let result = tokio::time::timeout_at(deadline, wait).await.ok();
+            #[cfg(debug_assertions)]
+            if result.is_none() {
+                settlement_test_control::pre_effect_deadline_observed(
+                    tokio::time::Instant::now().saturating_duration_since(deadline),
+                );
+            }
+            result
+        }
         None => Some(wait.await),
     }
 }
