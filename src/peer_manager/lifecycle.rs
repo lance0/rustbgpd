@@ -2042,9 +2042,14 @@ impl PeerManager {
             // `PeerDown`, so the RIB manager reaps again *after* its
             // own teardown emissions instead of racing them. Send
             // failure means the RIB manager is gone (daemon shutdown).
+            // Reads stay queued: the caller's removal is only partly applied.
             let _ = self
-                .rib_tx
-                .send(RibUpdate::PeerDeleted { peer: address })
+                .send_rib_update(
+                    RibUpdate::PeerDeleted { peer: address },
+                    OperatorReadAdmission::Fenced {
+                        reason: "the peer removal is partly applied",
+                    },
+                )
                 .await;
         }
     }

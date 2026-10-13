@@ -1885,15 +1885,19 @@ impl PeerManager {
             .collect();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.operator_read_seam = super::OperatorReadSeam::ForwardTransition;
+        // Admission to a full RIB lane serves reads on the same terms as the
+        // transition's reply wait below.
         let send_result = self
-            .rib_tx
-            .send(RibUpdate::ReplacePeerExportPolicies {
-                replacements: replacements.clone(),
-                reply: reply_tx,
-            })
+            .send_rib_update(
+                RibUpdate::ReplacePeerExportPolicies {
+                    replacements: replacements.clone(),
+                    reply: reply_tx,
+                },
+                context.operator_reads,
+            )
             .await;
         let cohort_result = match send_result {
-            Err(_) => Err("RIB manager unavailable".to_string()),
+            Err(()) => Err("RIB manager unavailable".to_string()),
             Ok(()) => {
                 self.await_export_policy_cohort_rib_reply(reply_rx, context.operator_reads)
                     .await
@@ -2092,13 +2096,20 @@ impl PeerManager {
     /// after the cohort failed before its transition committed. The RIB only
     /// removes a memberless group, so a race with a committed transition is
     /// harmless — callers still restrict this to pre-commit failure paths.
-    async fn discard_prepared_export_destination(&self, target: &ResolvedPeerPolicy) {
+    /// Reads stay queued while a full RIB lane holds the send: the cohort's
+    /// transition did not commit, and the caller is unwinding it or falling
+    /// back to per-peer applies.
+    async fn discard_prepared_export_destination(&mut self, target: &ResolvedPeerPolicy) {
         let _ = self
-            .rib_tx
-            .send(RibUpdate::DiscardPreparedExportPolicyDestination {
-                peer: target.address,
-                export_policy: target.export_policy.clone(),
-            })
+            .send_rib_update(
+                RibUpdate::DiscardPreparedExportPolicyDestination {
+                    peer: target.address,
+                    export_policy: target.export_policy.clone(),
+                },
+                OperatorReadAdmission::Fenced {
+                    reason: "the cohort transition did not commit",
+                },
+            )
             .await;
     }
 
