@@ -634,5 +634,52 @@ class HostLoopTests(unittest.TestCase):
         self.assertEqual([call.args[0][-1] for call in run.call_args_list], ['stop', 'stop'])
 
 
+def bond_report(ports, ceb_mii='up', ceb_aggregator=1, ceb_state=63):
+    """A trimmed Linux 7.0 /proc/net/bonding/bond0 report from the M121 CE."""
+    def slave(name, mii, aggregator, state):
+        return (f'Slave Interface: {name}\nMII Status: {mii}\nSpeed: 10000 Mbps\nAggregator ID: {aggregator}\n'
+                f'details actor lacp pdu:\n    port key: 15\n    port state: {state}\n'
+                'details partner lacp pdu:\n    oper key: 15\n    port state: 63\n')
+    return ('Bonding Mode: IEEE 802.3ad Dynamic link aggregation\nMII Status: up\n\n802.3ad info\n'
+            f'Active Aggregator Info:\n\tAggregator ID: 1\n\tNumber of ports: {ports}\n\tActor Key: 15\n\n'
+            + slave('cea', 'up', 1, 63) + '\n' + slave('ceb', ceb_mii, ceb_aggregator, ceb_state))
+
+
+class CoreIsolationTests(unittest.TestCase):
+    def test_member_in_the_active_aggregator(self):
+        report = bond_report(2)
+        self.assertTrue(driver.bond_member_active(report, 'ceb'))
+        self.assertEqual(driver.aggregator_ports(report), 2)
+
+    def test_removed_member_is_not_active(self):
+        # Observed on the CE after rustbgpd's admin-down: carrier lost, actor state unchanged.
+        report = bond_report(1, ceb_mii='down')
+        self.assertFalse(driver.bond_member_active(report, 'ceb'))
+        self.assertTrue(driver.bond_member_active(report, 'cea'))
+        self.assertEqual(driver.aggregator_ports(report), 1)
+
+    def test_other_aggregator_or_no_distributing_is_not_active(self):
+        self.assertFalse(driver.bond_member_active(bond_report(1, ceb_aggregator=2), 'ceb'))
+        self.assertFalse(driver.bond_member_active(bond_report(2, ceb_state=15), 'ceb'))
+
+    def test_unknown_member_fails(self):
+        with self.assertRaises(AssertionError):
+            driver.bond_member_active(bond_report(2), 'cec')
+
+    def test_held_requires_kernel_admin_down_and_ce_removal(self):
+        sample = dict(rust_member_admin_up=False, ce_ceb_active=False, ce_aggregator_ports=1)
+        self.assertTrue(driver.held(sample))
+        for key, value in [('rust_member_admin_up', True), ('ce_ceb_active', True), ('ce_aggregator_ports', 2)]:
+            with self.subTest(key=key):
+                self.assertFalse(driver.held({**sample, key: value}))
+
+    def test_core_isolation_config_uses_the_adr_defaults(self):
+        template = (Path(__file__).resolve().parents[1] / 'configs/rustbgpd-m121-pe.toml').read_text()
+        config = tomllib.loads(driver.render_config(template, 'core-isolation'))
+        self.assertEqual(config['evpn_core_isolation'], dict(enabled=True, uplinks=['ul']))
+        self.assertEqual({n['hold_time'] for n in config['neighbors']}, {9})
+        self.assertNotIn('evpn_core_isolation', tomllib.loads(driver.render_config(template, 'frr-df')))
+
+
 if __name__ == '__main__':
     unittest.main()

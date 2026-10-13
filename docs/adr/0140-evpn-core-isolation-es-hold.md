@@ -4,7 +4,9 @@
 [Decisions](#decisions). Implemented: `[evpn_core_isolation]`, the hold
 controller, the ownership receipt, the `--release-core-isolation` helper and
 the observability surface, with unit and privileged netns evidence. The
-interop evidence in decision 8 is pending.
+M121 interop leg's core-isolation cell covers decision 8's underlay cut,
+recovery hold and restart against a Linux LACP CE beside FRR 10.7.1, as
+functional evidence; the transition-loss bound still needs a quiet host.
 **Date:** 2026-10-12
 
 ## Context
