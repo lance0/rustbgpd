@@ -2405,7 +2405,11 @@ impl PeerSession {
             })
             .cloned()
             .collect();
-        for (type_code, removed_occurrences) in discarded_type_codes {
+        // A local replay re-normalizes retained input; its discards were
+        // counted when the UPDATE was received.
+        for (type_code, removed_occurrences) in
+            discarded_type_codes.into_iter().filter(|_| from_wire)
+        {
             self.metrics.record_path_attribute_discarded(
                 &self.peer_label,
                 type_code,

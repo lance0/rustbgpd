@@ -679,3 +679,64 @@ async fn run_loop_answers_then_replays_queued_work() {
     assert!(next.is_err(), "unexpected message to the peer: {next:?}");
     actor.abort();
 }
+
+/// Replay re-runs attribute normalization on retained input, but the
+/// discards were counted once when the UPDATE was received.
+#[tokio::test]
+async fn replay_normalizes_discarded_attributes_without_recounting_them() {
+    let mut f = fixture_with(
+        vrps(vec![vrp(INVALID, 65099)]),
+        deny_invalid(true),
+        |config| {
+            config.discard_path_attributes = Arc::from([4]);
+        },
+    )
+    .await;
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: prefix(INVALID),
+        }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Med(4),
+            // RFC 7606 §7.9: discarded when received from an external peer.
+            PathAttribute::OriginatorId(Ipv4Addr::new(192, 0, 2, 9)),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    f.session.process_update(update).await;
+    assert_eq!(f.retained(INVALID), Some(false));
+    let counted = counter_samples(&f.session.metrics, "bgp_path_attribute_discarded_total");
+    assert_eq!(counted.len(), 2, "MED and ORIGINATOR_ID: {counted:?}");
+
+    f.revalidate(
+        vrps(vec![vrp(INVALID, 65099), vrp(INVALID, 65002)]),
+        ValidationDelta::Rpki(Some(Arc::from(vec![vrp(INVALID, 65002)]))),
+    )
+    .await;
+
+    let Ok(RibUpdate::RoutesReceived { announced, .. }) = f.rib_rx.try_recv() else {
+        panic!("the replay admits the route");
+    };
+    assert_eq!(announced.len(), 1);
+    assert!(
+        announced[0]
+            .attributes
+            .iter()
+            .all(|attr| !matches!(attr.type_code(), 4 | 9)),
+        "the replayed route excludes the discarded attributes"
+    );
+    assert_eq!(
+        counter_samples(&f.session.metrics, "bgp_path_attribute_discarded_total"),
+        counted,
+        "the replay does not count the received discards again"
+    );
+}
