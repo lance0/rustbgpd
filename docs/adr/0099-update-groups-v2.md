@@ -232,8 +232,9 @@ mode and the exact LLGR family set. The global cluster ID remains a shared
 reflection input; a change must invalidate affected staging/encoding through
 the existing reload and regroup seams.
 
-The member's address, router ID and RT membership do not enter the storage key.
-They select its view of the table. RD, MAC, ESI and VNI are route data, not group
+The member's address and RT membership do not enter the storage key; they select
+its view of the table. Router IDs remain metadata for existing reflection
+attribute preparation. RD, MAC, ESI and VNI are route data, not group
 dimensions. Transport encoding profiles form separate sharing cohorts; unequal
 wire forms must never split or corrupt the RIB's desired table.
 
@@ -317,23 +318,17 @@ to EVPN. Do not substitute blanket withdrawals of all nonmatching keys.
 
 ### D. Reflection and shared encoding
 
-Keep direct-source exclusion at member emit, the existing client/non-client RR
-matrix, and receive-side originator/own-cluster loop rejection. Also exclude an
-iBGP reflection recipient whose OPEN router ID matches the route's original
-`ORIGINATOR_ID` (or source router ID when absent), even if another RR supplied the
-route. Keep that router ID as generation-bound member eligibility, not a storage
-key. `ORIGINATOR_ID` is preserved when present; otherwise
+Keep today's EVPN eligibility: direct-source exclusion at member emit, the
+existing client/non-client RR matrix, and receive-side originator/own-cluster
+loop rejection. `ORIGINATOR_ID` is preserved when present; otherwise
 `apply_reflector_attributes` supplies the source router ID and prepends
 the local cluster ID once. There is no negotiated destination cluster ID to add
 to the key or to substitute into `CLUSTER_LIST`. These are the existing
 [RFC 4456 §§6, 8 and 10](https://www.rfc-editor.org/rfc/rfc4456.html#section-6)
-semantics. The current EVPN path excludes only the immediate source peer; a
-route supplied by RR-A with originator C can still be sent toward client C,
-which rejects it on receive. The stronger sender exclusion therefore
-requires a common-path correction, applied to both grouped and private EVPN
-staging **before** comparing them. This is an intentional eligibility correction,
-not proof of byte/event parity against the uncorrected historical path. It adds
-no destination-cluster rewrite or eBGP router-ID gate.
+semantics. A route supplied by RR-A with originator C can still be sent toward
+client C, which rejects it on receive. Grouping adds no sender-side originator
+exclusion; parity is against the current private path. Any additional sender-side
+rule needs a separate all-family decision.
 
 Prepare attributes through each receiver's `SessionExportProfile` before proving
 byte equivalence. For equivalent receivers the resulting RR attributes for a
@@ -349,7 +344,8 @@ guard, progressive publication and session cursor for EVPN; do not fork a second
 registry or producer lifecycle. Share bytes only for proven-equal prepared
 attributes, next-hop form and a common eligible NLRI subset. One usable cohort
 includes a single source, identical received-RT match input and identical original
-originator ID, so source, originator and RTC exclusion cannot select half a chunk.
+originator ID, preserving equal prepared reflection attributes; source and RTC
+exclusion cannot select half a chunk.
 Different subsets or wire forms use separate cohorts or ordinary encoding.
 Capture the member filter at queue admission; an
 encoder must not consult a later live Φ and reorder a membership transition.
@@ -375,7 +371,7 @@ A clean member's derived table view equals its admitted outbound state. Join
 replays only that view; a clean regroup snapshots the old member view and diffs
 it against the new one. Preserve old source/RTC inputs across that boundary.
 The admitted projection includes the existing `peer_unexportable` exact-export
-rejection overlay as well as source/originator/RTC eligibility. A desired entry
+rejection overlay as well as source/RR/RTC eligibility. A desired entry
 that fails this member's export probe is neither advertised nor retained for its
 resync; counts and pending-withdraw retention use this same admissible projection.
 When the last member leaves, retire the group and its shared metadata using the
@@ -405,10 +401,25 @@ member view does not contain the key. This targets the heal and also prevents
 a stale failed withdrawal from removing a newly eligible route.
 
 Do not discard this provenance during a dirty RTC change, repeated regroup or
-source flip. If it cannot be captured or retained within explicit resource bounds,
-isolate/reset that peer through the existing session recovery path rather than
-guessing withdrawals. Key sets are not route-body copies, but many dirty peers can
-still cost O(dirty members × routes); measure and report that transient envelope.
+source flip. The initial EVPN recovery key-provenance limits are **16 MiB per
+peer** and **256 MiB daemon-wide**, enforced together as internal admission caps.
+Charge reserved container capacity and metadata, including snapshot, regroup,
+retired and temporary resize copies; retain the charge until memory is freed.
+Reserve credits before allocation and recheck before growth, rather than limiting
+only the number of live keys. These are proposed resource ceilings, not measured
+safe route counts; qualify them on the quiet host before production activation.
+
+If capturing or growing provenance would exceed either cap, or allocation fails,
+request a generation-matched session reset through the existing recovery owner
+with reason `recovery_provenance_exhausted`; never continue with guessed
+withdrawals. Count each accepted reset request in a dedicated recovery-exhaustion
+counter, with a fixed cause vocabulary (`peer_limit`, `daemon_limit`,
+`allocation_failure`), and log one structured warning for that peer/generation
+with the cause, attempted byte charge and both caps. A stale-generation request
+must not reset its replacement. This is a session reset under resource pressure,
+not transparent recovery. Key sets are not route-body copies, but many dirty peers
+can still cost O(dirty members × routes); report retained/peak charges and reset
+counts alongside the transient envelope during qualification.
 
 Keep per-member admitted counts and key provenance; failed sends do not advance
 them. Existing page versions still invalidate conservatively on projection,
@@ -416,8 +427,9 @@ policy, Φ and lifecycle changes, including failed admission; do not add a secon
 version ledger. A dirty group projection must not be presented as the current
 advertised RIB. For grouped advertised reads, choose the family-query pattern of a
 same-actor `FAILED_PRECONDITION` guard until resync settles, rather than recreating
-private route bodies. This is an explicit operator-availability change requiring
-surface/fixture review in the implementation slice. Clean views, filters, paging,
+private route bodies. This availability tradeoff is accepted: report temporary
+unavailability rather than label desired state as admitted output. The
+implementation still needs surface/fixture review. Clean views, filters, paging,
 explain and BMP stat-17 use the same member projection and admitted counts. MRT
 Adj-RIB-In snapshots and BMP's successfully written UPDATE feed remain unchanged.
 
@@ -471,10 +483,17 @@ a failing test.
 After this amendment is reviewed and merged, implement in bounded slices with
 regressions that fail with the relevant change removed:
 
-1. Correct originator eligibility on the common private/group staging path,
-   with a red regression for a route received through another RR.
-   Extend the shared oracle and targeted recovery provenance under the contract
-   above; pin actual admitted views, dirty RTC changes and repeated regroup.
+The shared-oracle tightening in section F is a **separate v1 correctness slice**,
+tracked and reviewed independently of EVPN storage and encoding. It owns unknown
+withdrawals, tombstone over-withdraw, the folded-only promotion exemption and any
+shipped unicast/VPN defects that the stronger oracle exposes. Its own PRs and
+validation must settle those findings before EVPN production activation; do not
+bury them in an EVPN rollout commit or alter the parity contract to obtain green
+tests.
+
+1. Extend the reviewed recovery machinery for EVPN with the bounded key
+   provenance, counted/logged reset fallback and admitted views in section E;
+   pin dirty RTC changes, repeated regroup and limit/allocation-failure behavior.
 2. Add EVPN staging/storage/member views behind the existing grouping classifier,
    with Type 1–6 identities, source flips, pre-policy RT changes under modifying
    policy, GR/LLGR, eligibility and no-op suppression coverage.
