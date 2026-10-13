@@ -1456,4 +1456,5 @@ mod unicast_prefix_peers;
 mod update_groups;
 mod update_groups_fault_corpus;
 mod update_groups_oracle;
+mod update_groups_recovery;
 mod vpn;

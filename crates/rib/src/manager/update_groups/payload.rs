@@ -14,7 +14,7 @@ use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 
 /// One entry of a shared group staging pass: the new staged route (or a
 /// withdrawal) for a `(prefix, path_id)` key, plus the source peer of
-/// the entry it replaced — everything the source-flip matrix needs.
+/// the entry it replaced and prior slots for member-specific admission.
 #[derive(Debug, Clone)]
 pub(in crate::manager) struct GroupDelta {
     pub(in crate::manager) prefix: Prefix,
@@ -25,6 +25,9 @@ pub(in crate::manager) struct GroupDelta {
     /// Source peer of the group-table entry this delta replaces, read
     /// BEFORE commit. `None` = the key was not previously staged.
     pub(in crate::manager) old_source: Option<IpAddr>,
+    /// The old shared entry and exception lane, read before this pass commits.
+    /// Receivers resolve their actual prior slot for admission and equality.
+    pub(in crate::manager) prior: Option<Box<PriorGroupSlots>>,
     /// Decision attribution of the permitting evaluation (`None` = absent or
     /// empty chain). Retained on the staged entry so a later join can
     /// replay the member's export counters without re-running policy.
@@ -45,6 +48,58 @@ pub(in crate::manager) struct GroupDelta {
     /// for withdraw deltas (no winner ⇒ no runner-up), and for
     /// non-zero-path residue withdraws.
     pub(in crate::manager) lane: Option<RunnerUp>,
+}
+
+/// Prior advertised slots retained only for a changed group key's delta.
+#[derive(Debug, Clone)]
+pub(in crate::manager) struct PriorGroupSlots {
+    pub(super) route: Route,
+    pub(super) nh: Option<NextHopAction>,
+    pub(super) source_attrs: Option<Arc<AttrSet>>,
+    pub(super) lane: Option<RunnerUp>,
+}
+
+impl PriorGroupSlots {
+    pub(super) fn capture(
+        group: &GroupRibOut,
+        prefix: Prefix,
+        path_id: u32,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Option<Box<Self>> {
+        let route = group.table.get(&prefix, path_id)?;
+        checkpoint(true);
+        let prior = Box::new(Self {
+            route: route.clone(),
+            nh: group.nh_override((prefix, path_id)),
+            source_attrs: if group.source_control_passthrough {
+                capture_source_attrs(route)
+            } else {
+                group.source_attrs.get(&(prefix, path_id)).cloned()
+            },
+            lane: (group.per_client_best && path_id == 0)
+                .then(|| group.runner_up.get(&prefix).cloned())
+                .flatten(),
+        });
+        checkpoint(true);
+        Some(prior)
+    }
+
+    pub(in crate::manager) fn adv_entry(&self, member: IpAddr) -> Option<AdvEntry<'_>> {
+        if self.route.peer != member {
+            return Some(AdvEntry {
+                route: &self.route,
+                nh: self.nh.as_ref(),
+                source_attrs: self.source_attrs.as_ref(),
+                policy_label: None,
+            });
+        }
+        self.lane.as_ref().map(|entry| AdvEntry {
+            route: &entry.route,
+            nh: entry.nh.as_ref(),
+            source_attrs: entry.source_attrs.as_ref(),
+            policy_label: entry.policy_label.as_ref(),
+        })
+    }
 }
 
 /// Capture a source route's attributes for RFC 7947 decisions at the
@@ -81,6 +136,7 @@ pub(in crate::manager) struct RunnerUp {
 /// fetches alongside it. Borrowed from the group: either the staged
 /// table entry with its table residue, or the exception-lane
 /// runner-up substituting for it with the lane's own payload.
+#[derive(Clone, Copy)]
 pub(in crate::manager) struct AdvEntry<'a> {
     pub(in crate::manager) route: &'a Route,
     /// Next-hop-override residue for the slot.
@@ -108,6 +164,8 @@ pub(in crate::manager) struct AdvEntry<'a> {
 pub(in crate::manager) struct LaneDelta {
     pub(in crate::manager) prefix: Prefix,
     pub(in crate::manager) new: Option<RunnerUp>,
+    /// The replaced lane slot, before this pass commits its desired view.
+    pub(in crate::manager) prior: Option<RunnerUp>,
     pub(in crate::manager) old_source: Option<IpAddr>,
     /// The ONE member this transition emits toward, resolved at
     /// staging time (every Decision 5 lane arm is member-scoped
@@ -351,6 +409,7 @@ pub(in crate::manager) struct GroupStageOutput {
     pub(in crate::manager) lane_deltas: Vec<LaneDelta>,
     /// Members whose emission differs from the shared one: the new
     /// source of an announce delta (announce → substitution/withdraw),
+    /// the former PCB winner source (compare its prior substitution),
     /// the old source of a withdraw delta (withdraw → skip/lane
     /// withdraw), or a consumed lane transition's `emit_target`
     /// (member-scoped emission the shared payload does not carry).
@@ -537,6 +596,12 @@ impl GroupStageOutput {
             checkpoint(false);
             if let Some((route, flag)) = &delta.new {
                 self.exceptions.insert(route.peer);
+                if let Some(prior) = &delta.prior
+                    && prior.route.peer != route.peer
+                {
+                    self.exceptions.insert(prior.route.peer);
+                    self.source_exclusion_unsafe.insert(prior.route.peer);
+                }
                 if delta.old_source.is_some() || delta.lane.is_some() {
                     self.source_exclusion_unsafe.insert(route.peer);
                 }
@@ -555,9 +620,8 @@ impl GroupStageOutput {
         // the shared payload carries nothing for it, so the target
         // must take the per-member walk (ADR-0126 Decision 5). A
         // superseded transition (`emit_target` = None) needs no entry:
-        // its target is either the winner announce's `route.peer`
-        // (inserted above) or exactly served by the shared payload
-        // (the flip-away arm announces `w'` to it).
+        // its target is either winner source (inserted above), whose
+        // matrix resolves the old/new slots, or is served by the shared payload.
         for delta in &self.lane_deltas {
             checkpoint(false);
             if let Some(target) = delta.emit_target {
@@ -949,6 +1013,21 @@ pub(in crate::manager) fn emit_group_deltas_for_member_with_checkpoint(
         checkpoint();
         match &delta.new {
             Some((route, nh)) => {
+                if let Some(prior) = &delta.prior
+                    && prior.route.peer != route.peer
+                    && (prior.route.peer == member || route.peer == member)
+                {
+                    emit_pcb_source_flip(
+                        delta,
+                        prior,
+                        member,
+                        rs_control,
+                        announce,
+                        withdraw,
+                        nh_override_flags,
+                    );
+                    continue;
+                }
                 let (source_communities, source_large_communities) =
                     source_control_input(delta.source_attrs.as_ref());
                 if route.peer == member {
@@ -1027,6 +1106,67 @@ pub(in crate::manager) fn emit_group_deltas_for_member_with_checkpoint(
             }
         }
     }
+}
+
+fn emit_pcb_source_flip(
+    delta: &GroupDelta,
+    prior: &PriorGroupSlots,
+    member: IpAddr,
+    rs_control: Option<(u32, u32)>,
+    announce: &mut Vec<Route>,
+    withdraw: &mut Vec<(Prefix, u32)>,
+    nh_override_flags: &mut Vec<Option<NextHopAction>>,
+) {
+    let Some((route, nh)) = &delta.new else {
+        return;
+    };
+    let old = prior
+        .adv_entry(member)
+        .and_then(|entry| prepare_pcb_slot(entry, rs_control));
+    let new = if route.peer == member {
+        delta.lane.as_ref().map(|entry| AdvEntry {
+            route: &entry.route,
+            nh: entry.nh.as_ref(),
+            source_attrs: entry.source_attrs.as_ref(),
+            policy_label: entry.policy_label.as_ref(),
+        })
+    } else {
+        Some(AdvEntry {
+            route,
+            nh: nh.as_ref(),
+            source_attrs: delta.source_attrs.as_ref(),
+            policy_label: delta.policy_label.as_ref(),
+        })
+    }
+    .and_then(|entry| prepare_pcb_slot(entry, rs_control));
+    match new {
+        Some((new, nh))
+            if old
+                .as_ref()
+                .is_none_or(|(old, _)| !super::routes_equal(old, &new)) =>
+        {
+            nh_override_flags.push(nh);
+            announce.push(new);
+        }
+        None if old.is_some() => withdraw.push((delta.prefix, delta.path_id)),
+        _ => {}
+    }
+}
+
+fn prepare_pcb_slot(
+    entry: AdvEntry<'_>,
+    rs_control: Option<(u32, u32)>,
+) -> Option<(Route, Option<NextHopAction>)> {
+    use crate::manager::distribution::rs_control::{
+        rs_control_route_rewrite, rs_control_suppressed,
+    };
+    let (communities, large_communities) = source_control_input(entry.source_attrs);
+    if rs_control_suppressed(communities, large_communities, rs_control) {
+        return None;
+    }
+    let mut route = entry.route.clone();
+    rs_control_route_rewrite(&mut route, large_communities, rs_control);
+    Some((route, entry.nh.cloned()))
 }
 
 /// Per-member emit for a pass's exception-lane transitions (ADR-0126

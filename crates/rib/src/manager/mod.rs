@@ -1038,11 +1038,14 @@ pub struct RibManager {
     /// group-owned VPN — held until its one-shot resync diff succeeds.
     /// Transient — regroups are config-time events.
     pending_regroup_baseline: HashMap<IpAddr, update_groups::RegroupBaseline>,
-    /// Extra (over-)withdraw keys a member must emit on its next
-    /// resync: tombstones carried across a regroup by a member that was
-    /// dirty when it moved (its missed withdrawals are unknown —
-    /// over-withdraw is the safe direction). Cleared on resync success.
+    /// Candidate withdrawal keys carried across a dirty regroup; admission
+    /// intersects these with the member's actual admitted-key proof. Cleared
+    /// on resync success.
     pending_extra_withdraws: HashMap<IpAddr, update_groups::ExtraWithdraws>,
+    /// Actual admitted unicast/VPN keys while a member's shared desired view
+    /// can advance without delivery. Bounded by its admitted inventory, and
+    /// released after recovery; routes remain shared in the group table.
+    pending_group_admitted: HashMap<IpAddr, HashSet<crate::update::ExactExportKey>>,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
@@ -2093,6 +2096,7 @@ impl RibManager {
             group_ribs: HashMap::new(),
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
+            pending_group_admitted: HashMap::new(),
             #[cfg(test)]
             test_force_ungrouped: false,
             #[cfg(test)]
@@ -3853,6 +3857,10 @@ impl RibManager {
                 ));
             }
             #[cfg(test)]
+            RibUpdate::TestQueryPeerOutboundDirty { peer, reply } => {
+                let _ = reply.send(self.dirty_peers.contains(&peer));
+            }
+            #[cfg(test)]
             RibUpdate::TestQueryPolicyTransitionStats { reply } => {
                 let stats = self.policy_transition_stats;
                 let _ = reply.send((
@@ -4829,6 +4837,8 @@ impl RibManager {
             self.peer_rt_membership.remove(&peer);
             return;
         };
+        let captured_prior =
+            self.vpn_grouped_member_of(peer).is_some() && self.capture_group_admitted_keys(peer);
         self.peer_rt_membership.insert(peer, new.clone());
         if !self.outbound_peers.contains_key(&peer) {
             return;
@@ -4879,6 +4889,12 @@ impl RibManager {
         } else {
             self.mark_outbound_dirty(peer);
             self.distribute_changes(&HashSet::new(), &HashSet::new());
+        }
+        if captured_prior
+            && !self.dirty_peers.contains(&peer)
+            && !self.pending_regroup_baseline.contains_key(&peer)
+        {
+            self.release_group_admitted_keys(peer);
         }
     }
 

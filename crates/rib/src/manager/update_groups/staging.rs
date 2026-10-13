@@ -1,5 +1,6 @@
 use crate::manager::{replacement_readiness_checkpoint, retire_vec};
 
+use super::payload::PriorGroupSlots;
 use super::{
     GroupDelta, GroupRibOut, GroupStageOutput, HashMap, HashSet, IpAddr, LaneDelta, PolicyAction,
     PolicyChain, PolicyFilteredRouteKey, PolicyLabel, Prefix, RibManager, RunnerUp,
@@ -176,11 +177,16 @@ impl RibManager {
                         .drain(..)
                         .zip(per_client_best_result.next_hop_override.drain(..))
                     {
+                        let prior =
+                            PriorGroupSlots::capture(group, *prefix, route.path_id, &mut |force| {
+                                self.replacement_checkpoint(force);
+                            });
                         out.deltas.push(GroupDelta {
                             prefix: *prefix,
                             path_id: route.path_id,
                             new: Some((route, nh)),
                             old_source,
+                            prior,
                             policy_label: stage.winner_label.clone(),
                             source_attrs: stage.winner_source_attrs.clone(),
                             lane: stage.runner_up.clone(),
@@ -192,6 +198,9 @@ impl RibManager {
                             path_id,
                             new: None,
                             old_source,
+                            prior: PriorGroupSlots::capture(group, p, path_id, &mut |force| {
+                                self.replacement_checkpoint(force);
+                            }),
                             policy_label: None,
                             source_attrs: None,
                             lane: None,
@@ -280,6 +289,7 @@ impl RibManager {
                         out.lane_deltas.push(LaneDelta {
                             prefix: *prefix,
                             new: stage.runner_up.clone(),
+                            prior: prior.cloned(),
                             old_source: prior.map(|entry| entry.route.peer),
                             emit_target,
                             prior_source_attrs: prior.and_then(|entry| entry.source_attrs.clone()),
@@ -334,11 +344,16 @@ impl RibManager {
                     .drain(..)
                     .zip(result.next_hop_override.drain(..))
                 {
+                    let prior =
+                        PriorGroupSlots::capture(group, *prefix, route.path_id, &mut |force| {
+                            self.replacement_checkpoint(force);
+                        });
                     out.deltas.push(GroupDelta {
                         prefix: *prefix,
                         path_id: route.path_id,
                         new: Some((route, nh)),
                         old_source,
+                        prior,
                         policy_label: label.clone(),
                         source_attrs: source_attrs.clone(),
                         lane: None,
@@ -350,6 +365,9 @@ impl RibManager {
                         path_id,
                         new: None,
                         old_source,
+                        prior: PriorGroupSlots::capture(group, p, path_id, &mut |force| {
+                            self.replacement_checkpoint(force);
+                        }),
                         policy_label: None,
                         source_attrs: None,
                         lane: None,

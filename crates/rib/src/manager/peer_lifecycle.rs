@@ -787,6 +787,7 @@ impl RibManager {
         self.export_policy_stats.remove(&peer);
         self.pending_regroup_baseline.remove(&peer);
         self.pending_extra_withdraws.remove(&peer);
+        self.release_group_admitted_keys(peer);
         self.remove_update_group_member(peer);
         // The extra-withdraw drop above mutates residue even for a peer
         // whose membership removal doesn't touch a group.
@@ -1387,6 +1388,11 @@ impl RibManager {
         // it is over one. `recompute_update_group` above decided whether the
         // bounded member set or the private prefix index is authoritative.
         self.install_registration_outbound_limits(peer);
+        // A fresh session has admitted no route, even when its group table
+        // already contains routes learned from other peers.
+        if self.grouped_member_of(peer).is_some() {
+            self.pending_group_admitted.entry(peer).or_default();
+        }
         true
     }
 
@@ -1846,6 +1852,11 @@ impl RibManager {
         let metrics = self.metrics.clone();
 
         let member_of = self.grouped_member_of(peer);
+        if member_of.is_some() {
+            // Fresh registration retains its empty seed; an existing-session
+            // replay retains the actual current advertised baseline instead.
+            self.capture_group_admitted_keys(peer);
+        }
         let all_prefixes: HashSet<Prefix> =
             if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
                 self.grouped_join_prefix_scope(peer, group, &mut || {
@@ -2540,6 +2551,9 @@ impl RibManager {
             &all_prefixes,
             &current_policy_filtered_routes,
         );
+        if !self.dirty_peers.contains(&peer) {
+            self.release_group_admitted_keys(peer);
+        }
 
         // Send End-of-RIB markers for all sendable families
         if !eor_families.is_empty()

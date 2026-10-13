@@ -1,6 +1,6 @@
 use super::{
-    AdjRibOut, FastMap, GroupMembership, GroupRibOut, HashSet, IpAddr, PolicyChain,
-    RegroupBaseline, RibManager,
+    AdjRibOut, ExactExportKey, FastMap, GroupMembership, GroupRibOut, HashSet, IpAddr, PolicyChain,
+    RegroupBaseline, RibManager, VpnRibRouteKey,
 };
 
 impl RibManager {
@@ -39,6 +39,9 @@ impl RibManager {
             GroupMembership::Grouped(id) => Some(id),
             _ => None,
         };
+        if previous.is_some() && (prev_gid.is_some() || new_gid.is_some()) {
+            self.capture_group_admitted_keys(peer);
+        }
         self.update_groups.members.insert(peer, membership);
         // A regroup is an already-registered peer whose membership
         // moved; first registration doesn't count.
@@ -68,7 +71,7 @@ impl RibManager {
                 .get(&peer)
                 .copied()
                 .zip(self.peer_asn.get(&peer).copied());
-            let baseline: Option<RegroupBaseline> = match prev_gid {
+            let mut baseline: Option<RegroupBaseline> = match prev_gid {
                 Some(gid) => {
                     let group = self.group_ribs.get(&gid);
                     let base = group.map(|g| RegroupBaseline {
@@ -99,7 +102,7 @@ impl RibManager {
                     });
                     // A member that leaves while dirty may have missed
                     // withdrawals; carry the group tombstones along as
-                    // extra (over-)withdraws for the destination resync.
+                    // candidate withdrawals for the destination resync.
                     if let Some(g) = group
                         && g.dirty_members.contains(&peer)
                         && (!g.tombstones.is_empty() || !g.vpn_tombstones.is_empty())
@@ -145,6 +148,21 @@ impl RibManager {
                 ),
                 None => None,
             };
+            if let Some(base) = baseline.as_mut()
+                && let Some(admitted) = self.pending_group_admitted.get(&peer)
+            {
+                base.unicast.retain(|(prefix, path_id), _| {
+                    checkpoint();
+                    admitted.contains(&ExactExportKey::Unicast(*prefix, *path_id))
+                });
+                base.vpn.retain(|nlri_key, _| {
+                    checkpoint();
+                    admitted.contains(&ExactExportKey::Vpn(VpnRibRouteKey {
+                        nlri_key: *nlri_key,
+                        path_id: 0,
+                    }))
+                });
+            }
             if let Some(base) = &baseline {
                 self.replacement_capacity(
                     "transient_baseline_unicast",
@@ -195,9 +213,9 @@ impl RibManager {
                 // Using it for equality suppression would silently drop
                 // those announces from the resync — an under-advertise
                 // that nothing later heals (LAN-346). Keep only the
-                // baseline's withdraw duty: ride its keys (plus any
+                // baseline's candidate keys: ride its keys (plus any
                 // retained baseline from an earlier unfinished regroup)
-                // as extra (over-)withdraw residue — the resync's
+                // as candidate withdrawal residue — the resync's
                 // retention guards filter them exactly — and let the
                 // dirty resync take the suppression-free arm
                 // (over-announce, the plain-dirty safe direction;
@@ -327,6 +345,9 @@ impl RibManager {
         // The regroup carry (a dirty leaver's tombstones riding into
         // its extra withdraws) mutates residue on this path too.
         self.refresh_group_residue_gauge();
+        if new_gid.is_none() && !self.dirty_peers.contains(&peer) {
+            self.release_group_admitted_keys(peer);
+        }
     }
 
     /// Add a member; a group seen for the first time snapshots its

@@ -14,8 +14,7 @@ impl RibManager {
     ///   Decision 4: the staged winner for a non-source member, the
     ///   lane runner-up substituting for the winner's own source —
     ///   with the resolved entry's own nh/source-attr residue) —
-    ///   withdraw `tombstones ∖ still-retained` (over-withdraw is the
-    ///   safe direction — the member's missed sends are unknown);
+    ///   withdraw actually admitted keys no longer retained;
     /// - regroup (baseline present): one-shot diff — announce entries
     ///   not `routes_equal` to the baseline, withdraw baseline keys the
     ///   member no longer retains;
@@ -44,6 +43,7 @@ impl RibManager {
         is_force: bool,
         baseline: Option<&FastMap<(Prefix, u32), Route>>,
         extras: Option<&HashSet<(Prefix, u32)>>,
+        admitted: Option<&HashSet<ExactExportKey>>,
         announce: &mut Vec<Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<NextHopAction>>,
@@ -68,12 +68,8 @@ impl RibManager {
             let (source_communities, source_large_communities) =
                 group.source_control_for_route(entry.route, entry.source_attrs);
             if rs_control_suppressed(source_communities, source_large_communities, rs_control) {
-                // Not on this member's wire going forward. Withdraw when
-                // it may be there now: always on a plain dirty resync
-                // (missed sends are unknown — over-withdraw is the safe
-                // direction), on a regroup diff only when the baseline
-                // proves the key was sent. Force-only re-announces and
-                // never withdraws.
+                // Add a candidate; the admitted proof below decides whether
+                // this receiver actually needs a withdrawal.
                 if !is_force && (is_dirty || baseline.is_some_and(|base| base.contains_key(&key))) {
                     suppressed_withdraws.insert(key);
                 }
@@ -93,14 +89,12 @@ impl RibManager {
         // A key the member still retains — its derived view
         // ([`GroupRibOut::adv_entry`]) holds a non-source-suppressed
         // route there — must not be withdrawn; everything else in the
-        // candidate sets is a safe (possibly spurious) withdraw.
+        // candidate sets needs the admitted-key proof before withdrawal.
         // Routing retention through `adv_entry` makes a lane
         // substitution retain exactly like a staged entry: a recorded
         // lane withdraw survives the filter while the lane is empty
         // (it must be delivered) and drops once the lane refills (the
-        // substituted announce above replaces it — over-withdraw and
-        // over-announce compose safely, announce+withdraw of one key
-        // does not).
+        // substituted announce above replaces it without a transient).
         let member_retains = |key: &(Prefix, u32)| {
             group.adv_entry(member, &key.0, key.1).is_some_and(|entry| {
                 let (communities, large_communities) =
@@ -118,6 +112,19 @@ impl RibManager {
         if let Some(extra) = extras {
             keys.extend(extra.iter().filter(|key| !member_retains(key)));
         }
+        if let Some(admitted) = admitted {
+            keys.extend(admitted.iter().filter_map(|key| match key {
+                ExactExportKey::Unicast(prefix, path_id)
+                    if !member_retains(&(*prefix, *path_id)) =>
+                {
+                    Some((*prefix, *path_id))
+                }
+                _ => None,
+            }));
+            keys.retain(|(prefix, path_id)| {
+                admitted.contains(&ExactExportKey::Unicast(*prefix, *path_id))
+            });
+        }
         withdraw.extend(keys);
     }
 
@@ -131,10 +138,8 @@ impl RibManager {
     /// `pass_m`, and retention is Φ-aware (a staged key failing Φ is
     /// NOT retained). A membership delta missed while dirty is healed
     /// through `extras`: the Φ-write seam records the keys leaving Φ as
-    /// extra (over-)withdraws — exact, instead of the design's blanket
-    /// failing-Φ withdraw term, which would put spurious withdraws on
-    /// clean regroup diffs too (spurious withdraws are RFC 4271 no-ops,
-    /// but the regroup one-shot diff is held to exact-stream parity).
+    /// candidate withdrawals, intersected with actually admitted keys. A
+    /// blanket failing-Φ withdrawal would include never-advertised keys.
     #[expect(
         clippy::too_many_arguments,
         reason = "the resync assembly takes the member's full pending-withdraw context"
@@ -147,6 +152,7 @@ impl RibManager {
         is_force: bool,
         baseline: Option<&FastMap<VpnRouteKey, VpnRibRoute>>,
         extras: Option<&HashSet<VpnRouteKey>>,
+        admitted: Option<&HashSet<ExactExportKey>>,
         vpn_announce: &mut Vec<VpnRibRoute>,
         vpn_withdraw: &mut Vec<VpnRibRouteKey>,
     ) {
@@ -187,6 +193,18 @@ impl RibManager {
         }
         if let Some(extra) = extras {
             keys.extend(extra.iter().filter(|key| !member_retains(key)));
+        }
+        if let Some(admitted) = admitted {
+            keys.extend(admitted.iter().filter_map(|key| match key {
+                ExactExportKey::Vpn(key) if !member_retains(&key.nlri_key) => Some(key.nlri_key),
+                _ => None,
+            }));
+            keys.retain(|nlri_key| {
+                admitted.contains(&ExactExportKey::Vpn(VpnRibRouteKey {
+                    nlri_key: *nlri_key,
+                    path_id: 0,
+                }))
+            });
         }
         vpn_withdraw.extend(keys.into_iter().map(|key| VpnRibRouteKey {
             nlri_key: key,
