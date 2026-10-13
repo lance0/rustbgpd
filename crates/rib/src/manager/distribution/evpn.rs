@@ -848,9 +848,9 @@ impl RibManager {
                     ..OutboundCommitBatch::default()
                 },
             )
+            && self.mark_outbound_dirty(peer)
         {
             warn!(%peer, "outbound channel full — EVPN update deferred");
-            self.mark_outbound_dirty(peer);
         }
     }
 }

@@ -975,8 +975,9 @@ impl RibManager {
                     group_prior,
                     None,
                 ) {
-                    warn!(%peer, "outbound channel full — VPN update deferred");
-                    self.mark_outbound_dirty(peer);
+                    if self.mark_outbound_dirty(peer) {
+                        warn!(%peer, "outbound channel full — VPN update deferred");
+                    }
                     // The member missed this pass's withdrawals: record
                     // them as VPN tombstones so its resync can
                     // (over-)withdraw them.
@@ -1111,9 +1112,9 @@ impl RibManager {
                         ..OutboundCommitBatch::default()
                     },
                 )
+                && self.mark_outbound_dirty(peer)
             {
                 warn!(%peer, "outbound channel full — VPN update deferred");
-                self.mark_outbound_dirty(peer);
             }
         }
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
