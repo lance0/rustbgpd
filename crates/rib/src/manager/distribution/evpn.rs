@@ -854,3 +854,140 @@ impl RibManager {
         }
     }
 }
+
+impl RibManager {
+    /// Storage preparation only. G2b must capture a late failed admission from
+    /// these displaced entries; this pre-stage full-channel probe is merely
+    /// opportunistic (another family can consume credit before EVPN fanout).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "EVPN classifier activation and admitted fanout remain a later slice"
+        )
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "shared staging retains displaced input and commits its matching route metadata together"
+    )]
+    pub(in crate::manager) fn stage_group_evpn_keys(
+        &mut self,
+        gid: usize,
+        keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+    ) -> crate::manager::update_groups::EvpnGroupStageOutput {
+        use crate::manager::update_groups::{
+            EvpnGroupDelta, EvpnGroupEntry, EvpnGroupInput, EvpnGroupStageOutput,
+        };
+        let mut out = EvpnGroupStageOutput::default();
+        let Some(group) = self.group_ribs.get(&gid).filter(|group| group.owns_evpn) else {
+            return out;
+        };
+        // Production owns_evpn is false. Activation additionally needs the
+        // sendable_evpn key bit, mixed-PCB exclusion, and the EVPN exclusion
+        // in GroupKey::is_unicast_only for clean transitions, plus qualified
+        // non-RTC admission, ownership transfer, views and counts.
+        let members: Vec<_> = group.members.iter().copied().collect();
+        for member in members {
+            if self.dirty_peers.contains(&member) || self.outbound_channel_full(member) {
+                self.capture_shared_evpn_admitted(member);
+            }
+        }
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint =
+            || super::super::replacement_readiness_checkpoint_at(&readiness, "staging_evpn", false);
+        let group = &self.group_ribs[&gid];
+        let chain = group.export_chain.as_ref().map(PolicyChain::share);
+        let mut singleton = HashSet::with_capacity(1);
+        let mut ignored_otc = Vec::new();
+        let mut denials = Vec::new();
+        for key in keys {
+            checkpoint();
+            singleton.clear();
+            singleton.insert(*key);
+            let old = group.evpn_entry(key);
+            let mut announce = Vec::new();
+            let mut withdraw = Vec::new();
+            Self::stage_evpn_routes_with_checkpoint(
+                &self.loc_rib,
+                &group.table,
+                &self.peer_is_rr_client,
+                &singleton,
+                &mut super::ExportTarget::Group {
+                    evals: &mut out.evals,
+                    local_role: group.local_role,
+                    otc_blocked: &mut ignored_otc,
+                },
+                group.is_ebgp,
+                group.interpret_rfc1997,
+                group.is_rr_client,
+                self.cluster_id,
+                Some(&group.sendable),
+                Some(&group.llgr),
+                chain.as_ref(),
+                None,
+                &mut announce,
+                &mut withdraw,
+                true, // Obtain the candidate even when policy hides an input change.
+                &mut checkpoint,
+            );
+            if let Some((label, rustbgpd_policy::PolicyAction::Deny, source)) =
+                out.evals.take_last()
+                && let Some(received) = self.loc_rib.get_evpn(key)
+            {
+                denials.push((
+                    *key,
+                    (source, label, received.extended_communities().to_vec()),
+                ));
+            }
+            let new = announce.pop().map(|route| {
+                let received = self
+                    .loc_rib
+                    .get_evpn(key)
+                    .expect("staged EVPN source remains installed");
+                EvpnGroupEntry {
+                    route,
+                    input: EvpnGroupInput {
+                        attributes: std::sync::Arc::clone(&received.attributes),
+                        source_is_rr_client: self
+                            .peer_is_rr_client
+                            .get(&received.peer)
+                            .copied()
+                            .unwrap_or(false),
+                    },
+                }
+            });
+            let unchanged = match (&old, &new) {
+                (None, None) => true,
+                (Some(old), Some(new)) => {
+                    // Storage must refresh replay/reflection metadata even
+                    // when ordinary private-path emission remains identical.
+                    evpn_routes_equal(&old.route, &new.route)
+                        && old.input == new.input
+                        && old.route.origin_type == new.route.origin_type
+                        && old.route.peer_router_id == new.route.peer_router_id
+                        && old.route.link_local_next_hop == new.route.link_local_next_hop
+                        && old.route.is_stale == new.route.is_stale
+                        && old.route.is_llgr_stale == new.route.is_llgr_stale
+                }
+                _ => false,
+            };
+            if !unchanged {
+                out.deltas.push(EvpnGroupDelta {
+                    key: *key,
+                    old,
+                    new,
+                });
+            }
+        }
+        let group = self
+            .group_ribs
+            .get_mut(&gid)
+            .expect("staged group remains installed");
+        for delta in &out.deltas {
+            checkpoint();
+            group.apply_evpn_delta(delta);
+        }
+        group.replace_evpn_denials_with_checkpoint(keys, denials, &mut checkpoint);
+        out
+    }
+}
