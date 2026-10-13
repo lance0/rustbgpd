@@ -383,7 +383,9 @@ assert_client_prefix_absent() {
     local family=${1:?} pfx=${2:?} witness=${3:?} label=${4:?}
     local attempts=${5:-5} adj_in
     log "Checking client adj-in stays without $pfx for $((attempts * 2))s — $label..."
+    # Sleep before each read so the last read lands at the end of the window.
     for i in $(seq 1 "$attempts"); do
+        sleep 2
         adj_in=$(client_adj_in_json "$family" || true)
         if jq -e --arg pfx "$pfx" 'has($pfx)' <<<"$adj_in" >/dev/null 2>&1; then
             fail "client received withheld $pfx ($label, poll $i)"
@@ -394,7 +396,6 @@ assert_client_prefix_absent() {
             fail "client adj-in read lacked witness $witness; absence of $pfx unproven ($label, poll $i)"
             return 1
         fi
-        sleep 2
     done
     ok "client adj-in never showed $pfx across $((attempts * 2))s while holding $witness ($label)"
 }
