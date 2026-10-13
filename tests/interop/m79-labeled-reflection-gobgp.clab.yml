@@ -6,8 +6,9 @@
 # preserved verbatim and RFC 4456 ORIGINATOR_ID / CLUSTER_LIST attached,
 # stores but withholds a multi-label stack (no Multiple Labels Capability
 # is negotiated, RFC 8277 §2.1), treats a re-announce with a new
-# label as an implicit replace, withdraws cleanly (RFC 8277 §2.4
-# compatibility-field withdraw on the wire), preserves the labeled routes
+# label as an implicit replace, accepts GoBGP's withdraw of the stack
+# without a session flap (GoBGP echoes the label stack instead of the
+# RFC 8277 §2.4 compatibility field), preserves the labeled routes
 # stale through a kill -9 GR window (RFC 4724, zero UPDATEs toward the
 # client), sweeps exactly the not-re-advertised route at the relaunched
 # (`gobgpd -r`) PE's End-of-RIB, and installs nothing into any dataplane.
