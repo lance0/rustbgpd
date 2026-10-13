@@ -272,7 +272,7 @@ an RT100-to-RT200 change under a policy that removes both RTs still withdraws th
 key from an RT100-only member and announces it to an RT200-only member. Conversely,
 an input-only change that leaves a member's eligibility and exported bytes equal
 uses the existing private-path equality rule to avoid an extra event. Policy
-denial and counter residue belongs once to the group; replay applies member
+denial records and counter residue belong once to the group; replay applies member
 eligibility without a second policy evaluator or a full denial map per receiver.
 
 ### C. RTC stays a per-member filter
