@@ -42,14 +42,31 @@ fn outbound_constructor_materializes_route_safety_counter_children() {
     );
 
     let exact = counter_samples(&metrics, "bgp_exact_export_rejections_total");
-    assert_eq!(exact.len(), exact_export_families().len() * 4);
+    // The label-count reason is materialized only for the four label-stack
+    // families (labeled unicast and VPN, IPv4 and IPv6).
+    let label_stack_families = [
+        "l3vpn_ipv4_unicast",
+        "l3vpn_ipv6_unicast",
+        "ipv4_labeled_unicast",
+        "ipv6_labeled_unicast",
+    ];
+    assert_eq!(
+        exact.len(),
+        exact_export_families().len() * 4 + label_stack_families.len()
+    );
     for (_, family) in exact_export_families() {
+        let label_count_reason = label_stack_families
+            .contains(&family)
+            .then_some("multiple_labels_not_negotiated");
         for reason in [
             "encoding",
             "missing_ipv6_next_hop",
             "ipv4_requires_extended_next_hop",
             "message_too_long",
-        ] {
+        ]
+        .into_iter()
+        .chain(label_count_reason)
+        {
             assert_zero_counter_sample(
                 &exact,
                 &[

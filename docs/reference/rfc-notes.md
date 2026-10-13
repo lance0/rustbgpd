@@ -25,7 +25,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; role-derived forwarding-state bits |
-| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim (a received IPv6 link-local next hop only toward its own link); no VRF import, no MPLS FIB, no local BGP-LS production |
+| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim (a received IPv6 link-local next hop only toward its own link); routes with more than one label are not reflected (no RFC 8277 Multiple Labels Capability); no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap), RFC 9251 (SMET relay) | Route types 1–6; Type 6 SMET relay only; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), RFC 9324 (opt-in), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention; local VRP/ASPA re-evaluation without Route Refresh when `[rpki] local_revalidation` is set |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
@@ -1086,6 +1086,32 @@ RFC 4271 §4.3 states well-known attributes should appear before optional
 attributes. rustbgpd accepts out-of-order attributes but emits a
 structured warning event. A future `strict_attribute_order` config option
 may reject them, but this is not v1 scope.
+
+---
+
+## RFC 8277 — Label stacks on labeled-unicast and VPN routes
+
+rustbgpd does not support the Multiple Labels Capability (code 8, §2.1).
+It does not advertise the capability, and a peer's copy is ignored, so no
+session negotiates it for any AFI/SAFI. Without the capability, only single-label NLRI may be
+exchanged (§2.2), and a route whose NLRI binds more than one label MUST NOT
+be propagated (§3.2.1).
+
+- Receive: labeled-unicast (SAFI 4) and VPN (SAFI 128) NLRI are read up to
+  the entry with the bottom-of-stack bit set, as RFC 3107 specified, so an
+  RFC 3107 sender's multi-label NLRI decodes to its real prefix and the
+  whole stack is stored and shown. §2.2 says a receiver without the
+  capability ignores the S bit. rustbgpd does not, so a single label sent
+  with S clear, which §2.2 forbids on transmission, is not read as the
+  one-label form.
+- Export: a route with more than one label is withheld from every peer
+  and counted in
+  `bgp_exact_export_rejections_total{reason="multiple_labels_not_negotiated"}`.
+  When a route already advertised with one label is replaced by a
+  multi-label route for the same key, the advertised copy is withdrawn
+  (§3.2.1). The stack is never truncated to one label: a route propagated
+  with its next hop unchanged keeps its label field unchanged (§3.2.1).
+  Earlier releases reflected multi-label stacks unchanged.
 
 ---
 
