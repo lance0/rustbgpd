@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-CELLS = ('frr-df', 'rust-df', 'modulo-hazard')
+CELLS = ('frr-df', 'rust-df', 'modulo-hazard', 'core-isolation')
 IPS = {'a': '10.211.0.1', 'b': '10.211.0.2', 'r': '10.211.0.3'}
 ESI = '03:aa:bb:cc:dd:ee:ff:00:00:01'
 PEER_MAC = '02:aa:bb:cc:dd:10'
@@ -75,6 +75,11 @@ def render_config(template, cell):
     elif cell == 'modulo-hazard':
         template = template.replace('df_algorithm = "highest-preference"\n', '')
         template = template.replace('df_preference = 100\n', '')
+    elif cell == 'core-isolation':
+        # ADR-0140 defaults (10 s settle hold, 180 s backstop); a short BGP
+        # hold time lets the sessions expire while the underlay is cut.
+        template = template.replace('hold_time = 30', 'hold_time = 9')
+        template += '\n[evpn_core_isolation]\nenabled = true\nuplinks = ["ul"]\n'
     return template
 
 
@@ -332,7 +337,6 @@ def setup_namespaces():
 
 
 def setup(config, vni):
-    global DAEMON
     run('ip', 'link', 'add', 'underlay', 'type', 'bridge')
     run('ip', 'link', 'set', 'underlay', 'up')
     setup_namespaces()
@@ -406,11 +410,16 @@ def setup(config, vni):
     # Each cell gets a fresh durable state directory as well as fresh namespaces.
     config = config.replace('/var/lib/rustbgpd-m121', str(OUT / 'runtime-state'))
     (OUT / 'b.toml').write_text(config)
-    log = (OUT / 'b-daemon.log').open('w')
-    DAEMON = subprocess.Popen([*prefix('b'), '/usr/local/bin/rustbgpd', str(OUT / 'b.toml')], stdout=log, stderr=log)
-    log.close()
-    event('daemon_started', pid=DAEMON.pid)
+    start_daemon('b-daemon.log')
     return bgp
+
+
+def start_daemon(log_name):
+    global DAEMON
+    with (OUT / log_name).open('w') as log:
+        DAEMON = subprocess.Popen([*prefix('b'), '/usr/local/bin/rustbgpd', str(OUT / 'b.toml')],
+                                  stdout=log, stderr=log)
+    event('daemon_started', pid=DAEMON.pid, log=log_name)
 
 
 def ready(vni, winner):
@@ -656,6 +665,220 @@ def carrier_cycle(vni, survivor_seeds):
                 timing_scope='controlled daemon resume after observed carrier return; five-second recovery ordering, not natural timer latency')
 
 
+HOLD_AFTER_SYNC = 10
+BACKSTOP = 180
+SOFT_FAILURES = []
+
+
+def aggregator_ports(text):
+    """The port count of the CE bond's active LACP aggregator."""
+    ports = re.search(r'Active Aggregator Info:\s*\n\s*Aggregator ID: \d+\s*\n\s*Number of ports: (\d+)', text)
+    return int(ports[1]) if ports else 0
+
+
+def bond_member_active(text, member):
+    """From a CE /proc/net/bonding report: is `member` up, collecting and
+    distributing in the active LACP aggregator?"""
+    head, *slaves = re.split(r'^Slave Interface: ', text, flags=re.MULTILINE)
+    active = re.search(r'Active Aggregator Info:\s*\n\s*Aggregator ID: (\d+)', head)
+    for section in slaves:
+        if section.split('\n', 1)[0].strip() != member:
+            continue
+        mii = re.search(r'^MII Status: (\S+)', section, re.MULTILINE)
+        aggregator = re.search(r'^Aggregator ID: (\d+)', section, re.MULTILINE)
+        actor = re.search(r'details actor lacp pdu:.*?port state: (\d+)', section, re.DOTALL)
+        assert mii and aggregator and actor, section
+        # Actor port state bits 4 and 5: collecting and distributing.
+        return bool(active and mii[1] == 'up' and aggregator[1] == active[1]
+                    and int(actor[1]) & 0x30 == 0x30)
+    raise AssertionError(f'{member} is not enslaved to the CE bond: {text}')
+
+
+def soft(name, action):
+    """Run one core-isolation assertion and record it. Later assertions still
+    run, so a red run shows every assertion that fails."""
+    try:
+        detail = action()
+    except AssertionError as error:
+        SOFT_FAILURES.append(name)
+        event('assertion', assertion=name, passed=False, detail=str(error)[:2000])
+        return None
+    event('assertion', assertion=name, passed=True, detail=detail)
+    return detail
+
+
+def core_state():
+    text = ns('b', 'python3', '-c', 'import urllib.request,sys; sys.stdout.write(urllib.request.urlopen('
+              '"http://127.0.0.1:9179/metrics", timeout=5).read().decode())')
+    states = [labels for labels in re.findall(r'^evpn_es_core_isolation_state\{([^}]*)\} 1$', text, re.MULTILINE)
+              if 'interface="es0"' in labels]
+    assert len(states) == 1, states
+    return re.search(r'state="([^"]+)"', states[0])[1]
+
+
+def link_sample(origin):
+    """Kernel view: rustbgpd's member admin state and the CE's LACP membership."""
+    elapsed = time.monotonic() - origin
+    bond = ns('ce', 'cat', '/proc/net/bonding/bond0')
+    sample = dict(elapsed=elapsed,
+                  rust_member_admin_up='UP' in json.loads(ns('b', 'ip', '-j', 'link', 'show', 'ac'))[0]['flags'],
+                  ce_ceb_active=bond_member_active(bond, 'ceb'), ce_aggregator_ports=aggregator_ports(bond))
+    try:
+        sample.update(established=sum(row['state'] == 'Established' for row in ctl('neighbor')),
+                      state=core_state())
+    except RuntimeError:
+        # A restarted daemon's API is not up yet; the kernel state still counts.
+        sample.update(established=None, state=None)
+    return sample
+
+
+def watch(name, origin, done, timeout):
+    """Sample until `done(sample)` or the deadline; the deadline is not an error."""
+    samples = []
+    deadline = time.monotonic() + timeout
+    while True:
+        if DAEMON is not None and DAEMON.poll() is not None:
+            raise RuntimeError(f'rustbgpd exited with {DAEMON.returncode} during {name}')
+        sample = link_sample(origin)
+        samples.append(sample)
+        if done(sample) or time.monotonic() > deadline:
+            save(name + '.json', samples)
+            return samples
+        time.sleep(.2)
+
+
+def held(sample):
+    return (not sample['rust_member_admin_up'] and not sample['ce_ceb_active']
+            and sample['ce_aggregator_ports'] == 1)
+
+
+def both_active(sample):
+    return sample['rust_member_admin_up'] and sample['ce_ceb_active'] and sample['ce_aggregator_ports'] == 2
+
+
+def cut_underlay(phase):
+    event(phase + '_underlay_cut')
+    run('ip', 'link', 'set', 'ul-b', 'down')
+    samples = watch(phase + '-cut', time.monotonic(), held, 10)
+
+    def removed():
+        assert held(samples[-1]), ('member up or in the CE aggregator 10 s after the cut', samples[-1])
+        return dict(elapsed=samples[-1]['elapsed'], state=samples[-1]['state'])
+    return soft(phase + ': rustbgpd admin-downs its member and the CE drops it from the aggregator', removed)
+
+
+def restore_underlay(phase):
+    """The member must stay down for the settle hold after the sessions return,
+    then come up, and the CE must re-add it."""
+    run('ip', 'link', 'set', 'ul-b', 'up')
+    event(phase + '_underlay_restored')
+    samples = watch(phase + '-recovery', time.monotonic(), both_active, 90)
+    held_at_restore = held(samples[0])
+    established = next((s['elapsed'] for s in samples if s['established']), None)
+    raised = next((s['elapsed'] for s in samples if s['rust_member_admin_up']), None)
+    readded = next((s['elapsed'] for s in samples if both_active(s)), None)
+
+    def hold():
+        assert established is not None and raised is not None, ('no session before the member came up',
+                                                                established, raised)
+        # Release needs EVPN sync, which follows Established, plus the settle hold.
+        assert raised >= established + HOLD_AFTER_SYNC - 2, ('raised before sync plus the hold', established, raised)
+        assert raised <= established + HOLD_AFTER_SYNC + 20, ('not raised after sync plus the hold', established, raised)
+        assert all(held(s) for s in samples if s['elapsed'] < raised), 'member up or in the aggregator during the hold'
+        assert not any(s['state'] == 'backstop_released' for s in samples), 'backstop release'
+        return dict(first_established=established, raised=raised, raised_after_established=raised - established)
+
+    def readd():
+        assert held_at_restore, ('member was not out of the CE aggregator when the underlay returned', samples[0])
+        assert raised is not None and readded is not None and readded >= raised, (raised, readded)
+        assert readded <= raised + 10, ('CE did not re-add the member within 10 s', raised, readded)
+        return dict(raised=raised, ce_readded=readded)
+    return dict(held_at_restore=held_at_restore,
+                hold=soft(phase + ': member held for the settle hold after sync, then raised', hold),
+                readd=soft(phase + ': CE re-adds the member to its aggregator', readd))
+
+
+def core_isolation(vni):
+    """ADR-0140 end to end: underlay cut, recovery hold, and restart before End-of-RIB."""
+    from m121_all_active_oracle import verify_discovery
+    ns('ce', 'ip', 'link', 'set', 'bond0', 'type', 'bond', 'xmit_hash_policy', 'layer3+4')
+    wait(lambda: ready(vni, 'a') and bond_member_active(ns('ce', 'cat', '/proc/net/bonding/bond0'), 'ceb')
+         and core_state() == 'released', 'both CE members active after the startup hold released')
+    # The remote host's Type 2 makes CE -> remote traffic known unicast at both PEs.
+    send('hr', 'eth0', [1], destination=PEER_MAC, source=REMOTE_MAC)
+
+    def remote_known():
+        assert any(r.get('mac') == REMOTE_MAC and r.get('peer') == IPS['r'] for r in ctl('evpn'))
+        rows = json.loads(ns('a', 'bridge', '-j', 'fdb', 'show', 'dev', 'vx100'))
+        assert any(r.get('mac') == REMOTE_MAC and r.get('dst') == IPS['r'] for r in rows), rows
+        return True
+    wait(remote_known, 'remote host Type 2 at both PEs')
+    seeds = list(range(154, 218))
+    paths = verify_discovery(capture('isolation-discover', seeds, count=1, direction='ce-to-remote',
+                                     destination=REMOTE_MAC, source=PEER_MAC), 'isolation-discover', seeds)
+    moved, kept = paths['b'][:4], paths['a'][:2]
+    assert len(moved) == 4 and len(kept) == 2, paths
+    snapshot('isolation-before', vni)
+    result = dict(hold_after_sync_seconds=HOLD_AFTER_SYNC, backstop_seconds=BACKSTOP,
+                  flows_hashed_to_rust=moved, flows_hashed_to_frr=kept)
+
+    result['cut'] = cut_underlay('isolation')
+    snapshot('isolation-cut', vni)
+
+    def traffic_moves():
+        phase = 'isolation-traffic'
+        packets = capture(phase, moved + kept, direction='ce-to-remote', destination=REMOTE_MAC, source=PEER_MAC)
+        assert not packets[f'{phase}-ce-ceb'] and not packets[f'{phase}-b-vx100'], 'traffic still sent to rustbgpd'
+        return dict(delivered_through_frr=len(packets[f'{phase}-hr-eth0']))
+    result['traffic'] = soft('isolation: CE traffic, including flows hashed to rustbgpd, moves to the FRR PE',
+                             traffic_moves)
+    wait(lambda: not any(r['state'] == 'Established' for r in ctl('neighbor')),
+         'rustbgpd EVPN sessions to expire with the underlay cut', timeout=40)
+    result['recovery'] = restore_underlay('isolation')
+
+    # Restart variant: kill rustbgpd while isolated, so before End-of-RIB.
+    result['restart_cut'] = cut_underlay('restart')
+    receipt_path = OUT / 'runtime-state' / 'evpn-core-isolation-owned.json'
+    receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
+    save('restart-receipt-before-kill.json', receipt)
+    DAEMON.kill()
+    DAEMON.wait(timeout=10)
+    event('daemon_killed', exit=DAEMON.returncode)
+    start_daemon('b-daemon-restart.log')
+    origin = time.monotonic()
+    log = OUT / 'b-daemon-restart.log'
+    samples = watch('restart-startup', origin, lambda s: s['state'] == 'startup_hold'
+                    and 'core-isolation receipt found at startup' in log.read_text(), 20)
+    # Keep the underlay cut a little longer: no session, so no End-of-RIB.
+    samples += watch('restart-isolated', origin, lambda s: False, 5)
+
+    def adopted():
+        text = log.read_text()
+        assert receipt and [e['link']['name'] for e in receipt['links']] == ['ac'], ('no owned receipt entry', receipt)
+        assert 'core-isolation receipt found at startup' in text, 'receipt not adopted'
+        assert 'took a CE-facing member administratively down' not in text, 'member taken down again, not adopted'
+        assert samples[-1]['state'] == 'startup_hold', samples[-1]
+        assert all(held(s) and not s['established'] for s in samples), 'member up before End-of-RIB'
+        return dict(samples=len(samples), held_for=samples[-1]['elapsed'])
+    result['restart_adoption'] = soft('restart: receipt adopted and the member stays down before End-of-RIB',
+                                      adopted)
+    result['restart_recovery'] = restore_underlay('restart')
+    released = time.monotonic() - origin
+
+    def no_backstop():
+        assert result['restart_recovery']['held_at_restore'], 'no restart hold to release'
+        assert released < BACKSTOP / 2, ('release near the backstop', released)
+        assert 'backstop_unsynced' not in log.read_text(), 'backstop release logged'
+        return dict(release_after_restart=released)
+    result['restart_backstop'] = soft('restart: released by sync plus the hold, not the 180 s backstop',
+                                      no_backstop)
+    snapshot('isolation-after', vni)
+    result['soft_failures'] = list(SOFT_FAILURES)
+    save('core-isolation-result.json', result)
+    assert not SOFT_FAILURES, SOFT_FAILURES
+    return result
+
+
 def cleanup_diagnostics(phase):
     (OUT / f'cleanup-{phase}-mountinfo.txt').write_text(Path('/proc/self/mountinfo').read_text())
     processes = {}
@@ -769,18 +992,21 @@ def main():
             OUT = root / cell
             OUT.mkdir()
             vni = 101 if cell == 'rust-df' else 100
-            winner = {'frr-df': 'a', 'rust-df': 'b', 'modulo-hazard': None}[cell]
+            winner = {'frr-df': 'a', 'rust-df': 'b', 'modulo-hazard': None, 'core-isolation': 'a'}[cell]
             try:
                 bgp = setup(render_config(template, cell), vni)
                 wait(lambda vni=vni, winner=winner: ready(vni, winner), 'BGP, LACP and expected DF roles')
                 result = dict(vni=vni, expected_df=winner)
-                if winner is not None:
+                if cell == 'core-isolation':
+                    result['core_isolation'] = core_isolation(vni)
+                elif winner is not None:
                     result['peer_only'] = peer_only(vni, compare_historical and cell == 'frr-df')
                     result['rust_origin'] = rust_origin(vni, 300 if cell == 'rust-df' else 100, bgp)
                     result['bidirectional'] = bidirectional(vni)
                 else:
                     result['modulo_fallback'] = modulo_fallback(vni)
-                result['bum'] = bum(vni, winner)
+                if cell != 'core-isolation':
+                    result['bum'] = bum(vni, winner)
                 if cell == 'frr-df':
                     result['carrier'] = carrier_cycle(vni, result['peer_only']['b_flow_seeds'])
                 save('result.json', result)

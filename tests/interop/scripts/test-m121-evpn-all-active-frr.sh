@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# M121: run fresh preference-DF cells and the explicit default-modulo hazard.
+# M121: run fresh preference-DF cells, the explicit default-modulo hazard and
+# the ADR-0140 core-isolation hold against the CE's kernel LACP state.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
