@@ -832,7 +832,7 @@ jobs:
 
   m83:
     needs: [prime_dev_image]
-    name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.10.0 + FRR 10.7.0 + RTR)
+    name: M83 — route-server profile, multi-stack (BIRD 2.19.3 + GoBGP 4.10.0 + FRR 10.7.0 + RTR)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -852,24 +852,24 @@ jobs:
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
 
-      - name: Stage verified BIRD 2.19.2 archive
+      - name: Stage verified BIRD 2.19.3 archive
         uses: ./.github/actions/stage-bird3-artifact
         id: bird_archive
         with:
-          version: "2.19.2"
+          version: "2.19.3"
 
-      - name: Build bird:v2.19.2-m83
-        # BIRD 2.19.2 + tshark: the member stack that carries the byte-level
+      - name: Build bird:v2.19.3-m83
+        # BIRD 2.19.3 + tshark: the member stack that carries the byte-level
         # RFC 7947 transparency / OTC / EoR wire assertions.
         uses: docker/build-push-action@v7
         with:
           context: tests/interop
-          file: tests/interop/Dockerfile.bird-v2192
+          file: tests/interop/Dockerfile.bird2
           build-args: BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
           load: true
-          tags: bird:v2.19.2-m83
-          cache-from: type=gha,scope=bird2192-m83
-          cache-to: type=gha,mode=max,scope=bird2192-m83,ignore-error=true
+          tags: bird:v2.19.3-m83
+          cache-from: type=gha,scope=bird2193-m83
+          cache-to: type=gha,mode=max,scope=bird2193-m83,ignore-error=true
 
       - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact
@@ -905,7 +905,7 @@ jobs:
 
   m85:
     needs: [prime_dev_image]
-    name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2.19.2
+    name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2.19.3
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -925,22 +925,22 @@ jobs:
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
 
-      - name: Stage verified BIRD 2.19.2 archive
+      - name: Stage verified BIRD 2.19.3 archive
         uses: ./.github/actions/stage-bird3-artifact
         id: bird_archive
         with:
-          version: "2.19.2"
+          version: "2.19.3"
 
-      - name: Build bird:v2.19.2-m85
+      - name: Build bird:v2.19.3-m85
         uses: docker/build-push-action@v7
         with:
           context: tests/interop
-          file: tests/interop/Dockerfile.bird-v2192
+          file: tests/interop/Dockerfile.bird2
           build-args: BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
           load: true
-          tags: bird:v2.19.2-m85
-          cache-from: type=gha,scope=bird2192-m85
-          cache-to: type=gha,mode=max,scope=bird2192-m85,ignore-error=true
+          tags: bird:v2.19.3-m85
+          cache-from: type=gha,scope=bird2193-m85
+          cache-to: type=gha,mode=max,scope=bird2193-m85,ignore-error=true
 
       - name: Run M85 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1743,8 +1743,10 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: tests/interop
-          file: tests/interop/Dockerfile.bird-v2192
-          build-args: BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
+          file: tests/interop/Dockerfile.bird2
+          build-args: |
+            BIRD_VERSION=2.19.2
+            BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
           load: true
           tags: bird:v2.19.2-m100
           cache-from: type=gha,scope=bird2192-m100
@@ -2013,22 +2015,22 @@ jobs:
             'import importlib.metadata; print(importlib.metadata.version("arouteserver"))')" = \
             1.23.2
 
-      - name: Stage verified BIRD 2.19.2 archive
+      - name: Stage verified BIRD 2.19.3 archive
         uses: ./.github/actions/stage-bird3-artifact
         id: bird_archive
         with:
-          version: "2.19.2"
+          version: "2.19.3"
 
-      - name: Build bird:v2.19.2-m104
+      - name: Build bird:v2.19.3-m104
         uses: docker/build-push-action@v7
         with:
           context: tests/interop
-          file: tests/interop/Dockerfile.bird-v2192
+          file: tests/interop/Dockerfile.bird2
           build-args: BIRD_SHA256=${{ steps.bird_archive.outputs.sha256 }}
           load: true
-          tags: bird:v2.19.2-m104
-          cache-from: type=gha,scope=bird2192-m104
-          cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true
+          tags: bird:v2.19.3-m104
+          cache-from: type=gha,scope=bird2193-m104
+          cache-to: type=gha,mode=max,scope=bird2193-m104,ignore-error=true
 
       - name: Stage verified GoBGP 4.10.0 archive
         uses: ./.github/actions/stage-gobgp-artifact

@@ -783,7 +783,7 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
     let topology = topology("m83-routeserver-multistack.clab.yml");
     assert_eq!(
         topology["topology"]["nodes"]["bird"]["image"],
-        "bird:v2.19.2-m83"
+        "bird:v2.19.3-m83"
     );
     assert_eq!(
         topology["topology"]["nodes"]["gobgp"]["image"],
@@ -798,11 +798,11 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
         "M83 FRR config must select the refreshed runtime profile"
     );
 
-    let dockerfile = fs::read_to_string(interop_path("Dockerfile.bird-v2192"))
-        .expect("read M83 BIRD Dockerfile");
+    let dockerfile =
+        fs::read_to_string(interop_path("Dockerfile.bird2")).expect("read M83 BIRD Dockerfile");
     for required in [
-        "ARG BIRD_VERSION=2.19.2",
-        "ARG BIRD_SHA256=aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660",
+        "ARG BIRD_VERSION=2.19.3",
+        "ARG BIRD_SHA256=853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd",
         "COPY bird3-archive/ /tmp/bird-archive/",
         "if [ ! -f \"${target}\" ]; then",
         "if [ \"${attempt}\" -ge 3 ]; then",
@@ -828,7 +828,7 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
     let script = fs::read_to_string(interop_path("scripts/test-m83-routeserver-multistack.sh"))
         .expect("read M83 script");
     for exact_version in [
-        "BIRD version 2.19.2",
+        "BIRD version 2.19.3",
         "gobgp version 4.10.0",
         "gobgpd version 4.10.0",
         "bgpd version 10.7.0_git",
@@ -2753,7 +2753,7 @@ fn m104_current_arouteserver_differential_is_exact_and_reuses_m90_inputs() {
     );
     let nodes = topology["topology"]["nodes"].as_mapping().unwrap();
     assert_eq!(nodes["rustbgpd"]["image"], "rustbgpd:dev");
-    assert_eq!(nodes["bird"]["image"], "bird:v2.19.2-m104");
+    assert_eq!(nodes["bird"]["image"], "bird:v2.19.3-m104");
     for member in ["member1", "member2", "member3"] {
         assert_eq!(
             nodes[member]["image"], "gobgp:v4.10.0-m104",
@@ -2779,8 +2779,8 @@ fn m104_current_arouteserver_differential_is_exact_and_reuses_m90_inputs() {
         "sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93",
         "ARS_VERSION=\"1.23.2\"",
         "ARS_TAG_COMMIT=\"85f24252564822556bd93cb9eba1f73d1e8268ea\"",
-        "BIRD_IMAGE=\"bird:v2.19.2-m104\"",
-        "BIRD_VERSION=\"BIRD version 2.19.2\"",
+        "BIRD_IMAGE=\"bird:v2.19.3-m104\"",
+        "BIRD_VERSION=\"BIRD version 2.19.3\"",
         "BIRD_TARGET_VERSION=\"2.16\"",
         "GOBGP_IMAGE=\"gobgp:v4.10.0-m104\"",
         "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",

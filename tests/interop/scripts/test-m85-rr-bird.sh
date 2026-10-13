@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M85 interop test — rustbgpd RR + BIRD 2.19.2 clients (RFC 4456 + RFC 4724)
+# M85 interop test — rustbgpd RR + BIRD 2.19.3 clients (RFC 4456 + RFC 4724)
 #
 # Topology: rustbgpd RR (AS 65001, cluster-id 10.85.0.1) with three RR
 # clients — bird1 (GR on), bird2 (GR default/aware), and a rustbgpd
@@ -41,8 +41,8 @@ source "$SCRIPT_DIR/test-lib.sh"
 BIRD1="clab-${TOPO}-bird1"
 BIRD2="clab-${TOPO}-bird2"
 CLIENT="clab-${TOPO}-client"
-readonly BIRD_IMAGE="bird:v2.19.2-m85"
-readonly BIRD_VERSION="BIRD version 2.19.2"
+readonly BIRD_IMAGE="bird:v2.19.3-m85"
+readonly BIRD_VERSION="BIRD version 2.19.3"
 
 BIRD1_ADDR="10.85.1.2"
 
@@ -161,7 +161,7 @@ client_lacks_route() { ! client_has_route "$1"; }
 # Test 1: sessions + capability exchange
 # ---------------------------------------------------------------------------
 
-# BIRD 2.19.2 prints local_caps, then remote_caps, then Session. Require
+# BIRD 2.19.3 prints local_caps, then remote_caps, then Session. Require
 # both AFs inside the neighbor's GR subsection, not its MP/LLGR capabilities.
 bird_neighbor_gr_capability() {
     awk '
@@ -374,7 +374,7 @@ test_gr_bird2_aware() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    log "M85 interop test: rustbgpd RR + BIRD 2.19.2 clients (RFC 4456 + RFC 4724)"
+    log "M85 interop test: rustbgpd RR + BIRD 2.19.3 clients (RFC 4456 + RFC 4724)"
     log "Topology: $TOPO"
 
     preflight

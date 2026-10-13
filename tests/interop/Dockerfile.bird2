@@ -1,7 +1,9 @@
 FROM debian:bookworm-slim
 
-ARG BIRD_VERSION=2.19.2
-ARG BIRD_SHA256=aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
+ARG BIRD_VERSION=2.19.3
+ARG BIRD_SHA256=853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd
+# Defaults are the current BIRD 2 interop pin. The M100 control passes its
+# frozen BIRD 2.19.2 version and checksum as build arguments.
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
     apt-get install -y --no-install-recommends \
