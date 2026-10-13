@@ -337,10 +337,11 @@ def check(root: Path) -> list[str]:
     # A default digest must be the manifest pin of the archive its own version
     # default selects, not merely some manifest digest: the manifest also keeps
     # pins for older controls, and a cold local build would check one archive
-    # against another's checksum.
+    # against another's checksum. Any default value is captured, so a malformed,
+    # empty or differently spelled default fails instead of escaping the match.
     for relative, source in dockerfiles.items():
         for tool, arch, digest in re.findall(
-            r"(?m)^(?:ARG|ENV) ([A-Z0-9]+)_(?:([A-Z0-9]+)_)?SHA256=([0-9a-f]{64})$", source
+            r"(?m)^(?:ARG|ENV) ([A-Z0-9]+)_(?:([A-Z0-9]+)_)?SHA256=(.*)$", source
         ):
             version = re.search(rf"(?m)^(?:ARG|ENV) {tool}_VERSION=([\w.]+)$", source)
             name = tool.lower()

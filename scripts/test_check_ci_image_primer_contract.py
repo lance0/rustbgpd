@@ -207,6 +207,31 @@ class PrimerContractTests(unittest.TestCase):
                 f"ARG GOBGP_ARM64_SHA256={ARCHIVE_PINS['gobgp_3.37.0_linux_amd64.tar.gz']}",
                 "gobgp_3.37.0_linux_arm64.tar.gz",
             ),
+            # Malformed defaults must fail closed rather than skip the pairing.
+            (
+                "BIRD 2 default digest is not a hash",
+                "tests/interop/Dockerfile.bird2",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST}",
+                "ARG BIRD_SHA256=invalid",
+                "bird-2.19.3.tar.gz",
+            ),
+            (
+                "BIRD 2 default digest is empty",
+                "tests/interop/Dockerfile.bird2",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST}",
+                "ARG BIRD_SHA256=",
+                "bird-2.19.3.tar.gz",
+            ),
+            # The manifest's lowercase spelling is the canonical pin that the
+            # archive-pin helper and stage actions resolve; another spelling of
+            # the same hash is a second, unchecked copy of the pin.
+            (
+                "BIRD 2 default digest is the right hash in uppercase",
+                "tests/interop/Dockerfile.bird2",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST}",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST.upper()}",
+                "bird-2.19.3.tar.gz",
+            ),
         ):
             with self.subTest(name):
                 self.assert_red(
