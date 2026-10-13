@@ -938,7 +938,9 @@ impl GroupEvalAccumulator {
 
     /// Take (and clear) the last recorded verdict — the staging loop's
     /// per-key label / denial-residue hook.
-    pub(super) fn take_last(&mut self) -> Option<(Option<PolicyLabel>, PolicyAction, IpAddr)> {
+    pub(in crate::manager) fn take_last(
+        &mut self,
+    ) -> Option<(Option<PolicyLabel>, PolicyAction, IpAddr)> {
         self.last.take()
     }
 }
@@ -1497,4 +1499,113 @@ pub(in crate::manager) fn emit_vpn_group_deltas_for_member_with_checkpoint(
         }
     }
     count_delta
+}
+/// The received match input is shared with the source RIB, before export edits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::manager) struct EvpnGroupInput {
+    pub(in crate::manager) attributes: Arc<AttrSet>,
+    pub(in crate::manager) source_is_rr_client: bool,
+}
+
+/// One displaced EVPN value; only changed keys retain an old route shell.
+#[derive(Clone, Debug)]
+pub(in crate::manager) struct EvpnGroupEntry {
+    pub(in crate::manager) route: crate::route::EvpnRibRoute,
+    pub(in crate::manager) input: EvpnGroupInput,
+}
+
+impl EvpnGroupInput {
+    pub(in crate::manager) fn eligible(
+        &self,
+        route: &crate::route::EvpnRibRoute,
+        member: IpAddr,
+        group: &super::GroupRibOut,
+        cluster_id: Option<std::net::Ipv4Addr>,
+        membership: Option<&super::RtcMembership>,
+        rejected: Option<&HashSet<crate::update::ExactExportKey>>,
+    ) -> bool {
+        let rr_allowed = group.is_ebgp
+            || route.origin_type != crate::route::RouteOrigin::Ibgp
+            || (cluster_id.is_some() && (self.source_is_rr_client || group.is_rr_client));
+        route.peer != member
+            && rr_allowed
+            && membership.is_none_or(|filter| {
+                filter.matches_any(
+                    self.attributes
+                        .iter()
+                        .find_map(rustbgpd_wire::PathAttribute::extended_communities)
+                        .unwrap_or(&[]),
+                )
+            })
+            && rejected.is_none_or(|keys| {
+                !keys.contains(&crate::update::ExactExportKey::Evpn(route.key()))
+            })
+    }
+}
+
+pub(in crate::manager) struct EvpnGroupDelta {
+    pub(in crate::manager) key: rustbgpd_wire::EvpnRouteKey,
+    pub(in crate::manager) old: Option<EvpnGroupEntry>,
+    pub(in crate::manager) new: Option<EvpnGroupEntry>,
+}
+
+#[derive(Default)]
+pub(in crate::manager) struct EvpnGroupStageOutput {
+    pub(in crate::manager) deltas: Vec<EvpnGroupDelta>,
+    pub(in crate::manager) evals: GroupEvalAccumulator,
+}
+
+/// Preparation only: activation will feed these ordinary per-peer payloads
+/// through the existing final export probe and queue-admission transaction.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "EVPN production ownership and member delivery activate in a later slice"
+    )
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "member emission uses the same old/new eligibility inputs as borrowed admitted projection"
+)]
+pub(in crate::manager) fn emit_evpn_group_deltas_for_member(
+    group: &super::GroupRibOut,
+    deltas: &[EvpnGroupDelta],
+    member: IpAddr,
+    cluster_id: Option<std::net::Ipv4Addr>,
+    membership: Option<&super::RtcMembership>,
+    rejected: Option<&HashSet<crate::update::ExactExportKey>>,
+    announce: &mut Vec<crate::route::EvpnRibRoute>,
+    withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
+) {
+    for delta in deltas {
+        let prior = delta.old.as_ref().filter(|entry| {
+            entry.input.eligible(
+                &entry.route,
+                member,
+                group,
+                cluster_id,
+                membership,
+                rejected,
+            )
+        });
+        let current = delta.new.as_ref().filter(|entry| {
+            // Changed desired values need a fresh exact-export probe even
+            // when the previous value failed; admission owns overlay commit.
+            entry
+                .input
+                .eligible(&entry.route, member, group, cluster_id, membership, None)
+        });
+        match (prior, current) {
+            (Some(_), None) => withdraw.push(delta.key),
+            (old, Some(new))
+                if old.is_none_or(|old| {
+                    !crate::manager::helpers::evpn_routes_equal(&old.route, &new.route)
+                }) =>
+            {
+                announce.push(new.route.clone());
+            }
+            _ => {}
+        }
+    }
 }

@@ -273,12 +273,17 @@ fn reconnect_reuses_actor_id_but_retires_the_old_channel_owner() {
 }
 
 #[test]
-fn clean_owned_same_connection_replay_requires_pre_clear_capture() {
+fn clean_owned_same_connection_replay_refuses_incomplete_projection_transfer() {
     let (mut manager, peer, _output) = fixture(8);
     own(&mut manager, peer, true);
     let owner = manager.evpn_recovery_handle(peer).unwrap();
     assert!(manager.settle_evpn_recovery(peer, [].into_iter()));
     assert!(manager.evpn_recovery.is_dormant(owner));
+    manager
+        .adj_ribs_out
+        .get_mut(&peer)
+        .unwrap()
+        .insert_evpn(route(1));
     let same_sender = manager.outbound_peers[&peer].clone();
     register(&mut manager, peer, same_sender);
     assert_eq!(manager.evpn_recovery_handle(peer), Some(owner));

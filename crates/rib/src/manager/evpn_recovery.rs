@@ -100,13 +100,94 @@ impl RibManager {
             return;
         };
         if self.evpn_recovery.is_dormant(handle) {
-            // Before this legacy cleanup moves the OLD projection, G2 must
-            // call capture_evpn_recovery_before_projection with its actual
-            // admissible keys and OLD pre-policy RTC/source metadata. G1 has
-            // no such producer. An unsealed capture fails closed rather than
-            // treating this live connection as a fresh empty admission.
-            let _ = self.evpn_recovery.begin_capture(handle);
+            self.capture_shared_evpn_admitted(peer);
         }
+    }
+
+    /// Future private-to-shared commit supplies a real ownership claim first;
+    /// this reads the actual private admitted map, never a desired group view.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "live EVPN ownership transfer is deferred until complete G2 admission and view integration"
+        )
+    )]
+    pub(in crate::manager) fn capture_private_evpn_admitted(&mut self, peer: IpAddr) -> bool {
+        self.capture_evpn_admitted(peer, true)
+    }
+
+    pub(in crate::manager) fn capture_shared_evpn_admitted(&mut self, peer: IpAddr) -> bool {
+        self.capture_evpn_admitted(peer, false)
+    }
+
+    fn capture_evpn_admitted(&mut self, peer: IpAddr, private: bool) -> bool {
+        let Some(gid) = self.evpn_grouped_member_of(peer) else {
+            return false;
+        };
+        if !self.register_evpn_recovery(peer, false) {
+            return false;
+        }
+        let handle = self
+            .evpn_recovery_handle(peer)
+            .expect("registered EVPN owner");
+        match self.evpn_recovery.begin_capture(handle) {
+            Ok(false) => {
+                return self
+                    .evpn_recovery
+                    .proof(handle)
+                    .is_ok_and(|proof| proof.is_some());
+            }
+            Err(_) => {
+                self.retry_evpn_recovery_reset(peer);
+                return false;
+            }
+            Ok(true) => {}
+        }
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint =
+            || super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", false);
+        let captured = if private {
+            capture_admitted_keys(
+                &mut self.evpn_recovery,
+                handle,
+                self.adj_ribs_out
+                    .get(&peer)
+                    .into_iter()
+                    .flat_map(crate::adj_rib_out::AdjRibOut::iter_evpn)
+                    .map(EvpnRibRoute::key),
+                &mut checkpoint,
+            )
+        } else {
+            let group = &self.group_ribs[&gid];
+            // A synthetic flag cannot make an incomplete ownership transfer
+            // authoritative: private bodies or missing received metadata mean
+            // the old shared projection is unknown, not an empty admission.
+            group.evpn_projection_complete()
+                && self
+                    .adj_ribs_out
+                    .get(&peer)
+                    .is_none_or(|rib| rib.evpn_len() == 0)
+                && capture_admitted_keys(
+                    &mut self.evpn_recovery,
+                    handle,
+                    group
+                        .evpn_member_projection(
+                            peer,
+                            self.cluster_id,
+                            self.peer_rt_membership.get(&peer),
+                            self.peer_unexportable.get(&peer),
+                        )
+                        .map(EvpnRibRoute::key),
+                    &mut checkpoint,
+                )
+        };
+        if !captured {
+            self.mark_outbound_dirty(peer);
+            self.retry_evpn_recovery_reset(peer);
+            return false;
+        }
+        self.evpn_recovery.seal_capture(handle).unwrap_or(false)
     }
 
     /// G2's pre-mutation capture seam. The iterator is already filtered for
@@ -388,4 +469,19 @@ impl RibManager {
             record.evpn_recovery_reset = None;
         }
     }
+}
+
+fn capture_admitted_keys(
+    ledger: &mut super::update_groups::recovery_provenance::EvpnRecoveryProvenance,
+    handle: ProvenanceHandle,
+    keys: impl Iterator<Item = EvpnRouteKey>,
+    checkpoint: &mut impl FnMut(),
+) -> bool {
+    for key in keys {
+        checkpoint();
+        if ledger.capture_key(handle, key).is_err() {
+            return false;
+        }
+    }
+    true
 }

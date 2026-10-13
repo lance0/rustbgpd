@@ -31,6 +31,12 @@ impl RibManager {
             // content-identical chains from shattering anything.
             return;
         }
+        // Capture the OLD EVPN projection/Φ before registry membership moves.
+        // Private-to-shared activation still needs its explicit ownership
+        // commit and capture_private_evpn_admitted before removing private data.
+        if self.evpn_grouped_member_of(peer).is_some() {
+            self.capture_shared_evpn_admitted(peer);
+        }
         let prev_gid = match previous {
             Some(GroupMembership::Grouped(id)) => Some(id),
             _ => None,
