@@ -720,11 +720,16 @@ def link_sample(origin):
     """Kernel view: rustbgpd's member admin state and the CE's LACP membership."""
     elapsed = time.monotonic() - origin
     bond = ns('ce', 'cat', '/proc/net/bonding/bond0')
-    return dict(elapsed=elapsed,
-                rust_member_admin_up='UP' in json.loads(ns('b', 'ip', '-j', 'link', 'show', 'ac'))[0]['flags'],
-                ce_ceb_active=bond_member_active(bond, 'ceb'), ce_aggregator_ports=aggregator_ports(bond),
-                established=sum(row['state'] == 'Established' for row in ctl('neighbor')),
-                state=core_state())
+    sample = dict(elapsed=elapsed,
+                  rust_member_admin_up='UP' in json.loads(ns('b', 'ip', '-j', 'link', 'show', 'ac'))[0]['flags'],
+                  ce_ceb_active=bond_member_active(bond, 'ceb'), ce_aggregator_ports=aggregator_ports(bond))
+    try:
+        sample.update(established=sum(row['state'] == 'Established' for row in ctl('neighbor')),
+                      state=core_state())
+    except RuntimeError:
+        # A restarted daemon's API is not up yet; the kernel state still counts.
+        sample.update(established=None, state=None)
+    return sample
 
 
 def watch(name, origin, done, timeout):
