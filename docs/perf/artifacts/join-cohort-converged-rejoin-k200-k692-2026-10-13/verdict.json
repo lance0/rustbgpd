@@ -1,0 +1,69 @@
+{
+  "verdict": "INVALID",
+  "smoke": false,
+  "problems": [
+    "base-k200-rep1: harness_rc=1 daemon_rc=0",
+    "base-k200-rep2: harness_rc=1 daemon_rc=0",
+    "base K=200: 3 valid rounds, need 9"
+  ],
+  "table": {
+    "base_k200": {
+      "n": 3,
+      "max_med": 23.643761,
+      "max_min": 23.52353,
+      "max_max": 23.949172,
+      "p50_med": 12.017199,
+      "gap_med": 131.202,
+      "gap_max": 139.249,
+      "ready": 114,
+      "rss_med": 422
+    },
+    "head_k200": {
+      "n": 9,
+      "max_med": 0.57257,
+      "max_min": 0.528687,
+      "max_max": 0.609073,
+      "p50_med": 0.345334,
+      "gap_med": 123.082,
+      "gap_max": 132.112,
+      "ready": 126,
+      "rss_med": 437
+    },
+    "base_k692": {
+      "n": 9,
+      "max_med": 80.312786,
+      "max_min": 79.823095,
+      "max_max": 80.886284,
+      "p50_med": 39.745156,
+      "gap_med": 135.625,
+      "gap_max": 150.907,
+      "ready": 901,
+      "rss_med": 404
+    },
+    "head_k692": {
+      "n": 9,
+      "max_med": 1.257435,
+      "max_min": 1.185107,
+      "max_max": 1.351879,
+      "p50_med": 0.756999,
+      "gap_med": 121.653,
+      "gap_max": 130.128,
+      "ready": 181,
+      "rss_med": 421
+    }
+  },
+  "bars": {
+    "B1": {
+      "pass": true,
+      "detail": "K=692 rejoin_max: head median 1.257s vs base 80.313s; head max 1.352s < base min 79.823s required (disjoint)"
+    },
+    "B2": {
+      "pass": true,
+      "detail": "K=200 rejoin_max: head median 0.573s <= 26.038s"
+    },
+    "B3": {
+      "pass": true,
+      "detail": "survivor max gap: K=200 head median 123.1 <= 194.3 ms and max 132.1 <= 253.2 ms; K=692 head median 121.7 <= 199.2 ms and max 130.1 <= 266.0 ms"
+    }
+  }
+}

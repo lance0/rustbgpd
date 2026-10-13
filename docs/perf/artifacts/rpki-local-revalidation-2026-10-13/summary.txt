@@ -1,0 +1,18 @@
+RFC 9324 local re-evaluation A/B, per arm x N (median [min-max] over cells; times from the daemon's RTR-incremental-update log;
+  settle and cpu net on the log clock; settle_cpu/cpu net@busy end before the next periodic RTR update)
+arm     N  n           settle s       settle_cpu s          cpu net s     cpu net@busy s  RR PDUs replay NLRI reval_loc fallback   queued  retained ret_rejects         steady MiB       delta peak MiB        hold peak MiB         readyz
+A      10  2   0.38 [0.38-0.38]   0.63 [0.63-0.63]   0.87 [0.84-0.89]   0.95 [0.93-0.97]     1400      400400         0        0        0         0           0      456 [451-462]        512 [505-520]        514 [508-520] 400/0bad
+B      10  2   0.16 [0.16-0.16]   0.15 [0.15-0.15]   0.17 [0.16-0.17]   0.17 [0.16-0.17]        0           0       700        0       10    400400        1574      509 [506-512]        573 [564-581]        573 [564-581] 400/0bad
+A     100  2   0.28 [0.26-0.30]   0.53 [0.51-0.55]   0.77 [0.75-0.78]   0.97 [0.97-0.97]     1400      400400         0        0        0         0           0      458 [457-460]        513 [506-520]        516 [511-520] 400/0bad
+B     100  2   0.16 [0.16-0.17]   0.13 [0.07-0.20]   0.18 [0.17-0.18]   0.18 [0.17-0.18]        0           0       700        0      100    400400        1574      528 [522-534]        582 [576-587]        582 [576-587] 400/0bad
+A    1000  2   0.34 [0.29-0.39]   0.59 [0.54-0.64]   0.82 [0.76-0.88]   0.95 [0.93-0.96]     1400      400400         0        0        0         0           0      456 [450-462]        543 [540-545]        544 [540-549] 400/0bad
+B    1000  2   0.22 [0.22-0.23]   0.16 [0.14-0.18]   0.29 [0.28-0.29]   0.29 [0.28-0.29]        0           0       700        0     1000    400400        1574      513 [513-513]        587 [576-598]        587 [576-598] 400/0bad
+reject retention (B): retained identities, retained rejects, B-A steady MiB (median per arm), B-A per retained identity
+  N=10    retained=400400 retained_rejects=1574 (0.39%) B-A steady=+52.5 MiB (137 B/identity)
+  N=100   retained=400400 retained_rejects=1574 (0.39%) B-A steady=+69.8 MiB (183 B/identity)
+  N=1000  retained=400400 retained_rejects=1574 (0.39%) B-A steady=+57.1 MiB (150 B/identity)
+  B1 no ROUTE-REFRESH/replay in B: PASS
+  B2 revalidated_locally=PEERS fallback=0 in B: PASS
+  B3 readiness held: PASS
+  B4 member views equal A vs B: PASS
+VERDICT=PASS; pooled median settle A 0.34s B 0.16s, cpu net A 0.81s B 0.18s; B retained_rejects median 1574

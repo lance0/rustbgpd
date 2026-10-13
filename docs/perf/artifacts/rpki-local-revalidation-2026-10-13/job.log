@@ -1,0 +1,52 @@
+2026-10-12T23:53:45Z START local-reval-r2 pin=7dc289613dc680d4328806870da2701c59779c0e peers=700 prefixes=400400 deltas='10 100 1000' repeats=2 load=1.13 1.80 1.80
+acquired host lock: <queue-dir>/nested-runner.lock
+file-descriptor headroom: nofile soft 65536 (hard 1048576)
+host quiet: retained two accepted samples in <out-dir>/quiet/A-n10-rep1.tsv
+2026-10-12T23:54:15Z cell A n=10 rep=1 start load=1.25
+2026-10-12T23:54:32Z cell A n=10 rep=1 injected
+2026-10-12T23:58:22Z cell A n=10 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/B-n10-rep1.tsv
+2026-10-12T23:58:53Z cell B n=10 rep=1 start load=1.19
+2026-10-12T23:59:09Z cell B n=10 rep=1 injected
+2026-10-13T00:03:00Z cell B n=10 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/B-n100-rep1.tsv
+2026-10-13T00:03:30Z cell B n=100 rep=1 start load=1.47
+2026-10-13T00:03:47Z cell B n=100 rep=1 injected
+2026-10-13T00:07:37Z cell B n=100 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/A-n100-rep1.tsv
+2026-10-13T00:08:07Z cell A n=100 rep=1 start load=1.48
+2026-10-13T00:08:24Z cell A n=100 rep=1 injected
+2026-10-13T00:12:15Z cell A n=100 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/A-n1000-rep1.tsv
+2026-10-13T00:12:45Z cell A n=1000 rep=1 start load=1.14
+2026-10-13T00:13:01Z cell A n=1000 rep=1 injected
+2026-10-13T00:16:52Z cell A n=1000 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/B-n1000-rep1.tsv
+2026-10-13T00:17:22Z cell B n=1000 rep=1 start load=1.52
+2026-10-13T00:17:39Z cell B n=1000 rep=1 injected
+2026-10-13T00:21:29Z cell B n=1000 rep=1 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/B-n1000-rep2.tsv
+2026-10-13T00:22:00Z cell B n=1000 rep=2 start load=1.12
+2026-10-13T00:22:16Z cell B n=1000 rep=2 injected
+2026-10-13T00:26:07Z cell B n=1000 rep=2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/A-n1000-rep2.tsv
+2026-10-13T00:26:37Z cell A n=1000 rep=2 start load=1.13
+2026-10-13T00:26:53Z cell A n=1000 rep=2 injected
+2026-10-13T00:30:44Z cell A n=1000 rep=2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/A-n100-rep2.tsv
+2026-10-13T00:31:14Z cell A n=100 rep=2 start load=1.16
+2026-10-13T00:31:31Z cell A n=100 rep=2 injected
+2026-10-13T00:35:22Z cell A n=100 rep=2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/B-n100-rep2.tsv
+2026-10-13T00:35:52Z cell B n=100 rep=2 start load=1.18
+2026-10-13T00:36:09Z cell B n=100 rep=2 injected
+2026-10-13T00:39:59Z cell B n=100 rep=2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/B-n10-rep2.tsv
+2026-10-13T00:40:29Z cell B n=10 rep=2 start load=1.16
+2026-10-13T00:40:46Z cell B n=10 rep=2 injected
+2026-10-13T00:44:36Z cell B n=10 rep=2 harness_rc=0 daemon_rc=0
+host quiet: retained two accepted samples in <out-dir>/quiet/A-n10-rep2.tsv
+2026-10-13T00:45:07Z cell A n=10 rep=2 start load=1.06
+2026-10-13T00:45:23Z cell A n=10 rep=2 injected
+2026-10-13T00:49:14Z cell A n=10 rep=2 harness_rc=0 daemon_rc=0
+2026-10-13T00:49:15Z END local-reval-r2 rc=0 (summary rc=0)

@@ -1,0 +1,16 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=200200 per_peer=286 pid=2208715
+# dualstack total_prefixes=400400 ipv4_prefixes=200200 ipv6_prefixes=200200 distribution=quotient-remainder filter_count=0
+established 700 at 0.7s
+establishment transport_retries=0 recovered_peers=0
+import_rejected_targets,ipv4_min=199418,ipv6_min=198836
+first_exact_bitmap,mode=reload,peers=700,total=200200,per_peer_min=286,per_peer_max=286,expected_min=199418,expected_max=199423,completed=700,min_unique=199418,max_unique=199423
+first_exact_bitmap6,mode=reload,peers=700,total=200200,per_peer_min=286,per_peer_max=286,expected_min=198836,expected_max=198843,completed=700,min_unique=198836,max_unique=198843
+converged exact per-family observer inventories at 3.0s rss_mib=522
+control_maxgap_ms: p50=240000.88 p95=240000.88 max=240000.88 (n=700)
+control_maxgap_v4_ms: p50=240000.88 p95=240000.88 max=240000.88 (n=700)
+control_maxgap_v6_ms: p50=240000.88 p95=240000.88 max=240000.88 (n=700)
+control_rss_mib 535
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reloadstall_dualstack_csv_header,reload,peers_total,peers_changed,prefixes_total,ipv4_prefixes,ipv6_prefixes,generation,filter_count,v4_completion_p50_s,v4_completion_p95_s,v4_completion_max_s,v6_completion_p50_s,v6_completion_p95_s,v6_completion_max_s,v4_maxgap_p50_ms,v4_maxgap_p95_ms,v4_maxgap_max_ms,v6_maxgap_p50_ms,v6_maxgap_p95_ms,v6_maxgap_max_ms,v4_first_generation_update_p50_ms,v4_first_generation_update_p95_ms,v4_first_generation_update_max_ms,v6_first_generation_update_p50_ms,v6_first_generation_update_p95_ms,v6_first_generation_update_max_ms,v4_filtered_withdrawn,v4_filtered_expected,v6_filtered_withdrawn,v6_filtered_expected,filtered_leaked,bystander_withdrawn,stable_withdrawn,duplicate_withdrawn,stable_marker_peers_v4,stable_marker_peers_v6,sessions_up,parse_errors
+final sessions_up 700/700 parse_errors=0
+done rss_mib=539
