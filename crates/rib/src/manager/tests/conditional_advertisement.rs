@@ -1186,6 +1186,45 @@ async fn expiry_cutoff_charges_coalesced_queued_messages() {
     handle_2.await.unwrap();
 }
 
+/// A settle deadline that falls due together with the RFC 4684 RTC
+/// End-of-RIB hold cap keeps its own cutoff. The RTC branch runs first and
+/// drains its backlog; a condition change that arrives during that drain is
+/// after the settle deadline and must wait for the expiry, not be counted as
+/// pre-deadline work.
+#[tokio::test(start_paused = true)]
+async fn expiry_cutoff_holds_when_the_rtc_end_of_rib_cap_is_due_too() {
+    let metrics = BgpMetrics::new();
+    let source = peer(1);
+    let (tx, handle) = spawn_with_source(&metrics, source).await;
+    // An RT-Constrain peer with an empty membership arms the 60-second
+    // End-of-RIB hold cap.
+    let _rtc_rx = vpn_rtc_peer_up(&tx, peer(3)).await;
+    barrier(&tx).await;
+
+    for octet in [7, 8, 9] {
+        tx.send(unrelated_two_chunk(source, octet)).await.unwrap();
+    }
+    // Both the settle deadline and the RTC cap are now overdue.
+    advance(Duration::from_secs(61)).await;
+    tx.send(routes_received(
+        source,
+        1,
+        vec![route_with_med(source, prefix(1), None)],
+        vec![],
+    ))
+    .await
+    .unwrap();
+    barrier(&tx).await;
+    assert!(
+        (transitions(&metrics) - 1.0).abs() < f64::EPSILON,
+        "the post-deadline condition change cancelled the due expiry"
+    );
+    assert!((condition_gauge(&metrics, "present") - 1.0).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// `(entry, state)` per condition entry of a status row.
 fn condition_states(status: &crate::ConditionalAdvertisementStatus) -> Vec<(String, &'static str)> {
     status

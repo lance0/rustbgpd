@@ -940,6 +940,38 @@ not add a neighbor-discovery monitor or make stale next hops reachable.
   extended communities never match, even against the default membership.
 - The outbound RT membership gate applies this to VPN and EVPN advertisements
   toward a peer that negotiated RT-Constrain.
+- §6 says "The exchange of VPN NLRI should follow the receipt of the
+  End-of-RIB markers" and that a speaker delaying VPN advertisement for that
+  marker "MUST limit that delay to an upper bound. By default, a 60 second
+  value should be used." A session that starts with an empty membership (a
+  new session, or a re-establish whose RT-Constrain routes were not
+  retained) sends VPN routes as the peer's interest arrives, but holds the
+  VPNv4, VPNv6 and EVPN End-of-RIB until the peer's RT-Constrain End-of-RIB
+  (or, after a collision failover, the RT-Constrain End-of-Route-Refresh
+  that closes an active refresh). The hold ends after 60 seconds without
+  one; the cap is fixed. Once the cap is due, only the inbound updates
+  already queued at that moment, and the route batches they started, are
+  processed ahead of the release, so continuing traffic cannot extend it.
+  While rustbgpd's own RT-Constrain route selection is still deferred after
+  a restart, membership is rebuilt only when that deferral releases, so a
+  marker that arrives during the deferral ends the hold at that release,
+  after the VPN and EVPN routes the rebuilt membership admits. A peer
+  acting as graceful-restart helper for the session therefore does not take
+  our End-of-RIB as the end of the initial update and sweep the VPN routes
+  it kept from us (RFC 4724 §4.2) before its interest has been re-applied.
+  RT-Constrain's own End-of-RIB and every other family's are not held. When
+  the membership is re-derived from retained RT-Constrain routes, it is
+  already known and nothing is held.
+- A peer whose OPEN sets the graceful-restart Restart State bit is not held.
+  RFC 4724 §4.1 has a restarting speaker defer route selection until it has
+  the End-of-RIB from all its peers, and in practice it advertises nothing,
+  its own RT-Constrain routes and End-of-RIB included, before then. Holding
+  our VPN End-of-RIB would only stall it until the cap and then trigger the
+  same sweep. GoBGP likewise skips its own RT-Constrain deferral toward a
+  restarting peer.
+- A peer that sends no RT-Constrain End-of-RIB receives the held markers at
+  the cap. GoBGP, for example, sends End-of-RIB only on sessions with
+  graceful restart enabled.
 
 ---
 
@@ -1174,7 +1206,11 @@ state is cleaned up. `bgp_gr_timer_expired_total` metric incremented.
 ### End-of-RIB Sending
 
 After sending the initial table to a new peer, EoR markers are sent for
-each negotiated family via `OutboundRouteUpdate.end_of_rib`.
+each negotiated family via `OutboundRouteUpdate.end_of_rib`. Toward a peer
+that negotiated RT-Constrain with an empty membership and is not itself
+restarting, the VPN and EVPN markers wait for the peer's RT-Constrain
+End-of-RIB for up to 60 seconds; see
+[RFC 4684](#rfc-4684--rt-constrain-membership-matching).
 
 ### Metrics
 

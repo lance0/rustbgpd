@@ -5573,7 +5573,7 @@ impl RibManager {
         // The ingest-stall fault injection must see every message on its
         // own receive; coalescing would bypass the stall.
         if self.test_ingest_stall.is_some()
-            || self.conditional_expiry_cutoff == Some(0)
+            || self.expiry_cutoff_reached()
             || !self.pending_route_batches.is_empty()
             || window.messages >= limits.messages
             || window.routes >= limits.routes
@@ -7487,7 +7487,9 @@ impl RibManager {
                 // piggyback only convergence-ready families on the successful
                 // dirty resync update so they cannot be starved behind the
                 // resync message on a small queue. Collision-failback holds
-                // stay pending until peer EoRR or the original timer.
+                // stay pending until peer EoRR or the original timer, and
+                // RFC 4684 §6 VPN/EVPN holds until the peer's RT-Constrain
+                // EoR or the hold cap.
                 // EoR piggyback only attaches to *dirty* resyncs (the
                 // dump-deferral pattern). A force-only resync is a
                 // GShut-style outbound-attribute refresh and never
@@ -7500,7 +7502,7 @@ impl RibManager {
                                 .iter()
                                 .inspect(|_| checkpoint())
                                 .copied()
-                                .filter(|family| !self.selection_convergence_held(*family))
+                                .filter(|family| !self.eor_held(peer, *family))
                                 .collect()
                         })
                         .unwrap_or_default()

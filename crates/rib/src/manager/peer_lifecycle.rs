@@ -758,6 +758,10 @@ impl RibManager {
         // The GR-deferred EoR is per-session too: the deferral pairs with
         // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
         self.gr_deferred_eor.remove(&peer);
+        // So is the RFC 4684 §6 hold: its EoRs leave with `pending_eor`, and
+        // `PeerUp` arms a fresh cap for the new session.
+        self.rtc_eor_hold.remove(&peer);
+        self.rtc_eor_hold_ready.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
         self.selection_deferred_refresh.remove(&peer);
@@ -1135,6 +1139,38 @@ impl RibManager {
             } else {
                 super::RtcMembership::default()
             };
+            // RFC 4684 §6: with no interest known yet, the VPN/EVPN initial
+            // update is not complete until the peer's RT membership is, so
+            // their EoR waits for its RT-Constrain EoR (bounded by the
+            // cap). A peer acting as GR helper for this session would
+            // otherwise sweep the VPN routes it kept from us (RFC 4724
+            // §4.2) before we re-send them. A membership re-derived from
+            // retained routes is already known: no hold.
+            //
+            // A peer whose OPEN sets the Restart State bit is exempt. RFC
+            // 4724 §4.1 has it defer route selection until it has every
+            // peer's EoR, and with it its own RTC routes and RTC EoR
+            // (GoBGP skips its RTC deferral for a restarting peer for this
+            // reason). Holding our VPN EoR would only stall it to the cap
+            // and then trigger the same sweep. Without the staged OPEN
+            // context the peer is treated as not restarting.
+            let peer_restarting = gr_context
+                .as_ref()
+                .is_some_and(|context| context.peer_restart_state);
+            // A new session's hold never inherits an earlier EoR.
+            self.rtc_eor_hold_ready.remove(&peer);
+            let rtc_gated_negotiated = sendable_families
+                .iter()
+                .any(|&family| Self::rtc_gated_family(family));
+            if rtc_gated_negotiated
+                && !peer_restarting
+                && membership == super::RtcMembership::default()
+            {
+                self.rtc_eor_hold
+                    .insert(peer, tokio::time::Instant::now() + super::RTC_EOR_HOLD_CAP);
+            } else {
+                self.rtc_eor_hold.remove(&peer);
+            }
             // Single Φ-write function (design risk 1); pre-registration,
             // so no corrective emit — the initial dump replays under Φ.
             self.set_rt_membership(peer, Some(membership));
@@ -1142,6 +1178,8 @@ impl RibManager {
             // A replacement session that dropped the family must not
             // inherit its predecessor's filter (not-negotiated ⇒ unfiltered).
             self.set_rt_membership(peer, None);
+            self.rtc_eor_hold.remove(&peer);
+            self.rtc_eor_hold_ready.remove(&peer);
         }
 
         // Classify only the startup-frozen waiter already present for this
@@ -2402,10 +2440,12 @@ impl RibManager {
         // survivor has replayed its Adj-RIB-In. Send those staged routes, but
         // keep the family EoR queued until an associated peer EoRR (or the
         // original Selection_Deferral_Timer) proves convergence.
+        // The RFC 4684 §6 RT-membership hold (`rtc_eor_hold`) queues VPN/EVPN
+        // EoR the same way, until the peer's RT-Constrain EoR or the cap.
         let convergence_held: HashSet<_> = eor_families
             .iter()
             .copied()
-            .filter(|family| self.selection_convergence_held(*family))
+            .filter(|family| self.eor_held(peer, *family))
             .collect();
         if !convergence_held.is_empty() {
             eor_families.retain(|family| !convergence_held.contains(family));
