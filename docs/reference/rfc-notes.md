@@ -1935,7 +1935,12 @@ carries inactive (absent), unlimited (zero), or finite.
     and label are all zero (also RFC 9136 §3.2). The Router's MAC is the
     EVPN Router's MAC Extended Community (RFC 9135 §8.1); absent or
     all-zero counts as zero. The label is the raw 3-octet field, so any
-    non-zero MPLS label or VNI keeps the route.
+    non-zero MPLS label or VNI keeps the route. An announcement whose
+    Router's MAC is multicast or broadcast is treat-as-withdraw whatever
+    its ESI, GW IP and label (RFC 9136 Table 1 note: "The route MUST be
+    treat as withdraw in case of an invalid MAC address"). Only the first
+    Router's MAC counts (RFC 9135 §8.1). Type 2 routes are not checked:
+    the note covers Type 5 only, and RFC 9135 sets no such rule.
 - Route Distinguisher (RFC 4364) displays as `<asn16>:<u32>` (Type 0),
   `<ipv4>:<u16>` (Type 1), `<asn32>:<u16>` (Type 2). Unknown RD types
   fall back to hex.

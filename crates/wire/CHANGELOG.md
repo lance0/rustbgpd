@@ -16,6 +16,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   decode it. `validate_evpn_announcements` is unchanged because it sees
   only the NLRI. No public item or signature changes. This is a validation
   behavior change and ships in the next minor release.
+- The same parsers now also report an EVPN Type 5 announcement whose first
+  Router's MAC Extended Community carries a multicast or broadcast MAC (I/G
+  bit set) as a treat-as-withdraw `MalformedAttribute` on `MP_REACH_NLRI`
+  (RFC 9136 §3.2, Table 1 note), whatever the route's ESI, gateway IP and
+  label. A unicast Router's MAC is accepted, and Type 2 routes are not
+  checked. No public item or signature changes.
 
 ## 0.25.0 - 2026-10-12
 
