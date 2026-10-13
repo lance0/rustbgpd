@@ -685,6 +685,33 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  m123:
+    needs: [prime_dev_image]
+    # The only hosted SR Linux leg. The 25.10.1 image is ~3.2 GB on disk and
+    # boots a chassis simulator; this leg runs it because no open-source peer
+    # implements RFC 9785 Don't-Preempt. The bonding module comes from
+    # setup-dataplane-host.
+    name: M123 — EVPN RFC 9785 Don't-Preempt (SR Linux 25.10.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M123 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M123
+          topology: tests/interop/m123-evpn-dont-preempt-srlinux.clab.yml
+          script: tests/interop/scripts/test-m123-evpn-dont-preempt-srlinux.sh
+      - name: Upload M123 phase snapshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m123-dont-preempt-srlinux
+          path: /tmp/m123
+          if-no-files-found: error
+          retention-days: 14
+
   m70:
     needs: [prime_dev_image]
     name: M70 — ADR-0089 VLAN-aware bridge FDB attribution (FRR 10.7.1)
@@ -1059,14 +1086,14 @@ jobs:
     needs: [classify_changes, bird3_archive, prime_dev_image, m36,
       m37, m37-ip, m38, m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42, m50, m52,
       m58, m53, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
-      m67, m68, m121, netns]
+      m67, m68, m121, m123, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
         classify_changes bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
         m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
-        m69 m70 m65 m71 m72 m66 m67 m68 m121 netns
+        m69 m70 m65 m71 m72 m66 m67 m68 m121 m123 netns
     steps:
       - name: Aggregate required Kernel Dataplane result
         shell: bash

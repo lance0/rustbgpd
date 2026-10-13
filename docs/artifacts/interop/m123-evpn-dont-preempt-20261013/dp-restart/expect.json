@@ -1,0 +1,35 @@
+{
+  "ce_bundled_ports": 2,
+  "rust_admin": [
+    200,
+    true
+  ],
+  "rust_advertised": [
+    100,
+    false
+  ],
+  "rust_decoded_srl": [
+    100,
+    true
+  ],
+  "rust_drained": false,
+  "rust_own_type4": [
+    100,
+    false
+  ],
+  "rust_recovery_pending": false,
+  "rust_role": "nondf",
+  "srl_decoded_rust": [
+    100,
+    false
+  ],
+  "srl_df": {
+    "10.0.123.1": false,
+    "192.0.2.2": true
+  },
+  "srl_oper": [
+    100,
+    true
+  ],
+  "srl_role_unchanged_since": "2026-10-13T13:35:24.672Z"
+}

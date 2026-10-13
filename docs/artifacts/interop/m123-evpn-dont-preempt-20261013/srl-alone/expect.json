@@ -1,0 +1,21 @@
+{
+  "ce_bundled_ports": 2,
+  "rust_role": null,
+  "srl_admin": [
+    100,
+    true
+  ],
+  "srl_df": {
+    "192.0.2.2": true
+  },
+  "srl_oper": [
+    100,
+    true
+  ],
+  "srl_oper_state": "up",
+  "srl_own_type4": [
+    100,
+    true
+  ],
+  "srl_role_settled_for": 15
+}

@@ -1,0 +1,1 @@
+Ethernet Segment 00:01:23:00:00:00:00:00:00:01 undrained: re-originated Type 4 (ES), EAD-per-ES, EAD-per-EVI, re-ran DF election, and replayed cached local MAC/MAC+IP state for 1 member VNI(s)

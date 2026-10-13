@@ -1,0 +1,1 @@
+Ethernet Segment 00:01:23:00:00:00:00:00:00:01 drained: withdrew Type 4 (ES), EAD-per-ES, EAD-per-EVI, and local Type 2 MAC/MAC+IP routes for 1 member VNI(s); new local-MAC origination suppressed while drained

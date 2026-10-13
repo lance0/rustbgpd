@@ -213,6 +213,9 @@ jobs:
           shellcheck tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh
           bash -n tests/interop/scripts/test-m120-evpn-bundle-irb-srlinux.sh
           shellcheck -x tests/interop/scripts/test-m120-evpn-bundle-irb-srlinux.sh tests/interop/scripts/setup-m120-irb.sh
+          python3 tests/interop/scripts/test_m123_dont_preempt_oracle.py
+          bash -n tests/interop/scripts/test-m123-evpn-dont-preempt-srlinux.sh
+          shellcheck -x tests/interop/scripts/test-m123-evpn-dont-preempt-srlinux.sh tests/interop/scripts/setup-m123-links.sh
       - name: Replay committed M120 bundle IRB receipt
         run: |
           set -euo pipefail

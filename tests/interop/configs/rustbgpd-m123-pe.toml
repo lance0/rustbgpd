@@ -1,0 +1,46 @@
+# M123: rustbgpd shares an all-active ES with SR Linux. Its administrative
+# preference (200) beats SR Linux (100); Don't-Preempt must stop a restart
+# from taking the DF role back.
+[global]
+asn = 65000
+router_id = "10.0.123.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.0.123.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.123.1"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:01:23:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_algorithm = "highest-preference"
+df_preference = 200
+df_dont_preempt = true
+redundancy_mode = "all-active"
+originator_ip = "10.0.123.1"
+interface = "es0"
+recovery_delay_seconds = 5
+
+[[neighbors]]
+address = "10.0.123.2"
+remote_asn = 65000
+hold_time = 30
+families = ["l2vpn_evpn"]
