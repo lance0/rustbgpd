@@ -22,7 +22,7 @@
 #     expected 16-octet global next hop (both receivers are off the source's
 #     link, so the source's link-local must not reach them), no receiver-bound
 #     IPv6 MP_REACH_NLRI has any other next-hop length, and no NOTIFICATION is
-#     sent or received;
+#     sent or received except a collision Cease (6/7) before Established;
 #   - both receiver sessions stay on their first connection.
 #
 # Topology: frr-source (eBGP) -> rustbgpd -> frr-ibgp (iBGP) + frr-rs (RS client)

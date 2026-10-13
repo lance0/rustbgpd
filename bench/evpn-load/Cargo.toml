@@ -29,3 +29,7 @@ name = "evpn-monitor"
 path = "src/bin/monitor.rs"
 
 
+
+[[bin]]
+name = "evpn-rr-soak"
+path = "src/bin/rr_soak.rs"

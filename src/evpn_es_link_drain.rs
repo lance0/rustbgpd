@@ -244,10 +244,13 @@ struct FeedState {
 }
 
 impl FeedState {
-    // Without cfg(test) `CarrierFeed` is a single unit variant and
-    // pass-by-value looks gratuitous; the test variant moves a
-    // receiver in.
-    #[cfg_attr(not(test), expect(clippy::needless_pass_by_value))]
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::needless_pass_by_value,
+            reason = "without cfg(test) `CarrierFeed` is a single unit variant and pass-by-value looks gratuitous; the test variant moves a receiver in"
+        )
+    )]
     fn new(feed: CarrierFeed, fallback_rx: watch::Receiver<CarrierMap>) -> Self {
         match feed {
             CarrierFeed::Kernel => Self {

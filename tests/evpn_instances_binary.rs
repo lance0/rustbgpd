@@ -266,6 +266,8 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rbgp() {
     assert_eq!(rows[0]["remote_route_drop_counts"], serde_json::json!([]));
     assert_eq!(rows[0]["service_interface"], "vlan_based");
     assert_eq!(rows[0]["ethernet_tag"], 0);
+    assert_eq!(rows[0]["current_apply_failure_count"], 0);
+    assert_eq!(rows[0]["latest_permanent_apply_error"], "");
 
     assert_eq!(rows[1]["vni"], 200);
     assert_eq!(rows[1]["rd"], "65000:200");
@@ -280,6 +282,8 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rbgp() {
     assert_eq!(rows[1]["ethernet_tag"], 20);
     assert_eq!(rows[1]["advertise_svi_mac"], true);
     assert_eq!(rows[1]["readiness"], "not-ready");
+    assert_eq!(rows[1]["current_apply_failure_count"], 0);
+    assert_eq!(rows[1]["latest_permanent_apply_error"], "");
     assert_eq!(
         optional_json_string(&rows[1], "not_ready_reason"),
         "bridge br200 not found"
@@ -299,7 +303,7 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rbgp() {
     );
     assert!(
         human.contains(
-            "vni=200 rd=65000:200 vtep=10.0.0.10 rts=[65000:200,65000:201] readiness=not-ready bridge=br200 bridge-vlan=20 service=vlan-aware-bundle ethernet-tag=20 advertise-svi-mac originated-local-macs=0 reason=[bridge br200 not found]"
+            "vni=200 rd=65000:200 vtep=10.0.0.10 rts=[65000:200,65000:201] readiness=not-ready bridge=br200 bridge-vlan=20 service=vlan-aware-bundle ethernet-tag=20 advertise-svi-mac originated-local-macs=0 current-apply-failures=0 reason=[bridge br200 not found]"
         ),
         "human output missing full VNI 200 row:\n{human}"
     );

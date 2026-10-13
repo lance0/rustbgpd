@@ -38,6 +38,8 @@ EVPN_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "evpn_df_role": ("gauge", ("esi", "vni", "role")),
     "evpn_es_ac_gate": ("gauge", ("esi", "state")),
     "evpn_es_auto_esi_state": ("gauge", ("interface", "state")),
+    "evpn_es_core_isolation_state": ("gauge", ("interface", "state")),
+    "evpn_core_isolated": ("gauge", ("signal",)),
     "evpn_df_role_changes_total": ("counter", ("esi", "vni")),
     "evpn_es_drained": ("gauge", ("esi", "reason")),
     "evpn_ip_vrf_observed_routes": ("gauge", ("vrf",)),
@@ -53,6 +55,7 @@ EVPN_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "evpn_ip_vrf_installed_routes": ("gauge", ("vrf",)),
     "evpn_ip_vrf_remote_prefix_drops": ("gauge", ("vrf", "reason")),
     "evpn_l2_remote_route_drops": ("gauge", ("vni", "reason")),
+    "evpn_current_apply_failures": ("gauge", ("vni", "kind", "class")),
     "evpn_managed_netdev_state": (
         "gauge",
         ("class", "name", "desired", "state"),

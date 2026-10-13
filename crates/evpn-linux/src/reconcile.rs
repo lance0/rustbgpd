@@ -94,6 +94,241 @@ struct ManagedNetdevOpKey {
     name: [u8; rustbgpd_evpn::MAX_IFNAME_LEN],
 }
 
+/// The same independent key spaces used by L2 retry and permanent suppression.
+/// FDB operations also carry a phase: conversions can contain both a remove
+/// and an add for one `(VNI, MAC)` in the same complete plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FdbFailureKind {
+    AddPeerSync,
+    RemovePeerSync,
+    AddRemote,
+    UpdateRemote,
+    RemoveRemote,
+    InstallNhg,
+    RemoveNhg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CurrentFailureKey {
+    Fdb(EvpnInstanceId, MacAddress, Option<u16>, FdbFailureKind),
+    Flood(EvpnInstanceId, IpAddr),
+    Bum(u32),
+    AcGate(u32),
+    Nhg(crate::group_state::AliasGroupKey),
+    Managed(ManagedNetdevOpKey),
+}
+
+#[derive(Debug)]
+struct CurrentFailure {
+    op: DataplaneOp,
+    class: FailureClass,
+    error: Option<String>,
+    sequence: u64,
+}
+
+#[derive(Default)]
+struct InstanceFailureSummary<'a> {
+    count: u64,
+    latest_permanent: Option<(u64, &'a str)>,
+}
+
+fn current_failure_key(op: &DataplaneOp) -> CurrentFailureKey {
+    match op {
+        DataplaneOp::AddFloodFdb { vni, dst } | DataplaneOp::RemoveFloodFdb { vni, dst } => {
+            CurrentFailureKey::Flood(*vni, *dst)
+        }
+        DataplaneOp::SetBumPortFlags { ifindex, .. } => CurrentFailureKey::Bum(*ifindex),
+        DataplaneOp::SetAcPortState { ifindex, .. } => CurrentFailureKey::AcGate(*ifindex),
+        DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => CurrentFailureKey::Nhg(*group_key),
+        DataplaneOp::CreateManagedBridge { .. }
+        | DataplaneOp::RemoveManagedBridge { .. }
+        | DataplaneOp::CreateManagedVxlan { .. }
+        | DataplaneOp::RemoveManagedVxlan { .. }
+        | DataplaneOp::CreateManagedSvdVxlan { .. }
+        | DataplaneOp::RemoveManagedSvdVxlan { .. }
+        | DataplaneOp::CreateManagedVrf { .. }
+        | DataplaneOp::RemoveManagedVrf { .. }
+        | DataplaneOp::CreateManagedL3Vxlan { .. }
+        | DataplaneOp::RemoveManagedL3Vxlan { .. }
+        | DataplaneOp::CreateManagedVlanUpper { .. }
+        | DataplaneOp::RemoveManagedVlanUpper { .. } => {
+            CurrentFailureKey::Managed(managed_op_key(op).expect("managed op has a key"))
+        }
+        DataplaneOp::AddPeerSyncFdb { vni, mac, vlan, .. } => {
+            CurrentFailureKey::Fdb(*vni, *mac, *vlan, FdbFailureKind::AddPeerSync)
+        }
+        DataplaneOp::RemovePeerSyncFdb { vni, mac, vlan, .. } => {
+            CurrentFailureKey::Fdb(*vni, *mac, *vlan, FdbFailureKind::RemovePeerSync)
+        }
+        DataplaneOp::AddRemoteFdb { vni, mac, vlan, .. } => {
+            CurrentFailureKey::Fdb(*vni, *mac, *vlan, FdbFailureKind::AddRemote)
+        }
+        DataplaneOp::UpdateRemoteFdb { vni, mac, vlan, .. } => {
+            CurrentFailureKey::Fdb(*vni, *mac, *vlan, FdbFailureKind::UpdateRemote)
+        }
+        DataplaneOp::RemoveRemoteFdb { vni, mac, vlan, .. } => {
+            CurrentFailureKey::Fdb(*vni, *mac, *vlan, FdbFailureKind::RemoveRemote)
+        }
+        DataplaneOp::InstallFdbNhg { vni, mac, vlan, .. } => {
+            CurrentFailureKey::Fdb(*vni, *mac, *vlan, FdbFailureKind::InstallNhg)
+        }
+        DataplaneOp::RemoveFdbNhg { vni, mac, vlan, .. } => {
+            CurrentFailureKey::Fdb(*vni, *mac, *vlan, FdbFailureKind::RemoveNhg)
+        }
+        DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddRemoteIpRouteEcmp { .. }
+        | DataplaneOp::RemoveRemoteIpRouteEcmp { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. }
+        | DataplaneOp::InstallL3FdbNhg { .. }
+        | DataplaneOp::RemoveL3FdbNhg { .. } => unreachable!("L3 operation in L2 apply plan"),
+    }
+}
+
+fn current_failure_scope(key: CurrentFailureKey) -> Option<EvpnInstanceId> {
+    match key {
+        CurrentFailureKey::Fdb(vni, _, _, _) | CurrentFailureKey::Flood(vni, _) => Some(vni),
+        CurrentFailureKey::Nhg(key) => Some(key.vni),
+        CurrentFailureKey::Bum(_)
+        | CurrentFailureKey::AcGate(_)
+        | CurrentFailureKey::Managed(_) => None,
+    }
+}
+
+fn current_failure_kind(key: CurrentFailureKey) -> &'static str {
+    match key {
+        CurrentFailureKey::Fdb(_, _, _, _) => "fdb",
+        CurrentFailureKey::Flood(_, _) => "flood",
+        CurrentFailureKey::Bum(_) => "bum_port",
+        CurrentFailureKey::AcGate(_) => "ac_gate",
+        CurrentFailureKey::Nhg(_) => "fdb_nhg",
+        CurrentFailureKey::Managed(_) => "managed_netdev",
+    }
+}
+
+fn current_failure_class(class: FailureClass) -> &'static str {
+    match class {
+        FailureClass::Transient | FailureClass::Conflict => "transient",
+        FailureClass::Permanent => "permanent",
+    }
+}
+
+fn retain_current_failures_for_plan(
+    failures: &mut BTreeMap<CurrentFailureKey, CurrentFailure>,
+    plan: &Plan,
+) {
+    let planned: BTreeMap<_, _> = plan
+        .ops
+        .iter()
+        .map(|op| (current_failure_key(op), op))
+        .collect();
+    failures.retain(|key, failure| planned.get(key).is_some_and(|op| *op == &failure.op));
+}
+
+fn bounded_apply_error(error: &str) -> String {
+    const MAX_BYTES: usize = 256;
+    let end = error.floor_char_boundary(error.len().min(MAX_BYTES));
+    error[..end].chars().filter(|c| !c.is_control()).collect()
+}
+
+#[cfg(test)]
+mod current_failure_tests {
+    use super::{
+        CurrentFailure, FailureClass, bounded_apply_error, current_failure_class,
+        current_failure_key, retain_current_failures_for_plan,
+    };
+    use crate::dataplane::DataplaneOp;
+    use crate::diff::Plan;
+    use rustbgpd_evpn::{EthernetSegmentIdentifier, EthernetTagId, EvpnInstanceId, MacAddress};
+    use std::collections::BTreeMap;
+    use std::net::IpAddr;
+
+    #[test]
+    fn conversion_plan_keeps_distinct_same_mac_remove_and_add_failures() {
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let mac = MacAddress::new([1; 6]);
+        let remove = DataplaneOp::RemoveFdbNhg {
+            vni,
+            mac,
+            vlan: None,
+            group_key: crate::group_state::AliasGroupKey::new(
+                vni,
+                EthernetSegmentIdentifier::new([1; 10]),
+                EthernetTagId(0),
+            ),
+        };
+        let add = DataplaneOp::AddRemoteFdb {
+            vni,
+            mac,
+            vlan: None,
+            dst: "192.0.2.1".parse::<IpAddr>().unwrap(),
+        };
+        let mut failures = BTreeMap::from([
+            (
+                current_failure_key(&remove),
+                CurrentFailure {
+                    op: remove.clone(),
+                    class: FailureClass::Permanent,
+                    error: Some("remove rejected".into()),
+                    sequence: 1,
+                },
+            ),
+            (
+                current_failure_key(&add),
+                CurrentFailure {
+                    op: add.clone(),
+                    class: FailureClass::Transient,
+                    error: None,
+                    sequence: 2,
+                },
+            ),
+        ]);
+        let mut plan = Plan {
+            ops: vec![remove, add],
+            ..Default::default()
+        };
+        retain_current_failures_for_plan(&mut failures, &plan);
+        assert_eq!(failures.len(), 2);
+        plan.ops.remove(0);
+        retain_current_failures_for_plan(&mut failures, &plan);
+        assert_eq!(failures.len(), 1);
+        assert!(failures.contains_key(&current_failure_key(&plan.ops[0])));
+    }
+
+    #[test]
+    fn vlan_bundle_sibling_removes_have_distinct_current_keys() {
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let mac = MacAddress::new([1; 6]);
+        let first = DataplaneOp::RemovePeerSyncFdb {
+            vni,
+            mac,
+            vlan: Some(10),
+            ifindex: 5,
+        };
+        let second = DataplaneOp::RemovePeerSyncFdb {
+            vni,
+            mac,
+            vlan: Some(20),
+            ifindex: 5,
+        };
+        assert_ne!(current_failure_key(&first), current_failure_key(&second));
+    }
+
+    #[test]
+    fn permanent_error_projection_is_utf8_safe_and_strips_controls() {
+        let input = format!("{}é\nsecret", "x".repeat(255));
+        let bounded = bounded_apply_error(&input);
+        assert_eq!(bounded.len(), 255);
+        assert!(!bounded.contains('é'));
+        assert!(!bounded.contains('\n'));
+        assert_eq!(bounded_apply_error("a\tb\r\nc"), "abc");
+        assert_eq!(current_failure_class(FailureClass::Conflict), "transient");
+    }
+}
+
 impl ManagedNetdevOpKey {
     fn new(kind: u8, name: &str) -> Self {
         let mut out = Self {
@@ -223,6 +458,8 @@ pub struct ReconcileActor<D: Dataplane> {
 /// borrows it disjointly from `dataplane`.
 #[derive(Debug)]
 struct ActorState {
+    current_apply_failures: BTreeMap<CurrentFailureKey, CurrentFailure>,
+    current_failure_sequence: u64,
     progress: WorkerProgress,
     owned: OwnedSet,
     /// Retry schedule for FDB ops, keyed by `(VNI, MAC)`.
@@ -541,6 +778,8 @@ impl ActorState {
             retry: RetrySchedule::new(),
             flood_retry: RetrySchedule::new(),
             flood_permanent_failures: BTreeMap::new(),
+            current_apply_failures: BTreeMap::new(),
+            current_failure_sequence: 0,
             warned_foreign_flood: BTreeSet::new(),
             adopted_flood: BTreeSet::new(),
             adopted_peer_sync: BTreeMap::new(),
@@ -2086,6 +2325,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         let mut failed = Vec::new();
         let now_ms = self.state.now_ms();
 
+        // A full plan is authoritative for L2 apply failures. A matching
+        // entry survives permanent suppression and transient backoff; an
+        // absent or reshaped operation is no longer a current failure.
+        retain_current_failures_for_plan(&mut self.state.current_apply_failures, plan);
+
         // Prune retry entries whose op left the plan (withdrawn or
         // superseded): a stale entry's past-due deadline would
         // otherwise pin the actor's retry timer in the past and
@@ -2268,10 +2512,25 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             match res {
                 Ok(()) => {
                     self.record_success(op, desired);
+                    self.state
+                        .current_apply_failures
+                        .remove(&current_failure_key(op));
                     applied.push(op_to_applied(op));
                 }
                 Err(err) => {
                     let class = err.class();
+                    self.state.current_failure_sequence =
+                        self.state.current_failure_sequence.saturating_add(1);
+                    self.state.current_apply_failures.insert(
+                        current_failure_key(op),
+                        CurrentFailure {
+                            op: op.clone(),
+                            class,
+                            error: (class == FailureClass::Permanent)
+                                .then(|| bounded_apply_error(&err.to_string())),
+                            sequence: self.state.current_failure_sequence,
+                        },
+                    );
                     let fdb_key_for_failed = (fdb_op_vni(op), fdb_op_mac(op));
                     match class {
                         FailureClass::Transient | FailureClass::Conflict => {
@@ -4387,7 +4646,45 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// Send a report, dropping it if the daemon-side receiver has gone
     /// away (it shouldn't during normal operation, but it's not worth
     /// crashing the actor over).
-    async fn emit_report(&mut self, payload: ReconcileReportPayload) {
+    async fn emit_report(&mut self, mut payload: ReconcileReportPayload) {
+        let mut current_apply_failures = BTreeMap::new();
+        let mut by_vni: BTreeMap<EvpnInstanceId, InstanceFailureSummary<'_>> = BTreeMap::new();
+        let mut unscoped = InstanceFailureSummary::default();
+        for (key, failure) in &self.state.current_apply_failures {
+            let vni = current_failure_scope(*key);
+            *current_apply_failures
+                .entry((
+                    vni,
+                    current_failure_kind(*key),
+                    current_failure_class(failure.class),
+                ))
+                .or_insert(0) += 1;
+            let entry = vni.map_or(&mut unscoped, |vni| by_vni.entry(vni).or_default());
+            entry.count += 1;
+            if failure.class == FailureClass::Permanent
+                && entry
+                    .latest_permanent
+                    .is_none_or(|(sequence, _)| failure.sequence > sequence)
+            {
+                entry.latest_permanent = failure
+                    .error
+                    .as_deref()
+                    .map(|error| (failure.sequence, error));
+            }
+        }
+        for row in &mut payload.instance_status {
+            if let Some(summary) = by_vni.get(&row.vni) {
+                row.current_apply_failure_count = summary.count;
+                row.latest_permanent_apply_error =
+                    summary.latest_permanent.map(|(_, error)| error.to_string());
+            }
+        }
+        let unscoped_apply_failures = rustbgpd_evpn::CurrentApplyFailureSummary {
+            count: unscoped.count,
+            latest_permanent_error: unscoped
+                .latest_permanent
+                .map(|(_, error)| error.to_string()),
+        };
         self.warn_managed_netdev_status_once(&payload.managed_netdevs);
 
         // Gate 9 slice 6c: snapshot installed-route counts per VRF
@@ -4425,6 +4722,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             instance_status: payload.instance_status,
             applied: payload.applied,
             failed: payload.failed,
+            current_apply_failures,
+            unscoped_apply_failures,
             bum_enforcement: payload.bum_enforcement,
             ip_vrf_status: payload.ip_vrf_status,
             ip_vrf_routes: payload.ip_vrf_routes,
@@ -6820,6 +7119,8 @@ fn build_instance_status(
                 state,
                 message,
                 bridge_mac,
+                current_apply_failure_count: 0,
+                latest_permanent_apply_error: None,
             }
         })
         .collect();

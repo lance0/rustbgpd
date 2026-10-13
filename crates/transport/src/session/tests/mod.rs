@@ -301,11 +301,12 @@ async fn session_event_source_state_change_channel_full_records_one_drop() {
         peer_asn: None,
         old: SessionState::Idle,
         new: SessionState::Connect,
+        teardown_cause: None,
     })
     .unwrap();
     let session = make_test_session_with_lifecycle(metrics.clone(), Some(tx));
 
-    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
+    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect, None);
 
     assert_session_event_source_drop_value(&metrics, "state_change", "channel_full", 1.0);
     assert_session_event_source_drop_value(&metrics, "state_change", "channel_closed", 0.0);
@@ -318,7 +319,7 @@ async fn session_event_source_state_change_channel_closed_records_one_drop() {
     drop(rx);
     let session = make_test_session_with_lifecycle(metrics.clone(), Some(tx));
 
-    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
+    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect, None);
 
     assert_session_event_source_drop_value(&metrics, "state_change", "channel_full", 0.0);
     assert_session_event_source_drop_value(&metrics, "state_change", "channel_closed", 1.0);
@@ -330,7 +331,7 @@ async fn session_event_source_state_change_success_delivers_exact_event_without_
     let (tx, mut rx) = mpsc::channel(1);
     let session = make_test_session_with_lifecycle(metrics.clone(), Some(tx));
 
-    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
+    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect, None);
 
     let event = rx.recv().await.expect("StateChanged delivered");
     let SessionLifecycleNotification::StateChanged {
@@ -340,7 +341,9 @@ async fn session_event_source_state_change_success_delivers_exact_event_without_
         peer_asn,
         old,
         new,
+        teardown_cause,
     } = event;
+    assert_eq!(teardown_cause, None);
     assert_eq!(session_id, 0);
     assert_eq!(role, SessionRole::Primary);
     assert_eq!(peer_addr, "10.0.0.2".parse::<IpAddr>().unwrap());
@@ -356,7 +359,7 @@ fn absent_session_event_source_records_no_drop() {
     let metrics = BgpMetrics::new();
     let session = make_test_session_with_lifecycle(metrics.clone(), None);
 
-    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
+    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect, None);
 
     assert_session_event_source_drop_value(&metrics, "state_change", "channel_full", 0.0);
     assert_session_event_source_drop_value(&metrics, "state_change", "channel_closed", 0.0);
@@ -2159,6 +2162,7 @@ mod collision_hold;
 mod denied_replacements;
 mod exact_export;
 mod export_policy;
+mod family_max_prefix;
 mod forwarding_state;
 mod import_policy;
 mod inbound_update;

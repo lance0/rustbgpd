@@ -14,6 +14,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_fuzz_target_inventory as inventory
 
 
+# Every nightly campaign enumerates its crate's targets and fuzzes each one.
+NIGHTLY_TARGET_LOOP = (
+    "targets=$(cargo fuzz list)",
+    'if [ -z "$targets" ]; then',
+    "for t in $targets; do",
+    'cargo fuzz run "$t"',
+)
+
+
 def exact_inventory() -> dict[str, tuple[str, ...]]:
     return dict(inventory.EXPECTED_TARGETS)
 
@@ -332,6 +341,49 @@ class FuzzTargetInventoryTests(unittest.TestCase):
                         ):
                             inventory.validate_pipeline_enrollment(builder, workflow)
 
+    def test_every_nightly_campaign_step_omission_is_rejected(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        for crate in inventory.EXPECTED_TARGETS:
+            with self.subTest(crate=crate):
+                body = inventory.campaign_block(workflow, crate)
+                self.assertIsNotNone(body)
+                body_start = workflow.index(body)
+                step_start = workflow.rindex("      - name:", 0, body_start)
+                mutated = workflow[:step_start] + workflow[body_start + len(body) :]
+                self.assertNotIn(f"cd {crate}\n", mutated)
+                with self.assertRaisesRegex(
+                    inventory.InventoryError, f"no {crate} campaign"
+                ):
+                    inventory.validate_pipeline_enrollment(builder, mutated)
+
+    def test_every_nightly_campaign_target_loop_is_load_bearing(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        for crate in inventory.EXPECTED_TARGETS:
+            body = inventory.campaign_block(workflow, crate)
+            self.assertIsNotNone(body)
+            run_line = next(
+                line for line in body.splitlines() if 'cargo fuzz run "$t"' in line
+            )
+            mutations = [
+                (f"{line} {how}", body.replace(line, replacement, 1))
+                for line in NIGHTLY_TARGET_LOOP
+                for how, replacement in (("removed", "true"), ("commented", f"# {line}"))
+            ]
+            # A fuzz run after the loop closes runs only the last target.
+            mutations.append(
+                ("run after done", body.replace(f"{run_line}\n", "", 1) + f"{run_line}\n")
+            )
+            for name, mutated_body in mutations:
+                with self.subTest(crate=crate, mutation=name):
+                    self.assertNotEqual(mutated_body, body)
+                    mutated = workflow.replace(body, mutated_body, 1)
+                    with self.assertRaisesRegex(
+                        inventory.InventoryError, f"every {crate} target"
+                    ):
+                        inventory.validate_pipeline_enrollment(builder, mutated)
+
     def test_new_nightly_campaign_omission_is_rejected(self) -> None:
         builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
         workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
@@ -362,16 +414,43 @@ class FuzzTargetInventoryTests(unittest.TestCase):
                 with self.assertRaisesRegex(inventory.InventoryError, "max_len"):
                     inventory.validate_pipeline_enrollment(builder, mutated)
 
-    def test_new_campaign_artifact_omission_is_rejected(self) -> None:
+    def test_every_campaign_artifact_omission_is_rejected(self) -> None:
         builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
         workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
-        for crate in inventory.CAMPAIGN_BOUNDS:
+        for crate in inventory.EXPECTED_TARGETS:
             with self.subTest(crate=crate):
                 mutated = workflow.replace(f"{crate}/fuzz/artifacts/", "omitted/", 1)
                 with self.assertRaisesRegex(
                     inventory.InventoryError, "failure artifacts"
                 ):
                     inventory.validate_pipeline_enrollment(builder, mutated)
+
+    def test_commented_artifact_path_does_not_retain_artifacts(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        for crate in inventory.EXPECTED_TARGETS:
+            entry = f"            {crate}/fuzz/artifacts/\n"
+            self.assertIn(entry, workflow)
+            for where, mutated in (
+                (
+                    "in the path block",
+                    workflow.replace(entry, f"            # {crate}/fuzz/artifacts/\n", 1),
+                ),
+                (
+                    "elsewhere",
+                    workflow.replace(entry, "", 1).replace(
+                        "    steps:\n",
+                        f"    # keep {crate}/fuzz/artifacts/\n    steps:\n",
+                        1,
+                    ),
+                ),
+            ):
+                with self.subTest(crate=crate, comment=where):
+                    self.assertNotEqual(mutated, workflow)
+                    with self.assertRaisesRegex(
+                        inventory.InventoryError, "failure artifacts"
+                    ):
+                        inventory.validate_pipeline_enrollment(builder, mutated)
 
     def test_new_campaign_options_and_harness_bounds_are_load_bearing(self) -> None:
         builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()

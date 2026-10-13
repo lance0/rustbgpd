@@ -881,6 +881,8 @@ remote_asn = 65003
 
 fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
     Neighbor {
+        admin_down: None,
+        admin_down_reason: None,
         tcp_mss: None,
         min_hold_time: None,
         address: addr.to_string(),
@@ -898,6 +900,14 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefixes_l3vpn_ipv4_unicast: None,
+        max_prefixes_l3vpn_ipv6_unicast: None,
+        max_prefixes_ipv4_labeled_unicast: None,
+        max_prefixes_ipv6_labeled_unicast: None,
+        max_prefixes_l2vpn_evpn: None,
+        max_prefixes_ipv4_flowspec: None,
+        max_prefixes_ipv6_flowspec: None,
+        max_prefixes_rtc: None,
         max_prefix_action: None,
         max_prefix_warning_percent: None,
         max_prefixes_out_ipv4: None,
@@ -2034,6 +2044,8 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "remote_asn",
     "description",
     "peer_group",
+    "admin_down",
+    "admin_down_reason",
     "hold_time",
     "min_hold_time",
     "slow_peer_threshold_pct",
@@ -2078,6 +2090,8 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
 /// minus the identity triple (`address`, `interface`, `remote_asn`) and
 /// TCP-AO.
 const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
+    "admin_down",
+    "admin_down_reason",
     "route_flap_dampening",
     "hold_time",
     "min_hold_time",
@@ -2478,6 +2492,7 @@ mod evpn_instances;
 mod evpn_ip_vrf;
 mod evpn_segments;
 mod examples;
+mod export_next_hop;
 mod families;
 mod grpc_security;
 mod gshut_blackhole;

@@ -48,13 +48,23 @@ impl PeerManager {
         // Capture per-peer operator-runtime state that should survive a
         // delete-then-readd cycle. Runtime state is not encoded in the TOML
         // candidate, so SIGHUP reconcile must carry it across explicitly.
+        // A changed config `admin_down` overrides the carried admin state.
+        // Taking a peer down sends the configured reason on the teardown.
+        let mut stop_reasons = HashMap::new();
         let preserved_runtime_state: HashMap<PeerKey, (bool, bool)> = changed
             .iter()
             .filter_map(|cfg| {
                 let peer = PeerKey::new(cfg.address, cfg.interface.clone());
-                self.peers
-                    .get(&peer)
-                    .map(|managed| (peer, (managed.enabled, managed.advertise_graceful_shutdown)))
+                self.peers.get(&peer).map(|managed| {
+                    let enabled = super::lifecycle::config_admin_enable(managed, cfg)
+                        .unwrap_or(managed.enabled);
+                    if let Some(reason) =
+                        super::lifecycle::replacement_stop_reason(managed.enabled, enabled, cfg)
+                    {
+                        stop_reasons.insert(peer.clone(), reason);
+                    }
+                    (peer, (enabled, managed.advertise_graceful_shutdown))
+                })
             })
             .collect();
 
@@ -79,6 +89,7 @@ impl PeerManager {
                     addr.clone(),
                     cfg.tcp_ao.as_ref(),
                     &cfg.discard_path_attributes,
+                    stop_reasons.remove(&addr),
                 )
                 .await
             {

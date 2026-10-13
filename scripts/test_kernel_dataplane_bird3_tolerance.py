@@ -27,7 +27,7 @@ EXPECTED_JOBS = """
 classify_changes bird3_archive prime_dev_image
 m36 m37 m37-ip m38 m39
 m39b m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
-m69 m70 m65 m71 m72 m66 m67 m68 netns
+m69 m70 m65 m71 m72 m66 m67 m68 m121 netns
 """.split()
 
 EXCUSE = "m43=skipped (bird3 archive unavailable upstream)"
@@ -166,6 +166,16 @@ class Bird3ToleranceTests(unittest.TestCase):
         noisy = needs_context(run_labs="false")
         noisy["m43"] = {"result": "failure"}
         self.assertEqual(1, run_aggregate(noisy).returncode)
+
+    def test_m121_is_required_even_when_bird3_is_unavailable(self) -> None:
+        for result in ("failure", "skipped", "cancelled"):
+            with self.subTest(result=result):
+                needs = needs_context(bird3_status="unavailable", m43_result="skipped")
+                needs["m121"] = {"result": result}
+                self.assertEqual(1, run_aggregate(needs).returncode)
+        needs = needs_context()
+        del needs["m121"]
+        self.assertEqual(1, run_aggregate(needs).returncode)
 
     def test_workflow_wiring(self) -> None:
         text = WORKFLOW.read_text()

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract": "rustbgpd-rs-rr-v1",
-  "baseline_release": "v0.76.0",
+  "baseline_release": "v0.77.0",
   "scope": "Narrow route-server, route-reflector and FlowSpec controller product contract; unlisted surfaces are not stable by implication.",
   "roles": [
     {
@@ -163,6 +163,7 @@
       {"path": "Config.apply_bum_enforcement", "classification": "alpha"},
       {"path": "Config.bfd_profiles", "classification": "outside_v1"},
       {"path": "Config.ethernet_segments", "classification": "alpha"},
+      {"path": "Config.evpn_core_isolation", "classification": "alpha"},
       {"path": "Config.evpn_instances", "classification": "alpha"},
       {"path": "Config.evpn_ip_vrfs", "classification": "alpha"},
       {"path": "Config.fib_tables", "classification": "alpha"},
@@ -182,7 +183,7 @@
     "stable_method_sets": [
       {"service": "GlobalService", "methods": ["GetGlobal"], "signature_sha256": "8a308253bef28e75326be5eeac7554554b51d950ea5e52dd9dd8e4b1afdd6a56", "message_graph_sha256": "24a1a3ec5656df07cd1ce3c8e95a3e0bb4a800e4aeddd5b3a9f671e959458932"},
       {"service": "ConfigService", "methods": ["DiffRuntimeConfig", "PlanConfigTransaction", "ApplyConfigTransaction", "ConfirmConfigTransaction", "AbortConfigTransaction", "GetConfigTransactionStatus", "GetEffectiveConfig"], "signature_sha256": "492da5fb3c49fbea39162a43b48b8184ea73554a313eab1abcbbe55b69938fb2", "message_graph_sha256": "012e55e57bbce378e414950a24d3bb562975ef8ff98f9260b90a1907bda62841"},
-      {"service": "NeighborService", "methods": ["AddNeighbor", "DeleteNeighbor", "ListNeighbors", "GetNeighborState", "EnableNeighbor", "DisableNeighbor", "SoftResetIn", "RefreshOutbound", "ListDynamicNeighbors", "AddDynamicNeighbor", "DeleteDynamicNeighbor", "SetGracefulShutdown"], "signature_sha256": "2a968482c1e3a6396b5d72f89e682bbec592ce187a8c6bd6f5b48e53c42313c6", "message_graph_sha256": "6bbbd101e574207534a8d3c201bdafc360018dbf0479af1035efa15276d58a45"},
+      {"service": "NeighborService", "methods": ["AddNeighbor", "DeleteNeighbor", "ListNeighbors", "GetNeighborState", "EnableNeighbor", "DisableNeighbor", "SoftResetIn", "RefreshOutbound", "ListDynamicNeighbors", "AddDynamicNeighbor", "DeleteDynamicNeighbor", "SetGracefulShutdown"], "signature_sha256": "2a968482c1e3a6396b5d72f89e682bbec592ce187a8c6bd6f5b48e53c42313c6", "message_graph_sha256": "2fea1a4466b597916e7f4459754d4bfcf08b795fb06d6931671795e1f15b1de8"},
       {"service": "PolicyService", "methods": ["ListPolicies", "GetPolicy", "SetPolicy", "DeletePolicy", "ListNeighborSets", "GetNeighborSet", "SetNeighborSet", "DeleteNeighborSet", "GetGlobalPolicyChains", "SetGlobalImportChain", "SetGlobalExportChain", "ClearGlobalImportChain", "ClearGlobalExportChain", "GetNeighborPolicyChains", "SetNeighborImportChain", "SetNeighborExportChain", "ClearNeighborImportChain", "ClearNeighborExportChain", "ExplainImportPolicy", "TestPolicy", "GetPolicyStats"], "signature_sha256": "c119c0087b1dcaca56e21842eaedfc5154fee5c8a5f2fd9f9cd64463a723f8e3", "message_graph_sha256": "752d36a7684441b3616448f7326a1825c4aa58a42ac72d3ab6218e593a212e42"},
       {"service": "PeerGroupService", "methods": ["ListPeerGroups", "GetPeerGroup", "SetPeerGroup", "DeletePeerGroup", "SetNeighborPeerGroup", "ClearNeighborPeerGroup"], "signature_sha256": "069596cd50a6a472ad3ca3e1fa81e634219ede2b2e7fda99118d4ca7765b4106", "message_graph_sha256": "4d60f139e203a88eb2323efe9852057b63f1f0e9da54d7bd16cfbc995e93122b"},
       {"service": "RibService", "methods": ["ListReceivedRoutes", "ListBestRoutes", "ListAdvertisedRoutes", "ExplainAdvertisedRoute", "ExplainBestPath", "ListRouteEvents", "ListFlowSpecRoutes"], "signature_sha256": "784c122ee96b6f158bb725273a0724cde51fd1e62b5e36dee40a0373c83d7e5d", "message_graph_sha256": "c6c72dded74e1e83b46e16457dace7ca1c192bcdebe410905e19b01b9fe293f7"},
@@ -295,11 +296,12 @@
         "evolution": "additive_fields_only_except_explicitly_experimental_fields",
         "executable_type_floor": true,
         "required_json_types": {"add_path_receive": "boolean", "add_path_send": "boolean", "address": "string", "authentication": "string", "description": "string", "distribution_mode": "string", "families": "array", "flap_count": "number", "hold_time": "number", "is_dynamic": "boolean", "last_error": "string", "messages_received": "number", "messages_sent": "number", "notifications_received": "number", "notifications_sent": "number", "prefixes_received": "number", "prefixes_sent": "number", "remote_asn": "number", "role_negotiated": "boolean", "route_reflector_client": "boolean", "route_server_client": "boolean", "send_hold_time": "number", "state": "string", "strict_role": "boolean", "tcp_ao_health": "string", "updates_received": "number", "updates_sent": "number", "uptime_seconds": "number"},
-        "optional_json_types": {"accepted_dynamic_range": "object", "add_path_send_max": "number", "discard_path_attributes": "array", "effective_posture": "object", "export_policy_routes_denied": "number", "export_policy_routes_permitted": "number", "graceful_shutdown_advertise_intent": "boolean", "import_policy_routes_denied": "number", "import_policy_routes_permitted": "number", "inbound_prefix_limits": "array", "interface": "string", "min_hold_time": "number", "negotiated_session": "object", "negotiation_available": "boolean", "otc_routes_blocked": "number", "outbound_prefix_limits": "array", "peer_group": "string", "per_client_best": "boolean", "reconnect_in_seconds": "number", "remote_role": "string", "rfc8212_export_policy": "string", "rfc8212_import_policy": "string", "role": "string", "selection_deferral": "array", "stale": "boolean", "tcp_ao": "object", "update_group": "string"},
+        "optional_json_types": {"accepted_dynamic_range": "object", "add_path_send_max": "number", "discard_path_attributes": "array", "effective_posture": "object", "export_policy_routes_denied": "number", "export_policy_routes_permitted": "number", "gr_retention": "array", "gr_retention_available": "boolean", "graceful_shutdown_advertise_intent": "boolean", "import_policy_routes_denied": "number", "import_policy_routes_permitted": "number", "inbound_prefix_limits": "array", "interface": "string", "min_hold_time": "number", "negotiated_session": "object", "negotiation_available": "boolean", "otc_routes_blocked": "number", "outbound_prefix_limits": "array", "peer_group": "string", "per_client_best": "boolean", "reconnect_in_seconds": "number", "remote_role": "string", "retention_only": "boolean", "rfc8212_export_policy": "string", "rfc8212_import_policy": "string", "role": "string", "selection_deferral": "array", "stale": "boolean", "tcp_ao": "object", "update_group": "string"},
         "explicitly_experimental_json_fields": ["paths_limits"],
         "nested_json_contracts": [
           {"path": "accepted_dynamic_range", "required_json_types": {"peer_group": "string", "prefix": "string"}, "optional_json_types": {}},
           {"path": "effective_posture", "required_json_types": {"interpret_rfc1997": "boolean", "next_hop_ownership": "string", "rs_control_communities": "boolean"}, "optional_json_types": {"orr_vantage": "string"}},
+          {"path": "gr_retention[]", "required_json_types": {"family": "string", "phase": "string"}, "optional_json_types": {"remaining_seconds": "number", "stale_routes": "number"}},
           {"path": "inbound_prefix_limits[]", "required_json_types": {"blocking": "boolean", "headroom": "number", "limit": "number", "scope": "string", "usage": "number"}, "optional_json_types": {"reason": "string"}},
           {"path": "negotiated_session", "required_json_types": {"families": "array"}, "optional_json_types": {"four_octet_as": "boolean", "graceful_restart": "object", "hold_time_seconds": "number", "outbound_max_message_bytes": "number", "peer_enhanced_route_refresh": "boolean", "peer_extended_message": "boolean", "peer_route_refresh": "boolean", "remote_router_id": "string"}},
           {"path": "negotiated_session.graceful_restart", "required_json_types": {"peer_families": "array"}, "optional_json_types": {"effective_retention_time_seconds": "number", "peer_restart_time_seconds": "number"}},
@@ -602,6 +604,49 @@
       "validation_source": "src/config/tests/mod.rs",
       "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
+    },
+    {
+      "from_release": "v0.76.0",
+      "to_release": "v0.77.0",
+      "fixture_directory": "tests/fixtures/v1-stable/v0.76.0/route-server",
+      "source_directory": "examples/route-server",
+      "files": [
+        {"path": "config.toml", "sha256": "2202139c654c960d22898ae03c7c4aeed01b270a45ce7d4f3f59082534c369ad"},
+        {"path": "hygiene.rpol", "sha256": "ca53ac1dd6189f8536a2f057b6095c1a9a510a6aeaff3588bfbcf14e8bfe046e"}
+      ],
+      "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
+      "validation_source": "src/config/tests/mod.rs",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
+      "result": "accepted_without_config_migration"
     }
-  ]
+  ],
+  "capabilities": {
+    "purpose": "Documentation and evidence navigation only, rendered to docs/reference/capabilities.md. A row promotes nothing: compatibility is read from the roles and inventoried surfaces above, and an uncataloged capability is not cataloged rather than unsupported.",
+    "rows": [
+      {
+        "id": "unicast-route-reflection",
+        "scope": "IPv4 iBGP client-to-client reflection with ORIGINATOR_ID and CLUSTER_LIST",
+        "excludes": ["IPv6", "optimal route reflection", "forwarding", "scale"],
+        "roles": ["route-reflector-unicast"],
+        "surfaces": [],
+        "evidence": [{"leg": "m14-rr-frr", "claims": ["stored", "advertised"]}]
+      },
+      {
+        "id": "bmp-base-export",
+        "scope": "Basic BMP collector session delivering Initiation, PeerUp and RouteMonitoring, with Initiation before PeerUp",
+        "excludes": ["RouteMonitoring ordering", "every BMP view", "draft BMPv4", "collector outage replay", "durability"],
+        "roles": [],
+        "surfaces": ["Config.bmp"],
+        "evidence": [{"leg": "m24-bmp-frr", "claims": ["encoded", "advertised"]}]
+      },
+      {
+        "id": "flowspec-controller",
+        "scope": "IPv4 and IPv6 controller create, replace and delete with local, selected and advertised views, reconnect, and explicit reconciliation after restart; an API acknowledgement is local channel admission",
+        "excludes": ["remote enforcement", "installation", "forwarding", "scale"],
+        "roles": ["flowspec-controller"],
+        "surfaces": ["InjectionService.AddFlowSpec", "InjectionService.DeleteFlowSpec", "RibService.ListFlowSpecRoutes", "Config.flowspec"],
+        "evidence": [{"leg": "m22-flowspec-controller", "claims": ["stored", "selected", "advertised"]}]
+      }
+    ]
+  }
 }

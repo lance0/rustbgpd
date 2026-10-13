@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Diagnose an unintended duplicate prefix announcement to a route reflector.
+# lab: rr  slug: route-reflector
+# summary: Diagnose an unintended duplicate prefix announcement to a route reflector.
+#
 set -euo pipefail
 
 if [[ $# != 1 ]]; then

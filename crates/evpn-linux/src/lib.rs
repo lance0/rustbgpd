@@ -98,6 +98,9 @@ pub mod linux;
 pub use linux::LinuxDataplane;
 
 #[cfg(target_os = "linux")]
+pub use linux::admin_link::{AdminLinkState, AdminLinks};
+
+#[cfg(target_os = "linux")]
 pub use linux::bond_lacp::{LacpPartner, LacpPartnerError, read_bond_lacp_partner};
 
 #[cfg(target_os = "linux")]

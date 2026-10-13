@@ -986,10 +986,23 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
     assert!(!rig.state.join("activation.lock").exists());
 
     let partial = rig.candidate("candidate-partial", 107);
+    // The edit must land after activation verified the candidate and before
+    // it copies it. The delayed checker's `--version` run sits between the
+    // two: it blocks reading a fifo, so the test's open of the write end
+    // returns only once the checker has started, and the checker continues
+    // only when the test closes that end after editing.
+    let gate = rig.root.join("startup-gate");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&gate)
+            .status()
+            .unwrap()
+            .success()
+    );
     let delayed = rig.root.join("delayed-checker.sh");
     executable(
         &delayed,
-        "#!/bin/sh\nroot=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd)\n[ \"$1\" = --version ] && { touch \"$root/version-started\"; sleep 1; }\nexec \"$root/checker.sh\" \"$@\"\n",
+        "#!/bin/sh\nroot=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd)\n[ \"$1\" = --version ] && cat \"$root/startup-gate\" >/dev/null\nexec \"$root/checker.sh\" \"$@\"\n",
     );
     let state = rig.state.clone();
     let rbgp = rig.rbgp.clone();
@@ -1004,20 +1017,28 @@ fn recovery_boundaries_refuse_before_publication_and_clean_partial_staging() {
             checker: &paths[2],
             rbgp: &paths[3],
             rbgp_addr: binding.rbgp_addr(),
-            settle: Duration::from_secs(2),
+            settle: SETTLE,
             initial: true,
             activation_command: &paths[4],
             activation_args: &args,
             binding: &binding,
         })
     });
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !rig.root.join("version-started").exists() {
-        assert!(Instant::now() < deadline, "delayed checker did not start");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let (opened, started) = std::sync::mpsc::channel();
+    std::thread::spawn(move || opened.send(fs::OpenOptions::new().write(true).open(gate)));
+    // Only a hang guard: the open returns as soon as the checker starts.
+    let gate_writer = started
+        .recv_timeout(Duration::from_secs(120))
+        .expect("delayed checker did not open the startup gate within 120 s")
+        .unwrap();
     fs::write(partial.join("policy/client-3.rpol"), "changed after verify").unwrap();
-    assert_refused(worker.join().unwrap());
+    drop(gate_writer);
+    // The candidate already passed verification before the checker started,
+    // so this mismatch is the re-verification of the staged copy.
+    assert_eq!(
+        worker.join().unwrap(),
+        Err(Error::Refused("candidate file hash mismatch"))
+    );
     assert_eq!(fs::read_dir(state.join("generations")).unwrap().count(), 0);
     let source = include_str!("../src/activation.rs");
     assert_eq!(source.matches("sync_dir(&generations)?;").count(), 2);

@@ -1006,18 +1006,39 @@ async fn failed_bum_op_is_re_emitted_on_next_pass() {
         ))
         .unwrap();
 
+    let first = wait_for_generation(&mut h, 1).await;
+    assert_eq!(
+        first
+            .current_apply_failures
+            .get(&(None, "bum_port", "transient")),
+        Some(&1)
+    );
+    assert_eq!(first.instance_status[0].current_apply_failure_count, 0);
+    assert_eq!(first.unscoped_apply_failures.count, 1);
+    assert!(
+        first
+            .unscoped_apply_failures
+            .latest_permanent_error
+            .is_none()
+    );
+
     // Drain reports until the kernel state reflects the desired
     // suppress_all. The first pass should fail; the actor's retry
     // timer should fire and the second pass should succeed (the
     // injected failure was popped FIFO).
     let suppress = rustbgpd_evpn_linux::BumPortFlags::suppress_all();
     let mut applied = false;
+    let mut cleared = false;
     for _ in 0..20 {
         // Advance virtual time past the backoff window (initial = 100ms,
         // ±25% jitter → up to 125ms). 250ms covers it with margin.
         tokio::time::advance(Duration::from_millis(250)).await;
         // Drain any reports that surfaced.
-        let _ = h.try_drain_reports().await;
+        cleared |= h
+            .try_drain_reports()
+            .await
+            .iter()
+            .any(|r| r.current_apply_failures.is_empty());
         if h.handle.bum_port_flags().get(&10) == Some(&suppress) {
             applied = true;
             break;
@@ -1027,6 +1048,10 @@ async fn failed_bum_op_is_re_emitted_on_next_pass() {
         applied,
         "BUM op never re-applied after transient failure; \
          last_bum_plan must update only on success"
+    );
+    assert!(
+        cleared,
+        "successful BUM retry must clear the unscoped current failure"
     );
 
     h.shutdown().await;
@@ -1096,7 +1121,39 @@ async fn failed_apply_retries_on_backoff_timer() {
     h.intent_tx.send(intent(1, inst, macs.build())).unwrap();
 
     // First reconcile sees the failure.
-    let _ = h.try_drain_reports().await;
+    let first = wait_for_generation(&mut h, 1).await;
+    assert_eq!(first.instance_status[0].current_apply_failure_count, 1);
+    assert_eq!(
+        first
+            .current_apply_failures
+            .get(&(Some(vni(100)), "fdb", "transient")),
+        Some(&1)
+    );
+    assert_eq!(first.failed.len(), 1);
+    let after_first = h.handle.apply_count();
+    let mut same = RemoteMacTable::builder();
+    same.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    h.intent_tx
+        .send(intent(
+            2,
+            one_instance_table(instance(100, Some("br100"), "10.0.0.1")),
+            same.build(),
+        ))
+        .unwrap();
+    let deferred = wait_for_generation(&mut h, 2).await;
+    assert!(
+        deferred.failed.is_empty(),
+        "backoff pass did not attempt the operation"
+    );
+    assert_eq!(deferred.instance_status[0].current_apply_failure_count, 1);
+    assert_eq!(
+        deferred
+            .current_apply_failures
+            .get(&(Some(vni(100)), "fdb", "transient")),
+        Some(&1)
+    );
+    assert_eq!(h.handle.apply_count(), after_first);
     tokio::task::yield_now().await;
     assert!(
         h.progress.borrow().initialized,
@@ -1117,6 +1174,13 @@ async fn failed_apply_retries_on_backoff_timer() {
         h.handle.apply_count()
     );
     assert!(h.handle.apply_count() >= 2);
+    let recovered = h.try_drain_reports().await;
+    assert!(
+        recovered
+            .iter()
+            .any(|r| r.instance_status[0].current_apply_failure_count == 0
+                && r.current_apply_failures.is_empty())
+    );
     assert!(h.progress.borrow().observed_at > failed_at);
     let progress = h.progress.clone();
     h.shutdown().await;
@@ -1329,7 +1393,19 @@ async fn permanent_failure_suppression_is_per_op_fingerprint() {
     // First reconcile records the permanent failure with the
     // current op shape.
     tokio::task::yield_now().await;
-    let _ = h.try_drain_reports().await;
+    let first = wait_for_generation(&mut h, 1).await;
+    assert_eq!(first.instance_status[0].current_apply_failure_count, 1);
+    assert!(
+        first.instance_status[0]
+            .latest_permanent_apply_error
+            .is_some()
+    );
+    assert_eq!(
+        first
+            .current_apply_failures
+            .get(&(Some(vni(100)), "fdb", "permanent")),
+        Some(&1)
+    );
     let after_first = h.handle.apply_count();
     assert!(
         after_first >= 1,
@@ -1341,7 +1417,12 @@ async fn permanent_failure_suppression_is_per_op_fingerprint() {
         tokio::time::advance(Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
     }
-    let _ = h.try_drain_reports().await;
+    let suppressed_reports = h.try_drain_reports().await;
+    assert!(
+        suppressed_reports
+            .iter()
+            .any(|r| r.failed.is_empty() && r.instance_status[0].current_apply_failure_count == 1)
+    );
     assert_eq!(
         h.handle.apply_count(),
         after_first,
@@ -1389,6 +1470,12 @@ async fn permanent_failure_suppression_is_per_op_fingerprint() {
          count stuck at {after_same_gen}"
     );
     assert!(h.handle.kernel_has_fdb(vni(100), mac(1)));
+    let moved = h.try_drain_reports().await;
+    assert!(
+        moved
+            .iter()
+            .any(|r| r.intent_generation == 3 && r.current_apply_failures.is_empty())
+    );
     h.shutdown().await;
 }
 
@@ -1412,7 +1499,8 @@ async fn permanent_failure_suppression_is_pruned_after_desired_withdraw() {
     h.intent_tx
         .send(intent(1, inst.clone(), macs.build()))
         .unwrap();
-    let _ = wait_for_generation(&mut h, 1).await;
+    let failed = wait_for_generation(&mut h, 1).await;
+    assert_eq!(failed.instance_status[0].current_apply_failure_count, 1);
     let after_first = h.handle.apply_count();
     assert!(
         after_first >= 1,
@@ -1423,7 +1511,9 @@ async fn permanent_failure_suppression_is_pruned_after_desired_withdraw() {
     h.intent_tx
         .send(intent(2, inst.clone(), RemoteMacTable::new()))
         .unwrap();
-    let _ = wait_for_generation(&mut h, 2).await;
+    let withdrawn = wait_for_generation(&mut h, 2).await;
+    assert!(withdrawn.current_apply_failures.is_empty());
+    assert_eq!(withdrawn.instance_status[0].current_apply_failure_count, 0);
     let after_withdraw = h.handle.apply_count();
 
     let mut macs_readded = RemoteMacTable::builder();
@@ -1444,6 +1534,50 @@ async fn permanent_failure_suppression_is_pruned_after_desired_withdraw() {
         "same-shape re-add after desired withdraw did not program the FDB"
     );
 
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_snapshot_preserves_current_failure_until_a_complete_plan_can_clear_it() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    h.handle
+        .inject_failure_kernel_too_old(Some(DataplaneOp::AddRemoteFdb {
+            vni: vni(100),
+            mac: mac(1),
+            vlan: None,
+            dst: ipa("10.0.0.2"),
+        }));
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.build()))
+        .unwrap();
+    let first = wait_for_generation(&mut h, 1).await;
+    assert_eq!(first.instance_status[0].current_apply_failure_count, 1);
+
+    h.handle.inject_snapshot_dump_failure();
+    h.intent_tx
+        .send(intent(2, inst.clone(), RemoteMacTable::new()))
+        .unwrap();
+    let incomplete = wait_for_generation(&mut h, 2).await;
+    assert!(incomplete.failed.is_empty());
+    assert_eq!(incomplete.instance_status[0].current_apply_failure_count, 1);
+    assert_eq!(
+        incomplete
+            .current_apply_failures
+            .get(&(Some(vni(100)), "fdb", "permanent")),
+        Some(&1)
+    );
+
+    h.intent_tx
+        .send(intent(3, inst, RemoteMacTable::new()))
+        .unwrap();
+    let complete = wait_for_generation(&mut h, 3).await;
+    assert!(complete.current_apply_failures.is_empty());
+    assert_eq!(complete.instance_status[0].current_apply_failure_count, 0);
     h.shutdown().await;
 }
 
@@ -1471,14 +1605,43 @@ async fn managed_permanent_suppression_is_pruned_after_intent_withdraw() {
     h.intent_tx
         .send(intent_with_managed_netdevs(1, table()))
         .unwrap();
-    let _ = wait_for_generation(&mut h, 1).await;
+    let first = wait_for_generation(&mut h, 1).await;
+    assert_eq!(
+        first
+            .current_apply_failures
+            .get(&(None, "managed_netdev", "permanent")),
+        Some(&1)
+    );
+    assert_eq!(first.unscoped_apply_failures.count, 1);
+    assert!(
+        first
+            .unscoped_apply_failures
+            .latest_permanent_error
+            .as_deref()
+            .is_some_and(|error| !error.is_empty())
+    );
+    assert!(first.instance_status.is_empty());
+    assert!(
+        !first
+            .current_apply_failures
+            .keys()
+            .any(|(scope, _, _)| *scope == Some(vni(1)))
+    );
     assert!(!h.handle.kernel_snapshot().links.contains_key("br300"));
 
     // Withdraw the managed intent — prunes the stale suppression.
     h.intent_tx
         .send(intent_with_managed_netdevs(2, ManagedNetdevTable::new()))
         .unwrap();
-    let _ = wait_for_generation(&mut h, 2).await;
+    let withdrawn = wait_for_generation(&mut h, 2).await;
+    assert!(withdrawn.current_apply_failures.is_empty());
+    assert_eq!(withdrawn.unscoped_apply_failures.count, 0);
+    assert!(
+        withdrawn
+            .unscoped_apply_failures
+            .latest_permanent_error
+            .is_none()
+    );
 
     // Same-shape re-add must be attempted again.
     h.intent_tx

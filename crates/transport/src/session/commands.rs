@@ -3,6 +3,7 @@ use super::{
     PeerSessionState, RibUpdate, RouteRefreshMessage, Safi, SessionNotificationDirection,
     SessionState, cease_subcode, debug, info, warn,
 };
+use crate::config::PrefixLimitFamily;
 use crate::handle::{MaxPrefixState, PeerCommandError, WarmCheckpointSessionState};
 
 struct TcpAoSessionAddOnlyPlan {
@@ -189,21 +190,25 @@ impl PeerSession {
         Ok(())
     }
 
-    /// Ask an Established peer to replay one unicast family after enabling a
+    /// Ask an Established peer to replay one family after enabling a
     /// received-prefix bound or ending a Block episode. Without route-refresh
     /// support, tell the operator that reannouncement or reset is required.
-    pub(super) fn request_unicast_reannouncement(&mut self, afi: Afi, reason: &'static str) {
+    pub(super) fn request_family_reannouncement(
+        &mut self,
+        family: (Afi, Safi),
+        reason: &'static str,
+    ) {
         if self.fsm.state() != SessionState::Established {
             return;
         }
-        let family = (afi, Safi::Unicast);
+        let (afi, safi) = family;
         let refresh_capable = self
             .negotiated
             .as_ref()
             .is_some_and(|n| n.peer_route_refresh)
             && self.negotiated_families().contains(&family);
         let outcome = if refresh_capable {
-            self.send_route_refresh(afi, Safi::Unicast)
+            self.send_route_refresh(afi, safi)
         } else {
             Err("peer did not negotiate route refresh for the family".to_owned())
         };
@@ -211,6 +216,7 @@ impl PeerSession {
             warn!(
                 peer = %self.peer_label,
                 ?afi,
+                ?safi,
                 %error,
                 reason,
                 "route refresh unavailable after max-prefix state change; peer \
@@ -1599,6 +1605,7 @@ impl PeerSession {
                     max_prefixes_ipv6,
                     max_prefixes_received_ipv4,
                     max_prefixes_received_ipv6,
+                    max_prefixes_family,
                     max_prefix_action,
                     max_prefix_warning_percent,
                     gr_stale_routes_time,
@@ -1626,6 +1633,17 @@ impl PeerSession {
                 self.config.max_prefixes_ipv6 = max_prefixes_ipv6;
                 self.config.max_prefixes_received_ipv4 = max_prefixes_received_ipv4;
                 self.config.max_prefixes_received_ipv6 = max_prefixes_received_ipv6;
+                if self.max_prefix_metric_lease.active {
+                    for family in PrefixLimitFamily::ALL {
+                        if max_prefixes_family.get(family).is_none()
+                            && self.config.max_prefixes_family.get(family).is_some()
+                        {
+                            self.metrics
+                                .remove_max_prefix_capacity(&self.peer_label, family.label());
+                        }
+                    }
+                }
+                self.config.max_prefixes_family = max_prefixes_family;
                 self.config.max_prefix_action = max_prefix_action;
                 self.config.max_prefix_warning_percent = max_prefix_warning_percent;
                 for (afi, was_tracked) in received_was_tracked {
@@ -1636,7 +1654,10 @@ impl PeerSession {
                     if was_tracked && !tracked {
                         self.drop_received_tracking(afi);
                     } else if !was_tracked && tracked {
-                        self.request_unicast_reannouncement(afi, "received-prefix bound enabled");
+                        self.request_family_reannouncement(
+                            (afi, Safi::Unicast),
+                            "received-prefix bound enabled",
+                        );
                     }
                 }
                 self.config.gr_stale_routes_time = gr_stale_routes_time;

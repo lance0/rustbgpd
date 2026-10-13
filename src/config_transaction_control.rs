@@ -3875,14 +3875,7 @@ fn resolve_peer_session_reshape_targets(
             .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
         targets
             .static_targets
-            .push(crate::reload::build_peer_mgr_config(
-                &resolved.transport_config,
-                resolved.max_prefix_restart_seconds,
-                &resolved.label,
-                resolved.import_policy.as_ref(),
-                resolved.export_policy.as_ref(),
-                resolved.peer_group.clone(),
-            ));
+            .push(crate::reload::build_peer_mgr_config(&resolved));
     }
     Ok(targets)
 }
@@ -4032,14 +4025,7 @@ fn resolve_static_neighbors(
             let resolved = candidate
                 .resolve_neighbor(neighbor)
                 .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
-            Ok(crate::reload::build_peer_mgr_config(
-                &resolved.transport_config,
-                resolved.max_prefix_restart_seconds,
-                &resolved.label,
-                resolved.import_policy.as_ref(),
-                resolved.export_policy.as_ref(),
-                resolved.peer_group.clone(),
-            ))
+            Ok(crate::reload::build_peer_mgr_config(&resolved))
         })
         .collect()
 }

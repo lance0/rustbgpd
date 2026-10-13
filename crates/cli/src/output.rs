@@ -315,10 +315,23 @@ pub struct JsonNeighbor {
     pub flap_count: u64,
     pub last_error: String,
     pub is_dynamic: bool,
+    /// `Some(true)` on a row for an address with no neighbor-inventory entry
+    /// whose GR/LLGR stale routes the RIB still retains (a down dynamic
+    /// neighbor). Omitted on ordinary rows and from older daemons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_dynamic_range: Option<JsonAcceptedDynamicRange>,
     pub route_reflector_client: bool,
     pub description: String,
+    /// GR/LLGR helper retention, one row per family still holding stale
+    /// routes; same shape as the detail view.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gr_retention: Vec<JsonGrRetentionFamily>,
+    /// `None` means the daemon predates retention exposure; `Some(true)`
+    /// with no rows means nothing is retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gr_retention_available: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -339,7 +352,9 @@ pub fn json_accepted_dynamic_range(
 /// Describe whether a live peer was statically configured or dynamically
 /// accepted, retaining an explicit rolling-upgrade fallback for older daemons.
 pub fn neighbor_source_label(neighbor: &proto::NeighborState) -> String {
-    if !neighbor.is_dynamic {
+    if neighbor.retention_only == Some(true) {
+        "retention only (no session or configuration)".to_string()
+    } else if !neighbor.is_dynamic {
         "static".to_string()
     } else if let Some(range) = neighbor.accepted_dynamic_range.as_ref() {
         format!("dynamic ({}, group {})", range.prefix, range.peer_group)
@@ -385,6 +400,11 @@ pub struct JsonNeighborDetail {
     pub flap_count: u64,
     pub last_error: String,
     pub is_dynamic: bool,
+    /// `Some(true)` on a row for an address with no neighbor-inventory entry
+    /// whose GR/LLGR stale routes the RIB still retains (a down dynamic
+    /// neighbor). Omitted on ordinary rows and from older daemons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_dynamic_range: Option<JsonAcceptedDynamicRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -482,6 +502,27 @@ pub struct JsonNeighborDetail {
     /// amendment).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inbound_prefix_limits: Vec<JsonInboundPrefixLimit>,
+    /// GR/LLGR helper retention, one row per family still holding stale
+    /// routes. Present while the session is down.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gr_retention: Vec<JsonGrRetentionFamily>,
+    /// `None` means the daemon predates retention exposure; `Some(true)`
+    /// with no rows means nothing is retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gr_retention_available: Option<bool>,
+}
+
+/// Stale routes one family still holds for GR or LLGR. `phase` is
+/// `gr_restart`, `gr_awaiting_eor`, or `llgr`.
+#[derive(Serialize)]
+pub struct JsonGrRetentionFamily {
+    pub family: String,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_seconds: Option<u64>,
+    /// Absent only when the daemon did not report it (an older daemon).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_routes: Option<u64>,
 }
 
 /// One finite inbound max-prefix bound. `reason` carries the stable
@@ -1577,6 +1618,11 @@ mod tests {
                         assert_json_shape(row, nested, contract_id);
                     }
                 }
+                "gr_retention[]" => {
+                    for row in value["gr_retention"].as_array().unwrap() {
+                        assert_json_shape(row, nested, contract_id);
+                    }
+                }
                 "tcp_ao" => assert_json_shape(&value["tcp_ao"], nested, contract_id),
                 "tcp_ao.keys[]" => {
                     for key in value["tcp_ao"]["keys"].as_array().unwrap() {
@@ -1895,6 +1941,7 @@ mod tests {
             flap_count: 7,
             last_error: String::new(),
             is_dynamic: true,
+            retention_only: Some(true),
             accepted_dynamic_range: Some(JsonAcceptedDynamicRange {
                 prefix: "10.0.0.0/24".to_string(),
                 peer_group: "rs-clients".to_string(),
@@ -2031,6 +2078,13 @@ mod tests {
                 blocking: true,
                 reason: Some("inbound_prefix_limit_reached".to_string()),
             }],
+            gr_retention: vec![JsonGrRetentionFamily {
+                family: "ipv4_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(86_400),
+                stale_routes: Some(3),
+            }],
+            gr_retention_available: Some(true),
         };
 
         let value: Value =
@@ -2315,6 +2369,15 @@ mod tests {
         assert_eq!(
             neighbor_source_label(&older_daemon),
             "dynamic (range unavailable)"
+        );
+
+        let retention_only = proto::NeighborState {
+            retention_only: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            neighbor_source_label(&retention_only),
+            "retention only (no session or configuration)"
         );
     }
 

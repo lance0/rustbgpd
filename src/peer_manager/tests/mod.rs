@@ -63,6 +63,8 @@ async fn replay_outbound_result(
 
 fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
     PeerManagerNeighborConfig {
+        admin_down: None,
+        restore_admin_enabled: None,
         min_hold_time: None,
         address: addr,
         interface: None,
@@ -80,6 +82,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefixes_family: rustbgpd_transport::FamilyPrefixLimits::default(),
         max_prefix_action: rustbgpd_transport::MaxPrefixAction::Shutdown,
         max_prefix_warning_percent: None,
         max_prefix_restart_seconds: None,
@@ -279,6 +282,7 @@ fn make_dynamic_manager_config() -> Config {
         file_path: None,
         evpn_instances: Vec::new(),
         ethernet_segments: Vec::new(),
+        evpn_core_isolation: None,
         evpn_ip_vrfs: Vec::new(),
         managed_netdevs: crate::config::ManagedNetdevsConfig::default(),
         fib_tables: Vec::new(),
@@ -479,6 +483,7 @@ fn insert_test_managed_peer_for_key(
             handle,
             session_id,
             ManagedPeerState {
+                admin_down: None,
                 policy_known_down: false,
                 remote_asn,
                 description: "test".to_string(),
@@ -842,6 +847,7 @@ fn insert_test_scoped_managed_peer(
             handle,
             session_id,
             ManagedPeerState {
+                admin_down: None,
                 policy_known_down: false,
                 remote_asn: 65002,
                 description: interface.to_string(),
@@ -1215,6 +1221,8 @@ async fn wait_counter(counter: &AtomicU32, expected: u32) {
 
 fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
     crate::config::Neighbor {
+        admin_down: None,
+        admin_down_reason: None,
         tcp_mss: None,
         min_hold_time: None,
         address: addr.to_string(),
@@ -1232,6 +1240,14 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefixes_l3vpn_ipv4_unicast: None,
+        max_prefixes_l3vpn_ipv6_unicast: None,
+        max_prefixes_ipv4_labeled_unicast: None,
+        max_prefixes_ipv6_labeled_unicast: None,
+        max_prefixes_l2vpn_evpn: None,
+        max_prefixes_ipv4_flowspec: None,
+        max_prefixes_ipv6_flowspec: None,
+        max_prefixes_rtc: None,
         max_prefix_action: None,
         max_prefix_warning_percent: None,
         max_prefixes_out_ipv4: None,
@@ -1300,6 +1316,7 @@ fn insert_test_dynamic_managed_peer(
             handle,
             session_id,
             ManagedPeerState {
+                admin_down: None,
                 policy_known_down: false,
                 remote_asn: 65030,
                 description: format!("dynamic:{range_peer_group}"),
@@ -1718,6 +1735,7 @@ fn spawn_rfc8212_rib_stub(
     })
 }
 
+mod admin_down;
 mod bfd;
 mod bmp_periodic;
 mod cohort_budgets;

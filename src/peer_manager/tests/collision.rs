@@ -1,6 +1,6 @@
 use super::*;
 
-fn mock_open(router_id: Ipv4Addr) -> OpenMessage {
+pub(super) fn mock_open(router_id: Ipv4Addr) -> OpenMessage {
     OpenMessage {
         version: 4,
         my_as: 65002,
@@ -16,7 +16,7 @@ fn mock_open(router_id: Ipv4Addr) -> OpenMessage {
     }
 }
 
-async fn read_bgp_message(stream: &mut TcpStream, buf: &mut BytesMut) -> Message {
+pub(super) async fn read_bgp_message(stream: &mut TcpStream, buf: &mut BytesMut) -> Message {
     loop {
         if let Ok(Some(len)) = peek_message_length(buf, rustbgpd_wire::MAX_MESSAGE_LEN) {
             let len = usize::from(len);
@@ -32,7 +32,7 @@ async fn read_bgp_message(stream: &mut TcpStream, buf: &mut BytesMut) -> Message
     }
 }
 
-async fn send_bgp_message(stream: &mut TcpStream, msg: &Message) {
+pub(super) async fn send_bgp_message(stream: &mut TcpStream, msg: &Message) {
     let encoded = encode_message(msg).expect("encode BGP message");
     stream.write_all(&encoded).await.expect("TCP write");
     stream.flush().await.expect("TCP flush");
@@ -92,6 +92,7 @@ async fn collision_notifications_flush_ready_lifecycle_events_first() {
             peer_asn: None,
             old: SessionState::Established,
             new: SessionState::Idle,
+            teardown_cause: Some("closed without NOTIFICATION".to_string()),
         })
         .await
         .unwrap();
@@ -1453,6 +1454,7 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
         rustbgpd_transport::SessionRole::Primary,
         SessionState::Idle,
         SessionState::Connect,
+        None,
     );
 
     let accepted = mgr.peers[&key(peer_addr)]
@@ -2497,6 +2499,7 @@ fn queue_state_changed(mgr: &PeerManager, session_id: u64, peer_addr: IpAddr) {
                 peer_asn: None,
                 old: SessionState::Idle,
                 new: SessionState::Connect,
+                teardown_cause: None,
             },
         )
         .unwrap();

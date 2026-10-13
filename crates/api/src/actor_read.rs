@@ -277,6 +277,7 @@ mod tests {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
+                include_retained: false,
             }
         })
         .await

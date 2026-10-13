@@ -1261,6 +1261,9 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 },
             ],
             inbound_prefix_limits: vec![],
+            gr_retention: vec![],
+            gr_retention_available: Some(true),
+            retention_only: None,
             effective_posture: self.state.neighbor_effective_posture.lock().await.clone(),
         };
         response.update_group_comparison = self.state.neighbor_comparison.lock().await.clone();
@@ -1640,7 +1643,11 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
                 readiness_state:
                     server_proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady as i32,
                 not_ready_reason: String::new(),
+                current_apply_failure_count: 0,
+                latest_permanent_apply_error: String::new(),
             }],
+            unscoped_apply_failure_count: 0,
+            latest_unscoped_permanent_apply_error: String::new(),
         }))
     }
 

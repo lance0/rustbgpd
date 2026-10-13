@@ -31,6 +31,77 @@ async fn tcp_reader_error_is_bounded_but_clean_eof_is_not_an_error() {
     assert_eq!(eof.last_error, "prior");
 }
 
+/// Load-bearing: a local administrative stop deliberately leaves `last_error`
+/// alone, and transport and Cease/8 teardowns record their own causes. Reading
+/// `last_error` at the transition reports the seeded value for all three.
+#[tokio::test]
+async fn established_loss_carries_its_own_teardown_cause() {
+    async fn lost_cause(teardown: impl AsyncFnOnce(&mut PeerSession)) -> (String, String) {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel(16);
+        session.session_lifecycle_tx = Some(lifecycle_tx);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        session.last_error = "prior".to_string();
+        teardown(&mut session).await;
+        let mut lost = Vec::new();
+        while let Ok(SessionLifecycleNotification::StateChanged {
+            old,
+            teardown_cause,
+            ..
+        }) = lifecycle_rx.try_recv()
+        {
+            if old == SessionState::Established {
+                lost.push(teardown_cause.expect("loss carries a cause"));
+            } else {
+                assert_eq!(teardown_cause, None);
+            }
+        }
+        let [cause] = <[String; 1]>::try_from(lost).expect("exactly one loss");
+        (cause, session.last_error.clone())
+    }
+
+    let (cause, last_error) = lost_cause(async |session| {
+        session
+            .drive_fsm(Event::ManualStop {
+                reason: Some(Bytes::from_static(b"\x03bye")),
+            })
+            .await;
+    })
+    .await;
+    assert_eq!(
+        cause,
+        "sent NOTIFICATION 6/2 (Administrative Shutdown): \"bye\""
+    );
+    assert_eq!(last_error, "prior");
+
+    let (cause, _) = lost_cause(async |session| {
+        session
+            .handle_tcp_read_result(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "secret reader detail",
+            )))
+            .await;
+    })
+    .await;
+    assert_eq!(cause, "TCP reader I/O failure (ConnectionReset)");
+
+    let (cause, _) = lost_cause(async |session| {
+        session.trigger_outbound_out_of_resources_teardown(
+            crate::handle::SessionFailureCause::OutboundSaturation,
+        );
+        session
+            .handle_writer_exit(Ok(Err(super::writer::WriterExit::TornDown)))
+            .await;
+    })
+    .await;
+    assert_eq!(
+        cause,
+        "sent NOTIFICATION 6/8 (Out of Resources); outbound writer queue saturated"
+    );
+}
+
 /// Load-bearing: raw writer or `JoinError` rendering leaks either sentinel;
 /// collapsing panic and cancellation or changing a clean exit replaces one of
 /// the exact bounded/seeded assertions.

@@ -183,6 +183,12 @@ jobs:
           bash tests/interop/scripts/test-test-wait-helper.sh
           python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
           python3 tests/interop/scripts/test_evpn_frr_peer_sync.py
+          python3 tests/interop/scripts/test_m121_all_active_oracle.py
+          python3 tests/interop/scripts/test_m121_all_active_wire.py
+          python3 tests/interop/scripts/test_m121_all_active_driver.py
+          python3 -m py_compile tests/interop/scripts/m121_all_active_frr.py tests/interop/scripts/m121_all_active_oracle.py tests/interop/scripts/m121_all_active_wire.py
+          bash -n tests/interop/scripts/test-m121-evpn-all-active-frr.sh
+          shellcheck -x tests/interop/scripts/test-m121-evpn-all-active-frr.sh
           python3 tests/interop/scripts/test_interop_signal_cleanup.py
           python3 tests/interop/scripts/test_m66_failure_diagnostics.py
           python3 tests/interop/scripts/test_m67_rerun_mode.py
@@ -202,6 +208,9 @@ jobs:
           bash -n tests/interop/scripts/test-m119-evpn-bundle-vtep-srlinux.sh
           shellcheck -x tests/interop/scripts/test-m119-evpn-bundle-vtep-srlinux.sh tests/interop/scripts/setup-m119-hosts.sh
           python3 tests/interop/scripts/test_m120_bundle_irb_oracle.py
+          python3 tests/interop/scripts/test_m122_evpn_gr_oracle.py
+          bash -n tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh
+          shellcheck tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh
           bash -n tests/interop/scripts/test-m120-evpn-bundle-irb-srlinux.sh
           shellcheck -x tests/interop/scripts/test-m120-evpn-bundle-irb-srlinux.sh tests/interop/scripts/setup-m120-irb.sh
       - name: Replay committed M120 bundle IRB receipt
@@ -257,6 +266,7 @@ jobs:
                 --phase "$phase" | cmp - "$m112/$phase-$view-check.json"
             done
           done
+      - run: python3 -m unittest -v scripts/test_check_v1_stable_surface.py
       - run: python3 scripts/check-v1-stable-surface.py
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -555,6 +565,7 @@ jobs:
           python3 -m unittest -v tests/soak/test_m67_link_drain_analyzer.py
           python3 -m unittest -v tests/soak/test_analyze_soak_rs_flagship.py
           python3 -m unittest -v tests/soak/test_analyze_soak_rr_flagship.py
+          python3 -m unittest -v tests/soak/test_analyze_soak_evpn_rr.py
           python3 -m unittest -v tests/soak/test_management_plane_load.py
           python3 -m unittest -v tests/soak/test_fd_headroom.py
           python3 -m unittest -v tests/soak/test_flagship_lifecycle.py
@@ -562,6 +573,7 @@ jobs:
           shellcheck -x tests/soak/flagship-lifecycle.sh
           shellcheck -x tests/soak/run-soak-rs-flagship.sh
           shellcheck -x tests/soak/run-soak-rr-flagship.sh
+          shellcheck -x tests/soak/run-soak-evpn-rr.sh
           python3 bench/scale/rebaseline/test_classifiers.py
           python3 bench/scale/rebaseline/test_parse_rrharness.py
           python3 bench/scale/rebaseline/test_validate_lan395_criterion.py

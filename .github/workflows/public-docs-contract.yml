@@ -127,6 +127,11 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_site_manifest.py
           python3 scripts/check_site_manifest.py
+      - name: Check generated capability, leg and lab indexes are fresh
+        if: matrix.contract == 'public'
+        run: |
+          python3 -m unittest -v scripts/test_generate_evidence_index.py
+          python3 scripts/generate_evidence_index.py --check
       - name: Check SIGHUP architecture route coverage
         if: matrix.contract == 'public'
         run: |

@@ -383,6 +383,18 @@ rows do not originate new Type 2 routes. Unbound segments provide control-plane 
 not provide this forwarding behavior. See the
 [ADR-0085 amendment](../adr/0085-evpn-es-interface-binding.md#amendment-2026-10-11-peer-synchronized-local-fdb-forwarding).
 
+**Use `highest-preference` with an FRR 10.7.1 ES peer, and make FRR the DF.**
+Set `df_algorithm = "highest-preference"` on rustbgpd, and set FRR's
+`evpn mh es-df-pref` on its access bond above rustbgpd's `df_preference`.
+FRR becomes non-DF on every VNI when the algorithms disagree. Stock FRR on
+Linux also does not filter BUM when it is non-DF: its netlink provider
+never applies the non-DF bridge-port update. With rustbgpd as DF, the CE
+receives each BUM frame twice, once through each PE. This is a known
+limitation, not a supported mode. With FRR as DF, rustbgpd filters as
+non-DF and the CE receives one copy. Highest-preference chooses one winner
+across the ES's VNIs. See
+[FRR all-active ES peers](../reference/configuration.md#frr-all-active-es-peers).
+
 What you still provide:
 
 - Each `member_vnis` entry must be a configured `[[evpn_instances]]`
@@ -401,6 +413,35 @@ What you still provide:
   restart. See
   [Auto-derived ESI](../reference/configuration.md#auto-derived-esi-lacp-type-1).
 
+### Core-isolation hold
+
+An all-active PE that loses its EVPN sessions or its underlay still has its
+CE link up, so the CE keeps hashing flows into it. Opt in to
+`[evpn_core_isolation]` to take the bound bond's members administratively down
+while the PE is isolated, and at startup until EVPN has synced:
+
+```toml
+[evpn_core_isolation]
+enabled = true
+uplinks = ["eth1", "eth2"]   # optional: isolated when every uplink loses carrier
+```
+
+Before enabling it:
+
+- The CE must drop the member quickly once this PE takes it down: use a NIC
+  that drops PHY link on close, or set the CE to request fast LACPDUs (Linux
+  `lacp_rate fast`). Otherwise removal waits for the CE's LACP timeout, up to
+  90 s at the slow rate.
+- rustbgpd then owns the members' admin state. Set
+  `ActivationPolicy=manual` on them in systemd-networkd and leave them
+  unmanaged by NetworkManager; do not toggle them with `ip link`.
+- Run `rustbgpd --release-core-isolation --runtime-state-dir DIR` after
+  every daemon exit. The shipped systemd unit does this with `ExecStopPost=`;
+  under a supervisor without a stop hook, run it yourself.
+
+See [`[evpn_core_isolation]`](../reference/configuration.md#evpn_core_isolation)
+for the signal, the peer rule, the hold timers and the ownership receipt.
+
 ## Verifying
 
 ```bash
@@ -408,7 +449,8 @@ rbgp evpn instances        # readiness=ready|not-ready|unbound|unknown, reason=[
 rbgp evpn vrfs <name>      # readiness=ready|not-ready|unknown, reasons=[...]
 rbgp evpn vrfs <name> --json # includes not_ready_reasons and remote_prefix_drop_counts
 rbgp evpn es list          # Ethernet Segments currently originated
-rbgp doctor                # evpn.es.<interface>.auto_esi names an auto-lacp segment's not-ready reason
+rbgp doctor                # evpn.es.<interface>.auto_esi names an auto-lacp segment's not-ready reason;
+                           # evpn.es.<interface>.core_isolation reports the core-isolation hold
 ```
 
 A NotReady `esi = "auto-lacp"` segment is absent from `rbgp evpn es list`,

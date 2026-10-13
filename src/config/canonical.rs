@@ -5,10 +5,10 @@ use serde::{Serialize, Serializer};
 
 use super::{
     BfdProfileConfig, BmpConfig, Config, ConfigEpoch, DynamicNeighborConfig, EthernetSegmentConfig,
-    EventHistoryConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig, FlowSpecConfig,
-    Global, GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
-    PeerGroupConfig, PolicyConfig, PolicyExplainConfig, PolicyRejectRetentionConfig,
-    PolicyStatementConfig, RpkiConfig, SecurityConfig,
+    EventHistoryConfig, EvpnCoreIsolationConfig, EvpnInstanceConfig, EvpnIpVrfConfig,
+    FibTableConfig, FlowSpecConfig, Global, GnmiDialoutConfig, InboundAdmissionConfig,
+    ManagedNetdevsConfig, MrtConfig, Neighbor, PeerGroupConfig, PolicyConfig, PolicyExplainConfig,
+    PolicyRejectRetentionConfig, PolicyStatementConfig, RpkiConfig, SecurityConfig,
 };
 
 const STATEMENT_CHUNK_LEN: usize = 256;
@@ -430,6 +430,7 @@ struct CanonicalConfig<'a> {
     mrt: &'a Option<MrtConfig>,
     evpn_instances: &'a [EvpnInstanceConfig],
     ethernet_segments: &'a [EthernetSegmentConfig],
+    evpn_core_isolation: &'a Option<EvpnCoreIsolationConfig>,
     evpn_ip_vrfs: &'a [EvpnIpVrfConfig],
     fib_tables: &'a [FibTableConfig],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -459,6 +460,7 @@ impl<'a> CanonicalConfig<'a> {
             mrt,
             evpn_instances,
             ethernet_segments,
+            evpn_core_isolation,
             evpn_ip_vrfs,
             fib_tables,
             managed_netdevs,
@@ -492,6 +494,7 @@ impl<'a> CanonicalConfig<'a> {
             mrt,
             evpn_instances,
             ethernet_segments,
+            evpn_core_isolation,
             evpn_ip_vrfs,
             fib_tables,
             managed_netdevs: optional_section(managed_netdevs, optional_sections),

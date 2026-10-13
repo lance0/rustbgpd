@@ -2,6 +2,7 @@
 pub(crate) mod bench_outbound;
 mod commands;
 pub(crate) mod export;
+mod family_limits;
 mod fsm;
 pub mod import_decision_cache;
 pub(crate) mod inbound;
@@ -47,7 +48,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{MaxPrefixAction, RemovePrivateAs, TransportConfig};
+use crate::config::{MaxPrefixAction, PrefixLimitFamily, RemovePrivateAs, TransportConfig};
 use crate::error::TransportError;
 use crate::event_sink::{NoopTransportEventSink, TransportEventSink};
 use crate::framing::ReadBuffer;
@@ -536,6 +537,15 @@ pub(crate) struct PeerSession {
     /// Accepted RT-Constrain routes from this peer (RFC 4684 keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_rtc: HashSet<RtcRibRouteKey>,
+    /// Unique accepted VPNv4/VPNv6 routes (RD + prefix, Add-Path collapsed)
+    /// for the per-family `max_prefixes_l3vpn_*` bounds, maintained with
+    /// `known_vpn`.
+    vpn_counts: family_limits::UniqueAfiCounts<rustbgpd_wire::VpnRouteKey>,
+    /// Labeled-unicast sibling of `vpn_counts`, maintained with
+    /// `known_labeled`.
+    labeled_counts: family_limits::UniqueAfiCounts<Prefix>,
+    /// Accepted IPv4/IPv6 `FlowSpec` rules, maintained with `known_flowspec`.
+    flowspec_counts: [usize; 2],
     /// Ephemeral RFC 7313 stale-identity snapshots used to keep transport-owned
     /// max-prefix accounting aligned with the RIB's refresh sweep.
     refresh_accounting: refresh_accounting::RefreshMaxPrefixAccounting,
@@ -553,6 +563,10 @@ pub(crate) struct PeerSession {
     flap_count: u64,
     established_at: Option<tokio::time::Instant>,
     last_error: String,
+    /// Bounded cause of the teardown in progress, captured where it happens
+    /// and attached to the loss of `Established`. Unlike `last_error`, it
+    /// never outlives the transition it explains.
+    teardown_cause: Option<String>,
     /// Root cause of an in-flight local Cease/8 teardown.
     pending_outbound_teardown_cause: Option<crate::handle::SessionFailureCause>,
     /// Latest query-time TCP-AO inspection for the currently owned stream.
@@ -726,15 +740,25 @@ pub(super) enum MaxPrefixScope {
     Ipv6,
     Ipv4Received,
     Ipv6Received,
+    /// A non-unicast per-family accepted bound (`max_prefixes_<family>`).
+    Family(PrefixLimitFamily),
 }
 
 impl MaxPrefixScope {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 13] = [
         Self::Aggregate,
         Self::Ipv4,
         Self::Ipv6,
         Self::Ipv4Received,
         Self::Ipv6Received,
+        Self::Family(PrefixLimitFamily::L3vpnIpv4),
+        Self::Family(PrefixLimitFamily::L3vpnIpv6),
+        Self::Family(PrefixLimitFamily::Ipv4LabeledUnicast),
+        Self::Family(PrefixLimitFamily::Ipv6LabeledUnicast),
+        Self::Family(PrefixLimitFamily::L2vpnEvpn),
+        Self::Family(PrefixLimitFamily::Ipv4Flowspec),
+        Self::Family(PrefixLimitFamily::Ipv6Flowspec),
+        Self::Family(PrefixLimitFamily::Rtc),
     ];
 
     pub(super) const fn as_str(self) -> &'static str {
@@ -744,18 +768,28 @@ impl MaxPrefixScope {
             Self::Ipv6 => "ipv6_unicast",
             Self::Ipv4Received => "ipv4_unicast_received",
             Self::Ipv6Received => "ipv6_unicast_received",
+            Self::Family(family) => family.label(),
         }
     }
 
     const fn index(self) -> usize {
-        self as usize
+        match self {
+            Self::Aggregate => 0,
+            Self::Ipv4 => 1,
+            Self::Ipv6 => 2,
+            Self::Ipv4Received => 3,
+            Self::Ipv6Received => 4,
+            Self::Family(family) => 5 + family as usize,
+        }
     }
 
-    const fn family(self) -> Option<Afi> {
+    /// The family a recovered `block` episode asks the peer to replay.
+    const fn family(self) -> Option<(Afi, Safi)> {
         match self {
             Self::Aggregate => None,
-            Self::Ipv4 | Self::Ipv4Received => Some(Afi::Ipv4),
-            Self::Ipv6 | Self::Ipv6Received => Some(Afi::Ipv6),
+            Self::Ipv4 | Self::Ipv4Received => Some((Afi::Ipv4, Safi::Unicast)),
+            Self::Ipv6 | Self::Ipv6Received => Some((Afi::Ipv6, Safi::Unicast)),
+            Self::Family(family) => Some(family.afi_safi()),
         }
     }
 }
@@ -1041,6 +1075,18 @@ impl PeerSession {
                     .remove_max_prefix_capacity(&self.peer_label, scope.as_str());
             }
         }
+        // A family scope exists only while its bound is configured; removing
+        // a bound at runtime drops its series (`UpdateRuntimeConfig`).
+        for family in PrefixLimitFamily::ALL {
+            if let limit @ Some(_) = self.config.max_prefixes_family.get(family) {
+                self.metrics.set_max_prefix_capacity(
+                    &self.peer_label,
+                    family.label(),
+                    self.family_prefix_usage(family),
+                    limit,
+                );
+            }
+        }
         for scope in MaxPrefixScope::ALL {
             if self.max_prefix_scope_usage(scope).1.is_some() {
                 self.metrics.set_max_prefix_blocking(
@@ -1066,6 +1112,10 @@ impl PeerSession {
                 self.received_unicast_v6(),
                 self.config.max_prefixes_received_ipv6,
             ),
+            MaxPrefixScope::Family(family) => (
+                self.family_prefix_usage(family),
+                self.config.max_prefixes_family.get(family),
+            ),
         }
     }
 
@@ -1088,7 +1138,7 @@ impl PeerSession {
     /// accounting boundary before the capacity gauges are published.
     fn reconcile_max_prefix_modes(&mut self) {
         let percent = self.max_prefix_warning_percent();
-        let mut recovered_families: Vec<Afi> = Vec::new();
+        let mut recovered_families: Vec<(Afi, Safi)> = Vec::new();
         for scope in MaxPrefixScope::ALL {
             let index = scope.index();
             let (usage, bound) = self.max_prefix_scope_usage(scope);
@@ -1107,10 +1157,10 @@ impl PeerSession {
                     bound,
                     "max prefix blocking ended; requesting route replay"
                 );
-                if let Some(afi) = scope.family()
-                    && !recovered_families.contains(&afi)
+                if let Some(family) = scope.family()
+                    && !recovered_families.contains(&family)
                 {
-                    recovered_families.push(afi);
+                    recovered_families.push(family);
                 }
             }
             let Some(bound) = bound else {
@@ -1161,8 +1211,8 @@ impl PeerSession {
                 }
             }
         }
-        for afi in recovered_families {
-            self.request_unicast_reannouncement(afi, "max-prefix blocking ended");
+        for family in recovered_families {
+            self.request_family_reannouncement(family, "max-prefix blocking ended");
         }
     }
 
@@ -1254,8 +1304,9 @@ impl PeerSession {
     /// First exceeded max-prefix bound, checked in a fixed order: the
     /// legacy aggregate `max_prefixes` (all counted families), then
     /// `max_prefixes_ipv4`, then `max_prefixes_ipv6` (unique unicast
-    /// prefixes per family). Aggregate and per-family limits are
-    /// independent — ADR-0108.
+    /// prefixes per family), the received bounds, then each non-unicast
+    /// `max_prefixes_<family>` in [`PrefixLimitFamily::ALL`] order.
+    /// Aggregate and per-family limits are independent — ADR-0108.
     fn max_prefix_violation(&self, include_aggregate: bool) -> Option<MaxPrefixViolation> {
         if include_aggregate
             && let Some(max) = self.config.max_prefixes
@@ -1313,7 +1364,17 @@ impl PeerSession {
                 path_limit: false,
             });
         }
-        None
+        PrefixLimitFamily::ALL.into_iter().find_map(|family| {
+            let max = self.config.max_prefixes_family.get(family)?;
+            let count = self.family_prefix_usage(family);
+            (count > max as usize).then(|| MaxPrefixViolation {
+                count,
+                bound: max,
+                family: Some(family.afi_safi()),
+                received: false,
+                path_limit: false,
+            })
+        })
     }
 
     /// Enforce max-prefix limits against the current accounting: on a
@@ -1788,6 +1849,9 @@ impl PeerSession {
         self.known_vpn.clear();
         self.known_labeled.clear();
         self.known_rtc.clear();
+        self.vpn_counts.clear();
+        self.labeled_counts.clear();
+        self.flowspec_counts = [0; 2];
         self.received_eor_families.clear();
         self.clear_refresh_accounting();
     }
@@ -2155,6 +2219,9 @@ impl PeerSession {
             known_vpn: HashSet::new(),
             known_labeled: HashSet::new(),
             known_rtc: HashSet::new(),
+            vpn_counts: family_limits::UniqueAfiCounts::default(),
+            labeled_counts: family_limits::UniqueAfiCounts::default(),
+            flowspec_counts: [0; 2],
             refresh_accounting: refresh_accounting::RefreshMaxPrefixAccounting::default(),
             refresh_accounting_timer: None,
             updates_received: 0,
@@ -2167,6 +2234,7 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            teardown_cause: None,
             pending_outbound_teardown_cause: None,
             tcp_ao_info,
             tcp_ao_key_metadata,
@@ -2529,10 +2597,10 @@ impl PeerSession {
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::LocalNoNotification);
                 if pending_outbound_cause.is_none() {
-                    self.last_error = format!(
+                    self.record_transport_cause(format!(
                         "send hold timer expired after {}s (RFC 9687)",
                         limit.as_secs()
-                    );
+                    ));
                 }
                 self.emit_notification_event(
                     SessionNotificationDirection::Sent,
@@ -2562,7 +2630,7 @@ impl PeerSession {
                 let cause = crate::handle::SessionFailureCause::WriterIo(e.kind());
                 debug!(peer = %self.peer_label, cause = %cause, "writer task TCP error");
                 if pending_outbound_cause.is_none() {
-                    self.last_error = cause.to_string();
+                    self.record_transport_cause(cause.to_string());
                 }
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::TransportError);
@@ -2575,7 +2643,7 @@ impl PeerSession {
                 };
                 warn!(peer = %self.peer_label, cause = %cause, "writer task ended unexpectedly");
                 if pending_outbound_cause.is_none() {
-                    self.last_error = cause.to_string();
+                    self.record_transport_cause(cause.to_string());
                 }
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::TransportError);
@@ -2598,7 +2666,7 @@ impl PeerSession {
                 let cause = crate::handle::SessionFailureCause::ReaderIo(e.kind());
                 debug!(peer = %self.peer_label, cause = %cause, "TCP read error");
                 if self.pending_outbound_teardown_cause.is_none() {
-                    self.last_error = cause.to_string();
+                    self.record_transport_cause(cause.to_string());
                 }
                 self.session_telemetry_metric_lease
                     .latch_down_reason(SessionDownReason::TransportError);

@@ -164,6 +164,7 @@ states that the whole decision is Superseded.
 | [0137](0137-conditional-advertisement.md) | Conditional advertisement | Accepted | 2026-10-07 | Active |
 | [0138](0138-route-flap-dampening.md) | Route flap dampening | Proposed (preparation pulled forward 2026-10-09 and shipped; runtime enablement NO-GO, demand-gated) | 2026-10-08 | Active |
 | [0139](0139-flowspec-controller-contract.md) | Scoped FlowSpec controller compatibility contract | Accepted | 2026-10-10 | Active |
+| [0140](0140-evpn-core-isolation-es-hold.md) | EVPN core isolation and startup hold for bound Ethernet Segments | Accepted (implemented; interop evidence pending) | 2026-10-12 | Active |
 
 ## Supporting records
 

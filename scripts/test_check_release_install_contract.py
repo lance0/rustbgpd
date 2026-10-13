@@ -55,9 +55,27 @@ MUTATIONS = (
     ),
     (
         "scripts/build-packages.sh",
-        "sed 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \\",
-        "sed 's|/usr/local/bin|/usr/bin|g' \\",
+        "sed -e 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \\",
+        "sed -e 's|/usr/local/bin|/usr/bin|g' \\",
         "native systemd staging",
+    ),
+    (
+        "scripts/build-packages.sh",
+        "-e 's|^ExecStopPost=/usr/local/bin/rustbgpd |ExecStopPost=/usr/bin/rustbgpd |' \\",
+        "-e 's|^ExecStopPost=x|y|' \\",
+        "native systemd staging",
+    ),
+    (
+        contract.SYSTEMD_UNIT,
+        "ExecStopPost=/usr/local/bin/rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd",
+        "ExecStopPost=-/usr/local/bin/rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd",
+        "systemd unit",
+    ),
+    (
+        contract.SYSTEMD_UNIT,
+        "ExecStart=/usr/local/bin/rustbgpd --runtime-state-dir /var/lib/rustbgpd /etc/rustbgpd/config.toml",
+        "ExecStart=/usr/local/bin/rustbgpd /etc/rustbgpd/config.toml",
+        "systemd unit",
     ),
     (
         contract.SYSTEMD_TEMPLATE,
@@ -759,6 +777,116 @@ class ReleaseInstallContractTest(unittest.TestCase):
         self.assertTrue(
             any("tarball active assertions" in error for error in errors), errors
         )
+
+    def test_tarball_failure_branches_must_exit(self) -> None:
+        marker = "          for f in "
+        for index in range(2):
+            for replacement in ("", "              true\n"):
+                with self.subTest(branch=index, replacement=replacement):
+                    root = self.fixture()
+                    path = root / RELEASE
+                    before, after = path.read_text().split(marker, 1)
+                    lines = after.splitlines(keepends=True)
+                    exits = [i for i, line in enumerate(lines) if line.strip() == "exit 1"]
+                    lines[exits[index]] = replacement
+                    path.write_text(before + marker + "".join(lines))
+                    errors = contract.check(root)
+                    self.assertTrue(
+                        any("tarball active assertions" in error for error in errors),
+                        errors,
+                    )
+
+    def test_guarded_lines_reject_failure_suppression(self) -> None:
+        guarded = (
+            (RELEASE, GREP_ASSERT),
+            (RELEASE, TAR_SIZE_ASSERT),
+            (WORKFLOW, 'test -n "$deb" && test -n "$rpm"'),
+            (WORKFLOW, '|| { echo "missing or not executable: $tree/usr/bin/$exe" >&2; exit 1; }'),
+            (WORKFLOW, 'test -s "$tree/$file" || { echo "missing or empty: $tree/$file" >&2; exit 1; }'),
+            (WORKFLOW, UNIT_ASSERT),
+            (WORKFLOW, TEMPLATE_EXEC_ASSERT),
+            (WORKFLOW, "grep -qxF 'StateDirectory=rustbgpd/%i rustbgpd/%i/activation' \"$template\""),
+            (WORKFLOW, "grep -qxF 'ReadWritePaths=/var/lib/rustbgpd/%i' \"$template\""),
+        )
+        for relative, line in guarded:
+            for suffix in (" || true", " || :"):
+                with self.subTest(line=line, suffix=suffix):
+                    root = self.fixture()
+                    path = root / relative
+                    text = path.read_text()
+                    if line.endswith("; then"):
+                        old, new = line, line.removesuffix("; then") + suffix + "; then"
+                    else:
+                        old, new = line + "\n", line + suffix + "\n"
+                    self.assertIn(old, text)
+                    path.write_text(text.replace(old, new, 1))
+                    self.assertNotEqual(contract.check(root), [])
+
+    def test_every_read_input_triggers_the_workflow(self) -> None:
+        monitoring = {source for source, _, _ in contract.MONITORING}
+        for relative in (path for path in INPUTS if path not in monitoring):
+            entry = f"      - {relative}\n"
+            for occurrence in range(2):
+                with self.subTest(path=relative, occurrence=occurrence):
+                    root = self.fixture()
+                    path = root / WORKFLOW
+                    text = path.read_text()
+                    self.assertEqual(text.count(entry), 2)
+                    start = text.find(entry) if occurrence == 0 else text.rfind(entry)
+                    commented = entry.replace("- ", "# - ", 1)
+                    path.write_text(
+                        text[:start] + commented + text[start + len(entry) :]
+                    )
+                    errors = contract.check(root)
+                    self.assertIn(
+                        f"release install workflow must trigger for {relative}", errors
+                    )
+
+    def test_scalar_valued_paths_key_is_not_a_filter(self) -> None:
+        header = "    paths:\n"
+        for occurrence in range(2):
+            for value in ("|", ">-", "[]"):
+                with self.subTest(occurrence=occurrence, value=value):
+                    root = self.fixture()
+                    path = root / WORKFLOW
+                    text = path.read_text()
+                    self.assertEqual(text.count(header), 2)
+                    at = text.find(header) if occurrence == 0 else text.rfind(header)
+                    path.write_text(
+                        text[:at] + f"    paths: {value}\n" + text[at + len(header) :]
+                    )
+                    errors = contract.check(root)
+                    self.assertIn(
+                        "release install workflow must trigger for LICENSES.md", errors
+                    )
+
+    def test_duplicate_entry_does_not_cover_the_other_filter(self) -> None:
+        monitoring = {source for source, _, _ in contract.MONITORING}
+        for relative in (path for path in INPUTS if path not in monitoring):
+            entry = f"      - {relative}\n"
+            for keep in ("pull_request", "push"):
+                with self.subTest(path=relative, keep=keep):
+                    root = self.fixture()
+                    path = root / WORKFLOW
+                    text = path.read_text()
+                    first, last = text.find(entry), text.rfind(entry)
+                    self.assertNotEqual(first, last)
+                    # Duplicate at the head of the kept list, away from the
+                    # original entry, and drop the other filter's entry.
+                    header = "    paths:\n"
+                    if keep == "pull_request":
+                        text = text[:last] + text[last + len(entry) :]
+                        at = text.find(header) + len(header)
+                    else:
+                        text = text[:first] + text[first + len(entry) :]
+                        at = text.rfind(header) + len(header)
+                    text = text[:at] + entry + text[at:]
+                    self.assertEqual(text.count(entry), 2)
+                    path.write_text(text)
+                    errors = contract.check(root)
+                    self.assertIn(
+                        f"release install workflow must trigger for {relative}", errors
+                    )
 
 
 class VerifiedInstallerTest(unittest.TestCase):

@@ -51,7 +51,8 @@ prints the result as `SIGHUP reload route`:
 | **rejected** | Dataset content/binding or BFD attachment changes combined with TCP-AO rotation or a listener MD5/GTSM edit; a sequential candidate whose peer-group edit adds or changes a config-file-only group field (below), or that changes a conditional-advertisement definition or neighbor attachment; or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
 
 The sequential route applies peer-group edits as `SetPeerGroup` definitions,
-which cannot carry the config-file-only group fields: `role`, `strict_role`,
+which cannot carry the config-file-only group fields: `admin_down`,
+`admin_down_reason`, `role`, `strict_role`,
 `prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`, the slow-peer knobs,
 the per-family and received prefix limits, `max_prefix_action`,
 `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
@@ -115,10 +116,10 @@ changes the GR settings themselves. The explicit purge reset for
 `discard_path_attributes` bypasses this retention.
 
 Static-neighbor edits whose **every** changed field is hot-applied
-(`description`, `max_prefixes`, `max_prefixes_ipv4`,
+(`description`, `admin_down`, `admin_down_reason`, `max_prefixes`, `max_prefixes_ipv4`,
 `max_prefixes_ipv6`, `max_prefixes_received_ipv4`,
-`max_prefixes_received_ipv6`, `max_prefix_action`,
-`max_prefix_warning_percent`, `max_prefixes_out_ipv4`,
+`max_prefixes_received_ipv6`, the non-unicast `max_prefixes_<family>` keys,
+`max_prefix_action`, `max_prefix_warning_percent`, `max_prefixes_out_ipv4`,
 `max_prefixes_out_ipv6`, `max_prefix_restart_seconds`,
 `gr_peer_restart_time_max`, `gr_stale_routes_time`,
 `local_ipv6_nexthop`, `remove_private_as`, `log_level`, the
@@ -195,12 +196,33 @@ planning and policy-only transactions also retain the scoped peer in their
 policy targets without requiring a fresh interface lookup. Transaction edits
 that rebuild sessions still require fresh scope resolution during planning.
 
+### Administrative state
+
+`admin_down` is the configured boot state and the runtime
+`rbgp neighbor <addr> enable|disable` toggle stays transient
+([ADR-0043](../adr/0043-config-persistence.md)):
+
+- At startup, and whenever a neighbor is added, `admin_down = true` adds the
+  peer disabled. It makes no connection attempts, refuses inbound
+  connections, reads 0 in `bgp_peer_admin_enabled`, and stays listed in
+  `rbgp neighbor`.
+- On reload, only a *change* to the resolved `admin_down` acts. Setting it
+  disables the peer: an Established session receives Cease/Administrative
+  Shutdown with `admin_down_reason` as its RFC 9003 shutdown communication.
+  Clearing it enables the peer.
+- While the resolved value is unchanged, a reload keeps the runtime toggle. A
+  runtime `enable` of a config-down peer therefore lasts until the next
+  daemon restart or a reload that changes `admin_down`; a runtime `disable`
+  of a config-up peer lasts the same way.
+
 | Field | Class | Notes |
 |---|---|---|
 | `address` | restart-required (identity) | Part of the diff key. Edit = delete + add. To change the peer address in place, delete the old neighbor (gRPC or remove from config + reload), then add the new one. |
 | `interface` | restart-required (identity) | Part of the diff key. Same as `address`. Used by IPv6 link-local + BGP unnumbered peering. |
 | `remote_asn` | live (session reset, identity) | Not part of the diff key: on SIGHUP the reconciler rebuilds the session immediately with the new ASN. Equivalent to delete + add of the neighbor — no daemon restart needed. Annotated "session reset: peer re-established with new ASN" by `rustbgpd --diff`. |
 | `description` | live | Metadata only; hot-applied in place — session task untouched. |
+| `admin_down` | live | Hot-applied in place through the operator disable/enable path; see [Administrative state](#administrative-state). Setting it sends Cease/Administrative Shutdown with `admin_down_reason`; clearing it starts the session. Mixed with a session-reset edit, the peer is rebuilt once and comes back in the new state; a rebuild that takes the peer down also sends `admin_down_reason`. A reload that fails and is compensated restores each peer's prior administrative state, including a runtime toggle. |
+| `admin_down_reason` | live | RFC 9003 shutdown communication, at most 128 bytes. A change is recorded in place and sent with the next `admin_down` shutdown. |
 | `peer_group` | live (session reset) | A reassignment changes the peer's effective inherited config, so SIGHUP reconcile (and the transaction session-reshape executor) rebuild the session. Group *field* edits on an unchanged membership hot-apply per the `[peer_groups.<name>]` table below. |
 | `hold_time` | live (effective next session) | Negotiated in OPEN. On SIGHUP the reconciler rebuilds the session immediately, so the new value is negotiated right away. |
 | `min_hold_time` | live (effective next session) | Validates the peer's next OPEN proposal. On SIGHUP the reconciler rebuilds the session immediately; existing sessions are not re-evaluated in place. |
@@ -213,6 +235,14 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `max_prefixes_ipv6` | live | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108). |
 | `max_prefixes_received_ipv4` | live | Pre-policy IPv4-unicast received-prefix cap (ADR-0108 amendment), enforced independently of the accepted-route caps. Lowering below the announced count enforces immediately. Adding the cap to an Established session starts tracking rejected identities and requests a plain route refresh for the family so already-rejected announcements are recounted; without negotiated route refresh the count is exact only for announcements after the change (logged). Removing the cap drops the tracked rejected identities and the `*_received` metric scope. |
 | `max_prefixes_received_ipv6` | live | IPv6-unicast sibling of `max_prefixes_received_ipv4`. |
+| `max_prefixes_l3vpn_ipv4_unicast` | live | Per-family VPN-IPv4 inbound cap, enforced independently of the aggregate and every other family. Hot-applied in place: lowering below the family's current count enforces immediately under `shutdown`; removing the cap drops its metric scope. |
+| `max_prefixes_l3vpn_ipv6_unicast` | live | Same as `max_prefixes_l3vpn_ipv4_unicast`, for its own family. |
+| `max_prefixes_ipv4_labeled_unicast` | live | Same as `max_prefixes_l3vpn_ipv4_unicast`, for its own family. |
+| `max_prefixes_ipv6_labeled_unicast` | live | Same as `max_prefixes_l3vpn_ipv4_unicast`, for its own family. |
+| `max_prefixes_l2vpn_evpn` | live | Same as `max_prefixes_l3vpn_ipv4_unicast`, for its own family. |
+| `max_prefixes_ipv4_flowspec` | live | Same as `max_prefixes_l3vpn_ipv4_unicast`, for its own family. |
+| `max_prefixes_ipv6_flowspec` | live | Same as `max_prefixes_l3vpn_ipv4_unicast`, for its own family. |
+| `max_prefixes_rtc` | live | Same as `max_prefixes_l3vpn_ipv4_unicast`, for its own family. |
 | `max_prefix_action` | live | Hot-applied; the new action governs the next evaluation. Leaving `block` clears its episodes and requests one route refresh per affected family; without that capability, peer reannouncement or reset is required. Switching to `shutdown` re-evaluates every per-family bound immediately (an over-limit family tears down at once). Switching to `block` never prunes: a family already above its bound simply withholds net-new prefixes until usage falls back under. |
 | `max_prefix_warning_percent` | live | Hot-applied; the threshold is re-evaluated immediately and each scope's once-per-crossing latch re-arms from the new value. |
 | `max_prefixes_out_ipv4` | live | RIB-owned outbound capacity (ADR-0113). Applies without touching the session. Adding or lowering is accepted only when the peer currently advertises at or below the candidate: an over-limit family rejects the whole edit (SIGHUP abandons the reload; a config transaction fails its precondition) and leaves the running maxima, admission state, Adj-RIB-Out, and wire state untouched — lowering is not an implicit pruning policy. A valid raise or removal schedules one coalesced, family-scoped resync. Commit-confirmed transactions may only tighten, because their automatic undo only loosens. |
@@ -289,6 +319,8 @@ static neighbors.
 
 | Field | Class | Notes |
 |---|---|---|
+| `admin_down` | live | Same as neighbor for inheriting static members. Rejected on a group referenced by `[[dynamic_neighbors]]`. |
+| `admin_down_reason` | live | Same as neighbor. |
 | `hold_time` | live (effective next session) | Same as neighbor. |
 | `min_hold_time` | live (effective next session) | Same as neighbor; static members are rebuilt, while accepted dynamic members follow the group caveat above. |
 | `send_hold_time` | live (effective next session) | Same as neighbor. |
@@ -300,6 +332,14 @@ static neighbors.
 | `max_prefixes_ipv6` | live | Same as neighbor. |
 | `max_prefixes_received_ipv4` | live | Same as neighbor; pre-policy received cap inherited by group members. |
 | `max_prefixes_received_ipv6` | live | Same as neighbor. |
+| `max_prefixes_l3vpn_ipv4_unicast` | live | Same as neighbor; inherited by group members. |
+| `max_prefixes_l3vpn_ipv6_unicast` | live | Same as neighbor; inherited by group members. |
+| `max_prefixes_ipv4_labeled_unicast` | live | Same as neighbor; inherited by group members. |
+| `max_prefixes_ipv6_labeled_unicast` | live | Same as neighbor; inherited by group members. |
+| `max_prefixes_l2vpn_evpn` | live | Same as neighbor; inherited by group members. |
+| `max_prefixes_ipv4_flowspec` | live | Same as neighbor; inherited by group members. |
+| `max_prefixes_ipv6_flowspec` | live | Same as neighbor; inherited by group members. |
+| `max_prefixes_rtc` | live | Same as neighbor; inherited by group members. |
 | `max_prefix_action` | live | Same as neighbor; inherited by group members. |
 | `max_prefix_warning_percent` | live | Same as neighbor; inherited by group members. |
 | `max_prefixes_out_ipv4` | live | Same maxima semantics as neighbor, evaluated by effective value: one over-limit member — static or accepted dynamic — rejects a group-wide lowering before any sibling changes. An all-`live` group edit swaps the maximum in place on every inheriting member, static and dynamic, without touching a session; a change set that also moves a session-reset field reshapes static members as before. Down children inherit the committed value when they reconnect. |
@@ -514,6 +554,7 @@ SIGHUP outcomes.
 | `[[evpn_instances]].duplicate_ip_detection` | coordinator-gated | Uses the full L2VNI redefine path even for a diagnostic-only edit: withdraws/replays local routes and clears duplicate-MAC quarantine. Clears IP move windows and removed-owner history while seeding preserved local/remote bindings without recounting them. Disabled by default. |
 | `[[evpn_ip_vrfs]]` | coordinator-gated | Supported IP-VRF add/delete/redefine and `ip_vrf` relink hot-apply, including decomposed mixed edits ([#268](https://github.com/lance0/rustbgpd/issues/268)); L3VNI/device/table identity changes stay restart-required by design — kernel VRF identity lifecycle (destroy + recreate); a runtime drain/recreate risks a dual-state window (see the ADR-0063 amendment). |
 | `[[ethernet_segments]]` | coordinator-gated | Supported ES add/delete/redefine and atomic tenant teardown hot-apply when the segment actor can converge; the first segment on a daemon started without one starts the actor live; mixed edits decompose ([#268](https://github.com/lance0/rustbgpd/issues/268)) with ES redefines applied one segment per generation. |
+| `[evpn_core_isolation]` | coordinator-gated | ADR-0140 core-isolation hold. Commits with the EVPN runtime config (a no-op plan for the EVPN model, like an `interface`-only edit), then republishes to the hold controller: `enabled`, `uplinks` and both timers apply live, and a changed timer keeps the hold's running clocks. Disabling the table or removing a binding releases the affected links at once; enabling it after startup arms no startup hold. `rustbgpd --diff` lists it with the EVPN runtime coordinator. See [`[evpn_core_isolation]`](configuration.md#evpn_core_isolation). |
 | `[managed_netdevs]` | restart-required | ADR-0091 bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and L3VXLAN lifecycle is resolved at startup and reconciled by the dataplane actor (create, stamp, restart adoption, same-owner orphan reap). Managed netdevs are not live-mutable in this tranche. |
 
 ## `[[fib_tables]]` and FIB runtime

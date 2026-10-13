@@ -318,7 +318,8 @@ pub enum SessionNotification {
         /// IP address of the remote peer.
         peer_addr: IpAddr,
         /// Bound scope: `aggregate`, `ipv4_unicast`, `ipv6_unicast`,
-        /// `ipv4_unicast_received`, or `ipv6_unicast_received`.
+        /// `ipv4_unicast_received`, `ipv6_unicast_received`, or a
+        /// non-unicast family label (`PrefixLimitFamily::label`).
         scope: &'static str,
         /// Usage that crossed the threshold.
         usage: usize,
@@ -431,6 +432,11 @@ pub enum SessionLifecycleNotification {
         old: SessionState,
         /// New FSM state.
         new: SessionState,
+        /// Bounded teardown cause captured when this transition left
+        /// `Established`: the sent or received NOTIFICATION (with any valid
+        /// RFC 9003 shutdown communication), a transport cause, or
+        /// `closed without NOTIFICATION`. `None` for every other transition.
+        teardown_cause: Option<String>,
     },
 }
 
@@ -452,6 +458,9 @@ pub struct PeerRuntimeConfigUpdate {
     pub max_prefixes_received_ipv4: Option<u32>,
     /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
     pub max_prefixes_received_ipv6: Option<u32>,
+    /// Non-unicast per-family accepted bounds. Lowering one below the
+    /// family's current count enforces immediately on apply.
+    pub max_prefixes_family: crate::config::FamilyPrefixLimits,
     /// Response to a crossed bound; switching to `Shutdown` re-evaluates
     /// every bound immediately.
     pub max_prefix_action: crate::config::MaxPrefixAction,
@@ -954,7 +963,8 @@ pub enum StateQueryOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaxPrefixScopeState {
     /// `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
-    /// or `ipv6_unicast_received`.
+    /// `ipv6_unicast_received`, or a non-unicast family label such as
+    /// `l3vpn_ipv4_unicast` (see `PrefixLimitFamily::label`).
     pub scope: &'static str,
     /// The session actor's enforcement count for the scope.
     pub usage: usize,
@@ -2566,6 +2576,7 @@ impl PeerHandle {
         max_prefixes_ipv6: Option<u32>,
         max_prefixes_received_ipv4: Option<u32>,
         max_prefixes_received_ipv6: Option<u32>,
+        max_prefixes_family: crate::config::FamilyPrefixLimits,
         max_prefix_action: crate::config::MaxPrefixAction,
         max_prefix_warning_percent: Option<u8>,
         gr_stale_routes_time: u64,
@@ -2585,6 +2596,7 @@ impl PeerHandle {
                         max_prefixes_ipv6,
                         max_prefixes_received_ipv4,
                         max_prefixes_received_ipv6,
+                        max_prefixes_family,
                         max_prefix_action,
                         max_prefix_warning_percent,
                         gr_stale_routes_time,

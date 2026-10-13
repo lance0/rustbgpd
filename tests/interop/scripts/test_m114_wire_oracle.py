@@ -70,8 +70,10 @@ def notification_scenarios(
 ) -> dict[str, tuple[str, list[str]]]:
     """The decoded NOTIFICATION verdict line and segments for each case.
 
-    Every case keeps a source connection that reaches Established (KEEPALIVE
-    both ways); the NOTIFICATION is on a second connection or after that.
+    Every case but one keeps a source connection that reaches Established
+    (KEEPALIVE both ways); the NOTIFICATION is on a second connection or after
+    that. Only a 6/7 Cease on an identified connection before Established
+    passes.
     """
     up = [
         segment(source, 50000, local, 179, message(1)),
@@ -87,33 +89,65 @@ def notification_scenarios(
             segment(local, 40000, peer, 179, message(4)),
         ]
 
-    def line(decoded: str) -> str:
-        return f"FAIL 1 NOTIFICATION message(s) captured: ['{decoded}']"
+    def fail(*decoded: str, allowed: tuple[str, ...] = ()) -> str:
+        return (
+            f"FAIL {len(decoded)} unexpected NOTIFICATION message(s) captured: {list(decoded)}"
+            + (f"; allowed collision Cease before Established: {list(allowed)}" if allowed else "")
+        )
 
+    def allowed(decoded: str) -> str:
+        return (
+            "PASS 0 unexpected NOTIFICATION message(s) captured; "
+            f"allowed collision Cease before Established: ['{decoded}']"
+        )
+
+    fsm_error = [
+        segment(receiver, 55242, local, 179, message(1)),
+        segment(local, 179, receiver, 55242, message(1), message(4)),
+        segment(receiver, 55242, local, 179, message(3, 5, 0)),
+    ]
+    source_collision = f"{source}:179 -> {local}:40000 code 6/7 before Established"
     return {
         "pre-Established source collision Cease": (
-            line(f"{source}:179 -> {local}:40000 code 6/7 before Established"),
+            allowed(source_collision),
             opened(source) + up + [segment(source, 179, local, 40000, message(3, 6, 7))],
         ),
-        "receiver FSM error before Established": (
-            line(f"{receiver}:55242 -> {local}:179 code 5/0 before Established"),
-            up
-            + [
-                segment(receiver, 55242, local, 179, message(1)),
-                segment(local, 179, receiver, 55242, message(1), message(4)),
-                segment(receiver, 55242, local, 179, message(3, 5, 0)),
-            ],
+        "pre-Established collision Cease sent by rustbgpd": (
+            allowed(f"{local}:179 -> {source}:50000 code 6/7 before Established"),
+            up[:1] + [segment(local, 179, source, 50000, message(3, 6, 7))],
         ),
         "receiver collision Cease": (
-            line(f"{receiver}:179 -> {local}:40000 code 6/7 before Established"),
+            allowed(f"{receiver}:179 -> {local}:40000 code 6/7 before Established"),
             up + opened(receiver) + [segment(receiver, 179, local, 40000, message(3, 6, 7))],
         ),
+        "receiver FSM error before Established": (
+            fail(f"{receiver}:55242 -> {local}:179 code 5/0 before Established"),
+            up + fsm_error,
+        ),
+        "other Cease subcode before Established": (
+            fail(f"{source}:179 -> {local}:40000 code 6/2 before Established"),
+            opened(source) + up + [segment(source, 179, local, 40000, message(3, 6, 2))],
+        ),
         "post-Established source Cease": (
-            line(f"{source}:50000 -> {local}:179 code 6/2 after Established"),
+            fail(f"{source}:50000 -> {local}:179 code 6/2 after Established"),
             up + [segment(source, 50000, local, 179, message(3, 6, 2))],
         ),
-        "NOTIFICATION without TCP ports": (
-            line(f"{source}:? -> {local}:? code 6/7 before Established"),
+        "post-Established collision Cease": (
+            fail(f"{source}:50000 -> {local}:179 code 6/7 after Established"),
+            up + [segment(source, 50000, local, 179, message(3, 6, 7))],
+        ),
+        "collision Cease beside an FSM error": (
+            fail(
+                f"{receiver}:55242 -> {local}:179 code 5/0 before Established",
+                allowed=(source_collision,),
+            ),
+            opened(source)
+            + up
+            + [segment(source, 179, local, 40000, message(3, 6, 7))]
+            + fsm_error,
+        ),
+        "collision Cease without TCP ports": (
+            fail(f"{source}:? -> {local}:? code 6/7 before Established"),
             up
             + [
                 segment(source, 179, local, 40000, message(3, 6, 7)).replace(
@@ -153,7 +187,7 @@ class M114WireOracleTests(unittest.TestCase):
         root = pdml(update(("3", "10.114.0.1")), notification)
         self.assertEqual(verdicts(root)[2], "FAIL")
 
-    def test_every_notification_fails_decoded(self) -> None:
+    def test_every_notification_decoded(self) -> None:
         cases = notification_scenarios("10.114.0.1", "10.114.0.2", "10.114.1.2")
         for name, (want, segments) in cases.items():
             with self.subTest(name):

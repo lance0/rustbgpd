@@ -60,6 +60,11 @@ pub enum RibSummaryQuery {
         peers: Vec<IpAddr>,
         /// Optional update-group comparison.
         comparison: Option<(IpAddr, IpAddr)>,
+        /// Also return a row for every peer the RIB retains GR/LLGR stale
+        /// routes for that `peers` does not name (a down dynamic neighbor
+        /// has left the neighbor inventory). Bounded by the retained-peer
+        /// count; no per-route work.
+        include_retained: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },
@@ -71,10 +76,12 @@ impl From<RibSummaryQuery> for RibUpdate {
             RibSummaryQuery::NeighborRibSnapshots {
                 peers,
                 comparison,
+                include_retained,
                 reply,
             } => Self::QueryNeighborRibSnapshots {
                 peers,
                 comparison,
+                include_retained,
                 reply,
             },
         }
@@ -1823,6 +1830,52 @@ pub struct NeighborRibSnapshot {
     pub policy_stats: NeighborPolicyStats,
     /// Live outbound registration and capacity state.
     pub outbound: PeerOutboundState,
+    /// Peer ASN the RIB last recorded for this peer; kept while its routes
+    /// are retained after the session went down.
+    pub remote_asn: Option<u32>,
+    /// RFC 4724 / RFC 9494 helper-side stale-route retention, one row per
+    /// family the RIB tracks in a GR or LLGR phase. Empty when nothing is
+    /// retained.
+    pub gr_retention: Vec<GrRetentionFamilyState>,
+}
+
+/// Helper-side retention phase of one family's stale routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrRetentionPhase {
+    /// Session down; the peer's GR restart timer is running.
+    GrRestart,
+    /// Session re-established; waiting for the family's End-of-RIB.
+    GrAwaitingEor,
+    /// RFC 9494 long-lived stale phase.
+    Llgr,
+}
+
+impl GrRetentionPhase {
+    /// Stable operator label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GrRestart => "gr_restart",
+            Self::GrAwaitingEor => "gr_awaiting_eor",
+            Self::Llgr => "llgr",
+        }
+    }
+}
+
+/// Neighbor-facing GR/LLGR retention state for one family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrRetentionFamilyState {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub phase: GrRetentionPhase,
+    /// Whole seconds, rounded up, until the RIB's next retention deadline
+    /// for this family: GR timer expiry (sweep, or promotion when LLGR is
+    /// negotiated) or the LLGR sweep, whichever is first. `None` when no
+    /// deadline is armed.
+    pub remaining_secs: Option<u64>,
+    /// Routes of this family still held GR- or LLGR-stale, from the
+    /// Adj-RIB-In's maintained counters (no route scan).
+    pub stale_routes: u64,
 }
 
 /// One actor-turn response for `NeighborService`'s RIB-owned state.
@@ -1832,6 +1885,10 @@ pub struct NeighborRibSnapshotResponse {
     pub snapshots: Vec<NeighborRibSnapshot>,
     /// Optional update-group comparison requested with the primary snapshot.
     pub comparison: Option<UpdateGroupPeerComparison>,
+    /// With `include_retained`: peers the request did not name whose GR/LLGR
+    /// stale routes the RIB still retains, in address order. Every row has
+    /// a non-empty `gr_retention`.
+    pub retained: Vec<NeighborRibSnapshot>,
 }
 
 /// Neighbor-facing ADR-0113 outbound capacity for one unicast family.
@@ -1995,6 +2052,32 @@ impl WireRoutesReceived {
             validated_with,
         }
     }
+}
+
+/// Reply to [`RibUpdate::QueryEvpnEsSnapshot`]: the session state and the
+/// Type 4 rows read in one RIB turn, so no session teardown and its route
+/// flush can fall between the two (ADR-0140 decision 4).
+#[derive(Debug, Clone, Default)]
+pub struct EvpnEsSnapshot {
+    /// The same counts [`RibUpdate::QueryEvpnSessionsSynced`] reports.
+    pub sessions: EvpnSessionsSync,
+    /// Every best Type 4 (Ethernet Segment) route in the Loc-RIB, read in
+    /// O(Type 4) through an index, never by walking the EVPN table.
+    pub es_routes: Vec<EvpnRibRoute>,
+}
+
+/// Reply to [`RibUpdate::QueryEvpnSessionsSynced`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvpnSessionsSync {
+    /// Peers whose newest live session negotiated L2VPN/EVPN.
+    pub established: usize,
+    /// Peers whose L2VPN/EVPN routes are retained as stale under
+    /// graceful restart or long-lived graceful restart.
+    pub stale: usize,
+    /// At least one L2VPN/EVPN session is established, every such
+    /// session has sent End-of-RIB, and GR selection deferral does not
+    /// hold the family.
+    pub synced: bool,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -2669,6 +2752,11 @@ pub enum RibUpdate {
         peers: Vec<IpAddr>,
         /// Optional `(primary, comparison)` update-group comparison.
         comparison: Option<(IpAddr, IpAddr)>,
+        /// Also return a row for every peer the RIB retains GR/LLGR stale
+        /// routes for that `peers` does not name (a down dynamic neighbor
+        /// has left the neighbor inventory). Bounded by the retained-peer
+        /// count; no per-route work.
+        include_retained: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },
@@ -3078,13 +3166,24 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
     },
-    /// Whether every established L2VPN/EVPN session has sent End-of-RIB
-    /// for the family and graceful-restart selection deferral is not
-    /// holding L2VPN/EVPN; `false` while none is established. Gates the
-    /// RFC 9785 §4.3 boot-time Designated Forwarder recovery decision.
+    /// L2VPN/EVPN session state: the established and stale-retained
+    /// session counts, and whether every established session has sent
+    /// End-of-RIB for the family while graceful-restart selection
+    /// deferral is not holding L2VPN/EVPN (`synced` is `false` while
+    /// none is established). Gates the RFC 9785 §4.3 boot-time
+    /// Designated Forwarder recovery decision and feeds the ADR-0140
+    /// core-isolation signal.
     QueryEvpnSessionsSynced {
         /// Response channel.
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<EvpnSessionsSync>,
+    },
+    /// The L2VPN/EVPN session state together with every best Type 4 route,
+    /// answered in one actor turn. Feeds the ADR-0140 core-isolation peer
+    /// latch at a per-second cadence, so it reads Type 4 rows through an
+    /// index rather than the whole EVPN Loc-RIB.
+    QueryEvpnEsSnapshot {
+        /// Response channel.
+        reply: oneshot::Sender<EvpnEsSnapshot>,
     },
     /// Query one bounded, version-fenced EVPN table page. Each page scans the
     /// scope but copies at most the clamped page size, ordered by typed key.

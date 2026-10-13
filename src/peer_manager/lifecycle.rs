@@ -499,6 +499,8 @@ impl PeerManager {
             remote_asn: managed.remote_asn,
             description: managed.description.clone(),
             peer_group: managed.peer_group.clone(),
+            admin_down: managed.admin_down.clone(),
+            restore_admin_enabled: Some(managed.enabled),
             hold_time: managed.hold_time,
             min_hold_time: tc.peer.min_hold_time,
             send_hold_time: Some(tc.peer.send_hold_time),
@@ -507,6 +509,7 @@ impl PeerManager {
             max_prefixes_ipv6: tc.max_prefixes_ipv6,
             max_prefixes_received_ipv4: tc.max_prefixes_received_ipv4,
             max_prefixes_received_ipv6: tc.max_prefixes_received_ipv6,
+            max_prefixes_family: tc.max_prefixes_family,
             max_prefix_action: tc.max_prefix_action,
             max_prefix_warning_percent: tc.max_prefix_warning_percent,
             max_prefix_restart_seconds: managed.max_prefix_restart_seconds,
@@ -587,7 +590,13 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
         sync_config_snapshot: bool,
     ) -> Result<(), PeerLifecycleError> {
-        self.add_peer_impl(config, sync_config_snapshot, true, true)
+        // A new peer's admin state is the config's: `admin_down` adds it
+        // disabled, so it never connects or accepts until enabled. A replayed
+        // rollback prior restores its captured state instead.
+        let enabled = config
+            .restore_admin_enabled
+            .unwrap_or(config.admin_down.is_none());
+        self.add_peer_impl(config, sync_config_snapshot, enabled, true)
             .await
     }
 
@@ -762,6 +771,7 @@ impl PeerManager {
             self.local_forwarding_state.clone(),
         ));
         let address = config.address;
+        let admin_down = config.admin_down.clone();
         let remote_asn = config.remote_asn;
         let description = label;
         let hold_time = Some(transport.peer.hold_time);
@@ -830,6 +840,7 @@ impl PeerManager {
                     description,
                     peer_group,
                     enabled,
+                    admin_down,
                     hold_time,
                     max_prefixes,
                     max_prefix_restart_seconds: config.max_prefix_restart_seconds,
@@ -937,7 +948,7 @@ impl PeerManager {
         peer: PeerKey,
         sync_config_snapshot: bool,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
-        self.delete_peer_checked(peer, sync_config_snapshot, None, true, None)
+        self.delete_peer_checked(peer, sync_config_snapshot, None, true, None, None)
             .await
     }
 
@@ -949,6 +960,7 @@ impl PeerManager {
         peer: PeerKey,
         next_tcp_ao: Option<&TcpAoKeyring>,
         next_discard_path_attributes: &[u8],
+        stop_reason: Option<bytes::Bytes>,
     ) -> Result<(), PeerLifecycleError> {
         self.delete_peer_checked(
             peer,
@@ -956,6 +968,7 @@ impl PeerManager {
             next_tcp_ao,
             false,
             Some(next_discard_path_attributes),
+            stop_reason,
         )
         .await
         .map(|_| ())
@@ -1018,10 +1031,16 @@ impl PeerManager {
             *remaining -= 1;
         }
         self.invalidate_max_prefix_restart(&peer);
-        let (was_enabled, graceful_shutdown) = self
+        let (was_enabled, graceful_shutdown, enabled) = self
             .peers
             .get(&peer)
-            .map(|managed| (managed.enabled, managed.advertise_graceful_shutdown))
+            .map(|managed| {
+                (
+                    managed.enabled,
+                    managed.advertise_graceful_shutdown,
+                    config_admin_enable(managed, &config).unwrap_or(managed.enabled),
+                )
+            })
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
 
         let previous = self
@@ -1031,12 +1050,10 @@ impl PeerManager {
                 config.tcp_ao.as_ref(),
                 false,
                 Some(&config.discard_path_attributes),
+                replacement_stop_reason(was_enabled, enabled, &config),
             )
             .await?;
-        if let Err(add_error) = self
-            .add_peer_with_admin_state(config, false, was_enabled)
-            .await
-        {
+        if let Err(add_error) = self.add_peer_with_admin_state(config, false, enabled).await {
             if let Some(prior) = dataset_prior.take() {
                 prior.restore();
             }
@@ -1198,11 +1215,18 @@ impl PeerManager {
             }
             *remaining -= 1;
         }
-        let (knobs_changed, export_knobs_changed, policies_changed, restart_policy_changed) = {
+        let (
+            knobs_changed,
+            export_knobs_changed,
+            policies_changed,
+            restart_policy_changed,
+            admin_enable,
+        ) = {
             let managed = self
                 .peers
                 .get(&peer)
                 .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+            let admin_enable = config_admin_enable(managed, &config);
             let tc = &managed.transport_config;
             // The export-affecting subset: `local_ipv6_nexthop` decides the
             // exact-export preflight's `MissingIpv6NextHop` suppression and
@@ -1217,6 +1241,7 @@ impl PeerManager {
                     || tc.max_prefixes_ipv6 != config.max_prefixes_ipv6
                     || tc.max_prefixes_received_ipv4 != config.max_prefixes_received_ipv4
                     || tc.max_prefixes_received_ipv6 != config.max_prefixes_received_ipv6
+                    || tc.max_prefixes_family != config.max_prefixes_family
                     || tc.max_prefix_action != config.max_prefix_action
                     || tc.max_prefix_warning_percent != config.max_prefix_warning_percent
                     || tc.gr_stale_routes_time != config.gr_stale_routes_time
@@ -1226,6 +1251,7 @@ impl PeerManager {
                 managed.import_policy != config.import_policy
                     || managed.export_policy != config.export_policy,
                 managed.max_prefix_restart_seconds != config.max_prefix_restart_seconds,
+                admin_enable,
             )
         };
 
@@ -1255,6 +1281,7 @@ impl PeerManager {
                     config.max_prefixes_ipv6,
                     config.max_prefixes_received_ipv4,
                     config.max_prefixes_received_ipv6,
+                    config.max_prefixes_family,
                     config.max_prefix_action,
                     config.max_prefix_warning_percent,
                     config.gr_stale_routes_time,
@@ -1321,6 +1348,28 @@ impl PeerManager {
             self.rearm_max_prefix_restart(&peer, config.max_prefix_restart_seconds);
         }
 
+        // A changed config `admin_down` reuses the operator disable/enable
+        // paths: setting it sends Cease/Administrative Shutdown with the
+        // configured RFC 9003 reason, clearing it starts the session.
+        // A config transition stays pending until its Stop is enqueued: a
+        // failed `disable_peer` leaves `enabled` false but `admin_down`
+        // unrecorded, so the next reload retries it whatever `enabled` says.
+        let (enabled, pending_edge) = self.peers.get(&peer).map_or((false, false), |managed| {
+            (
+                managed.enabled,
+                config.restore_admin_enabled.is_none()
+                    && managed.admin_down.is_some() != config.admin_down.is_some(),
+            )
+        });
+        match admin_enable {
+            Some(false) if enabled || pending_edge => {
+                self.disable_peer(peer.clone(), admin_down_shutdown_communication(&config))
+                    .await?;
+            }
+            Some(true) if !enabled => self.enable_peer(peer.clone()).await?,
+            _ => {}
+        }
+
         // Manager-side bookkeeping so `rbgp neighbor list` and any later
         // session rebuild see the new values.
         let managed = self
@@ -1328,6 +1377,7 @@ impl PeerManager {
             .get_mut(&peer)
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         managed.description.clone_from(&config.description);
+        managed.admin_down.clone_from(&config.admin_down);
         managed.max_prefixes = config.max_prefixes;
         managed.max_prefix_restart_seconds = config.max_prefix_restart_seconds;
         managed.transport_config.max_prefixes = config.max_prefixes;
@@ -1335,6 +1385,7 @@ impl PeerManager {
         managed.transport_config.max_prefixes_ipv6 = config.max_prefixes_ipv6;
         managed.transport_config.max_prefixes_received_ipv4 = config.max_prefixes_received_ipv4;
         managed.transport_config.max_prefixes_received_ipv6 = config.max_prefixes_received_ipv6;
+        managed.transport_config.max_prefixes_family = config.max_prefixes_family;
         managed.transport_config.max_prefix_action = config.max_prefix_action;
         managed.transport_config.max_prefix_warning_percent = config.max_prefix_warning_percent;
         managed.transport_config.gr_stale_routes_time = config.gr_stale_routes_time;
@@ -1509,7 +1560,9 @@ impl PeerManager {
         // Replays the captured prior configs in reverse of the apply order.
         // `reconfigure_peer` re-reads the live enabled / graceful-shutdown state
         // and re-applies it, so rollback preserves the peer's current admin and
-        // GShut state rather than resurrecting a stale transient toggle.
+        // GShut state rather than resurrecting a stale transient toggle. A
+        // prior also carries the admin state captured before the reshape,
+        // which `config_admin_enable` restores exactly.
         //
         // Best-effort: a failed restore does not stop the sweep — every prior
         // is still attempted, so one stuck member cannot strand the others in
@@ -1686,7 +1739,7 @@ impl PeerManager {
         outcome
     }
 
-    async fn restore_reconfigured_peer(
+    pub(super) async fn restore_reconfigured_peer(
         &mut self,
         peer: PeerKey,
         previous: PeerManagerNeighborConfig,
@@ -1698,13 +1751,14 @@ impl PeerManager {
         let candidate =
             rollback_config.map(|prior| Box::new(self.replace_current_config(prior.clone())));
         let restored = async {
-            if self.peers.contains_key(&peer) {
+            if let Some(current_enabled) = self.peers.get(&peer).map(|managed| managed.enabled) {
                 self.delete_peer_checked(
                     peer.clone(),
                     false,
                     previous.tcp_ao.as_ref(),
                     false,
                     Some(&previous.discard_path_attributes),
+                    replacement_stop_reason(current_enabled, was_enabled, &previous),
                 )
                 .await?;
             }
@@ -1756,6 +1810,7 @@ impl PeerManager {
         next_tcp_ao: Option<&TcpAoKeyring>,
         reap_metric_series: bool,
         next_discard_path_attributes: Option<&[u8]>,
+        stop_reason: Option<bytes::Bytes>,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let address = peer.address;
         // Dynamic-range peers are not deletable through the static-neighbor
@@ -1914,6 +1969,13 @@ impl PeerManager {
                 .await;
         }
 
+        if stop_reason.is_some() {
+            // Best effort: an Established session sends Cease/Administrative
+            // Shutdown with the reason; the shutdown below closes it anyway.
+            let _ = primary_handle
+                .stop_timeout(stop_reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await;
+        }
         let shutdown = self
             .quiesce_retiring_session(
                 &peer,
@@ -2469,4 +2531,49 @@ pub(super) struct SoftResetFailure {
     /// A command may have been accepted without an authoritative reply. Keep
     /// this distinct from a definite rejection after earlier family delivery.
     pub(super) acknowledgement_lost: bool,
+}
+
+/// The admin state a reload or reshape must apply to `managed` for `next`,
+/// or `None` to keep the runtime state.
+///
+/// The config's `admin_down` is the boot truth, but on a live peer only a
+/// change to it acts: setting it disables the peer and clearing it enables
+/// the peer. While it is unchanged, the transient runtime
+/// `enable`/`disable` toggle (ADR-0043) carries over, so an operator enable
+/// of a config-down peer lasts until restart or a reload that changes the
+/// key.
+///
+/// A replayed rollback prior ([`PeerManager::removed_peer_config`]) carries
+/// the admin state captured before the forward step and restores exactly that
+/// state, so compensation leaves an earlier runtime toggle intact.
+pub(super) fn config_admin_enable(
+    managed: &ManagedPeerState,
+    next: &PeerManagerNeighborConfig,
+) -> Option<bool> {
+    if let Some(enabled) = next.restore_admin_enabled {
+        return Some(enabled);
+    }
+    let next_down = next.admin_down.is_some();
+    (managed.admin_down.is_some() != next_down).then_some(!next_down)
+}
+
+/// The shutdown communication for a replacement's teardown: the configured
+/// reason when the replacement takes an enabled peer down, as disable sends.
+pub(super) fn replacement_stop_reason(
+    enabled: bool,
+    next_enabled: bool,
+    next: &PeerManagerNeighborConfig,
+) -> Option<bytes::Bytes> {
+    (enabled && !next_enabled)
+        .then(|| admin_down_shutdown_communication(next))
+        .flatten()
+}
+
+/// The RFC 9003 shutdown communication a config-driven disable sends.
+fn admin_down_shutdown_communication(config: &PeerManagerNeighborConfig) -> Option<bytes::Bytes> {
+    config
+        .admin_down
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+        .map(rustbgpd_wire::notification::encode_shutdown_communication)
 }

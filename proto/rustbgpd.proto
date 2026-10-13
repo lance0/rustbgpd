@@ -768,6 +768,44 @@ message NeighborState {
   // enforcement order. Empty from an older daemon, a stale peer-session
   // snapshot, or a peer with no finite bound.
   repeated InboundPrefixLimitState inbound_prefix_limits = 58;
+  // RFC 4724 / RFC 9494 helper-side stale-route retention, one row per family
+  // the RIB tracks in a GR or LLGR phase. Present while the session is down;
+  // empty when nothing is retained.
+  repeated GracefulRestartRetentionState gr_retention = 59;
+  // Presence distinguishes an older daemon that does not expose retention
+  // from a current daemon whose empty gr_retention means nothing is retained.
+  optional bool gr_retention_available = 60;
+  // Present and true on a row synthesized for an address that has no
+  // neighbor-inventory entry but whose GR/LLGR stale routes the RIB still
+  // retains, such as a dynamic neighbor whose session went idle. Such a row
+  // carries config.address, config.remote_asn (the ASN the RIB last
+  // recorded, 0 if unknown), state IDLE, and the RIB-owned fields including
+  // gr_retention; every other configuration and session field is its
+  // default. The row disappears when retention ends. Absent on ordinary rows
+  // and from older daemons.
+  optional bool retention_only = 61;
+}
+
+// Stale routes one family of a neighbor still holds for GR or LLGR.
+message GracefulRestartRetentionState {
+  // Family label, for example "ipv4_unicast".
+  string family = 1;
+  // "gr_restart" (session down, restart timer running), "gr_awaiting_eor"
+  // (session re-established, waiting for End-of-RIB), or "llgr" (RFC 9494
+  // long-lived stale phase).
+  string phase = 2;
+  // Whole seconds, rounded up, until the RIB's next retention deadline for
+  // this family: GR timer expiry (sweep, or promotion to LLGR when
+  // negotiated) or the LLGR sweep, whichever comes first. Absent when no
+  // deadline is armed.
+  optional uint64 remaining_seconds = 3;
+  // Routes of this family still held GR- or LLGR-stale, from counters the
+  // RIB maintains as routes are marked, re-advertised, withdrawn and swept.
+  // Reported by both ListNeighbors and GetNeighborState; absent from older
+  // daemons, and from ListNeighbors on daemons that counted only for a
+  // single neighbor. Zero while End-of-RIB is still awaited after every
+  // stale route was re-advertised.
+  optional uint64 stale_routes = 4;
 }
 
 message AcceptedDynamicNeighborRange {
@@ -835,8 +873,10 @@ message OutboundPrefixLimitState {
 // One finite inbound max-prefix bound's live capacity for a neighbor
 // (ADR-0108 amendment).
 message InboundPrefixLimitState {
-  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received", or
-  // "ipv6_unicast_received".
+  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received",
+  // "ipv6_unicast_received", or a non-unicast family label ("l3vpn_ipv4_unicast",
+  // "l3vpn_ipv6_unicast", "ipv4_labeled_unicast", "ipv6_labeled_unicast",
+  // "l2vpn_evpn", "ipv4_flowspec", "ipv6_flowspec", "rtc").
   string scope = 1;
   // The session actor's enforcement count for the scope.
   uint64 usage = 2;
@@ -4438,6 +4478,9 @@ message ListEvpnInstancesRequest {}
 
 message ListEvpnInstancesResponse {
   repeated EvpnInstanceState instances = 1;
+  // Host-wide L2 apply failures (BUM, AC, managed netdev), including when no EVI exists.
+  uint64 unscoped_apply_failure_count = 2;
+  string latest_unscoped_permanent_apply_error = 3;
 }
 
 message ListManagedNetdevsRequest {}
@@ -4901,6 +4944,12 @@ message EvpnInstanceState {
   // EVPN Ethernet Tag this instance originates and imports L2 routes under:
   // 0 for "vlan_based", the member tag for "vlan_aware_bundle".
   uint32 ethernet_tag = 13;
+  // Still-current Linux L2 apply failures for this VNI, including operations
+  // suppressed after a permanent error or waiting for transient backoff.
+  uint64 current_apply_failure_count = 14;
+  // Latest still-current permanent apply error for this VNI (bounded). Empty
+  // when no permanent failure remains. Host-wide operations are excluded.
+  string latest_permanent_apply_error = 15;
 }
 
 message EvpnInstanceRemoteRouteDropCount {

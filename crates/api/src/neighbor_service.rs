@@ -440,6 +440,7 @@ async fn query_neighbor_rib_snapshots(
     summary_tx: Option<&mpsc::Sender<RibSummaryQuery>>,
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
+    include_retained: bool,
 ) -> Result<NeighborRibSnapshotResponse, Status> {
     tokio::time::timeout(
         RIB_SNAPSHOT_TIMEOUT,
@@ -447,6 +448,7 @@ async fn query_neighbor_rib_snapshots(
             RibSummaryQuery::NeighborRibSnapshots {
                 peers,
                 comparison,
+                include_retained,
                 reply,
             }
         }),
@@ -467,6 +469,36 @@ fn apply_rib_snapshot(state: &mut proto::NeighborState, snapshot: &NeighborRibSn
     state.selection_deferral = selection_deferral_to_proto(&snapshot.outbound.selection_deferral);
     state.outbound_prefix_limits =
         outbound_prefix_limits_to_proto(&snapshot.outbound.outbound_prefix_limits);
+    state.gr_retention = snapshot
+        .gr_retention
+        .iter()
+        .map(|row| proto::GracefulRestartRetentionState {
+            family: family_to_string(row.afi, row.safi),
+            phase: row.phase.as_str().to_string(),
+            remaining_seconds: row.remaining_secs,
+            stale_routes: Some(row.stale_routes),
+        })
+        .collect();
+    state.gr_retention_available = Some(true);
+}
+
+/// A row for an address with no neighbor-inventory entry whose GR/LLGR stale
+/// routes the RIB still retains (a dynamic neighbor whose session went idle).
+/// Only the address, the ASN the RIB last recorded, and the RIB-owned fields
+/// are known; everything else stays at its default.
+fn retention_only_neighbor(snapshot: &NeighborRibSnapshot) -> proto::NeighborState {
+    let mut state = proto::NeighborState {
+        config: Some(proto::NeighborConfig {
+            address: snapshot.peer.to_string(),
+            remote_asn: snapshot.remote_asn.unwrap_or(0),
+            ..Default::default()
+        }),
+        state: proto::SessionState::Idle as i32,
+        retention_only: Some(true),
+        ..Default::default()
+    };
+    apply_rib_snapshot(&mut state, snapshot);
+    state
 }
 
 fn update_group_comparison_to_proto(
@@ -1157,6 +1189,11 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         // RIB-owned (ADR-0113); the outbound query fills it in for callers
         // that issue one.
         outbound_prefix_limits: Vec::new(),
+        // RIB-owned; the snapshot query fills both in. Absent availability
+        // means the retention state was not observed.
+        gr_retention: Vec::new(),
+        gr_retention_available: None,
+        retention_only: None,
         effective_posture: Some(proto::EffectiveNeighborPosture {
             next_hop_ownership: if info.next_hop_ownership_strict_peer {
                 proto::NextHopOwnershipMode::StrictPeer
@@ -1319,6 +1356,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             self.rib_summary_tx.as_ref(),
             infos.iter().map(|info| info.address).collect(),
             None,
+            // Down dynamic neighbors whose routes are still retained.
+            true,
         )
         .await?;
         if snapshots.snapshots.len() != infos.len() {
@@ -1337,6 +1376,23 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             let mut state = peer_info_to_proto(info);
             apply_rib_snapshot(&mut state, &snapshot);
             neighbors.push(state);
+        }
+        if !snapshots.retained.is_empty() {
+            // Merge the retention-only rows into address order. The RIB
+            // excluded every listed address, so no address appears twice.
+            let mut keyed: Vec<(IpAddr, proto::NeighborState)> = infos
+                .iter()
+                .map(|info| info.address)
+                .zip(neighbors)
+                .chain(
+                    snapshots
+                        .retained
+                        .iter()
+                        .map(|snapshot| (snapshot.peer, retention_only_neighbor(snapshot))),
+                )
+                .collect();
+            keyed.sort_by_key(|(address, _)| *address);
+            neighbors = keyed.into_iter().map(|(_, state)| state).collect();
         }
 
         Ok(Response::new(proto::ListNeighborsResponse { neighbors }))
@@ -1373,7 +1429,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             }
         };
 
-        let info =
+        let Some(info) =
             peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
                 PeerManagerOperatorQuery::GetPeerState {
                     peer: peer.clone(),
@@ -1381,7 +1437,28 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 }
             })
             .await?
+        else {
+            // A down dynamic neighbor has left the inventory while the RIB
+            // may still retain its routes. RIB identity is address-only, so
+            // an interface-scoped or comparison read never falls back.
+            if initial_roster_pending || peer.interface.is_some() || compare_peer.is_some() {
+                return Err(missing_peer(&peer));
+            }
+            let snapshot = query_neighbor_rib_snapshots(
+                &self.rib_tx,
+                self.rib_summary_tx.as_ref(),
+                vec![peer.address],
+                None,
+                false,
+            )
+            .await?
+            .snapshots
+            .into_iter()
+            .next()
+            .filter(|snapshot| snapshot.peer == peer.address && !snapshot.gr_retention.is_empty())
             .ok_or_else(|| missing_peer(&peer))?;
+            return Ok(Response::new(retention_only_neighbor(&snapshot)));
+        };
 
         if let Some(compare_peer) = &compare_peer {
             peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
@@ -1402,6 +1479,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             self.rib_summary_tx.as_ref(),
             vec![info.address],
             comparison_pair,
+            false,
         )
         .await?;
         if snapshots.snapshots.len() != 1 {
@@ -1795,6 +1873,7 @@ mod tests {
             reply
                 .send(NeighborRibSnapshotResponse {
                     snapshots: Vec::new(),
+                    retained: Vec::new(),
                     comparison: None,
                 })
                 .unwrap();
@@ -2051,6 +2130,7 @@ mod tests {
                     peers,
                     comparison,
                     reply,
+                    include_retained: _,
                 } = summary_rx.recv().await.unwrap();
                 assert_eq!(peers, ["192.0.2.1".parse::<IpAddr>().unwrap()]);
                 assert!(comparison.is_none());
@@ -2066,7 +2146,10 @@ mod tests {
                                 selection_deferral: Vec::new(),
                                 outbound_prefix_limits: Vec::new(),
                             },
+                            remote_asn: None,
+                            gr_retention: Vec::new(),
                         }],
+                        retained: Vec::new(),
                         comparison: None,
                     })
                     .unwrap();
@@ -2111,6 +2194,7 @@ mod tests {
                             peers: Vec::new(),
                             comparison: None,
                             reply,
+                            include_retained: false,
                         })
                         .await
                         .unwrap();
@@ -3700,6 +3784,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one responder fixture covers every RIB-owned snapshot field"
+    )]
     async fn prefixes_sent_populated() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
@@ -3725,6 +3813,7 @@ mod tests {
                         peers,
                         comparison,
                         reply,
+                        include_retained: _,
                     } => {
                         assert_eq!(peers, vec![addr]);
                         assert!(comparison.is_none());
@@ -3762,7 +3851,16 @@ mod tests {
                                         },
                                     ],
                                 },
+                                remote_asn: None,
+                                gr_retention: vec![rustbgpd_rib::GrRetentionFamilyState {
+                                    afi: Afi::Ipv6,
+                                    safi: Safi::Unicast,
+                                    phase: rustbgpd_rib::GrRetentionPhase::Llgr,
+                                    remaining_secs: Some(86_400),
+                                    stale_routes: 12,
+                                }],
                             }],
+                            retained: Vec::new(),
                             comparison: None,
                         });
                     }
@@ -3797,6 +3895,16 @@ mod tests {
         assert_eq!(resp.selection_deferral[0].waiter_session_id, Some(42));
         assert_eq!(resp.selection_deferral[0].blocking_waiters, 2);
         assert_eq!(resp.selection_deferral[0].remaining_millis, 1_500);
+        assert_eq!(resp.gr_retention_available, Some(true));
+        assert_eq!(
+            resp.gr_retention,
+            vec![proto::GracefulRestartRetentionState {
+                family: "ipv6_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(86_400),
+                stale_routes: Some(12),
+            }]
+        );
     }
 
     /// Load-bearing: restoring the former per-peer triple-query loop sends a
@@ -3829,12 +3937,14 @@ mod tests {
                 peers,
                 comparison,
                 reply,
+                include_retained,
             }) = rib_rx.recv().await
             else {
                 panic!("ListNeighbors must issue one aggregate RIB snapshot");
             };
             assert_eq!(peers, vec![second, tenth, link_local, link_local]);
             assert!(comparison.is_none());
+            assert!(include_retained, "a neighbor list asks for retained peers");
             let link_local_snapshot = NeighborRibSnapshot {
                 peer: link_local,
                 advertised_count: 11,
@@ -3845,6 +3955,8 @@ mod tests {
                     selection_deferral: vec![],
                     outbound_prefix_limits: vec![],
                 },
+                remote_asn: None,
+                gr_retention: Vec::new(),
             };
             reply
                 .send(NeighborRibSnapshotResponse {
@@ -3863,6 +3975,8 @@ mod tests {
                                 selection_deferral: vec![],
                                 outbound_prefix_limits: vec![],
                             },
+                            remote_asn: None,
+                            gr_retention: Vec::new(),
                         },
                         NeighborRibSnapshot {
                             peer: tenth,
@@ -3879,12 +3993,15 @@ mod tests {
                                 selection_deferral: vec![],
                                 outbound_prefix_limits: vec![],
                             },
+                            remote_asn: None,
+                            gr_retention: Vec::new(),
                         },
                         // RIB identity is address-only and forbids this duplicate
                         // live topology; identical clones isolate comparator order.
                         link_local_snapshot.clone(),
                         link_local_snapshot,
                     ],
+                    retained: Vec::new(),
                     comparison: None,
                 })
                 .unwrap();
@@ -3960,6 +4077,7 @@ mod tests {
             peers,
             comparison,
             reply,
+            include_retained: _,
         }) = tokio::time::timeout(Duration::from_secs(3), rib_rx.recv())
             .await
             .expect("RIB lookup must follow the inventory reply")
@@ -3981,14 +4099,19 @@ mod tests {
                         advertised_count: 7,
                         policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
                         outbound: empty_outbound_state(),
+                        remote_asn: None,
+                        gr_retention: Vec::new(),
                     },
                     NeighborRibSnapshot {
                         peer: second,
                         advertised_count: 9,
                         policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
                         outbound: empty_outbound_state(),
+                        remote_asn: None,
+                        gr_retention: Vec::new(),
                     },
                 ],
+                retained: Vec::new(),
                 comparison: None,
             })
             .unwrap();
@@ -4023,6 +4146,7 @@ mod tests {
             reply
                 .send(NeighborRibSnapshotResponse {
                     snapshots: Vec::new(),
+                    retained: Vec::new(),
                     comparison: None,
                 })
                 .unwrap();
@@ -4069,7 +4193,10 @@ mod tests {
                         advertised_count: 0,
                         policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
                         outbound: empty_outbound_state(),
+                        remote_asn: None,
+                        gr_retention: Vec::new(),
                     }],
+                    retained: Vec::new(),
                     comparison: None,
                 })
                 .unwrap();
@@ -4116,6 +4243,7 @@ mod tests {
                 peers,
                 comparison: comparison_pair,
                 reply,
+                include_retained: _,
             } = rib_rx.recv().await.expect("RIB snapshot")
             else {
                 panic!("expected aggregate RIB snapshot");
@@ -4129,7 +4257,10 @@ mod tests {
                         advertised_count: 0,
                         policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
                         outbound: empty_outbound_state(),
+                        remote_asn: None,
+                        gr_retention: Vec::new(),
                     }],
+                    retained: Vec::new(),
                     comparison: None,
                 })
                 .unwrap();
@@ -4243,7 +4374,7 @@ mod tests {
             }
         });
         let rib_task = tokio::spawn(async move {
-            let Some(RibUpdate::QueryNeighborRibSnapshots { peers, comparison: comparison_pair, reply })
+            let Some(RibUpdate::QueryNeighborRibSnapshots { peers, comparison: comparison_pair, include_retained: _, reply })
                 = rib_rx.recv().await else {
                 panic!("comparison must use the aggregate RIB snapshot query");
             };
@@ -4271,7 +4402,10 @@ mod tests {
                             headroom: Some(1), blocking: false,
                         }],
                     },
+                    remote_asn: None,
+                    gr_retention: Vec::new(),
                 }],
+                retained: Vec::new(),
                 comparison: Some(UpdateGroupPeerComparison {
                     primary_update_group: "group:7".into(), verdict: UpdateGroupComparisonVerdict::Separate,
                     primary_membership: UpdateGroupComparisonMembership::Grouped,
@@ -4352,6 +4486,8 @@ mod tests {
                     blocking: false,
                 }],
             },
+            remote_asn: None,
+            gr_retention: Vec::new(),
         };
         let peer_task = tokio::spawn(async move {
             for expected in [primary, primary, secondary] {
@@ -4369,6 +4505,7 @@ mod tests {
                     peers,
                     comparison: actual,
                     reply,
+                    include_retained: _,
                 }) = rib_rx.recv().await
                 else {
                     panic!("expected aggregate RIB snapshot");
@@ -4378,6 +4515,7 @@ mod tests {
                 reply
                     .send(NeighborRibSnapshotResponse {
                         snapshots: vec![snapshot.clone()],
+                        retained: Vec::new(),
                         comparison: comparison.map(|_| UpdateGroupPeerComparison {
                             primary_update_group: "group:7".into(),
                             verdict: UpdateGroupComparisonVerdict::Separate,

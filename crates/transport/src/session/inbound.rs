@@ -69,6 +69,23 @@ fn raw_path_attribute(mut attrs: &[u8], type_code: u8) -> Option<&[u8]> {
     None
 }
 
+/// Whether the raw `MP_REACH_NLRI` encodes any NLRI octets after its AFI,
+/// SAFI, next-hop length, next hop and reserved octet.
+fn raw_mp_reach_encodes_nlri(raw_attrs: &[u8]) -> bool {
+    use rustbgpd_wire::constants::{attr_flags, attr_type};
+    raw_path_attribute(raw_attrs, attr_type::MP_REACH_NLRI).is_some_and(|attr| {
+        let header = if attr[0] & attr_flags::EXTENDED_LENGTH != 0 {
+            4
+        } else {
+            3
+        };
+        let value = &attr[header..];
+        value
+            .get(3)
+            .is_some_and(|&next_hop_len| value.len() > 5 + usize::from(next_hop_len))
+    })
+}
+
 fn malformed_subcode_reason(subcode: u8) -> MalformedUpdateReason {
     use rustbgpd_wire::notification::update_subcode;
     match subcode {
@@ -1491,10 +1508,10 @@ impl PeerSession {
                 .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
         }
         for rule in &loop_fs_withdrawn {
-            self.known_flowspec.remove(rule);
+            self.forget_flowspec(rule);
         }
         for rule in loop_fs_rejected {
-            if self.known_flowspec.remove(&rule) {
+            if self.forget_flowspec(&rule) {
                 loop_fs_withdrawn.push(rule);
             }
         }
@@ -1515,18 +1532,18 @@ impl PeerSession {
             }
         }
         for key in &loop_l3vpn_withdrawn {
-            self.known_vpn.remove(key);
+            self.forget_vpn(key);
         }
         for key in loop_l3vpn_rejected {
-            if self.known_vpn.remove(&key) {
+            if self.forget_vpn(&key) {
                 loop_l3vpn_withdrawn.push(key);
             }
         }
         for key in &loop_labeled_withdrawn {
-            self.known_labeled.remove(key);
+            self.forget_labeled(key);
         }
         for key in loop_labeled_rejected {
-            if self.known_labeled.remove(&key) {
+            if self.forget_labeled(&key) {
                 loop_labeled_withdrawn.push(key);
             }
         }
@@ -1882,10 +1899,11 @@ impl PeerSession {
             .attributes
             .iter()
             .any(|a| matches!(a, PathAttribute::MpReachNlri(_)));
-        let mp_reach_carries_nlri = parsed.attributes.iter().any(|a| match a {
-            PathAttribute::MpReachNlri(mp) => mp_reach_announced_count(mp) != 0,
-            _ => false,
-        });
+        // Judge NLRI content from the raw attribute: the decoder may drop
+        // every NLRI it carried (RFC 7606 §5.4 unsupported EVPN types,
+        // RFC 9135 §9.1.1 zero-length-MAC Type 2), and NLRI that was encoded
+        // and parsed still makes treat-as-withdraw the right action.
+        let mp_reach_carries_nlri = raw_mp_reach_encodes_nlri(&update.path_attributes);
         let has_body_nlri = !parsed.announced.is_empty();
         let has_nlri = has_body_nlri || has_mp_reach_attr;
         let mut validation_options = rustbgpd_wire::UpdateValidationOptions::default();
@@ -2116,7 +2134,21 @@ impl PeerSession {
                 return;
             }
             // MP EoR: UPDATE with only an empty MP_UNREACH_NLRI (IPv6 unicast, FlowSpec, etc.)
+            // The decoder can drop every EVPN NLRI it carried (RFC 7606 §5.4
+            // unsupported types, RFC 9135 §9.1.1 zero-length MAC), so also
+            // require the raw attribute to encode none (RFC 4724 §2): its
+            // value is exactly the 3-octet AFI/SAFI. Other attributes the
+            // decoder ignored do not matter.
             if parsed.attributes.len() == 1
+                && raw_path_attribute(
+                    &update.path_attributes,
+                    rustbgpd_wire::constants::attr_type::MP_UNREACH_NLRI,
+                )
+                .is_some_and(|attr| {
+                    let extended =
+                        attr[0] & rustbgpd_wire::constants::attr_flags::EXTENDED_LENGTH != 0;
+                    attr.len() == if extended { 4 } else { 3 } + 3
+                })
                 && let Some(PathAttribute::MpUnreachNlri(mp)) = parsed.attributes.first()
                 && self.negotiated_families().contains(&(mp.afi, mp.safi))
                 && (mp.afi, mp.safi) != (Afi::Ipv4, Safi::Unicast)
@@ -3588,15 +3620,16 @@ impl PeerSession {
                 .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
         }
         for key in &flowspec_withdrawn {
-            self.known_flowspec.remove(key);
+            self.forget_flowspec(key);
         }
         for key in denied_flowspec {
-            if self.known_flowspec.remove(&key) {
+            if self.forget_flowspec(&key) {
                 flowspec_withdrawn.push(key);
             }
         }
+        self.block_over_limit_flowspec(&mut flowspec_announced);
         for route in &flowspec_announced {
-            self.known_flowspec.insert(route.selection_key());
+            self.remember_flowspec(route.selection_key());
         }
         for key in &evpn_withdrawn {
             self.known_evpn.remove(key);
@@ -3606,6 +3639,7 @@ impl PeerSession {
                 evpn_withdrawn.push(key);
             }
         }
+        self.block_over_limit_evpn(&mut evpn_announced);
         for route in &evpn_announced {
             self.known_evpn.insert(route.key());
         }
@@ -3621,33 +3655,37 @@ impl PeerSession {
             self.known_bgpls.insert(route.key());
         }
         for key in &vpn_withdrawn {
-            self.known_vpn.remove(key);
+            self.forget_vpn(key);
         }
         for key in denied_vpn {
-            if self.known_vpn.remove(&key) {
+            if self.forget_vpn(&key) {
                 vpn_withdrawn.push(key);
             }
         }
+        self.block_over_limit_vpn(&mut vpn_announced);
         for route in &vpn_announced {
             // Keyed by (RD+prefix, path_id): under VPN Add-Path each received
-            // path counts toward max-prefix separately. Deliberately stricter
-            // than unicast's unique-prefix refcount — over-counting tears the
-            // session down earlier, never lets a peer bypass the cap.
-            self.known_vpn.insert(route.key());
+            // path counts toward the aggregate max-prefix separately.
+            // Deliberately stricter than unicast's unique-prefix refcount —
+            // over-counting tears the session down earlier, never lets a peer
+            // bypass the cap. The per-family bound collapses Add-Path paths.
+            self.remember_vpn(route.key());
         }
         for key in &labeled_withdrawn {
-            self.known_labeled.remove(key);
+            self.forget_labeled(key);
         }
         for key in denied_labeled {
-            if self.known_labeled.remove(&key) {
+            if self.forget_labeled(&key) {
                 labeled_withdrawn.push(key);
             }
         }
+        self.block_over_limit_labeled(&mut labeled_announced);
         for route in &labeled_announced {
             // Keyed by (prefix, path_id): under labeled Add-Path each
-            // received path counts toward max-prefix separately — the same
-            // deliberately-strict accounting as the VPN sibling.
-            self.known_labeled.insert(route.key());
+            // received path counts toward the aggregate max-prefix
+            // separately — the same deliberately-strict accounting as the
+            // VPN sibling. The per-family bound collapses Add-Path paths.
+            self.remember_labeled(route.key());
         }
         for key in &rtc_withdrawn {
             self.known_rtc.remove(key);
@@ -3657,6 +3695,7 @@ impl PeerSession {
                 rtc_withdrawn.push(key);
             }
         }
+        self.block_over_limit_rtc(&mut rtc_announced);
         for route in &rtc_announced {
             self.known_rtc.insert(route.key());
         }

@@ -662,6 +662,29 @@ jobs:
           topology: tests/interop/m69-evpn-preference-df-frr.clab.yml
           script: tests/interop/scripts/test-m69-evpn-preference-df-frr.sh
 
+  m121:
+    needs: [prime_dev_image]
+    name: M121 — EVPN all-active forwarding (FRR 10.7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+      - name: Run M121 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M121
+          topology: tests/interop/m121-evpn-all-active-frr.clab.yml
+          script: tests/interop/scripts/test-m121-evpn-all-active-frr.sh
+      - name: Upload M121 packet and state evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m121-all-active-forwarding
+          path: /tmp/m121
+          if-no-files-found: error
+          retention-days: 14
+
   m70:
     needs: [prime_dev_image]
     name: M70 — ADR-0089 VLAN-aware bridge FDB attribution (FRR 10.7.1)
@@ -926,6 +949,12 @@ jobs:
       - name: Auto-lacp Ethernet Segment daemon readiness netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh auto_lacp_daemon
 
+      - name: ADR-0140 core-isolation hold controller netns tests
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh core_isolation
+
+      - name: ADR-0140 core-isolation daemon and release helper netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh core_isolation_daemon
+
       - name: Single-active AC-gate netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate
 
@@ -1030,14 +1059,14 @@ jobs:
     needs: [classify_changes, bird3_archive, prime_dev_image, m36,
       m37, m37-ip, m38, m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42, m50, m52,
       m58, m53, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
-      m67, m68, netns]
+      m67, m68, m121, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
         classify_changes bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
         m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
-        m69 m70 m65 m71 m72 m66 m67 m68 netns
+        m69 m70 m65 m71 m72 m66 m67 m68 m121 netns
     steps:
       - name: Aggregate required Kernel Dataplane result
         shell: bash

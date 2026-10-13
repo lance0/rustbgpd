@@ -511,7 +511,8 @@ never as `NOT_REQUIRED`.
 `NeighborState.inbound_prefix_limits` reports ADR-0108 inbound max-prefix
 capacity, one `InboundPrefixLimitState` per finite configured bound in
 enforcement order: the `scope` name (`aggregate`, `ipv4_unicast`,
-`ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`), the
+`ipv6_unicast`, `ipv4_unicast_received`, `ipv6_unicast_received`, or a
+non-unicast family label such as `l3vpn_ipv4_unicast` or `l2vpn_evpn`), the
 session actor's `usage` for that scope, the configured `limit`, the
 saturating `headroom`, a `blocking` flag for an open
 `max_prefix_action = "block"` episode, and the stable `reason`
@@ -522,6 +523,35 @@ does not expose the field and from a stale peer-session snapshot. Absence is
 therefore never proof that no bound is configured. Counts come from the
 session actor's O(1) enforcement accounting, never from the RIB, whose rows
 carry different Add-Path and lifecycle semantics.
+
+`NeighborState.gr_retention` reports RFC 4724 / RFC 9494 helper-side
+stale-route retention, one `GracefulRestartRetentionState` per family the RIB
+tracks in a GR or LLGR phase: the `family` label, the `phase`
+(`gr_restart` while the session is down and the restart timer runs,
+`gr_awaiting_eor` after re-establishment until End-of-RIB, or `llgr`), the
+`remaining_seconds` until the RIB's next retention deadline for that family,
+and the `stale_routes` count. The RIB reads all of it in the same actor turn
+as the rest of the neighbor snapshot, so the rows are present while the
+session is down. Phase and deadline are lookups, and the count comes from
+per-family counters the RIB maintains as routes are marked stale,
+re-advertised, withdrawn and swept, so `ListNeighbors` and `GetNeighborState`
+both report `stale_routes` without scanning received routes. The count can be
+zero while End-of-RIB is still awaited after every stale route was
+re-advertised.
+`gr_retention_available` is present and true from a daemon that exposes the
+rows; its absence means an older daemon, so an empty list must not be read as
+"nothing retained" unless the flag is present.
+
+A dynamic neighbor leaves the neighbor inventory when its session goes idle,
+but the RIB can still retain its routes. Both RPCs still return a row for it
+while they are retained, with `retention_only` present and true: the row
+carries `config.address`, `config.remote_asn` (the ASN the RIB last recorded,
+0 if unknown), state `SESSION_STATE_IDLE`, and the RIB-owned fields including
+`gr_retention`; every other configuration and session field is its default.
+`ListNeighbors` merges these rows into address order; `GetNeighborState`
+returns one only for an address without an interface or comparison peer.
+The row disappears when retention ends. `retention_only` is absent on
+ordinary rows and from older daemons, which return no row for such a peer.
 
 `NeighborState.max_prefix_action` is the effective current disposition of a
 crossed inbound bound, not a straight echo of the `max_prefix_action`
@@ -3162,7 +3192,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 | RPC | Description |
 |-----|-------------|
 | `GetEvpnRuntime` | Return the committed EVPN runtime generation, lifecycle, mutation state, configured EVI/IP-VRF/ES counts, and a concise status message |
-| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, optional local `bridge_vlan`, advertise_svi_mac flag, originated_local_macs_count, L2 dataplane `readiness_state`, `not_ready_reason` when NotReady, and `remote_route_drop_counts`) |
+| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, optional local `bridge_vlan`, advertise_svi_mac flag, originated_local_macs_count, L2 dataplane `readiness_state`, `not_ready_reason` when NotReady, `remote_route_drop_counts`, `current_apply_failure_count`, and bounded `latest_permanent_apply_error`); response-level `unscoped_apply_failure_count` and `latest_unscoped_permanent_apply_error` cover host-wide L2 operations even with no EVI |
 | `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level L2 and L3 orphan-NH and pending-delete counts and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListEthernetSegments` | List configured Ethernet Segments sorted by ESI, joined with live multi-homing state: composed drain reasons, advertised DF preference/Don't-Preempt beside the administrative values (they differ while RFC 9785 recovery inherits another PE's preference), any pending recovery wait with its remaining milliseconds, per-member DF role and BUM forwarding action, same-ESI local-bias eligibility, whole-port AC-gate state/interface, and matching FDB-NHG group / MAC-ref counts — read-only ADR-0083/0085 diagnose visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
@@ -3298,6 +3328,18 @@ with no drops is omitted. The routes stay in Adj-RIB-In and are still
 reflected. The human CLI adds
 `remote-route-drops=[ethernet_tag_mismatch=2]` when the list is non-empty,
 and JSON exposes it as `remote_route_drop_counts` (`[]` when empty).
+
+`current_apply_failure_count` counts still-current Linux L2 operations that
+failed for this VNI, including those suppressed after a permanent error or
+deferred by transient backoff. `latest_permanent_apply_error` is a bounded
+diagnostic for the latest still-current permanent failure; it is empty when
+none remains. These fields do not change bridge readiness. Host-wide BUM
+port, AC gate, and managed-netdev operations have no VNI attribution; the
+response-level unscoped count and bounded latest permanent error expose them
+even when there are no configured EVIs. `rbgp evpn instances --json` retains
+its array of EVI rows; use `rbgp evpn diagnose --json` for the host-wide
+overview. The
+same current state is exported as `evpn_current_apply_failures` metrics.
 
 ### List EVPN FDB nexthop groups
 

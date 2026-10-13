@@ -236,6 +236,7 @@ async fn max_prefix_capacity_metrics_follow_updates_and_runtime_limits() {
                     max_prefixes_ipv6: None,
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefixes_family: session.config.max_prefixes_family,
                     max_prefix_action: crate::config::MaxPrefixAction::Shutdown,
                     max_prefix_warning_percent: None,
                     gr_stale_routes_time: session.config.gr_stale_routes_time,
@@ -856,6 +857,7 @@ async fn runtime_lowering_per_family_limit_enforces_immediately() {
                     max_prefixes_ipv6: None,
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefixes_family: session.config.max_prefixes_family,
                     max_prefix_action: crate::config::MaxPrefixAction::Shutdown,
                     max_prefix_warning_percent: None,
                     gr_stale_routes_time: 360,
@@ -910,6 +912,7 @@ async fn runtime_lowering_aggregate_limit_keeps_next_update_semantics() {
                     max_prefixes_ipv6: None,
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefixes_family: session.config.max_prefixes_family,
                     max_prefix_action: crate::config::MaxPrefixAction::Shutdown,
                     max_prefix_warning_percent: None,
                     gr_stale_routes_time: 360,
@@ -1131,6 +1134,7 @@ fn received_runtime_update(
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4,
         max_prefixes_received_ipv6: None,
+        max_prefixes_family: session.config.max_prefixes_family,
         max_prefix_action: session.config.max_prefix_action,
         max_prefix_warning_percent: session.config.max_prefix_warning_percent,
         gr_stale_routes_time: session.config.gr_stale_routes_time,
@@ -1692,7 +1696,12 @@ async fn received_limit_notification_marks_the_received_bound() {
     assert_eq!(notification.subcode, cease_subcode::MAX_PREFIXES);
 }
 
-fn counter_value(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -> Option<f64> {
+pub(super) fn counter_value(
+    metrics: &BgpMetrics,
+    name: &str,
+    peer: &str,
+    scope: &str,
+) -> Option<f64> {
     counter_samples(metrics, name)
         .into_iter()
         .find(|(labels, _)| {
@@ -1727,6 +1736,7 @@ fn mode_runtime_update(
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: session.config.max_prefixes_received_ipv4,
         max_prefixes_received_ipv6: None,
+        max_prefixes_family: session.config.max_prefixes_family,
         max_prefix_action,
         max_prefix_warning_percent: session.config.max_prefix_warning_percent,
         gr_stale_routes_time: session.config.gr_stale_routes_time,
@@ -1737,7 +1747,7 @@ fn mode_runtime_update(
 }
 
 /// Established session with the lossless notification lane attached.
-async fn notifying_session(
+pub(super) async fn notifying_session(
     config: TransportConfig,
 ) -> (
     PeerSession,
@@ -1772,7 +1782,7 @@ async fn notifying_session(
     (session, rib_rx, notify_rx, server)
 }
 
-fn mode_config(action: crate::config::MaxPrefixAction) -> TransportConfig {
+pub(super) fn mode_config(action: crate::config::MaxPrefixAction) -> TransportConfig {
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 1;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];

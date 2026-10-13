@@ -65,6 +65,17 @@
         "synchronous": "full"
       }
     },
+    "evpn_core_isolation": {
+      "description": "ADR-0140 core-isolation hold for bound Ethernet Segments. Absent\nby default; `enabled = true` lets rustbgpd take the CE-facing\nmembers of each bound segment administratively down while the PE\nis core-isolated and at startup until EVPN syncs.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvpnCoreIsolationConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "evpn_instances": {
       "description": "Local EVPN instances on this VTEP. Empty by default — only set\nwhen this daemon is acting as a leaf VTEP (Phase 2). Route\nreflector deployments leave this list empty; reflection has no\ndependency on local EVI state.",
       "type": "array",
@@ -820,6 +831,41 @@
           "description": "`SQLite` `PRAGMA synchronous` mode. `full` (default) fsyncs\nper commit; `normal` checkpoints periodically and trades a\nsmall crash window for throughput.",
           "type": "string",
           "default": "full"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EvpnCoreIsolationConfig": {
+      "description": "`[evpn_core_isolation]` (ADR-0140): hold the CE-facing links of\nbound Ethernet Segments administratively down while this PE is\ncore-isolated, and at startup until EVPN has synced.\n\nOpt-in. Enabling it gives rustbgpd ownership of the admin state of\nevery member of each bound bond (or the bound link itself). Accepted\nonly with at least one `[[ethernet_segments]]` entry that has an\n`interface`, on Linux.",
+      "type": "object",
+      "properties": {
+        "backstop_seconds": {
+          "description": "Seconds after daemon start (startup hold) or after the core\nreturns (isolation hold) at which a hold releases even without\nEVPN sync, with a warning. Default 180, range `1..=3600`, and at\nleast `hold_after_sync_seconds`.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 180,
+          "maximum": 3600,
+          "minimum": 1
+        },
+        "enabled": {
+          "description": "Take control of bound-segment link admin state. Default `false`.",
+          "type": "boolean",
+          "default": false
+        },
+        "hold_after_sync_seconds": {
+          "description": "Seconds EVPN must stay synced before a hold releases. Default 10,\nrange `0..=3600`.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "maximum": 3600,
+          "minimum": 0
+        },
+        "uplinks": {
+          "description": "Underlay uplink names. When set and every one lacks carrier, the\nPE is core-isolated even with EVPN sessions up. Optional.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
@@ -2094,6 +2140,20 @@
           "description": "Peer IP address (IPv4 or IPv6).",
           "type": "string"
         },
+        "admin_down": {
+          "description": "Keep this configured neighbor administratively down: it is\nadded disabled at startup, makes no connection attempts and\nrefuses inbound connections, but stays visible in `rbgp\nneighbor`, the looking glass, and per-peer metrics. On\nreload, setting it sends Cease/Administrative Shutdown\n(RFC 4486 subcode 2) and clearing it enables the peer. The\nruntime `rbgp neighbor <addr> enable|disable` toggle stays\ntransient: it holds until a restart or a reload that changes\nthis key. Default: false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "admin_down_reason": {
+          "description": "RFC 9003 shutdown communication sent with the\nCease/Administrative Shutdown when `admin_down` takes an\nEstablished session down. UTF-8, at most 128 bytes: RFC 9003\nallows 255 octets, but rustbgpd sends at most 128 so a peer\nthat only implements RFC 8203 still accepts it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "bfd": {
           "description": "BFD (RFC 5880/5881/5883) attachment, referencing a\n`[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.\nAttachment edits apply on SIGHUP; profile definitions require restart.",
           "anyOf": [
@@ -2271,7 +2331,7 @@
           ]
         },
         "max_prefix_action": {
-          "description": "What a crossed max-prefix bound does: `\"shutdown\"` (default;\nCease/1 teardown and latch, optionally followed by a timed\nrestart), `\"block\"` (withhold net-new prefixes beyond the\nbound while the session stays Established), or `\"warning\"`\n(warn once per crossing and keep accepting). `block` applies\nto the per-family unicast bounds and requires the aggregate\n`max_prefixes` to be unset; `block` and `warning` exclude\n`max_prefix_restart_seconds`.",
+          "description": "What a crossed max-prefix bound does: `\"shutdown\"` (default;\nCease/1 teardown and latch, optionally followed by a timed\nrestart), `\"block\"` (withhold net-new prefixes beyond the\nbound while the session stays Established), or `\"warning\"`\n(warn once per crossing and keep accepting). `block` applies\nto the per-family bounds and requires the aggregate\n`max_prefixes` to be unset; `block` and `warning` exclude\n`max_prefix_restart_seconds`.",
           "type": [
             "string",
             "null"
@@ -2314,8 +2374,71 @@
           "format": "uint32",
           "minimum": 0
         },
+        "max_prefixes_ipv4_flowspec": {
+          "description": "Maximum unique accepted IPv4 `FlowSpec` rules\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv4_labeled_unicast": {
+          "description": "Maximum unique accepted IPv4 labeled-unicast prefixes\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "max_prefixes_ipv6": {
           "description": "Maximum unique IPv6-unicast prefixes accepted from this peer\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes` (ADR-0108). Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_flowspec": {
+          "description": "Maximum unique accepted IPv6 `FlowSpec` rules\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_labeled_unicast": {
+          "description": "Maximum unique accepted IPv6 labeled-unicast prefixes\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l2vpn_evpn": {
+          "description": "Maximum unique accepted EVPN routes (unique RFC 7432 route keys)\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l3vpn_ipv4_unicast": {
+          "description": "Maximum unique accepted VPN-IPv4 (`l3vpn_ipv4_unicast`) routes, unique by RD + prefix\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l3vpn_ipv6_unicast": {
+          "description": "Maximum unique accepted VPN-IPv6 (`l3vpn_ipv6_unicast`) routes, unique by RD + prefix\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
           "type": [
             "integer",
             "null"
@@ -2352,6 +2475,15 @@
         },
         "max_prefixes_received_ipv6": {
           "description": "Maximum unique IPv6-unicast prefixes this peer may announce,\ncounted before import policy (accepted and rejected alike),\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes_ipv6` (ADR-0108 amendment).\nUnset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_rtc": {
+          "description": "Maximum unique accepted RT-Constrain membership routes\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
           "type": [
             "integer",
             "null"
@@ -2646,6 +2778,20 @@
             }
           ]
         },
+        "admin_down": {
+          "description": "Administrative-down boot state inherited by neighbors in this\ngroup. See the neighbor-level `admin_down`. Not allowed on a\ngroup referenced by `[[dynamic_neighbors]]`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "admin_down_reason": {
+          "description": "Shutdown communication inherited by neighbors in this group.\nSee the neighbor-level `admin_down_reason`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "bfd": {
           "description": "BFD attachment inherited by neighbors in this group (unless\nthe neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.\nAttachment edits apply on SIGHUP; profile definitions require restart.",
           "anyOf": [
@@ -2852,8 +2998,71 @@
           "format": "uint32",
           "minimum": 0
         },
+        "max_prefixes_ipv4_flowspec": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv4_flowspec`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv4_labeled_unicast": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv4_labeled_unicast`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "max_prefixes_ipv6": {
           "description": "IPv6-unicast prefix limit inherited by neighbors in this group.\nSee the neighbor-level `max_prefixes_ipv6`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_flowspec": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv6_flowspec`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_labeled_unicast": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv6_labeled_unicast`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l2vpn_evpn": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_l2vpn_evpn`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l3vpn_ipv4_unicast": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_l3vpn_ipv4_unicast`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_l3vpn_ipv6_unicast": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_l3vpn_ipv6_unicast`.",
           "type": [
             "integer",
             "null"
@@ -2890,6 +3099,15 @@
         },
         "max_prefixes_received_ipv6": {
           "description": "Pre-policy IPv6-unicast received-prefix limit inherited by\nneighbors in this group. See the neighbor-level\n`max_prefixes_received_ipv6`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_rtc": {
+          "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_rtc`.",
           "type": [
             "integer",
             "null"

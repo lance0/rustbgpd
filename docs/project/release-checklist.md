@@ -140,9 +140,10 @@ The [2026-09-29 run](../soaks/soak-rs-flagship-24h-2026-09-29.md) on the
 v0.73.0 tag failed the doctor and management-correctness gates on one
 `rbgp doctor` result. The
 [2026-10-04 run](../soaks/soak-rs-flagship-24h-2026-10-04.md) qualified the
-v0.74.0 tag on its on-host verdict, every gate passing, and the
+v0.74.0 tag on its on-host verdict, every gate passing; the
 [2026-10-06 run](../soaks/soak-rs-flagship-24h-2026-10-06.md) qualified the
-v0.75.0 tag the same way. Use the
+v0.75.0 tag and the [2026-10-11 run](../soaks/soak-rs-flagship-24h-2026-10-11.md) the
+v0.76.0 tag the same way. Use the
 [runner procedure](../../tests/soak/README.md) and its
 [precommitted gates](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 

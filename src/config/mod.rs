@@ -1456,6 +1456,32 @@ impl Config {
         Ok(out)
     }
 
+    /// ADR-0140: the core-isolation view of this config — the
+    /// `[evpn_core_isolation]` table when present, and every bound
+    /// segment keyed by interface with its configured ESI text, resolved
+    /// ESI (`None` while an `auto-lacp` bond is not ready) and originator.
+    pub(crate) fn core_isolation_snapshot(&self, esis: &AutoLacpEsis) -> CoreIsolationSnapshot {
+        let bindings = self
+            .ethernet_segments
+            .iter()
+            .filter_map(|cfg| {
+                let interface = cfg.interface.clone()?;
+                Some((
+                    interface,
+                    CoreIsolationBinding {
+                        esi_text: cfg.esi.clone(),
+                        esi: segment_esi(cfg, esis).ok().flatten(),
+                        originator_ip: cfg.originator_ip.parse().ok(),
+                    },
+                ))
+            })
+            .collect();
+        CoreIsolationSnapshot {
+            settings: self.evpn_core_isolation.clone(),
+            bindings,
+        }
+    }
+
     /// Resolve `[[evpn_ip_vrfs]]` entries into runtime [`IpVrfTable`].
     ///
     /// Validates:
@@ -1903,6 +1929,14 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "max_prefixes_ipv6"
         | "max_prefixes_received_ipv4"
         | "max_prefixes_received_ipv6"
+        | "max_prefixes_l3vpn_ipv4_unicast"
+        | "max_prefixes_l3vpn_ipv6_unicast"
+        | "max_prefixes_ipv4_labeled_unicast"
+        | "max_prefixes_ipv6_labeled_unicast"
+        | "max_prefixes_l2vpn_evpn"
+        | "max_prefixes_ipv4_flowspec"
+        | "max_prefixes_ipv6_flowspec"
+        | "max_prefixes_rtc"
         | "max_prefix_action"
         | "max_prefix_warning_percent"
         | "max_prefixes_out_ipv4"
@@ -1919,6 +1953,14 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "export_policy_chain"
         | "route_flap_dampening"
         | "conditional_advertisements" => (ConfigFieldImpact::HotApplied, "hot-applied"),
+        "admin_down" => (
+            ConfigFieldImpact::HotApplied,
+            "hot-applied: setting sends Cease/Administrative Shutdown; clearing enables the peer",
+        ),
+        "admin_down_reason" => (
+            ConfigFieldImpact::HotApplied,
+            "hot-applied: sent with the next admin_down shutdown",
+        ),
         "remote_asn" => (
             ConfigFieldImpact::SessionReset,
             "session reset: peer re-established with new ASN",
@@ -2088,6 +2130,8 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(remote_asn);
     cmp_field!(description);
     cmp_field!(peer_group);
+    cmp_field!(admin_down);
+    cmp_field!(admin_down_reason);
     cmp_field!(hold_time);
     cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
@@ -2099,6 +2143,14 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(max_prefixes_ipv6);
     cmp_field!(max_prefixes_received_ipv4);
     cmp_field!(max_prefixes_received_ipv6);
+    cmp_field!(max_prefixes_l3vpn_ipv4_unicast);
+    cmp_field!(max_prefixes_l3vpn_ipv6_unicast);
+    cmp_field!(max_prefixes_ipv4_labeled_unicast);
+    cmp_field!(max_prefixes_ipv6_labeled_unicast);
+    cmp_field!(max_prefixes_l2vpn_evpn);
+    cmp_field!(max_prefixes_ipv4_flowspec);
+    cmp_field!(max_prefixes_ipv6_flowspec);
+    cmp_field!(max_prefixes_rtc);
     cmp_field!(max_prefix_action);
     cmp_field!(max_prefix_warning_percent);
     cmp_field!(max_prefixes_out_ipv4);
@@ -2228,6 +2280,8 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.remote_asn == new.remote_asn
         && old.description == new.description
         && old.peer_group == new.peer_group
+        && old.admin_down == new.admin_down
+        && old.admin_down_reason == new.admin_down_reason
         && old.hold_time == new.hold_time
         && old.min_hold_time == new.min_hold_time
         && old.send_hold_time == new.send_hold_time
@@ -2239,6 +2293,14 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.max_prefixes_ipv6 == new.max_prefixes_ipv6
         && old.max_prefixes_received_ipv4 == new.max_prefixes_received_ipv4
         && old.max_prefixes_received_ipv6 == new.max_prefixes_received_ipv6
+        && old.max_prefixes_l3vpn_ipv4_unicast == new.max_prefixes_l3vpn_ipv4_unicast
+        && old.max_prefixes_l3vpn_ipv6_unicast == new.max_prefixes_l3vpn_ipv6_unicast
+        && old.max_prefixes_ipv4_labeled_unicast == new.max_prefixes_ipv4_labeled_unicast
+        && old.max_prefixes_ipv6_labeled_unicast == new.max_prefixes_ipv6_labeled_unicast
+        && old.max_prefixes_l2vpn_evpn == new.max_prefixes_l2vpn_evpn
+        && old.max_prefixes_ipv4_flowspec == new.max_prefixes_ipv4_flowspec
+        && old.max_prefixes_ipv6_flowspec == new.max_prefixes_ipv6_flowspec
+        && old.max_prefixes_rtc == new.max_prefixes_rtc
         && old.max_prefix_action == new.max_prefix_action
         && old.max_prefix_warning_percent == new.max_prefix_warning_percent
         && old.max_prefixes_out_ipv4 == new.max_prefixes_out_ipv4
@@ -2440,6 +2502,9 @@ pub struct ConfigDiff {
     /// at startup, so edits are restart-required until a runtime swap
     /// surface exists.
     pub ethernet_segments_changed: bool,
+    /// `[evpn_core_isolation]` changed (ADR-0140). Hot-applied through the
+    /// EVPN runtime commit, which republishes the hold's configuration.
+    pub evpn_core_isolation_changed: bool,
     /// `[managed_netdevs]` changed. ADR-0091 v1 reads this table at
     /// startup and reports status from the Linux dataplane actor; live
     /// lifecycle changes are restart-required until the managed-netdev
@@ -3180,6 +3245,30 @@ impl Config {
             neighbor.max_prefixes_received_ipv6 = neighbor
                 .max_prefixes_received_ipv6
                 .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6));
+            neighbor.max_prefixes_l3vpn_ipv4_unicast = neighbor
+                .max_prefixes_l3vpn_ipv4_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_l3vpn_ipv4_unicast));
+            neighbor.max_prefixes_l3vpn_ipv6_unicast = neighbor
+                .max_prefixes_l3vpn_ipv6_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_l3vpn_ipv6_unicast));
+            neighbor.max_prefixes_ipv4_labeled_unicast = neighbor
+                .max_prefixes_ipv4_labeled_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4_labeled_unicast));
+            neighbor.max_prefixes_ipv6_labeled_unicast = neighbor
+                .max_prefixes_ipv6_labeled_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6_labeled_unicast));
+            neighbor.max_prefixes_l2vpn_evpn = neighbor
+                .max_prefixes_l2vpn_evpn
+                .or_else(|| group.and_then(|g| g.max_prefixes_l2vpn_evpn));
+            neighbor.max_prefixes_ipv4_flowspec = neighbor
+                .max_prefixes_ipv4_flowspec
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4_flowspec));
+            neighbor.max_prefixes_ipv6_flowspec = neighbor
+                .max_prefixes_ipv6_flowspec
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6_flowspec));
+            neighbor.max_prefixes_rtc = neighbor
+                .max_prefixes_rtc
+                .or_else(|| group.and_then(|g| g.max_prefixes_rtc));
             neighbor.max_prefix_action = neighbor
                 .max_prefix_action
                 .clone()
@@ -3628,7 +3717,8 @@ impl SighupReloadFamilies {
             dynamic_ranges: diff.dynamic_neighbors_reload_applied_changed,
             evpn_runtime: diff.evpn_instances_changed
                 || diff.evpn_ip_vrfs_changed
-                || diff.ethernet_segments_changed,
+                || diff.ethernet_segments_changed
+                || diff.evpn_core_isolation_changed,
             fib_tables: diff.fib_tables_changed,
             honor_knobs: diff.honor_graceful_shutdown_changed || diff.honor_blackhole_changed,
             tcp_ao: diff.neighbor_tcp_ao_changed || diff.dynamic_neighbor_tcp_ao_changed,
@@ -3812,6 +3902,7 @@ fn resolved_session_change(
     probe.max_prefixes_ipv6 = next.max_prefixes_ipv6;
     probe.max_prefixes_received_ipv4 = next.max_prefixes_received_ipv4;
     probe.max_prefixes_received_ipv6 = next.max_prefixes_received_ipv6;
+    probe.max_prefixes_family = next.max_prefixes_family;
     probe.max_prefix_action = next.max_prefix_action;
     probe.max_prefix_warning_percent = next.max_prefix_warning_percent;
     probe.gr_stale_routes_time = next.gr_stale_routes_time;
@@ -3822,6 +3913,7 @@ fn resolved_session_change(
         return Some(ReloadPeerActionKind::Replace);
     }
     let hot_moved = !knobs_unchanged
+        || old.admin_down != new.admin_down
         || old.label != new.label
         || old.max_prefix_restart_seconds != new.max_prefix_restart_seconds;
     hot_moved.then_some(ReloadPeerActionKind::HotUpdate)
@@ -4083,6 +4175,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
         class
             .restart_required_sections
             .push("[[ethernet_segments]]".to_string());
+    }
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_core_isolation_changed {
+        class
+            .restart_required_sections
+            .push("[evpn_core_isolation]".to_string());
     }
     if diff.fib_tables_requires_restart {
         class
@@ -4359,6 +4456,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.ethernet_segments_changed,
+            "evpn_core_isolation_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_core_isolation_changed,
             "effective_neighbor_impact": &diff.effective_neighbor_impact,
         },
         "restart_required": {
@@ -4371,6 +4469,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_instances_changed,
             "evpn_ip_vrfs_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_ip_vrfs_changed,
             "ethernet_segments_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed,
+            "evpn_core_isolation_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_core_isolation_changed,
             "managed_netdevs_changed": diff.managed_netdevs_changed,
             "security_grpc_changed": diff.security_grpc_changed,
             "event_history_changed": diff.event_history_changed,
@@ -4660,6 +4759,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     }
     if diff.evpn_runtime_change_class.is_restart_required() && diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
+    }
+    if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_core_isolation_changed {
+        restart_sections.push("[evpn_core_isolation]");
     }
     if diff.managed_netdevs_changed {
         restart_sections.push("[managed_netdevs]");
@@ -4966,6 +5068,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         evpn_instances_changed: old.evpn_instances != new.evpn_instances,
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
+        evpn_core_isolation_changed: old.evpn_core_isolation != new.evpn_core_isolation,
         managed_netdevs_changed: old.managed_netdevs != new.managed_netdevs,
         security_grpc_changed: old.security != new.security,
         event_history_changed: old.event_history != new.event_history,
@@ -5002,6 +5105,7 @@ fn evpn_runtime_config_changed(old: &Config, new: &Config) -> bool {
     old.evpn_instances != new.evpn_instances
         || old.evpn_ip_vrfs != new.evpn_ip_vrfs
         || old.ethernet_segments != new.ethernet_segments
+        || old.evpn_core_isolation != new.evpn_core_isolation
 }
 
 fn classify_evpn_runtime_change(old: &Config, new: &Config) -> EvpnRuntimeChangeClass {
@@ -6215,6 +6319,8 @@ pub fn describe_peer_group_changes(
         };
     }
 
+    cmp_field!(admin_down);
+    cmp_field!(admin_down_reason);
     cmp_field!(hold_time);
     cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
@@ -6223,6 +6329,14 @@ pub fn describe_peer_group_changes(
     cmp_field!(max_prefixes_ipv6);
     cmp_field!(max_prefixes_received_ipv4);
     cmp_field!(max_prefixes_received_ipv6);
+    cmp_field!(max_prefixes_l3vpn_ipv4_unicast);
+    cmp_field!(max_prefixes_l3vpn_ipv6_unicast);
+    cmp_field!(max_prefixes_ipv4_labeled_unicast);
+    cmp_field!(max_prefixes_ipv6_labeled_unicast);
+    cmp_field!(max_prefixes_l2vpn_evpn);
+    cmp_field!(max_prefixes_ipv4_flowspec);
+    cmp_field!(max_prefixes_ipv6_flowspec);
+    cmp_field!(max_prefixes_rtc);
     cmp_field!(max_prefix_action);
     cmp_field!(max_prefix_warning_percent);
     cmp_field!(max_prefixes_out_ipv4);
@@ -6284,6 +6398,8 @@ pub fn describe_peer_group_changes(
 /// classified here as config-file-only or API-owned.
 pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &PeerGroupConfig) {
     let PeerGroupConfig {
+        admin_down,
+        admin_down_reason,
         tcp_mss,
         slow_peer_threshold_pct,
         slow_peer_duration,
@@ -6292,6 +6408,14 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         max_prefixes_ipv6,
         max_prefixes_received_ipv4,
         max_prefixes_received_ipv6,
+        max_prefixes_l3vpn_ipv4_unicast,
+        max_prefixes_l3vpn_ipv6_unicast,
+        max_prefixes_ipv4_labeled_unicast,
+        max_prefixes_ipv6_labeled_unicast,
+        max_prefixes_l2vpn_evpn,
+        max_prefixes_ipv4_flowspec,
+        max_prefixes_ipv6_flowspec,
+        max_prefixes_rtc,
         max_prefix_action,
         max_prefix_warning_percent,
         max_prefixes_out_ipv4,
@@ -6338,6 +6462,8 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         import_policy_chain: _,
         export_policy_chain: _,
     } = source.clone();
+    target.admin_down = admin_down;
+    target.admin_down_reason = admin_down_reason;
     target.tcp_mss = tcp_mss;
     target.slow_peer_threshold_pct = slow_peer_threshold_pct;
     target.slow_peer_duration = slow_peer_duration;
@@ -6346,6 +6472,14 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.max_prefixes_ipv6 = max_prefixes_ipv6;
     target.max_prefixes_received_ipv4 = max_prefixes_received_ipv4;
     target.max_prefixes_received_ipv6 = max_prefixes_received_ipv6;
+    target.max_prefixes_l3vpn_ipv4_unicast = max_prefixes_l3vpn_ipv4_unicast;
+    target.max_prefixes_l3vpn_ipv6_unicast = max_prefixes_l3vpn_ipv6_unicast;
+    target.max_prefixes_ipv4_labeled_unicast = max_prefixes_ipv4_labeled_unicast;
+    target.max_prefixes_ipv6_labeled_unicast = max_prefixes_ipv6_labeled_unicast;
+    target.max_prefixes_l2vpn_evpn = max_prefixes_l2vpn_evpn;
+    target.max_prefixes_ipv4_flowspec = max_prefixes_ipv4_flowspec;
+    target.max_prefixes_ipv6_flowspec = max_prefixes_ipv6_flowspec;
+    target.max_prefixes_rtc = max_prefixes_rtc;
     target.max_prefix_action = max_prefix_action;
     target.max_prefix_warning_percent = max_prefix_warning_percent;
     target.max_prefixes_out_ipv4 = max_prefixes_out_ipv4;
@@ -6838,6 +6972,28 @@ pub struct EsLinkBinding {
     pub interface: String,
     /// Hold-off between carrier return and link-drain release.
     pub recovery_delay: std::time::Duration,
+}
+
+/// ADR-0140 core-isolation input published to the hold controller on
+/// every committed config advance and every applied `auto-lacp` round.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CoreIsolationSnapshot {
+    /// `[evpn_core_isolation]`, when present.
+    pub settings: Option<EvpnCoreIsolationConfig>,
+    /// Bound segments keyed by interface.
+    pub bindings: BTreeMap<String, CoreIsolationBinding>,
+}
+
+/// One bound segment as the core-isolation hold sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreIsolationBinding {
+    /// The configured `esi` text (hex or `auto-lacp`), recorded in the
+    /// ownership receipt.
+    pub esi_text: String,
+    /// The resolved ESI; `None` while an `auto-lacp` bond is not ready.
+    pub esi: Option<EthernetSegmentIdentifier>,
+    /// This PE's Type 4 originator for the segment.
+    pub originator_ip: Option<IpAddr>,
 }
 
 /// `[[ethernet_segments]].esi` value that opts a segment into RFC 7432

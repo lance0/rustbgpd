@@ -125,6 +125,10 @@ enum Drive {
     HotExportKnobs,
     GracefulShutdown,
     OutboundReplay,
+    /// Reload settlement publishes the configured-owner catalogue to the RIB.
+    ConfiguredOwnerPublication,
+    /// A reload commits a BFD membership change and awaits the BFD actor.
+    BfdReload,
 }
 
 #[derive(Clone, Copy)]
@@ -242,6 +246,10 @@ fn is_restore(update: &RibUpdate) -> bool {
 
 fn is_retained_stale(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::QueryPeerRetainedStale { .. })
+}
+
+fn is_owner_publication(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::PublishDampeningOwners { .. })
 }
 
 fn is_reevaluate(update: &RibUpdate) -> bool {
@@ -739,6 +747,28 @@ const WAIT_SITES: &[WaitSite] = &[
         contract: Contract::Served,
         completion: Completion::Finished,
     },
+    WaitSite {
+        site: "configured_owners.rs::configured_owner_publication",
+        awaits: "RibUpdate::PublishDampeningOwners acknowledgement (reload settlement)",
+        drive: Drive::ConfiguredOwnerPublication,
+        rib: RibHold::Reply(is_owner_publication),
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "bfd.rs::commit_bfd_reload",
+        awaits: "BfdReloadCommand acknowledgement from the BFD actor",
+        drive: Drive::BfdReload,
+        rib: RibHold::None,
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
 ];
 
 /// Shared hold point: a stub signals `held` when it parks the transaction and
@@ -813,6 +843,9 @@ fn answer_rib(update: RibUpdate, cohort_reply: CohortReply) {
         }
         RibUpdate::QueryPeerRetainedStale { reply, .. } => {
             let _ = reply.send(0);
+        }
+        RibUpdate::PublishDampeningOwners { reply, .. } => {
+            let _ = reply.send(Ok(()));
         }
         _ => {}
     }
@@ -1155,7 +1188,9 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         | Drive::HotExportKnobs
         | Drive::GracefulShutdown
         | Drive::OutboundReplay
-        | Drive::MaxPrefixRestart => (Vec::new(), false),
+        | Drive::MaxPrefixRestart
+        | Drive::ConfiguredOwnerPublication
+        | Drive::BfdReload => (Vec::new(), false),
     };
     match drive {
         Drive::ForwardCohort { .. }
@@ -1313,7 +1348,81 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::OutboundReplay => replay_outbound_result(manager, key(peers[0]))
             .await
             .map_err(|error| error.to_string()),
+        Drive::ConfiguredOwnerPublication => {
+            use rustbgpd_api::peer_types::ConfiguredOwnerPublicationOperation as Publication;
+            let receipt = manager
+                .configured_owner_publication(Publication::Begin)
+                .await
+                .map_err(|error| error.to_string())?;
+            let published = manager
+                .configured_owner_publication(Publication::Publish(receipt))
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(published, receipt);
+            Ok(())
+        }
+        Drive::BfdReload => {
+            let coupling = manager.bfd_coupling.as_mut().unwrap();
+            let mut replacement = bfd_session(peers[0]);
+            replacement.revision = 1;
+            coupling.pending = Some(std::collections::HashMap::from([(peers[0], replacement)]));
+            coupling.reloading = true;
+            manager.commit_bfd_reload(None).await
+        }
     }
+}
+
+fn bfd_session(peer: IpAddr) -> crate::bfd_runtime::BfdSessionParams {
+    crate::bfd_runtime::BfdSessionParams {
+        revision: 0,
+        peer,
+        scope_id: None,
+        destination: crate::bfd_runtime::bfd_destination(peer, None, false)
+            .expect("global test peer destination"),
+        desired_min_tx_us: 300_000,
+        required_min_rx_us: 300_000,
+        detect_mult: 3,
+        strict: false,
+        enabled: true,
+        multihop: false,
+        source: None,
+    }
+}
+
+/// Attach BFD coupling for `peer` with a BFD actor stub that parks each
+/// reload acknowledgement on `gate`.
+fn attach_held_bfd_actor(manager: PeerManager, peer: IpAddr, gate: Gate) -> PeerManager {
+    let (desired_tx, _desired_rx) =
+        tokio::sync::watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    tokio::spawn(async move {
+        while let Some(command) = reload_rx.recv().await {
+            gate.hold().await;
+            let acks = command
+                .desired
+                .sessions
+                .iter()
+                .filter(|params| params.enabled)
+                .map(|params| crate::bfd_runtime::BfdStateChange {
+                    revision: params.revision,
+                    peer: params.peer,
+                    state: rustbgpd_bfd::SessionState::Down,
+                    diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
+                    remote_admin_down: false,
+                    resync: true,
+                })
+                .collect();
+            let _ = command.reply.send(acks);
+        }
+    });
+    manager
+        .with_bfd_coupling(
+            desired_tx,
+            state_rx,
+            std::collections::HashMap::from([(peer, bfd_session(peer))]),
+        )
+        .with_bfd_reload(reload_tx)
 }
 
 async fn list_peers(
@@ -1485,7 +1594,11 @@ async fn run(row: &WaitSite) {
         | Drive::OutboundRefresh
         | Drive::HotExportKnobs
         | Drive::GracefulShutdown
-        | Drive::OutboundReplay => {}
+        | Drive::OutboundReplay
+        | Drive::ConfiguredOwnerPublication => {}
+        Drive::BfdReload => {
+            manager = attach_held_bfd_actor(manager, first, gate.clone());
+        }
     }
 
     let import_roster = manager.import_roster();
@@ -1556,22 +1669,23 @@ async fn run(row: &WaitSite) {
     let read_deadline = tokio::time::Instant::now() + row.window;
     let mut infos = list_peers(&operator_tx).await;
     let mut known = has_peer_address(&operator_tx, first).await;
+    // Readiness is served at every parked site, fenced or not.
+    let (reply, response) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::Ping { reply })
+        .await
+        .unwrap();
+    tokio::time::timeout_at(read_deadline, response)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{site}: a readiness ping must be served while {} is awaited",
+                row.awaits
+            )
+        })
+        .unwrap();
     match row.contract {
         Contract::Served => {
-            if matches!(
-                row.drive,
-                Drive::HonorGracefulShutdown | Drive::HonorBlackhole
-            ) {
-                let (reply, response) = oneshot::channel();
-                readiness_tx
-                    .send(PeerManagerReadinessQuery::Ping { reply })
-                    .await
-                    .unwrap();
-                tokio::time::timeout_at(read_deadline, response)
-                    .await
-                    .expect("readiness is served during the held honor fan-out")
-                    .unwrap();
-            }
             let infos = tokio::time::timeout_at(read_deadline, &mut infos)
                 .await
                 .unwrap_or_else(|_| {
@@ -1696,7 +1810,7 @@ async fn every_wait_site_honours_its_operator_read_contract() {
 
 /// Call sites of the wait helpers per enclosing function, excluding the
 /// helper definitions themselves.
-fn wait_call_sites(file: &'static str, source: &str) -> BTreeMap<String, usize> {
+fn wait_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
     const HELPERS: [&str; 2] = ["await_with_readiness", "await_with_readiness_budget"];
     let mut sites = BTreeMap::new();
     let mut current = "<none>";
@@ -1730,14 +1844,29 @@ fn wait_call_sites(file: &'static str, source: &str) -> BTreeMap<String, usize> 
 /// (`additional_entry`) are not counted, so each site is keyed once.
 #[test]
 fn wait_site_table_covers_every_call_site() {
+    // Scan every production source file of the module, so a new file cannot
+    // escape the guard. `read_dir` is not recursive: `tests/` holds only test
+    // drivers, which make no actor waits of their own.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/peer_manager");
     let mut sources = BTreeMap::new();
-    for (file, source) in [
-        ("mod.rs", include_str!("../mod.rs")),
-        ("policy.rs", include_str!("../policy.rs")),
-        ("lifecycle.rs", include_str!("../lifecycle.rs")),
-    ] {
-        sources.extend(wait_call_sites(file, source));
+    let mut scanned = BTreeSet::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "rs") {
+            let file = path.file_name().unwrap().to_str().unwrap().to_owned();
+            sources.extend(wait_call_sites(
+                &file,
+                &std::fs::read_to_string(&path).unwrap(),
+            ));
+            scanned.insert(file);
+        }
     }
+    assert!(
+        ["mod.rs", "policy.rs", "configured_owners.rs"]
+            .iter()
+            .all(|file| scanned.contains(*file)),
+        "the scan must cover the module's source files: {scanned:?}"
+    );
     let mut table = BTreeMap::new();
     for row in WAIT_SITES
         .iter()
@@ -2584,4 +2713,147 @@ async fn detached_snapshot_reply_after_the_deadline_is_stale_behind_a_held_row()
         row(&infos, late_addr).stale,
         "a reply after the deadline is not fresh"
     );
+}
+
+/// The peer manager drains ready commands back to back inside one task poll,
+/// up to Tokio's cooperative budget. A readiness reply sent mid-queue wakes
+/// the probe's task into this worker's LIFO slot, which no other worker can
+/// steal, so without a yield the answered probe waits for the rest of the
+/// poll. The hook holds every later command until the answered probe has run:
+/// a stranded probe cannot run, the hold times out and the test fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression drives a held command queue through the run loop with a handshake"
+)]
+async fn readiness_ping_runs_while_commands_stay_queued() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const COMMANDS: usize = 64;
+    let (commands, command_rx) = mpsc::channel(COMMANDS);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (ran_tx, ran_rx) = std::sync::mpsc::channel::<()>();
+    let probe_ran = Arc::new(AtomicBool::new(false));
+    let stranded = Arc::new(AtomicBool::new(false));
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    manager.test_command_hook = Some(Arc::new({
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let ran_rx = Mutex::new(ran_rx);
+        let probe_ran = Arc::clone(&probe_ran);
+        let stranded = Arc::clone(&stranded);
+        let dispatched = Arc::clone(&dispatched);
+        let readiness_tx = readiness_tx.clone();
+        move |command| {
+            if !matches!(command, PeerManagerCommand::Ping { .. }) {
+                return;
+            }
+            if dispatched.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Hold the first command inside the actor's poll until the
+                // probe is queued behind the rest of the queue.
+                entered_tx.lock().unwrap().send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test releases the first command");
+                return;
+            }
+            // The readiness lane has capacity 1, so a free slot means the
+            // actor has dequeued the probe and, in the same arm, replied.
+            let answered = readiness_tx.capacity() == readiness_tx.max_capacity();
+            if answered
+                && !probe_ran.load(Ordering::SeqCst)
+                && !stranded.load(Ordering::SeqCst)
+                && ran_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_err()
+            {
+                // Bounded so the unfixed actor fails instead of hanging.
+                stranded.store(true, Ordering::SeqCst);
+            }
+        }
+    }));
+    let actor = tokio::spawn(manager.run());
+
+    // Command replies are dropped, so answering them wakes no task.
+    for _ in 0..COMMANDS {
+        let (reply, _) = oneshot::channel();
+        commands
+            .send(PeerManagerCommand::Ping { reply })
+            .await
+            .unwrap();
+    }
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("actor dispatches the first command");
+    })
+    .await
+    .unwrap();
+
+    let (armed_tx, armed_rx) = oneshot::channel::<()>();
+    let probe = tokio::spawn({
+        let probe_ran = Arc::clone(&probe_ran);
+        async move {
+            let (reply, mut response) = oneshot::channel();
+            let started = std::time::Instant::now();
+            readiness_tx
+                .send(rustbgpd_api::peer_types::PeerManagerReadinessQuery::Ping { reply })
+                .await
+                .unwrap();
+            // Signal only once the reply waker is registered, so the actor's
+            // reply has to wake this task rather than find it already ready.
+            let mut armed = Some(armed_tx);
+            let result = std::future::poll_fn(|cx| {
+                let poll = std::future::Future::poll(std::pin::Pin::new(&mut response), cx);
+                if poll.is_pending()
+                    && let Some(armed) = armed.take()
+                {
+                    armed.send(()).unwrap();
+                }
+                poll
+            })
+            .await;
+            let elapsed = started.elapsed();
+            probe_ran.store(true, Ordering::SeqCst);
+            let _ = ran_tx.send(());
+            (result, elapsed)
+        }
+    });
+    armed_rx.await.unwrap();
+    release_tx.send(()).unwrap();
+
+    let (result, elapsed) = probe.await.unwrap();
+    result.unwrap();
+    assert!(
+        !stranded.load(Ordering::SeqCst),
+        "the answered readiness ping stayed parked on the actor's worker behind queued commands"
+    );
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "readiness ping took {elapsed:?} behind queued commands"
+    );
+
+    commands.send(PeerManagerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+    assert_eq!(dispatched.load(Ordering::SeqCst), COMMANDS);
 }

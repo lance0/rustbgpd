@@ -319,6 +319,63 @@ async fn hot_update_peer_forwards_and_records_gr_peer_restart_cap() {
     assert_eq!(managed.transport_config.gr_peer_restart_time_max, 300);
 }
 
+/// Mutant: dropping `max_prefixes_family` from the hot-knob comparison sends
+/// no runtime command; forwarding the old value, or skipping the manager-side
+/// copy, leaves the session or the stored transport config unbounded.
+#[tokio::test]
+async fn hot_update_peer_forwards_and_records_family_max_prefix_limits() {
+    use rustbgpd_transport::{FamilyPrefixLimits, PeerCommand, PrefixLimitFamily};
+
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let (commands, mut command_rx) = mpsc::channel(16);
+    let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                PeerCommand::UpdateRuntimeConfig { config, reply } => {
+                    let _ = seen_tx.send(config.max_prefixes_family);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 83));
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(commands, task),
+        false,
+    );
+
+    let mut limits = FamilyPrefixLimits::default();
+    limits.0[PrefixLimitFamily::L3vpnIpv4 as usize] = Some(500);
+    limits.0[PrefixLimitFamily::L2vpnEvpn as usize] = Some(300);
+    let mut updated = make_config(addr, 65002);
+    updated.max_prefixes_family = limits;
+    mgr.hot_update_peer(updated).await.unwrap();
+
+    assert_eq!(seen_rx.try_recv().unwrap(), limits);
+    assert!(seen_rx.try_recv().is_err(), "one runtime command");
+    assert_eq!(
+        mgr.peers[&key(addr)].transport_config.max_prefixes_family,
+        limits
+    );
+}
+
 /// Load-bearing hot-update boundary proof: an unrelated accepted edit keeps
 /// the exact armed incident, while a successful restart-duration change
 /// reschedules it to now + new under a fresh generation. Removing the

@@ -148,14 +148,30 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
 ///
 /// Returns a [`PeerError`] if local-address inspection, accept, OPEN exchange,
 /// or initial KEEPALIVE fails.
-#[expect(clippy::too_many_lines, reason = "reader task body is the bulk")]
 pub async fn establish_on(listener: TcpListener, cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
     validate_hold_time(cfg.hold_time)?;
     let listen = listener.local_addr()?;
     tracing::info!(%listen, "evpn-load peer listening for BGP session");
-    let (mut stream, remote) = listener.accept().await?;
+    let (stream, remote) = listener.accept().await?;
     tracing::info!(%remote, "evpn-load peer accepted inbound BGP connection");
     drop(listener);
+    establish_stream(stream, cfg).await
+}
+
+/// Establish a synthetic peer over an already-connected TCP stream.
+///
+/// Used by drivers that dial the daemon's passive listener instead of
+/// waiting for its active connect; `cfg.listen` is not used.
+///
+/// # Errors
+///
+/// Returns a [`PeerError`] if the OPEN exchange or initial KEEPALIVE fails.
+#[expect(clippy::too_many_lines, reason = "reader task body is the bulk")]
+pub async fn establish_stream(
+    mut stream: TcpStream,
+    cfg: PeerConfig,
+) -> Result<PeerHandle, PeerError> {
+    validate_hold_time(cfg.hold_time)?;
 
     // Send our OPEN first — simplifies the handshake; the peer will
     // respond in kind.

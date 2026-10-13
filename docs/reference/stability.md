@@ -62,6 +62,11 @@ probe; the [route-server soak policy](../soaks/soak-acceptance-gates.md#readines
 defines consecutive-failure and evidence requirements. Passing that scenario
 does not promise zero transient readiness failures or widen the stable inventory.
 
+The [capability evidence table](capabilities.md) links a few scoped
+capabilities to the dated interop evidence behind them. It is navigation only:
+a row never widens the stable inventory, and its compatibility column is read
+from the inventory rather than declared.
+
 ## Authorization is a different classification
 
 The [gRPC method inventory](grpc-method-inventory.md) assigns every method an

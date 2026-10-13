@@ -982,6 +982,29 @@ fn inbound_prefix_limit_checks(
         .collect()
 }
 
+/// A family in the RFC 9494 LLGR phase is retained by configuration, possibly
+/// for months; warn with the time left instead of failing.
+fn llgr_retention_checks(
+    identity: &str,
+    rows: &[crate::proto::GracefulRestartRetentionState],
+) -> Vec<Check> {
+    rows.iter()
+        .filter(|row| row.phase == "llgr")
+        .map(|row| Check {
+            name: format!("peer.{identity}.llgr_retention.{}", row.family),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "peer {identity} family {} is in the LLGR stale phase{}; sweep in {}",
+                row.family,
+                row.stale_routes
+                    .map(|n| format!(" holding {n} stale route{}", if n == 1 { "" } else { "s" }))
+                    .unwrap_or_default(),
+                super::neighbor::retention_remaining_label(row.remaining_seconds)
+            ),
+        })
+        .collect()
+}
+
 fn inbound_prefix_bound_check(
     identity: &str,
     neighbor: &crate::proto::NeighborState,
@@ -994,7 +1017,17 @@ fn inbound_prefix_bound_check(
         || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
-        || !neighbor.inbound_prefix_limits.is_empty()
+        || neighbor.inbound_prefix_limits.iter().any(|row| {
+            // Non-unicast family scopes bound only their own family.
+            matches!(
+                row.scope.as_str(),
+                "aggregate"
+                    | "ipv4_unicast"
+                    | "ipv6_unicast"
+                    | "ipv4_unicast_received"
+                    | "ipv6_unicast_received"
+            )
+        })
         || neighbor.effective_max_prefixes.is_some()
         || neighbor.effective_max_prefixes_ipv4.is_some()
         || neighbor.effective_max_prefixes_ipv6.is_some()
@@ -1580,6 +1613,208 @@ fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Ch
             }
         })
         .collect()
+}
+
+/// Every `state` reading 1 per `interface` in one state-set family.
+fn state_set(metrics: &str, family: &str) -> HashMap<String, BTreeSet<String>> {
+    let mut states: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for line in metrics.lines() {
+        let Some((labels, value)) = line
+            .strip_prefix(family)
+            .and_then(|rest| rest.strip_prefix('{'))
+            .and_then(|rest| rest.split_once("} "))
+        else {
+            continue;
+        };
+        let Some(labels) = parse_metric_labels(labels) else {
+            continue;
+        };
+        let (Some(interface), Some(state)) = (labels.get("interface"), labels.get("state")) else {
+            continue;
+        };
+        let entry = states.entry(interface.clone()).or_default();
+        if value.trim() == "1" {
+            entry.insert(state.clone());
+        }
+    }
+    states
+}
+
+/// ADR-0140: one `evpn.es.<interface>.core_isolation` check per bound
+/// segment while `[evpn_core_isolation] enabled = true`, from the daemon's
+/// `evpn_es_core_isolation_state` gauge, plus `evpn.core_isolation.uplinks`
+/// when every configured uplink lacks carrier while EVPN sessions are up.
+fn evpn_core_isolation_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Check> {
+    let enabled = document
+        .get("evpn_core_isolation")
+        .and_then(|t| t.get("enabled"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    let states = state_set(metrics.unwrap_or_default(), "evpn_es_core_isolation_state");
+    let bound = if enabled {
+        config_rows(document, &["ethernet_segments"])
+    } else {
+        &[]
+    };
+    let mut checks: Vec<Check> = bound
+        .iter()
+        .filter_map(|row| row.get("interface").and_then(toml::Value::as_str))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|interface| {
+            let active = states
+                .get(interface)
+                .map(|set| set.iter().map(String::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let (status, detail) = match (metrics, active.as_slice()) {
+                (None, _) => (
+                    CheckStatus::Warn,
+                    "core-isolation state unknown: the metrics snapshot is unavailable".to_string(),
+                ),
+                (Some(_), []) => (
+                    CheckStatus::Warn,
+                    "no core-isolation state reported for this binding yet; rerun doctor"
+                        .to_string(),
+                ),
+                (Some(_), [_, _, ..]) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "core-isolation state ambiguous: more than one state reads 1 ({}); \
+                         rerun doctor",
+                        active.join(", ")
+                    ),
+                ),
+                (Some(_), [state]) => core_isolation_status(state, interface),
+            };
+            Check {
+                name: format!("evpn.es.{interface}.core_isolation"),
+                status,
+                detail,
+            }
+        })
+        .collect();
+    // A failure outlives the table: a release that failed after a disable or
+    // an unbind still leaves a link down, so it is reported for any
+    // interface, configured or not.
+    let covered: BTreeSet<String> = checks.iter().map(|c| c.name.clone()).collect();
+    let failing: BTreeMap<&String, &BTreeSet<String>> = states.iter().collect();
+    for (interface, set) in failing {
+        let name = format!("evpn.es.{interface}.core_isolation");
+        if covered.contains(&name) {
+            continue;
+        }
+        if let [state] = set
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            let (status, detail) = core_isolation_status(state, interface);
+            if status == CheckStatus::Fail {
+                checks.push(Check {
+                    name,
+                    status,
+                    detail,
+                });
+            }
+        }
+    }
+    if !enabled {
+        return checks;
+    }
+    let signal = |name: &str| {
+        metrics.and_then(|text| {
+            text.lines()
+                .find_map(|line| {
+                    line.strip_prefix(&format!("evpn_core_isolated{{signal=\"{name}\"}} "))
+                })
+                .map(|value| value.trim() == "1")
+        })
+    };
+    let uplinks_configured = document
+        .get("evpn_core_isolation")
+        .and_then(|t| t.get("uplinks"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|u| !u.is_empty());
+    if uplinks_configured && signal("uplinks") == Some(true) && signal("sessions") == Some(false) {
+        checks.push(Check {
+            name: "evpn.core_isolation.uplinks".to_string(),
+            status: CheckStatus::Warn,
+            detail: "every configured uplink lacks carrier while EVPN sessions are up, so the \
+                     uplink signal isolates a PE that still reaches the overlay; check the \
+                     [evpn_core_isolation] uplinks list"
+                .to_string(),
+        });
+    }
+    checks
+}
+
+/// Doctor mapping for one `evpn_es_core_isolation_state` (ADR-0140
+/// decision 7).
+fn core_isolation_status(state: &str, interface: &str) -> (CheckStatus, String) {
+    match state {
+        "released" => (
+            CheckStatus::Ok,
+            "released: the CE-facing links are up".to_string(),
+        ),
+        "startup_hold" | "recovering" => (
+            CheckStatus::Ok,
+            format!("{state}: CE-facing links held down until EVPN syncs and settles"),
+        ),
+        "disabled" => (CheckStatus::Ok, "disabled".to_string()),
+        "isolated" => (
+            CheckStatus::Warn,
+            "isolated: the PE lost its EVPN sessions or every uplink, and the CE-facing \
+             members are held down; check the underlay and rbgp neighbor"
+                .to_string(),
+        ),
+        "backstop_released" => (
+            CheckStatus::Warn,
+            "backstop_released: the backstop released the hold before EVPN synced, so the CE \
+             may send traffic this PE has no routes for; check that EVPN sessions reach \
+             End-of-RIB"
+                .to_string(),
+        ),
+        "suppressed_no_peer" => (
+            CheckStatus::Warn,
+            "suppressed_no_peer: the PE is isolated but the segment had no remote ES peer, so \
+             its links stay up and the CE has no other path"
+                .to_string(),
+        ),
+        "overridden" => (
+            CheckStatus::Warn,
+            format!(
+                "overridden: another writer raised a held member of {interface}; rustbgpd owns \
+                 this admin state while the feature is enabled (check systemd-networkd \
+                 ActivationPolicy, NetworkManager and manual ip link use)"
+            ),
+        ),
+        "ownership_ambiguous" => (
+            CheckStatus::Fail,
+            "ownership_ambiguous: a receipt entry no longer matches its link, which is left \
+             down (see the daemon log for the member); raise or delete the link by hand, and \
+             the stop hook (rustbgpd --release-core-isolation) or the next start drops the \
+             entry"
+                .to_string(),
+        ),
+        "action_failed" => (
+            CheckStatus::Fail,
+            "action_failed: an admin-state write or receipt publication failed; see the daemon \
+             log"
+            .to_string(),
+        ),
+        "uplink_overlap" => (
+            CheckStatus::Fail,
+            format!(
+                "uplink_overlap: a configured uplink is {interface} or is enslaved under it, so \
+                 it is excluded from the uplink signal; fix the uplinks list"
+            ),
+        ),
+        other => (
+            CheckStatus::Warn,
+            format!("unknown core-isolation state {other}"),
+        ),
+    }
 }
 
 /// Remediation for one `auto-lacp` not-ready reason, as in the reasons
@@ -3086,6 +3321,11 @@ async fn run_with_deadlines(
                             for check in evpn_auto_esi_checks(&document, metrics_text.as_deref()) {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
+                            for check in
+                                evpn_core_isolation_checks(&document, metrics_text.as_deref())
+                            {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
                             if let Some(check) = authz_enforcement_check(&document) {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
@@ -3289,25 +3529,35 @@ async fn run_with_deadlines(
                         let identity = cfg.map_or_else(String::new, |config| {
                             peer_identity(&config.address, &config.interface)
                         });
-                        let policy_check = rfc8212_policy_check(
-                            &identity,
-                            n.rfc8212_import_policy,
-                            n.rfc8212_export_policy,
-                        );
-                        reporter.record(
-                            policy_check.name,
-                            policy_check.status,
-                            policy_check.detail,
-                        )?;
-                        for check in
-                            outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
-                                .into_iter()
-                                .chain(inbound_prefix_limit_checks(
-                                    &identity,
-                                    &n.inbound_prefix_limits,
-                                ))
-                                .chain(inbound_prefix_bound_check(&identity, n, local_asn))
-                        {
+                        // A down dynamic neighbor whose routes are still
+                        // retained has no session or configuration to check:
+                        // only its retention is diagnosed, but it stays in
+                        // the roster and the support bundle.
+                        let retention_only = n.retention_only == Some(true);
+                        if !retention_only {
+                            let policy_check = rfc8212_policy_check(
+                                &identity,
+                                n.rfc8212_import_policy,
+                                n.rfc8212_export_policy,
+                            );
+                            reporter.record(
+                                policy_check.name,
+                                policy_check.status,
+                                policy_check.detail,
+                            )?;
+                            for check in
+                                outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
+                                    .into_iter()
+                                    .chain(inbound_prefix_limit_checks(
+                                        &identity,
+                                        &n.inbound_prefix_limits,
+                                    ))
+                                    .chain(inbound_prefix_bound_check(&identity, n, local_asn))
+                            {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
+                        }
+                        for check in llgr_retention_checks(&identity, &n.gr_retention) {
                             reporter.record(check.name, check.status, check.detail)?;
                         }
                         records.push(NeighborDoctorRecord {
@@ -3327,6 +3577,7 @@ async fn run_with_deadlines(
                                 flap_count: n.flap_count,
                                 last_error: redact_text(&n.last_error),
                                 is_dynamic: n.is_dynamic,
+                                retention_only: n.retention_only,
                                 accepted_dynamic_range: output::json_accepted_dynamic_range(
                                     n.accepted_dynamic_range.as_ref(),
                                 ),
@@ -3334,6 +3585,8 @@ async fn run_with_deadlines(
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
                                 ),
+                                gr_retention: super::neighbor::json_gr_retention(&n.gr_retention),
+                                gr_retention_available: n.gr_retention_available,
                             },
                             identity,
                             update_group: n.update_group.clone(),
@@ -3364,7 +3617,10 @@ async fn run_with_deadlines(
                             )?,
                         }
                     }
-                    for record in &records {
+                    for record in records
+                        .iter()
+                        .filter(|record| record.support.retention_only != Some(true))
+                    {
                         let session_evidence = if session_history_available {
                             SessionHistoryEvidence::Retained {
                                 last_transition_unix: transitions.get(&record.identity).copied(),
@@ -3819,9 +4075,12 @@ mod tests {
                 flap_count: 0,
                 last_error: String::new(),
                 is_dynamic: false,
+                retention_only: None,
                 accepted_dynamic_range: None,
                 route_reflector_client: false,
                 description: String::new(),
+                gr_retention: Vec::new(),
+                gr_retention_available: None,
             },
             identity: peer_identity(address, interface),
             update_group: String::new(),
@@ -4550,6 +4809,17 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             }];
             assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
         }
+        // A non-unicast family bound (for example `max_prefixes_rtc`) leaves
+        // the unicast feed and the aggregate unbounded: the warning stays.
+        let mut family_only = peer.clone();
+        family_only.inbound_prefix_limits = vec![crate::proto::InboundPrefixLimitState {
+            scope: "rtc".to_string(),
+            limit: 10,
+            ..Default::default()
+        }];
+        let check = inbound_prefix_bound_check("10.0.0.2", &family_only, Some(65001))
+            .expect("a family-only bound must not satisfy the unicast check");
+        assert_eq!(check.status, CheckStatus::Warn);
         for case in 0..4 {
             let mut bounded = peer.clone();
             match case {
@@ -5341,6 +5611,86 @@ paths = ["x"]
     /// pre-existing `rpki.vrp_table` check passes this fixture. The session
     /// check is what warns; mapping a retained disconnect to `Ok` makes the
     /// retained-cache assertion red.
+    /// ADR-0140 decision 7 mapping: warn for isolated, backstop_released,
+    /// suppressed_no_peer and overridden; fail for action_failed,
+    /// ownership_ambiguous and uplink_overlap; nothing while disabled.
+    #[test]
+    fn evpn_core_isolation_check_maps_states_and_flags_dead_uplinks() {
+        let document = |enabled: bool| -> toml::Value {
+            toml::from_str(&format!(
+                r#"
+                [evpn_core_isolation]
+                enabled = {enabled}
+                uplinks = ["eth1"]
+                [[ethernet_segments]]
+                esi = "auto-lacp"
+                interface = "bond0"
+                [[ethernet_segments]]
+                esi = "00:11:22:33:44:55:66:77:88:99"
+                "#
+            ))
+            .unwrap()
+        };
+        let row = |state: &str| {
+            format!("evpn_es_core_isolation_state{{interface=\"bond0\",state=\"{state}\"}} 1\n")
+        };
+        for (state, status) in [
+            ("released", CheckStatus::Ok),
+            ("startup_hold", CheckStatus::Ok),
+            ("recovering", CheckStatus::Ok),
+            ("isolated", CheckStatus::Warn),
+            ("backstop_released", CheckStatus::Warn),
+            ("suppressed_no_peer", CheckStatus::Warn),
+            ("overridden", CheckStatus::Warn),
+            ("action_failed", CheckStatus::Fail),
+            ("ownership_ambiguous", CheckStatus::Fail),
+            ("uplink_overlap", CheckStatus::Fail),
+        ] {
+            let checks = evpn_core_isolation_checks(&document(true), Some(&row(state)));
+            assert_eq!(checks.len(), 1, "only bound segments get a check");
+            assert_eq!(checks[0].name, "evpn.es.bond0.core_isolation");
+            assert_eq!(checks[0].status, status, "{state}: {}", checks[0].detail);
+            assert!(checks[0].detail.starts_with(state), "{}", checks[0].detail);
+        }
+        assert!(evpn_core_isolation_checks(&document(false), Some(&row("isolated"))).is_empty());
+        assert!(evpn_core_isolation_checks(&document(false), Some(&row("disabled"))).is_empty());
+        // Disabling must not hide a failed release, nor must unbinding.
+        for state in ["action_failed", "ownership_ambiguous"] {
+            let checks = evpn_core_isolation_checks(&document(false), Some(&row(state)));
+            assert_eq!(checks.len(), 1, "{state}");
+            assert_eq!(checks[0].name, "evpn.es.bond0.core_isolation");
+            assert_eq!(checks[0].status, CheckStatus::Fail);
+        }
+        let gone = "evpn_es_core_isolation_state{interface=\"old0\",state=\"action_failed\"} 1\n";
+        let checks = evpn_core_isolation_checks(
+            &document(true),
+            Some(&format!("{}{gone}", row("released"))),
+        );
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[1].name, "evpn.es.old0.core_isolation");
+        assert_eq!(checks[1].status, CheckStatus::Fail);
+        let unknown = evpn_core_isolation_checks(&document(true), Some(""));
+        assert_eq!(unknown[0].status, CheckStatus::Warn);
+
+        let dead_uplinks = format!(
+            "{}evpn_core_isolated{{signal=\"sessions\"}} 0\nevpn_core_isolated{{signal=\"uplinks\"}} 1\n",
+            row("isolated")
+        );
+        let checks = evpn_core_isolation_checks(&document(true), Some(&dead_uplinks));
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[1].name, "evpn.core_isolation.uplinks");
+        assert_eq!(checks[1].status, CheckStatus::Warn);
+        let both_down = format!(
+            "{}evpn_core_isolated{{signal=\"sessions\"}} 1\nevpn_core_isolated{{signal=\"uplinks\"}} 1\n",
+            row("isolated")
+        );
+        assert_eq!(
+            evpn_core_isolation_checks(&document(true), Some(&both_down)).len(),
+            1,
+            "a real isolation is not an uplink-list problem"
+        );
+    }
+
     #[test]
     fn evpn_auto_esi_check_reports_the_not_ready_reason_and_follows_the_gauge() {
         let document: toml::Value = toml::from_str(
@@ -6953,6 +7303,147 @@ paths = ["x"]
             3
         );
         assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The LLGR warning names the count with the right number, and omits it
+    /// for a daemon that does not report one.
+    #[test]
+    fn llgr_retention_detail_counts_stale_routes() {
+        let row = |stale_routes| crate::proto::GracefulRestartRetentionState {
+            family: "ipv4_unicast".to_string(),
+            phase: "llgr".to_string(),
+            remaining_seconds: Some(60),
+            stale_routes,
+        };
+        let detail = |stale_routes| {
+            llgr_retention_checks("192.0.2.2", &[row(stale_routes)])
+                .remove(0)
+                .detail
+        };
+        let prefix = "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase";
+        assert_eq!(
+            detail(Some(1)),
+            format!("{prefix} holding 1 stale route; sweep in 00:01:00")
+        );
+        assert_eq!(
+            detail(Some(2)),
+            format!("{prefix} holding 2 stale routes; sweep in 00:01:00")
+        );
+        assert_eq!(detail(None), format!("{prefix}; sweep in 00:01:00"));
+    }
+
+    /// A family held in the LLGR phase is a configured outcome: doctor warns
+    /// with the time left and the exit code stays green. A GR-phase family
+    /// raises no retention check. Dropping the check loses the warning;
+    /// classifying it as a failure turns the exit code red.
+    #[tokio::test]
+    async fn doctor_warns_llgr_retention_with_remaining_time() {
+        let server = spawn_mock_server(None).await;
+        let mut peer = neighbor(
+            "192.0.2.2",
+            rustbgpd_api::proto::SessionState::Established as i32,
+            0,
+            "",
+        );
+        peer.update_group = "group:1".to_string();
+        peer.config.as_mut().unwrap().max_prefixes = 10;
+        peer.gr_retention_available = Some(true);
+        peer.gr_retention = vec![
+            rustbgpd_api::proto::GracefulRestartRetentionState {
+                family: "ipv4_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(16_416_000),
+                stale_routes: Some(42),
+            },
+            rustbgpd_api::proto::GracefulRestartRetentionState {
+                family: "ipv6_unicast".to_string(),
+                phase: "gr_awaiting_eor".to_string(),
+                remaining_seconds: Some(300),
+                stale_routes: None,
+            },
+        ];
+        *server.state.list_neighbors_response.lock().await = vec![peer];
+        let output_dir = tempfile::tempdir().unwrap();
+        let (code, manifest) =
+            run_doctor(&server.addr, &output_dir.path().join("bundle.tar.gz"), None).await;
+
+        assert_eq!(code, 0, "LLGR retention is advisory");
+        let check = manifest_check(&manifest, "peer.192.0.2.2.llgr_retention.ipv4_unicast");
+        assert_eq!(check["status"], "warn");
+        assert_eq!(
+            check["detail"],
+            "peer 192.0.2.2 family ipv4_unicast is in the LLGR stale phase holding 42 stale routes; sweep in 190d 0h"
+        );
+        assert!(!manifest["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"]
+                .as_str()
+                .unwrap()
+                .contains("llgr_retention.ipv6_unicast")
+        }));
+    }
+
+    /// A retention-only row (a down dynamic neighbor whose stale routes the
+    /// RIB still retains) has no session or configuration: doctor reports
+    /// only its retention and keeps a green exit code. Running the ordinary
+    /// per-peer checks on it adds session and policy checks for a peer that
+    /// is gone.
+    #[tokio::test]
+    async fn doctor_reports_only_retention_for_retention_only_neighbor() {
+        let server = spawn_mock_server(None).await;
+        let row = rustbgpd_api::proto::NeighborState {
+            config: Some(rustbgpd_api::proto::NeighborConfig {
+                address: "192.0.2.9".to_string(),
+                remote_asn: 65009,
+                ..Default::default()
+            }),
+            state: rustbgpd_api::proto::SessionState::Idle as i32,
+            retention_only: Some(true),
+            gr_retention_available: Some(true),
+            gr_retention: vec![rustbgpd_api::proto::GracefulRestartRetentionState {
+                family: "ipv4_unicast".to_string(),
+                phase: "llgr".to_string(),
+                remaining_seconds: Some(3_600),
+                stale_routes: None,
+            }],
+            ..Default::default()
+        };
+        *server.state.list_neighbors_response.lock().await = vec![row];
+        let output_dir = tempfile::tempdir().unwrap();
+        let (code, manifest) =
+            run_doctor(&server.addr, &output_dir.path().join("bundle.tar.gz"), None).await;
+
+        assert_eq!(code, 0, "retention is advisory");
+        let peer_checks: Vec<&str> = manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|check| check["name"].as_str())
+            .filter(|name| name.starts_with("peer.192.0.2.9."))
+            .collect();
+        assert_eq!(
+            peer_checks,
+            ["peer.192.0.2.9.llgr_retention.ipv4_unicast"],
+            "{manifest}"
+        );
+        let check = manifest_check(&manifest, "peer.192.0.2.9.llgr_retention.ipv4_unicast");
+        assert_eq!(check["status"], "warn");
+        // The row is still a neighbor: it counts toward the roster, so the
+        // empty-roster result is absent, and the support bundle carries it.
+        assert!(
+            !manifest["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["name"] == "peers.configured"),
+            "{manifest}"
+        );
+        let files = extract_bundle(&output_dir.path().join("bundle.tar.gz"));
+        let peers: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
+        assert_eq!(peers.as_array().unwrap().len(), 1, "{peers}");
+        assert_eq!(peers[0]["address"], "192.0.2.9");
+        assert_eq!(peers[0]["retention_only"], true);
+        assert_eq!(peers[0]["gr_retention"][0]["phase"], "llgr");
     }
 
     #[tokio::test]

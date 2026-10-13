@@ -1,5 +1,6 @@
-//! Actual RIB ownership regression. The encoder holds two production probes;
-//! the peer-manager harness supplies the independent first/last RPC stages.
+//! Neighbor and policy reads against an actual RIB actor. In the ownership
+//! regression the encoder holds two production probes; the peer-manager
+//! harness supplies the independent first/last RPC stages.
 
 use std::any::Any;
 use std::net::{IpAddr, Ipv4Addr};
@@ -676,4 +677,138 @@ fn export_peer_up(
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     }
+}
+
+/// A dynamic neighbor whose session went idle has left the peer manager's
+/// roster, while the RIB still retains its routes for graceful restart. Both
+/// neighbor reads still report it, marked retention-only, with its phase and
+/// remaining time and stale-route count.
+/// Once the GR timer sweeps the routes the row is gone and the address is
+/// not found again. Without the RIB's retained roster neither read sees it.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual-RIB fixture walks GR entry, both reads, and the sweep"
+)]
+async fn down_dynamic_neighbor_retention_row_lasts_until_sweep() {
+    let peer: IpAddr = "192.0.2.9".parse().unwrap();
+    let (rib_tx, rib_rx) = mpsc::channel(16);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let manager = RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
+    let manager_task = tokio::spawn(manager.run());
+    let (peer_tx, _peer_rx) = mpsc::channel(1);
+    let (operator_tx, mut operator_rx) = mpsc::channel::<EnqueuedOperatorQuery>(8);
+    // The peer manager has already retired the dynamic peer.
+    let peer_task = tokio::spawn(async move {
+        while let Some(query) = operator_rx.recv().await {
+            match query.query {
+                PeerManagerOperatorQuery::ListPeers { reply } => {
+                    let _ = reply.send(Vec::new());
+                }
+                PeerManagerOperatorQuery::GetPeerState { reply, .. } => {
+                    let _ = reply.send(None);
+                }
+                PeerManagerOperatorQuery::HasPeerAddress { .. } => {
+                    panic!("unexpected operator query")
+                }
+            }
+        }
+    });
+    let neighbor = NeighborService::new(65000, AccessMode::ReadOnly, peer_tx, query_tx, None)
+        .with_operator_queries(operator_tx);
+    let get = |address: &str| {
+        NeighborRpc::get_neighbor_state(
+            &neighbor,
+            Request::new(proto::GetNeighborStateRequest {
+                address: address.to_string(),
+                ..Default::default()
+            }),
+        )
+    };
+
+    let (outbound_tx, _outbound_rx) = mpsc::channel(32);
+    rib_tx
+        .send(export_peer_up(peer, 0, outbound_tx))
+        .await
+        .unwrap();
+    rib_tx
+        .send(RibUpdate::RoutesReceived {
+            peer,
+            session_id: 0,
+            announced: (0..3).map(route).collect(),
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(neighbors(&neighbor).await.neighbors, Vec::new());
+    rib_tx
+        .send(RibUpdate::PeerGracefulRestart {
+            peer,
+            session_id: 0,
+            restart_time: 120,
+            stale_routes_time: 360,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        })
+        .await
+        .unwrap();
+    // Queries use their own lane: wait until the actor has applied GR entry.
+    let mut entered = Vec::new();
+    for _ in 0..1_000 {
+        entered = neighbors(&neighbor).await.neighbors;
+        if !entered.is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(entered.len(), 1, "the retained dynamic neighbor is listed");
+    assert_eq!(entered[0].gr_retention[0].remaining_seconds, Some(120));
+    tokio::time::advance(Duration::from_secs(20)).await;
+
+    let listed = neighbors(&neighbor).await.neighbors;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    let row = &listed[0];
+    assert_eq!(row.retention_only, Some(true));
+    assert_eq!(row.state, proto::SessionState::Idle as i32);
+    let config = row.config.as_ref().unwrap();
+    assert_eq!(config.address, "192.0.2.9");
+    assert_eq!(config.remote_asn, 65001);
+    assert_eq!(row.gr_retention_available, Some(true));
+    assert_eq!(
+        row.gr_retention,
+        vec![proto::GracefulRestartRetentionState {
+            family: "ipv4_unicast".to_string(),
+            phase: "gr_restart".to_string(),
+            remaining_seconds: Some(100),
+            stale_routes: Some(3),
+        }]
+    );
+    let single = get("192.0.2.9").await.unwrap().into_inner();
+    assert_eq!(single.retention_only, Some(true));
+    assert_eq!(single.gr_retention[0].phase, "gr_restart");
+    assert_eq!(single.gr_retention[0].remaining_seconds, Some(100));
+    assert_eq!(single.gr_retention[0].stale_routes, Some(3));
+    // An address the RIB retains nothing for stays not found.
+    assert_eq!(
+        get("192.0.2.10").await.unwrap_err().code(),
+        tonic::Code::NotFound
+    );
+
+    // GR expiry without LLGR sweeps the stale routes, ending retention.
+    tokio::time::advance(Duration::from_secs(101)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(neighbors(&neighbor).await.neighbors, Vec::new());
+    assert_eq!(
+        get("192.0.2.9").await.unwrap_err().code(),
+        tonic::Code::NotFound
+    );
+    manager_task.abort();
+    peer_task.abort();
 }

@@ -306,6 +306,10 @@ struct ManagedPeerState {
     description: String,
     peer_group: Option<String>,
     enabled: bool,
+    /// Config-owned administrative-down state the peer was added or last
+    /// reloaded with. Reload compares it with the candidate: only a change
+    /// overrides the runtime `enabled` toggle.
+    admin_down: Option<String>,
     hold_time: Option<u16>,
     max_prefixes: Option<u32>,
     /// Manager-owned max-prefix restart policy. Session tasks only report the
@@ -437,6 +441,9 @@ struct PendingInbound {
     handle: PeerHandle,
     session_id: u64,
 }
+
+#[cfg(test)]
+type CommandHook = Arc<dyn Fn(&PeerManagerCommand) + Send + Sync>;
 
 /// Manages the lifecycle of all peer sessions.
 ///
@@ -635,6 +642,9 @@ pub struct PeerManager {
     /// mid-cohort failure and rollback contract can be exercised.
     #[cfg(test)]
     inject_hot_update_failures: std::collections::BTreeMap<PeerKey, u32>,
+    /// Runs synchronously at the start of every dispatched command.
+    #[cfg(test)]
+    test_command_hook: Option<CommandHook>,
 }
 
 impl PeerManager {
@@ -718,6 +728,7 @@ impl PeerManager {
                 dynamic_neighbors: Vec::new(),
                 evpn_instances: Vec::new(),
                 ethernet_segments: Vec::new(),
+                evpn_core_isolation: None,
                 evpn_ip_vrfs: Vec::new(),
                 managed_netdevs: crate::config::ManagedNetdevsConfig::default(),
                 fib_tables: Vec::new(),
@@ -983,6 +994,10 @@ impl PeerManager {
         }
     }
 
+    /// Answer a readiness query, then yield. The reply wakes the probe's task
+    /// into this worker's LIFO slot, which other workers cannot steal; without
+    /// the yield it waits until the actor next returns `Pending`, which a
+    /// queue of ready commands can defer for Tokio's whole cooperative budget.
     async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::Ping { reply } => {
@@ -992,6 +1007,7 @@ impl PeerManager {
                 self.answer_list_peers(reply).await;
             }
         }
+        tokio::task::yield_now().await;
     }
 
     /// Drive one owned step while servicing at most one read-only readiness
@@ -1227,6 +1243,8 @@ impl PeerManager {
             dataset_generations_at_peer_construction: None,
             #[cfg(test)]
             inject_hot_update_failures: std::collections::BTreeMap::new(),
+            #[cfg(test)]
+            test_command_hook: None,
         }
     }
 
@@ -1345,6 +1363,7 @@ impl PeerManager {
         transport.max_prefixes_ipv6 = config.max_prefixes_ipv6;
         transport.max_prefixes_received_ipv4 = config.max_prefixes_received_ipv4;
         transport.max_prefixes_received_ipv6 = config.max_prefixes_received_ipv6;
+        transport.max_prefixes_family = config.max_prefixes_family;
         transport.max_prefix_action = config.max_prefix_action;
         transport.max_prefix_warning_percent = config.max_prefix_warning_percent;
         transport.peer_group.clone_from(&config.peer_group);
@@ -1444,6 +1463,10 @@ impl PeerManager {
         reason = "command dispatch preserves one exhaustive match over the public actor protocol"
     )]
     async fn dispatch_command(&mut self, cmd: PeerManagerCommand) -> ControlFlow<()> {
+        #[cfg(test)]
+        if let Some(hook) = &self.test_command_hook {
+            hook(&cmd);
+        }
         self.operator_read_seam = OperatorReadSeam::Unfenced;
         match cmd {
             PeerManagerCommand::EnablePeerOwned { peer, reply } => {
@@ -2468,6 +2491,8 @@ impl PeerManager {
                     match query {
                         Some(PeerManagerReadinessQuery::ListPeers { reply }) => {
                             self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply }).await;
+                            // Same LIFO-slot hand-off as `handle_readiness_query`.
+                            tokio::task::yield_now().await;
                         }
                         Some(query) => self.handle_readiness_query(query).await,
                         None => self.readiness_rx = None,

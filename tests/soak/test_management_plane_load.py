@@ -174,6 +174,69 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 "route",
             )
 
+    def test_evpn_views_require_typed_rows_from_the_right_source(self):
+        peer = "127.1.0.1"
+
+        def page(view, rows, total=None, neighbor=peer):
+            return json.dumps({
+                "view": view, "neighbor": neighbor, "routes": rows,
+                "total_count": len(rows) if total is None else total,
+                "next_page_token": "", "page_version": None,
+            }).encode()
+
+        own = [{"route_type": 2, "peer": peer}, {"route_type": 5, "peer": peer}]
+        other = [{"route_type": 5, "peer": "127.1.0.2"}]
+        self.assertEqual(
+            load.validate_cli_json("evpn_received", page("received", own, 900), 1, peer),
+            "ok",
+        )
+        self.assertEqual(
+            load.validate_cli_json("evpn_advertised", page("advertised", other), 1, peer),
+            "ok",
+        )
+        cases = {
+            ("evpn_received", page("received", other)): "route",
+            ("evpn_received", page("received", [])): "route",
+            ("evpn_received", page("received", [{"route_type": 3, "peer": peer}])): "route",
+            ("evpn_received", page("received", own, total=1)): "route",
+            ("evpn_advertised", page("advertised", own)): "route",
+            ("evpn_received", page("advertised", own)): "schema",
+            ("evpn_received", page("received", own, neighbor="127.1.0.2")): "schema",
+            ("evpn_advertised", b"[]"): "schema",
+        }
+        for (operation, payload), expected in cases.items():
+            with self.subTest(operation=operation, payload=payload):
+                self.assertEqual(
+                    load.validate_cli_json(operation, payload, 1, peer), expected
+                )
+
+    def test_evpn_mode_swaps_unicast_reads_for_paged_peer_views(self):
+        commands = load.cli_commands(
+            "/bin/rbgp", "unix:///tmp/grpc.sock", "20.0.0.0/24", "/run/b.tar.gz",
+            evpn_peer="127.1.0.1",
+        )
+        self.assertEqual(set(commands), {"neighbor", "doctor", "evpn_received",
+                                         "evpn_advertised"})
+        self.assertEqual(
+            commands["evpn_received"],
+            ["/bin/rbgp", "-s", "unix:///tmp/grpc.sock", "--json",
+             "evpn", "received", "127.1.0.1"],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = load.ManagementPlaneLoad(
+                output=str(Path(tmp) / "load.jsonl"), metrics_url="http://x/metrics",
+                rbgp="/bin/rbgp", uds="unix:///tmp/grpc.sock", peer_count=3,
+                route_prefix="20.0.0.0/24", doctor_bundle="/run/b.tar.gz",
+                metrics_interval_seconds=1.0, cli_interval_seconds=5.0,
+                doctor_interval_seconds=60.0, timeout_seconds=5.0,
+                evpn_peer="127.1.0.1",
+            )
+            engine.sink.close()
+        self.assertEqual(engine.operations, load.EVPN_OPERATIONS)
+        self.assertEqual(set(engine.intervals), set(load.EVPN_OPERATIONS))
+        self.assertEqual(set(engine.phase_offsets), set(load.EVPN_OPERATIONS))
+        self.assertEqual(engine.identity, {"evpn_peer": "127.1.0.1"})
+
     def test_malformed_json_and_wrong_root_are_rejected(self):
         self.assertEqual(load.validate_cli_json("neighbor", b"{", 1, "p"), "json")
         self.assertEqual(load.validate_cli_json("rib_prefix", b"{}", 1, "p"), "schema")

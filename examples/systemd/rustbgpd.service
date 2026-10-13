@@ -11,8 +11,15 @@ StartLimitBurst=5
 Type=notify
 NotifyAccess=main
 TimeoutStartSec=10min
-ExecStart=/usr/local/bin/rustbgpd /etc/rustbgpd/config.toml
+# --runtime-state-dir must match the config's runtime_state_dir; the daemon
+# refuses to start otherwise, so the stop hook below always reads the
+# directory the daemon wrote.
+ExecStart=/usr/local/bin/rustbgpd --runtime-state-dir /var/lib/rustbgpd /etc/rustbgpd/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
+# EVPN core-isolation hold: after any exit, raise the CE-facing links the
+# daemon took down. Reads only the ownership receipt, never the config; exits
+# 0 when there is nothing to release.
+ExecStopPost=/usr/local/bin/rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd
 # READY=1 arrives once the configured peer roster is installed and BGP
 # ingress is active; STOPPING=1 marks the start of coordinated shutdown.
 # WATCHDOG=1 is sent every 2.5 minutes only while the PeerManager and RIB

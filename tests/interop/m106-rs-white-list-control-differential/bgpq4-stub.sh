@@ -49,6 +49,7 @@ case "$label" in
             AS-M90-ONE|AS64500)   emit "64500" ;;
             AS-M90-TWO|AS64501)   emit "64501" ;;
             AS-M90-THREE|AS64502) emit "64502" ;;
+            AS-M106-FOUR|AS64503) emit "64503" ;;
             AS64510)              emit "64510" ;;
             *) echo "bgpq4-stub: unknown ASN-mode object: $object" >&2; exit 1 ;;
         esac
@@ -65,6 +66,8 @@ case "$label" in
                 emit '{"prefix": "203.0.113.128/25", "exact": true}' ;;
             AS-M90-THREE|AS64502)
                 emit '{"prefix": "203.0.113.64/26", "exact": true}' ;;
+            AS-M106-FOUR|AS64503)
+                emit '{"prefix": "203.0.113.224/27", "exact": true}' ;;
             # The white-listed origin has no route objects of its own.
             AS64510) emit "" ;;
             *) echo "bgpq4-stub: unknown prefix-mode object: $object" >&2; exit 1 ;;

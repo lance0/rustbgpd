@@ -3,6 +3,37 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.25.0 - 2026-10-12
+
+- `decode_evpn_nlri` (and the UPDATE parsers built on it) now accepts an
+  all-zero ESI in EVPN Type 1 and Type 4 routes instead of returning an
+  error. A single-homed VPWS per-EVI Ethernet A-D route carries ESI 0
+  (RFC 8214 §4), and RFC 7432 §8.2.1 does not prohibit it on a per-ES route.
+  `validate_evpn_announcements` now rejects a zero-ESI Type 4 announcement
+  (RFC 7432 §8.1.1), so `UpdateMessage::parse_revised` reports it as a
+  treat-as-withdraw `MalformedAttribute` rather than a session-reset error.
+  Withdrawals and the legacy `parse` path decode it structurally. No public
+  item or signature changes. This is a decode-behavior change, so under the
+  crate's semver policy it ships in a minor release, not a patch.
+- `UpdateMessage::parse_revised` (and `parse_revised_observed*`) now treat
+  an EVPN Type 2 route with MAC Address Length 0 as RFC 7606
+  treat-as-withdraw (RFC 9135 §9.1.1) instead of returning a session-reset
+  error. RFC 7432 §7.2 includes the MAC Address Length in the route key and
+  `EvpnMacIp` has no field for it, so the route is dropped from
+  `evpn_announced` / `evpn_withdrawn` rather than keyed as the 48-bit route
+  for the same MAC. In `MP_REACH_NLRI` the attribute is reported as a
+  treat-as-withdraw `MalformedAttribute` and its other routes stay
+  available for the UPDATE-wide withdrawal; in `MP_UNREACH_NLRI` the route
+  withdraws nothing. `decode_evpn_nlri`, `decode_evpn_nlri_counted` and the
+  legacy `parse` path still return an error for it, as before.
+  `validate_evpn_announcements` now also rejects a Type 5 announcement with
+  both a non-zero ESI and a non-zero gateway IP (RFC 9136 §3.2), so
+  `parse_revised` reports it as treat-as-withdraw; withdrawals still decode
+  it. No public item or signature changes. These are decode and validation
+  behavior changes and ship in a minor release.
+- Pair this wire compatibility line with FSM 0.12 and RPKI 0.7 when sharing
+  public wire types.
+
 ## 0.24.0 - 2026-10-11
 
 - `is_dataplane_route_type` now returns `true` for Type 3 (IMET). Received

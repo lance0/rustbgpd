@@ -40,12 +40,26 @@ impl ReplacementSummaries {
                 RibSummaryQuery::NeighborRibSnapshots {
                     peers,
                     comparison,
+                    include_retained,
                     reply,
                 } => {
+                    // The capture includes every retained peer, so its
+                    // non-empty retention rows are the retained roster.
+                    let retained_candidates = if include_retained {
+                        self.view
+                            .neighbors
+                            .iter()
+                            .filter(|(_, row)| !row.gr_retention.is_empty())
+                            .map(|(peer, _)| *peer)
+                            .collect()
+                    } else {
+                        std::collections::BTreeSet::new()
+                    };
                     super::queries::send_neighbor_rib_snapshot(
                         reply,
                         peers,
                         comparison,
+                        retained_candidates,
                         |peer| {
                             self.view.neighbors.get(&peer).cloned().unwrap_or_else(|| {
                                 NeighborRibSnapshot {
@@ -53,6 +67,8 @@ impl ReplacementSummaries {
                                     advertised_count: 0,
                                     policy_stats: NeighborPolicyStats::default(),
                                     outbound: self.view.unknown_outbound.clone(),
+                                    remote_asn: None,
+                                    gr_retention: Vec::new(),
                                 }
                             })
                         },
@@ -203,6 +219,11 @@ impl RibManager {
             .chain(self.adj_ribs_out.keys())
             .chain(self.export_policy_stats.keys())
             .chain(self.update_groups.members.keys())
+            // A peer in GR/LLGR retention may have no outbound registration
+            // while its session is down; its retention row must survive.
+            .chain(self.gr_peers.keys())
+            .chain(self.llgr_peers.keys())
+            .chain(self.llgr_stale_deadlines.keys().map(|(peer, _, _)| peer))
         {
             peers.insert(*peer);
             self.replacement_checkpoint(false);
@@ -302,6 +323,7 @@ mod tests {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
+                include_retained: false,
             })
             .unwrap();
             response
@@ -387,6 +409,7 @@ mod tests {
                 peers: vec![unknown, waiter, unknown],
                 comparison: Some((unknown, waiter)),
                 reply,
+                include_retained: false,
             })
             .unwrap();
             let (canceled_reply, canceled_response) = oneshot::channel();
@@ -395,6 +418,7 @@ mod tests {
                 peers: vec![unknown],
                 comparison: None,
                 reply: canceled_reply,
+                include_retained: false,
             })
             .unwrap();
             manager.with_replacement_summary_reads("apply", |manager| {
@@ -413,6 +437,7 @@ mod tests {
             peers: Vec::new(),
             comparison: None,
             reply,
+            include_retained: false,
         })
         .unwrap();
         manager.drain_summary_queries();
@@ -513,6 +538,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    include_retained: false,
                 })
                 .unwrap();
             context.state.lock().unwrap().last_service -= budget;
@@ -581,6 +607,7 @@ mod tests {
                             peers: Vec::new(),
                             comparison: None,
                             reply,
+                            include_retained: false,
                         })
                         .unwrap();
                     snapshots.push(response);
@@ -651,6 +678,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    include_retained: false,
                 })
                 .unwrap();
             (count, snapshot)
@@ -746,6 +774,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    include_retained: false,
                 })
                 .unwrap();
             response
@@ -881,6 +910,7 @@ mod tests {
                     peers: Vec::new(),
                     comparison: None,
                     reply,
+                    include_retained: false,
                 })
                 .unwrap();
                 replies.push(response);

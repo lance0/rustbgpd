@@ -4950,6 +4950,7 @@ policy customer-in(peer_lp: u32) {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
+                include_retained: false,
             })
             .unwrap();
         let (roster, _publication) = stats_roster();

@@ -5559,6 +5559,7 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
             peers: Vec::new(),
             comparison: None,
             reply,
+            include_retained: false,
         })
         .unwrap();
     manager.drain_general_queries_if_unfenced();
@@ -8940,6 +8941,7 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
                 peers: Vec::new(),
                 comparison: None,
                 reply,
+                include_retained: false,
             })
             .unwrap();
         let summary = Arc::new(Mutex::new(summary));
@@ -12470,6 +12472,7 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                                     peers: peers.clone(),
                                     comparison: Some((peers[0], peers[1])),
                                     reply: neighbors_reply,
+                                    include_retained: false,
                                 })
                                 .unwrap();
                         }

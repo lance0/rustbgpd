@@ -11,11 +11,11 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_rib::dampening::{DampeningAdmission, DampeningOwner};
 use rustbgpd_rib::update::AcceptedDynamicRange;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::Config;
 
-use super::{PeerManager, RIB_REPLY_TIMEOUT};
+use super::{OperatorReadAdmission, PeerManager, RIB_REPLY_TIMEOUT};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum OwnerIdentity {
@@ -202,8 +202,9 @@ impl PeerManager {
             .map(|entry| entry.admission.independent_recovery()))
     }
 
+    /// Owns its sender so a caller can serve readiness while it is parked.
     async fn send_configured_owners(
-        &self,
+        rib_tx: mpsc::Sender<RibUpdate>,
         receipt: PublicationReceipt,
         owners: Vec<Arc<DampeningOwner>>,
     ) -> Result<(), PublicationError> {
@@ -211,7 +212,7 @@ impl PeerManager {
         let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
         tokio::time::timeout_at(
             deadline,
-            self.rib_tx.send(RibUpdate::PublishDampeningOwners {
+            rib_tx.send(RibUpdate::PublishDampeningOwners {
                 publication: receipt.0,
                 owners,
                 reply,
@@ -233,7 +234,8 @@ impl PeerManager {
         if self.configured_owners.committed.is_empty() {
             return Ok(());
         }
-        self.send_configured_owners(
+        Self::send_configured_owners(
+            self.rib_tx.clone(),
             self.configured_owners.last_publication,
             self.configured_owners
                 .committed
@@ -261,13 +263,19 @@ impl PeerManager {
                 let next = self
                     .configured_owners
                     .prepare(receipt, &self.current_config)?;
-                self.send_configured_owners(
+                let send = Self::send_configured_owners(
+                    self.rib_tx.clone(),
                     receipt,
                     next.values()
                         .map(|entry| Arc::clone(&entry.owner))
                         .collect(),
-                )
-                .await?;
+                );
+                // SIGHUP settlement runs this after a reload completes, when
+                // the RIB's primary queue can hold seconds of post-commit
+                // export work. The configuration is already committed and
+                // reads never touch the owner catalogue, so serve them too.
+                self.await_with_readiness(send, OperatorReadAdmission::Served)
+                    .await?;
                 for entry in next.values() {
                     entry.admission.acknowledge_publication();
                 }

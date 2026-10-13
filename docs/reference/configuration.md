@@ -949,6 +949,8 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `remote_asn`           | u32      | yes      | --      | Peer's autonomous system number                  |
 | `description`          | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
 | `peer_group`           | string   | no       | --      | Named peer-group to inherit transport and policy defaults from      |
+| `admin_down`           | bool     | no       | false   | Keep the configured neighbor administratively down: added disabled at startup, no connection attempts, inbound connections refused, still listed in `rbgp neighbor` and metrics. Inherits from the peer group. See [Administrative down](#administrative-down-admin_down) |
+| `admin_down_reason`    | string   | no       | --      | RFC 9003 shutdown communication sent with the Cease/Administrative Shutdown when `admin_down` takes an Established session down. UTF-8, at most 128 bytes: RFC 9003 allows 255 octets, but rustbgpd [sends at most 128](rfc-notes.md#rfc-8203--admin-shutdown-communication) so an RFC 8203-only peer still accepts it. Inherits from the peer group |
 | `hold_time`            | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
 | `min_hold_time`        | u16      | no       | unset   | Minimum hold time accepted from the peer (3..=65535). The effective local `hold_time` must be non-zero and at least this value; a peer proposal of 0 is rejected. |
 | `send_hold_time`       | u32      | no       | (auto)  | RFC 9687 send hold timer in seconds: tear the session down when the peer stops draining its TCP socket for this long. 0 disables; non-zero must be > `hold_time`. Default: `max(480, 2 × hold_time)` per RFC 9687 §6. Pending outbound queue admission uses the same interval; when 0, admission still has the default finite resource deadline (Cease/8) |
@@ -960,7 +962,15 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `max_prefixes_ipv6`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108) |
 | `max_prefixes_received_ipv4` | u32 | no      | --      | Maximum unique IPv4-unicast prefixes the peer may announce, counted **before** import policy: every prefix the peer currently announces counts once whether policy accepts or rejects it, Add-Path identities share one slot, and an explicit withdrawal or an enhanced-route-refresh sweep releases it. Same latched Cease/1 teardown, RFC 4486 data, Notification GR encapsulation, and `max_prefix_restart_seconds` contract as `max_prefixes_ipv4`, enforced independently of it. Rejected identities are tracked only while this bound is set; enabling it on an Established session requests a route refresh so the peer's existing rejections are recounted. Inherits from the peer group when omitted; a neighbor value overrides the group value (ADR-0108 amendment) |
 | `max_prefixes_received_ipv6` | u32 | no      | --      | IPv6-unicast sibling of `max_prefixes_received_ipv4`; inherits from the peer group when omitted and may be overridden per neighbor |
-| `max_prefix_action`    | string   | no       | `"shutdown"` | What a crossed max-prefix bound does. `"shutdown"`: Cease/1 teardown and latch (plus the optional `max_prefix_restart_seconds` timed restart). `"block"`: net-new prefixes beyond a full bound are withheld (never installed; the episode is counted once in `bgp_max_prefix_blocked_total`) while the session stays Established; a prefix already accepted still takes attribute changes and new Add-Path identities. Usage falling below the bound, removing the bound, or leaving `block` ends the episode and requests one route refresh so the peer replays what was withheld. Without negotiated route refresh, peer reannouncement or a session reset is required. `"warning"`: warn once per crossing at the bound and keep accepting. `block` applies to the per-family unicast bounds and requires the aggregate `max_prefixes` to be unset; `block` and `warning` exclude `max_prefix_restart_seconds`. Inherits from the peer group (ADR-0108 amendment) |
+| `max_prefixes_l3vpn_ipv4_unicast` | u32 | no | -- | Maximum unique accepted VPN-IPv4 routes (RD + prefix) from the peer, counted after import policy like `max_prefixes_ipv4`: Add-Path paths of one route share a slot, withdrawals and enhanced-route-refresh sweeps release it, and a session reset clears it. Applies `max_prefix_action`: `shutdown` sends Cease/1 with RFC 4486 AFI/SAFI/bound data (RFC 8538 Cease/9 encapsulation under Notification GR) and latches the peer; `block` withholds net-new routes of this family only; `warning` reports. Enforced independently of `max_prefixes` and every other family bound, so a leak in one family never consumes another family's budget. Inherits from the peer group when omitted; a neighbor value overrides it |
+| `max_prefixes_l3vpn_ipv6_unicast` | u32 | no | -- | VPN-IPv6 (AFI 2/SAFI 128) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_ipv4_labeled_unicast` | u32 | no | -- | IPv4 labeled unicast (AFI 1/SAFI 4) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_ipv6_labeled_unicast` | u32 | no | -- | IPv6 labeled unicast (AFI 2/SAFI 4) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_l2vpn_evpn` | u32 | no | -- | EVPN (AFI 25/SAFI 70) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_ipv4_flowspec` | u32 | no | -- | IPv4 `FlowSpec` (AFI 1/SAFI 133) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_ipv6_flowspec` | u32 | no | -- | IPv6 `FlowSpec` (AFI 2/SAFI 133) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_rtc` | u32 | no | -- | RT-Constrain (AFI 1/SAFI 132) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefix_action`    | string   | no       | `"shutdown"` | What a crossed max-prefix bound does. `"shutdown"`: Cease/1 teardown and latch (plus the optional `max_prefix_restart_seconds` timed restart). `"block"`: net-new prefixes beyond a full bound are withheld (never installed; the episode is counted once in `bgp_max_prefix_blocked_total`) while the session stays Established; a prefix already accepted still takes attribute changes and new Add-Path identities. Usage falling below the bound, removing the bound, or leaving `block` ends the episode and requests one route refresh so the peer replays what was withheld. Without negotiated route refresh, peer reannouncement or a session reset is required. `"warning"`: warn once per crossing at the bound and keep accepting. `block` applies to the per-family bounds (unicast and the non-unicast `max_prefixes_<family>` keys) and requires the aggregate `max_prefixes` to be unset; `block` and `warning` exclude `max_prefix_restart_seconds`. Inherits from the peer group (ADR-0108 amendment) |
 | `max_prefix_warning_percent` | u8 | no      | --      | Warning threshold as a percentage (1..=100) of every finite max-prefix bound, independent of `max_prefix_action`. Crossing it (usage ≥ percent of the bound) emits one warn log line, one `max_prefix_warning` session event, and one `bgp_max_prefix_warning_total` increment; the latch re-arms when usage falls back under the threshold. Never a teardown. Inherits from the peer group |
 | `max_prefixes_out_ipv4` | non-zero u32 | no | -- | Maximum distinct IPv4-unicast prefixes advertised **to** this peer (ADR-0113). Excess net-new prefixes are withheld while the session stays Established; nothing already advertised is withdrawn and no NOTIFICATION is sent. Counts prefixes, not paths: every Add-Path identity for one NLRI shares a slot |
 | `max_prefixes_out_ipv6` | non-zero u32 | no | -- | IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113) |
@@ -1251,6 +1261,38 @@ observation-gate predecessor deprecation in the same immutable generation.
 A still-later SIGHUP can delete deprecated MKTs that are not selected, provided
 the owner set, survivor order, and key definitions are unchanged; deleting a
 non-deprecated or selected key remains restart-required.
+
+### Administrative down (`admin_down`)
+
+`admin_down = true` keeps a configured neighbor down across restarts without
+deleting it, so it stays visible in `rbgp neighbor`, the looking glass and the
+per-peer metrics:
+
+```toml
+[[neighbors]]
+address = "192.0.2.10"
+remote_asn = 64510
+admin_down = true
+admin_down_reason = "quarantined pending abuse review"
+```
+
+At startup, and whenever the neighbor is added, the peer is added disabled. It
+makes no connection attempts, refuses inbound connections and reads 0 in
+`bgp_peer_admin_enabled`. On `SIGHUP`, setting the key on a running peer sends
+Cease/Administrative Shutdown carrying `admin_down_reason`, and clearing it
+enables the peer. The [reload matrix](reload-matrix.md#administrative-state)
+classifies both.
+
+The runtime `rbgp neighbor <addr> enable|disable` toggle stays transient (it
+is not persisted to the file). A reload acts only when the resolved
+`admin_down` changes; otherwise it keeps the runtime state. A runtime `enable`
+of a config-down peer therefore lasts until the next restart or a reload that
+changes `admin_down`. To bring the peer up permanently, remove the key and
+reload.
+
+`admin_down` can be set on a peer group and overridden per neighbor
+(`admin_down = false`). It is rejected on a group referenced by
+`[[dynamic_neighbors]]`; remove the range to stop accepting its peers.
 
 ### TCP MSS clamp
 
@@ -1596,10 +1638,10 @@ hold_time = 45  # neighbor override beats peer-group default
 
 Peer-group fields mirror every neighbor setting except `address`,
 `interface`, `remote_asn`, `description`, `peer_group`, and `tcp_ao`.
-That covers timers, families,
+That covers `admin_down` / `admin_down_reason` (static members only), timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
-`max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
-`max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
+`max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`, the non-unicast
+`max_prefixes_<family>` keys, `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
 `max_prefix_restart_seconds`,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
 receive-side Prefix ORF, `disable_ipv4_unicast`, `link_local_next_hop`,
@@ -3415,16 +3457,32 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
-unicast route is an RFC 8950 next hop. An IPv4 address does not apply to a
-route with IPv6 NLRI (IPv6 unicast, IPv6 labeled unicast, or VPNv6), whose
-`MP_REACH_NLRI` next hop must be IPv6 (RFC 2545 §3, RFC 8277, RFC 4659
-§3.2.1); the route keeps its next hop, as with FRR's `set ip next-hop`.
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
+IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6 (RFC 2545
+§3); the route keeps its next hop, as with FRR's `set ip next-hop`.
 rustbgpd does not originate 6PE or 6VPE routes and never converts an IPv4
 `set_next_hop` into an IPv4-mapped IPv6 address. To set one deliberately, give
 the IPv6 form, such as `"::ffff:192.0.2.9"`. A received IPv4-mapped next hop
 is reflected unchanged. On import, `"self"` for an IPv6 route resolves to the
 session's local IPv6 address, else `local_ipv6_nexthop`; with neither (IPv4
 transport and no `local_ipv6_nexthop`) the route keeps its received next hop.
+
+`set_next_hop` never applies to a labeled-unicast or VPN route
+(`ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l3vpn_ipv4_unicast`,
+`l3vpn_ipv6_unicast`). Such a route keeps its received labels, which are valid
+only at the received next hop (RFC 8277 §3.2.2), and rustbgpd allocates no
+labels ([ADR-0077](../adr/0077-mpls-vpn-bgpls-address-family-boundary.md)
+Decision 6). Config validation therefore rejects an export policy whose
+`set_next_hop`, `"self"` or an address, can reach one of those families on the
+neighbor, peer group or dynamic range it is bound to. The check runs at
+startup and before a SIGHUP or API change commits, and the error names the
+family, the policy and the binding. A TOML statement has no family match, so
+bind a policy that sets the next hop only to unicast peers. In `.rpol`, a term
+whose guard excludes those families, such as `route.family == ipv4-unicast`,
+stays legal on a peer that also carries them; a guard the check cannot prove
+exclusive, such as a prefix match alone, is rejected. On import the action
+leaves a labeled or VPN route's next hop unchanged, as before.
+
 Export never encodes an IPv4 next hop for a route with IPv6 NLRI, including a
 VPNv6 route received with a 12-octet RD + IPv4 next hop: such a route is
 withheld from that peer and counted in
@@ -4548,6 +4606,33 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `interface`     | string   | no       | --            | ADR-0085 attachment-circuit link binding: name of the local link whose carrier drives this ES's link drain. When set, carrier loss on the link drains the segment automatically |
 | `recovery_delay_seconds` | u64 | no     | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it. The earlier spelling `recovery_delay_secs` is still accepted as an alias |
 
+### FRR all-active ES peers
+
+When rustbgpd shares an all-active ES with stock FRR 10.7.1 on Linux:
+
+- Set `df_algorithm = "highest-preference"` and bind `interface` to the
+  CE-facing bond. FRR runs only preference election, and it becomes non-DF
+  on every VNI when an ES peer advertises another algorithm. rustbgpd then
+  falls back to modulo (RFC 8584 §2.2), so the two PEs disagree on the DF.
+  See the [pinned FRR election logic](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/zebra/zebra_evpn_mh.c#L1948-L1976).
+- Give FRR the higher DF preference: set FRR's `evpn mh es-df-pref` above
+  rustbgpd's `df_preference`. FRR on Linux does not filter BUM when it is
+  non-DF. It reports `non-df`, but its netlink provider
+  [returns success without applying](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/zebra/kernel_netlink.c#L1473-L1478)
+  the non-DF bridge-port update, so its ES port keeps flooding. rustbgpd as
+  non-DF does filter, so with FRR as DF the CE receives each BUM frame once.
+
+Highest-preference elects the same winner across an ES's member VNIs;
+changing the VNI does not distribute the DF role between its PEs.
+
+**Known limitation:** with rustbgpd as DF beside stock-Linux FRR, the CE
+receives each BUM frame twice, once through each PE. This is not a
+supported mode. The same applies to any VNI on which rustbgpd is DF under
+`default-modulo`. On a VNI that modulo assigns to FRR, rustbgpd filters and
+the CE receives one copy, from FRR's still-flooding port; BUM is not lost.
+The [mixed-peer receipt](../artifacts/interop/evpn-all-active-frr-20261012T131652Z/README.md) records all
+three cases.
+
 ### Auto-derived ESI (LACP, Type 1)
 
 `esi = "auto-lacp"` derives the RFC 7432 §5 Type 1 ESI from the 802.3ad
@@ -4663,6 +4748,152 @@ additive build-up, and dropping an Ethernet Segment (delete or member-shrink)
 as part of an atomic tenant teardown alongside its member L2VNI. Mixed edits
 that can be decomposed into the supported primitive order also commit live;
 unsupported dependency cycles fail closed before commit.
+
+---
+
+## `[evpn_core_isolation]`
+
+Optional, opt-in (ADR-0140, alpha with EVPN multihoming). Holds the CE-facing
+links of bound Ethernet Segments administratively down while this PE is
+core-isolated, and at startup until EVPN has synced, so the CE moves its
+traffic to the other ES member instead of hashing flows into a PE that cannot
+deliver them. Only segments with an `interface` binding are affected.
+
+```toml
+[evpn_core_isolation]
+enabled = true                 # default false
+uplinks = ["eth1", "eth2"]     # optional underlay uplinks
+hold_after_sync_seconds = 10   # default 10, 0..=3600
+backstop_seconds = 180         # default 180, 1..=3600
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Let rustbgpd own the admin state of every bound segment's CE-facing members |
+| `uplinks` | string[] | `[]` | Underlay links. When set and every one lacks carrier (`IFF_LOWER_UP`; a missing link counts as down), the PE is core-isolated even with EVPN sessions up |
+| `hold_after_sync_seconds` | u64 | `10` | How long EVPN must stay synced before a hold releases (`0..=3600`) |
+| `backstop_seconds` | u64 | `180` | When a hold releases even without EVPN sync, with a warning (`1..=3600`, at least `hold_after_sync_seconds`) |
+
+The table is accepted only on Linux and only with at least one
+`[[ethernet_segments]]` entry that has an `interface`. While `enabled = true`,
+each `interface` may be bound by only one segment; validation names both
+segments. An `uplinks` entry that names a bound interface is rejected, because
+the hold would take its own uplink down and never release. The table reloads
+live with the EVPN runtime config on SIGHUP or `ApplyEvpnRuntime`; disabling it
+or removing a binding releases the affected links at once.
+
+**Signal.** The PE is core-isolated when it has no Established L2VPN/EVPN
+session and no EVPN peer whose routes it retains as GR or LLGR stale, or when
+every configured uplink lacks carrier. Isolation is entered immediately. An
+uplink that is a bound link, is enslaved under a bound bond, or is an owned
+member is excluded from the signal, logged as an error and reported as
+`uplink_overlap`; if every uplink is excluded the uplink signal is false. Do
+not use an uplink stacked on a bound interface (such as a VLAN on the bound
+bond): it loses carrier when the hold takes the members down, which keeps the
+PE isolated, and validation does not detect it yet.
+
+**Action.** For a bound bond, every member is set administratively down
+(`RTM_SETLINK` clearing `IFF_UP`); the bond stays up and the members stay
+enslaved. A bound link that is not a bond is itself set down. Protodown is not
+used: bonds, veths and physical NIC drivers do not accept it. While a hold is in
+place, member discovery is level-triggered: a member enslaved admin-up during
+the hold is recorded and taken down, a member already down when the hold
+begins is left alone and is not raised later, and a held member that another
+writer raises is reported as `overridden` and not taken down again until the
+hold ends. A held member that leaves the bond and is enslaved again comes back
+admin-up from the kernel, so it is taken down again rather than treated as
+overridden. Taking the members down drops the bond's carrier, so the ADR-0085
+link drain withdraws the segment's routes; on release, origination returns
+after `recovery_delay_seconds`.
+
+**Peer rule.** Isolation holds a segment only if a remote PE's Type 4 route for
+its ESI, with the matching ES-Import route target, was present while the core
+was up and EVPN was synced; a session that has not yet sent End-of-RIB never
+updates that record. Otherwise the CE has no other member and the hold is
+suppressed (`suppressed_no_peer`). Until EVPN has synced after startup and
+every bound segment has a peer record (an `auto-lacp` bond that the startup
+hold leaves unresolved has none), a core loss keeps the startup hold rather
+than becoming a suppressed isolation. A RIB that does not answer a poll gives
+no reading: nothing is decided on the previous one, and an isolation hold is
+released after `backstop_seconds` without an answer. A reload that gives a bound interface
+another ESI or originator drops that peer record and the hold: the members are
+released, and the segment is held again only after a Type 4 is seen for the
+new identity.
+
+**Holds.** A hold arms at daemon start (every bound segment, without the peer
+rule) or at the isolation edge. It releases once EVPN has been continuously
+synced (an Established session, End-of-RIB from every one, and no GR selection
+deferral) for `hold_after_sync_seconds`, or, without sync, when
+`backstop_seconds` have passed since daemon start or since the core came back.
+A backstop release logs a warning with reason `backstop_unsynced` and reports
+`backstop_released` until sync is observed. The settle hold gives the dataplane
+time to program remote MACs; it does not confirm that it did.
+
+**Device requirements.** The CE removes the member immediately when its end of
+the link loses carrier on admin-down, as with a veth or a NIC that drops PHY
+link on close. Otherwise removal waits for the CE's LACP timeout, about 3 s at
+the fast rate and 90 s at the slow rate. Use a NIC that drops link on close
+(for example the `link-down-on-close` private flag on i40e and ice) or have the
+CE request fast LACPDUs (Linux `lacp_rate fast`, the LACP short timeout
+elsewhere).
+
+**Ownership contract.** Enabling the table gives rustbgpd exclusive ownership
+of the admin state of each bound bond's members (or the bound link). Do not
+manage that state with `ip link`, systemd-networkd, NetworkManager or ifupdown.
+systemd-networkd's `ActivationPolicy=always-up` re-raises a downed link and
+`BindCarrier=` also drives admin state: give the members
+`ActivationPolicy=manual`. Leave the members unmanaged by NetworkManager. To
+work on a member, disable the table or remove the binding first.
+
+**Ownership receipt and release.** Before each admin-down, rustbgpd durably
+publishes `<runtime_state_dir>/evpn-core-isolation-owned.json`, recording the
+boot ID, network namespace, binding, ifindex, name, permanent and assigned
+MACs, and master bond of the member; the lock file
+`evpn-core-isolation-owned.json.lock` beside it is never removed. A link is
+raised only when every recorded field still matches exactly one link and the
+link is still down. A different boot ID discards the entry. Any other mismatch
+(renamed, recreated, a member removed from the bond, more than one candidate)
+leaves the link down, keeps the entry, and reports `ownership_ambiguous`. Raise
+(or delete) the link by hand: the release helper and the next start drop an
+ambiguous entry once no link with its ifindex or name is left down, and keep it
+otherwise. Dropping an entry never raises a link. Held links are released:
+
+- on clean shutdown, after the EVPN sessions close;
+- after any exit by `rustbgpd --release-core-isolation --runtime-state-dir DIR`,
+  which the shipped systemd unit runs as `ExecStopPost=`. It does not read the
+  config, refuses while a daemon holds the lock, exits 0 only when no owned link
+  is left down, and exits 1 for a missing directory, an unreadable receipt or an
+  ambiguous entry. Supervisors without a stop hook (plain containers, runit,
+  OpenRC without `stop_post`) must run it after the daemon exits;
+- at the next start, which adopts matching entries into the startup hold and
+  raises entries whose binding is gone or whose table is disabled.
+
+The daemon accepts the same `--runtime-state-dir` flag and refuses to start
+when it differs from `runtime_state_dir`, so the stop hook always reads the
+directory the daemon wrote.
+
+**Planned restarts.** A restart moves the CE's traffic to the other ES member
+for the startup hold. Between the old daemon's shutdown and the new daemon's
+startup hold, and during the supervisor's restart delay, the CE may hash into
+this PE.
+
+**Observability.** `evpn_es_core_isolation_state{interface, state}` is a state
+set per bound interface: `released`, `startup_hold`, `isolated`, `recovering`,
+`backstop_released`, `suppressed_no_peer`, `overridden`, `ownership_ambiguous`,
+`uplink_overlap`, `action_failed` or `disabled`.
+`evpn_core_isolated{signal}` is 1 while the `sessions` or `uplinks` signal
+holds. Each transition is logged once with its state as the reason code.
+`action_failed` and `ownership_ambiguous` outrank `disabled`, and an interface
+whose binding was removed keeps its series while one of its releases is
+failing, so a disable or unbind that could not raise a link stays visible.
+`rbgp doctor` reports `evpn.es.<interface>.core_isolation` for each bound
+segment while the table is enabled, reports those two failure states for any
+interface whatever the table's state, and reports
+`evpn.core_isolation.uplinks` when every uplink lacks carrier while EVPN
+sessions are up.
+
+Stock-Linux FRR peers do not provide the reverse protection: FRR's protodown
+write fails on bond members, so an isolated FRR PE keeps attracting CE traffic.
 
 ---
 

@@ -168,6 +168,32 @@ def active_script(step: str) -> str:
     return "\n".join(commands)
 
 
+def trigger_paths(workflow: str, event: str) -> set[str]:
+    """Return `on.<event>.paths` from block-style workflow YAML.
+
+    Comments are dropped, so a commented-out entry does not count. A flow-style
+    or otherwise unrecognised filter yields no entries and fails closed.
+    """
+    stack: list[tuple[int, str]] = []
+    paths = set()
+    for raw in workflow.splitlines():
+        line = re.sub(r"(^|\s)#.*$", "", raw).rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        item = line.lstrip().startswith("- ")
+        while stack and (stack[-1][0] > indent or (stack[-1][0] == indent and not item)):
+            stack.pop()
+        if item:
+            if [key for _, key in stack] == ["on", event, "paths"]:
+                paths.add(line.lstrip()[2:].strip().strip("\"'"))
+        elif key := re.match(r"\s*([\w-]+):(?:\s|$)", line):
+            # Only a bare `key:` opens a mapping or sequence. A key with an
+            # inline value (block scalar, flow value) shadows what follows.
+            stack.append((indent, key.group(1) if line.endswith(":") else ""))
+    return paths
+
+
 def require_patterns(
     errors: list[str], label: str, text: str, patterns: tuple[str, ...]
 ) -> None:
@@ -241,6 +267,33 @@ def check_systemd_exit_70(
         ):
             errors.append(
                 f"{label}: {key} must not classify exit 70/SOFTWARE as non-restartable"
+            )
+
+
+def check_systemd_core_isolation(
+    errors: list[str], text: str, *, packaged: bool = False
+) -> None:
+    """ADR-0140: the shipped unit passes one runtime-state directory to the
+    daemon and to the stop-hook release helper."""
+    binary = "/usr/bin/rustbgpd" if packaged else "/usr/local/bin/rustbgpd"
+    expected = {
+        ("Service", "ExecStart"): (
+            f"{binary} --runtime-state-dir /var/lib/rustbgpd /etc/rustbgpd/config.toml"
+        ),
+        ("Service", "ExecStopPost"): (
+            f"{binary} --release-core-isolation --runtime-state-dir /var/lib/rustbgpd"
+        ),
+    }
+    assignments = systemd_assignments(text)
+    for (section, key), value in expected.items():
+        actual = [
+            found
+            for found_section, found_key, found in assignments
+            if found_section == section and found_key == key
+        ]
+        if actual != [value]:
+            errors.append(
+                f"systemd unit: [{section}] {key} must occur once with value {value!r}, got {actual!r}"
             )
 
 
@@ -461,9 +514,16 @@ def check_compose(errors: list[str], text: str) -> None:
 
 def check(root: Path) -> list[str]:
     errors: list[str] = []
-    read = lambda path: (root / path).read_text(encoding="utf-8")
+    inputs: list[str] = []
+
+    def read(path: str) -> str:
+        inputs.append(path)
+        return (root / path).read_text(encoding="utf-8")
+
     try:
-        check_systemd_unit(errors, read(SYSTEMD_UNIT))
+        unit = read(SYSTEMD_UNIT)
+        check_systemd_unit(errors, unit)
+        check_systemd_core_isolation(errors, unit)
         check_systemd_template(errors, read(SYSTEMD_TEMPLATE))
         check_systemd_container(errors, read(SYSTEMD_CONTAINER_UNIT))
         check_container_deployment_docs(
@@ -486,8 +546,6 @@ def check(root: Path) -> list[str]:
             "cp packaging/install.sh artifacts/install.sh",
         )
         workflow = read(".github/workflows/release-install-contract.yml")
-        if workflow.count("      - packaging/install.sh") != 2:
-            errors.append("release install workflow must trigger for packaging/install.sh")
         build_packages = read("scripts/build-packages.sh")
         require_patterns(
             errors,
@@ -495,7 +553,8 @@ def check(root: Path) -> list[str]:
             build_packages,
             (
                 exact("for unit in rustbgpd.service 'rustbgpd@.service'; do"),
-                r"^\s+sed 's\|\^ExecStart=/usr/local/bin/rustbgpd \|ExecStart=/usr/bin/rustbgpd \|' \\$",
+                r"^\s+sed -e 's\|\^ExecStart=/usr/local/bin/rustbgpd \|ExecStart=/usr/bin/rustbgpd \|' \\$",
+                r"^\s+-e 's\|\^ExecStopPost=/usr/local/bin/rustbgpd \|ExecStopPost=/usr/bin/rustbgpd \|' \\$",
                 r"^grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config\.toml' \\$",
             ),
         )
@@ -529,11 +588,14 @@ def check(root: Path) -> list[str]:
             errors.append(
                 f"tarball payload assertions: missing {sorted(missing_payloads)!r}"
             )
-        tar_checks = (
-            exact('if ! grep -qxF "$f" <<<"$entries"; then'),
-            exact(
-                'if [ "$(tar -xOzf "dist/rustbgpd-${SUFFIX}.tar.gz" "$f" | wc -c)" -eq 0 ]; then'
-            ),
+        # Each failure branch must stop the job, not only report the error.
+        tar_checks = tuple(
+            exact(condition).removesuffix("$")
+            + r'\necho "::error::[^\n]*"\nexit 1\nfi$'
+            for condition in (
+                'if ! grep -qxF "$f" <<<"$entries"; then',
+                'if [ "$(tar -xOzf "dist/rustbgpd-${SUFFIX}.tar.gz" "$f" | wc -c)" -eq 0 ]; then',
+            )
         )
         require_patterns(errors, "tarball active assertions", assertion, tar_checks)
 
@@ -589,9 +651,9 @@ def check(root: Path) -> list[str]:
                 r'^rpm2cpio "\$rpm" \| cpio --quiet -id --no-absolute-filenames --directory=extracted/rpm$',
                 r"^for tree in extracted/deb extracted/rpm; do$",
                 r"^for exe in rustbgpd rbgp rs-config-render birdwatcher-adapter; do$",
-                r'^test -x "\$tree/usr/bin/\$exe" ',
+                exact('test -x "$tree/usr/bin/$exe" || { echo "missing or not executable: $tree/usr/bin/$exe" >&2; exit 1; }'),
                 r"^for file in lib/systemd/system/rustbgpd\.service lib/systemd/system/rustbgpd@\.service usr/share/man/man1/rbgp\.1\.gz usr/share/man/man8/rustbgpd\.8\.gz usr/share/doc/rustbgpd/LICENSES\.md usr/share/doc/rustbgpd/monitoring/rustbgpd-overview\.json usr/share/doc/rustbgpd/monitoring/rustbgpd-evpn\.json usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts\.yml usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts_test\.yml; do$",
-                r'^test -s "\$tree/\$file" ',
+                exact('test -s "$tree/$file" || { echo "missing or empty: $tree/$file" >&2; exit 1; }'),
                 r'^"\$tree/usr/bin/rustbgpd" --check "\$tree/etc/rustbgpd/config\.toml"$',
                 r'^unit="\$tree/lib/systemd/system/rustbgpd\.service"$',
                 r"^for directive in Type=notify NotifyAccess=main WatchdogSec=5min TimeoutStartSec=10min StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do$",
@@ -614,6 +676,12 @@ def check(root: Path) -> list[str]:
 
         image_command = "docker run --rm --entrypoint birdwatcher-adapter rustbgpd:release-install-contract --help"
         select_script(workflow, "production image adapter assertion", image_command)
+
+        # Both the pull_request and push path filters must cover every input.
+        filters = [trigger_paths(workflow, event) for event in ("pull_request", "push")]
+        for path in inputs:
+            if not all(path in paths for paths in filters):
+                errors.append(f"release install workflow must trigger for {path}")
     except (OSError, ValueError) as error:
         errors.append(str(error))
     return errors

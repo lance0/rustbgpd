@@ -15,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 LIFECYCLE = HERE / "flagship-lifecycle.sh"
-RUNNERS = ("run-soak-rs-flagship.sh", "run-soak-rr-flagship.sh")
+RUNNERS = ("run-soak-rs-flagship.sh", "run-soak-rr-flagship.sh", "run-soak-evpn-rr.sh")
 
 
 def free_port():
@@ -222,13 +222,17 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             root / "target/scale/reloadstall": (
                 "#!/usr/bin/env bash\nprintf '%s\\n' \"$$\" >>\"$STUB_RUN_DIR/children\"\nprintf 'converged (stub)\\n'\nexec sleep 300\n"
             ),
+            root / "target/release/evpn-rr-soak": (
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$$\" >>\"$STUB_RUN_DIR/children\"\nprintf 'converged (initial) stub\\n'\nexec sleep 300\n"
+            ),
             root / "bench/scale/reloadstall/gen-scenario.py": textwrap.dedent("""\
                 #!/usr/bin/env python3
                 import pathlib
                 import sys
                 directory = pathlib.Path(sys.argv[2])
                 directory.mkdir(parents=True, exist_ok=True)
-                for name in ("config.toml", "member.rpol", "gen-a.rpol", "gen-b.rpol"):
+                for name in ("config.toml", "member.rpol", "gen-a.rpol", "gen-b.rpol",
+                             "config-gen-a.toml", "config-gen-b.toml"):
                     (directory / name).write_text("stub\\n")
                 """),
             fake_bin / "cargo": "#!/usr/bin/env bash\nexit 0\n",
@@ -265,6 +269,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             RUN_JSON="$RUN_DIR/run.json"
             RUSTBGPD_LOG="$RUN_DIR/rustbgpd.log"
             RELOADSTALL_LOG="$RUN_DIR/reloadstall.log"
+            DRIVER_LOG="$RUN_DIR/driver.log"
             MANAGEMENT_LOAD_JSONL="$RUN_DIR/management-plane-load.jsonl"
             MANAGEMENT_LOAD_LOG="$RUN_DIR/management-plane-load.log"
             DOCTOR_BUNDLE="$RUN_DIR/doctor-bundle.tar.gz"
@@ -305,6 +310,8 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             "TRIP_RESTART_SECONDS": "10",
             "TRIP_FINAL_QUIESCE_SEC": "30",
             "CONVERGE_CAP_SEC": "5",
+            "FLAP_EVERY": "1",
+            "RELOAD_EVERY": "1",
             "STUB_RUN_DIR": str(run_dir),
             "STUB_PORT": str(port),
         }
@@ -396,7 +403,8 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                 try:
                     identity = run_dir / "runner.identity"
                     wait_for(identity)
-                    wait_for_children(run_dir / "children", 3 if runner.startswith("run-soak-rs") else 2)
+                    wait_for_children(
+                        run_dir / "children", 2 if runner == "run-soak-rr-flagship.sh" else 3)
                     wait_for(run_dir / "metrics-snapshots.txt.gz")
                     actual_pid = int(identity.read_text().split()[0])
                     self.assertNotEqual(outer.pid, actual_pid)
@@ -422,7 +430,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                     )
                     with socket.socket() as listener:
                         listener.bind(("127.0.0.1", port))
-                    if runner.startswith("run-soak-rs"):
+                    if runner != "run-soak-rr-flagship.sh":
                         self.assertIn("clean_sigterm", (run_dir / "management-plane-load.jsonl").read_text())
                     self.assertFalse((run_dir / "verdict.json").exists())
                     with gzip.open(run_dir / "metrics-snapshots.txt.gz", "rt", encoding="utf-8") as retained:
@@ -576,6 +584,57 @@ class FlagshipLifecycleContracts(unittest.TestCase):
 
         self.assertEqual(append("2026-01-01T00:00:30Z", "30").returncode, 0)
         self.assertEqual(snapshots(), 3)
+
+    def run_evpn_release(self, directory, last_elapsed, sample_records=True):
+        """Source the EVPN runner, stub its externals, and call release_driver."""
+        run_dir = directory / "run"
+        (run_dir / "engine-finish").mkdir(parents=True)
+        (run_dir / "engine-finish/ready").write_text("ready\n")
+        events = directory / "events"
+        script = textwrap.dedent(f"""\
+            source "$1"
+            RUN_DIR={run_dir}
+            CYCLES_LOG="$RUN_DIR/cycles.log"
+            SAMPLE_START_EPOCH=$(($(date +%s) - {last_elapsed}))
+            LAST_SAMPLE_ELAPSED={last_elapsed}
+            SAMPLE_ROWS=5
+            H_PID=$$
+            sample_row() {{
+                echo "sample $1" >>{events}
+                if [[ {str(sample_records).lower()} == true ]]; then
+                    LAST_SAMPLE_ELAPSED=$1
+                    SAMPLE_ROWS=$((SAMPLE_ROWS + 1))
+                fi
+            }}
+            stop_management_load() {{ echo stop >>{events}; }}
+            monotonic_now() {{ echo 1.0; }}
+            write_run_json() {{ :; }}
+            release_driver
+            """)
+        return subprocess.run(
+            ["bash", "-c", script, "evpn-release", str(HERE / "run-soak-evpn-rr.sh")],
+            text=True, capture_output=True, check=False, timeout=30,
+        ), events, run_dir
+
+    def test_evpn_release_records_a_final_sample_before_draining_the_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, events, run_dir = self.run_evpn_release(Path(tmp), last_elapsed=0)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = events.read_text().split()
+            self.assertEqual(lines[0], "sample")
+            # Strictly after the previous row, while every session is held.
+            self.assertGreater(int(lines[1]), 0)
+            self.assertEqual(lines[2], "stop")
+            self.assertTrue((run_dir / "engine-finish/ack").exists())
+
+    def test_evpn_release_aborts_when_the_final_sample_is_not_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, events, run_dir = self.run_evpn_release(
+                Path(tmp), last_elapsed=0, sample_records=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("final sample", (run_dir / "cycles.log").read_text())
+            self.assertNotIn("stop", events.read_text())
+            self.assertFalse((run_dir / "engine-finish/ack").exists())
 
     def test_failed_snapshot_append_leaves_the_archive_readable(self):
         for runner in RUNNERS:

@@ -96,6 +96,49 @@ fn bird_empty_channels_emit_a_daemon_valid_config() {
     );
 }
 
+/// Imported administrative-down state loads: BIRD `disabled` on a template,
+/// FRR `shutdown message` on a neighbor, and `GoBGP` `admin-down`.
+#[test]
+fn admin_down_imports_emit_a_daemon_valid_config() {
+    for (format, path, source) in [
+        (
+            SourceFormat::Bird,
+            "bird-disabled.conf",
+            "router id 192.0.2.10;\n\
+             template bgp parked { local as 64500; disabled; }\n\
+             protocol bgp member from parked { neighbor 192.0.2.1 as 64496; }\n",
+        ),
+        (
+            SourceFormat::Frr,
+            "frr-shutdown.conf",
+            "router bgp 64500\n bgp router-id 192.0.2.10\n \
+             neighbor 192.0.2.1 remote-as 64496\n \
+             neighbor 192.0.2.1 shutdown message abuse report\n!\n",
+        ),
+        (
+            SourceFormat::Gobgp,
+            "gobgp-admin-down.toml",
+            "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+             [[neighbors]]\n[neighbors.config]\nneighbor-address = \"192.0.2.1\"\n\
+             peer-as = 64496\nadmin-down = true\n",
+        ),
+    ] {
+        let imported = import_source(format, path, source)
+            .unwrap_or_else(|e| panic!("{path}: import failed: {e}"));
+        assert!(
+            imported.config_toml.contains("admin_down = true"),
+            "{path}: {}",
+            imported.config_toml
+        );
+        let (code, stdout, stderr) = run_check(&imported.config_toml);
+        assert_eq!(
+            code,
+            Some(0),
+            "{path}: rustbgpd --check rejected the import\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
 /// Fail-closed exit contract: when the emitted config is one the daemon's
 /// `--check` rejects, the import itself must exit nonzero — a clean exit 0
 /// alongside a rejected translation would break the ladder's "operator
@@ -197,6 +240,15 @@ fn import_exits_nonzero_when_emitted_config_fails_check() {
              [neighbors.config]\nneighbor-address = \"192.0.2.1\"\n\
              peer-group = \"ixp\"\n",
             "duplicate peer group",
+        ),
+        (
+            SourceFormat::Frr,
+            "frr-long-shutdown-message.conf",
+            "router bgp 64500\n bgp router-id 192.0.2.10\n \
+             neighbor 192.0.2.1 remote-as 64496\n \
+             neighbor 192.0.2.1 shutdown message xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\
+             xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n!\n",
+            "admin_down_reason",
         ),
     ] {
         let imported = import_source(format, path, source)

@@ -1204,14 +1204,7 @@ fn peer_config_from_toml(toml: &str, address: &str) -> PeerManagerNeighborConfig
         .iter()
         .find(|neighbor| neighbor.transport_config.remote_addr.ip() == address)
         .expect("neighbor must exist");
-    crate::reload::build_peer_mgr_config(
-        &neighbor.transport_config,
-        neighbor.max_prefix_restart_seconds,
-        &neighbor.label,
-        neighbor.import_policy.as_ref(),
-        neighbor.export_policy.as_ref(),
-        neighbor.peer_group.clone(),
-    )
+    crate::reload::build_peer_mgr_config(neighbor)
 }
 
 fn gnmi_set_add_neighbor(

@@ -259,30 +259,44 @@ impl PeerSession {
 impl PeerSession {
     /// Retain a bounded, secret-free reset cause for snapshots, without
     /// replacing an actionable error during intentional local maintenance.
+    /// The teardown cause always records the NOTIFICATION, plus any valid
+    /// RFC 9003 shutdown communication in sanitized form.
     pub(super) fn record_notification_cause(
         &mut self,
         direction: SessionNotificationDirection,
         notification: &rustbgpd_wire::NotificationMessage,
+        shutdown_reason: Option<&str>,
     ) {
-        if direction == SessionNotificationDirection::Sent
+        let local_maintenance = direction == SessionNotificationDirection::Sent
             && notification.code == NotificationCode::Cease
             && matches!(
                 notification.subcode,
                 cease_subcode::ADMINISTRATIVE_SHUTDOWN | cease_subcode::ADMINISTRATIVE_RESET
-            )
-        {
-            return;
-        }
+            );
         let direction = match direction {
             SessionNotificationDirection::Sent => "sent",
             SessionNotificationDirection::Received => "received",
         };
-        self.last_error = format!(
+        let cause = format!(
             "{direction} NOTIFICATION {}/{} ({})",
             notification.code.as_u8(),
             notification.subcode,
             notification_description(notification)
         );
+        self.teardown_cause = Some(match shutdown_reason {
+            Some(reason) => format!("{cause}: \"{}\"", sanitized_notification_reason(reason)),
+            None => cause.clone(),
+        });
+        if !local_maintenance {
+            self.last_error = cause;
+        }
+    }
+
+    /// Record a transport-level teardown cause for snapshots and for the
+    /// loss lifecycle event.
+    pub(super) fn record_transport_cause(&mut self, cause: String) {
+        self.teardown_cause = Some(cause.clone());
+        self.last_error = cause;
     }
 
     /// Handle a hold-timer expiry observed by the select loop.
@@ -578,7 +592,11 @@ impl PeerSession {
                         &notif,
                         shutdown_reason.as_deref(),
                     );
-                    self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
+                    self.record_notification_cause(
+                        SessionNotificationDirection::Sent,
+                        &notif,
+                        shutdown_reason.as_deref(),
+                    );
                     // RFC 8538: track outbound Hard Reset to bypass GR
                     if code == NotificationCode::Cease && subcode == cease_subcode::HARD_RESET {
                         self.sent_hard_reset = true;
@@ -684,7 +702,17 @@ impl PeerSession {
                     // bounded channel per session so PeerManager can preserve
                     // per-session order. Constructors without that optional
                     // channel intentionally emit no lifecycle notification.
-                    self.try_send_lifecycle_state_changed(old, new);
+                    // The cause is captured by this transition, never re-read
+                    // later from `last_error`: retries overwrite that slot and
+                    // a clean close leaves an older cause in it.
+                    let teardown_cause = self.teardown_cause.take();
+                    let teardown_cause = (old == SessionState::Established
+                        && new != SessionState::Established)
+                        .then(|| {
+                            teardown_cause
+                                .unwrap_or_else(|| "closed without NOTIFICATION".to_owned())
+                        });
+                    self.try_send_lifecycle_state_changed(old, new, teardown_cause);
 
                     // Notify PeerManager for lossless collision detection.
                     // Read from the FSM's negotiated (set at OpenConfirm),
@@ -1222,7 +1250,12 @@ impl PeerSession {
         follow_up
     }
 
-    pub(super) fn try_send_lifecycle_state_changed(&self, old: SessionState, new: SessionState) {
+    pub(super) fn try_send_lifecycle_state_changed(
+        &self,
+        old: SessionState,
+        new: SessionState,
+        teardown_cause: Option<String>,
+    ) {
         if let Some(ref lifecycle_tx) = self.session_lifecycle_tx {
             let negotiated = self.fsm.negotiated().or(self.negotiated.as_deref());
             match lifecycle_tx.try_send(SessionLifecycleNotification::StateChanged {
@@ -1232,6 +1265,7 @@ impl PeerSession {
                 peer_asn: negotiated.map(|n| n.peer_asn),
                 old,
                 new,
+                teardown_cause,
             }) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {

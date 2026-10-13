@@ -901,6 +901,7 @@ async fn dynamic_peer_open_received_updates_remote_asn_and_metric_without_state_
         peer_asn: Some(65099),
         old: SessionState::OpenConfirm,
         new: SessionState::Established,
+        teardown_cause: None,
     });
     assert_eq!(mgr.peers[&peer].remote_asn, 65099);
     assert_eq!(peer_info_remote_asn(&mgr).as_deref(), Some("65099"));

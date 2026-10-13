@@ -383,22 +383,23 @@ async fn fetch_http(addr: SocketAddr, path: &str, deadline: Instant) -> Result<S
             .await
             .map_err(|e| e.to_string())?;
         if response.len() > METRICS_MAX_BYTES {
-            return Err("metrics response exceeds 32 MiB".into());
+            return Err(format!("{path} response exceeds 32 MiB"));
         }
-        let text = std::str::from_utf8(&response).map_err(|_| "metrics response is not UTF-8")?;
+        let text =
+            std::str::from_utf8(&response).map_err(|_| format!("{path} response is not UTF-8"))?;
         let (head, body) = text
             .split_once("\r\n\r\n")
             .ok_or("malformed HTTP response")?;
         let mut lines = head.lines();
         let status = lines.next().ok_or("missing HTTP status")?;
         if status.split_ascii_whitespace().nth(1) != Some("200") {
-            return Err("metrics HTTP status is not 200".into());
+            return Err(format!("{path} HTTP status is not 200: {status}"));
         }
         let mut length = None;
         for line in lines {
             let (key, value) = line.split_once(':').ok_or("malformed HTTP header")?;
             if key.eq_ignore_ascii_case("transfer-encoding") {
-                return Err("chunked metrics response is forbidden".into());
+                return Err(format!("chunked {path} response is forbidden"));
             }
             if key.eq_ignore_ascii_case("content-length")
                 && length
@@ -414,7 +415,7 @@ async fn fetch_http(addr: SocketAddr, path: &str, deadline: Instant) -> Result<S
             }
         }
         if length != Some(body.len()) {
-            return Err("truncated or overlong metrics body".into());
+            return Err(format!("truncated or overlong {path} body"));
         }
         Ok(body.to_owned())
     };
@@ -7429,11 +7430,15 @@ mod tests {
                     std::future::pending::<()>().await;
                 }
             });
-            assert!(
-                fetch_http(addr, "/readyz", Instant::now() + Duration::from_millis(20))
-                    .await
-                    .is_err()
-            );
+            let error = fetch_http(addr, "/readyz", Instant::now() + Duration::from_millis(20))
+                .await
+                .unwrap_err();
+            let expected = if response.is_some() {
+                "/readyz HTTP status is not 200: HTTP/1.1 503 Service Unavailable"
+            } else {
+                "/readyz checkpoint exceeded deadline"
+            };
+            assert_eq!(error, expected);
             server.abort();
             let _ = server.await;
         }

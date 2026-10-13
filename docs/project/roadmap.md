@@ -39,7 +39,7 @@ those.
 | BGP core (RFC 4271 FSM, 4-byte ASN, capabilities, collision detection) | Shipped | All 6 states, property-tested |
 | Address families: IPv4/IPv6 unicast (MP-BGP, RFC 4760) | Shipped | Dual-stack, FRR-interop validated |
 | Extensions: Add-Path (7911), Extended Messages (8654), Extended Nexthop (8950) | Partial | Extended Message send/receive directionality and per-type size-limit correction shipped |
-| Graceful Restart (4724) + LLGR (9494) + Notification GR (8538) | Partial | GR helper + minimal restarting speaker shipped; optional bounded shutdown checkpoint publication shipped without boot restore/adoption; real-peer receipts cover IPv4 unicast GR/LLGR (M11/M16), IPv4/IPv6 unicast GR (M85), VPNv4/VPNv6/RTC GR+LLGR and BGP-LS GR (M77), and IPv4/IPv6 labeled-unicast GR (M79); IPv6-unicast LLGR, EVPN, FlowSpec, and BGP-LS VPN restart behavior remains internally tested rather than real-peer receipted |
+| Graceful Restart (4724) + LLGR (9494) + Notification GR (8538) | Partial | GR helper + minimal restarting speaker shipped; optional bounded shutdown checkpoint publication shipped without boot restore/adoption; real-peer receipts cover IPv4 unicast GR/LLGR (M11/M16), IPv4/IPv6 unicast GR (M85), VPNv4/VPNv6/RTC GR+LLGR and BGP-LS GR (M77), IPv4/IPv6 labeled-unicast GR (M79), and EVPN Types 1–5 RR helper GR/LLGR ([M122 receipt](../artifacts/interop/m122-evpn-rr-gr-20261012/README.md)); IPv6-unicast LLGR, FlowSpec, and BGP-LS VPN restart behavior remains internally tested rather than real-peer receipted |
 | Route Refresh (2918) + Enhanced Route Refresh (7313) | Shipped | |
 | BGP Roles + Only-to-Customer (9234) | Shipped | Static eBGP, IPv4/IPv6 unicast (ADR-0071, M55) |
 | BGP unnumbered / IPv6 link-local peering | Shipped | Static interface-bound link-local (ADR-0069, M53) |
@@ -186,7 +186,22 @@ Ethernet Segments, single-homed VLAN-aware bundle VTEP service with IRB, and
 promotes the scoped FlowSpec controller role into the v1 inventory, with
 next-hop export, EVPN DF election and flood-list fixes. It publishes wire
 0.24.0, FSM 0.11.0 and RPKI 0.6.0. It ships on its per-change regression
-tests and main CI; no flagship receipt covers it. The
+tests and main CI. The
+[2026-10-11 run](../soaks/soak-rs-flagship-24h-2026-10-11.md) then qualified
+the v0.76.0 tag under the current gates (on-host verdict, no reanalysis;
+every gate passes, with all 146 `rbgp doctor` runs `ok`), so the published
+route-server flagship receipt now describes v0.76.0. v0.77.0 (2026-10-12) is
+a minor release that adds the opt-in EVPN core-isolation hold for bound
+Ethernet Segments, per-family inbound max-prefix limits for the non-unicast
+families a route reflector carries, persistent `admin_down` neighbors,
+per-family GR/LLGR stale-route retention reporting and the latest SIGHUP
+result. It refuses export next-hop rewrites that can reach labeled-unicast or
+VPN routes, treats malformed zero-length-MAC Type 2 and ESI-plus-gateway
+Type 5 routes as withdraws instead of resetting the session, accepts
+zero-ESI Type 1 routes, and keeps readiness probes answered through mass
+graceful-restart entry and large reloads. It publishes wire 0.25.0, FSM
+0.12.0 and RPKI 0.7.0. It ships on its per-change regression tests and main
+CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

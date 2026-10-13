@@ -40,6 +40,8 @@ pub type OriginatedLocalMacCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'sta
 /// deterministic snapshot.
 pub type InstanceStatusSnapshotFn =
     Arc<dyn Fn() -> Vec<InstanceDataplaneStatus> + Send + Sync + 'static>;
+pub type UnscopedApplyFailureSnapshotFn =
+    Arc<dyn Fn() -> rustbgpd_evpn::CurrentApplyFailureSummary + Send + Sync + 'static>;
 
 /// Read-side hook for the latest ADR-0091 managed-netdev status
 /// snapshot. The daemon backs it with `DataplaneReport.managed_netdevs`.
@@ -228,6 +230,7 @@ pub struct EvpnService {
     access_mode: AccessMode,
     originated_local_mac_count: OriginatedLocalMacCountFn,
     instance_status_snapshot: InstanceStatusSnapshotFn,
+    unscoped_apply_failure_snapshot: UnscopedApplyFailureSnapshotFn,
     managed_netdev_status_snapshot: ManagedNetdevStatusSnapshotFn,
     ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
@@ -258,6 +261,9 @@ impl EvpnService {
             access_mode: AccessMode::ReadWrite,
             originated_local_mac_count: Arc::new(|_| 0),
             instance_status_snapshot: Arc::new(Vec::new),
+            unscoped_apply_failure_snapshot: Arc::new(
+                rustbgpd_evpn::CurrentApplyFailureSummary::default,
+            ),
             managed_netdev_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
@@ -292,6 +298,9 @@ impl EvpnService {
             access_mode: AccessMode::ReadWrite,
             originated_local_mac_count,
             instance_status_snapshot: Arc::new(Vec::new),
+            unscoped_apply_failure_snapshot: Arc::new(
+                rustbgpd_evpn::CurrentApplyFailureSummary::default,
+            ),
             managed_netdev_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
@@ -398,6 +407,9 @@ impl EvpnService {
             access_mode,
             originated_local_mac_count,
             instance_status_snapshot: Arc::new(Vec::new),
+            unscoped_apply_failure_snapshot: Arc::new(
+                rustbgpd_evpn::CurrentApplyFailureSummary::default,
+            ),
             managed_netdev_status_snapshot: Arc::new(Vec::new),
             ip_vrf_status_snapshot,
             originated_ip_vrf_route_count,
@@ -426,6 +438,15 @@ impl EvpnService {
         instance_status_snapshot: InstanceStatusSnapshotFn,
     ) -> Self {
         self.instance_status_snapshot = instance_status_snapshot;
+        self
+    }
+
+    #[must_use]
+    pub fn with_unscoped_apply_failure_snapshot(
+        mut self,
+        snapshot: UnscopedApplyFailureSnapshotFn,
+    ) -> Self {
+        self.unscoped_apply_failure_snapshot = snapshot;
         self
     }
 
@@ -546,8 +567,13 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
                 )
             })
             .collect();
+        let unscoped = (self.unscoped_apply_failure_snapshot)();
         Ok(Response::new(proto::ListEvpnInstancesResponse {
             instances,
+            unscoped_apply_failure_count: unscoped.count,
+            latest_unscoped_permanent_apply_error: unscoped
+                .latest_permanent_error
+                .unwrap_or_default(),
         }))
     }
 
@@ -987,6 +1013,10 @@ fn evpn_instance_to_proto(
         remote_route_drop_counts,
         service_interface: inst.service_interface().to_string(),
         ethernet_tag: inst.ethernet_tag.0,
+        current_apply_failure_count: status.map_or(0, |row| row.current_apply_failure_count),
+        latest_permanent_apply_error: status
+            .and_then(|row| row.latest_permanent_apply_error.clone())
+            .unwrap_or_default(),
     };
 
     let Some(row) = status else {
@@ -1383,6 +1413,29 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(resp.instances.len(), 0);
+        assert_eq!(resp.unscoped_apply_failure_count, 0);
+    }
+
+    #[tokio::test]
+    async fn list_surfaces_unscoped_failure_without_any_instance() {
+        let svc = EvpnService::new(Arc::new(EvpnInstanceTable::new()))
+            .with_unscoped_apply_failure_snapshot(Arc::new(|| {
+                rustbgpd_evpn::CurrentApplyFailureSummary {
+                    count: 2,
+                    latest_permanent_error: Some("permission denied".into()),
+                }
+            }));
+        let resp = svc
+            .list_evpn_instances(Request::new(proto::ListEvpnInstancesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.instances.len(), 0);
+        assert_eq!(resp.unscoped_apply_failure_count, 2);
+        assert_eq!(
+            resp.latest_unscoped_permanent_apply_error,
+            "permission denied"
+        );
     }
 
     #[tokio::test]
@@ -1547,6 +1600,10 @@ mod tests {
         assert_eq!(resp.instances[0].originated_local_macs_count, 7);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one RPC fixture covers readiness and failure joins"
+    )]
     #[tokio::test]
     async fn list_evpn_instances_joins_l2_readiness_snapshot() {
         let mut table = EvpnInstanceTable::new();
@@ -1610,6 +1667,8 @@ mod tests {
                     state: InstanceState::Ready,
                     message: None,
                     bridge_mac: Some(MacAddress::new([0x02, 0, 0, 0, 0, 3])),
+                    current_apply_failure_count: 2,
+                    latest_permanent_apply_error: Some("kernel rejected FDB update".into()),
                 },
                 InstanceDataplaneStatus {
                     vni: EvpnInstanceId::new(400).unwrap(),
@@ -1618,6 +1677,8 @@ mod tests {
                         "bridge br400 is VLAN-aware (vlan_filtering=1); not supported".into(),
                     ),
                     bridge_mac: None,
+                    current_apply_failure_count: 0,
+                    latest_permanent_apply_error: None,
                 },
             ]
         }));
@@ -1644,6 +1705,12 @@ mod tests {
             proto::EvpnInstanceReadinessState::EvpnInstanceReadinessReady as i32
         );
         assert_eq!(resp.instances[2].not_ready_reason.len(), 0);
+        assert_eq!(resp.instances[2].current_apply_failure_count, 2);
+        assert_eq!(
+            resp.instances[2].latest_permanent_apply_error,
+            "kernel rejected FDB update"
+        );
+        assert_eq!(resp.instances[1].current_apply_failure_count, 0);
         assert_eq!(
             resp.instances[3].readiness_state,
             proto::EvpnInstanceReadinessState::EvpnInstanceReadinessNotReady as i32
@@ -1732,6 +1799,8 @@ mod tests {
             state: InstanceState::NotReady,
             message: None,
             bridge_mac: None,
+            current_apply_failure_count: 0,
+            latest_permanent_apply_error: None,
         };
 
         let row = evpn_instance_to_proto(&inst, Some(&status), 0, Vec::new());

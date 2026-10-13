@@ -121,3 +121,13 @@ summary with an error and retain the available raw artifacts; preserve those
 logs when diagnosing the failure. Move load-bearing raw evidence into
 `docs/artifacts/` when writing a dated performance receipt; generated run
 directories do not belong in Git.
+
+## Route-reflector soak driver
+
+`evpn-rr-soak` is the client side of the EVPN route-reflector soak
+(`tests/soak/run-soak-evpn-rr.sh`). Unlike the tester and monitor, it dials the
+daemon's passive listener from `127.1.x.y` sources, the same addressing as
+`bench/scale/reloadstall/gen-scenario.py` with `GEN_EVPN=1`. Every client both
+originates Type 2 and Type 5 windows and checks the full reflected view it
+receives. The soak runner owns its arguments and output; see
+`tests/soak/README.md`.

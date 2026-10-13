@@ -7,10 +7,17 @@
 #   - AS64501 member2: white_list_route bound to origin 64501 for
 #     198.51.100.0/25 le 26 — member1's space, absent from AS-M90-TWO.
 #   - AS64502 member3: unchanged hygiene violator.
+#
+# Two session rows on top of the M90 roster:
+#   - member1 carries a TCP MD5 password: its session establishes only when
+#     both route servers render the key;
+#   - AS64503 member4 (192.0.2.14) sets a strict BGP Role and sends no Role
+#     capability, so both route servers must refuse its session.
 clients:
   - asn: 64500
     ip: "192.0.2.11"
     description: "member1 - IRR-clean member"
+    password: "m106-md5-member1"
     cfg:
       filtering:
         irrdb:
@@ -50,3 +57,16 @@ clients:
             - "AS-M90-THREE"
         max_prefix:
           limit_ipv4: 100
+  - asn: 64503
+    ip: "192.0.2.14"
+    description: "member4 - strict role, sends no Role capability"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M106-FOUR"
+        max_prefix:
+          limit_ipv4: 100
+        roles:
+          enabled: True
+          strict_mode: True

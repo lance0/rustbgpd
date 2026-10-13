@@ -1304,9 +1304,10 @@ synchronous actor work: a clone already running cannot be interrupted.
 ### Peer max-prefix exceeded
 
 When a peer exceeds `max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
-or the pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6`
-bounds, the daemon sends a NOTIFICATION and tears down the
-session. Without negotiated Notification GR this is Cease/1 (Maximum Number of
+the pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6`
+bounds, or a non-unicast `max_prefixes_<family>` bound (VPN, labeled unicast,
+EVPN, FlowSpec, RT-Constrain), the daemon sends a NOTIFICATION and tears down
+the session. Without negotiated Notification GR this is Cease/1 (Maximum Number of
 Prefixes Reached). With the RFC 8538 N-bit, the daemon sends outer Cease/9
 (Hard Reset) whose data encapsulates the same Cease/1 reason and RFC 4486 data,
 preventing the over-limit routes from being retained as stale. By default the
@@ -1422,16 +1423,21 @@ rather than derived from placeholder zero counts.
 Prometheus exposes the same live actor authority as
 `bgp_max_prefix_usage`, `bgp_max_prefix_limit`, and
 `bgp_max_prefix_headroom`, keyed by `peer` and bounded `scope`
-(`aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or
-`ipv6_unicast_received`). Usage is the session
+(`aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
+`ipv6_unicast_received`, or a non-unicast family label: `l3vpn_ipv4_unicast`,
+`l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`,
+`l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`). Usage is the session
 actor's enforcement count, not an alias for `bgp_rib_prefixes`: in particular,
 unicast Add-Path IDs collapse to one unique prefix while the aggregate also
 includes max-prefix-counted non-unicast identities. Limit and headroom series
 exist only for finite configured bounds. The two `*_received` scopes report
 the pre-policy count bounded by `max_prefixes_received_*` (announced prefixes,
 accepted or rejected) and exist — usage included — only while that bound is
-configured, because rejected identities are not tracked otherwise. All
-capacity families are
+configured, because rejected identities are not tracked otherwise. A
+non-unicast family scope exists only while its `max_prefixes_<family>` bound
+is configured; its usage counts unique accepted routes with Add-Path paths
+collapsed, while the aggregate keeps counting VPN and labeled-unicast Add-Path
+paths separately. All capacity families are
 removed when the session goes down and republished from fresh actor state on
 reconnect; GR-retained RIB rows therefore never appear as live session usage.
 
@@ -1668,7 +1674,7 @@ exactly under the floods these drops account for.
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
 | `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, or `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait) |
-| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`; series are absent while the session is down, and the `*_received` scopes are absent while their `max_prefixes_received_*` bound is unset |
+| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, `ipv6_unicast_received`, or a non-unicast family (`l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`); series are absent while the session is down, and the `*_received` and non-unicast family scopes are absent while their bound is unset |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
 | `bgp_max_prefix_blocking{peer,scope}` | 1 while a `max_prefix_action = "block"` episode is open for a finite scope — net-new prefixes are being withheld until usage falls back under the bound; present for every finite scope, reaped with the other capacity series |
@@ -2487,7 +2493,7 @@ counters, using a 15-minute increase window:
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_gr_active_peers` | Peers currently in GR stale-route state |
-| `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale) |
+| `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale); falls as the peer re-advertises or withdraws them before End-of-RIB |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
 | `bgp_selection_deferral_active{afi_safi}` | Planned-restart family convergence/release gate (1 = active); it remains active while collision failback waits for EoRR even after route selection is staged |
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking family convergence/release, including an `awaiting_refresh` survivor after route selection is staged |
@@ -2529,6 +2535,27 @@ waiter. A full survivor outbound channel retains one session-generation-scoped
 request and retries it through the bounded RIB resync cadence. A closed channel
 retires the request without spinning; the original selection-deferral deadline
 remains the bounded fallback.
+
+For a peer whose stale routes "won't go away", `rbgp neighbor <address>`
+(and `GetNeighborState`'s `gr_retention`) shows a **Stale Route Retention**
+row per family the RIB tracks in a GR or LLGR phase, including while the
+session is down: the phase (`gr_restart`: session down, restart timer
+running; `gr_awaiting_eor`: re-established, waiting for End-of-RIB before
+`gr_stale_routes_time` expires; `llgr`: long-lived stale), the time remaining
+until the RIB's next deadline for that family (GR expiry sweeps the routes or
+promotes them to LLGR; LLGR expiry sweeps them), and the stale-route count.
+The count comes from counters the RIB maintains per family, so the neighbor
+list (`rbgp neighbor`, `--json` included) and `rbgp doctor` report it too
+without scanning any peer's received routes during a mass restart event. The
+row disappears once nothing is retained. A dynamic neighbor leaves the neighbor inventory when its
+session goes idle; while the RIB still retains its routes it stays listed as a
+retention-only row (source `retention only (no session or configuration)`,
+`"retention_only": true` in JSON) with the same retention rows, and
+`rbgp neighbor <address>` still shows it. Doctor runs only the retention
+check for such a row. `llgr_stale_time` can hold a
+route for up to about 194 days by design, so `rbgp doctor` reports each
+family in the `llgr` phase as a `peer.<scoped-address>.llgr_retention.<family>`
+warning that names the stale-route count and the time left, not as a failure.
 
 The `active` and `waiters` gauges, plus ordinary `all_eor`,
 `collision_refresh`, and `all_excluded` releases, are dashboard context rather
@@ -2620,6 +2647,7 @@ per-cache readiness metrics and RTR logs for those questions.
 | `evpn_ip_vrf_installed_routes{vrf}` | Remote Type 5 routes currently owned in each IP-VRF kernel table |
 | `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` | Current remote Type 5 projection drops by bounded IP-VRF/reason labels. Overlay-index reasons include `overlay_index_no_linked_l2vni`, `unresolved_overlay_index_gateway`, and `ambiguous_overlay_index_gateway`; `vrf="_unscoped"` means the drop happened before a configured IP-VRF could be selected. `non_zero_ethernet_tag` counts routes for a configured IP-VRF that carry a non-zero Ethernet Tag; Type 5 VLAN-aware bundle routes are not imported. |
 | `evpn_l2_remote_route_drops{vni,reason}` | Current remote Type 1 EAD-per-EVI, Type 2 and Type 3 IMET routes that select a local L2VNI but that the VTEP does not program, by local VNI and reason. A route selects an instance by VNI (the IMET PMSI label) and route target, or a VLAN-aware bundle member by route target and Ethernet Tag. `ethernet_tag_mismatch` means the route carries another Ethernet Tag than the instance (`0` for `vlan_based` rows). `vni_mismatch` means a bundle member's route target and Ethernet Tag select the route but its VNI differs (locally assigned VNIs are unsupported). `multihoming_unsupported` counts multi-homed Type 2 and EAD-per-EVI routes for a bundle member. The routes stay in Adj-RIB-In and are still reflected. `rbgp evpn instances` shows the same counts per instance. |
+| `evpn_current_apply_failures{vni,kind,class}` | Still-current Linux L2 apply failures, including operations suppressed after a permanent error and those waiting for transient backoff. `kind` is one of `fdb`, `flood`, `fdb_nhg`, `bum_port`, `ac_gate`, `managed_netdev`; `class` is `transient` or `permanent`. `vni="unscoped"` identifies bridge-port and managed-netdev operations without per-instance attribution. The actor removes a resolved or retired tuple; absent series mean zero. No MAC or interface name is a label. |
 | `evpn_foreign_replaces_blocked_total` | Installs or replaces withheld because an exact-key foreign kernel row already exists |
 | `evpn_foreign_deletes_skipped_total` | Deletes skipped after the live kernel row ceased to be rustbgpd-owned |
 | `evpn_foreign_owned_relinquished_total` | Owned keys released after another writer replaced the live kernel row |
@@ -2667,11 +2695,16 @@ to `0`, republishes the quarantine set, and replays still-live local MAC or
 MAC+IP state through the normal recovery path.
 `rbgp evpn instances` also reports each L2VNI's
 `readiness=ready|not-ready|unbound|unknown` and
-`originated-local-macs=N`, plus `remote-route-drops=[reason=N,...]` when
+`originated-local-macs=N`, `current-apply-failures=N`, plus
+`remote-route-drops=[reason=N,...]` when
 remote L2 routes for the VNI are not programmed;
 `rbgp evpn instances --json` exposes the same values as `readiness`,
 `not_ready_reason`, `originated_local_macs_count`, and
-`remote_route_drop_counts`.
+`remote_route_drop_counts`, along with the bounded
+`latest_permanent_apply_error`. `rbgp evpn diagnose` summarizes the
+per-instance failure count and includes the current gauge samples. Its
+host-wide overview and `ListEvpnInstances` response-level unscoped count/error
+cover BUM, AC, and managed-netdev failures even when no EVI is configured.
 
 ---
 
@@ -2858,10 +2891,16 @@ retain their `%interface` scope in both check names and details.
 eBGP peer with no effective inbound prefix bound after peer-group inheritance.
 It names the peer and the five keys that can set a bound: `max_prefixes`,
 `max_prefixes_ipv4`, `max_prefixes_ipv6`, `max_prefixes_received_ipv4`, and
-`max_prefixes_received_ipv6`. Static, API-added, and accepted dynamic peers
+`max_prefixes_received_ipv6`. A non-unicast `max_prefixes_<family>` bound
+alone does not satisfy the check. Static, API-added, and accepted dynamic peers
 are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
 are excluded; the check also requires the daemon's global ASN and peer
 configuration to be available. This advisory warning retains exit status 0.
+
+`peer.<scoped-address>.llgr_retention.<family>` is yellow for each family the
+RIB holds in the RFC 9494 LLGR phase. The detail names the time until the
+LLGR sweep; long retention is a configured outcome, so
+the warning retains exit status 0. GR-phase families add no check.
 
 Doctor parses the effective-config document once and reads probe targets from
 its documented key paths. With `global.listen_addresses`, a local check uses
@@ -2897,6 +2936,8 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 | `rpki.cache.<addr>.session` | With configured caches and a reachable daemon, the daemon's `ListCaches` row for each `[rpki] cache_servers` entry | yellow when the RTR session is down (the detail says whether a contribution is still retained and its age), when the cache has no inventory row, or when `ListCaches` fails, for example because the token cannot read RPKI cache state |
 | `rpki.cache.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[rpki] cache_servers` entry | yellow on failure because this is CLI-network-vantage evidence, not daemon-side connectivity; use `rpki.cache.<addr>.session` and `rpki.vrp_table` for the daemon's state |
 | `evpn.es.<interface>.auto_esi` | With a reachable daemon, the `evpn_es_auto_esi_state` series at 1 for each `esi = "auto-lacp"` segment in the effective config | yellow when the segment is not ready (the detail names the reason, such as `no_partner` or `down`), when no readiness is reported for it yet, or when the metrics snapshot is unavailable; a not-ready segment originates nothing and is absent from `rbgp evpn es list` |
+| `evpn.es.<interface>.core_isolation` | With `[evpn_core_isolation] enabled = true`, the `evpn_es_core_isolation_state` series at 1 for each bound segment in the effective config | yellow for `isolated`, `backstop_released`, `suppressed_no_peer` or `overridden`, when no state is reported yet, or when the metrics snapshot is unavailable; red for `action_failed`, `ownership_ambiguous` or `uplink_overlap`. The two failure states `action_failed` and `ownership_ambiguous` are reported for any interface even with the table disabled or the binding removed, because a failed release can leave a link down |
+| `evpn.core_isolation.uplinks` | With `uplinks` configured, `evpn_core_isolated{signal="uplinks"}` at 1 while `signal="sessions"` reads 0 | yellow: every configured uplink lacks carrier while EVPN sessions are up, which points to a wrong `uplinks` list |
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
 | `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, crash reports, and the event-history DB write there |

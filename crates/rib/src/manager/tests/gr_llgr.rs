@@ -2766,6 +2766,109 @@ async fn partial_gr_stale_gauge_counts_both_phases_through_reconnect() {
     }
 }
 
+fn received(source: IpAddr, announced: Vec<Route>, withdrawn: Vec<(Prefix, u32)>) -> RibUpdate {
+    RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    }
+}
+
+/// GR expiry promotes the LLGR families and purges the rest; the gauge must
+/// drop the purged routes at that promotion, not keep its GR-entry value.
+#[tokio::test(start_paused = true)]
+async fn gr_stale_gauge_drops_routes_purged_at_llgr_promotion() {
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    manager.handle_update(gr_with_llgr(
+        source,
+        10,
+        vec![V4_UNICAST, V6_UNICAST],
+        vec![V4_UNICAST],
+        60,
+    ));
+    assert_eq!(gr_gauges(&manager, source), (1.0, 2.0));
+
+    manager.sweep_gr_stale(source);
+    assert_llgr_stale(
+        adj_route(&manager, source, retention_v4_prefix()),
+        "v4 promoted",
+    );
+    assert!(adj_route(&manager, source, retention_v6_prefix()).is_none());
+    assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+}
+
+/// While a reconnected peer re-advertises before End-of-RIB,
+/// `bgp_gr_stale_routes` and the retention row follow the maintained
+/// counters: a re-advertised stale route stops counting, and so does a
+/// withdrawn one. A gauge set only at retention transitions keeps reading 2
+/// until End-of-RIB.
+#[tokio::test(start_paused = true)]
+async fn gr_stale_gauge_falls_as_routes_are_readvertised_before_eor() {
+    let stale_rows = |manager: &RibManager, peer| -> Vec<u64> {
+        manager
+            .gr_retention_snapshot(peer)
+            .iter()
+            .map(|row| row.stale_routes)
+            .collect()
+    };
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    manager.handle_update(gr_with_llgr(
+        source,
+        120,
+        vec![V4_UNICAST, V6_UNICAST],
+        vec![],
+        0,
+    ));
+    assert_eq!(gr_gauges(&manager, source), (1.0, 2.0));
+    let _new_rx = reconnect_with_capabilities(&mut manager, source, &[V4_UNICAST, V6_UNICAST], &[]);
+    assert_eq!(gr_gauges(&manager, source), (1.0, 2.0));
+    assert_eq!(stale_rows(&manager, source), vec![1, 1]);
+
+    manager.handle_update(received(
+        source,
+        vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 1),
+        )],
+        vec![],
+    ));
+    drain_route_chunks(&mut manager);
+    assert!(
+        !adj_route(&manager, source, retention_v4_prefix())
+            .unwrap()
+            .is_stale
+    );
+    assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+    assert_eq!(stale_rows(&manager, source), vec![0, 1]);
+
+    manager.handle_update(received(source, vec![], vec![(retention_v6_prefix(), 0)]));
+    drain_route_chunks(&mut manager);
+    assert_eq!(gr_gauges(&manager, source), (1.0, 0.0));
+    assert_eq!(stale_rows(&manager, source), vec![0, 0]);
+
+    for safi_family in [V4_UNICAST, V6_UNICAST] {
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: source,
+            session_id: 0,
+            afi: safi_family.0,
+            safi: safi_family.1,
+        });
+    }
+    assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
+}
+
 /// A second restart can leave GR and LLGR paths under the same prefix.
 /// End-of-RIB must remove both kinds by path ID while retaining the refreshed
 /// path, resolving only its family, and distributing the lost prefixes.
@@ -3363,4 +3466,484 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
         manager.loc_rib.get(&v4(7)).is_none(),
         "unrefreshed LLGR route swept"
     );
+}
+
+async fn gr_retention_rows(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+) -> Vec<crate::update::GrRetentionFamilyState> {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryNeighborRibSnapshots {
+        peers: vec![peer],
+        comparison: None,
+        reply,
+        include_retained: false,
+    })
+    .await
+    .unwrap();
+    let mut response = response.await.unwrap();
+    assert_eq!(response.snapshots.len(), 1);
+    response.snapshots.remove(0).gr_retention
+}
+
+fn assert_retention(
+    rows: &[crate::update::GrRetentionFamilyState],
+    phase: crate::update::GrRetentionPhase,
+    remaining_secs: u64,
+) {
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].afi, rows[0].safi), (Afi::Ipv4, Safi::Unicast));
+    assert_eq!(rows[0].phase, phase, "{rows:?}");
+    assert_eq!(rows[0].remaining_secs, Some(remaining_secs), "{rows:?}");
+    assert_eq!(rows[0].stale_routes, 2);
+}
+
+/// The neighbor snapshot's retention row follows the RIB's own deadlines
+/// through GR entry, reconnect without End-of-RIB, and LLGR promotion, and
+/// is absent before and after retention. Reading no deadline leaves
+/// `remaining_secs` empty and fails every phase assertion.
+#[tokio::test]
+async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
+    use crate::update::GrRetentionPhase::{GrAwaitingEor, GrRestart, Llgr};
+
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let family = vec![(Afi::Ipv4, Safi::Unicast)];
+    let _out_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
+                Ipv4Addr::new(10, 0, 0, 1),
+            ),
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24),
+                Ipv4Addr::new(10, 0, 0, 1),
+            ),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(gr_retention_rows(&tx, source).await, Vec::new());
+
+    // Session down: the 120 s restart timer runs.
+    tx.send(gr_with_llgr(source, 120, family.clone(), family, 3_600))
+        .await
+        .unwrap();
+    assert_retention(&gr_retention_rows(&tx, source).await, GrRestart, 120);
+    // A list read (neighbor list, doctor) carries the same row, counts
+    // included: they come from maintained counters, not a scan.
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryNeighborRibSnapshots {
+        peers: vec![source, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
+        comparison: None,
+        reply,
+        include_retained: false,
+    })
+    .await
+    .unwrap();
+    let listed = response.await.unwrap().snapshots;
+    assert_eq!(listed[0].gr_retention.len(), 1);
+    assert_eq!(listed[0].gr_retention[0].phase, GrRestart);
+    assert_eq!(listed[0].gr_retention[0].remaining_secs, Some(120));
+    assert_eq!(listed[0].gr_retention[0].stale_routes, 2);
+    assert_eq!(listed[1].gr_retention, Vec::new());
+    tokio::time::advance(Duration::from_secs(30)).await;
+    tokio::task::yield_now().await;
+    assert_retention(&gr_retention_rows(&tx, source).await, GrRestart, 90);
+
+    // Reconnect without End-of-RIB: the 360 s stale-routes time runs.
+    let _out_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
+    assert_retention(&gr_retention_rows(&tx, source).await, GrAwaitingEor, 360);
+    tokio::time::advance(Duration::from_secs(100)).await;
+    tokio::task::yield_now().await;
+    assert_retention(&gr_retention_rows(&tx, source).await, GrAwaitingEor, 260);
+
+    // GR timer expiry promotes to LLGR with its 3600 s stale time. Tokio
+    // rounds timer deadlines up to the next millisecond, so step past them.
+    tokio::time::advance(Duration::from_secs(261)).await;
+    tokio::task::yield_now().await;
+    assert_retention(&gr_retention_rows(&tx, source).await, Llgr, 3_600);
+    tokio::time::advance(Duration::from_secs(600)).await;
+    tokio::task::yield_now().await;
+    assert_retention(&gr_retention_rows(&tx, source).await, Llgr, 3_000);
+
+    // LLGR sweep: nothing retained, so no row.
+    tokio::time::advance(Duration::from_secs(3_001)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(gr_retention_rows(&tx, source).await, Vec::new());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+async fn retained_query(
+    tx: &mpsc::Sender<RibUpdate>,
+    peers: Vec<IpAddr>,
+    include_retained: bool,
+) -> crate::update::NeighborRibSnapshotResponse {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryNeighborRibSnapshots {
+        peers,
+        comparison: None,
+        reply,
+        include_retained,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap()
+}
+
+/// A down dynamic neighbor has left the neighbor inventory, so a list read
+/// names only the inventory's peers. `include_retained` adds a row for every
+/// other peer whose routes the RIB still retains, with its recorded ASN,
+/// never one the request named, and none once the sweep ends retention.
+/// Dropping the retained roster loses the row.
+#[tokio::test]
+async fn include_retained_reports_unlisted_peer_until_sweep() {
+    use crate::update::GrRetentionPhase::GrRestart;
+
+    let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let listed = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let _source_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
+    let _listed_rx = channel_peer_up(&tx, listed, ipv4_sendable()).await;
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 1),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        retained_query(&tx, vec![listed], true).await.retained,
+        Vec::new()
+    );
+
+    tx.send(gr_with_llgr(source, 120, ipv4_sendable(), vec![], 0))
+        .await
+        .unwrap();
+    let response = retained_query(&tx, vec![listed], true).await;
+    assert_eq!(response.snapshots.len(), 1);
+    assert_eq!(response.snapshots[0].peer, listed);
+    assert_eq!(response.retained.len(), 1, "{:?}", response.retained);
+    let row = &response.retained[0];
+    assert_eq!(row.peer, source);
+    assert_eq!(row.remote_asn, Some(65000));
+    assert_eq!(row.gr_retention.len(), 1);
+    assert_eq!(row.gr_retention[0].phase, GrRestart);
+    assert_eq!(row.gr_retention[0].remaining_secs, Some(120));
+    assert_eq!(row.gr_retention[0].stale_routes, 1);
+    // A requested peer is never repeated as a retained row.
+    let response = retained_query(&tx, vec![source, listed], true).await;
+    assert_eq!(response.snapshots[0].gr_retention.len(), 1);
+    assert_eq!(response.retained, Vec::new());
+    // Without the flag the roster is not read.
+    assert_eq!(
+        retained_query(&tx, vec![listed], false).await.retained,
+        Vec::new()
+    );
+
+    // GR expiry without LLGR sweeps the routes, ending retention.
+    tokio::time::advance(Duration::from_secs(121)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        retained_query(&tx, vec![listed], true).await.retained,
+        Vec::new()
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer whose session is down has no outbound registration, so the frozen
+/// replacement view must capture it from the retention maps. Dropping the
+/// retention chain from the capture serves the unknown-peer fallback row,
+/// which carries no retention.
+#[tokio::test(start_paused = true)]
+async fn replacement_summary_view_keeps_down_peer_retention_row() {
+    let (_tx, manager) = direct_manager(None);
+    let (summary_tx, summary_rx) = mpsc::channel(4);
+    let mut manager = manager.with_summary_queries(summary_rx);
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(source);
+    let _out_rx = establish_peer(&mut manager, peer);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
+            source,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    manager.handle_update(gr_with_llgr(peer, 120, ipv4_sendable(), vec![], 0));
+    let expected = manager.neighbor_rib_snapshot(peer);
+    assert_eq!(expected.gr_retention.len(), 1);
+    assert_eq!(
+        expected.gr_retention[0].phase,
+        crate::update::GrRetentionPhase::GrRestart
+    );
+
+    manager.with_replacement_summary_reads("apply", |manager| {
+        let (reply, mut response) = oneshot::channel();
+        summary_tx
+            .try_send(crate::update::RibSummaryQuery::NeighborRibSnapshots {
+                peers: vec![peer],
+                comparison: None,
+                reply,
+                include_retained: false,
+            })
+            .unwrap();
+        manager.replacement_checkpoint(true);
+        assert_eq!(
+            response.try_recv().unwrap().snapshots,
+            vec![expected.clone()]
+        );
+        // The frozen view also serves the retained roster for a list read
+        // that does not name the down peer.
+        let (reply, mut response) = oneshot::channel();
+        summary_tx
+            .try_send(crate::update::RibSummaryQuery::NeighborRibSnapshots {
+                peers: Vec::new(),
+                comparison: None,
+                reply,
+                include_retained: true,
+            })
+            .unwrap();
+        manager.replacement_checkpoint(true);
+        assert_eq!(response.try_recv().unwrap().retained, vec![expected]);
+    });
+}
+
+/// An LLGR deadline that outlived both family maps still reports its row,
+/// found by keyed lookup; another peer's deadline never leaks into it.
+/// Dropping the configured-family probe loses the orphaned row.
+#[tokio::test(start_paused = true)]
+async fn retention_row_reports_llgr_deadline_outside_family_maps() {
+    let (_tx, mut manager) = direct_manager(None);
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let now = tokio::time::Instant::now();
+    manager.llgr_stale_deadlines.insert(
+        (peer, Afi::Ipv6, Safi::Unicast),
+        now + Duration::from_secs(100),
+    );
+    manager.llgr_stale_deadlines.insert(
+        (other, Afi::Ipv4, Safi::Unicast),
+        now + Duration::from_secs(50),
+    );
+    let rows = manager.gr_retention_snapshot(peer);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].afi, rows[0].safi), (Afi::Ipv6, Safi::Unicast));
+    assert_eq!(rows[0].phase, crate::update::GrRetentionPhase::Llgr);
+    assert_eq!(rows[0].remaining_secs, Some(100));
+    assert_eq!(
+        manager.gr_retention_snapshot(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
+        Vec::new()
+    );
+}
+
+/// A mass disconnect queues one `PeerGracefulRestart` per peer, and the actor
+/// applies them back to back inside one task poll, up to Tokio's cooperative
+/// budget. A readiness reply sent mid-burst wakes the probe's task into this
+/// worker's LIFO slot, which no other worker can steal, so without a yield the
+/// answered probe waits for the rest of that poll (about 200 ms at 200 peers).
+/// The hook holds every later GR entry until the answered probe has run:
+/// a stranded probe cannot run, the hold times out and the test fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression drives a real 200-peer GR-entry burst through the run loop with a handshake"
+)]
+async fn readiness_probe_runs_during_mass_graceful_restart_entry() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const PEERS: u8 = 200;
+    let (tx, rx) = mpsc::channel(usize::from(PEERS) * 2);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (ran_tx, ran_rx) = std::sync::mpsc::channel::<()>();
+    let probe_ran = Arc::new(AtomicBool::new(false));
+    let stranded = Arc::new(AtomicBool::new(false));
+    let gr_entries = Arc::new(AtomicUsize::new(0));
+    manager.test_primary_update_hook = Some(Arc::new({
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let ran_rx = Mutex::new(ran_rx);
+        let probe_ran = Arc::clone(&probe_ran);
+        let stranded = Arc::clone(&stranded);
+        let gr_entries = Arc::clone(&gr_entries);
+        let readiness_tx = readiness_tx.clone();
+        move |update| {
+            if !matches!(update, RibUpdate::PeerGracefulRestart { .. }) {
+                return;
+            }
+            if gr_entries.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Hold the first GR entry inside the actor's poll until the
+                // probe is queued behind the rest of the burst.
+                entered_tx.lock().unwrap().send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test releases the first GR entry");
+                return;
+            }
+            // The readiness lane has capacity 1, so a free slot means the
+            // actor has dequeued the probe and, in the same arm, replied.
+            let answered = readiness_tx.capacity() == readiness_tx.max_capacity();
+            if answered && !probe_ran.load(Ordering::SeqCst) && !stranded.load(Ordering::SeqCst) {
+                // Bounded so the unfixed actor fails instead of hanging.
+                if ran_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_err()
+                {
+                    stranded.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    }));
+
+    let peers: Vec<IpAddr> = (1..=PEERS)
+        .map(|index| IpAddr::V4(Ipv4Addr::new(10, 57, 0, index)))
+        .collect();
+    let mut outbound = Vec::new();
+    for &peer in &peers {
+        let (outbound_tx, outbound_rx) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 1,
+            peer,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        outbound.push(outbound_rx);
+    }
+    let handle = tokio::spawn(manager.run());
+    for outbound_rx in &mut outbound {
+        drain_eor(outbound_rx).await;
+    }
+
+    for &peer in &peers {
+        tx.send(RibUpdate::PeerGracefulRestart {
+            session_id: 1,
+            peer,
+            restart_time: 180,
+            stale_routes_time: 360,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        })
+        .await
+        .unwrap();
+    }
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("actor enters the GR burst");
+    })
+    .await
+    .unwrap();
+
+    let (armed_tx, armed_rx) = oneshot::channel::<()>();
+    let probe = tokio::spawn({
+        let probe_ran = Arc::clone(&probe_ran);
+        async move {
+            let (reply, mut response) = oneshot::channel();
+            let started = Instant::now();
+            readiness_tx
+                .send(RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: started,
+                })
+                .await
+                .unwrap();
+            // Signal only once the reply waker is registered, so the actor's
+            // reply has to wake this task rather than find it already ready.
+            let mut armed = Some(armed_tx);
+            let result = std::future::poll_fn(|cx| {
+                let poll = std::future::Future::poll(std::pin::Pin::new(&mut response), cx);
+                if poll.is_pending()
+                    && let Some(armed) = armed.take()
+                {
+                    armed.send(()).unwrap();
+                }
+                poll
+            })
+            .await;
+            let elapsed = started.elapsed();
+            probe_ran.store(true, Ordering::SeqCst);
+            let _ = ran_tx.send(());
+            (result, elapsed)
+        }
+    });
+    armed_rx.await.unwrap();
+    release_tx.send(()).unwrap();
+
+    let (result, elapsed) = probe.await.unwrap();
+    assert_eq!(result.unwrap(), Ok(0));
+    assert!(
+        !stranded.load(Ordering::SeqCst),
+        "the answered readiness probe stayed parked on the actor's worker behind queued GR entries"
+    );
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "readiness probe took {elapsed:?} during the GR-entry burst"
+    );
+
+    // Every peer really entered GR: each outbound registration was cleared.
+    for outbound_rx in &mut outbound {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), outbound_rx.recv())
+                .await
+                .expect("GR entry clears the outbound registration")
+                .is_none()
+        );
+    }
+    assert_eq!(gr_entries.load(Ordering::SeqCst), usize::from(PEERS));
+    drop(tx);
+    handle.await.unwrap();
 }

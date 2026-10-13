@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# leg: m22  slug: flowspec
+# proves: IPv4 and IPv6 FlowSpec controller create, replace and delete with local, selected and advertised API views, reconnect, and explicit reconciliation after restart; intent is process-local; no remote enforcement, installation, forwarding or scale claim
+# claims: stored selected advertised
+# evidence: docs/artifacts/interop/m22-flowspec-controller-20261002/README.md
+# pinned: FRR 10.7.1, daemon 326dc11218f70f75d1a9a103118682d3ab0b1a5a, 2026-10-02
+#
 # Run on a fresh M22 deployment, separately from test-m22-flowspec-frr.sh.
 # Optional first argument: directory for JSON observations and result receipt.
 TOPO="m22-flowspec-frr"

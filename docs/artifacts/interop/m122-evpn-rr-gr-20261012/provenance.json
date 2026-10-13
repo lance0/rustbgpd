@@ -1,0 +1,109 @@
+{
+  "complete_attribute_flags_replay": {
+    "checked_flags_attributes": [
+      8,
+      9,
+      10,
+      14,
+      15,
+      16,
+      22
+    ],
+    "focused_regressions": 26,
+    "oracle_sha256": "b4a513981baf265e73459126d07aa40d6b624a3fe7b57f16fe782e1469b2630d",
+    "result": "pass"
+  },
+  "gobgp_source_commit": "da824d99912e02124b53741245ee4186c381adcc",
+  "gobgp_version": "4.10.0",
+  "harness_dirty": true,
+  "harness_sha256": {
+    "tests/interop/Dockerfile.m122-tools": "13b148de6bd628775891e51b8a7a5860af75a04fc2248bfa36f12b79953a00fe",
+    "tests/interop/configs/gobgp-m122-client.toml": "828ace1376bef2ed053f6b322a6675426c9084b6406d051158620dde208af022",
+    "tests/interop/configs/gobgp-m122-source.toml": "4844acfbf2557f08b4a383c41835d357b647b0a675a4d0ecdc48dec1bd31d653",
+    "tests/interop/configs/rustbgpd-m122-evpn-gr-rr.toml": "e6cc296322867a180b0003d624af58242b3516c425a9848f908e34fc762893c4",
+    "tests/interop/m122-evpn-gr-rr-gobgp.clab.yml": "32cf949a8999000822c4ef7aeb03ce4d828b3f0823f7f20bbc4b5a115f2496b3",
+    "tests/interop/scripts/m105_capture_oracle.py": "9d152b017ff20a27e8db17b4e2b5afab5e40d050e2b9144f6d70730a67a434c9",
+    "tests/interop/scripts/m122_evpn_gr_oracle.py": "0b7bea34e83034c7cf678eabce265bd0a05c7a0e260e46cbaeeb85523ebf6d9d",
+    "tests/interop/scripts/run_m122_evpn_gr.py": "b46547433d6b9b762eb7f78988eb545a8bd43e9cb46331ca14c208aee84ed536",
+    "tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh": "85ecb8f4a0e26d4fae0d37a6f17ee214fae2e15acf3d4481637cf714e2c4cc2b"
+  },
+  "ordered_wire_replay": {
+    "client_order": {
+      "expiry_withdrawals": [
+        {
+          "completion": [
+            49,
+            1993
+          ],
+          "keys": [
+            "1:0000fde90000000b0000000000000000120100000000",
+            "2:0000fde900000015000000003002000000120120c0000201",
+            "3:0000fde90000001f00000000200a007a02",
+            "4:0000fde90000002900000000000000001201200a007a02",
+            "5:0000fde9000000330000000020cb007101"
+          ]
+        }
+      ],
+      "llgr_promotion_completion": [
+        46,
+        1799
+      ],
+      "omitted_withdrawals": [
+        {
+          "completion": [
+            41,
+            1425
+          ],
+          "keys": [
+            "1:0000fde90000000c0000000000000000120200000000",
+            "2:0000fde900000016000000003002000000120220c0000202",
+            "3:0000fde90000002000000000200a007a02",
+            "4:0000fde90000002a00000000000000001202200a007a02",
+            "5:0000fde9000000340000000020cb007102"
+          ]
+        }
+      ],
+      "source_eor_completion": [
+        40,
+        445
+      ]
+    },
+    "focused_regressions": 25,
+    "oracle_sha256": "df315db369fb1ac2186b9622533e6582d1707e2970225993687c5b25547fdb3c",
+    "result": "pass"
+  },
+  "peers": [
+    {
+      "gobgp_sha256": "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",
+      "gobgpd_sha256": "bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d",
+      "image": "sha256:cb11461fb5974c334e9a501c221fb286c20400e59776aa27a5af5d94a3db32d2"
+    },
+    {
+      "gobgp_sha256": "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",
+      "gobgpd_sha256": "bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d",
+      "image": "sha256:cb11461fb5974c334e9a501c221fb286c20400e59776aa27a5af5d94a3db32d2"
+    }
+  ],
+  "rustbgpd_commit": "75a3820a4d245871e5078cecbc2b7e55e6cf87db",
+  "rustbgpd_source_id": "96c31f7b1047c9e041bc95d646a2bbfe025504d3f0f3972d6100c40bb103ba43",
+  "strengthened_oracle_replay": {
+    "focused_regressions": 16,
+    "initial_source_routes": 10,
+    "oracle_sha256": "fe86e66022b369114ced0f039fff697ee9472e9974204a2d9cbe9c87f8d4d506",
+    "refreshed_routes": 5,
+    "result": "pass"
+  },
+  "strengthened_snapshot_replay": {
+    "focused_regressions": 17,
+    "phase_source_stale": {
+      "eor-five": 0,
+      "expired": 0,
+      "gr-five": 5,
+      "gr-ten": 10,
+      "initial": null,
+      "llgr-five": 5
+    },
+    "result": "pass",
+    "runner_sha256": "7771d74eb2d8bba6068038dc45a8e27424df73d5f77b8aca4685168c1e170de7"
+  }
+}

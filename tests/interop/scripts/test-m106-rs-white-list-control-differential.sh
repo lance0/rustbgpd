@@ -14,7 +14,11 @@
 #   - the daemon's fixed RFC 7947 §2.3.2 control-community matrix, which
 #     the site configures exactly, so the rendered sessions keep
 #     `rs_control_communities` on: per-target suppression, the
-#     announce-to-none override, prepending, and scrubbing.
+#     announce-to-none override, prepending, and scrubbing;
+#   - two session rows: member1's TCP MD5 password (its sessions establish
+#     only when both route servers render the key) and member4's strict
+#     BGP Role (it sends no Role capability, so both route servers must
+#     refuse its OPEN).
 #
 # Every manifest row gets the M90 verdict assertions (accept/reject on
 # both daemons, explain naming the deciding policy and term, BIRD cause
@@ -132,6 +136,20 @@ bird_established_count() {
 rs_sessions_up()   { [ "$(rs_established_count)" -ge 3 ]; }
 bird_sessions_up() { [ "$(bird_established_count)" -ge 3 ]; }
 
+# The strict-Role member received an OPEN on rustbgpd and is not Established.
+rs_refused_after_open() {
+    rs_ctl neighbor -j | jq -e --arg a "${1:?}" \
+        'any(.[]; .address == $a and .state != "Established" and .messages_received > 0)' \
+        >/dev/null
+}
+
+# BIRD's protocol for the strict-Role member is down with a Role mismatch.
+bird_refused_role() {
+    local output
+    output=$(docker exec "$BIRD" birdc "show protocols all ${1:?}" 2>/dev/null) || return 1
+    ! grep -q "Established" <<<"$output" && grep -qi "role mismatch" <<<"$output"
+}
+
 # ---------------------------------------------------------------------------
 # Phase 0a: render the BIRD side with arouteserver proper
 # ---------------------------------------------------------------------------
@@ -202,23 +220,23 @@ render_rustbgpd_config() {
     # exact receipt/config assertion fail before either
     # daemon starts.
     if jq -e \
-        '.clients | length == 3 and ([.[].id] | sort == ["AS64500_1", "AS64501_1", "AS64502_1"]) and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
+        '.clients | length == 4 and ([.[].id] | sort == ["AS64500_1", "AS64501_1", "AS64502_1", "AS64503_1"]) and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
         "$RENDER_DIR/render-receipt.json" >/dev/null 2>&1 \
-        && [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$RENDER_DIR/config.toml")" -eq 3 ] \
-        && [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$RENDER_DIR/config.toml")" -eq 3 ]; then
-        ok "render receipt and config carry all 3 members with exact 100/12000 limits"
+        && [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$RENDER_DIR/config.toml")" -eq 4 ] \
+        && [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$RENDER_DIR/config.toml")" -eq 4 ]; then
+        ok "render receipt and config carry all 4 members with exact 100/12000 limits"
     else
-        fail "render receipt/config missing exact 3-member 100/12000 max-prefix limits"
+        fail "render receipt/config missing exact 4-member 100/12000 max-prefix limits"
         cat "$RENDER_DIR/render-receipt.json" >&2 || true
         return 1
     fi
     if jq -e '
         .schema == "rustbgpd.arouteserver-reject-communities.v1" and
-        .peers == ["192.0.2.11", "192.0.2.12", "192.0.2.13"] and
+        .peers == ["192.0.2.11", "192.0.2.12", "192.0.2.13", "192.0.2.14"] and
         .std == {"dynamic":"65520:dyn_val","cause_map":{"3":"64512:3"}} and
         .lrg == {"dynamic":"64496:65520:dyn_val","cause_map":{"3":"64496:65521:3"}}
     ' "$RENDER_DIR/birdwatcher-reject-communities.json" >/dev/null; then
-        ok "renderer artifact carries the exact three members and configured communities"
+        ok "renderer artifact carries the exact four members and configured communities"
     else
         fail "renderer reject-community artifact does not match the pinned site"
         return 1
@@ -248,7 +266,7 @@ render_rustbgpd_config() {
     # Every generated policy carries in-language tests derived from the
     # site's own data; all must pass offline.
     local rpol
-    for rpol in rs-hygiene client-as64500-1 client-as64501-1 client-as64502-1; do
+    for rpol in rs-hygiene client-as64500-1 client-as64501-1 client-as64502-1 client-as64503-1; do
         if docker exec "$RUSTBGPD" rbgp policy check "/etc/rustbgpd/policy/${rpol}.rpol" >/dev/null 2>&1; then
             ok "rbgp policy check ${rpol}.rpol"
         else
@@ -287,7 +305,7 @@ start_daemons() {
 
     log "Starting GoBGP members..."
     local m
-    for m in member1 member2 member3; do
+    for m in member1 member2 member3 member4; do
         docker exec -d "$(member_container "$m")" sh -c \
             'nohup gobgpd -f /config/gobgp.toml >/tmp/gobgpd.log 2>&1'
     done
@@ -523,10 +541,54 @@ assert_exports() {
 
 assert_control_knob_rendered() {
     log "Rendered sessions keep the control-community knob on..."
-    if [ "$(grep -c '^rs_control_communities = true$' "$RENDER_DIR/config.toml")" -eq 3 ]; then
-        ok "rendered config keeps rs_control_communities on for all 3 members"
+    if [ "$(grep -c '^rs_control_communities = true$' "$RENDER_DIR/config.toml")" -eq 4 ]; then
+        ok "rendered config keeps rs_control_communities on for all 4 members"
     else
-        fail "rendered config does not keep rs_control_communities on for all 3 members"
+        fail "rendered config does not keep rs_control_communities on for all 4 members"
+    fi
+}
+
+# Both pipelines carry the session rows from the one clients.yml: member1's
+# MD5 key and member4's strict Role, on those members only.
+assert_session_rows_rendered() {
+    log "Rendered configs carry the MD5 password and strict-Role rows..."
+    local neighbors
+    neighbors=$(python3 -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb"))["neighbors"]))' \
+        "$RENDER_DIR/config.toml")
+    if jq -e '
+        ([.[] | select(.md5_password != null) | [.address, .md5_password]]
+          == [["192.0.2.11", "m106-md5-member1"]]) and
+        ([.[] | select(.strict_role == true) | .address] == ["192.0.2.14"])
+    ' <<<"$neighbors" >/dev/null; then
+        ok "rustbgpd config: md5_password on member1 only, strict_role on member4 only"
+    else
+        fail "rustbgpd config lacks the exact md5_password/strict_role rows"
+        echo "$neighbors" >&2
+    fi
+    local bird_conf="$ARS_WORK/out/bird.conf"
+    if [ "$(grep -c 'password "m106-md5-member1";' "$bird_conf")" -eq 1 ] \
+        && [ "$(grep -c 'require roles on;' "$bird_conf")" -eq 1 ]; then
+        ok "bird.conf: one MD5 password and one require-roles session"
+    else
+        fail "bird.conf lacks the exact MD5 password/require-roles rows"
+    fi
+}
+
+# member1 established on both route servers proves the MD5 key end to end
+# (start_daemons waits for three sessions). member4 must be refused on both
+# after its OPEN arrived, not merely never connected.
+assert_strict_role_refused() {
+    log "Strict-Role member4 is refused by both route servers..."
+    poll 30 2 "rustbgpd refuses member4 (192.0.2.14) after its OPEN" \
+        rs_refused_after_open 192.0.2.14 || rs_ctl neighbor >&2 || true
+    poll 30 2 "BIRD refuses member4 (AS64503_1) with a Role mismatch" \
+        bird_refused_role AS64503_1 \
+        || docker exec "$BIRD" birdc "show protocols all AS64503_1" >&2 || true
+    if [ "$(rs_established_count)" -eq 3 ] && [ "$(bird_established_count)" -eq 3 ]; then
+        ok "exactly members 1-3 are Established on both route servers"
+    else
+        fail "Established count is not exactly 3 on both route servers \
+($(rs_established_count) rustbgpd, $(bird_established_count) BIRD)"
     fi
 }
 
@@ -548,7 +610,9 @@ main() {
     render_bird_config
     render_rustbgpd_config
     assert_control_knob_rendered
+    assert_session_rows_rendered
     start_daemons
+    assert_strict_role_refused
     inject_announcements
     assert_accepts
     assert_rejects

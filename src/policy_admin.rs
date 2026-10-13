@@ -509,6 +509,10 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         remote_asn: raw.remote_asn,
         description: raw.description.clone(),
         peer_group: raw.peer_group.clone(),
+        // Runtime neighbor creation has no admin-state field; the peer
+        // starts enabled unless its peer group is configured down.
+        admin_down: None,
+        admin_down_reason: None,
         hold_time: raw.hold_time,
         min_hold_time: raw.min_hold_time,
         send_hold_time: raw.send_hold_time,
@@ -520,6 +524,14 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefixes_l3vpn_ipv4_unicast: None,
+        max_prefixes_l3vpn_ipv6_unicast: None,
+        max_prefixes_ipv4_labeled_unicast: None,
+        max_prefixes_ipv6_labeled_unicast: None,
+        max_prefixes_l2vpn_evpn: None,
+        max_prefixes_ipv4_flowspec: None,
+        max_prefixes_ipv6_flowspec: None,
+        max_prefixes_rtc: None,
         max_prefix_action: None,
         max_prefix_warning_percent: None,
         max_prefixes_out_ipv4: None,
@@ -608,6 +620,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     remote_asn: cfg.remote_asn,
                     description: Some(cfg.description.clone()),
                     peer_group: cfg.peer_group.clone(),
+                    admin_down: cfg.admin_down.is_some().then_some(true),
+                    admin_down_reason: cfg.admin_down.clone().filter(|reason| !reason.is_empty()),
                     hold_time: cfg.hold_time,
                     min_hold_time: cfg.min_hold_time,
                     send_hold_time: cfg.send_hold_time,
@@ -624,6 +638,14 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     // the per-family accepted bounds above.
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefixes_l3vpn_ipv4_unicast: None,
+                    max_prefixes_l3vpn_ipv6_unicast: None,
+                    max_prefixes_ipv4_labeled_unicast: None,
+                    max_prefixes_ipv6_labeled_unicast: None,
+                    max_prefixes_l2vpn_evpn: None,
+                    max_prefixes_ipv4_flowspec: None,
+                    max_prefixes_ipv6_flowspec: None,
+                    max_prefixes_rtc: None,
                     max_prefix_action: None,
                     max_prefix_warning_percent: None,
                     // Also absent from the runtime neighbor-add surface:
@@ -1096,6 +1118,63 @@ remote_asn = 65002
         assert_eq!(snapshot.statements[0].set_community_add, vec!["65001:100"]);
     }
 
+    /// An API policy edit that would make a VPN peer's export chain set the
+    /// next hop fails the candidate's validation, before it can commit.
+    #[test]
+    fn set_policy_event_refuses_set_next_hop_bound_to_a_vpn_peer() {
+        let mut config = minimal_config();
+        config.neighbors[0].families = vec!["l3vpn_ipv6_unicast".to_string()];
+        config.neighbors[0].export_policy_chain = vec!["shared".to_string()];
+        config.policy.definitions.insert(
+            "shared".to_string(),
+            crate::config::NamedPolicyConfig {
+                default_action: "permit".to_string(),
+                statements: Vec::new(),
+            },
+        );
+        config.validate().expect("a permit-all policy is legal");
+
+        let mut definition = config_definition_to_api(&config.policy.definitions["shared"]);
+        definition.statements.push(PolicyStatementDefinition {
+            action: "permit".to_string(),
+            prefix: Some("2001:db8::/32".to_string()),
+            ge: None,
+            le: Some(64),
+            match_community: Vec::new(),
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            set_local_pref: None,
+            set_med: None,
+            set_next_hop: Some("2001:db8::9".to_string()),
+            set_community_add: Vec::new(),
+            set_community_remove: Vec::new(),
+            set_as_path_prepend: None,
+        });
+        let error = apply_config_event(
+            &mut config.clone(),
+            &ConfigEvent::SetPolicy {
+                name: "shared".to_string(),
+                definition,
+                ack: None,
+            },
+        )
+        .expect_err("VPN export set_next_hop must not validate");
+        let error = error.to_string();
+        assert!(error.contains("l3vpn_ipv6_unicast"), "{error}");
+        assert!(error.contains("export policy \"shared\""), "{error}");
+    }
+
     #[test]
     fn policy_references_find_global_and_neighbor_chains() {
         let mut config = minimal_config();
@@ -1335,6 +1414,8 @@ peer_group = "fabric"
         address: IpAddr,
     ) -> rustbgpd_api::peer_types::PeerManagerNeighborConfig {
         rustbgpd_api::peer_types::PeerManagerNeighborConfig {
+            admin_down: None,
+            restore_admin_enabled: None,
             min_hold_time: Some(30),
             address,
             interface: None,
@@ -1349,6 +1430,7 @@ peer_group = "fabric"
             max_prefixes_ipv6: None,
             max_prefixes_received_ipv4: None,
             max_prefixes_received_ipv6: None,
+            max_prefixes_family: rustbgpd_transport::FamilyPrefixLimits::default(),
             max_prefix_action: rustbgpd_transport::MaxPrefixAction::Shutdown,
             max_prefix_warning_percent: None,
             max_prefix_restart_seconds: None,
@@ -1531,6 +1613,8 @@ peer_group = "fabric"
         config.peer_groups.insert(
             "tunnel".to_string(),
             PeerGroupConfig {
+                admin_down: None,
+                admin_down_reason: None,
                 hold_time: Some(90),
                 families: vec!["ipv4_unicast".into(), "ipv6_unicast".into()],
                 route_server_client: Some(true),
@@ -1544,6 +1628,14 @@ peer_group = "fabric"
                 max_prefixes_ipv6: Some(500),
                 max_prefixes_received_ipv4: Some(2000),
                 max_prefixes_received_ipv6: Some(1000),
+                max_prefixes_l3vpn_ipv4_unicast: Some(100),
+                max_prefixes_l3vpn_ipv6_unicast: Some(101),
+                max_prefixes_ipv4_labeled_unicast: Some(102),
+                max_prefixes_ipv6_labeled_unicast: Some(103),
+                max_prefixes_l2vpn_evpn: Some(104),
+                max_prefixes_ipv4_flowspec: Some(105),
+                max_prefixes_ipv6_flowspec: Some(106),
+                max_prefixes_rtc: Some(107),
                 max_prefix_action: Some("warning".into()),
                 max_prefix_warning_percent: Some(90),
                 max_prefixes_out_ipv4: std::num::NonZeroU32::new(100),

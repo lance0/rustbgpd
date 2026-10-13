@@ -443,3 +443,68 @@ async fn configured_owner_static_compensation_authorizes_restored_capture() {
         "discard settles against the unchanged committed RIB publication"
     );
 }
+
+/// SIGHUP settlement publishes configured owners after the reload completes
+/// and waits for the RIB's acknowledgement on its primary update queue. After
+/// a 1000-peer export-policy commit that queue stays busy with post-commit
+/// export work for 1-2 s. The peer manager must keep answering readiness
+/// probes while the acknowledgement is held, not leave its readiness lane
+/// unpolled for the whole RIB round trip.
+#[tokio::test(start_paused = true)]
+async fn configured_owner_publication_serves_readiness_while_rib_acknowledgement_is_held() {
+    use rustbgpd_api::health_probe::CORE_READINESS_DEADLINE;
+    use rustbgpd_api::peer_types::PeerManagerReadinessQuery;
+
+    let (mut manager, mut rib_rx) = owner_manager();
+    let (tx, rx) = mpsc::channel(4);
+    manager.rx = rx;
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let task = tokio::spawn(manager.with_readiness_queries(readiness_rx).run());
+    let RibUpdate::PublishDampeningOwners { reply, .. } = rib_rx.recv().await.unwrap() else {
+        panic!("expected initial owner publication")
+    };
+    reply.send(Ok(())).unwrap();
+
+    let (reply, response) = oneshot::channel();
+    tx.send(PeerManagerCommand::ConfiguredOwnerPublication {
+        operation: PublicationOperation::Begin,
+        reply,
+    })
+    .await
+    .unwrap();
+    let receipt = response.await.unwrap().unwrap();
+    let (reply, published) = oneshot::channel();
+    tx.send(PeerManagerCommand::ConfiguredOwnerPublication {
+        operation: PublicationOperation::Publish(receipt),
+        reply,
+    })
+    .await
+    .unwrap();
+    // The actor is now parked on the RIB acknowledgement; hold it.
+    let RibUpdate::PublishDampeningOwners {
+        publication,
+        reply: rib_reply,
+        ..
+    } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected settlement owner publication")
+    };
+    assert_eq!(publication, receipt.0);
+
+    // Paused time advances only when every task is idle, so the deadline
+    // fires only if the parked actor never answers.
+    let (reply, pong) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::Ping { reply })
+        .await
+        .unwrap();
+    tokio::time::timeout(CORE_READINESS_DEADLINE, pong)
+        .await
+        .expect("readiness ping answered while the owner publication awaits the RIB")
+        .unwrap();
+
+    rib_reply.send(Ok(())).unwrap();
+    assert_eq!(published.await.unwrap(), Ok(receipt));
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    task.await.unwrap();
+}

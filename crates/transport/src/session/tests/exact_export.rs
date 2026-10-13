@@ -425,6 +425,7 @@ async fn export_profile_generation_changes_once_per_wire_runtime_mutation() {
                         max_prefixes_ipv6: None,
                         max_prefixes_received_ipv4: None,
                         max_prefixes_received_ipv6: None,
+                        max_prefixes_family: session.config.max_prefixes_family,
                         max_prefix_action: crate::config::MaxPrefixAction::Shutdown,
                         max_prefix_warning_percent: None,
                         gr_stale_routes_time: 999,

@@ -885,7 +885,7 @@ fn administrative_notifications_keep_directional_maintenance_semantics() {
         cease_subcode::ADMINISTRATIVE_RESET,
     ] {
         let notification = NotificationMessage::new(NotificationCode::Cease, subcode, Bytes::new());
-        session.record_notification_cause(SessionNotificationDirection::Sent, &notification);
+        session.record_notification_cause(SessionNotificationDirection::Sent, &notification, None);
         assert_eq!(session.last_error, "previous actionable failure");
     }
     let reset = NotificationMessage::new(
@@ -893,7 +893,7 @@ fn administrative_notifications_keep_directional_maintenance_semantics() {
         cease_subcode::ADMINISTRATIVE_RESET,
         Bytes::new(),
     );
-    session.record_notification_cause(SessionNotificationDirection::Received, &reset);
+    session.record_notification_cause(SessionNotificationDirection::Received, &reset, None);
     assert_eq!(
         session.last_error,
         "received NOTIFICATION 6/4 (Administrative Reset)"

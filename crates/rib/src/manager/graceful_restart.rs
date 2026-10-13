@@ -15,6 +15,7 @@ use super::helpers::{
     validate_route_rpki,
 };
 use crate::route::{BgpLsFamily, BgpLsRouteKey};
+use crate::update::{GrRetentionFamilyState, GrRetentionPhase};
 
 /// Deadline registry with a cached minimum. The actor loop probes the
 /// nearest GR / LLGR / refresh deadline on every iteration; with the cache
@@ -131,38 +132,128 @@ impl<'a, K> IntoIterator for &'a DeadlineMap<K> {
     }
 }
 
-/// Routes of one peer still held stale for GR or LLGR retention, across every
-/// family table: the value of `bgp_gr_stale_routes`. A partial-GR peer holds
-/// GR-stale and LLGR-stale routes at the same time, so both flags count.
-pub(super) fn retained_stale_count(rib: &crate::adj_rib_in::AdjRibIn) -> usize {
-    rib.iter().filter(|r| r.is_stale || r.is_llgr_stale).count()
-        + rib
-            .iter_flowspec()
-            .filter(|r| r.is_stale || r.is_llgr_stale)
-            .count()
-        + rib
-            .iter_evpn()
-            .filter(|r| r.is_stale || r.is_llgr_stale)
-            .count()
-        + rib
-            .iter_vpn()
-            .filter(|r| r.is_stale || r.is_llgr_stale)
-            .count()
-        + rib
-            .iter_labeled()
-            .filter(|r| r.is_stale || r.is_llgr_stale)
-            .count()
-        + rib
-            .iter_bgpls()
-            .filter(|r| r.is_stale || r.is_llgr_stale)
-            .count()
-        + rib
-            .iter_rtc()
-            .filter(|r| r.is_stale || r.is_llgr_stale)
-            .count()
-}
-
 impl RibManager {
+    /// Publish `bgp_gr_stale_routes{peer}` from the peer's maintained stale
+    /// counters: every route held GR- or LLGR-stale, across every family
+    /// table. A partial-GR peer holds both kinds at once, so both count.
+    pub(super) fn publish_gr_stale_routes(&self, peer: IpAddr) {
+        self.metrics.set_gr_stale_routes(
+            &peer.to_string(),
+            i64::try_from(self.retained_stale_count(peer)).unwrap_or(i64::MAX),
+        );
+    }
+
+    /// Routes `peer` holds GR- or LLGR-stale, from maintained counters.
+    pub(super) fn retained_stale_count(&self, peer: IpAddr) -> u64 {
+        self.ribs
+            .get(&peer)
+            .map_or(0, crate::adj_rib_in::AdjRibIn::retained_stale_count)
+    }
+
+    /// Republish `bgp_gr_stale_routes` after a route receipt changed the
+    /// peer's count from `before`. Receipts re-advertise or withdraw stale
+    /// routes without passing a retention transition, so they publish here;
+    /// a peer whose count did not move (every peer with nothing retained)
+    /// gains no series.
+    pub(super) fn republish_gr_stale_routes_if_moved(&self, peer: IpAddr, before: u64) {
+        if self.retained_stale_count(peer) != before {
+            self.publish_gr_stale_routes(peer);
+        }
+    }
+
+    /// Every peer that may hold GR/LLGR retention, from the same three maps
+    /// [`Self::gr_retention_snapshot`] reads. Map keys only: bounded by the
+    /// retained peer-family count, never by routes.
+    pub(super) fn gr_retention_peers(&self) -> std::collections::BTreeSet<IpAddr> {
+        self.gr_peers
+            .keys()
+            .chain(self.llgr_peers.keys())
+            .chain(self.llgr_stale_deadlines.keys().map(|(peer, _, _)| peer))
+            .copied()
+            .collect()
+    }
+
+    /// Helper-side retention rows for `peer`, read from the same deadline
+    /// registries the GR/LLGR timer arms sweep from. A family in `gr_peers`
+    /// reports the GR phase (restart while the session is absent, awaiting
+    /// End-of-RIB once it is back); a family with only an LLGR deadline
+    /// reports `llgr`. A GR-phase family that also kept its original LLGR
+    /// deadline across a reconnect reports the earlier of the two.
+    ///
+    /// The phase and deadline reads are map lookups and the stale counts
+    /// come from the Adj-RIB-In's maintained counters, so a row costs
+    /// O(families) and a list or doctor read never scans routes.
+    pub(super) fn gr_retention_snapshot(&self, peer: IpAddr) -> Vec<GrRetentionFamilyState> {
+        let gr_families = self.gr_peers.get(&peer);
+        let llgr_families = self.llgr_peers.get(&peer);
+        let mut rows: Vec<((Afi, Safi), GrRetentionPhase, Option<tokio::time::Instant>)> =
+            Vec::new();
+        if let Some(families) = gr_families {
+            let present = self.outbound_peers.contains_key(&peer)
+                || self.live_sessions.get(&peer).is_some_and(|s| !s.is_empty());
+            let phase = if present {
+                GrRetentionPhase::GrAwaitingEor
+            } else {
+                GrRetentionPhase::GrRestart
+            };
+            let deadline = self.gr_stale_deadlines.get(&peer).copied();
+            rows.extend(families.iter().map(|&family| (family, phase, deadline)));
+        }
+        rows.extend(
+            llgr_families
+                .into_iter()
+                .flatten()
+                .filter(|family| gr_families.is_none_or(|gr| !gr.contains(family)))
+                .map(|&family| (family, GrRetentionPhase::Llgr, None)),
+        );
+        // Keyed LLGR deadline lookups, never a walk of every peer's entries.
+        // A deadline can outlive both family maps (an LLGR-stale family the
+        // re-established session did not promote again), so every family the
+        // RIB can hold routes in is probed too.
+        for &(_, afi, safi) in rustbgpd_wire::CONFIGURED_FAMILIES {
+            if !rows.iter().any(|row| row.0 == (afi, safi)) {
+                rows.push(((afi, safi), GrRetentionPhase::Llgr, None));
+            }
+        }
+        rows.retain_mut(|(family, phase, deadline)| {
+            let llgr = self
+                .llgr_stale_deadlines
+                .get(&(peer, family.0, family.1))
+                .copied();
+            if let Some(llgr) = llgr {
+                *deadline = Some(deadline.map_or(llgr, |d| d.min(llgr)));
+            }
+            // A probed family is kept only when it holds an LLGR deadline.
+            llgr.is_some()
+                || *phase != GrRetentionPhase::Llgr
+                || llgr_families.is_some_and(|families| families.contains(family))
+        });
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let rib = self.ribs.get(&peer);
+        let now = tokio::time::Instant::now();
+        let mut out: Vec<GrRetentionFamilyState> = rows
+            .into_iter()
+            .map(|((afi, safi), phase, deadline)| GrRetentionFamilyState {
+                afi,
+                safi,
+                phase,
+                remaining_secs: deadline.map(|d| {
+                    let left = d.saturating_duration_since(now);
+                    left.as_secs() + u64::from(left.subsec_nanos() > 0)
+                }),
+                stale_routes: rib.map_or(0, |rib| {
+                    rib.stale_route_counts()
+                        .find(|(family, _)| *family == (afi, safi))
+                        .map_or(0, |(_, counts)| counts.total())
+                }),
+            })
+            .collect();
+        out.sort_by_key(|row| (row.afi as u16, row.safi as u8));
+        out
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "GR peer-up carries negotiated restart and LLGR session state together"
@@ -491,11 +582,8 @@ impl RibManager {
             self.llgr_peer_config.insert(peer, llgr_config);
         }
 
-        let peer_label = peer.to_string();
-        self.metrics.set_gr_active(&peer_label, true);
-        let stale_count = self.ribs.get(&peer).map_or(0, retained_stale_count);
-        self.metrics
-            .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
+        self.metrics.set_gr_active(&peer.to_string(), true);
+        self.publish_gr_stale_routes(peer);
         true
     }
 
@@ -692,7 +780,9 @@ impl RibManager {
             info!(%peer, "GR timer expired — promoting to LLGR stale phase");
 
             self.enter_llgr_phase(peer, &gr_families, &llgr_config);
-            // GR remains "active" for metrics until LLGR completes
+            // GR remains "active" for metrics until LLGR completes. The
+            // promotion purged non-LLGR families and NO_LLGR routes.
+            self.publish_gr_stale_routes(peer);
             return;
         }
 
@@ -800,7 +890,11 @@ impl RibManager {
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
 
-        if !llgr_retention_remains {
+        if llgr_retention_remains {
+            // LLGR-stale routes from an earlier cycle keep the series alive;
+            // it must drop the GR-stale routes just swept.
+            self.publish_gr_stale_routes(peer);
+        } else {
             self.release_peer_state_if_departed(peer);
         }
         self.prune_exact_export_rejections();
@@ -1045,7 +1139,6 @@ impl RibManager {
         let mut rtc_swept = Vec::new();
         let mut rib_len = 0;
         let mut evpn_len = 0;
-        let mut llgr_stale_remaining = 0;
         for &(afi, safi) in families {
             self.llgr_stale_deadlines.remove(&(peer, afi, safi));
             if let Some(awaiting) = self.llgr_peers.get_mut(&peer) {
@@ -1070,7 +1163,6 @@ impl RibManager {
                 .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
-            llgr_stale_remaining = retained_stale_count(rib);
         }
         let had_swept = !swept.is_empty();
         let had_fs_swept = !fs_swept.is_empty();
@@ -1144,8 +1236,7 @@ impl RibManager {
         // families with longer stale times keep their retention (and the
         // peer's config, needed for a later re-promotion) alive.
         if self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer) {
-            self.metrics
-                .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_remaining));
+            self.publish_gr_stale_routes(peer);
             return;
         }
         self.llgr_peers.remove(&peer);
@@ -1153,8 +1244,7 @@ impl RibManager {
             // Re-established and awaiting End-of-RIB, or (partial GR) other
             // families still in the GR phase: the GR machinery owns the
             // remaining lifecycle (and still reads `llgr_peer_config`).
-            self.metrics
-                .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_remaining));
+            self.publish_gr_stale_routes(peer);
             return;
         }
         // LLGR is the last retention phase — the per-peer LLGR config has
@@ -1221,7 +1311,9 @@ impl RibManager {
             .map(|(&(peer, afi, safi), _)| (peer, afi, safi))
             .collect();
         for (peer, afi, safi) in expired {
+            let stale_before = self.retained_stale_count(peer);
             self.finish_route_refresh(peer, afi, safi, true);
+            self.republish_gr_stale_routes_if_moved(peer, stale_before);
         }
         self.prune_exact_export_rejections();
     }

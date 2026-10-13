@@ -2732,7 +2732,11 @@ fn runtime_converger_rib_responder(
                     let _ = reply.send(events_tx.subscribe());
                 }
                 RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                    let _ = reply.send(true);
+                    let _ = reply.send(rustbgpd_rib::EvpnSessionsSync {
+                        established: 1,
+                        stale: 0,
+                        synced: true,
+                    });
                 }
                 RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
@@ -2766,7 +2770,11 @@ fn runtime_converger_rib_recorder(
                     let _ = reply.send(events_tx.subscribe());
                 }
                 RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                    let _ = reply.send(true);
+                    let _ = reply.send(rustbgpd_rib::EvpnSessionsSync {
+                        established: 1,
+                        stale: 0,
+                        synced: true,
+                    });
                 }
                 RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
@@ -3798,6 +3806,58 @@ async fn committed_config_advance_republishes_es_link_bindings() {
         "binding removal published"
     );
     assert!(bindings_rx.borrow_and_update().is_empty());
+}
+
+/// ADR-0140: an `[evpn_core_isolation]`-only edit commits as an EVPN
+/// planner no-op and republishes the hold controller's snapshot.
+#[tokio::test]
+async fn committed_config_advance_republishes_core_isolation() {
+    let bound_toml = format!(
+        "{}interface = \"bond0\"\n",
+        l2vni_one_es_runtime_candidate_toml()
+    );
+    let baseline = load_runtime_test_config(&bound_toml, "test baseline");
+    let enabled = load_runtime_test_config(
+        &format!("{bound_toml}\n[evpn_core_isolation]\nenabled = true\nbackstop_seconds = 60\n"),
+        "test candidate",
+    );
+    let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+        baseline.resolve_evpn_instances().unwrap(),
+        baseline.resolve_evpn_ip_vrfs().unwrap(),
+        baseline.resolve_ethernet_segments().unwrap(),
+    )));
+    let esis = crate::config::AutoLacpEsis::default();
+    let (core_tx, mut core_rx) =
+        tokio::sync::watch::channel(Arc::new(baseline.core_isolation_snapshot(&esis)));
+    let reload_apply = EvpnRuntimeReloadApply::new(
+        coordinator,
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::ok()),
+        baseline,
+    )
+    .with_core_isolation_publisher(Arc::new(core_tx));
+    assert!(core_rx.borrow_and_update().settings.is_none());
+
+    let changed =
+        |new: &Config, current: &Config| new.evpn_core_isolation != current.evpn_core_isolation;
+    let attempt = reload_apply
+        .apply_config_if_changed(&enabled, changed, || {
+            panic!("planner no-op must remain preflight")
+        })
+        .await;
+    assert!(matches!(
+        attempt.terminal,
+        EvpnRuntimeReloadTerminal::Applied(EvpnRuntimeReloadApplyResult {
+            outcome: EvpnRuntimeReloadOutcome::Noop,
+            ..
+        })
+    ));
+    assert!(core_rx.has_changed().unwrap(), "enabling is published");
+    let published = core_rx.borrow_and_update().clone();
+    let settings = published.settings.as_ref().expect("table published");
+    assert!(settings.enabled);
+    assert_eq!(settings.backstop_seconds, 60);
+    assert!(published.bindings.contains_key("bond0"));
 }
 
 fn evpn_runtime_changed_for_test(new_config: &Config, current: &Config) -> bool {
@@ -8389,9 +8449,13 @@ fn svi_dataplane_report(
             state: rustbgpd_evpn::InstanceState::Ready,
             message: None,
             bridge_mac: Some(bridge_mac),
+            current_apply_failure_count: 0,
+            latest_permanent_apply_error: None,
         }],
         applied: vec![],
         failed: vec![],
+        current_apply_failures: std::collections::BTreeMap::new(),
+        unscoped_apply_failures: rustbgpd_evpn::CurrentApplyFailureSummary::default(),
         bum_enforcement: vec![],
         ip_vrf_status: vec![],
         ip_vrf_routes: Some(rustbgpd_evpn::ip_vrf::IpVrfRouteDump::default()),

@@ -1,0 +1,28 @@
+# M106 member1 (AS64500, 192.0.2.11) — the M90 member1 session plus the TCP
+# MD5 password from the M106 clients.yml. Both route servers must render the
+# key for either session to establish.
+[global.config]
+as = 64500
+router-id = "192.0.2.11"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.9"
+peer-as = 64496
+description = "rustbgpd-rs"
+auth-password = "m106-md5-member1"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.10"
+peer-as = 64496
+description = "bird-rs"
+auth-password = "m106-md5-member1"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"

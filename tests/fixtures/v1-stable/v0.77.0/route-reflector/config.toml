@@ -1,0 +1,120 @@
+# iBGP route reflector configuration
+#
+# rustbgpd as an IPv4/IPv6 unicast route reflector (RFC 4456) for one
+# autonomous system. It is control-plane only: it reflects routes between
+# its clients and the rest of the iBGP mesh, and forwards no traffic.
+# - one peer-group template for the whole client fleet: dual-stack,
+#   graceful restart with long-lived stale retention, Add-Path send
+# - two statically configured clients plus an auto-accept range for the
+#   rest of the fleet
+# - one non-client iBGP session to the second reflector of the pair
+# - a short import chain that keeps a client from injecting a default
+#   route into the core
+#
+# Path hiding: a reflector advertises only its own best path, so clients
+# behind it lose the alternates they would have seen in a full mesh.
+# Add-Path send (RFC 7911) gives each client up to four candidates and
+# lets it run its own selection — faster convergence and working iBGP
+# multipath at the edge.
+#
+# Run a second reflector for redundancy. Give the pair one shared
+# `cluster_id` so each discards the copies the other reflected (less
+# state), or distinct IDs so each keeps them (a client that loses one of
+# its two sessions is still reachable through both reflectors).
+
+[global]
+asn = 64512
+router_id = "192.0.2.1"
+listen_port = 179
+# RFC 4456 cluster identifier. It defaults to `router_id` once any neighbor
+# is a reflector client; stating it keeps the value stable if the router
+# ID is ever renumbered.
+cluster_id = "192.0.2.1"
+# Cap for sessions accepted from the [[dynamic_neighbors]] range below.
+dynamic_neighbor_limit = 256
+# RFC 8212 posture, stated rather than inherited. It governs eBGP sessions
+# only, so the iBGP sessions here are unaffected; an eBGP neighbor added
+# later carries nothing until it has explicit import and export policy.
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# Local gRPC uses the implicit owner-only socket at
+# <runtime_state_dir>/grpc.sock and the local-operator identity.
+
+# --- Named policy definitions ---
+
+# The default route belongs to the border routers' own configuration, not
+# to a session with the reflector: one client originating it by mistake
+# would otherwise be reflected to every other client.
+[policy.definitions.reject-default-route]
+default_action = "permit"
+[[policy.definitions.reject-default-route.statements]]
+prefix = "0.0.0.0/0"
+action = "deny"
+[[policy.definitions.reject-default-route.statements]]
+prefix = "::/0"
+action = "deny"
+
+# A reflector should not change what it reflects (RFC 4456 §10), so the
+# export side is a declared permit-all rather than an omitted one.
+[policy.definitions.rr-transparent-export]
+default_action = "permit"
+
+[policy]
+export_chain = ["rr-transparent-export"]
+
+# --- Reflector clients ---
+
+# One template for the client fleet. GR/LLGR: the reflector is a
+# receiving-speaker helper. When a client restarts it keeps that client's
+# routes for the restart window (RFC 4724) and then, because
+# llgr_stale_time is non-zero, demotes them to LLGR_STALE (RFC 9494)
+# instead of withdrawing them from every other client at once.
+[peer_groups.rr-clients]
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_reflector_client = true
+graceful_restart = true
+gr_stale_routes_time = 120
+llgr_stale_time = 300
+max_prefixes = 100000
+import_policy_chain = ["reject-default-route"]
+
+[peer_groups.rr-clients.add_path]
+send = true
+send_max = 4
+
+[[neighbors]]
+address = "192.0.2.11"
+remote_asn = 64512
+description = "edge-01"
+peer_group = "rr-clients"
+
+[[neighbors]]
+address = "192.0.2.12"
+remote_asn = 64512
+description = "edge-02"
+peer_group = "rr-clients"
+
+# Every other router in the client loopback range is accepted on connect
+# and inherits the same template.
+[[dynamic_neighbors]]
+prefix = "198.51.100.0/24"
+remote_asn = 64512
+peer_group = "rr-clients"
+description = "access routers"
+
+# --- Non-client iBGP peer ---
+
+# The second reflector of the pair. Routes learned from a non-client are
+# reflected to clients only; routes learned from clients are reflected to
+# clients and non-clients alike (RFC 4456 §6).
+[[neighbors]]
+address = "192.0.2.2"
+remote_asn = 64512
+description = "rr-02"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]

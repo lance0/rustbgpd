@@ -529,7 +529,7 @@ clients:
   description: member1 - IRR-clean member
   id: AS64500_1
   ip: 192.0.2.11
-  password: null
+  password: m106-md5-member1
 - 16bit_mapped_asn: null
   asn: 64501
   cfg:
@@ -660,6 +660,67 @@ clients:
   id: AS64502_1
   ip: 192.0.2.13
   password: null
+- 16bit_mapped_asn: null
+  asn: 64503
+  cfg:
+    add_path: false
+    attach_custom_communities: null
+    blackhole_filtering:
+      announce_to_client: true
+    custom_options: null
+    filtering:
+      black_list_pref: null
+      ipv4_pref_len: *id001
+      ipv6_pref_len: *id002
+      irrdb:
+        as_set_bundle_ids: !!set
+          ? 456eb77de8d33a3d279fd6ca2bad960297d0445c0a882bd72d165fd04ec94107099b11ba25132cbdd469bb36a009c4c9cf2dc0400c0ea356bfa4819617cac5d2
+          : null
+          ? f014d71266ea423e1bba3083286416267718576309a82039ac8ec8642593ea515bca2b7d49da78dfefc2b86e0f3cd336781bad4aa514566912220260a4684e13
+          : null
+        as_sets:
+        - AS-M106-FOUR
+        enforce_origin_in_as_set: true
+        enforce_prefix_in_as_set: true
+        white_list_asn: null
+        white_list_pref: null
+        white_list_route: null
+      max_as_path_len: 32
+      max_prefix:
+        action: shutdown
+        count_rejected_routes: false
+        limit_ipv4: 100
+        limit_ipv6: 12000
+        peering_db:
+          enabled: false
+          increment:
+            absolute: 100
+            relative: 15
+        restart_after: 15
+      next_hop:
+        authorized_addresses_list: null
+        policy: strict
+      reject_invalid_as_in_as_path: false
+      reject_policy:
+        policy: tag_and_reject
+      roles:
+        enabled: true
+        local_role: rs
+        strict_mode: true
+      rpki_bgp_origin_validation:
+        enabled: false
+        reject_invalid: true
+    graceful_shutdown:
+      enabled: false
+    gtsm: false
+    multihop: null
+    passive: true
+    prepend_rs_as: false
+    rfc8950: false
+  description: member4 - strict role, sends no Role capability
+  id: AS64503_1
+  ip: 192.0.2.14
+  password: null
 
 
 asns
@@ -704,6 +765,20 @@ irrdb_info
     max_length: 32
     prefix: 203.0.113.0
   used_by: client AS64500_1
+- asns:
+  - 64503
+  descr: AS-M106-FOUR
+  id: 456eb77de8d33a3d279fd6ca2bad960297d0445c0a882bd72d165fd04ec94107099b11ba25132cbdd469bb36a009c4c9cf2dc0400c0ea356bfa4819617cac5d2
+  name: AS_M106_FOUR
+  prefixes:
+  - comment: null
+    exact: true
+    ge: null
+    le: null
+    length: 27
+    max_length: 32
+    prefix: 203.0.113.224
+  used_by: client AS64503_1
 - asns:
   - 64501
   descr: AS-M90-TWO
@@ -753,6 +828,20 @@ irrdb_info
     max_length: 32
     prefix: 198.51.100.128
   used_by: client AS64500_1 white list
+- asns:
+  - 64503
+  descr: AS64503
+  id: f014d71266ea423e1bba3083286416267718576309a82039ac8ec8642593ea515bca2b7d49da78dfefc2b86e0f3cd336781bad4aa514566912220260a4684e13
+  name: AS64503
+  prefixes:
+  - comment: null
+    exact: true
+    ge: null
+    le: null
+    length: 27
+    max_length: 32
+    prefix: 203.0.113.224
+  used_by: client AS64503_1
 - asns:
   - 64502
   descr: AS64502

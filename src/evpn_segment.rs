@@ -2007,7 +2007,10 @@ fn gather_candidates_from_routes(
     by_ip.into_values().collect()
 }
 
-fn has_matching_es_import_rt(attrs: &[PathAttribute], esi: EthernetSegmentIdentifier) -> bool {
+pub(crate) fn has_matching_es_import_rt(
+    attrs: &[PathAttribute],
+    esi: EthernetSegmentIdentifier,
+) -> bool {
     let expected = es_import_rt_from_esi(esi);
     attrs.iter().any(|attr| {
         let Some(extcomms) = attr.extended_communities() else {
@@ -2134,7 +2137,7 @@ async fn evpn_sessions_synced(
             .send(RibUpdate::QueryEvpnSessionsSynced { reply })
             .await
             .is_ok()
-            && rx.await.unwrap_or(false)
+            && rx.await.is_ok_and(|sync| sync.synced)
     })
     .await
     .unwrap_or(false)
@@ -2548,7 +2551,7 @@ fn build_es_route(
 /// share this rule; for Type 0/1/2 system-MAC-derived ESIs the
 /// resulting RT happens to encode that system MAC, which is what
 /// FRR / Junos / Cumulus already filter on.
-fn es_import_rt_from_esi(esi: EthernetSegmentIdentifier) -> [u8; 6] {
+pub(crate) fn es_import_rt_from_esi(esi: EthernetSegmentIdentifier) -> [u8; 6] {
     let o = esi.octets();
     [o[1], o[2], o[3], o[4], o[5], o[6]]
 }
@@ -2670,7 +2673,11 @@ mod tests {
                         let _ = reply.send(Vec::new());
                     }
                     RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                        let _ = reply.send(true);
+                        let _ = reply.send(rustbgpd_rib::EvpnSessionsSync {
+                            established: 1,
+                            stale: 0,
+                            synced: true,
+                        });
                     }
                     RibUpdate::InjectEvpn { route, reply } => {
                         injects.lock().await.push(route.key());
@@ -2778,9 +2785,9 @@ mod tests {
 
     /// Regression: a key shape the Type 1/4 originators never emit is
     /// skipped, not "handled" by synthesizing a fallback route. The old
-    /// fallback built a zero-ESI Type 4 that the wire decoder itself
-    /// rejects ("EVPN Type 4 ES route with all-zero ESI"), so a fired
-    /// fallback put undecodable bytes on the wire.
+    /// fallback built a zero-ESI Type 4, which names no multihomed segment
+    /// (RFC 7432 §8.1.1) and which receivers, including this daemon, treat
+    /// as withdraw.
     #[test]
     fn build_es_route_skips_unexpected_key_shape() {
         let inst = instance(100);
@@ -4456,7 +4463,11 @@ mod tests {
                         );
                     }
                     RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                        let _ = reply.send(true);
+                        let _ = reply.send(rustbgpd_rib::EvpnSessionsSync {
+                            established: 1,
+                            stale: 0,
+                            synced: true,
+                        });
                     }
                     RibUpdate::InjectEvpn { route, reply } => {
                         injects.lock().await.push(route.key());
@@ -4822,6 +4833,19 @@ mod tests {
         bindings: watch::Sender<EsLinkBindings>,
     }
 
+    /// One boot-wait session query answered as synced or not.
+    struct SyncReply(oneshot::Sender<rustbgpd_rib::EvpnSessionsSync>);
+
+    impl SyncReply {
+        fn send(self, synced: bool) -> Result<(), rustbgpd_rib::EvpnSessionsSync> {
+            self.0.send(rustbgpd_rib::EvpnSessionsSync {
+                established: usize::from(synced),
+                stale: 0,
+                synced,
+            })
+        }
+    }
+
     impl DfWaitActor {
         fn new(algorithm: DfAlgorithm) -> Self {
             let mut instances = EvpnInstanceTable::new();
@@ -4905,11 +4929,11 @@ mod tests {
             reply
         }
 
-        async fn sync_reply(&mut self) -> oneshot::Sender<bool> {
+        async fn sync_reply(&mut self) -> SyncReply {
             let RibUpdate::QueryEvpnSessionsSynced { reply } = self.next_query().await else {
                 panic!("election must wait for boot synchronization");
             };
-            reply
+            SyncReply(reply)
         }
 
         fn assert_role(&self, role: DfRole) {
@@ -7041,7 +7065,12 @@ mod tests {
                         held.push(reply);
                     }
                     RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                        let _ = reply.send(rib_synced.load(std::sync::atomic::Ordering::SeqCst));
+                        let synced = rib_synced.load(std::sync::atomic::Ordering::SeqCst);
+                        let _ = reply.send(rustbgpd_rib::EvpnSessionsSync {
+                            established: usize::from(synced),
+                            stale: 0,
+                            synced,
+                        });
                     }
                     RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         let _ = reply.send(rib_routes.lock().await.clone());

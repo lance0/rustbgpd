@@ -521,6 +521,9 @@ struct VpnLabeledStagingContext<'a> {
     force: bool,
 }
 
+#[cfg(test)]
+type PrimaryUpdateHook = Arc<dyn Fn(&RibUpdate) + Send + Sync>;
+
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
@@ -900,6 +903,9 @@ pub struct RibManager {
     replacement_readiness: Option<Arc<ReplacementReadinessContext>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    /// Runs synchronously at the start of every applied primary update.
+    #[cfg(test)]
+    test_primary_update_hook: Option<PrimaryUpdateHook>,
     #[cfg(test)]
     replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
@@ -2040,6 +2046,8 @@ impl RibManager {
             #[cfg(test)]
             replacement_readiness_test_hook: None,
             #[cfg(test)]
+            test_primary_update_hook: None,
+            #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
             flowspec_validation: flowspec_validation::ValidationState::default(),
@@ -2352,6 +2360,46 @@ impl RibManager {
     }
 
     #[must_use]
+    /// L2VPN/EVPN session counts and End-of-RIB sync, from the newest live
+    /// session record per peer.
+    fn evpn_sessions_sync(&self) -> crate::update::EvpnSessionsSync {
+        let evpn = (Afi::L2Vpn, Safi::Evpn);
+        // The newest live record is the one registration uses; an older
+        // collision-window record cannot vouch for it.
+        let peers: Vec<bool> = self
+            .live_sessions
+            .values()
+            .filter_map(|sessions| sessions.last())
+            .filter(|s| s.sendable_families.contains(&evpn))
+            .map(|s| s.evpn_end_of_rib)
+            .collect();
+        // Peers retaining L2VPN/EVPN routes as GR or LLGR stale: the
+        // overlay still forwards on them (ADR-0140 decision 2).
+        let stale = self
+            .gr_peers
+            .keys()
+            .chain(self.llgr_peers.keys())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter(|peer| {
+                self.gr_peers.get(*peer).is_some_and(|f| f.contains(&evpn))
+                    || self
+                        .llgr_peers
+                        .get(*peer)
+                        .is_some_and(|f| f.contains(&evpn))
+            })
+            .count();
+        // GR selection deferral keeps EVPN Loc-RIB unchanged, so remote
+        // Type 4 routes are not readable until it releases.
+        crate::update::EvpnSessionsSync {
+            established: peers.len(),
+            stale,
+            synced: !self.selection_deferred(evpn)
+                && !peers.is_empty()
+                && peers.iter().all(|&synced| synced),
+        }
+    }
+
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.selection_deferral
             .as_ref()
@@ -2705,6 +2753,17 @@ impl RibManager {
         }
     }
 
+    /// Answer a readiness probe from the actor loop, then yield. The reply
+    /// wakes the probe's task into this worker's LIFO slot, which other
+    /// workers cannot steal. Without the yield that task waits until the actor
+    /// next returns `Pending`; back-to-back queued updates (a mass GR entry)
+    /// can defer that for Tokio's whole cooperative budget, about 200 ms at
+    /// 200 peers.
+    async fn serve_readiness_query(&mut self, query: RibReadinessQuery) {
+        self.handle_readiness_query(query, None);
+        tokio::task::yield_now().await;
+    }
+
     /// Service a bounded number of type-narrow readiness probes at an actor
     /// seam without admitting any ordinary query or mutation.
     fn drain_readiness_queries(&mut self, policy_transition_elapsed: Option<std::time::Duration>) {
@@ -2999,11 +3058,56 @@ impl RibManager {
     }
 
     /// Process a single `RibUpdate` message.
+    ///
+    /// The typed-family receipts, `PeerUp` and the refresh boundaries change
+    /// a peer's stale routes in this turn without publishing
+    /// `bgp_gr_stale_routes` themselves, so the gauge is republished here
+    /// when the count moved. Unicast, `FlowSpec` and EVPN receipts are
+    /// queued and republish per chunk (`process_next_route_chunk`). GR
+    /// entry, the timer sweeps, End-of-RIB and teardown publish at their
+    /// own sites.
+    fn handle_update(&mut self, update: RibUpdate) {
+        let receipt_peer = match &update {
+            RibUpdate::BgpLsRoutesReceived { peer, .. }
+            | RibUpdate::VpnRoutesReceived { peer, .. }
+            | RibUpdate::LabeledRoutesReceived { peer, .. }
+            | RibUpdate::RtcRoutesReceived { peer, .. }
+            | RibUpdate::PeerUp { peer, .. }
+            | RibUpdate::EndRouteRefresh { peer, .. }
+            | RibUpdate::RouteRefreshTimeout { peer, .. } => Some(*peer),
+            _ => None,
+        };
+        let before = receipt_peer.map(|peer| (peer, self.retained_stale_count(peer)));
+        self.dispatch_update(update);
+        if let Some((peer, before)) = before {
+            self.republish_gr_stale_routes_if_moved(peer, before);
+        }
+        #[cfg(test)]
+        self.assert_stale_counters_match_scan();
+    }
+
+    /// Test-only oracle: every Adj-RIB-In's maintained stale counters equal
+    /// a full scan of its tables.
+    #[cfg(test)]
+    pub(super) fn assert_stale_counters_match_scan(&self) {
+        for (peer, rib) in &self.ribs {
+            assert_eq!(
+                rib.maintained_stale_route_counts(),
+                rib.scanned_stale_route_counts(),
+                "maintained stale counters diverged from a scan for {peer}"
+            );
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
-    fn handle_update(&mut self, update: RibUpdate) {
+    fn dispatch_update(&mut self, update: RibUpdate) {
+        #[cfg(test)]
+        if let Some(hook) = &self.test_primary_update_hook {
+            hook(&update);
+        }
         self.dampening_history.arm_owner_retirement();
         assert!(
             !(self.test_panic_on_peer_up.is_some() && matches!(&update, RibUpdate::PeerUp { .. })),
@@ -3528,9 +3632,15 @@ impl RibManager {
             RibUpdate::QueryNeighborRibSnapshots {
                 peers,
                 comparison,
+                include_retained,
                 reply,
             } => {
-                self.handle_query_neighbor_rib_snapshots(peers, comparison, reply);
+                self.handle_query_neighbor_rib_snapshots(
+                    peers,
+                    comparison,
+                    include_retained,
+                    reply,
+                );
             }
             RibUpdate::QueryUpdateGroupSnapshot { reply } => {
                 self.handle_query_update_group_snapshot(reply);
@@ -3840,23 +3950,15 @@ impl RibManager {
                 queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
             }
             RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                let evpn = (Afi::L2Vpn, Safi::Evpn);
-                // The newest live record is the one registration uses; an
-                // older collision-window record cannot vouch for it.
-                let peers: Vec<bool> = self
-                    .live_sessions
-                    .values()
-                    .filter_map(|sessions| sessions.last())
-                    .filter(|s| s.sendable_families.contains(&evpn))
-                    .map(|s| s.evpn_end_of_rib)
-                    .collect();
-                // GR selection deferral keeps EVPN Loc-RIB unchanged, so
-                // remote Type 4 routes are not readable until it releases.
-                let _ = reply.send(
-                    !self.selection_deferred(evpn)
-                        && !peers.is_empty()
-                        && peers.iter().all(|&synced| synced),
-                );
+                let _ = reply.send(self.evpn_sessions_sync());
+            }
+            RibUpdate::QueryEvpnEsSnapshot { reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(crate::update::EvpnEsSnapshot {
+                        sessions: self.evpn_sessions_sync(),
+                        es_routes: self.loc_rib.iter_evpn_es().cloned().collect(),
+                    });
+                }
             }
             RibUpdate::QueryEvpnRoutesPage {
                 scope,
@@ -5144,7 +5246,7 @@ impl RibManager {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
                         match readiness {
-                            Some(query) => self.handle_readiness_query(query, None),
+                            Some(query) => self.serve_readiness_query(query).await,
                             None => self.readiness_rx = None,
                         }
                     }
@@ -5242,7 +5344,7 @@ impl RibManager {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
                         match readiness {
-                            Some(query) => self.handle_readiness_query(query, None),
+                            Some(query) => self.serve_readiness_query(query).await,
                             None => self.readiness_rx = None,
                         }
                     }
