@@ -772,14 +772,15 @@ def restore_underlay(phase):
     then come up, and the CE must re-add it."""
     run('ip', 'link', 'set', 'ul-b', 'up')
     event(phase + '_underlay_restored')
-    samples = watch(phase + '-recovery', time.monotonic(),
-                    both_active, 90)
+    samples = watch(phase + '-recovery', time.monotonic(), both_active, 90)
+    held_at_restore = held(samples[0])
     established = next((s['elapsed'] for s in samples if s['established']), None)
     raised = next((s['elapsed'] for s in samples if s['rust_member_admin_up']), None)
     readded = next((s['elapsed'] for s in samples if both_active(s)), None)
 
     def hold():
-        assert established is not None and raised is not None, (established, raised)
+        assert established is not None and raised is not None, ('no session before the member came up',
+                                                                established, raised)
         # Release needs EVPN sync, which follows Established, plus the settle hold.
         assert raised >= established + HOLD_AFTER_SYNC - 2, ('raised before sync plus the hold', established, raised)
         assert raised <= established + HOLD_AFTER_SYNC + 20, ('not raised after sync plus the hold', established, raised)
@@ -788,10 +789,12 @@ def restore_underlay(phase):
         return dict(first_established=established, raised=raised, raised_after_established=raised - established)
 
     def readd():
+        assert held_at_restore, ('member was not out of the CE aggregator when the underlay returned', samples[0])
         assert raised is not None and readded is not None and readded >= raised, (raised, readded)
         assert readded <= raised + 10, ('CE did not re-add the member within 10 s', raised, readded)
         return dict(raised=raised, ce_readded=readded)
-    return dict(hold=soft(phase + ': member held for the settle hold after sync, then raised', hold),
+    return dict(held_at_restore=held_at_restore,
+                hold=soft(phase + ': member held for the settle hold after sync, then raised', hold),
                 readd=soft(phase + ': CE re-adds the member to its aggregator', readd))
 
 
@@ -851,7 +854,7 @@ def core_isolation(vni):
 
     def adopted():
         text = log.read_text()
-        assert receipt and [e['link']['name'] for e in receipt['links']] == ['ac'], receipt
+        assert receipt and [e['link']['name'] for e in receipt['links']] == ['ac'], ('no owned receipt entry', receipt)
         assert 'core-isolation receipt found at startup' in text, 'receipt not adopted'
         assert 'took a CE-facing member administratively down' not in text, 'member taken down again, not adopted'
         assert samples[-1]['state'] == 'startup_hold', samples[-1]
@@ -863,6 +866,7 @@ def core_isolation(vni):
     released = time.monotonic() - origin
 
     def no_backstop():
+        assert result['restart_recovery']['held_at_restore'], 'no restart hold to release'
         assert released < BACKSTOP / 2, ('release near the backstop', released)
         assert 'backstop_unsynced' not in log.read_text(), 'backstop release logged'
         return dict(release_after_restart=released)
