@@ -338,9 +338,9 @@ impl RibManager {
                         ..OutboundCommitBatch::default()
                     },
                 )
+                && self.mark_outbound_dirty(peer)
             {
                 warn!(%peer, "outbound channel full — BGP-LS update deferred");
-                self.mark_outbound_dirty(peer);
             }
         }
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);

@@ -686,6 +686,106 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     handle.await.unwrap();
 }
 
+/// A send that fails because the target's session closed during the pass is
+/// not backpressure: it must not log "outbound channel full" or leave the
+/// peer dirty. A full channel on a live session still warns and goes dirty.
+#[test]
+fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
+    use std::sync::{Arc as StdArc, Mutex};
+    const DEFERRED: &str = "outbound channel full — EVPN update deferred";
+
+    let (_tx, rx) = mpsc::channel(4);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some("192.0.2.254".parse().unwrap()),
+        BgpMetrics::new(),
+    );
+    let closed: IpAddr = "192.0.2.30".parse().unwrap();
+    let full: IpAddr = "192.0.2.31".parse().unwrap();
+    let mut receivers = Vec::new();
+    for (peer, router_id) in [(closed, "192.0.2.30"), (full, "192.0.2.31")] {
+        let (outbound_tx, mut out) = mpsc::channel(1);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: router_id.parse().unwrap(),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while out.try_recv().is_ok() {}
+        receivers.push(out);
+    }
+    let closed_rx = receivers.remove(0);
+    let _full_rx = receivers.remove(0);
+
+    // The announce fills both one-slot channels. Forget it in each
+    // Adj-RIB-Out so every later pass stages it again.
+    let route = make_evpn_imet("192.0.2.10".parse().unwrap(), 100);
+    let key = route.key();
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    for peer in [closed, full] {
+        assert!(
+            manager
+                .adj_ribs_out
+                .get_mut(&peer)
+                .unwrap()
+                .remove_evpn(&key)
+        );
+    }
+    let keys = HashSet::from([key]);
+
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    let subscriber = CaptureSubscriber {
+        level: tracing::Level::WARN,
+        events: StdArc::clone(&captured),
+    };
+    let messages = || {
+        captured
+            .lock()
+            .unwrap()
+            .drain(..)
+            .map(|fields| fields.0.get("message").cloned().unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        // Sibling tests reach this callsite through `manager.run()` with no
+        // subscriber; warm it here and refresh its cached interest first.
+        manager.distribute_evpn_keys_to_peer(full, &keys, &mut || {});
+        tracing::callsite::rebuild_interest_cache();
+        messages();
+
+        // The session closes after the pass's gone-check but before its
+        // send, as when it tears down concurrently.
+        let mut closed_rx = Some(closed_rx);
+        manager.distribute_evpn_keys_to_peer(closed, &keys, &mut || drop(closed_rx.take()));
+        assert!(closed_rx.is_none(), "the pass reached its checkpoint");
+        assert_eq!(
+            messages(),
+            Vec::<String>::new(),
+            "closed channel is not backpressure"
+        );
+        assert!(!manager.dirty_peers.contains(&closed));
+
+        manager.distribute_evpn_keys_to_peer(full, &keys, &mut || {});
+        assert_eq!(messages(), vec![DEFERRED.to_string()]);
+        assert!(manager.dirty_peers.contains(&full));
+    });
+}
+
 /// Regression: when an EVPN update fails to send (outbound channel full),
 /// the peer is marked dirty; a later `distribute_changes` must resync EVPN
 /// routes, not only unicast / `FlowSpec`. Before this fix, dirty resync

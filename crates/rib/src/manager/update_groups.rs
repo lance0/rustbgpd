@@ -1849,11 +1849,14 @@ impl RibManager {
     /// through here — including the send-failure retry path, so this is
     /// where a closed channel (peer gone) is distinguished from a full
     /// one (peer slow): only the latter may re-arm the resync timer.
-    pub(in crate::manager) fn mark_outbound_dirty(&mut self, peer: IpAddr) {
+    ///
+    /// Returns `false` for a closed channel, so a caller's "channel full"
+    /// warning is not emitted for a session that is already going down.
+    pub(in crate::manager) fn mark_outbound_dirty(&mut self, peer: IpAddr) -> bool {
         if self.outbound_channel_gone(peer) {
             debug!(%peer, "outbound channel closed — dropping dirty state instead of re-marking");
             self.drop_gone_dirty_peer(peer);
-            return;
+            return false;
         }
         self.dirty_peers.insert(peer);
         if let Some(gid) = self.grouped_member_of(peer)
@@ -1861,6 +1864,7 @@ impl RibManager {
         {
             group.dirty_members.insert(peer);
         }
+        true
     }
 
     /// Re-derive the withdrawal-residue gauge: group tombstones
