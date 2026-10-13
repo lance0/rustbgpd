@@ -109,6 +109,8 @@ enum Drive {
     /// with reads admitted after earlier restoration steps succeeded.
     CompensatingReplay,
     ValidationRefresh,
+    /// RFC 9324 local re-evaluation fan-out (`[rpki] local_revalidation`).
+    LocalRevalidation,
     DatasetRefresh,
     DatasetGeneration {
         compensate: bool,
@@ -179,6 +181,13 @@ fn stall_then_hold_state(command: &PeerCommand, index: usize) -> SessionAction {
     match (command, index) {
         (PeerCommand::QueryState { .. }, 0) => SessionAction::Stall,
         (PeerCommand::QueryState { .. }, 1) => SessionAction::Hold,
+        _ => SessionAction::Answer,
+    }
+}
+
+fn hold_first_revalidate(command: &PeerCommand, index: usize) -> SessionAction {
+    match command {
+        PeerCommand::RevalidateImport { .. } if index == 0 => SessionAction::Hold,
         _ => SessionAction::Answer,
     }
 }
@@ -523,6 +532,17 @@ const WAIT_SITES: &[WaitSite] = &[
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::ExportRestored,
+    },
+    WaitSite {
+        site: "policy.rs::revalidate_import_validation_dependents",
+        awaits: "PeerCommand::RevalidateImport answer of each validation-dependent peer",
+        drive: Drive::LocalRevalidation,
+        rib: RibHold::None,
+        session: hold_first_revalidate,
+        additional_entry: None,
+        window: Duration::from_millis(250),
+        contract: Contract::Served,
+        completion: Completion::Finished,
     },
     WaitSite {
         site: "policy.rs::soft_reset_import_validation_dependents",
@@ -894,6 +914,7 @@ fn command_kind(command: &PeerCommand) -> &'static str {
         PeerCommand::SendRouteRefresh { .. } => "SendRouteRefresh",
         PeerCommand::QueryImportPolicyTermHits { .. } => "QueryImportPolicyTermHits",
         PeerCommand::ReplayOutbound { .. } => "ReplayOutbound",
+        PeerCommand::RevalidateImport { .. } => "RevalidateImport",
         _ => "other",
     }
 }
@@ -924,6 +945,15 @@ fn answer_session(command: PeerCommand, addr: IpAddr, established: bool, fail: b
         | PeerCommand::UpdateGracefulShutdown { reply, .. }
         | PeerCommand::SendRouteRefresh { reply, .. } => {
             let _ = reply.send(if fail { failed() } else { Ok(()) });
+        }
+        PeerCommand::RevalidateImport { reply, .. } => {
+            let _ = reply.send(if established {
+                rustbgpd_transport::ImportRevalidation::Local {
+                    refresh_families: Vec::new(),
+                }
+            } else {
+                rustbgpd_transport::ImportRevalidation::NotEstablished
+            });
         }
         PeerCommand::QueryImportPolicyTermHits { reply } => {
             let _ = reply.send(Some(ImportPolicyTermHits {
@@ -1148,6 +1178,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         | Drive::HonorBlackhole
         | Drive::CompensatingReplay
         | Drive::ValidationRefresh
+        | Drive::LocalRevalidation
         | Drive::DatasetRefresh
         | Drive::DatasetGeneration { .. }
         | Drive::RetainedStaleCapacity
@@ -1240,6 +1271,13 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::ValidationRefresh => {
             manager
                 .soft_reset_import_validation_dependents(ImportValidationDependency::Rpki)
+                .await
+        }
+        Drive::LocalRevalidation => {
+            manager
+                .revalidate_import_validation_dependents(rustbgpd_transport::ValidationDelta::Rpki(
+                    None,
+                ))
                 .await
         }
         Drive::DatasetRefresh => {
@@ -1507,7 +1545,7 @@ async fn run(row: &WaitSite) {
                     crate::config::RFC8212_MISSING_IMPORT_POLICY,
                 ));
         }
-        Drive::ValidationRefresh => {
+        Drive::ValidationRefresh | Drive::LocalRevalidation => {
             for peer in [first, second] {
                 manager.peers.get_mut(&key(peer)).unwrap().import_policy =
                     Some(validation_policy_chain(ImportValidationDependency::Rpki));

@@ -5743,12 +5743,13 @@ impl BgpMetrics {
         self.0.aspa_records.set(count);
     }
 
-    /// Record validation-cache-triggered inbound Route Refresh work.
+    /// Record validation-cache-triggered import re-evaluation work.
     ///
     /// Labels are bounded:
     /// - `dependency`: `"rpki"` or `"aspa"`.
-    /// - `outcome`: `"eligible"`, `"refreshed"`,
-    ///   `"skipped_not_established"`, or `"failed"`.
+    /// - `outcome`: `"eligible"`, `"refreshed"`, `"skipped_not_established"`,
+    ///   `"skipped_state_unknown"`, `"failed"`, and with RFC 9324 local
+    ///   re-evaluation `"revalidated_locally"` or `"fallback_refresh"`.
     pub fn record_validation_import_refresh(&self, dependency: &str, outcome: &str, count: u64) {
         self.0
             .validation_import_refreshes

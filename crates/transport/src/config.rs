@@ -709,6 +709,10 @@ pub struct TransportConfig {
     /// for `PolicyService.ListRejectedRoutes`. Operator knob:
     /// `[policy.reject_retention] capacity`.
     pub reject_retention_capacity: usize,
+    /// RFC 9324 local re-evaluation (`[rpki] local_revalidation`): retain
+    /// the pre-policy unicast input of validation-dependent import decisions
+    /// so a VRP or ASPA change is re-evaluated without Route Refresh.
+    pub local_revalidation: bool,
     /// Emit RFC 8671 post-policy Adj-RIB-Out BMP route monitoring for
     /// every outbound UPDATE. Set when at least one BMP collector
     /// monitors `rib_out_post`; kept off otherwise so the lossy BMP
@@ -795,6 +799,7 @@ impl TransportConfig {
             reject_retention_enabled: true,
             reject_retention_capacity:
                 crate::session::rejected_routes::DEFAULT_REJECT_RETENTION_CAPACITY,
+            local_revalidation: false,
             bmp_rib_out: false,
             slow_peer_threshold_pct: DEFAULT_SLOW_PEER_THRESHOLD_PCT,
             slow_peer_duration: DEFAULT_SLOW_PEER_DURATION_SECS,

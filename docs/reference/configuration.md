@@ -2728,14 +2728,58 @@ Every route receives a validation state based on RPKI data:
 
 Use `match_rpki_validation` in import or export policy statements to filter
 routes by RPKI state. Import validation evaluates against the current VRP
-snapshot at ingress time. Each changed VRP/ASPA snapshot asks every affected
-Established peer whose resolved import policy matches validation state to
-replay all negotiated families. This is a full family replay, not a replay
+snapshot at ingress time. By default, each changed VRP/ASPA snapshot asks every
+affected Established peer whose resolved import policy matches validation state
+to replay all negotiated families. This is a full family replay, not a replay
 limited to prefixes covered by the cache delta. When negotiated, Enhanced Route
 Refresh can bracket it with BoRR/EoRR but does not delta-reduce it.
 Reconsidering previously denied routes requires negotiated Route Refresh and
 the peer's replay; peers that cannot be refreshed evaluate against the new
 snapshot when routes are naturally re-advertised or a new session replays them.
+[Local re-evaluation](#local-re-evaluation-rfc-9324) replaces that replay with
+a local one.
+
+### Local re-evaluation (RFC 9324)
+
+```toml
+[rpki]
+local_revalidation = true
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|:--------:|:-------:|-------------|
+| `local_revalidation` | bool | no | `false` | Re-evaluate VRP and ASPA changes from locally retained input instead of asking peers for inbound Route Refresh |
+
+With `local_revalidation = true`, every session whose import policy matches
+RPKI or ASPA state keeps the pre-policy IPv4/IPv6 unicast input it received:
+each accepted route, and each rejected route that a different validation
+outcome would have admitted. A reject that holds for every validation outcome
+(a bogon, an IRR mismatch) is not kept. A changed VRP snapshot re-runs import
+policy for the retained routes covered by the changed VRPs; a changed ASPA
+snapshot does the same for routes whose `AS_PATH` contains a changed customer
+ASN. Newly admitted routes enter the RIB and newly rejected ones are withdrawn
+through the ordinary inbound path, and no ROUTE-REFRESH is sent. The first
+table after startup, an RTR cache reset, and a full snapshot re-evaluate every
+retained route. Re-evaluation runs in bounded chunks on the session task.
+
+Each session keeps at most 65,536 retained rejects. A session that exceeds the
+bound discards its retained input, logs a warning, and falls back to inbound
+Route Refresh for later changes until the session resets;
+`bgp_validation_import_refreshes_total{outcome="fallback_refresh"}` counts each
+fallback. If the overflow interrupts queued work, the session requests the
+unicast replay immediately. FlowSpec import still sees the destination
+prefix's RPKI state and is not retained, so negotiated FlowSpec families keep
+Route Refresh. An import policy that starts depending on validation state
+during an established session falls back the same way until an enhanced Route
+Refresh (RFC 7313) has replayed every negotiated unicast family, or until the
+session resets. A peer whose import-policy Route Refresh failed and awaits retry also
+falls back, because its retained input predates the policy change.
+
+The retained input costs memory in proportion to the routes received from
+validation-dependent peers. RFC 9324 Section 4 requires this control to be
+global, so it is not available per neighbor. Like the rest of `[rpki]`,
+changing it requires a restart. IRR and other policy dataset swaps still use
+Route Refresh.
 
 Drop RPKI-invalid routes (recommended):
 
@@ -5596,7 +5640,7 @@ quoting it:
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `gr_stale_routes_time must be > 0` / `gr_stale_routes_time <value> exceeds 3600 (1 hour max)` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `prefix length ... exceeds` |
 | Policy entry must have at least one match condition (see [Match conditions](#match-conditions)) | `must have at least one match condition` |
-| Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates trigger inbound Route Refresh for established peers whose import policy depends on validation state | *(informational — no error)* |
+| Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates re-evaluate established peers whose import policy depends on validation state, by inbound Route Refresh unless `[rpki] local_revalidation` re-evaluates them locally | *(informational — no error)* |
 | `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |

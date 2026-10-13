@@ -121,6 +121,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         explain_cache_size: 4096,
         reject_retention_enabled: true,
         reject_retention_capacity: 1024,
+        local_revalidation: false,
         bmp_rib_out: false,
         slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
         slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,

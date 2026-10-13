@@ -1208,6 +1208,11 @@ impl PeerSession {
                     self.rejected_routes.clear();
                     self.metrics
                         .set_rejected_routes_retained(&self.peer_label, 0);
+                    // RFC 9324 retention is per-session input; the next
+                    // session starts complete and refills from its UPDATEs.
+                    if let Some(retention) = self.validation_retention.as_mut() {
+                        retention.clear();
+                    }
                     // Reset framing limit for the next session (RFC 8654 §2:
                     // extended messages are per-session, not persistent).
                     self.read_buf

@@ -1498,6 +1498,11 @@ impl PeerSession {
                 }
                 ControlFlow::Continue(())
             }
+            PeerCommand::RevalidateImport { delta, reply } => {
+                // Queue only; the run loop replays in bounded chunks.
+                let _ = reply.send(self.revalidate_import(&delta));
+                ControlFlow::Continue(())
+            }
             PeerCommand::UpdateImportPolicy { policy, reply } => {
                 let policy = policy.map(|policy| *policy);
                 self.install_import_policy(policy);

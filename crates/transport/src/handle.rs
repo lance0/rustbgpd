@@ -536,6 +536,15 @@ pub enum PeerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
+    /// RFC 9324: a validation snapshot changed. The session answers at once
+    /// whether it can re-evaluate locally, then replays the affected
+    /// retained routes through its inbound path.
+    RevalidateImport {
+        /// What changed.
+        delta: ValidationDelta,
+        /// The session's answer, sent before the re-evaluation runs.
+        reply: oneshot::Sender<ImportRevalidation>,
+    },
     /// Replace the import policy chain for future inbound UPDATE processing.
     UpdateImportPolicy {
         /// New effective import policy chain (`None` = permit-all).
@@ -713,6 +722,35 @@ impl PeerCommand {
             _ => std::future::pending().await,
         }
     }
+}
+
+/// What changed in the validation snapshot, for RFC 9324 local
+/// re-evaluation ([`PeerCommand::RevalidateImport`]).
+#[derive(Debug, Clone)]
+pub enum ValidationDelta {
+    /// VRPs changed. `Some` lists every added or removed VRP; `None` (full
+    /// snapshot, cache reset, or first table) re-evaluates every retained route.
+    Rpki(Option<Arc<[rustbgpd_rpki::VrpEntry]>>),
+    /// ASPA records changed. `Some` holds the changed customer ASNs; `None`
+    /// re-evaluates every retained route.
+    Aspa(Option<Arc<rustc_hash::FxHashSet<u32>>>),
+}
+
+/// A session's answer to [`PeerCommand::RevalidateImport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportRevalidation {
+    /// Not Established: nothing to re-evaluate.
+    NotEstablished,
+    /// Retained unicast input is complete and is being re-evaluated locally.
+    /// `refresh_families` lists negotiated families outside the store whose
+    /// import can still depend on the change (`FlowSpec` destination RPKI).
+    Local {
+        /// Families that still need inbound Route Refresh.
+        refresh_families: Vec<(Afi, Safi)>,
+    },
+    /// No complete retained input (disabled, reject bound exceeded, or
+    /// retention started mid-session): fall back to Route Refresh.
+    Incomplete,
 }
 
 /// Per-term hit-counter snapshot for one session's installed import
