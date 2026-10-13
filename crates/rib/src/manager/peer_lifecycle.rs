@@ -1511,9 +1511,12 @@ impl RibManager {
     /// source or the post-policy route (the LAN-474 emit-filter
     /// predicate). Membership is re-checked after each joiner installs.
     ///
+    /// At most [`MAX_JOIN_COHORT`] registrations complete, leader included.
     /// One turn's admission work is bounded: at most one control-tag pass
     /// over the group table, whatever the number of distinct RS ASNs, and
-    /// at most [`MAX_JOIN_COHORT_EXAMINED`] queued entries examined.
+    /// at most [`MAX_JOIN_COHORT_EXAMINED`] queued entries checked against
+    /// the leader's profile. Every other entry is moved back to the queue
+    /// unexamined, so the requeue itself is linear in the queue length.
     fn take_join_cohort(&mut self, leader: IpAddr) -> Vec<IpAddr> {
         if self.pending_initial_registrations.is_empty() {
             return Vec::new();
@@ -1550,9 +1553,10 @@ impl RibManager {
         let queued = std::mem::take(&mut self.pending_initial_registrations);
         let mut members = Vec::new();
         for (examined, peer) in queued.into_iter().enumerate() {
-            // The leader is the cohort's first registration.
+            // The leader is the cohort's first registration, so at most
+            // `MAX_JOIN_COHORT - 1` members join it.
             let joins = examined < MAX_JOIN_COHORT_EXAMINED
-                && members.len() + 1 < MAX_JOIN_COHORT
+                && members.len() < MAX_JOIN_COHORT - 1
                 && self
                     .live_sessions
                     .get(&peer)
