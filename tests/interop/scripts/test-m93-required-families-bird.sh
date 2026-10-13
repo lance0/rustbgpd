@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M93 runs against checksum-built BIRD 2.19.2.
+# M93 runs against checksum-built BIRD 2.19.3.
 # Load-bearing: removing the required-family guard establishes phase 1 instead
 # of producing the exact OPEN 2/7 frame; the final phase pins empty-list parity.
 
@@ -11,8 +11,8 @@ export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 BIRD="clab-${TOPO}-bird"
-readonly BIRD_IMAGE="bird:v2.19.2-m85"
-readonly BIRD_VERSION="BIRD version 2.19.2"
+readonly BIRD_IMAGE="bird:v2.19.3-m85"
+readonly BIRD_VERSION="BIRD version 2.19.3"
 PEER="10.93.0.2"
 EXPECTED_NOTIFICATION="ffffffffffffffffffffffffffffffff001b030207010400020001"
 
@@ -94,7 +94,7 @@ capture_has_exact_rejection() {
 }
 
 main() {
-    log "M93: required-family enforcement against BIRD 2.19.2"
+    log "M93: required-family enforcement against BIRD 2.19.3"
     preflight
     resolve_grpc_addr
     preflight_bird_version || exit 1

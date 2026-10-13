@@ -4,7 +4,7 @@
 # M104 reuses every M90 site/config input read-only while changing only the
 # daemon identities under proof:
 #   - rustbgpd: the exact workflow SHA built as rustbgpd:dev
-#   - BIRD 2.19.2, built from the staged checksum-verified source archive
+#   - BIRD 2.19.3, built from the staged checksum-verified source archive
 #   - GoBGP 4.10.0, built from the checksum-pinned release archive
 #
 # The driver renders both route-server configurations after deploy, validates
@@ -45,7 +45,7 @@ topology:
 
     bird:
       kind: linux
-      image: bird:v2.19.2-m104
+      image: bird:v2.19.3-m104
       cmd: sleep infinity
       exec:
         - ip addr add 192.0.2.10/24 dev eth1
