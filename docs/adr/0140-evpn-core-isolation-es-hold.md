@@ -745,6 +745,21 @@ Implementation review tightened decision 4 in two ways.
   repeat of the last reading. Only backstops act without a reading, and an
   isolation hold is released after `backstop_seconds` with no answer.
 
+## Amendment (2026-10-13): stacked uplinks
+
+- **An uplink stacked on a bound link is excluded too.** A VLAN on a bound
+  bond loses carrier when the hold downs the bond's members, so it latches
+  isolation exactly as an enslaved uplink would. Decision 2's exclusion
+  therefore follows the uplink's kernel lower device (`IFLA_LINK`, which a
+  VLAN, macvlan or ipvlan reports for its parent and a veth for its peer),
+  applying the same bound, enslaved and owned tests at each hop, and reports
+  `uplink_overlap`. The walk stops after eight hops, the kernel's nesting
+  limit, which also ends a veth pair's cycle. A lower device that is absent
+  from the link dump, or that `IFLA_LINK_NETNSID` places in another
+  namespace, ends the walk as no overlap, as an unreadable master already
+  does: the hold cannot take down a link it cannot see. A VXLAN's underlay
+  device is `IFLA_VXLAN_LINK`, not `IFLA_LINK`, and is not followed.
+
 ## Consequences
 
 - An isolated all-active PE stops attracting CE traffic. At recovery and

@@ -2443,8 +2443,8 @@ impl BgpMetrics {
                  isolation did not hold the segment because it had no remote ES peer. \
                  overridden: another writer raised a held member. ownership_ambiguous: \
                  a receipt entry no longer matches its link, which is left down. \
-                 uplink_overlap: an uplink is, or is enslaved under, this binding and is \
-                 excluded from the signal. action_failed: an admin-state write or \
+                 uplink_overlap: an uplink is, is enslaved under, or is stacked on this \
+                 binding and is excluded from the signal. action_failed: an admin-state write or \
                  receipt publication failed. disabled: [evpn_core_isolation] is off. \
                  interface is the bound link name. Series are removed when the binding \
                  leaves the config, except that an interface whose release is still \

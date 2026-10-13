@@ -457,6 +457,7 @@ mod tests {
             carrier: false,
             is_bond: master.is_none() && name.starts_with("bond"),
             master,
+            lower: None,
             address: Some(vec![2, 0, 0, 0, 0, 1]),
             perm_address: None,
             bond_perm_hwaddr: master.map(|_| vec![2, 0, 0, 0, 0, u8::try_from(ifindex).unwrap()]),

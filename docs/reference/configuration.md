@@ -4787,10 +4787,12 @@ session and no EVPN peer whose routes it retains as GR or LLGR stale, or when
 every configured uplink lacks carrier. Isolation is entered immediately. An
 uplink that is a bound link, is enslaved under a bound bond, or is an owned
 member is excluded from the signal, logged as an error and reported as
-`uplink_overlap`; if every uplink is excluded the uplink signal is false. Do
-not use an uplink stacked on a bound interface (such as a VLAN on the bound
-bond): it loses carrier when the hold takes the members down, which keeps the
-PE isolated, and validation does not detect it yet.
+`uplink_overlap`; if every uplink is excluded the uplink signal is false. The
+same applies to an uplink stacked on such a link, such as a VLAN on the bound
+bond: the daemon follows each uplink's kernel lower device (`IFLA_LINK`) for up
+to eight hops, because the stacked link loses carrier when the hold takes the
+members down. A lower device that is missing, or that lives in another network
+namespace, ends the check, and the uplink keeps its own carrier in the signal.
 
 **Action.** For a bound bond, every member is set administratively down
 (`RTM_SETLINK` clearing `IFF_UP`); the bond stays up and the members stay

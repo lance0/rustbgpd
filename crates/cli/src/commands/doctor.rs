@@ -1861,8 +1861,8 @@ fn core_isolation_status(state: &str, interface: &str) -> (CheckStatus, String) 
         "uplink_overlap" => (
             CheckStatus::Fail,
             format!(
-                "uplink_overlap: a configured uplink is {interface} or is enslaved under it, so \
-                 it is excluded from the uplink signal; fix the uplinks list"
+                "uplink_overlap: a configured uplink is {interface}, is enslaved under it or is \
+                 stacked on it, so it is excluded from the uplink signal; fix the uplinks list"
             ),
         ),
         other => (

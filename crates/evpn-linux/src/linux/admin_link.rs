@@ -8,7 +8,8 @@
 //!   fields ADR-0140 decision 6 records (ifindex, name, master, assigned
 //!   MAC, `IFLA_PERM_ADDRESS`, `IFLA_BOND_SLAVE_PERM_HWADDR`) together
 //!   with admin state and carrier (`IFF_LOWER_UP`, the same bit the
-//!   ADR-0085 `link_carrier` projection reads).
+//!   ADR-0085 `link_carrier` projection reads) and the lower device
+//!   (`IFLA_LINK`) the uplink signal follows to find a stacked uplink.
 //! - [`AdminLinks::get`] re-reads one link for the fresh check made
 //!   immediately before each write.
 //! - [`AdminLinks::set_admin_up`] writes only the `IFF_UP` bit.
@@ -48,6 +49,11 @@ pub struct AdminLinkState {
     pub is_bond: bool,
     /// `IFLA_MASTER`.
     pub master: Option<u32>,
+    /// `IFLA_LINK`: the lower device a VLAN, macvlan or ipvlan is stacked
+    /// on, or a veth's peer. `None` when the kernel omits it (the link is
+    /// its own lower), when it is 0, or when `IFLA_LINK_NETNSID` says the
+    /// ifindex belongs to another namespace and so names no link here.
+    pub lower: Option<u32>,
     /// `IFLA_ADDRESS`: the assigned MAC.
     pub address: Option<Vec<u8>>,
     /// `IFLA_PERM_ADDRESS`; the kernel omits an all-zero address.
@@ -187,11 +193,13 @@ pub fn parse_link(message: &LinkMessage) -> Option<AdminLinkState> {
         carrier: message.header.flags.contains(LinkFlags::LowerUp),
         is_bond: false,
         master: None,
+        lower: None,
         address: None,
         perm_address: None,
         bond_perm_hwaddr: None,
     };
     let mut named = false;
+    let mut other_netns = false;
     for attr in &message.attributes {
         match attr {
             LinkAttribute::IfName(name) => {
@@ -199,6 +207,8 @@ pub fn parse_link(message: &LinkMessage) -> Option<AdminLinkState> {
                 named = true;
             }
             LinkAttribute::Controller(master) => state.master = Some(*master),
+            LinkAttribute::Link(lower) => state.lower = Some(*lower).filter(|&l| l != 0),
+            LinkAttribute::LinkNetNsId(_) => other_netns = true,
             LinkAttribute::Address(mac) => state.address = Some(mac.clone()),
             LinkAttribute::PermAddress(mac) => state.perm_address = Some(mac.clone()),
             LinkAttribute::LinkInfo(infos) => {
@@ -217,6 +227,9 @@ pub fn parse_link(message: &LinkMessage) -> Option<AdminLinkState> {
             }
             _ => {}
         }
+    }
+    if other_netns {
+        state.lower = None;
     }
     named.then_some(state)
 }
@@ -247,6 +260,19 @@ mod tests {
         assert_eq!(state.master, Some(3));
         assert_eq!(state.bond_perm_hwaddr, Some(vec![2, 0, 0, 0, 0, 9]));
         assert_eq!(state.perm_address, None, "absent stays absent");
+        assert_eq!(state.lower, None, "absent stays absent");
+
+        // A VLAN's IFLA_LINK is its lower device; 0 or another namespace's
+        // ifindex names no link here.
+        message.attributes.push(LinkAttribute::Link(3));
+        assert_eq!(parse_link(&message).unwrap().lower, Some(3));
+        message.attributes.push(LinkAttribute::LinkNetNsId(1));
+        assert_eq!(parse_link(&message).unwrap().lower, None);
+        message
+            .attributes
+            .retain(|a| !matches!(a, LinkAttribute::Link(_) | LinkAttribute::LinkNetNsId(_)));
+        message.attributes.push(LinkAttribute::Link(0));
+        assert_eq!(parse_link(&message).unwrap().lower, None);
 
         message
             .attributes
