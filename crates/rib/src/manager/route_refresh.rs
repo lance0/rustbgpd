@@ -649,7 +649,7 @@ impl RibManager {
                 .primary_lookahead
                 .take()
                 .expect("refresh admitted above");
-            self.count_conditional_expiry_admission();
+            self.expiry_cutoffs.charge();
             self.advance_route_pages_for_update(&update);
             let RibUpdate::RouteRefreshRequest {
                 peer,

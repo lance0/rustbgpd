@@ -8631,7 +8631,11 @@ async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
         let (mut manager, peers, mut receivers) = direct_clean_transition_manager(66, 2, None);
         let (tx, rx) = mpsc::channel(128);
         manager.rx = rx;
-        manager.conditional_expiry_cutoff = cutoff;
+        if let Some(cutoff) = cutoff {
+            manager
+                .expiry_cutoffs
+                .observe(ExpiryTimer::Conditional, true, cutoff);
+        }
         let flags: Vec<_> = peers
             .iter()
             .map(|peer| queue_refresh(&tx, *peer, 0, Afi::Ipv4))
@@ -8643,7 +8647,7 @@ async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
             assert_eq!(receiver.try_recv().is_ok(), i < admitted);
         }
         if cutoff.is_some() {
-            assert_eq!(manager.conditional_expiry_cutoff, Some(0));
+            assert!(manager.expiry_cutoffs.any_exhausted());
         }
     }
 }

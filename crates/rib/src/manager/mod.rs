@@ -999,16 +999,13 @@ pub struct RibManager {
     /// distribution window, held until the run loop's next ordinary receive
     /// so a non-extending update keeps its FIFO position.
     primary_lookahead: Option<RibUpdate>,
-    /// ADR-0137: while a conditional-advertisement settle deadline is due,
-    /// the primary updates still admitted before it fires — the backlog
-    /// when expiry was first seen. Every admission counts, including one a
-    /// distribution window coalesces, and a window does not extend past it.
-    conditional_expiry_cutoff: Option<usize>,
-    /// The same admission cutoff for a due RFC 4684 §6 `EoR` hold cap: the
-    /// primary backlog when the cap was first seen due. Only that work may
-    /// run before the held markers are released, so sustained ingress
-    /// cannot postpone the cap indefinitely.
-    rtc_eor_expiry_cutoff: Option<usize>,
+    /// ADR-0137 admission cutoffs, one per run-loop timer: while a timer is
+    /// due, the primary updates still admitted before it fires, which is
+    /// the backlog when it was first seen due. Every admission counts,
+    /// including one a distribution window coalesces, and a window does not
+    /// extend past an exhausted cutoff. Sustained ingress therefore cannot
+    /// postpone any of these deadlines indefinitely.
+    expiry_cutoffs: ExpiryCutoffs,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
@@ -1096,6 +1093,61 @@ pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Durat
 /// arriving after it do not emit a record; the interval alone cannot
 /// establish whether a query was delayed by the commit.
 const POST_COMMIT_QUERY_TRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run-loop timers whose expiry waits only for the work queued when they
+/// first fell due (ADR-0137 admission cutoff).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpiryTimer {
+    RtcEor,
+    Conditional,
+    GrStale,
+    LlgrStale,
+    RefreshWindow,
+    SelectionDeferral,
+}
+
+impl ExpiryTimer {
+    const COUNT: usize = 6;
+}
+
+/// One admission cutoff per [`ExpiryTimer`]: `None` while the timer is not
+/// due, else the primary updates still admitted before it fires. An
+/// admission is charged to every captured cutoff, so several timers due at
+/// once each fire within the backlog present when they fell due.
+#[derive(Debug, Default)]
+struct ExpiryCutoffs([Option<usize>; ExpiryTimer::COUNT]);
+
+impl ExpiryCutoffs {
+    /// Capture `backlog` the first time `timer` is seen due; forget it once
+    /// the timer is no longer due.
+    fn observe(&mut self, timer: ExpiryTimer, due: bool, backlog: usize) {
+        let cutoff = &mut self.0[timer as usize];
+        if !due {
+            *cutoff = None;
+        } else if cutoff.is_none() {
+            *cutoff = Some(backlog);
+        }
+    }
+
+    fn remaining(&self, timer: ExpiryTimer) -> usize {
+        self.0[timer as usize].unwrap_or(0)
+    }
+
+    fn clear(&mut self, timer: ExpiryTimer) {
+        self.0[timer as usize] = None;
+    }
+
+    /// Charge one primary admission to every due timer.
+    fn charge(&mut self) {
+        for cutoff in self.0.iter_mut().flatten() {
+            *cutoff = cutoff.saturating_sub(1);
+        }
+    }
+
+    fn any_exhausted(&self) -> bool {
+        self.0.contains(&Some(0))
+    }
+}
 
 /// Upper bound on holding a peer's VPN/EVPN End-of-RIB while waiting for its
 /// RT-Constrain End-of-RIB. RFC 4684 §6: a speaker that delays VPN
@@ -2090,8 +2142,7 @@ impl RibManager {
             pending_distribute_affected: HashSet::new(),
             distribution_window: distribution::DistributionWindow::default(),
             distribution_window_limits: distribution::DistributionWindowLimits::default(),
-            conditional_expiry_cutoff: None,
-            rtc_eor_expiry_cutoff: None,
+            expiry_cutoffs: ExpiryCutoffs::default(),
             primary_lookahead: None,
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
@@ -3101,26 +3152,33 @@ impl RibManager {
             .take()
             .or_else(|| self.rx.try_recv().ok());
         if update.is_some() {
-            self.count_conditional_expiry_admission();
+            self.expiry_cutoffs.charge();
         }
         update
-    }
-
-    /// Charge one primary admission against a due settle deadline's cutoff,
-    /// and against a due RTC `EoR` hold cap's cutoff.
-    fn count_conditional_expiry_admission(&mut self) {
-        if let Some(cutoff) = self.conditional_expiry_cutoff.as_mut() {
-            *cutoff = cutoff.saturating_sub(1);
-        }
-        if let Some(cutoff) = self.rtc_eor_expiry_cutoff.as_mut() {
-            *cutoff = cutoff.saturating_sub(1);
-        }
     }
 
     /// A due timer's admission cutoff is exhausted: coalescing paths must
     /// not admit further primary updates ahead of its expiry.
     fn expiry_cutoff_reached(&self) -> bool {
-        self.conditional_expiry_cutoff == Some(0) || self.rtc_eor_expiry_cutoff == Some(0)
+        self.expiry_cutoffs.any_exhausted()
+    }
+
+    /// Drain-first expiry for a due `timer`: run one admitted route chunk,
+    /// or admit one queued update charged to the cutoffs, and return `true`
+    /// so the caller re-enters the loop. Return `false`, clearing the
+    /// cutoff, once only post-deadline work remains and the timer may fire.
+    /// An admitted route batch always finishes first (its chunks and final
+    /// distribution); batches come only from admitted updates, so this
+    /// stays bounded.
+    async fn drain_before_expiry(&mut self, timer: ExpiryTimer) -> bool {
+        let remaining = self.expiry_cutoffs.remaining(timer);
+        if (!self.pending_route_batches.is_empty() || remaining > 0)
+            && self.drain_ready_updates().await
+        {
+            return true;
+        }
+        self.expiry_cutoffs.clear(timer);
+        false
     }
 
     /// Cancel-safe receive of the next primary update, the held lookahead
@@ -5250,45 +5308,39 @@ impl RibManager {
 
             let now = tokio::time::Instant::now();
             let conditional_due = has_conditional_timer && conditional_sleep.deadline() <= now;
-            if !conditional_due {
-                self.conditional_expiry_cutoff = None;
-            } else if self.conditional_expiry_cutoff.is_none() {
-                // Capture the ADR-0137 cutoff the moment the deadline is
-                // first seen due, before the RTC End-of-RIB branch below can
-                // drain: updates admitted there are charged to this cutoff
-                // too, so a message that arrives after the deadline is never
-                // counted as pre-deadline work.
-                self.conditional_expiry_cutoff = Some(self.primary_backlog());
-            }
             let rtc_eor_due = has_rtc_eor_timer && rtc_eor_sleep.deadline() <= now;
-            if !rtc_eor_due {
-                self.rtc_eor_expiry_cutoff = None;
+            let gr_due = has_gr_timers && gr_sleep.deadline() <= now;
+            let llgr_due = has_llgr_timers && llgr_sleep.deadline() <= now;
+            let refresh_due = has_refresh_timers && refresh_sleep.deadline() <= now;
+            let selection_due = has_selection_timer && selection_sleep.deadline() <= now;
+            // ADR-0137: capture every due timer's admission cutoff the
+            // moment it is first seen due, before any branch below drains.
+            // Each due branch admits only that backlog (drain-first within
+            // it) and then fires, and every admission is charged to all
+            // captured cutoffs, so an update that arrives after a deadline
+            // is never counted as pre-deadline work and sustained ingress
+            // cannot postpone any of these timers. The branch order below
+            // only decides which of several due timers fires first.
+            let backlog = self.primary_backlog();
+            for (timer, due) in [
+                (ExpiryTimer::RtcEor, rtc_eor_due),
+                (ExpiryTimer::Conditional, conditional_due),
+                (ExpiryTimer::GrStale, gr_due),
+                (ExpiryTimer::LlgrStale, llgr_due),
+                (ExpiryTimer::RefreshWindow, refresh_due),
+                (ExpiryTimer::SelectionDeferral, selection_due),
+            ] {
+                self.expiry_cutoffs.observe(timer, due, backlog);
             }
             if rtc_eor_due {
                 // A queued RT-Constrain EoR releases the hold with its
                 // membership applied; let it win over the cap. RFC 4684 §6
-                // requires the delay to be bounded, so only the primary
-                // updates already queued when the cap was first seen may
-                // run first (the ADR-0137 cutoff shape below); later
-                // arrivals cannot postpone the cap. This check precedes
-                // every other timer branch: those drain one update and
-                // `continue` while their own expired deadline stays due,
-                // which under sustained ingress would otherwise keep this
-                // cutoff from ever being captured or consumed.
-                let cutoff = match self.rtc_eor_expiry_cutoff {
-                    Some(cutoff) => cutoff,
-                    None => *self.rtc_eor_expiry_cutoff.insert(self.primary_backlog()),
-                };
-                // An admitted route batch finishes (chunks and its final
-                // distribution) first, so no route from an update queued
-                // before the cap lands behind the released EoR. Batches
-                // come only from admitted updates, so this stays bounded.
-                if (!self.pending_route_batches.is_empty() || cutoff > 0)
-                    && self.drain_ready_updates().await
-                {
+                // requires the delay to be bounded; an admitted route batch
+                // finishes first, so no route from an update queued before
+                // the cap lands behind the released EoR.
+                if self.drain_before_expiry(ExpiryTimer::RtcEor).await {
                     continue;
                 }
-                self.rtc_eor_expiry_cutoff = None;
                 self.expire_rtc_eor_holds();
                 continue;
             }
@@ -5323,29 +5375,15 @@ impl RibManager {
                 // ADR-0137: expiry applies only the observation of a finished
                 // batch. An open route batch, and the primary updates already
                 // queued when expiry was first seen, run first so their
-                // observation flush precedes it. Later traffic cannot defer
-                // the timer: the cutoff is captured once per expiry and
-                // charged for every admission, and this check precedes the
-                // other timers, whose drains are unbounded under traffic
-                // (only the RTC End-of-RIB cap, bounded by its own cutoff,
-                // runs first).
-                let cutoff = match self.conditional_expiry_cutoff {
-                    Some(cutoff) => cutoff,
-                    None => *self
-                        .conditional_expiry_cutoff
-                        .insert(self.primary_backlog()),
-                };
-                if (!self.pending_route_batches.is_empty() || cutoff > 0)
-                    && self.drain_ready_updates().await
-                {
+                // observation flush precedes it.
+                if self.drain_before_expiry(ExpiryTimer::Conditional).await {
                     continue;
                 }
-                self.conditional_expiry_cutoff = None;
                 let _ = self.fire_conditional_advertisement_timers();
                 continue;
             }
-            if has_gr_timers && gr_sleep.deadline() <= now {
-                if self.drain_ready_updates().await {
+            if gr_due {
+                if self.drain_before_expiry(ExpiryTimer::GrStale).await {
                     continue;
                 }
                 let expired: Vec<IpAddr> = self
@@ -5359,24 +5397,28 @@ impl RibManager {
                 }
                 continue;
             }
-            if has_llgr_timers && llgr_sleep.deadline() <= now {
-                if self.drain_ready_updates().await {
+            if llgr_due {
+                if self.drain_before_expiry(ExpiryTimer::LlgrStale).await {
                     continue;
                 }
                 self.sweep_expired_llgr_stale();
                 continue;
             }
-            if has_refresh_timers && refresh_sleep.deadline() <= now {
-                if self.drain_ready_updates().await {
+            if refresh_due {
+                if self.drain_before_expiry(ExpiryTimer::RefreshWindow).await {
                     continue;
                 }
                 self.expire_refresh_windows();
                 continue;
             }
-            if has_selection_timer && selection_sleep.deadline() <= now {
-                // A queued current-session EoR wins the all-EoR release race
-                // over a simultaneously ready timer.
-                if self.drain_ready_updates().await {
+            if selection_due {
+                // A current-session EoR queued before the timer was first
+                // seen due wins the all-EoR release race; one that arrives
+                // after it does not count toward the expired deferral.
+                if self
+                    .drain_before_expiry(ExpiryTimer::SelectionDeferral)
+                    .await
+                {
                     continue;
                 }
                 self.expire_selection_deferral();
@@ -5488,45 +5530,13 @@ impl RibManager {
                             resync_armed = false;
                         }
                     }
-                    () = gr_sleep.as_mut(), if has_gr_timers => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        // Find all peers whose GR deadline has expired
-                        let now = tokio::time::Instant::now();
-                        let expired: Vec<IpAddr> = self
-                            .gr_stale_deadlines
-                            .iter()
-                            .filter(|&(_, &deadline)| deadline <= now)
-                            .map(|(&peer, _)| peer)
-                            .collect();
-                        for peer in expired {
-                            self.sweep_gr_stale(peer);
-                        }
-                    }
-                    () = llgr_sleep.as_mut(), if has_llgr_timers => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        self.sweep_expired_llgr_stale();
-                    }
-                    () = refresh_sleep.as_mut(), if has_refresh_timers => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        self.expire_refresh_windows();
-                    }
-                    // Expiry is applied by the due check above, under its
-                    // admission cutoff.
+                    // Each timer only wakes the loop: expiry is applied by
+                    // the due checks above, under its admission cutoff.
+                    () = gr_sleep.as_mut(), if has_gr_timers => {}
+                    () = llgr_sleep.as_mut(), if has_llgr_timers => {}
+                    () = refresh_sleep.as_mut(), if has_refresh_timers => {}
                     () = rtc_eor_sleep.as_mut(), if has_rtc_eor_timer => {}
-                    () = selection_sleep.as_mut(), if has_selection_timer => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        self.expire_selection_deferral();
-                    }
-                    // Expiry is applied by the due check at the top of the
-                    // loop, after any ready update that precedes it.
+                    () = selection_sleep.as_mut(), if has_selection_timer => {}
                     () = conditional_sleep.as_mut(), if has_conditional_timer => {}
                 }
             } else {
