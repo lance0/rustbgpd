@@ -1541,26 +1541,70 @@ fn stalled_stage_acknowledgement_settles_clean_before_the_budget() {
 fn assert_stall_fenced_past_pre_effect_deadline(lab: &Lab, daemon: &mut Daemon) {
     daemon.wait_exit(70, CLEAN_EXIT_LIMIT);
     let log = daemon.log();
-    let observed: Vec<u64> = log
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|entry| entry["fields"]["message"] == PRE_EFFECT_OBSERVED)
-        .filter_map(|entry| entry["fields"]["late_ms"].as_u64())
-        .collect();
     // The pre-effect margin is the smaller of 30 s and a tenth of the budget.
     let margin = STAGE_HOLD_BUDGET / 10;
     assert!(
-        matches!(observed[..], [late] if Duration::from_millis(late) >= margin),
+        stall_fence_proven(&log, margin),
         "fenced before the owner honoured its pre-effect deadline: observed \
-         lateness {observed:?} ms, margin {margin:?}\n{log}"
+         lateness {:?} ms, margin {margin:?}\n{log}",
+        pre_effect_observations(&log)
     );
     eprintln!(
-        "host stall: owner observed its pre-effect deadline {observed:?} ms late; fence accepted"
+        "host stall: owner observed its pre-effect deadline {:?} ms late; fence accepted",
+        pre_effect_observations(&log)
     );
     lab.assert_disk("matrix-peer-group", false);
     lab.restart_and_assert_absent(
         "peer-group",
         &["--json", "peer-group", "get", "matrix-peer-group"],
+    );
+}
+
+/// Every pre-effect deadline observation in a daemon log, as lateness in ms.
+fn pre_effect_observations(log: &str) -> Vec<u64> {
+    log.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| entry["fields"]["message"] == PRE_EFFECT_OBSERVED)
+        .filter_map(|entry| entry["fields"]["late_ms"].as_u64())
+        .collect()
+}
+
+/// A budget fence is proven to follow a host stall only when the one owner
+/// observed its pre-effect deadline at least `margin` late.
+fn stall_fence_proven(log: &str, margin: Duration) -> bool {
+    matches!(
+        pre_effect_observations(log)[..],
+        [late] if Duration::from_millis(late) >= margin
+    )
+}
+
+#[test]
+fn stall_fence_requires_exactly_one_observation_at_least_a_margin_late() {
+    let margin = Duration::from_millis(300);
+    let observed = |late_ms: &[u64]| {
+        late_ms
+            .iter()
+            .map(|late| {
+                format!(
+                    "{{\"fields\":{{\"message\":\"{PRE_EFFECT_OBSERVED}\",\"late_ms\":{late}}}}}\n"
+                )
+            })
+            .collect::<String>()
+    };
+    let unrelated = "{\"fields\":{\"message\":\"runtime config settlement fail-stop armed\"}}\n";
+    assert!(!stall_fence_proven(unrelated, margin), "no observation");
+    assert!(!stall_fence_proven(&observed(&[299]), margin), "on time");
+    assert!(
+        stall_fence_proven(&observed(&[300]), margin),
+        "exactly the margin"
+    );
+    assert!(
+        stall_fence_proven(&format!("{unrelated}{}", observed(&[301])), margin),
+        "past the margin"
+    );
+    assert!(
+        !stall_fence_proven(&observed(&[900, 0]), margin),
+        "one late and one on time"
     );
 }
 
