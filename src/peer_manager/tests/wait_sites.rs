@@ -843,9 +843,10 @@ const WAIT_SITES: &[WaitSite] = &[
         contract: Contract::Served,
         completion: Completion::Finished,
     },
-    // Reply-less RIB updates wait for primary-lane capacity for as long as
-    // the RIB runs: dropping one would desynchronize the RIB, so no constant
-    // bounds these waits. Each caller chooses its read admission.
+    // RIB mailbox admission waits for primary-lane capacity for as long as
+    // the RIB runs: dropping an update would desynchronize the RIB, so no
+    // constant bounds these waits. Each caller chooses its read admission;
+    // a reply, where the update carries one, is awaited separately.
     WaitSite {
         site: "mod.rs::send_rib_update",
         awaits: "RibUpdate::PeerDown fence for a replaced unstoppable primary (full RIB channel)",

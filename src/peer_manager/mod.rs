@@ -1111,11 +1111,13 @@ impl PeerManager {
         }
     }
 
-    /// Queue one RIB update that carries no reply, serving readiness while
-    /// the RIB's primary lane is full. The update keeps the RIB's peer or
-    /// export state in step with this actor, so it is never dropped for time:
-    /// the send waits for capacity for as long as the RIB runs, and fails only
-    /// once the RIB has exited.
+    /// Readiness-aware mailbox admission: queue one RIB update on the primary
+    /// lane, serving readiness while that lane is full. This covers only the
+    /// admission wait; a caller whose update carries a reply awaits it
+    /// separately. The update keeps the RIB's peer or export state in step
+    /// with this actor, so it is never dropped for time: the send waits for
+    /// capacity for as long as the RIB runs, and fails only once the RIB has
+    /// exited.
     async fn send_rib_update(
         &mut self,
         update: RibUpdate,
