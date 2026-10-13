@@ -9,7 +9,7 @@ use rustbgpd_rib::{
 };
 use tokio::sync::oneshot;
 
-use super::{PeerManager, RIB_REPLY_TIMEOUT};
+use super::{OperatorReadAdmission, PeerManager, RIB_REPLY_TIMEOUT};
 use crate::config::{Config, ResolvedNeighbor};
 
 #[derive(Debug)]
@@ -193,16 +193,25 @@ fn capacity_class(
 }
 
 impl PeerManager {
-    pub(super) async fn query_update_group_snapshot(&self) -> Result<UpdateGroupSnapshot, String> {
+    /// The query queues behind the RIB's primary-lane work, so the wait serves
+    /// readiness. Planning mutates nothing, so operator reads are served too.
+    pub(super) async fn query_update_group_snapshot(
+        &mut self,
+    ) -> Result<UpdateGroupSnapshot, String> {
         let (reply, recv) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryUpdateGroupSnapshot { reply })
+        let rib_tx = self.rib_tx.clone();
+        let round_trip = async move {
+            rib_tx
+                .send(RibUpdate::QueryUpdateGroupSnapshot { reply })
+                .await
+                .map_err(|_| "RIB unavailable while planning update-group impact".to_string())?;
+            tokio::time::timeout(RIB_REPLY_TIMEOUT, recv)
+                .await
+                .map_err(|_| "RIB update-group snapshot timed out".to_string())?
+                .map_err(|_| "RIB dropped update-group snapshot reply".to_string())
+        };
+        self.await_with_readiness(round_trip, OperatorReadAdmission::Served)
             .await
-            .map_err(|_| "RIB unavailable while planning update-group impact".to_string())?;
-        tokio::time::timeout(RIB_REPLY_TIMEOUT, recv)
-            .await
-            .map_err(|_| "RIB update-group snapshot timed out".to_string())?
-            .map_err(|_| "RIB dropped update-group snapshot reply".to_string())
     }
 
     #[expect(

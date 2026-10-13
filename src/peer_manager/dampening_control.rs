@@ -6,65 +6,69 @@ use rustbgpd_api::peer_types::{
     OwnedDampeningControlOutcome as Outcome, PeerKey, PeerLifecycleError,
 };
 use rustbgpd_rib::RibUpdate;
-use rustbgpd_rib::dampening::{DampeningCapacityNotice, DampeningControlError};
+use rustbgpd_rib::dampening::DampeningCapacityNotice;
 use rustbgpd_rib::update::{PeerSourceContext, ReceivedRouteSource};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
-use super::{PeerManager, RIB_REPLY_TIMEOUT};
-
-async fn rib_control<T>(
-    rib_tx: &mpsc::Sender<RibUpdate>,
-    command: RibUpdate,
-    response: oneshot::Receiver<Result<T, DampeningControlError>>,
-) -> Result<Result<T, DampeningControlError>, PeerLifecycleError> {
-    let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
-    tokio::time::timeout_at(deadline, rib_tx.send(command))
-        .await
-        .map_err(|_| PeerLifecycleError::internal("dampening RIB control queue timed out"))?
-        .map_err(|_| PeerLifecycleError::internal("dampening RIB control queue closed"))?;
-    tokio::time::timeout_at(deadline, response)
-        .await
-        .map_err(|_| {
-            PeerLifecycleError::internal("accepted dampening RIB control acknowledgement timed out")
-        })?
-        .map_err(|_| {
-            PeerLifecycleError::internal("accepted dampening RIB control acknowledgement lost")
-        })
-}
+use super::{OperatorReadAdmission, PeerManager, RIB_REPLY_TIMEOUT};
 
 impl PeerManager {
+    /// Send `commands` in order on the primary RIB lane, then await
+    /// `response`. Mailbox admission and the acknowledgement share one
+    /// `RIB_REPLY_TIMEOUT` deadline.
+    ///
+    /// The acknowledgement queues behind every earlier primary-lane update,
+    /// which can take seconds after a large export commit, so the wait serves
+    /// readiness. Operator reads stay queued: the source is mid-transition. A
+    /// retiring dynamic peer is out of the peer table until the barrier
+    /// decides whether it returns, and a disable or enable has not yet been
+    /// acknowledged against the RIB's capacity block.
+    async fn rib_control<T>(
+        &mut self,
+        commands: Vec<RibUpdate>,
+        response: oneshot::Receiver<T>,
+        what: &'static str,
+    ) -> Result<T, PeerLifecycleError> {
+        let rib_tx = self.rib_tx.clone();
+        let round_trip = async move {
+            for command in commands {
+                rib_tx
+                    .send(command)
+                    .await
+                    .map_err(|_| format!("{what} queue closed"))?;
+            }
+            response
+                .await
+                .map_err(|_| format!("{what} acknowledgement lost"))
+        };
+        let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
+        self.await_with_readiness(
+            tokio::time::timeout_at(deadline, round_trip),
+            OperatorReadAdmission::Fenced {
+                reason: "the dampening source is mid-transition",
+            },
+        )
+        .await
+        .map_err(|_| PeerLifecycleError::internal(format!("{what} timed out")))?
+        .map_err(PeerLifecycleError::internal)
+    }
+
     /// Producers must already be joined. This primary-lane acknowledgement
     /// follows their exact teardown and every previously queued route chunk.
     pub(super) async fn dampening_retirement_barrier(
-        &self,
+        &mut self,
         peer: std::net::IpAddr,
         retired_sessions: &[u64],
     ) -> Result<(), PeerLifecycleError> {
-        let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
-        let barrier = async {
-            for &session_id in retired_sessions {
-                self.rib_tx
-                    .send(RibUpdate::PeerDown { peer, session_id })
-                    .await
-                    .map_err(|_| {
-                        PeerLifecycleError::internal("RIB source-retirement queue closed")
-                    })?;
-            }
-            let (reply, response) = oneshot::channel();
-            self.rib_tx
-                .send(RibUpdate::QueryLocRibCount { reply })
-                .await
-                .map_err(|_| {
-                    PeerLifecycleError::internal("RIB source-retirement barrier queue closed")
-                })?;
-            response.await.map_err(|_| {
-                PeerLifecycleError::internal("RIB source-retirement acknowledgement lost")
-            })?;
-            Ok(())
-        };
-        tokio::time::timeout_at(deadline, barrier)
+        let (reply, response) = oneshot::channel();
+        let commands = retired_sessions
+            .iter()
+            .map(|&session_id| RibUpdate::PeerDown { peer, session_id })
+            .chain([RibUpdate::QueryLocRibCount { reply }])
+            .collect();
+        self.rib_control(commands, response, "RIB source-retirement barrier")
             .await
-            .map_err(|_| PeerLifecycleError::internal("RIB source-retirement barrier timed out"))?
+            .map(drop)
     }
 
     pub(super) async fn disable_dampening_capacity(
@@ -125,21 +129,15 @@ impl PeerManager {
         // installs a fresh Idle actor with the same pre-owned recovery latch.
         self.replace_unstoppable_primary(&peer).await;
         let (reply, response) = oneshot::channel();
-        let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
-        let barrier = async {
-            self.rib_tx
-                .send(RibUpdate::QueryLocRibCount { reply })
-                .await
-                .map_err(|_| {
-                    PeerLifecycleError::internal("RIB capacity-disable barrier queue closed")
-                })?;
-            response.await.map_err(|_| {
-                PeerLifecycleError::internal("RIB capacity-disable barrier acknowledgement lost")
-            })?;
-            Ok::<_, PeerLifecycleError>(())
-        };
-        match tokio::time::timeout_at(deadline, barrier).await {
-            Ok(Ok(())) => {
+        match self
+            .rib_control(
+                vec![RibUpdate::QueryLocRibCount { reply }],
+                response,
+                "RIB capacity-disable barrier",
+            )
+            .await
+        {
+            Ok(_) => {
                 // The primary-lane barrier follows every joined producer's
                 // PeerDown, so all old pending chunks/distribution are gone.
                 admission.acknowledge_capacity_disable();
@@ -150,10 +148,7 @@ impl PeerManager {
                 );
                 Outcome::Applied
             }
-            Ok(Err(error)) => Outcome::Ambiguous(error),
-            Err(_) => Outcome::Ambiguous(PeerLifecycleError::internal(
-                "RIB capacity-disable barrier timed out",
-            )),
+            Err(error) => Outcome::Ambiguous(error),
         }
     }
 
@@ -191,16 +186,17 @@ impl PeerManager {
             })),
         };
         let (reply, response) = oneshot::channel();
-        let receipt = match rib_control(
-            &self.rib_tx,
-            RibUpdate::PrepareDampeningEnable {
-                source,
-                reason,
-                reply,
-            },
-            response,
-        )
-        .await
+        let receipt = match self
+            .rib_control(
+                vec![RibUpdate::PrepareDampeningEnable {
+                    source,
+                    reason,
+                    reply,
+                }],
+                response,
+                "dampening RIB control",
+            )
+            .await
         {
             Ok(Ok(receipt)) => receipt,
             Ok(Err(error)) => {
@@ -212,16 +208,17 @@ impl PeerManager {
         // This owner retains the receipt even though the old block is cleared.
         let enabled = self.enable_peer(peer.clone()).await;
         let (reply, response) = oneshot::channel();
-        match rib_control(
-            &self.rib_tx,
-            RibUpdate::CompleteDampeningEnable {
-                receipt,
-                enabled: enabled.is_ok(),
-                reply,
-            },
-            response,
-        )
-        .await
+        match self
+            .rib_control(
+                vec![RibUpdate::CompleteDampeningEnable {
+                    receipt,
+                    enabled: enabled.is_ok(),
+                    reply,
+                }],
+                response,
+                "dampening RIB control",
+            )
+            .await
         {
             Ok(Ok(())) => match enabled {
                 Ok(()) => Outcome::Applied,
