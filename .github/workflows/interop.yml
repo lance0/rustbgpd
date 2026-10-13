@@ -2214,7 +2214,7 @@ jobs:
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
-      m26_m27_m28_m59_m91, m92, m84, m99, m100, m101, m102, m103, m104, m107, m114, m115, m116, m118, m122]
+      m26_m27_m28_m59_m91, m92, m84, m99, m100, m101, m102, m103, m104, m107, m114, m115, m116, m118, m122, m125]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
@@ -2222,7 +2222,7 @@ jobs:
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
-        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104 m107 m114 m115 m116 m118 m122
+        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104 m107 m114 m115 m116 m118 m122 m125
     steps:
       - name: Aggregate required Interop result
         shell: bash
@@ -2366,3 +2366,54 @@ jobs:
             ${{ runner.temp }}/m122-evidence/gr-five.json
             ${{ runner.temp }}/m122-evidence/llgr-five.json
             ${{ runner.temp }}/m122-evidence/expired.json
+
+  m125:
+    needs: [prime_dev_image]
+    name: M125 — global-table SRv6 reflection (FRR 10.7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Check M125 oracle and driver
+        run: |
+          python3 tests/interop/scripts/test_m125_capture_oracle.py
+          bash -n tests/interop/scripts/test-m125-srv6-global-reflection.sh
+
+      - name: Build rustbgpd:dev
+        uses: ./.github/actions/build-rustbgpd-dev
+
+      - name: Stage verified GoBGP archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        id: gobgp_archive
+
+      - name: Build pinned observer and capture images
+        run: |
+          docker build --build-arg TARGETARCH=amd64 \
+            --build-arg GOBGP_AMD64_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}" \
+            -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+          docker build -t bmpsink:m102 -f tests/interop/Dockerfile.bmpsink tests/interop
+
+      - name: Run M125 (single-attempt native wire proof)
+        uses: ./.github/actions/run-interop-test
+        env:
+          M125_ARTIFACT_DIR: ${{ runner.temp }}/m125-evidence
+        with:
+          label: M125
+          topology: tests/interop/m125-srv6-global-reflection.clab.yml
+          script: tests/interop/scripts/test-m125-srv6-global-reflection.sh
+          max_attempts: "1"
+
+      - name: Upload M125 receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m125-global-srv6-witnesses
+          path: ${{ runner.temp }}/m125-evidence/
+          if-no-files-found: error
