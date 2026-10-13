@@ -1,0 +1,2 @@
+base-k200-rep1 {"timestamp":"2026-10-13T00:50:53.452493Z","level":"WARN","fields":{"message":"readiness probe deadline exceeded"},"target":"rustbgpd::metrics_server"}
+base-k200-rep2 {"timestamp":"2026-10-13T01:17:14.329915Z","level":"WARN","fields":{"message":"readiness probe deadline exceeded"},"target":"rustbgpd::metrics_server"}

@@ -1,0 +1,124 @@
+{
+ "vrp_snapshot": {
+  "source": "https://ftp.ripe.net/rpki/<ta>.tal/2026/08/08/roas.csv.xz",
+  "date": "2026-08-08",
+  "sha256": {
+   "afrinic": "639fab2e6572162ccce106b9e76d1a4ee2489aeafb9a64286b9449446329c561",
+   "apnic": "dce7bd7ef7fe7f4fb0d76ba317f9688b3fd42e04cdcd7b87587b5fe6e4e4daf9",
+   "arin": "6f6511ebde145d414b2869dadb815a6b4b1e06844920130cef1018b614ddaa1b",
+   "lacnic": "8ed140a2319a365933b09fe68a558683b086d5ab897206fdc0a97d22ab56f231",
+   "ripencc": "e5d2f1b936ab322de020b8cc21b13112eab568773edc9227ca6684c4d8dd09bd"
+  },
+  "unique_vrps": 988293
+ },
+ "ipv4": {
+  "rib": "https://archive.routeviews.org/route-views2/bgpdata/2026.08/RIBS/rib.20260808.0000.bz2",
+  "rib_sha256": "03bf1ea39809789576786c61c7ff77d8e1977d04706af1457aaafaf7cb0e95fb",
+  "rib_peers": 28,
+  "distinct_prefix_origin": 1121489,
+  "notfound": 347921,
+  "valid": 770787,
+  "invalid": 2781,
+  "invalid_share": 0.002479738989860801,
+  "notfound_share": 0.3102313085549658,
+  "full_feed_peer_invalid_shares": [
+   1e-05,
+   1e-05,
+   1e-05,
+   1e-05,
+   1e-05,
+   1e-05,
+   2e-05,
+   2e-05,
+   3e-05,
+   4e-05,
+   0.00011,
+   0.00017,
+   0.00024,
+   0.00025,
+   0.00025,
+   0.00026,
+   0.00048,
+   0.00118,
+   0.00197
+  ]
+ },
+ "ipv6": {
+  "rib": "https://archive.routeviews.org/route-views6/bgpdata/2026.08/RIBS/rib.20260808.0000.bz2",
+  "rib_sha256": "9aa035ad09ff6b7c64bb84c1aacc38df6d5ce30857ed465e0ad3450c82c59a4e",
+  "rib_peers": 26,
+  "distinct_prefix_origin": 265422,
+  "valid": 214571,
+  "notfound": 49422,
+  "invalid": 1429,
+  "invalid_share": 0.005383879256429384,
+  "notfound_share": 0.18620159594909239,
+  "full_feed_peer_invalid_shares": [
+   0.0,
+   0.0,
+   0.0,
+   1e-05,
+   1e-05,
+   3e-05,
+   5e-05,
+   6e-05,
+   0.0001,
+   0.0001,
+   0.0001,
+   0.00018,
+   0.00024,
+   0.00026,
+   0.00036,
+   0.00037,
+   0.00053,
+   0.00284,
+   0.00374,
+   0.00403
+  ]
+ },
+ "literal_scenario": {
+  "ipv4_invalid": 62931,
+  "ipv4_notfound": 137269,
+  "ipv6_notfound": 200200
+ },
+ "scenario": {
+  "peers": 700,
+  "prefixes": 400400,
+  "ipv4": 200200,
+  "vrps": 500000,
+  "covering_vrps": 301014,
+  "assigned": {
+   "ipv4": {
+    "routes": 200200,
+    "invalid": 496,
+    "notfound": 62108,
+    "valid": 137596
+   },
+   "ipv6": {
+    "routes": 200200,
+    "invalid": 1078,
+    "notfound": 37278,
+    "valid": 161844
+   }
+  },
+  "rejected_total": 1574,
+  "deltas": {
+   "10": {
+    "ipv4": 5,
+    "ipv6": 5,
+    "invalid_vrps_touched": 0
+   },
+   "100": {
+    "ipv4": 50,
+    "ipv6": 50,
+    "invalid_vrps_touched": 2
+   },
+   "1000": {
+    "ipv4": 500,
+    "ipv6": 500,
+    "invalid_vrps_touched": 7
+   }
+  },
+  "invalid_asn_base": 4200001000
+ }
+}

@@ -1,0 +1,15 @@
+converged rejoin A/B, 700 peers x 400400 prefixes, K=200,692, 3 reps x 3 rounds per arm and K
+arm     K   n     rejoin_max med [min-max] s  rejoin_p50 med s  gap med ms  gap max ms  ready rss med MiB
+base  200   3     23.644 [23.524-23.949]                12.017       131.2       139.2    114         422
+head  200   9      0.573 [0.529-0.609]                 0.345       123.1       132.1    126         437
+base  692   9     80.313 [79.823-80.886]                39.745       135.6       150.9    901         404
+head  692   9      1.257 [1.185-1.352]                 0.757       121.7       130.1    181         421
+B1 PASS: K=692 rejoin_max: head median 1.257s vs base 80.313s; head max 1.352s < base min 79.823s required (disjoint)
+B2 PASS: K=200 rejoin_max: head median 0.573s <= 26.038s
+B3 PASS: survivor max gap: K=200 head median 123.1 <= 194.3 ms and max 132.1 <= 253.2 ms; K=692 head median 121.7 <= 199.2 ms and max 130.1 <= 266.0 ms
+info: base K=692/K=200 median rejoin_max ratio 3.40
+info: head K=692/K=200 median rejoin_max ratio 2.20
+invalid: base-k200-rep1: harness_rc=1 daemon_rc=0
+invalid: base-k200-rep2: harness_rc=1 daemon_rc=0
+invalid: base K=200: 3 valid rounds, need 9
+VERDICT: INVALID (3 validity problems)

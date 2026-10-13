@@ -1,0 +1,4 @@
+cgroup=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/run-r08ad2d88561b4525bb23e38741e6de1e.scope
+steady_current=538230784
+lifetime_peak_preinject=558477312
+swap_max=0

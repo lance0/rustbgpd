@@ -1,0 +1,14 @@
+base=1d0e4e155d0cf8e42ab007c399067540855c02df 1d0e4e155d0cf8e42ab007c399067540855c02df tree=e6be5128b32b4f39fa7e157398e2d26fb6805fba daemon_sha256=3c72e77d0287f2856ae3ae81a2a10ef1ef9ea2dc5cec34b4d5112d940c3c77d3
+head=9951192c3579869c1fcedcba4d5f3b2922453b0e 9951192c3579869c1fcedcba4d5f3b2922453b0e tree=076422354fc9a63b475fb8152d416e107b77ab95 daemon_sha256=a0b0d85eef29332b1c39c175dd39d854351d4d9176286c9fff1fc4b2ede48ea1
+diffstat= 1303 files changed, 446591 insertions(+), 3616 deletions(-)
+driver=9951192c3579869c1fcedcba4d5f3b2922453b0e dirty=1
+prebuilt=<queue-dir>/binaries/rejoin
+reloadstall_sha256=62240fd68ee053cefbd2d1755583b620df4a37ebc2a73b2f3459e0ef2b2186fb
+gen_scenario_sha256=e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42
+analyzer_sha256=aa15ea5b652613dcf4d3569fe5a654bb82a1eee4625dc54391c28a1611bd58d6
+campaign_sha256=c99710020b317abf4d70d66d327ae02edc78446da44c84f11b58234617e863de
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+kernel=7.0.0-30-generic
+peers=700 prefixes=400400 ks=200,692 repeats=3 rounds=3 control_secs=30 quiet=1 smoke=
+daemon_cpus=12-32,34-39 engine_cpus=40-63
+loadavg_start=1.66 1.70 1.54
