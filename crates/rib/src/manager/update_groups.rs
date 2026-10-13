@@ -50,6 +50,7 @@ use rustbgpd_wire::ExtendedCommunity;
 mod membership;
 mod payload;
 mod policy_transition;
+pub(in crate::manager) mod recovery_provenance;
 pub(in crate::manager) use policy_transition::{
     PrestagedInventoryOutcome, PrestagedTransitionInventory,
 };
@@ -632,6 +633,9 @@ pub(in crate::manager) struct GroupRibOut {
     pub(in crate::manager) is_rr_client: bool,
     pub(in crate::manager) local_role: Option<BgpRole>,
     pub(in crate::manager) sendable: Vec<(Afi, Safi)>,
+    /// G1 prepares recovery without activating EVPN grouping. G2 must enable
+    /// this only with its authoritative group table and received-RT metadata.
+    pub(in crate::manager) owns_evpn: bool,
     pub(in crate::manager) llgr: Vec<(Afi, Safi)>,
     /// ADR-0126 staging mode: `true` stages the first export-permitted
     /// candidate (winner walk + runner-up lane) instead of
@@ -755,6 +759,7 @@ impl GroupRibOut {
             is_rr_client,
             local_role,
             sendable,
+            owns_evpn: false,
             llgr,
             per_client_best,
             inventory_log: None,
@@ -1999,6 +2004,9 @@ impl RibManager {
     /// Callers must have emitted the pending extra withdraws (or shown
     /// them empty/retained) before calling: this drops them.
     pub(in crate::manager) fn clear_grouped_member_synced(&mut self, peer: IpAddr) {
+        if !self.finish_evpn_recovery(peer) {
+            return;
+        }
         self.release_group_admitted_keys(peer);
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =

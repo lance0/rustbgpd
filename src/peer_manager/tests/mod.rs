@@ -1205,7 +1205,11 @@ fn attach_test_pending_inbound(
     mgr.peers
         .get_mut(&key(peer_addr))
         .expect("managed peer")
-        .pending_inbound = Some(PendingInbound { handle, session_id });
+        .pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
+        handle,
+        session_id,
+    });
     mgr.register_session(session_id, &key(peer_addr));
 }
 
@@ -1763,6 +1767,7 @@ mod policy_apply;
 mod policy_failures;
 mod policy_stats;
 mod queries;
+mod recovery;
 mod reload_generation;
 mod rfc8212;
 mod snapshots;

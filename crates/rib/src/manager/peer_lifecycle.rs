@@ -662,6 +662,13 @@ impl RibManager {
     /// classification (`peer_is_rr_client`) stay out: GR keeps them for stale
     /// routes and the returning peer; terminal `PeerDown` removes them.
     pub(super) fn clear_outbound_peer_state(&mut self, peer: IpAddr) {
+        self.clear_outbound_peer_state_inner(peer, false);
+    }
+
+    fn clear_outbound_peer_state_inner(&mut self, peer: IpAddr, same_connection_replay: bool) {
+        if !same_connection_replay {
+            self.retire_evpn_recovery(peer);
+        }
         let was_registered = self.outbound_peers.remove(&peer).is_some();
         self.outbound_session_ids.remove(&peer);
         self.pending_inbound_refresh.remove(&peer);
@@ -859,7 +866,19 @@ impl RibManager {
                 self.clear_policy_filtered_routes_for_peer(peer);
                 self.clear_peer_adj_rib_in(peer);
             }
-            self.clear_outbound_peer_state(peer);
+            // Legacy emitters can reannounce the same actor/channel. Their
+            // existing admission proof and accepted reset handoff still
+            // belong to that connection, even while this ordinary replay
+            // rebuilds the other outbound registration state.
+            let same_connection_replay = self.outbound_session_ids.get(&peer) == Some(&session_id)
+                && self
+                    .outbound_peers
+                    .get(&peer)
+                    .is_some_and(|previous| previous.same_channel(&outbound_tx));
+            if same_connection_replay {
+                self.prepare_evpn_registration_replay(peer);
+            }
+            self.clear_outbound_peer_state_inner(peer, same_connection_replay);
         }
 
         let local_role = self
@@ -880,6 +899,9 @@ impl RibManager {
                 .iter()
                 .find(|record| record.session_id == session_id)
         });
+        let evpn_recovery_reset = previous_session
+            .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
+            .and_then(|record| record.evpn_recovery_reset);
         let record = LiveSessionRecord {
             session_id,
             source_context: self
@@ -915,6 +937,7 @@ impl RibManager {
             gr_context,
             exact_export_encoder,
             evpn_end_of_rib: false,
+            evpn_recovery_reset,
         };
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0
@@ -1312,6 +1335,19 @@ impl RibManager {
             exact_export_encoder.or_else(|| Some(super::permissive_test_exact_export_encoder()));
 
         debug!(%peer, "peer up — registering for outbound updates");
+        if self
+            .outbound_session_ids
+            .get(&peer)
+            .is_some_and(|previous| *previous != session_id)
+            || self
+                .outbound_peers
+                .get(&peer)
+                .is_some_and(|previous| !previous.same_channel(&outbound_tx))
+        {
+            // Actor IDs can be reused on reconnect. Retire the predecessor's
+            // charged owner while its channel/session maps still identify it.
+            self.retire_evpn_recovery(peer);
+        }
         let peer_label = peer.to_string();
         self.metrics.set_rib_prefixes(&peer_label, "all", 0);
         // Selective steady-state refresh relies on every family series already
@@ -1393,6 +1429,7 @@ impl RibManager {
         if self.grouped_member_of(peer).is_some() {
             self.pending_group_admitted.entry(peer).or_default();
         }
+        self.register_evpn_recovery(peer, true);
         true
     }
 
@@ -2551,7 +2588,7 @@ impl RibManager {
             &all_prefixes,
             &current_policy_filtered_routes,
         );
-        if !self.dirty_peers.contains(&peer) {
+        if !self.dirty_peers.contains(&peer) && self.finish_evpn_recovery(peer) {
             self.release_group_admitted_keys(peer);
         }
 

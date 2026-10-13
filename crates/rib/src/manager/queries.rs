@@ -660,6 +660,11 @@ impl RibManager {
             {
                 return Err(RoutePageError::Invalidated);
             }
+            if let RouteQueryScope::Advertised { peer } = scope
+                && self.evpn_advertised_resync_in_progress(peer)
+            {
+                return Err(RoutePageError::ResyncInProgress);
+            }
             let mut page = match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_evpn_routes(
                     self.ribs

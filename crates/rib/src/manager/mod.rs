@@ -15,6 +15,7 @@ pub use bench_support::{
 mod conditional_advertisement;
 mod dampening_history;
 mod distribution;
+mod evpn_recovery;
 mod export_chains;
 mod flowspec_validation;
 mod graceful_restart;
@@ -1046,6 +1047,10 @@ pub struct RibManager {
     /// can advance without delivery. Bounded by its admitted inventory, and
     /// released after recovery; routes remain shared in the group table.
     pending_group_admitted: HashMap<IpAddr, HashSet<crate::update::ExactExportKey>>,
+    /// Charged EVPN history only for explicitly group-owned EVPN. Negotiated
+    /// families and unicast group membership do not establish that ownership.
+    evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance,
+    evpn_recovery_reset: Option<crate::update::EvpnRecoveryResetFn>,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
@@ -1516,6 +1521,8 @@ pub(super) struct LiveSessionRecord {
     /// This session has sent its L2VPN/EVPN End-of-RIB since the peer's
     /// Adj-RIB-In was last discarded.
     evpn_end_of_rib: bool,
+    /// Failed reset admission remains in this bounded existing session record.
+    evpn_recovery_reset: Option<evpn_recovery::PendingReset>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2097,6 +2104,8 @@ impl RibManager {
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
             pending_group_admitted: HashMap::new(),
+            evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
+            evpn_recovery_reset: None,
             #[cfg(test)]
             test_force_ungrouped: false,
             #[cfg(test)]
@@ -2201,6 +2210,18 @@ impl RibManager {
         readiness_rx: mpsc::Receiver<RibReadinessQuery>,
     ) -> Self {
         self.readiness_rx = Some(readiness_rx);
+        self
+    }
+
+    /// Install nonblocking reset admission to the existing session lifecycle
+    /// owner. Exhausted EVPN recovery remains unsettled until that generation
+    /// leaves; successful callback admission is not a completed reset receipt.
+    #[must_use]
+    pub fn with_evpn_recovery_reset_handler(
+        mut self,
+        handler: crate::update::EvpnRecoveryResetFn,
+    ) -> Self {
+        self.evpn_recovery_reset = Some(handler);
         self
     }
 

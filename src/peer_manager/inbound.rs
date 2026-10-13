@@ -276,7 +276,11 @@ impl PeerManager {
                 .await;
             return false;
         }
-        managed.pending_inbound = Some(PendingInbound { handle, session_id });
+        managed.pending_inbound = Some(PendingInbound {
+            recovery_reset: None,
+            handle,
+            session_id,
+        });
         self.register_session(session_id, &peer_key);
         true
     }
@@ -1066,6 +1070,9 @@ impl PeerManager {
         let (old_handle, old_session_id) =
             self.peers
                 .replace_handle(peer_key, pending.handle, new_session_id)?;
+        if let Some((_, slot)) = self.peers.recovery_session_mut(peer_key, new_session_id) {
+            *slot = pending.recovery_reset;
+        }
         self.register_session(new_session_id, peer_key);
         Some((old_handle, old_session_id, new_session_id))
     }

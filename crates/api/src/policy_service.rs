@@ -1810,6 +1810,9 @@ async fn query_test_policy_page(
     })
     .await?
     .map_err(|error| match error {
+        RoutePageError::ResyncInProgress => Status::failed_precondition(
+            "TestPolicy advertised routes are unavailable until outbound resynchronization completes",
+        ),
         RoutePageError::Invalidated => Status::aborted(
             "route table changed during TestPolicy; retry the whole RPC from the beginning",
         ),

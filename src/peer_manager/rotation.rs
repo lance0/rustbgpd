@@ -2467,6 +2467,7 @@ mod tests {
         );
         manager.peers.get_mut(&peer_a).unwrap().pending_inbound =
             Some(super::super::PendingInbound {
+                recovery_reset: None,
                 handle: deletion_apply_reset_peer_handle("a-pending", order.clone(), Ok(())),
                 session_id: 3,
             });

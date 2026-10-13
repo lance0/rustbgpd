@@ -2192,4 +2192,5 @@ mod tcp_ao;
 mod tcp_mss;
 mod vpn;
 
+mod recovery;
 mod replay;
