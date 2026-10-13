@@ -730,6 +730,9 @@ pub enum ExactExportErrorCode {
     Ipv4RequiresExtendedNextHop,
     /// The one-route UPDATE exceeds the negotiated message ceiling.
     MessageTooLong,
+    /// A labeled-unicast or VPN route binds more than one label, and the peer
+    /// has not negotiated the RFC 8277 Multiple Labels Capability.
+    MultipleLabelsNotNegotiated,
 }
 
 impl ExactExportErrorCode {
@@ -742,6 +745,7 @@ impl ExactExportErrorCode {
             Self::MissingIpv6NextHop => ExactExportReason::MissingIpv6NextHop,
             Self::Ipv4RequiresExtendedNextHop => ExactExportReason::Ipv4RequiresExtendedNextHop,
             Self::MessageTooLong => ExactExportReason::MessageTooLong,
+            Self::MultipleLabelsNotNegotiated => ExactExportReason::MultipleLabelsNotNegotiated,
         }
     }
 

@@ -558,14 +558,18 @@ pub enum ExactExportReason {
     MissingIpv6NextHop,
     Ipv4RequiresExtendedNextHop,
     MessageTooLong,
+    /// RFC 8277 §2.1 / §3.2.1: more than one label toward a peer without the
+    /// Multiple Labels Capability for the family. Labeled-unicast and VPN only.
+    MultipleLabelsNotNegotiated,
 }
 
 impl ExactExportReason {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Encoding,
         Self::MissingIpv6NextHop,
         Self::Ipv4RequiresExtendedNextHop,
         Self::MessageTooLong,
+        Self::MultipleLabelsNotNegotiated,
     ];
 
     #[must_use]
@@ -575,6 +579,7 @@ impl ExactExportReason {
             Self::MissingIpv6NextHop => "missing_ipv6_next_hop",
             Self::Ipv4RequiresExtendedNextHop => "ipv4_requires_extended_next_hop",
             Self::MessageTooLong => "message_too_long",
+            Self::MultipleLabelsNotNegotiated => "multiple_labels_not_negotiated",
         }
     }
 }
@@ -779,6 +784,7 @@ mod tests {
                 "missing_ipv6_next_hop",
                 "ipv4_requires_extended_next_hop",
                 "message_too_long",
+                "multiple_labels_not_negotiated",
             ]
         );
     }

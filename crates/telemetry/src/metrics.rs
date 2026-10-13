@@ -5168,9 +5168,22 @@ impl BgpMetrics {
         peer: &str,
         families: impl IntoIterator<Item = &'a str>,
     ) {
+        use crate::reason_labels::ExactExportReason;
         for family in families {
             let family = Self::exact_export_family_label(family);
-            for reason in crate::reason_labels::ExactExportReason::ALL {
+            let label_stack_family = matches!(
+                family,
+                "l3vpn_ipv4_unicast"
+                    | "l3vpn_ipv6_unicast"
+                    | "ipv4_labeled_unicast"
+                    | "ipv6_labeled_unicast"
+            );
+            for reason in ExactExportReason::ALL {
+                // Only label-stack families can hit the label-count reason;
+                // skip a zero series that can never move.
+                if reason == ExactExportReason::MultipleLabelsNotNegotiated && !label_stack_family {
+                    continue;
+                }
                 self.0
                     .exact_export_rejections
                     .with_label_values(&[peer, family, reason.as_str()])

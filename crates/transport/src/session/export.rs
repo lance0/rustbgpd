@@ -873,6 +873,7 @@ impl SessionExportProfile {
         route: &VpnRibRoute,
     ) -> Result<PreparedMpCandidate<rustbgpd_wire::VpnNlriEntry>, ExportProbeError> {
         let (afi, safi) = route.afi_safi();
+        refuse_multiple_labels(&route.nlri.labels)?;
         // RFC 8950 §5: reflect the received next-hop encoding unchanged,
         // but only to a recipient that advertised support for that encoding.
         if afi == Afi::Ipv4 && route.next_hop.is_ipv6() && !self.extended_nexthop_vpnv4 {
@@ -904,6 +905,7 @@ impl SessionExportProfile {
         route: &LabeledRibRoute,
     ) -> Result<PreparedMpCandidate<rustbgpd_wire::LabeledNlriEntry>, ExportProbeError> {
         let (afi, safi) = route.afi_safi();
+        refuse_multiple_labels(&route.nlri.labels)?;
         // RFC 8277 / RFC 2545 §3: a labeled-IPv6 next hop is 16 or 32
         // octets. Refuse rather than encode a 4-octet one.
         if afi == Afi::Ipv6 && route.next_hop.is_ipv4() {
@@ -1758,6 +1760,20 @@ impl PreparedAttrCache {
     }
 }
 
+/// RFC 8277 §2.1 / §3.2.1: a route whose NLRI binds more than one label
+/// MUST NOT be propagated to a peer that has not negotiated the Multiple
+/// Labels Capability for the family. rustbgpd never advertises that
+/// capability, so no session negotiates it and such a route is withheld from
+/// every peer. A rejected replacement withdraws the copy already advertised.
+fn refuse_multiple_labels(
+    labels: &[rustbgpd_wire::MplsLabelEntry],
+) -> Result<(), ExportProbeError> {
+    if labels.len() > 1 {
+        return Err(ExportProbeError::MultipleLabelsNotNegotiated);
+    }
+    Ok(())
+}
+
 pub(super) struct PreparedMpCandidate<T> {
     pub(super) afi: Afi,
     pub(super) safi: Safi,
@@ -1774,6 +1790,7 @@ pub(crate) enum ExportProbeError {
     LinkLocalNextHopScope,
     Ipv4RequiresExtendedNextHop,
     Vpnv4RequiresExtendedNextHop,
+    MultipleLabelsNotNegotiated,
     /// An EVPN route type this build does not model (non-exhaustive
     /// `EvpnRouteKey`) cannot be converted back into wire NLRI.
     UnmodeledEvpnRouteType,
@@ -1797,6 +1814,9 @@ impl std::fmt::Display for ExportProbeError {
             }
             Self::Vpnv4RequiresExtendedNextHop => formatter
                 .write_str("VPNv4 with an IPv6 next-hop requires peer Extended Next Hop support"),
+            Self::MultipleLabelsNotNegotiated => formatter.write_str(
+                "more than one MPLS label requires peer Multiple Labels Capability support",
+            ),
             Self::UnmodeledEvpnRouteType => {
                 formatter.write_str("EVPN route type not modeled by this build")
             }
@@ -2081,6 +2101,9 @@ fn exact_export_result(
             ExportProbeError::Ipv4RequiresExtendedNextHop
             | ExportProbeError::Vpnv4RequiresExtendedNextHop => {
                 ExactExportErrorCode::Ipv4RequiresExtendedNextHop
+            }
+            ExportProbeError::MultipleLabelsNotNegotiated => {
+                ExactExportErrorCode::MultipleLabelsNotNegotiated
             }
         };
         ExactExportError::new(code, error)
