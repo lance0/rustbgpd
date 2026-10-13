@@ -185,6 +185,34 @@ class PrimerContractTests(unittest.TestCase):
                     f"ARG BIRD_SHA256={DRIFTED}",
                 ),
             )
+        for name, dockerfile, old, new, archive in (
+            (
+                "BIRD 2 default digest is another manifest pin",
+                "tests/interop/Dockerfile.bird2",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST}",
+                f"ARG BIRD_SHA256={ARCHIVE_PINS['bird-2.19.2.tar.gz']}",
+                "bird-2.19.3.tar.gz",
+            ),
+            (
+                "GoBGP 4.x default digest is another manifest pin",
+                "tests/interop/Dockerfile.gobgp-v47",
+                f"ARG GOBGP_SHA256={ARCHIVE_PINS['gobgp_4.7.0_linux_amd64.tar.gz']}",
+                f"ARG GOBGP_SHA256={ARCHIVE_PINS['gobgp_4.8.0_linux_amd64.tar.gz']}",
+                "gobgp_4.7.0_linux_amd64.tar.gz",
+            ),
+            (
+                "GoBGP per-architecture default digest is the other architecture's pin",
+                "tests/interop/Dockerfile.gobgp",
+                f"ARG GOBGP_ARM64_SHA256={ARCHIVE_PINS['gobgp_3.37.0_linux_arm64.tar.gz']}",
+                f"ARG GOBGP_ARM64_SHA256={ARCHIVE_PINS['gobgp_3.37.0_linux_amd64.tar.gz']}",
+                "gobgp_3.37.0_linux_arm64.tar.gz",
+            ),
+        ):
+            with self.subTest(name):
+                self.assert_red(
+                    f"{dockerfile}: default digest is not the {MANIFEST} pin for {archive}",
+                    (dockerfile, old, new),
+                )
         with self.subTest("manifest bumped: one local Docker default still needs a bump"):
             errors = self.mutated_errors((MANIFEST, BIRD3_DIGEST, DRIFTED))
             stale = {error.split(":", 1)[0] for error in errors if "is not in" in error}
