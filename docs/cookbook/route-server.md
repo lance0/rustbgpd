@@ -191,7 +191,8 @@ max_prefixes = 50000
 ```
 
 Set an inbound prefix limit on each member or its peer group; `rbgp doctor`
-warns when an established eBGP member has no effective bound.
+warns when an established eBGP member negotiates a family with no effective
+bound.
 
 <a id="member-set-control-communities-rfc-7947-232--rfc-8195"></a>
 ## Member-set control communities

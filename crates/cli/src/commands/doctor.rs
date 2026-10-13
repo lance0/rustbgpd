@@ -1017,30 +1017,85 @@ fn inbound_prefix_bound_check(
         || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
-        || neighbor.inbound_prefix_limits.iter().any(|row| {
-            // Non-unicast family scopes bound only their own family.
-            matches!(
-                row.scope.as_str(),
-                "aggregate"
-                    | "ipv4_unicast"
-                    | "ipv6_unicast"
-                    | "ipv4_unicast_received"
-                    | "ipv6_unicast_received"
-            )
-        })
         || neighbor.effective_max_prefixes.is_some()
-        || neighbor.effective_max_prefixes_ipv4.is_some()
-        || neighbor.effective_max_prefixes_ipv6.is_some()
+        || has_inbound_scope(neighbor, "aggregate")
     {
         return None;
     }
+    let negotiated = neighbor
+        .negotiated_session
+        .as_ref()
+        .map_or(&[][..], |session| session.families.as_slice());
+    let detail = if negotiated.is_empty() {
+        // No negotiated-family evidence (an older daemon): any unicast bound
+        // satisfies the check, as before per-family coverage existed.
+        if ["ipv4_unicast", "ipv6_unicast"]
+            .into_iter()
+            .any(|family| family_bounded(neighbor, family))
+        {
+            return None;
+        }
+        format!(
+            "peer {identity} is Established eBGP with no effective inbound prefix bound; configure max_prefixes, max_prefixes_ipv4, max_prefixes_ipv6, max_prefixes_received_ipv4, or max_prefixes_received_ipv6 on the neighbor or its peer group"
+        )
+    } else {
+        let unbounded: Vec<String> = negotiated
+            .iter()
+            .filter(|family| !family_bounded(neighbor, family))
+            .map(|family| format!("{family} ({})", family_bound_keys(family)))
+            .collect();
+        if unbounded.is_empty() {
+            return None;
+        }
+        format!(
+            "peer {identity} is Established eBGP with no effective inbound prefix bound for negotiated families {}; configure the listed key or the aggregate max_prefixes on the neighbor or its peer group",
+            unbounded.join(", ")
+        )
+    };
     Some(Check {
         name: format!("peer.{identity}.inbound_prefix_bound"),
         status: CheckStatus::Warn,
-        detail: format!(
-            "peer {identity} is Established eBGP with no effective inbound prefix bound; configure max_prefixes, max_prefixes_ipv4, max_prefixes_ipv6, max_prefixes_received_ipv4, or max_prefixes_received_ipv6 on the neighbor or its peer group"
-        ),
+        detail,
     })
+}
+
+fn has_inbound_scope(neighbor: &crate::proto::NeighborState, scope: &str) -> bool {
+    neighbor
+        .inbound_prefix_limits
+        .iter()
+        .any(|row| row.scope == scope)
+}
+
+/// Whether a finite per-family bound covers one negotiated family. Scope
+/// names are the canonical family labels (plus `_received` for unicast).
+fn family_bounded(neighbor: &crate::proto::NeighborState, family: &str) -> bool {
+    has_inbound_scope(neighbor, family)
+        || has_inbound_scope(neighbor, &format!("{family}_received"))
+        || match family {
+            "ipv4_unicast" => neighbor.effective_max_prefixes_ipv4.is_some(),
+            "ipv6_unicast" => neighbor.effective_max_prefixes_ipv6.is_some(),
+            _ => false,
+        }
+}
+
+/// The per-family keys that can bound `family`, besides the aggregate.
+fn family_bound_keys(family: &str) -> String {
+    match family {
+        "ipv4_unicast" => "max_prefixes_ipv4 or max_prefixes_received_ipv4".to_string(),
+        "ipv6_unicast" => "max_prefixes_ipv6 or max_prefixes_received_ipv6".to_string(),
+        "l3vpn_ipv4_unicast"
+        | "l3vpn_ipv6_unicast"
+        | "ipv4_labeled_unicast"
+        | "ipv6_labeled_unicast"
+        | "l2vpn_evpn"
+        | "ipv4_flowspec"
+        | "ipv6_flowspec"
+        | "rtc" => {
+            format!("max_prefixes_{family}")
+        }
+        // BGP-LS and unrecognised families have no per-family key.
+        _ => "aggregate max_prefixes only".to_string(),
+    }
 }
 
 /// Most recent session-event timestamp per peer, for time-in-state.
@@ -4830,6 +4885,149 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 _ => unreachable!(),
             }
             assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
+        }
+    }
+
+    fn bound_peer(families: &[&str], scopes: &[&str]) -> crate::proto::NeighborState {
+        crate::proto::NeighborState {
+            config: Some(crate::proto::NeighborConfig {
+                remote_asn: 65002,
+                ..Default::default()
+            }),
+            state: crate::proto::SessionState::Established as i32,
+            negotiated_session: Some(crate::proto::NegotiatedSessionState {
+                families: families.iter().map(ToString::to_string).collect(),
+                ..Default::default()
+            }),
+            inbound_prefix_limits: scopes
+                .iter()
+                .map(|scope| crate::proto::InboundPrefixLimitState {
+                    scope: (*scope).to_string(),
+                    limit: 100,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The warning detail for an eBGP peer, or `None` when it passes.
+    fn bound_warning(neighbor: &crate::proto::NeighborState) -> Option<String> {
+        inbound_prefix_bound_check("10.0.0.2", neighbor, Some(65001)).map(|check| {
+            assert_eq!(check.name, "peer.10.0.0.2.inbound_prefix_bound");
+            assert_eq!(check.status, CheckStatus::Warn);
+            check.detail
+        })
+    }
+
+    const VPN_PEER: [&str; 2] = ["ipv4_unicast", "l3vpn_ipv4_unicast"];
+    const DUAL_STACK_PEER: [&str; 2] = ["ipv4_unicast", "ipv6_unicast"];
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_vpn_only_bound_for_dual_family_peer() {
+        let detail = bound_warning(&bound_peer(&VPN_PEER, &["l3vpn_ipv4_unicast"]))
+            .expect("the negotiated IPv4 unicast feed is unbounded");
+        assert!(
+            detail.contains(
+                "negotiated families ipv4_unicast (max_prefixes_ipv4 or max_prefixes_received_ipv4);"
+            ),
+            "{detail}"
+        );
+        assert!(detail.contains("aggregate max_prefixes"), "{detail}");
+    }
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_unicast_only_bound_for_vpn_peer() {
+        let detail = bound_warning(&bound_peer(&VPN_PEER, &["ipv4_unicast"]))
+            .expect("the negotiated VPN family is unbounded");
+        assert!(
+            detail.contains(
+                "negotiated families l3vpn_ipv4_unicast (max_prefixes_l3vpn_ipv4_unicast);"
+            ),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_ipv4_only_row_for_dual_stack_peer() {
+        let detail = bound_warning(&bound_peer(&DUAL_STACK_PEER, &["ipv4_unicast"]))
+            .expect("the negotiated IPv6 unicast feed is unbounded");
+        assert!(
+            detail.contains(
+                "negotiated families ipv6_unicast (max_prefixes_ipv6 or max_prefixes_received_ipv6);"
+            ),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_ipv4_only_effective_field_for_dual_stack_peer() {
+        let mut peer = bound_peer(&DUAL_STACK_PEER, &[]);
+        peer.effective_max_prefixes_ipv4 = Some(100);
+        let detail = bound_warning(&peer).expect("the negotiated IPv6 unicast feed is unbounded");
+        assert!(
+            detail.contains(
+                "negotiated families ipv6_unicast (max_prefixes_ipv6 or max_prefixes_received_ipv6);"
+            ),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_linkstate_without_aggregate() {
+        // BGP-LS has no per-family key; only the aggregate covers it.
+        let detail = bound_warning(&bound_peer(
+            &["ipv4_unicast", "linkstate"],
+            &["ipv4_unicast"],
+        ))
+        .expect("the negotiated BGP-LS family is unbounded");
+        assert!(
+            detail.contains("negotiated families linkstate (aggregate max_prefixes only);"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inbound_prefix_bound_passes_with_aggregate_or_every_family_bound() {
+        // The aggregate covers every negotiated family.
+        assert_eq!(bound_warning(&bound_peer(&VPN_PEER, &["aggregate"])), None);
+        assert_eq!(
+            bound_warning(&bound_peer(&["linkstate"], &["aggregate"])),
+            None
+        );
+        let mut aggregate = bound_peer(&DUAL_STACK_PEER, &[]);
+        aggregate.effective_max_prefixes = Some(100);
+        assert_eq!(bound_warning(&aggregate), None);
+        // A per-family bound on every negotiated family passes, through
+        // accepted rows, received-only rows, or the legacy effective fields.
+        assert_eq!(
+            bound_warning(&bound_peer(
+                &VPN_PEER,
+                &["ipv4_unicast", "l3vpn_ipv4_unicast"]
+            )),
+            None
+        );
+        assert_eq!(
+            bound_warning(&bound_peer(
+                &DUAL_STACK_PEER,
+                &["ipv4_unicast_received", "ipv6_unicast_received"]
+            )),
+            None
+        );
+        let mut legacy_both = bound_peer(&DUAL_STACK_PEER, &[]);
+        legacy_both.effective_max_prefixes_ipv4 = Some(100);
+        legacy_both.effective_max_prefixes_ipv6 = Some(100);
+        assert_eq!(bound_warning(&legacy_both), None);
+        // With every family unbounded, the detail still names each key.
+        let detail = bound_warning(&bound_peer(&DUAL_STACK_PEER, &[])).unwrap();
+        for key in [
+            "max_prefixes",
+            "max_prefixes_ipv4",
+            "max_prefixes_ipv6",
+            "max_prefixes_received_ipv4",
+            "max_prefixes_received_ipv6",
+        ] {
+            assert!(detail.contains(key), "{detail}");
         }
     }
 
