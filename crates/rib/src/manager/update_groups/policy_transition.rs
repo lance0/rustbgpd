@@ -57,8 +57,13 @@ fn inventory_entry(
         return Err("source flip");
     }
     let next_hop = new.nh_override(key);
-    if routes_equal(prior, route) && old.nh_override(key) == next_hop {
-        return Ok(InventoryEntry::Unchanged);
+    if routes_equal(prior, route) {
+        if old.nh_override(key) == next_hop {
+            return Ok(InventoryEntry::Unchanged);
+        }
+        // Action-only diffs require receiver preparation equivalence; keep
+        // these on the authoritative path until shared qualification covers it.
+        return Err("receiver next-hop action diff");
     }
     let tagged = !rs_asns.is_empty() && {
         let (old_communities, old_large) = old.source_control(key);
@@ -1021,6 +1026,28 @@ impl RibManager {
             let key = (route.prefix, route.path_id);
             let next_hop = destination.nh_override(key);
             let prior = source.table.get(&route.prefix, route.path_id);
+            let action_only = |old: Option<super::AdvEntry<'_>>,
+                               new: Option<super::AdvEntry<'_>>| {
+                old.zip(new).is_some_and(|(old, new)| {
+                    old.nh != new.nh && routes_equal(old.route, new.route)
+                })
+            };
+            // Resolve both source exceptions too: a policy winner change can
+            // replace an old lane with an equal Route but a different action.
+            if prior
+                .is_some_and(|old| routes_equal(old, route) && source.nh_override(key) != next_hop)
+                || [route.peer, prior.map_or(route.peer, |old| old.peer)]
+                    .into_iter()
+                    .any(|member| {
+                        action_only(
+                            source.adv_entry(member, &route.prefix, route.path_id),
+                            destination.adv_entry(member, &route.prefix, route.path_id),
+                        )
+                    })
+            {
+                rejected = true;
+                break 'destination;
+            }
             let changed = match prior {
                 None => true,
                 Some(prior_route) => {

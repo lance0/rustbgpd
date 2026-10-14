@@ -3485,6 +3485,17 @@ is reflected unchanged. On import, `"self"` for an IPv6 route resolves to the
 session's local IPv6 address, else `local_ipv6_nexthop`; with neither (IPv4
 transport and no `local_ipv6_nexthop`) the route keeps its received next hop.
 
+Export unicast next-hop decisions are part of the peer's advertised state. If
+an unchanged policy switches between `"self"` and the received next hop because
+a route's matching attributes change, the route is re-announced when its
+prepared next hop changes, even if the policy removes those matching attributes.
+An action change that produces the same UPDATE bytes for that peer needs no
+extra announcement. This also applies to a per-client-best runner-up becoming
+the winning route; no withdrawal is inserted between the two next-hop forms.
+For a grouped peer whose advertised projection is resynchronizing without an
+admitted baseline, unicast export explain returns `FAILED_PRECONDITION` until
+recovery finishes; it does not report the desired action as already advertised.
+
 `set_next_hop` never applies to a labeled-unicast or VPN route
 (`ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l3vpn_ipv4_unicast`,
 `l3vpn_ipv6_unicast`). Such a route keeps its received labels, which are valid

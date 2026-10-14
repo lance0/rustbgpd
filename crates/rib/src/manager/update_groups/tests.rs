@@ -2893,6 +2893,7 @@ fn dirty_resync_replays_table_and_tombstones() {
         false,
         None,
         None,
+        None,
         Some(admitted.view()),
         &mut announce,
         &mut withdraw,
@@ -2938,6 +2939,7 @@ fn regroup_baseline_diff_and_force() {
         Some(&baseline),
         None,
         None,
+        None,
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
@@ -2959,6 +2961,7 @@ fn regroup_baseline_diff_and_force() {
         false,
         true,
         Some(&baseline),
+        None,
         None,
         None,
         &mut announce,
@@ -3136,6 +3139,7 @@ fn extra_withdraws_respect_retained_keys() {
         true,
         false,
         None,
+        None,
         Some(&extras),
         Some(admitted.view()),
         &mut announce,
@@ -3177,6 +3181,7 @@ fn resync(
         rs_control,
         is_dirty,
         is_force,
+        None,
         None,
         extras,
         None,
@@ -3918,12 +3923,17 @@ fn pcb_member_view_snapshot_records_substitution_for_regroup_diff() {
         Some(lane_entry(route(k2, OTHER2), MEMBER, "lane", None)),
     );
 
-    let baseline = group.member_view_snapshot(MEMBER, None, &HashSet::new());
-    assert_eq!(baseline.len(), 2);
+    let baseline =
+        group.member_view_snapshot_with_checkpoint(MEMBER, None, &HashSet::new(), &mut |_| {});
+    assert_eq!(baseline.unicast.len(), 2);
     assert_eq!(
-        baseline[&(k2, 0)].peer,
+        baseline.unicast[&(k2, 0)].peer,
         OTHER2,
         "the baseline records adv(m), not the staged winner"
+    );
+    assert_eq!(
+        baseline.next_hop_overrides.get(&(k2, 0)),
+        Some(&NextHopAction::Self_)
     );
 
     let regroup_diff = |group: &GroupRibOut| {
@@ -3936,7 +3946,8 @@ fn pcb_member_view_snapshot_records_substitution_for_regroup_diff() {
             None,
             false,
             false,
-            Some(&baseline),
+            Some(&baseline.unicast),
+            Some(&baseline.next_hop_overrides),
             None,
             None,
             &mut announce,
@@ -3964,7 +3975,7 @@ fn pcb_member_view_snapshot_records_substitution_for_regroup_diff() {
     assert_eq!(announce.len(), 1);
     assert_eq!((announce[0].prefix, announce[0].peer), (k2, OTHER2));
     assert!(
-        !routes_equal(&announce[0], &baseline[&(k2, 0)]),
+        !routes_equal(&announce[0], &baseline.unicast[&(k2, 0)]),
         "the announce is the CHANGED lane content"
     );
     assert_eq!(withdraw.len(), 0);

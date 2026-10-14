@@ -4277,6 +4277,193 @@ async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
     }
 }
 
+/// An unchanged policy strips its match community, leaving identical Route
+/// fields while the separately carried export action changes in both directions.
+#[tokio::test]
+async fn oracle_action_only_pcb_lane_change_and_promotion() {
+    const SELF_TAG: u32 = 0xFDE8_0064;
+    for initially_self in [false, true] {
+        let mut runs = Vec::new();
+        for force_ungrouped in [false, true] {
+            let mut policy = permit_all_with(RouteModifications {
+                communities_remove: vec![SELF_TAG],
+                ..RouteModifications::default()
+            });
+            let mut tagged = policy.policies[0].policy.entries[0].clone();
+            tagged.match_community = vec![CommunityMatch::Standard { value: SELF_TAG }];
+            tagged.modifications.set_next_hop = Some(NextHopAction::Self_);
+            policy.policies[0].policy.entries.insert(0, tagged);
+            let candidate = |use_self: bool| {
+                rs_route(
+                    pfx(1, 0),
+                    B,
+                    vec![65002; 2],
+                    if use_self { vec![SELF_TAG] } else { vec![] },
+                )
+            };
+            let mut o = Oracle::spawn(force_ungrouped, None);
+            for peer in [A, B, C] {
+                pcb_peer_up(&mut o, peer, Some(policy.clone()), 64).await;
+            }
+            assert_eq!(
+                o.group_label(A).await.starts_with("group:"),
+                !force_ungrouped
+            );
+            o.routes(A, vec![ranked(pfx(1, 0), A, 1)], vec![]).await;
+            o.routes(B, vec![candidate(initially_self)], vec![]).await;
+            let initial = o.drain_peer_available(A).await;
+            let initial: Vec<_> = initial.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(initial.len(), 1);
+            let initial = initial[0].clone();
+            assert_eq!(initial.5, initially_self.then_some(NextHopAction::Self_));
+
+            // The same policy strips its guard community, so only the
+            // separately carried action changes on B's exported candidate.
+            o.routes(B, vec![candidate(!initially_self)], vec![]).await;
+            let changed = o.drain_peer_available(A).await;
+            assert!(changed.iter().all(|msg| msg.withdraw.is_empty()));
+            let changed: Vec<_> = changed.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(
+                changed.len(),
+                1,
+                "the changed action must reannounce its key exactly once"
+            );
+            assert_eq!(
+                changed[0].5,
+                (!initially_self).then_some(NextHopAction::Self_)
+            );
+            assert_eq!(
+                (
+                    &changed[0].0,
+                    changed[0].1,
+                    changed[0].2,
+                    changed[0].3,
+                    &changed[0].4
+                ),
+                (&initial.0, initial.1, initial.2, initial.3, &initial.4)
+            );
+            o.routes(A, vec![], vec![pfx(1, 0)]).await;
+            let promotion = o.drain_peer_available(A).await;
+            assert!(
+                promotion
+                    .iter()
+                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                "promotion must not duplicate the already admitted action"
+            );
+
+            // Explicit refresh repeats the now-admitted action, after its
+            // ordinary transition and without an intermediate withdrawal.
+            o.refresh_outbound(A).await;
+            let replay = o.drain_peer_available(A).await;
+            let replay: Vec<_> = replay.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(replay.len(), 1);
+            let replay = replay[0];
+            assert_eq!(replay.5, (!initially_self).then_some(NextHopAction::Self_));
+            assert_eq!(
+                (&replay.0, replay.1, replay.2, replay.3, &replay.4),
+                (&initial.0, initial.1, initial.2, initial.3, &initial.4),
+                "the post-policy Route fields stay equal despite the changed action"
+            );
+            runs.push(o.finish().await);
+        }
+        assert_route_parity(&runs[0], &runs[1]);
+    }
+}
+
+/// One source update changes raw selection rank and policy action together;
+/// export normalization hides the rank/tag changes from the Route comparison.
+#[tokio::test]
+async fn oracle_action_only_same_update_pcb_winner_promotion() {
+    const SELF_TAG: u32 = 0xFDE8_0064;
+    for initially_self in [false, true] {
+        let mut runs = Vec::new();
+        for force_ungrouped in [false, true] {
+            let mut policy = permit_all_with(RouteModifications {
+                set_local_pref: Some(100),
+                communities_remove: vec![SELF_TAG],
+                ..RouteModifications::default()
+            });
+            let mut tagged = policy.policies[0].policy.entries[0].clone();
+            tagged.match_community = vec![CommunityMatch::Standard { value: SELF_TAG }];
+            tagged.modifications.set_next_hop = Some(NextHopAction::Self_);
+            policy.policies[0].policy.entries.insert(0, tagged);
+            let candidate = |src, local_pref, use_self| {
+                let mut route = rs_route(
+                    pfx(1, 0),
+                    src,
+                    vec![65001],
+                    if use_self { vec![SELF_TAG] } else { vec![] },
+                );
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(PathAttribute::LocalPref(local_pref));
+                });
+                route
+            };
+            let mut o = Oracle::spawn(force_ungrouped, None);
+            for peer in [A, B, C] {
+                pcb_peer_up(&mut o, peer, Some(policy.clone()), 64).await;
+            }
+            assert_eq!(
+                o.group_label(A).await.starts_with("group:"),
+                !force_ungrouped
+            );
+            o.routes(A, vec![candidate(A, 150, false)], vec![]).await;
+            o.routes(B, vec![candidate(B, 100, initially_self)], vec![])
+                .await;
+            let initial = o.drain_peer_available(A).await;
+            let initial: Vec<_> = initial.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(initial.len(), 1);
+            let initial = initial[0].clone();
+            assert_eq!(initial.5, initially_self.then_some(NextHopAction::Self_));
+
+            // B becomes winner and flips its action in this one update.
+            o.routes(B, vec![candidate(B, 200, !initially_self)], vec![])
+                .await;
+            let replacement = o.drain_peer_available(A).await;
+            assert!(replacement.iter().all(|msg| msg.withdraw.is_empty()));
+            let replacement: Vec<_> = replacement.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(
+                replacement.len(),
+                1,
+                "winner promotion must deliver the changed action exactly once"
+            );
+            assert_eq!(
+                replacement[0].5,
+                (!initially_self).then_some(NextHopAction::Self_)
+            );
+            assert_eq!(
+                (
+                    &replacement[0].0,
+                    replacement[0].1,
+                    replacement[0].2,
+                    replacement[0].3,
+                    &replacement[0].4
+                ),
+                (&initial.0, initial.1, initial.2, initial.3, &initial.4)
+            );
+            let observer = o.drain_peer_available(C).await;
+            let promoted: Vec<_> = observer
+                .iter()
+                .flat_map(|msg| &msg.announce)
+                .filter(|entry| entry.3 == IpAddr::V4(B))
+                .collect();
+            assert_eq!(promoted.len(), 1, "raw rank must promote B before export");
+            let promoted = promoted[0];
+            assert_eq!(
+                promoted.5,
+                (!initially_self).then_some(NextHopAction::Self_)
+            );
+            assert_eq!(
+                (&promoted.0, promoted.1, promoted.2, promoted.3, &promoted.4),
+                (&initial.0, initial.1, initial.2, initial.3, &initial.4),
+                "the newly winning B Route must equal A's old B substitution"
+            );
+            runs.push(o.finish().await);
+        }
+        assert_route_parity(&runs[0], &runs[1]);
+    }
+}
+
 /// A new winner's source already holds the standing route it now receives as
 /// a substitution. Clean promotion must not reannounce that unchanged value.
 #[tokio::test]
@@ -4547,6 +4734,170 @@ async fn oracle_queued_refresh_cohort_matches_private_replays() {
                     .iter()
                     .any(|message| { !message.refresh_markers.is_empty() }),
                 "each member received a refresh response"
+            );
+        }
+    }
+}
+
+/// Plain single-best groups and private peers preserve their admitted action
+/// across a content-changing, behavior-preserving clean regroup.
+#[tokio::test]
+async fn oracle_action_only_single_best_after_clean_regroup() {
+    const SELF_TAG: u32 = 0xFDE8_0064;
+    for initially_self in [false, true] {
+        let mut runs = Vec::new();
+        for force_ungrouped in [false, true] {
+            let mut policy = permit_all_with(RouteModifications {
+                communities_remove: vec![SELF_TAG],
+                ..RouteModifications::default()
+            });
+            let mut tagged = policy.policies[0].policy.entries[0].clone();
+            tagged.match_community = vec![CommunityMatch::Standard { value: SELF_TAG }];
+            tagged.modifications.set_next_hop = Some(NextHopAction::Self_);
+            policy.policies[0].policy.entries.insert(0, tagged);
+            let mut o = Oracle::spawn(force_ungrouped, Some(A));
+            o.peer_up(A, false, true, None, 64).await;
+            for peer in [B, C] {
+                o.peer_up(peer, false, true, Some(policy.clone()), 64).await;
+            }
+            let candidate = |use_self: bool| {
+                ibgp_route(
+                    pfx(1, 0),
+                    A,
+                    100,
+                    if use_self { vec![SELF_TAG] } else { vec![] },
+                )
+            };
+            o.routes(A, vec![candidate(initially_self)], vec![]).await;
+            let initial = o.drain_peer_available(C).await;
+            let initial: Vec<_> = initial.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(initial.len(), 1);
+            assert_eq!(initial[0].5, initially_self.then_some(NextHopAction::Self_));
+            policy.policies[0].policy.entries.insert(
+                0,
+                deny_prefix_chain(pfx(9, 0)).policies[0].policy.entries[0].clone(),
+            );
+            o.replace_policy(C, Some(policy)).await;
+            assert_eq!(
+                o.group_label(C).await.starts_with("group:"),
+                !force_ungrouped
+            );
+            assert!(
+                o.drain_peer_available(C)
+                    .await
+                    .iter()
+                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                "clean regroup must preserve the old action without replaying it"
+            );
+            o.routes(A, vec![candidate(!initially_self)], vec![]).await;
+            let changed = o.drain_peer_available(C).await;
+            assert!(changed.iter().all(|msg| msg.withdraw.is_empty()));
+            let changed: Vec<_> = changed.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(changed.len(), 1);
+            assert_eq!(
+                changed[0].5,
+                (!initially_self).then_some(NextHopAction::Self_)
+            );
+            runs.push(o.finish().await);
+        }
+        assert_route_parity(&runs[0], &runs[1]);
+    }
+}
+
+/// A refused action-only replacement must survive a dirty membership move
+/// and targeted replay. The old action remains the admitted wire truth until
+/// the receiver has room for the replacement.
+#[tokio::test]
+async fn oracle_action_only_refusal_regroup_and_replay() {
+    const SELF_TAG: u32 = 0xFDE8_0064;
+    tokio::time::pause();
+    for initially_self in [false, true] {
+        let mut runs = Vec::new();
+        for force_ungrouped in [false, true] {
+            let mut policy = permit_all_with(RouteModifications {
+                communities_remove: vec![SELF_TAG],
+                ..RouteModifications::default()
+            });
+            let mut tagged = policy.policies[0].policy.entries[0].clone();
+            tagged.match_community = vec![CommunityMatch::Standard { value: SELF_TAG }];
+            tagged.modifications.set_next_hop = Some(NextHopAction::Self_);
+            policy.policies[0].policy.entries.insert(0, tagged);
+            let mut o = Oracle::spawn(force_ungrouped, Some(A));
+            o.peer_up(A, false, true, None, 64).await;
+            o.peer_up(B, false, true, Some(policy.clone()), 64).await;
+            o.peer_up(C, false, true, Some(policy.clone()), 1).await;
+            o.drain_one(C).await; // Initial End-of-RIB occupies the one-slot queue.
+            let candidate = |use_self: bool| {
+                ibgp_route(
+                    pfx(1, 0),
+                    A,
+                    100,
+                    if use_self { vec![SELF_TAG] } else { vec![] },
+                )
+            };
+            o.routes(A, vec![candidate(initially_self)], vec![]).await;
+            // Leave the admitted initial announcement queued to refuse the change.
+            o.routes(A, vec![candidate(!initially_self)], vec![]).await;
+            let (reply, response) = oneshot::channel();
+            o.tx.send(RibUpdate::ExplainAdvertisedRoute {
+                peer: IpAddr::V4(C),
+                prefix: Prefix::V4(pfx(1, 0)),
+                rd: None,
+                labeled: false,
+                source: None,
+                reply,
+            })
+            .await
+            .unwrap();
+            let before = response.await.unwrap();
+            if force_ungrouped {
+                assert!(
+                    !before.unwrap().already_advertised,
+                    "private state retains the old admitted action"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        before,
+                        Err(crate::update::ExplainAdvertisedRouteError::FailedPrecondition(_))
+                    ),
+                    "dirty shared desired action is not proof of admission"
+                );
+            }
+            policy.policies[0].policy.entries.insert(
+                0,
+                peer_context_permit_chain().policies[0].policy.entries[0].clone(),
+            );
+            o.replace_policy(C, Some(policy)).await;
+            assert!(!o.group_label(C).await.starts_with("group:"));
+            o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
+                .await;
+            tokio::time::advance(Duration::from_secs(2)).await;
+            o.quiesce().await;
+            o.end_recovery(C).await;
+            let after =
+                query_explain_advertised_route(&o.tx, IpAddr::V4(C), Prefix::V4(pfx(1, 0))).await;
+            assert!(
+                after.already_advertised,
+                "recovery admits the replacement action"
+            );
+            runs.push(o.finish().await);
+        }
+        assert_route_parity(&runs[0], &runs[1]);
+        for stream in &runs {
+            let messages = &stream[&IpAddr::V4(C)];
+            assert!(messages.iter().all(|msg| msg.withdraw.is_empty()));
+            let actions: Vec<_> = messages
+                .iter()
+                .flat_map(|msg| &msg.announce)
+                .map(|entry| entry.5.clone())
+                .collect();
+            assert_eq!(
+                actions,
+                vec![
+                    initially_self.then_some(NextHopAction::Self_),
+                    (!initially_self).then_some(NextHopAction::Self_)
+                ]
             );
         }
     }

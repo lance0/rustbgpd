@@ -407,6 +407,11 @@ pub(in crate::manager) enum PolicyTransitionGroupStart {
 #[derive(Default)]
 pub(in crate::manager) struct GroupStageOutput {
     pub(in crate::manager) deltas: Vec<GroupDelta>,
+    /// Prior actions only for equal-body plain-group transitions. Their delta
+    /// body is also the old route; other plain history remains unknown here.
+    pub(in crate::manager) prior_equal_actions: FastMap<(Prefix, u32), Option<NextHopAction>>,
+    /// Any changed shared or exception slot carries next-hop action residue.
+    pub(in crate::manager) has_next_hop_actions: bool,
     pub(in crate::manager) evals: GroupEvalAccumulator,
     /// RFC 9234 denials from this staging pass, replayed per member for
     /// transport's existing metric/event diagnostics.
@@ -447,6 +452,49 @@ pub(in crate::manager) struct GroupStageOutput {
 }
 
 impl GroupStageOutput {
+    pub(in crate::manager) fn prior_slots(
+        &self,
+        member: IpAddr,
+    ) -> impl Iterator<Item = ((Prefix, u32), AdvEntry<'_>)> {
+        self.deltas
+            .iter()
+            .filter_map(move |delta| {
+                let key = (delta.prefix, delta.path_id);
+                let entry = if let Some(prior) = &delta.prior {
+                    prior.adv_entry(member)
+                } else {
+                    let action = self.prior_equal_actions.get(&key)?;
+                    let (route, _) = delta.new.as_ref()?;
+                    (delta.old_source == Some(route.peer) && route.peer != member).then_some(
+                        AdvEntry {
+                            route,
+                            nh: action.as_ref(),
+                            source_attrs: delta.prior_source_attrs.as_ref(),
+                            policy_label: None,
+                        },
+                    )
+                };
+                entry.map(|entry| (key, entry))
+            })
+            .chain(self.lane_deltas.iter().filter_map(move |delta| {
+                delta
+                    .prior
+                    .as_ref()
+                    .filter(|entry| entry.winner_source == member)
+                    .map(|entry| {
+                        (
+                            (delta.prefix, 0),
+                            AdvEntry {
+                                route: &entry.route,
+                                nh: entry.nh.as_ref(),
+                                source_attrs: entry.source_attrs.as_ref(),
+                                policy_label: None,
+                            },
+                        )
+                    })
+            }))
+    }
+
     /// Keys withdrawn by this pass — the tombstone contribution when a
     /// member is (or goes) dirty.
     pub(in crate::manager) fn withdrawn_keys<'a>(
@@ -598,6 +646,7 @@ impl GroupStageOutput {
     /// shell clone per delta, TOTAL — not per member).
     pub(super) fn build_shared_emit(&mut self, checkpoint: &mut impl FnMut(bool)) {
         checkpoint(true);
+        self.has_next_hop_actions |= !self.prior_equal_actions.is_empty();
         let announce_count = self
             .deltas
             .iter()
@@ -616,6 +665,11 @@ impl GroupStageOutput {
         checkpoint(true);
         for delta in &self.deltas {
             checkpoint(false);
+            self.has_next_hop_actions |= delta.new.as_ref().is_some_and(|(_, nh)| nh.is_some())
+                || delta.prior.as_ref().is_some_and(|old| {
+                    old.nh.is_some() || old.lane.as_ref().is_some_and(|lane| lane.nh.is_some())
+                })
+                || delta.lane.as_ref().is_some_and(|lane| lane.nh.is_some());
             if let Some((route, flag)) = &delta.new {
                 self.exceptions.insert(route.peer);
                 if let Some(prior) = &delta.prior
@@ -646,6 +700,8 @@ impl GroupStageOutput {
         // matrix resolves the old/new slots, or is served by the shared payload.
         for delta in &self.lane_deltas {
             checkpoint(false);
+            self.has_next_hop_actions |= delta.new.as_ref().is_some_and(|entry| entry.nh.is_some())
+                || delta.prior.as_ref().is_some_and(|entry| entry.nh.is_some());
             if let Some(target) = delta.emit_target {
                 self.exceptions.insert(target);
                 self.source_exclusion_unsafe.insert(target);
@@ -662,6 +718,9 @@ impl GroupStageOutput {
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
         checkpoint(true);
         crate::manager::retire_vec(&mut self.deltas, &mut || checkpoint(false));
+        crate::adj_rib_out::release_hash_map(&mut self.prior_equal_actions, &mut || {
+            checkpoint(false);
+        });
         crate::manager::retire_vec(&mut self.otc_blocked, &mut || checkpoint(false));
         crate::manager::retire_vec(&mut self.rs_transitions, &mut || checkpoint(false));
         crate::manager::retire_vec(&mut self.lane_deltas, &mut || checkpoint(false));
@@ -1165,9 +1224,14 @@ fn emit_pcb_source_flip(
     .and_then(|entry| prepare_pcb_slot(entry, rs_control));
     match new {
         Some((new, nh))
-            if old
-                .as_ref()
-                .is_none_or(|(old, _)| !super::routes_equal(old, &new)) =>
+            if old.as_ref().is_none_or(|(old, old_nh)| {
+                !crate::manager::helpers::unicast_routes_equal(
+                    old,
+                    old_nh.as_ref(),
+                    &new,
+                    nh.as_ref(),
+                )
+            }) =>
         {
             nh_override_flags.push(nh);
             announce.push(new);

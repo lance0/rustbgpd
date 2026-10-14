@@ -1461,6 +1461,18 @@ impl RibManager {
                 return;
             }
         }
+        if rd.is_none()
+            && !labeled
+            && self.grouped_member_of(peer).is_some()
+            && self.dirty_peers.contains(&peer)
+            && !self.pending_regroup_baseline.contains_key(&peer)
+        {
+            let _ = reply.send(Err(ExplainAdvertisedRouteError::FailedPrecondition(
+                "grouped advertised state is resynchronizing; no admitted baseline is available"
+                    .to_string(),
+            )));
+            return;
+        }
         let explanation = match (rd, labeled) {
             (Some(rd), _) => self.explain_vpn_export(peer, prefix, rd),
             (None, true) => self.explain_labeled_export(peer, prefix),
@@ -1599,6 +1611,7 @@ impl RibManager {
                 peer_asn: self.peer_asn.get(&peer).copied(),
                 peer_group: self.peer_group.get(&peer).map(String::as_str),
                 local_role: self.peer_local_roles.get(&peer).copied().flatten(),
+                snapshot: None,
                 trace: &mut trace,
             };
             Self::stage_evpn_routes(
@@ -1769,9 +1782,26 @@ impl RibManager {
     /// backstop, exact-export rejections and outbound capacity admission,
     /// so this view agrees with the advertised listing.
     fn grouped_unicast_explain_view(&self, peer: IpAddr) -> Option<AdjRibOut> {
+        self.grouped_member_of(peer)?;
         let mut view = AdjRibOut::new(peer);
+        if self.dirty_peers.contains(&peer) {
+            let baseline = self.pending_regroup_baseline.get(&peer)?;
+            for (key, route) in &baseline.unicast {
+                view.insert_with_next_hop(
+                    route.clone(),
+                    baseline.next_hop_overrides.get(key).cloned(),
+                    &mut || {},
+                );
+            }
+            return Some(view);
+        }
         for route in self.grouped_advertised_routes_iter(peer)? {
-            view.insert(route.clone());
+            let action = self
+                .grouped_member_of(peer)
+                .and_then(|id| self.group_ribs.get(&id))
+                .and_then(|group| group.adv_entry(peer, &route.prefix, route.path_id))
+                .and_then(|entry| entry.nh.cloned());
+            view.insert_with_next_hop(route.clone(), action, &mut || {});
         }
         Some(view)
     }
@@ -1846,6 +1876,10 @@ impl RibManager {
         // advertised-state diff runs against the materialized group
         // view (`adv(m)`) on BOTH explain arms below.
         let member_of = self.grouped_member_of(peer);
+        let snapshot = self
+            .peer_export_encoders
+            .get(&peer)
+            .map(|encoder| encoder.snapshot());
         let grouped_rib_out = self.grouped_unicast_explain_view(peer);
 
         if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best {
@@ -1876,6 +1910,7 @@ impl RibManager {
                 orr_ctx,
                 per_client_best,
                 source,
+                snapshot.as_deref(),
             );
             explanation.update_group_id = member_of.map(|gid| gid as u64);
             return self.apply_unicast_export_overlays_to_explain(peer, explanation);
@@ -1899,6 +1934,7 @@ impl RibManager {
             peer_asn,
             peer_group,
             local_role: self.peer_local_roles.get(&peer).copied().flatten(),
+            snapshot: snapshot.as_deref(),
             trace: &mut trace,
         };
         let mut memo = distribution::ExportMemo::default();
@@ -2038,6 +2074,7 @@ impl RibManager {
             peer_asn,
             peer_group,
             local_role: self.peer_local_roles.get(&peer).copied().flatten(),
+            snapshot: None,
             trace: &mut trace,
         };
         let mut keys = HashSet::new();
@@ -2148,6 +2185,7 @@ impl RibManager {
             peer_asn,
             peer_group,
             local_role: self.peer_local_roles.get(&peer).copied().flatten(),
+            snapshot: None,
             trace: &mut trace,
         };
         let mut keys = HashSet::new();

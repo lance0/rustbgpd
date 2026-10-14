@@ -1870,6 +1870,7 @@ impl RibManager {
         if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
             peer,
             OutboundCommitBatch {
+                force_unicast_replay: true,
                 defer_grouped_refresh_prior,
                 unicast_otc_prechecked,
                 announce_source_exclusion,
@@ -1894,6 +1895,7 @@ impl RibManager {
             group_prior,
             shared_unicast_precommit,
             member_of.is_none().then_some(&all_prefixes),
+            None,
         ) {
             if let Some(blocking) = prior_blocking {
                 self.set_outbound_blocking(peer, afi, blocking);

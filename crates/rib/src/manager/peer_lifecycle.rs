@@ -2562,6 +2562,7 @@ impl RibManager {
             || self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
+                    force_unicast_replay: true,
                     unicast_otc_prechecked,
                     announce_source_exclusion,
                     shared_group_encode,
@@ -2583,6 +2584,7 @@ impl RibManager {
                 HashSet::new(),
                 shared_unicast_precommit,
                 member_of.is_none().then_some(&otc_prefixes),
+                None,
             );
         export_memo.retire_with(&mut checkpoint);
         if !sent {

@@ -59,6 +59,29 @@ pub(super) fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> 
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+pub(super) fn unicast_routes_equal(
+    a: &crate::route::Route,
+    old_action: Option<&rustbgpd_policy::NextHopAction>,
+    b: &crate::route::Route,
+    new_action: Option<&rustbgpd_policy::NextHopAction>,
+) -> bool {
+    routes_equal(a, b) && old_action == new_action
+}
+
+pub(super) fn unicast_routes_equal_for_profile(
+    old: &crate::route::Route,
+    old_action: Option<&rustbgpd_policy::NextHopAction>,
+    new: &crate::route::Route,
+    new_action: Option<&rustbgpd_policy::NextHopAction>,
+    snapshot: Option<&dyn crate::update::ExactExportSnapshot>,
+) -> bool {
+    routes_equal(old, new)
+        && (old_action == new_action
+            || snapshot.is_some_and(|profile| {
+                profile.unicast_next_hop_actions_equal(new, old_action, new_action)
+            }))
+}
+
 /// EVPN counterpart of [`routes_equal`]. Skip the deep attribute compare
 /// when the underlying `Arc<AttrSet>` is the same allocation.
 pub(super) fn evpn_routes_equal(

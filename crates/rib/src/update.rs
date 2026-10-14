@@ -863,6 +863,19 @@ pub trait ExactExportSnapshot: Any + Send + Sync {
     /// Monotonic generation of the immutable session export profile.
     fn generation(&self) -> u64;
 
+    /// Compare unicast next-hop actions under this immutable profile after
+    /// route fields compare equal. Failed preparation cannot prove equality.
+    /// The default conservatively preserves action distinctions for embedders.
+    fn unicast_next_hop_actions_equal(
+        &self,
+        route: &Route,
+        old: Option<&rustbgpd_policy::NextHopAction>,
+        new: Option<&rustbgpd_policy::NextHopAction>,
+    ) -> bool {
+        let _ = route;
+        old == new
+    }
+
     /// Probe one post-policy route using the exact live message builder.
     ///
     /// # Errors
