@@ -1595,14 +1595,18 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `LookupBestPath` | Outside-v1 global-only LPM: bounded ancestor probes return the closest installed Loc-RIB winner plus every alternative for that one matched prefix from one actor turn; old daemons fail with `UNIMPLEMENTED` |
 | `ListFlowSpecRoutes` | FlowSpec selected Loc-RIB, local-intent reconciliation, or per-peer committed advertised Adj-RIB-Out within the scoped controller contract; remote received-candidate diagnostics remain alpha |
-| `ListEvpnRoutes` | EVPN routes (RFC 7432 / RFC 9136 / RFC 9251 Type 6) in Loc-RIB view, filterable by route type / source peer / RD |
+| `ListEvpnRoutes` | Deprecated whole-table EVPN Loc-RIB view, outside v1; use `ListBestEvpnRoutes` for bounded best pages |
 | `ListReceivedEvpnRoutes` | Bounded accepted post-policy EVPN Adj-RIB-In for one source neighbor, filterable by type / RD |
 | `ListAdvertisedEvpnRoutes` | Bounded committed EVPN Adj-RIB-Out for one destination neighbor, filterable by type / RD |
 | `ExplainEvpnRoute` | Exact typed EVPN candidate selection, optional destination export trace and caller-selected SRv6 Argument pair inspection, with installed and committed state kept distinct |
 | `ListBgpLsRoutes` | BGP-LS / BGP-LS VPN routes (RFC 9552) in Loc-RIB view, exposed as opaque NLRI/TLV bytes and filterable by family, peer, and NLRI type |
-| `ListVpnRoutes` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, and MPLS labels |
-| `ListLabeledRoutes` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability |
-| `ListRtcRoutes` | RFC 4684 RT-Constrain membership NLRI — which Route Targets each peer imports |
+| `ListVpnRoutes` | Deprecated whole-table selected VPNv4/VPNv6 view, outside v1; use `ListVpnRibRoutes` with `view = BEST` |
+| `ListLabeledRoutes` | Deprecated whole-table selected labeled-unicast view, outside v1; use `ListLabeledRibRoutes` with `view = BEST` |
+| `ListRtcRoutes` | Deprecated whole-table selected RT-Constrain view, outside v1; use `ListRtcRibRoutes` with `view = BEST` |
+| `ListVpnRibRoutes` | Scoped RR-only L3VPN: bounded best/received/advertised pages with typed family, prefix, RD and peer filters |
+| `ListLabeledRibRoutes` | Scoped RR-only labeled-unicast: bounded best/received/advertised pages with typed family, prefix and peer filters |
+| `ListRtcRibRoutes` | Scoped RR-only RT-Constrain: bounded best/received/advertised pages with membership and peer filters |
+| `ListBestEvpnRoutes` | Bounded selected EVPN best pages with source/RD/MAC/ESI/VNI filters; scoped RR-only for Types 1–5, with all-types and Type 6 calls outside v1 |
 | `ListTopologyNodes` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union |
 | `ListTopologyLinks` | RFC 9107 ORR topology links — IGP adjacencies, link addresses, and metrics (the SPF input) |
 | `ListOrrStatus` | RFC 9107 ORR per-vantage status — configured vantages, their resolved topology nodes, and the peers bound to them |
@@ -1836,8 +1840,9 @@ and empty `best_reason`; the CLI prints the retained candidates. A prefix with
 no retained candidates still returns `NOT_FOUND`. `only_path` means one
 eligible candidate, even if other retained candidates are ineligible. EVPN
 received views and exact explain likewise retain the received route and its
-eligibility reason. `ListVpnRoutes` exposes selected VPN routes only; the
-additive `ListVpnRibRoutes` provides received and advertised pages.
+eligibility reason. Use `ListVpnRibRoutes` for bounded selected, received and
+advertised VPN pages. The deprecated `ListVpnRoutes` retains only the
+whole-table selected view outside v1.
 
 ### Longest-prefix lookup in the global Loc-RIB
 
@@ -1871,7 +1876,9 @@ Route-listing RPCs and the route-event surfaces (`ListReceivedRoutes`,
 unicast families). Route watch events include the address family of each route
 change. FlowSpec routes use `ListFlowSpecRoutes` with
 `IPV4_FLOWSPEC` (3), `IPV6_FLOWSPEC` (4), or unspecified (0). EVPN routes
-use `ListEvpnRoutes` and its EVPN-specific filters. BGP-LS routes use
+use the bounded `ListBestEvpnRoutes`, `ListReceivedEvpnRoutes` and
+`ListAdvertisedEvpnRoutes` with EVPN-specific filters; the deprecated
+`ListEvpnRoutes` retains its whole-table view outside v1. BGP-LS routes use
 `ListBgpLsRoutes` with `ADDRESS_FAMILY_BGP_LS` (6),
 `ADDRESS_FAMILY_BGP_LS_VPN` (7), or unspecified (0).
 
@@ -2272,27 +2279,36 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 The CLI prints one page and its continuation metadata; pass `--page-token '<token>'`
-to resume, quoting the opaque token for the shell. `--json` returns a page object for these new views. The existing commands
-below retain their best-route output and syntax.
+to resume, quoting the opaque token for the shell. `--json` returns a page
+object. For selected Loc-RIB pages, use `ListBestEvpnRoutes`: each example
+below returns one page, not the whole table. Repeat the same filters with the
+returned `next_page_token` until it is empty; after `ABORTED`, restart with an
+empty token. The legacy plain CLI listing retains its whole-table behavior.
 
 ```bash
-# All EVPN routes in Loc-RIB
+# First Loc-RIB page across all supported types (outside the scoped v1 profile)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  localhost:50051 rustbgpd.v1.RibService/ListEvpnRoutes
+  -d '{"page_size":100}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBestEvpnRoutes
 
-# Only Type 2 (MAC/IP) routes
+# First Type 2 (MAC/IP) page within the scoped RR-only role
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  -d '{"route_type_filter": 2}' \
-  localhost:50051 rustbgpd.v1.RibService/ListEvpnRoutes
+  -d '{"route_type_filter":2,"page_size":100}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBestEvpnRoutes
 
-# Filter by Route Distinguisher
+# First Type 2 page filtered by Route Distinguisher
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  -d '{"rd_filter": "65000:100"}' \
-  localhost:50051 rustbgpd.v1.RibService/ListEvpnRoutes
+  -d '{"route_type_filter":2,"rd_filter":"65000:100","page_size":100}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBestEvpnRoutes
+
+# Continue the preceding filtered query with its returned nonempty token
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"route_type_filter":2,"rd_filter":"65000:100","page_size":100,"page_token":"<next_page_token>"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBestEvpnRoutes
 ```
 
-`route_type_filter` accepts 0 (no filter) or `1..=6` matching the EVPN
-route type numbers (RFC 7432, RFC 9136, and RFC 9251 Type 6). `peer_filter`
+For the deprecated `ListEvpnRoutes`, `route_type_filter` accepts 0 (no filter)
+or `1..=6` matching the EVPN route type numbers (RFC 7432, RFC 9136, and RFC 9251 Type 6). `peer_filter`
 is an optional typed IP-address match (for example, expanded and compressed IPv6 spellings are equivalent); `rd_filter`
 is an optional typed route-distinguisher match (for example, `"65000:100"`,
 `"10.0.0.1:100"`, or `"4200000000:100"` per RFC 4364 RD types 0/1/2, plus
