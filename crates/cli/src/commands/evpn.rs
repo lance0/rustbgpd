@@ -74,6 +74,10 @@ pub async fn list_best_page(
     Ok(())
 }
 
+#[expect(
+    deprecated,
+    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
+)]
 pub async fn list(
     connection: Connection,
     route_type: Option<u32>,
@@ -1849,6 +1853,10 @@ fn diagnose_json(
 }
 
 /// Read-only EVPN alpha health summary.
+#[expect(
+    deprecated,
+    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
+)]
 pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut evpn_client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
