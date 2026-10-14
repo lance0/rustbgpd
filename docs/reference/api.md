@@ -1803,14 +1803,15 @@ with `rd` and `labeled`.
 
 A grouped peer's unicast explain and `ListAdvertisedRoutes` read the same
 admitted state. If the peer missed an update because its outbound queue was
-full, and no pre-regroup baseline exists, nothing records which group entries
-it missed. Both RPCs then return `FAILED_PRECONDITION` instead of reporting
-the group's desired routes as advertised. The listing's message is
+full or its receiver closed before peer teardown, and no pre-regroup baseline
+exists, nothing records which group entries it missed. Both RPCs then return
+`FAILED_PRECONDITION` instead of reporting the group's desired routes as
+advertised. The listing's message is
 `advertised routes are unavailable until outbound resynchronization
 completes`. The refusal is transient and clears when the peer's next resync is
-admitted, so retry after its queue drains. A peer that retains a regroup
-baseline is answered from that baseline by both RPCs. VPN and labeled-unicast
-explain do not apply this refusal.
+admitted, so retry after its queue drains or a new session registers. A peer
+that retains a regroup baseline is answered from that baseline by both RPCs.
+VPN and labeled-unicast explain do not apply this refusal.
 
 Best-path explain is also available via `ExplainBestPath` RPC — it returns all
 candidates for a prefix with the decisive comparison reason for each. Set
@@ -2129,11 +2130,12 @@ peer in `peer_address`; they do not prove remote receipt. Best mode treats
 `peer_filter` as an optional selected-source filter. Unknown received or
 advertised neighbors return `NOT_FOUND`, while a known peer with no matching
 routes gets an empty page. Group-owned VPN advertised pages return
-`FAILED_PRECONDITION` while the destination is dirty or awaiting resync:
+`FAILED_PRECONDITION` while the destination is dirty, awaiting resync, or its
+outbound receiver is closed before peer teardown:
 shared staging cannot reconstruct that peer's last admitted announcements
-or undelivered withdrawals. Retry after export settles. The existing
-operator count projection retains its behavior; the new page never presents
-deferred desired rows as committed advertised routes.
+or undelivered withdrawals. Retry after export settles or a new session
+registers. The existing operator count projection retains its behavior; the
+new page never presents deferred desired rows as committed advertised routes.
 
 VPN and labeled pages accept `afi_safi` and exact CIDR `prefix_filter`.
 Host bits must be zero. VPN also accepts an exact typed `rd_filter`.

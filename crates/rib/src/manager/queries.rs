@@ -737,7 +737,8 @@ impl RibManager {
             }
             if let RouteQueryScope::Advertised { peer } = scope
                 && let Some(gid) = self.vpn_grouped_member_of(peer)
-                && (self.dirty_peers.contains(&peer)
+                && (self.outbound_channel_gone(peer)
+                    || self.dirty_peers.contains(&peer)
                     || self
                         .group_ribs
                         .get(&gid)
@@ -1993,25 +1994,26 @@ impl RibManager {
     }
 
     /// Whether `peer` is a grouped member whose admitted unicast state is
-    /// unknown: it missed delivery (dirty) and retains no regroup baseline.
+    /// unknown: it missed delivery or its channel closed, and it retains no
+    /// regroup baseline. Closed channels lose retry flags before `PeerDown`.
     /// Its group view is then desired state, and no per-key record says
     /// which entries changed after the missed send, so unicast export explain
     /// and the advertised listing both refuse until the resync completes.
     fn grouped_unicast_admission_unknown(&self, peer: IpAddr) -> bool {
         self.grouped_member_of(peer).is_some()
-            && self.dirty_peers.contains(&peer)
+            && (self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer))
             && !self.pending_regroup_baseline.contains_key(&peer)
     }
 
-    /// The admitted unicast state of a dirty grouped member that retains a
-    /// regroup baseline; `None` when the group view is authoritative or the
-    /// state is unknown.
+    /// The admitted unicast state of an unsettled grouped member that retains
+    /// a regroup baseline; `None` when the group view is authoritative or the
+    /// state is unknown. A closed channel remains unsettled without retry flags.
     fn grouped_dirty_unicast_baseline(
         &self,
         peer: IpAddr,
     ) -> Option<&update_groups::RegroupBaseline> {
         self.grouped_member_of(peer)?;
-        if !self.dirty_peers.contains(&peer) {
+        if !self.dirty_peers.contains(&peer) && !self.outbound_channel_gone(peer) {
             return None;
         }
         self.pending_regroup_baseline.get(&peer)
@@ -2023,14 +2025,14 @@ impl RibManager {
     /// runner-up substituting at an own-sourced slot of a per-client-best
     /// group. The shared advertised iterator applies the member's OTC
     /// backstop, exact-export rejections and outbound capacity admission.
-    /// A dirty member is explained against its retained regroup baseline;
+    /// An unsettled member is explained against its retained regroup baseline;
     /// without one, the caller has already refused
     /// ([`Self::grouped_unicast_admission_unknown`]). The advertised listing
     /// applies the same rule, so the two agree.
     fn grouped_unicast_explain_view(&self, peer: IpAddr) -> Option<AdjRibOut> {
         self.grouped_member_of(peer)?;
         let mut view = AdjRibOut::new(peer);
-        if self.dirty_peers.contains(&peer) {
+        if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
             let baseline = self.pending_regroup_baseline.get(&peer)?;
             for (key, route) in &baseline.unicast {
                 view.insert_with_next_hop(

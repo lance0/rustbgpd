@@ -591,3 +591,85 @@ fn vpn_grouped_page_refuses_unadmitted_announces_and_undelivered_withdraws() {
         "the admitted old route is withdrawn during recovery"
     );
 }
+
+#[test]
+fn vpn_grouped_page_rejects_closed_receiver_until_fresh_session() {
+    let (mut manager, source) = fixture();
+    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let register = |manager: &mut RibManager, session_id| {
+        let (outbound_tx, receiver) = mpsc::channel(16);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer: destination,
+            session_id,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        receiver
+    };
+    let mut receiver = register(&mut manager, 0);
+    while receiver.try_recv().is_ok() {}
+    let old = make_vpn_rib_route(source, 1, 100, 100);
+    manager.handle_vpn_routes_received(source.into(), vec![old.clone()], vec![]);
+    assert_eq!(
+        receiver.try_recv().unwrap().vpn_announce[0].key(),
+        old.key()
+    );
+    let scope = RouteQueryScope::Advertised { peer: destination };
+    assert_eq!(
+        vpn_page(&mut manager, scope, None, None, 10).unwrap().total,
+        1
+    );
+
+    drop(receiver);
+    let new = make_vpn_rib_route(source, 2, 200, 100);
+    manager.handle_vpn_routes_received(source.into(), vec![new.clone()], vec![old.key()]);
+    let gid = manager.vpn_grouped_member_of(destination).unwrap();
+    assert!(manager.group_ribs[&gid].table.get_vpn(&new.key()).is_some());
+    assert!(manager.group_ribs[&gid].table.get_vpn(&old.key()).is_none());
+    assert!(manager.outbound_channel_gone(destination));
+    assert!(!manager.dirty_peers.contains(&destination));
+    assert!(
+        !manager.group_ribs[&gid]
+            .dirty_members
+            .contains(&destination)
+    );
+    assert_eq!(
+        vpn_page(&mut manager, scope, None, None, 10).unwrap_err(),
+        RoutePageError::ResyncInProgress,
+        "closed delivery must not expose the staged announcement or hide the owed withdrawal"
+    );
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: destination,
+        session_id: 0,
+    });
+    assert!(manager.vpn_grouped_member_of(destination).is_none());
+    assert!(!manager.outbound_peers.contains_key(&destination));
+    assert!(
+        vpn_page(&mut manager, scope, None, None, 10)
+            .unwrap()
+            .routes
+            .is_empty()
+    );
+    let mut fresh = register(&mut manager, 1);
+    let mut admitted = Vec::new();
+    while let Ok(update) = fresh.try_recv() {
+        admitted.extend(update.vpn_announce.into_iter().map(|route| route.key()));
+    }
+    assert_eq!(admitted, vec![new.key()]);
+    let page = vpn_page(&mut manager, scope, None, None, 10).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.routes[0].key(), new.key());
+}

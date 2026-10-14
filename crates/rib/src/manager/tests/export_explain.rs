@@ -1691,3 +1691,94 @@ fn grouped_resync_window_keeps_explain_and_advertised_listing_in_agreement() {
         "the resync delivered the route the listing now reports"
     );
 }
+
+#[test]
+fn grouped_closed_receiver_keeps_explain_and_listing_on_admitted_state() {
+    let mut actual = Vec::new();
+    let mut expected = Vec::new();
+    for retain_baseline in [false, true] {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let destination: IpAddr = "10.0.0.2".parse().unwrap();
+        let mut receiver = grouped_resync_peer_up(&mut manager, destination, 16);
+        while receiver.try_recv().is_ok() {}
+        let source = Ipv4Addr::new(192, 0, 2, 1);
+        let old = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let new = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+        for announced in [vec![make_route(old, source)], vec![make_route(new, source)]] {
+            manager.handle_update(RibUpdate::RoutesReceived {
+                peer: source.into(),
+                session_id: 0,
+                announced,
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            });
+            while manager.process_next_route_chunk() {}
+            if !manager.outbound_channel_gone(destination) {
+                assert_eq!(
+                    receiver.try_recv().unwrap().announce[0].prefix,
+                    Prefix::V4(old)
+                );
+                if retain_baseline {
+                    let mut baseline = crate::manager::update_groups::RegroupBaseline::default();
+                    for route in manager.grouped_advertised_routes(destination).unwrap() {
+                        baseline
+                            .unicast
+                            .insert((route.prefix, route.path_id), route);
+                    }
+                    manager
+                        .pending_regroup_baseline
+                        .insert(destination, baseline);
+                }
+                receiver.close();
+            }
+        }
+        assert!(manager.grouped_member_of(destination).is_some());
+        assert!(manager.outbound_channel_gone(destination));
+        assert!(!manager.dirty_peers.contains(&destination));
+        for prefix in [old, new] {
+            actual.push(grouped_resync_views(
+                &mut manager,
+                destination,
+                Prefix::V4(prefix),
+            ));
+            expected.push(if retain_baseline {
+                (Some(prefix == old), Some(vec![Prefix::V4(old)]))
+            } else {
+                (None, None)
+            });
+        }
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![(Prefix::V4(old), 0)],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+        actual.push(grouped_resync_views(
+            &mut manager,
+            destination,
+            Prefix::V4(old),
+        ));
+        // No current candidate means no identical announcement to suppress;
+        // the admitted baseline still lists the undelivered withdrawal.
+        expected.push(if retain_baseline {
+            (Some(false), Some(vec![Prefix::V4(old)]))
+        } else {
+            (None, None)
+        });
+    }
+    assert_eq!(
+        actual, expected,
+        "closed members read a retained admission baseline or refuse"
+    );
+}
