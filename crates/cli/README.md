@@ -562,6 +562,9 @@ with the same peer and filters for the next page; restart without it after a
 table change aborts the query. JSON returns `view`, `neighbor`, `routes`,
 `total_count`, `next_page_token`, and `page_version`.
 Best and peer pages accept the same `--mac`, `--esi`, and `--vni` filters.
+Peer queries require the daemon to acknowledge these filters and fail before
+printing rows or counts if an older daemon ignores them. Unfiltered peer
+queries retain their existing behavior.
 Their `--rd` accepts structured text or `0x` plus 16 raw hex digits, allowing
 an exact RD type to be selected when its display text is ambiguous.
 

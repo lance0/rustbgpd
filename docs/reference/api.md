@@ -2219,6 +2219,13 @@ includes calls filtered to Types 1–5 through its inventoried fields and JSON
 floor; all-types and Type 6 calls remain alpha. Older servers return
 `UNIMPLEMENTED` without falling back to a unicast table.
 
+Requests with MAC, ESI or VNI filters return response metadata
+`x-rustbgpd-evpn-peer-filters: mac,esi,vni`. Clients must check this
+acknowledgement before interpreting rows or counts: older daemons can silently
+ignore additive request fields. `rbgp` fails before printing text or JSON when
+the acknowledgement is absent or different. Calls without those filters keep
+their existing response behavior.
+
 Received means **accepted post-policy Adj-RIB-In**, including candidates that
 are not best. An absent route does not prove the neighbor never sent it;
 historical EVPN import rejection details are not retained. Advertised means

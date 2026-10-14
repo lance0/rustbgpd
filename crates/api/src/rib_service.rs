@@ -286,6 +286,8 @@ impl RibService {
         req: proto::ListPeerEvpnRoutesRequest,
         advertised: bool,
     ) -> Result<Response<proto::ListPeerEvpnRoutesResponse>, Status> {
+        let filters_requested =
+            !req.mac_filter.is_empty() || !req.esi_filter.is_empty() || req.vni_filter.is_some();
         let peer = req.neighbor_address.parse::<IpAddr>().map_err(|error| {
             Status::invalid_argument(format!("invalid neighbor_address: {error}"))
         })?;
@@ -351,7 +353,7 @@ impl RibService {
         } else {
             String::new()
         };
-        Ok(Response::new(proto::ListPeerEvpnRoutesResponse {
+        let mut response = Response::new(proto::ListPeerEvpnRoutesResponse {
             routes: page.routes.iter().map(evpn_route_to_proto).collect(),
             next_page_token,
             total_count: page.total,
@@ -359,7 +361,15 @@ impl RibService {
                 epoch: page.version.epoch,
                 generation: page.version.generation,
             }),
-        }))
+        });
+        if filters_requested {
+            // Older daemons ignore these additive fields; clients require acknowledgement.
+            response.metadata_mut().insert(
+                "x-rustbgpd-evpn-peer-filters",
+                tonic::metadata::MetadataValue::from_static("mac,esi,vni"),
+            );
+        }
+        Ok(response)
     }
 
     async fn query_explain_advertised_route(

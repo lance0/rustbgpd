@@ -228,6 +228,9 @@ pub async fn list_peer(
     mut request: crate::proto::ListPeerEvpnRoutesRequest,
     json: bool,
 ) -> Result<(), CliError> {
+    let filters_requested = !request.mac_filter.is_empty()
+        || !request.esi_filter.is_empty()
+        || request.vni_filter.is_some();
     let peer = request.neighbor_address.clone();
     validate_peer_view(&peer, None)?;
     if !request.rd_filter.is_empty() {
@@ -235,7 +238,7 @@ pub async fn list_peer(
     }
     request.neighbor_address = bare_ip_rpc_address(&peer).to_string();
     let mut client = connection.rib_listing_client();
-    let mut response = if received {
+    let response = if received {
         read_rpc(
             "ListReceivedEvpnRoutes",
             client.list_received_evpn_routes(request),
@@ -247,8 +250,19 @@ pub async fn list_peer(
             client.list_advertised_evpn_routes(request),
         )
         .await?
+    };
+    if filters_requested
+        && response
+            .metadata()
+            .get("x-rustbgpd-evpn-peer-filters")
+            .and_then(|value| value.to_str().ok())
+            != Some("mac,esi,vni")
+    {
+        return Err(CliError::Rpc(
+            "daemon does not acknowledge EVPN peer filters; upgrade it before using --mac, --esi or --vni".into(),
+        ));
     }
-    .into_inner();
+    let mut response = response.into_inner();
     for route in &mut response.routes {
         restore_matching_scoped_address(Some(&peer), &mut route.peer_address);
     }

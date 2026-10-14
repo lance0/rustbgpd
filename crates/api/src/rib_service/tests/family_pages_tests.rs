@@ -317,6 +317,72 @@ async fn typed_family_prefix_pages_match_exact_and_longer_routes_in_the_real_rib
 }
 
 #[tokio::test]
+async fn evpn_peer_filter_acknowledgement_preserves_unfiltered_calls() {
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let (route, ..) = non_unicast_routes(peer);
+    let (tx, mut rx) = mpsc::channel(8);
+    let service = RibService::new(tx);
+    let actor = tokio::spawn(async move {
+        for _ in 0..8 {
+            let Some(RibUpdate::QueryEvpnRoutesPage { reply, .. }) = rx.recv().await else {
+                panic!("expected EVPN page");
+            };
+            reply
+                .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                    routes: vec![route.clone()],
+                    total: 1,
+                    has_more: false,
+                    version: RoutePageVersion {
+                        epoch: 1,
+                        generation: 2,
+                    },
+                }))
+                .unwrap();
+        }
+    });
+    for advertised in [false, true] {
+        for (mac, esi, vni, expected) in [
+            ("", "", None, None),
+            ("00:11:22:33:44:55", "", None, Some("mac,esi,vni")),
+            (
+                "",
+                "00:01:02:03:04:05:06:07:08:09",
+                None,
+                Some("mac,esi,vni"),
+            ),
+            ("", "", Some(0), Some("mac,esi,vni")),
+        ] {
+            let request = Request::new(proto::ListPeerEvpnRoutesRequest {
+                neighbor_address: if advertised {
+                    "192.0.2.2".into()
+                } else {
+                    peer.to_string()
+                },
+                mac_filter: mac.into(),
+                esi_filter: esi.into(),
+                vni_filter: vni,
+                ..Default::default()
+            });
+            let response = if advertised {
+                service.list_advertised_evpn_routes(request).await
+            } else {
+                service.list_received_evpn_routes(request).await
+            }
+            .unwrap();
+            assert_eq!(
+                response
+                    .metadata()
+                    .get("x-rustbgpd-evpn-peer-filters")
+                    .map(|v| v.to_str().unwrap()),
+                expected
+            );
+            assert_eq!(response.into_inner().total_count, 1);
+        }
+    }
+    actor.await.unwrap();
+}
+
+#[tokio::test]
 async fn evpn_peer_raw_rd_filter_changes_reject_foreign_continuation() {
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
     let (route, ..) = non_unicast_routes(peer);

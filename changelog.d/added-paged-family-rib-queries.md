@@ -7,7 +7,10 @@
   An additive EVPN best-route page filters MAC, ESI and VXLAN VNI without
   copying the full table. EVPN received/advertised pages also accept the
   explicitly unstable MAC, ESI and VNI filters, with exact raw RD input
-  available on the new family pages and existing EVPN peer pages. New `rbgp rib vpn|labeled|rtc received|advertised`
+  available on the new family pages and existing EVPN peer pages. New EVPN
+  peer filters require daemon acknowledgement before the CLI prints a result,
+  preventing an older server from silently ignoring them.
+  New `rbgp rib vpn|labeled|rtc received|advertised`
   and `rbgp evpn best` commands expose mutation-fenced continuation tokens
   and JSON page metadata. Group-owned VPN advertised pages refuse reads
   while that destination is resynchronizing. Existing unpaged RPCs and CLI arrays are unchanged;

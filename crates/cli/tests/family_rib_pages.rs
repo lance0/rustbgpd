@@ -499,6 +499,59 @@ async fn family_plain_best_listings_keep_legacy_rpc_shapes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_peer_filters_require_server_ack_before_output() {
+    let server = test_support::spawn_mock_server(None).await;
+    server
+        .state
+        .list_peer_evpn_filters_legacy
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *server.state.list_peer_evpn_response.lock().await = proto::ListPeerEvpnRoutesResponse {
+        routes: vec![proto::EvpnRouteEntry {
+            route_type: 2,
+            mac: "00:11:22:33:44:66".into(),
+            peer_address: "192.0.2.1".into(),
+            ..Default::default()
+        }],
+        total_count: 1,
+        ..Default::default()
+    };
+    for view in ["received", "advertised"] {
+        for json in [false, true] {
+            for (flag, value) in [
+                ("--mac", "00:11:22:33:44:55"),
+                ("--esi", "00:01:02:03:04:05:06:07:08:09"),
+                ("--vni", "0"),
+            ] {
+                let mut args = vec!["evpn", view, "192.0.2.1", flag, value];
+                if json {
+                    args.push("--json");
+                }
+                let output = run(&server.addr, &args);
+                assert_eq!(output.status.code(), Some(1), "{output:?}");
+                assert!(
+                    output.stdout.is_empty(),
+                    "unsupported filters must print no rows: {output:?}"
+                );
+                assert!(
+                    String::from_utf8(output.stderr)
+                        .unwrap()
+                        .contains("does not acknowledge EVPN peer filters")
+                );
+            }
+        }
+        let output = run(&server.addr, &["evpn", view, "192.0.2.1", "--json"]);
+        assert!(
+            output.status.success(),
+            "old unfiltered requests remain supported: {output:?}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["total_count"],
+            1
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn evpn_peer_pages_forward_raw_rd_and_mac_esi_vni_without_changing_json() {
     let server = test_support::spawn_mock_server(None).await;
     *server.state.list_peer_evpn_response.lock().await = proto::ListPeerEvpnRoutesResponse {
