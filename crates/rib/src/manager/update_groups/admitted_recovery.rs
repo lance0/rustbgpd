@@ -528,29 +528,50 @@ impl AdmittedRecovery {
         }
     }
 
-    /// Try an immutable universe with zero admission bits. The caller supplies
-    /// an authoritative OLD filtered count, or a fresh empty proof's candidate
-    /// count. A sparse bounded flat proof remains available if the raw universe
-    /// costs more than that member can retain. No error publishes partial bits.
+    /// Reserve immediate sparse additions before optional snapshot publication.
+    /// A refused empty representation leaves authoritative flat capture available.
     pub(in crate::manager) fn share_capture_with_checkpoint<A: Iterator<Item = Key>>(
         &mut self,
         peer: IpAddr,
         hint: Option<SnapshotHandle>,
         count: usize,
         keys: A,
-        filtered: usize,
+        shape: (usize, usize),
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<SnapshotHandle>, Failure> {
         let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
-        if self.records[index].snapshot.is_some() {
+        if self.records[index].masked != 0 || !self.records[index].keys.0.is_empty() {
             return Ok(self.records[index].snapshot);
         }
-        if !self.records[index].keys.0.is_empty() || count == 0 {
+        if self.records[index].snapshot.is_none() && count == 0 {
             return Ok(None);
         }
         if matches!(self.records[index].state, State::Failed(_)) {
             return Err(self.missing_proof(peer));
         }
+        let shared = self.grow_keys(index, shape.1, checkpoint).and_then(|()| {
+            self.attach_snapshot_with_checkpoint(index, hint, count, keys, shape.0, checkpoint)
+        });
+        if matches!(shared, Ok(Some(_))) {
+            return shared;
+        }
+        self.free_keys(index, checkpoint);
+        shared
+    }
+
+    fn attach_snapshot_with_checkpoint<A: Iterator<Item = Key>>(
+        &mut self,
+        index: usize,
+        hint: Option<SnapshotHandle>,
+        count: usize,
+        keys: A,
+        filtered: usize,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<Option<SnapshotHandle>, Failure> {
+        if let Some(handle) = self.records[index].snapshot {
+            return Ok(Some(handle));
+        }
+        let peer = self.records[index].peer;
         let words = Self::shared_words(count)?;
         let bytes = words
             .checked_mul(size_of::<u64>())
@@ -659,6 +680,28 @@ impl AdmittedRecovery {
             });
             (count + 1, additions + usize::from(missing))
         })
+    }
+
+    /// An attached empty proof's universe takes precedence over a group hint.
+    pub(in crate::manager) fn candidate_universe_contains(
+        &self,
+        peer: IpAddr,
+        hint: Option<SnapshotHandle>,
+        key: &Key,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Option<bool> {
+        let index = self.index(peer).ok()?;
+        let universe = self.records[index].snapshot.or(hint)?;
+        let index = self.snapshot_index(universe)?;
+        Some(
+            self.snapshots[index]
+                .keys
+                .binary_search_by(|prior| {
+                    checkpoint(false);
+                    prior.cmp(key)
+                })
+                .is_ok(),
+        )
     }
 
     /// Reserve flat keys or the exact sparse additions of a shared capture.
@@ -1794,13 +1837,14 @@ mod tests {
         actual: &[Key],
     ) -> SnapshotHandle {
         ledger.begin_capture(address).unwrap();
+        let shape = ledger.capture_shape_with_checkpoint(hint, actual.iter().copied(), &mut |_| {});
         let handle = ledger
             .share_capture_with_checkpoint(
                 address,
                 hint,
                 raw.len(),
                 raw.iter().copied(),
-                actual.len(),
+                shape,
                 &mut |_| {},
             )
             .unwrap()
@@ -1840,7 +1884,7 @@ mod tests {
                 handle,
                 raw.len(),
                 raw.iter().copied(),
-                raw.len(),
+                (raw.len(), 0),
                 &mut |_| {},
             )
             .unwrap()
@@ -2228,7 +2272,7 @@ mod tests {
                     Some(handle),
                     count,
                     actual.into_iter(),
-                    count,
+                    (count, additions),
                     &mut |_| {}
                 )
                 .unwrap(),
@@ -2281,7 +2325,7 @@ mod tests {
                     Some(handle),
                     actual.len(),
                     actual.into_iter(),
-                    actual.len(),
+                    (actual.len(), 0),
                     &mut |_| {},
                 )
                 .unwrap()
@@ -2308,6 +2352,61 @@ mod tests {
                 ledger.get(&peer(1)).unwrap().iter().collect::<Vec<_>>(),
                 raw.map(ExactExportKey::from)
             );
+        }
+    }
+
+    #[test]
+    fn optional_sparse_allocations_roll_back_before_attaching_an_older_snapshot() {
+        for stage in 0..2 {
+            let mut ledger = AdmittedRecovery::new();
+            let raw: Vec<_> = (1..=100).map(key).collect();
+            let actual: Vec<_> = (101..=200).map(key).collect();
+            let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+            ledger.begin_capture(peer(2)).unwrap();
+            let before = ledger.bytes();
+            ledger.allocation_countdown = Some(stage);
+            let error = ledger
+                .share_capture_with_checkpoint(
+                    peer(2),
+                    Some(handle),
+                    actual.len(),
+                    actual.iter().copied(),
+                    (actual.len(), actual.len()),
+                    &mut |_| {},
+                )
+                .unwrap_err();
+            assert_eq!(error.cause, FailureCause::AllocationFailure);
+            assert_eq!(ledger.bytes(), before);
+            assert_eq!(ledger.records[1].state, State::Capturing);
+            assert!(ledger.records[1].snapshot.is_none());
+            assert_eq!(ledger.records[1].keys.0.capacity(), 0);
+            assert_eq!(ledger.records[1].words.capacity(), 0);
+            assert_eq!(ledger.snapshots[0].handle, handle);
+            assert_eq!(ledger.snapshots[0].references, 1);
+            ledger
+                .reserve_capture_with_checkpoint(peer(2), actual.len(), &mut |_| {})
+                .unwrap();
+            for key in &actual {
+                ledger.push_capture(peer(2), *key).unwrap();
+            }
+            ledger.seal_capture(peer(2)).unwrap();
+            assert_eq!(
+                ledger.get(&peer(2)).unwrap().iter().collect::<Vec<_>>(),
+                actual
+                    .into_iter()
+                    .map(ExactExportKey::from)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                ledger.get(&peer(1)).unwrap().iter().collect::<Vec<_>>(),
+                raw.into_iter()
+                    .map(ExactExportKey::from)
+                    .collect::<Vec<_>>()
+            );
+            ledger.remove(&peer(2));
+            assert_eq!(ledger.snapshots[0].references, 1);
+            ledger.remove(&peer(1));
+            assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
         }
     }
 
@@ -2343,7 +2442,7 @@ mod tests {
                 None,
                 100,
                 (1..=100).map(key),
-                100,
+                (100, 0),
                 &mut |_| {},
             );
             assert_eq!(result.unwrap_err().cause, FailureCause::AllocationFailure);
@@ -2378,7 +2477,7 @@ mod tests {
                     Some(handle),
                     raw.len(),
                     raw.iter().copied(),
-                    raw.len(),
+                    (raw.len(), 0),
                     &mut |_| {}
                 )
                 .unwrap_err()
@@ -2403,7 +2502,7 @@ mod tests {
                     None,
                     100,
                     (1..=100).map(key),
-                    2,
+                    (2, 0),
                     &mut |_| {}
                 )
                 .unwrap_err()
@@ -2438,7 +2537,7 @@ mod tests {
                 None,
                 COUNT as usize,
                 (0..COUNT).map(full_key),
-                COUNT as usize,
+                (COUNT as usize, 0),
                 &mut |_| {},
             )
             .unwrap()
@@ -2479,7 +2578,7 @@ mod tests {
                 None,
                 3_000_000,
                 std::iter::empty(),
-                3_000_000,
+                (3_000_000, 0),
                 &mut |_| {},
             )
             .unwrap_err();

@@ -440,6 +440,17 @@ Adj-RIB-In snapshots and BMP's successfully written UPDATE feed remain unchanged
 > [bounded-proof amendment](#amendment-2026-10-14-bounded-unicastvpn-recovery-proofs)
 > for its causes and limits; complete proofs and EVPN keep targeted withdrawals.
 
+Unicast/VPN proofs may reuse a still-live older key universe after group contents
+change. Each capture reconstructs actual OLD admission through member mask bits
+and bounded sparse additions; desired membership or a cache hint alone proves
+no admission. New keys still consume sparse storage per member. Private/regroup
+captures can instead reserve bounded flat proofs. Group cache hints reset on
+recreation; sharing across recreated groups remains unqualified.
+Sharing an empty proof reserves its immediate sparse requirement before
+attachment; refusal retries a fitting flat proof before the counted no-proof
+fallback. The [snapshot-churn receipt](../perf/update-group-recovery-snapshot-churn-2026-10-14.md)
+qualifies its recorded shapes, not arbitrary churn or general regroup scale.
+
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
 withdraws equals the per-peer path, with exact NLRI and prepared attribute bytes.

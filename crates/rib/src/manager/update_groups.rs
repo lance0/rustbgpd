@@ -1960,7 +1960,7 @@ impl RibManager {
                     group.recovery_snapshot,
                     raw_count,
                     raw,
-                    count,
+                    (count, additions),
                     &mut checkpoint,
                 );
                 let handle = shared.ok().flatten();
@@ -2001,11 +2001,13 @@ impl RibManager {
         true
     }
 
-    pub(in crate::manager) fn prepare_empty_group_recovery_admission(
+    pub(in crate::manager) fn prepare_empty_group_recovery_admission<A>(
         &mut self,
         peer: IpAddr,
-        candidates: usize,
-    ) {
+        candidates: A,
+    ) where
+        A: Clone + Iterator<Item = admitted_recovery::Key>,
+    {
         use admitted_recovery::Key;
         if self
             .pending_group_admitted
@@ -2020,6 +2022,25 @@ impl RibManager {
         let Some(group) = self.group_ribs.get_mut(&gid) else {
             return;
         };
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = |force| super::replacement_readiness_checkpoint(&readiness, force);
+        let shape = candidates.fold((0, 0), |(count, additions), key| {
+            checkpoint(false);
+            let present = self
+                .pending_group_admitted
+                .candidate_universe_contains(peer, group.recovery_snapshot, &key, &mut checkpoint)
+                .unwrap_or_else(|| match key {
+                    Key::Unicast(prefix, path_id) => group.table.get(&prefix, path_id).is_some(),
+                    Key::Vpn(nlri_key, path_id) => {
+                        group.stages_vpn()
+                            && group
+                                .table
+                                .get_vpn(&VpnRibRouteKey { nlri_key, path_id })
+                                .is_some()
+                    }
+                });
+            (count + 1, additions + usize::from(!present))
+        });
         let count = group.table.len().saturating_add(if group.stages_vpn() {
             group.table.vpn_len()
         } else {
@@ -2039,14 +2060,13 @@ impl RibManager {
                         Key::Vpn(key.nlri_key, key.path_id)
                     }),
             );
-        let readiness = self.replacement_readiness.clone();
         if let Ok(Some(handle)) = self.pending_group_admitted.share_capture_with_checkpoint(
             peer,
             group.recovery_snapshot,
             count,
             raw,
-            candidates,
-            &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
+            shape,
+            &mut checkpoint,
         ) {
             group.recovery_snapshot = Some(handle);
         }
