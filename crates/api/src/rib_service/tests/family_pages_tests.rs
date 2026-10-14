@@ -739,9 +739,7 @@ async fn grouped_vpn_resync_refusal_is_failed_precondition() {
         let Some(RibUpdate::QueryVpnRoutesPage { reply, .. }) = rx.recv().await else {
             panic!("expected VPN page");
         };
-        reply
-            .send(Err(RoutePageError::ResyncInProgress))
-            .unwrap();
+        reply.send(Err(RoutePageError::ResyncInProgress)).unwrap();
     });
     let error = svc
         .list_vpn_routes_page(Request::new(proto::ListVpnRoutesPageRequest {
