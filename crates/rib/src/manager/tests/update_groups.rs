@@ -1001,6 +1001,54 @@ fn distribution_skips_pristine_otc_prefix_visits() {
     }
 }
 
+/// Clean grouped fanout without next-hop actions must not scan each member's
+/// batch for action suppression; a group with actions still does.
+#[test]
+fn clean_grouped_fanout_without_actions_skips_action_suppression_scan() {
+    use crate::manager::distribution::ACTION_SUPPRESSION_SCANS;
+    const PEERS: usize = 4;
+    let scans = || ACTION_SUPPRESSION_SCANS.with(std::cell::Cell::get);
+    let mut next_hop_self = deny_statement(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+    next_hop_self.prefix = None;
+    next_hop_self.action = PolicyAction::Permit;
+    next_hop_self.modifications.set_next_hop = Some(rustbgpd_policy::NextHopAction::Self_);
+    let next_hop_self = PolicyChain::new(vec![Policy {
+        entries: vec![next_hop_self],
+        default_action: PolicyAction::Deny,
+    }]);
+    for (policy, expect_scans) in [(None, false), (Some(next_hop_self), true)] {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let mut outbound = Vec::with_capacity(PEERS);
+        for host in 1..=PEERS {
+            let host = u8::try_from(host).expect("four peers fit in an IPv4 host octet");
+            let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 4, host));
+            let mut receiver = register_direct_peer_with_policy(&mut manager, peer, policy.clone());
+            assert_eq!(receiver.try_recv().unwrap().end_of_rib, ipv4_sendable());
+            assert!(manager.grouped_member_of(peer).is_some());
+            outbound.push(receiver);
+        }
+        let source = Ipv4Addr::new(192, 0, 2, 6);
+        let prefix = |octet| Ipv4Prefix::new(Ipv4Addr::new(203, 0, octet, 0), 24);
+        distribute_direct_routes(&mut manager, source, (0..64).map(prefix));
+        let before = scans();
+        distribute_direct_routes(&mut manager, source, (64..128).map(prefix));
+        for receiver in &mut outbound {
+            assert_eq!(receiver.try_recv().unwrap().announce.len(), 64);
+            assert_eq!(receiver.try_recv().unwrap().announce.len(), 64);
+        }
+        // Load-bearing proof: removing the O(1) gate in
+        // `suppress_equivalent_unicast_actions` makes the action-free group
+        // count one scan per member and fails this assertion.
+        assert_eq!(
+            scans() > before,
+            expect_scans,
+            "action suppression scans: {}",
+            scans() - before
+        );
+    }
+}
+
 #[test]
 fn otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly() {
     let (_tx, rx) = mpsc::channel(1);
