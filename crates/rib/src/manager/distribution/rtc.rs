@@ -251,6 +251,9 @@ impl RibManager {
             super::super::replacement_readiness_checkpoint_at(&readiness, "selection_rtc", false);
         };
         checkpoint();
+        if !affected.is_empty() {
+            self.advance_table_pages();
+        }
         self.record_deferred_rtc(affected);
         if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
             return;

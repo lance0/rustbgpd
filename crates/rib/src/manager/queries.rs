@@ -301,32 +301,32 @@ pub(super) fn page_routes<'a>(
         version: RoutePageVersion::default(),
     }
 }
-/// Scan an unordered EVPN table with O(page) retained references and clones.
-/// The full scope is visited on each page to compute the filtered total.
-fn page_evpn_routes<'a>(
-    routes: impl Iterator<Item = &'a crate::route::EvpnRibRoute>,
-    filter: Option<&RibRowFilter<crate::route::EvpnRibRoute>>,
-    after: Option<EvpnRouteQueryKey>,
+/// Full unordered scope scan, O(page) retained references and clones.
+// shortcut: each page scans its scope; add an ordered index when these families need large-table reads.
+fn page_family_rows<'a, T: Clone + 'a, K: Ord + Copy>(
+    routes: impl Iterator<Item = &'a T>,
+    filter: Option<&RibRowFilter<T>>,
+    after: Option<K>,
     page_size: usize,
-) -> EvpnRoutePage {
-    struct Entry<'a>(EvpnRouteQueryKey, &'a crate::route::EvpnRibRoute);
-    impl PartialEq for Entry<'_> {
+    key: impl Fn(&T) -> K,
+) -> crate::update::RibRowsPage<T> {
+    struct Entry<'a, K, T>(K, &'a T);
+    impl<K: Ord, T> PartialEq for Entry<'_, K, T> {
         fn eq(&self, other: &Self) -> bool {
             self.0 == other.0
         }
     }
-    impl Eq for Entry<'_> {}
-    impl PartialOrd for Entry<'_> {
+    impl<K: Ord, T> Eq for Entry<'_, K, T> {}
+    impl<K: Ord, T> PartialOrd for Entry<'_, K, T> {
         fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
             Some(self.cmp(other))
         }
     }
-    impl Ord for Entry<'_> {
+    impl<K: Ord, T> Ord for Entry<'_, K, T> {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
             self.0.cmp(&other.0)
         }
     }
-
     let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
     let mut heap = std::collections::BinaryHeap::with_capacity(n);
     let mut total = 0;
@@ -336,7 +336,7 @@ fn page_evpn_routes<'a>(
             continue;
         }
         total += 1;
-        let key = (route.key(), route.peer);
+        let key = key(route);
         if after.is_some_and(|after| key <= after) {
             continue;
         }
@@ -353,11 +353,26 @@ fn page_evpn_routes<'a>(
         .into_iter()
         .map(|entry| entry.1.clone())
         .collect();
-    EvpnRoutePage {
+    crate::update::RibRowsPage {
         has_more: remaining > routes.len(),
         routes,
         total,
         version: RoutePageVersion::default(),
+    }
+}
+
+fn page_evpn_routes<'a>(
+    routes: impl Iterator<Item = &'a crate::route::EvpnRibRoute>,
+    filter: Option<&RibRowFilter<crate::route::EvpnRibRoute>>,
+    after: Option<EvpnRouteQueryKey>,
+    page_size: usize,
+) -> EvpnRoutePage {
+    let page = page_family_rows(routes, filter, after, page_size, |r| (r.key(), r.peer));
+    EvpnRoutePage {
+        routes: page.routes,
+        total: page.total,
+        has_more: page.has_more,
+        version: page.version,
     }
 }
 
@@ -692,6 +707,199 @@ impl RibManager {
                     filter,
                     after,
                     page_size,
+                ),
+            };
+            page.version = version;
+            Ok(page)
+        });
+        let _ = reply.send(result);
+    }
+
+    pub(super) fn handle_query_vpn_routes_page(
+        &self,
+        scope: RouteQueryScope,
+        filter: Option<&RibRowFilter<crate::route::VpnRibRoute>>,
+        after: Option<crate::update::VpnRouteQueryKey>,
+        expected_version: Option<RoutePageVersion>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::RibRowsPage<crate::route::VpnRibRoute>, RoutePageError>,
+        >,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let result = self.route_page_version(scope).and_then(|version| {
+            if after.is_some() != expected_version.is_some()
+                || expected_version.is_some_and(|expected| expected != version)
+            {
+                return Err(RoutePageError::Invalidated);
+            }
+            if let RouteQueryScope::Advertised { peer } = scope
+                && let Some(gid) = self.vpn_grouped_member_of(peer)
+                && (self.outbound_channel_gone(peer)
+                    || self.dirty_peers.contains(&peer)
+                    || self
+                        .group_ribs
+                        .get(&gid)
+                        .is_some_and(|group| group.dirty_members.contains(&peer)))
+            {
+                return Err(RoutePageError::ResyncInProgress);
+            }
+            let key = |r: &crate::route::VpnRibRoute| (r.nlri.key(), r.peer, r.path_id);
+            let mut page = match scope {
+                RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
+                    self.ribs
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibIn::iter_vpn),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+                RouteQueryScope::Received { peer: None } => page_family_rows(
+                    self.ribs.values().flat_map(AdjRibIn::iter_vpn),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+                RouteQueryScope::Best => {
+                    page_family_rows(self.loc_rib.iter_vpn(), filter, after, page_size, key)
+                }
+                RouteQueryScope::Advertised { peer } => {
+                    match self.grouped_advertised_vpn_routes_iter(peer) {
+                        Some(routes) => page_family_rows(routes, filter, after, page_size, key),
+                        None => page_family_rows(
+                            self.adj_ribs_out
+                                .get(&peer)
+                                .into_iter()
+                                .flat_map(AdjRibOut::iter_vpn),
+                            filter,
+                            after,
+                            page_size,
+                            key,
+                        ),
+                    }
+                }
+            };
+            page.version = version;
+            Ok(page)
+        });
+        let _ = reply.send(result);
+    }
+
+    pub(super) fn handle_query_labeled_routes_page(
+        &self,
+        scope: RouteQueryScope,
+        filter: Option<&RibRowFilter<crate::route::LabeledRibRoute>>,
+        after: Option<crate::update::LabeledRouteQueryKey>,
+        expected_version: Option<RoutePageVersion>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::RibRowsPage<crate::route::LabeledRibRoute>, RoutePageError>,
+        >,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let result = self.route_page_version(scope).and_then(|version| {
+            if after.is_some() != expected_version.is_some()
+                || expected_version.is_some_and(|expected| expected != version)
+            {
+                return Err(RoutePageError::Invalidated);
+            }
+            let key = |r: &crate::route::LabeledRibRoute| (r.nlri.prefix, r.peer, r.path_id);
+            let mut page = match scope {
+                RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
+                    self.ribs
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibIn::iter_labeled),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+                RouteQueryScope::Received { peer: None } => page_family_rows(
+                    self.ribs.values().flat_map(AdjRibIn::iter_labeled),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+                RouteQueryScope::Best => {
+                    page_family_rows(self.loc_rib.iter_labeled(), filter, after, page_size, key)
+                }
+                RouteQueryScope::Advertised { peer } => page_family_rows(
+                    self.adj_ribs_out
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_labeled),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+            };
+            page.version = version;
+            Ok(page)
+        });
+        let _ = reply.send(result);
+    }
+
+    pub(super) fn handle_query_rtc_routes_page(
+        &self,
+        scope: RouteQueryScope,
+        filter: Option<&RibRowFilter<crate::route::RtcRibRoute>>,
+        after: Option<crate::update::RtcRouteQueryKey>,
+        expected_version: Option<RoutePageVersion>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::RibRowsPage<crate::route::RtcRibRoute>, RoutePageError>,
+        >,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let result = self.route_page_version(scope).and_then(|version| {
+            if after.is_some() != expected_version.is_some()
+                || expected_version.is_some_and(|expected| expected != version)
+            {
+                return Err(RoutePageError::Invalidated);
+            }
+            let key = |r: &crate::route::RtcRibRoute| (r.nlri, r.peer, r.path_id);
+            let mut page = match scope {
+                RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
+                    self.ribs
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibIn::iter_rtc),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+                RouteQueryScope::Received { peer: None } => page_family_rows(
+                    self.ribs.values().flat_map(AdjRibIn::iter_rtc),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+                RouteQueryScope::Best => {
+                    page_family_rows(self.loc_rib.iter_rtc(), filter, after, page_size, key)
+                }
+                RouteQueryScope::Advertised { peer } => page_family_rows(
+                    self.adj_ribs_out
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_rtc),
+                    filter,
+                    after,
+                    page_size,
+                    key,
                 ),
             };
             page.version = version;
@@ -1786,25 +1994,26 @@ impl RibManager {
     }
 
     /// Whether `peer` is a grouped member whose admitted unicast state is
-    /// unknown: it missed delivery (dirty) and retains no regroup baseline.
+    /// unknown: it missed delivery or its channel closed, and it retains no
+    /// regroup baseline. Closed channels lose retry flags before `PeerDown`.
     /// Its group view is then desired state, and no per-key record says
     /// which entries changed after the missed send, so unicast export explain
     /// and the advertised listing both refuse until the resync completes.
     fn grouped_unicast_admission_unknown(&self, peer: IpAddr) -> bool {
         self.grouped_member_of(peer).is_some()
-            && self.dirty_peers.contains(&peer)
+            && (self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer))
             && !self.pending_regroup_baseline.contains_key(&peer)
     }
 
-    /// The admitted unicast state of a dirty grouped member that retains a
-    /// regroup baseline; `None` when the group view is authoritative or the
-    /// state is unknown.
+    /// The admitted unicast state of an unsettled grouped member that retains
+    /// a regroup baseline; `None` when the group view is authoritative or the
+    /// state is unknown. A closed channel remains unsettled without retry flags.
     fn grouped_dirty_unicast_baseline(
         &self,
         peer: IpAddr,
     ) -> Option<&update_groups::RegroupBaseline> {
         self.grouped_member_of(peer)?;
-        if !self.dirty_peers.contains(&peer) {
+        if !self.dirty_peers.contains(&peer) && !self.outbound_channel_gone(peer) {
             return None;
         }
         self.pending_regroup_baseline.get(&peer)
@@ -1816,14 +2025,14 @@ impl RibManager {
     /// runner-up substituting at an own-sourced slot of a per-client-best
     /// group. The shared advertised iterator applies the member's OTC
     /// backstop, exact-export rejections and outbound capacity admission.
-    /// A dirty member is explained against its retained regroup baseline;
+    /// An unsettled member is explained against its retained regroup baseline;
     /// without one, the caller has already refused
     /// ([`Self::grouped_unicast_admission_unknown`]). The advertised listing
     /// applies the same rule, so the two agree.
     fn grouped_unicast_explain_view(&self, peer: IpAddr) -> Option<AdjRibOut> {
         self.grouped_member_of(peer)?;
         let mut view = AdjRibOut::new(peer);
-        if self.dirty_peers.contains(&peer) {
+        if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
             let baseline = self.pending_regroup_baseline.get(&peer)?;
             for (key, route) in &baseline.unicast {
                 view.insert_with_next_hop(

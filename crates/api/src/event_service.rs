@@ -2735,6 +2735,34 @@ mod tests {
     // ── ADR-0072 PR5 — SubscribeFromEvent handler tests ────────
 
     #[tokio::test]
+    async fn subscribe_from_event_keeps_existing_family_acceptance() {
+        let (_dir, manager, service) = cursor_test_service().await;
+        for afi_safi in 0..=7 {
+            let response = service
+                .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
+                    afi_safi,
+                    ..Default::default()
+                }))
+                .await
+                .expect("existing event families remain accepted");
+            drop(response);
+        }
+        for afi_safi in [8, 9, 10, 11, 12, -1, i32::MAX] {
+            let result = service
+                .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
+                    afi_safi,
+                    ..Default::default()
+                }))
+                .await;
+            let Err(error) = result else {
+                panic!("new RIB family {afi_safi} must not create an unsupported event stream");
+            };
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        }
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn subscribe_from_event_quiet_stream_fails_on_producer_loss() {
         // Load-bearing break: removing the producer-loss branch leaves the
         // quiet stream pending until this test's deadline expires.

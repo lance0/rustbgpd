@@ -329,7 +329,12 @@ fn advertised_prefixes(manager: &mut RibManager, peer: IpAddr) -> HashSet<Prefix
 fn export_explain_limit_fixture(
     ungrouped: bool,
     per_client_best: bool,
-) -> (RibManager, IpAddr, HashSet<Prefix>) {
+) -> (
+    RibManager,
+    IpAddr,
+    HashSet<Prefix>,
+    [mpsc::Receiver<OutboundRouteUpdate>; 2],
+) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = ungrouped;
@@ -361,7 +366,9 @@ fn export_explain_limit_fixture(
         wire_prefixes(&mut sibling_rx),
         HashSet::from([v4(1), v4(2), v4(3)])
     );
-    (manager, peer, advertised)
+    // These queries exercise live admission; receiver closure is a separate
+    // lifecycle transition that must remain under the caller's control.
+    (manager, peer, advertised, [peer_rx, sibling_rx])
 }
 
 /// Removing the commit overlay reports Advertise for a prefix absent from the
@@ -372,7 +379,7 @@ fn export_explain_denies_withheld_prefix_at_outbound_limit() {
 
     for ungrouped in [false, true] {
         for per_client_best in [false, true] {
-            let (mut manager, peer, advertised) =
+            let (mut manager, peer, advertised, _receivers) =
                 export_explain_limit_fixture(ungrouped, per_client_best);
             let withheld = [v4(1), v4(2), v4(3)]
                 .into_iter()
@@ -404,7 +411,7 @@ fn export_explain_denies_withheld_prefix_at_outbound_limit() {
 fn export_explain_allows_admitted_prefix_at_outbound_limit() {
     for ungrouped in [false, true] {
         for per_client_best in [false, true] {
-            let (mut manager, peer, advertised) =
+            let (mut manager, peer, advertised, _receivers) =
                 export_explain_limit_fixture(ungrouped, per_client_best);
             let admitted = *advertised.iter().next().unwrap();
             let explanation = explain_export(&mut manager, peer, admitted);
@@ -433,7 +440,8 @@ fn baseline_window_listing_and_explain_agree_at_outbound_limit() {
     use crate::update::{ExplainDecision, OUTBOUND_PREFIX_LIMIT_REACHED};
 
     for per_client_best in [false, true] {
-        let (mut manager, peer, advertised) = export_explain_limit_fixture(false, per_client_best);
+        let (mut manager, peer, advertised, _receivers) =
+            export_explain_limit_fixture(false, per_client_best);
         // Capture the admitted projection as a regroup does, then hold the
         // member dirty so both surfaces must read the baseline.
         let mut baseline = crate::manager::update_groups::RegroupBaseline::default();
@@ -465,7 +473,8 @@ fn baseline_window_listing_and_explain_agree_at_outbound_limit() {
 #[test]
 fn export_explain_outbound_limit_preserves_earlier_exact_rejection() {
     for ungrouped in [false, true] {
-        let (mut manager, peer, advertised) = export_explain_limit_fixture(ungrouped, false);
+        let (mut manager, peer, advertised, _receivers) =
+            export_explain_limit_fixture(ungrouped, false);
         let withheld = [v4(1), v4(2), v4(3)]
             .into_iter()
             .find(|prefix| !advertised.contains(prefix))

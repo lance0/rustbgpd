@@ -194,6 +194,15 @@ pub(crate) struct MockState {
     pub(crate) list_bgpls_response: Mutex<Option<server_proto::ListBgpLsResponse>>,
     pub(crate) list_conditional_response:
         Mutex<Option<server_proto::ListConditionalAdvertisementsResponse>>,
+    pub(crate) family_page_error: Mutex<Option<(Code, String)>>,
+    pub(crate) last_list_vpn_page: Mutex<Option<server_proto::ListVpnRibRoutesRequest>>,
+    pub(crate) list_vpn_page_response: Mutex<server_proto::ListVpnRibRoutesResponse>,
+    pub(crate) last_list_labeled_page: Mutex<Option<server_proto::ListLabeledRibRoutesRequest>>,
+    pub(crate) list_labeled_page_response: Mutex<server_proto::ListLabeledRibRoutesResponse>,
+    pub(crate) last_list_rtc_page: Mutex<Option<server_proto::ListRtcRibRoutesRequest>>,
+    pub(crate) list_rtc_page_response: Mutex<server_proto::ListRtcRibRoutesResponse>,
+    pub(crate) last_list_evpn_page: Mutex<Option<server_proto::ListBestEvpnRoutesRequest>>,
+    pub(crate) list_evpn_page_response: Mutex<server_proto::ListBestEvpnRoutesResponse>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) list_vpn_response: Mutex<Option<server_proto::ListVpnRoutesResponse>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
@@ -211,6 +220,7 @@ pub(crate) struct MockState {
     pub(crate) last_list_advertised_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
     pub(crate) list_peer_evpn_response: Mutex<server_proto::ListPeerEvpnRoutesResponse>,
     pub(crate) list_peer_evpn_error: Mutex<Option<(Code, String)>>,
+    pub(crate) list_peer_evpn_filters_legacy: AtomicBool,
     pub(crate) last_explain_evpn: Mutex<Option<server_proto::ExplainEvpnRouteRequest>>,
     pub(crate) explain_evpn_response: Mutex<server_proto::ExplainEvpnRouteResponse>,
     pub(crate) explain_evpn_error: Mutex<Option<(Code, String)>>,
@@ -2338,6 +2348,58 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         }))
     }
 
+    async fn list_vpn_rib_routes(
+        &self,
+        request: Request<server_proto::ListVpnRibRoutesRequest>,
+    ) -> Result<Response<server_proto::ListVpnRibRoutesResponse>, Status> {
+        *self.state.last_list_vpn_page.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_vpn_page_response.lock().await.clone(),
+        ))
+    }
+
+    async fn list_labeled_rib_routes(
+        &self,
+        request: Request<server_proto::ListLabeledRibRoutesRequest>,
+    ) -> Result<Response<server_proto::ListLabeledRibRoutesResponse>, Status> {
+        *self.state.last_list_labeled_page.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_labeled_page_response.lock().await.clone(),
+        ))
+    }
+
+    async fn list_rtc_rib_routes(
+        &self,
+        request: Request<server_proto::ListRtcRibRoutesRequest>,
+    ) -> Result<Response<server_proto::ListRtcRibRoutesResponse>, Status> {
+        *self.state.last_list_rtc_page.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_rtc_page_response.lock().await.clone(),
+        ))
+    }
+
+    async fn list_best_evpn_routes(
+        &self,
+        request: Request<server_proto::ListBestEvpnRoutesRequest>,
+    ) -> Result<Response<server_proto::ListBestEvpnRoutesResponse>, Status> {
+        *self.state.last_list_evpn_page.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_evpn_page_response.lock().await.clone(),
+        ))
+    }
+
     async fn list_topology_nodes(
         &self,
         request: Request<server_proto::ListTopologyNodesRequest>,
@@ -2422,26 +2484,54 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListPeerEvpnRoutesRequest>,
     ) -> Result<Response<server_proto::ListPeerEvpnRoutesResponse>, Status> {
-        *self.state.last_list_received_evpn.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        let filters_requested = !request.mac_filter.is_empty()
+            || !request.esi_filter.is_empty()
+            || request.vni_filter.is_some();
+        *self.state.last_list_received_evpn.lock().await = Some(request);
         if let Some((code, message)) = self.state.list_peer_evpn_error.lock().await.clone() {
             return Err(Status::new(code, message));
         }
-        Ok(Response::new(
-            self.state.list_peer_evpn_response.lock().await.clone(),
-        ))
+        let mut response = Response::new(self.state.list_peer_evpn_response.lock().await.clone());
+        if filters_requested
+            && !self
+                .state
+                .list_peer_evpn_filters_legacy
+                .load(Ordering::SeqCst)
+        {
+            response.metadata_mut().insert(
+                "x-rustbgpd-evpn-peer-filters",
+                "mac,esi,vni".parse().unwrap(),
+            );
+        }
+        Ok(response)
     }
 
     async fn list_advertised_evpn_routes(
         &self,
         request: Request<server_proto::ListPeerEvpnRoutesRequest>,
     ) -> Result<Response<server_proto::ListPeerEvpnRoutesResponse>, Status> {
-        *self.state.last_list_advertised_evpn.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        let filters_requested = !request.mac_filter.is_empty()
+            || !request.esi_filter.is_empty()
+            || request.vni_filter.is_some();
+        *self.state.last_list_advertised_evpn.lock().await = Some(request);
         if let Some((code, message)) = self.state.list_peer_evpn_error.lock().await.clone() {
             return Err(Status::new(code, message));
         }
-        Ok(Response::new(
-            self.state.list_peer_evpn_response.lock().await.clone(),
-        ))
+        let mut response = Response::new(self.state.list_peer_evpn_response.lock().await.clone());
+        if filters_requested
+            && !self
+                .state
+                .list_peer_evpn_filters_legacy
+                .load(Ordering::SeqCst)
+        {
+            response.metadata_mut().insert(
+                "x-rustbgpd-evpn-peer-filters",
+                "mac,esi,vni".parse().unwrap(),
+            );
+        }
+        Ok(response)
     }
 
     async fn explain_evpn_route(

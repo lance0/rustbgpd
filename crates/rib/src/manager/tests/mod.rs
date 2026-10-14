@@ -1428,6 +1428,7 @@ mod exact_export_lifecycle;
 mod explain_mrt;
 mod export_explain;
 mod exportability;
+mod family_pages;
 mod flowspec;
 mod flowspec_advertised;
 mod gr_llgr;

@@ -60,7 +60,7 @@ impl MockExactExportEncoder {
         };
     }
 
-    fn probed(&self) -> Vec<ExactExportKey> {
+    pub(super) fn probed(&self) -> Vec<ExactExportKey> {
         self.probed.lock().unwrap().clone()
     }
 
