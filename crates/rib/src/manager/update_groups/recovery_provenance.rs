@@ -157,6 +157,13 @@ impl Record {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::manager) enum FinalAdmissionFault {
+    Preflight,
+    Apply,
+}
+
 #[derive(Debug)]
 pub(in crate::manager) struct EvpnRecoveryProvenance {
     records: Records,
@@ -171,6 +178,8 @@ pub(in crate::manager) struct EvpnRecoveryProvenance {
     fail_next_allocation: bool,
     #[cfg(test)]
     allocation_countdown: Option<usize>,
+    #[cfg(test)]
+    final_admission_fault: Option<FinalAdmissionFault>,
 }
 
 impl EvpnRecoveryProvenance {
@@ -196,6 +205,8 @@ impl EvpnRecoveryProvenance {
             fail_next_allocation: false,
             #[cfg(test)]
             allocation_countdown: None,
+            #[cfg(test)]
+            final_admission_fault: None,
         }
     }
 
@@ -207,6 +218,16 @@ impl EvpnRecoveryProvenance {
     #[cfg(test)]
     pub(in crate::manager) fn fail_next_allocation_for_test(&mut self) {
         self.fail_next_allocation = true;
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn fail_final_admission_for_test(&mut self, fault: FinalAdmissionFault) {
+        self.final_admission_fault = Some(fault);
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn final_admission_fault_pending(&self) -> bool {
+        self.final_admission_fault.is_some()
     }
 
     #[cfg(test)]
@@ -1446,6 +1467,13 @@ impl EvpnRecoveryProvenance {
         if !self.records[index].primary || !matches!(self.records[index].state, State::Ready) {
             return Ok(false);
         }
+        // A changed final reservation is an internal invariant failure. This
+        // hook exercises the real manager's late refusal after normal probing.
+        #[cfg(test)]
+        if self.final_admission_fault == Some(FinalAdmissionFault::Apply) {
+            self.final_admission_fault = None;
+            return Err(self.mark_exhausted(handle, Self::admission_invariant()));
+        }
         if self.records[index].universe.is_some() {
             return self.apply_shared(handle, index, announcements, withdrawals, checkpoint);
         }
@@ -1526,6 +1554,13 @@ impl EvpnRecoveryProvenance {
         };
         if !self.records[index].primary || !matches!(self.records[index].state, State::Ready) {
             return Ok(false);
+        }
+        // A changed final reservation is an internal invariant failure. This
+        // hook exercises the real manager's late refusal after normal probing.
+        #[cfg(test)]
+        if self.final_admission_fault == Some(FinalAdmissionFault::Preflight) {
+            self.final_admission_fault = None;
+            return Err(self.mark_exhausted(handle, Self::admission_invariant()));
         }
         if self.records[index].universe.is_some() {
             return match Self::shared_batch_capacity(
