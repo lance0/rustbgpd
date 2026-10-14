@@ -1436,7 +1436,7 @@ impl RibManager {
                         super::replacement_readiness_checkpoint(&readiness, force);
                     })
             {
-                self.record_group_recovery_refusal(peer, error);
+                self.record_group_recovery_refusal(peer, error, false);
             }
             self.refresh_group_recovery_gauges();
         }
@@ -1903,7 +1903,7 @@ impl RibManager {
         if member_of.is_some() {
             // Fresh registration retains its empty seed; an existing-session
             // replay retains the actual current advertised baseline instead.
-            self.capture_group_admitted_keys(peer);
+            self.capture_group_admitted_keys_for_send(peer);
         }
         let all_prefixes: HashSet<Prefix> =
             if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {

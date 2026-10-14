@@ -167,84 +167,131 @@ error. It never substitutes a guessed tick rate or a zero CPU sample.
 
 ## Recovery memory receipt
 
-`recovery-memory` is a separate memory-only mode with four consumer runtime
-workers and the dedicated manager thread. It has no profiler, RSS, elapsed-time
-or throughput output:
+`recovery-memory` measures manager-direct RIB recovery with four consumer runtime
+workers and the dedicated manager thread. It emits no profiler, RSS, elapsed-time
+or throughput result. Each profile has one registered source and homogeneous
+plain RR clients in one shared group:
 
-```text
-rrharness recovery-memory dataset-reevaluate 256 100000
-rrharness recovery-memory peer-down 256 100000
-```
+| Profile | Seed routes per receiver | Qualified receivers | Cells |
+| --- | --- | --- | --- |
+| `ipv4-100k` | 100,000 IPv4 unicast | 256 | reevaluation, source down |
+| `full-uc` | 1,000,000 IPv4 + 230,000 IPv6 unicast | 100 | reevaluation, source down |
+| `full-vpn` | 1,000,000 VPNv4 + 230,000 VPNv6 | 100 | reevaluation, source down, widening |
+| `mixed-widen` | the `full-uc` seed, plus initially empty VPN families | 100 | widening only |
 
-One source originates 100,000 routes to 256 homogeneous plain RR clients in
-one shared group. The registered non-client source has an empty separate
-profile. Eight-slot outbound queues and compact, fixed receiver bitmaps are
-included in the measured scope; each receiver bitmap occupies 12,504 bytes
-at this shape. The consumers apply frozen source exclusions and reject unknown
-or repeated withdrawals of exact prefix/path keys. Initial population may
-retry announcements after bounded-queue deferral; the receipt records their
-actual count.
+The original IPv4 and full unicast cells retain their ordinary family profile.
+The mixed widening case proves new VPN admission during unicast recovery; it
+**does not prove pure unicast churn**. VPN inventory alternates two legal raw RD
+encodings that display as `65000:100` but identify different routes. Consumers
+fold AFI, SAFI, canonical prefix/address/length, path ID and raw RD. They separately
+check the expected label, attributes, route source and next hop, and reject
+unknown or repeated exact-key withdrawals. Initial population can retry
+announcements after bounded-queue deferral; actual announcement counts are kept.
 
-Both cells drain, pause and acknowledge every receiver, then fill its queue
-with empty envelopes. The first drives production
-`ReevaluatePeerExportPolicies` for the shared client group; it does not drive
-the full dataset publication coordinator. The second sends the registered
-source's actual generation-matched `PeerDown` and confirms an empty Loc-RIB.
-Both require the actor's observed dirty-peer and group-dirty counts to equal
-the full receiver cohort before recording retained and operation-end samples.
-Consumers resume afterward. Settlement requires zero outbound recovery
-residue, matching advertised counts and exact folded receiver inventories;
-source removal additionally requires exactly 100,000 withdrawals per client.
-Actor query and receiver drain barriers establish completion, with a finite
-deadline for failure rather than a fixed sleep as proof.
+Eight-slot outbound queues and fixed receiver bitmaps are charged to the scope.
+At the original shape the bitmap occupies 12,504 bytes per receiver; the mixed
+IPv4/IPv6 seed occupies 153,752 bytes. No per-receiver route map is added by the
+harness. The source has an empty separate non-client profile.
+
+Each cell drains and acknowledges every receiver, pauses consumption, and fills
+all queues with empty envelopes. Reevaluation invokes the production
+`ReevaluatePeerExportPolicies` path with unchanged eligibility. Source removal
+sends the real generation-matched `PeerDown`. Both require observed dirty-peer
+and group-dirty counts equal to the whole cohort. Actor FIFO query barriers and
+receiver folds prove settlement, with family-specific BMP counts including VPN.
+No unicast-only Loc-RIB count is used as proof for VPN.
+
+Widening first establishes that same dirty seed boundary. A feature-only actor
+transaction grants exactly one owned filler credit per receiver, then invokes
+the existing `VpnRoutesReceived` handler before a retry timer can consume it.
+It admits 100,000 new VPNv4 and 23,000 new VPNv6 keys. In `full-vpn` these extend
+the VPN table; in `mixed-widen` they introduce the previously empty VPN families.
+All receivers must remain dirty, and the candidate retained-key gauge must equal
+`receivers × (seed + new keys)` behind that synchronous admission barrier.
+Paused consumer folds still represent the seed; they are never presented as the
+new admitted projection. After release, every receiver must fold the complete
+expanded inventory. This exercises sparse **admitted** additions rather than
+only pending desired routes.
+
+Unchanged-policy reevaluation and widening require zero withdrawals throughout.
+A withdrawal/reannouncement flap fails even when the final bitmap is full.
+Source removal requires exactly one withdrawal per admitted key and an empty
+final inventory in every family. Settlement also requires zero dirty/recovery
+residue and matching operator projections. The finite 30-minute cell deadline
+is a failure bound, not a timing result; query and drain barriers establish
+completion.
 
 The hosted-only driver
 [`../compare-recovery-memory.sh`](../compare-recovery-memory.sh) freezes the
-committed harness source and minimally broadens two existing observer cfg gates
-on both `c862af9338aa828b7462f3cf85781f63b0e79fe8` and the exact candidate SHA.
-It verifies the unchanged observer bodies, retains the instrumentation and
-patches, preserves each revision's lockfile/pins, and builds serially with the
-`scale` profile, locked dependencies, four build jobs and separate targets.
-Each cell runs in A/B/B/A order in fresh root-owned transient systemd scopes.
+committed harness and feature-only instrumentation on three source revisions:
+`c862af9338aa828b7462f3cf85781f63b0e79fe8`, the intermediate refusal control
+`bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00`, and the exact candidate SHA. It
+validates the unchanged observer bodies and atomic-credit seam, retains both
+patches, preserves manifests/lockfiles/pins, and builds serially with locked
+`scale` settings, four jobs and separate targets. Each selected profile/cell
+runs A/B/B/A separately against each historical control.
 
-The dispatch-only `recovery_memory_receipt` CI job runs on a fresh hosted
-`ubuntu-24.04` VM **only when explicitly dispatching
-`fix/update-group-recovery-bounds`**. Manual main or release CI does not run
-the campaign. The driver refuses dev/self-hosted environments and fails before
-building if cgroup v2 peak accounting or the zero-swap fence is unavailable.
-Measured mode also verifies its own unified cgroup membership and records
-PID/start-time identity before allocating the RIB or receiver inventory.
-The binary embeds its original revision and instrumentation digest; the
-checker matches those identities and the running `/proc/PID/exe` digest to
-the recorded build. Raw ownership samples cover the scoped Bash launcher,
-Python checker and Rust workload before, during and after the workload, with
-foreign members and populated descendant cgroups refused. Every leg requires
-a distinct scope and workload identity.
-Primary evidence is whole-scope `memory.peak` in bytes, with current/stat
-snapshots at population, retained, operation-end and settled barriers; actual
-swap must remain zero and any cgroup or host OOM invalidates the campaign.
+The default `--phase pilot` uses **four full-table receivers** for feasibility
+only; it makes no 100-member qualification claim. An explicit
+`--phase qualified` selects the qualified cohort sizes. `--profile PROFILE`
+can limit a fresh VM to one profile. The dispatch-only job runs on a fresh
+hosted `ubuntu-24.04` VM, only on `fix/update-group-recovery-memory`. Its reviewed
+`RECOVERY_MEMORY_PHASE` and `RECOVERY_MEMORY_PROFILE` values select the campaign;
+manual main/release CI does not run it. For example, on that hosted VM:
 
-Artifacts retain source and binary hashes, toolchain/build inputs, commands,
-exits, logs, raw cgroup files, phase gauges and per-cause fallback counts.
-Candidate recovery gauges are required; their baseline absence is recorded
-explicitly. Any available EVPN provenance-exhaustion counter is recorded as
-inactive/zero: this plain RR receipt does not exercise EVPN or imply that the
-common fallback resets sessions. Recovery-byte gauges are reservation charges,
-not a component attribution of RSS. The same fixed launcher and consumer
-overhead are charged to both revisions. The comparison has no timing verdict
-or automatic capacity threshold and is not a full-daemon, TCP, socket-buffer,
-dataset-publication or final transport-writer receipt.
-Settlement restores the population-ready empty-proof reservation charge,
-including the fixed ledger header, and retains the peak charge. Cgroup phase
-peaks must be monotonic, and the end snapshot must cover the pre-workload and
-all phase high-water marks.
+```sh
+bash bench/scale/compare-recovery-memory.sh --head "$GITHUB_SHA" \
+  --output-dir "$RUNNER_TEMP/recovery-pilot" --phase pilot --profile full-vpn
+```
+
+The driver refuses dev/self-hosted environments and fails before building if
+cgroup v2 peak accounting or the zero-swap fence is unavailable. Each leg uses
+a fresh root-owned transient systemd scope. Measured mode verifies its own
+unified cgroup membership before allocating inventory, records PID/start-time,
+and embeds its original revision plus instrumentation digest. The checker binds
+those values and the running `/proc/PID/exe` digest to the recorded build. Raw
+ownership samples cover only the Bash launcher, Python checker and Rust workload
+before, during and after execution; foreign members, populated descendants and
+reused scope/workload identities are refused. Actual swap must stay zero and
+any cgroup or host OOM invalidates the campaign.
+
+Whole-scope `memory.peak` in bytes is primary. Current/stat snapshots, charged
+recovery gauges and fixed per-cause counters are retained at population,
+retained, operation-end and settled barriers. Candidate qualification requires
+all logical proofs at the selected shape and zero budget/proof fallbacks. The
+old baseline has no recovery gauges; the intermediate full-table control must
+show an actual refusal. Historical route/contract failures remain failed evidence
+and do not stop later matched candidate legs. They suppress a comparison ratio;
+no incomplete control is promoted to a valid memory comparison. Every candidate
+failure makes the final checker fail, after writing the comparison artifact.
+Missing accounting, bad identity, swap or OOM always fails independently of the
+route verdict.
+
+Artifacts contain source/binary hashes, frozen source and patches, build inputs,
+commands, exits, logs and raw ownership/cgroup samples, including failed legs.
+Host memory is recorded after builds and before each leg; pre-build free memory
+is not used as a workload headroom claim. Any available EVPN exhaustion counter
+must stay zero; EVPN remains inactive here. Common proof fallback is not described
+as a session reset. Byte gauges account requested capacity, not component RSS.
+Settlement restores the population-ready empty-proof charge, including fixed
+headers, while retaining peak charge. Phase peaks are monotonic; scope exit peak
+must cover the pre-workload and every phase high-water mark.
+
+This receipt covers the production RIB and exact-export preflight plus harness
+consumers. It makes no full-daemon, TCP, final encoded-wire, socket-buffer or
+full dataset-publication claim. Separate small transport correctness controls
+are required; they do not expand this memory scope. Per-peer/daemon cap refusal
+correctness remains covered by bounded RIB controls, not a cap increase or a
+claim that one full-table shape exhausts both caps.
 
 The checker and adversarial fixtures are
 [`../recovery_memory.py`](../recovery_memory.py) and
-[`../test_recovery_memory.py`](../test_recovery_memory.py). A local, tiny
-correctness exercise skips all memory and `/proc` reads:
+[`../test_recovery_memory.py`](../test_recovery_memory.py). Tiny correctness-only
+runs skip **all** memory and `/proc` reads:
 
 ```text
-rrharness recovery-memory dataset-reevaluate 4 200 --correctness-only
-rrharness recovery-memory peer-down 4 200 --correctness-only
+rrharness recovery-memory dataset-reevaluate 4 smoke-uc --correctness-only
+rrharness recovery-memory peer-down 4 smoke-vpn --correctness-only
+rrharness recovery-memory widen 4 smoke-mixed --correctness-only
+rrharness recovery-memory widen 4 smoke-vpn --correctness-only
 ```

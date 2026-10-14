@@ -20,7 +20,7 @@ ROSTER = {
 }
 RECOVERY_MEMORY_SELECTOR = (
     "${{ github.event_name == 'workflow_dispatch' && "
-    "github.ref == 'refs/heads/fix/update-group-recovery-bounds' }}"
+    "github.ref == 'refs/heads/fix/update-group-recovery-memory' }}"
 )
 RESULTS = ("CORE", "CORE_TESTS", "SCALE_RECEIPTS")
 RETIRED_PRIVILEGED_WORKFLOW = ".github/workflows/privileged-interop.yml"

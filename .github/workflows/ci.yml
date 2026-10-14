@@ -721,11 +721,14 @@ jobs:
   recovery_memory_receipt:
     # Bounded, operator-dispatched qualification; never part of push/PR,
     # main/release re-tests, or the reserved self-hosted soak runner.
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fix/update-group-recovery-bounds' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fix/update-group-recovery-memory' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       CARGO_BUILD_JOBS: "4"
+      # Pilot is feasibility only; select a qualified profile in a reviewed head.
+      RECOVERY_MEMORY_PHASE: pilot
+      RECOVERY_MEMORY_PROFILE: all
     steps:
       - uses: actions/checkout@v7
         with:
@@ -747,6 +750,8 @@ jobs:
           bash bench/scale/compare-recovery-memory.sh \
             --head "$GITHUB_SHA" \
             --output-dir "$RUNNER_TEMP/update-group-recovery-memory/campaign" \
+            --phase "$RECOVERY_MEMORY_PHASE" \
+            --profile "$RECOVERY_MEMORY_PROFILE" \
             > "$RUNNER_TEMP/update-group-recovery-memory/driver.log" 2>&1
       - name: Upload recovery evidence even after refusal or failure
         if: always()

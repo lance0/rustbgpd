@@ -354,6 +354,19 @@ fn test_manager() -> RibManager {
     RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
 }
 
+fn observe_group_prior_materialization(manager: &mut RibManager) -> Arc<AtomicUsize> {
+    let visits = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |stage| {
+            if stage == "group_prior_materialization" {
+                visits.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }));
+    visits
+}
+
 fn register_exact_target(
     manager: &mut RibManager,
     peer: IpAddr,
@@ -1283,28 +1296,99 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
         !manager.adj_ribs_out.contains_key(&limited),
         "the owed withdrawal must depend on the lazy group prior, not a private fallback"
     );
-    assert!(commit_shared_unicast_with_precommit(
-        &mut manager,
-        limited,
-        Arc::clone(&announce),
-        Arc::clone(&next_hop_override),
-        HashSet::new(),
-        &mut cache,
-        Some(crate::manager::distribution::LazyCleanGroupPrior {
-            peer: limited,
-            deltas: &deltas,
-        }),
-    ));
+    let prior_visits = observe_group_prior_materialization(&mut manager);
+    assert!(manager.with_replacement_readiness(|manager| {
+        commit_shared_unicast_with_precommit(
+            manager,
+            limited,
+            Arc::clone(&announce),
+            Arc::clone(&next_hop_override),
+            HashSet::new(),
+            &mut cache,
+            Some(crate::manager::distribution::LazyCleanGroupPrior {
+                peer: limited,
+                deltas: &deltas,
+            }),
+        )
+    }));
     let limited_update = limited_rx.try_recv().unwrap();
     assert!(limited_update.announce.is_empty());
     assert_eq!(limited_update.withdraw, vec![route_identity]);
     assert!(manager.peer_unexportable[&limited].contains(&key));
+    assert!(prior_visits.load(Ordering::Relaxed) > 0);
     assert_eq!(source_encoder.probe_count(), 1);
     assert_eq!(
         limited_encoder.probe_count(),
         0,
         "the target must apply its ceiling to the shared encoded length"
     );
+}
+
+#[test]
+fn clean_plain_shared_withdrawal_skips_prior_materialization() {
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 7).into();
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let route = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 1), 32), source);
+    let key = (route.prefix, route.path_id);
+    let mut manager = test_manager();
+    manager.loc_rib.recompute(key.0, std::iter::once(&route));
+    let (outbound, mut receiver) = mpsc::channel(16);
+    manager.handle_update(super::update_groups_recovery::peer_up(
+        member, outbound, None,
+    ));
+    let delivered = receiver.try_recv().unwrap();
+    assert_eq!(delivered.announce.len(), 1);
+    assert_eq!(
+        (delivered.announce[0].prefix, delivered.announce[0].path_id),
+        key
+    );
+    while receiver.try_recv().is_ok() {}
+    let gid = manager.grouped_member_of(member).unwrap();
+    assert!(!manager.group_ribs[&gid].per_client_best);
+    assert!(!manager.peer_rs_control.contains_key(&member));
+    assert!(!manager.peer_unexportable.contains_key(&member));
+    assert!(!manager.outbound_prefix_limits.contains_key(&member));
+    assert!(manager.pending_group_admitted.get(&member).is_none());
+    assert!(manager.loc_rib.recompute(key.0, std::iter::empty()));
+    let prefixes = HashSet::from([key.0]);
+    let stage = manager
+        .stage_update_groups(
+            &prefixes,
+            &prefixes,
+            &mut crate::manager::distribution::ExportMemo::default(),
+        )
+        .remove(&gid)
+        .unwrap();
+    assert_eq!(stage.shared_withdraw, vec![key]);
+    assert!(stage.shared_applies_to(member));
+    let prior_visits = observe_group_prior_materialization(&mut manager);
+    let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
+    assert!(manager.with_replacement_readiness(|manager| {
+        manager.try_send_and_commit_outbound_update_with_group_prior(
+            member,
+            OutboundCommitBatch {
+                withdraw: stage.shared_withdraw.clone(),
+                ..OutboundCommitBatch::with_unicast(
+                    Arc::clone(&stage.shared_announce),
+                    Arc::clone(&stage.shared_nh),
+                )
+            },
+            HashSet::new(),
+            Some(crate::manager::distribution::SharedUnicastPrecommit {
+                group_id: gid,
+                probe_cache: &mut cache,
+                lazy_group_prior: Some(crate::manager::distribution::LazyCleanGroupPrior {
+                    peer: member,
+                    deltas: &stage.deltas,
+                }),
+            }),
+        )
+    }));
+    let withdrawn = receiver.try_recv().unwrap();
+    assert_eq!(withdrawn.withdraw, vec![key]);
+    assert!(withdrawn.announce.is_empty());
+    assert_eq!(prior_visits.load(Ordering::Relaxed), 0);
+    assert!(receiver.try_recv().is_err());
 }
 
 #[test]

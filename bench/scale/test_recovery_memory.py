@@ -38,7 +38,17 @@ class RecoveryReceiptTests(unittest.TestCase):
             (path / name).write_text(value.rstrip() + "\n", encoding="utf-8")
         return path
 
-    def samples(self, role: str = "candidate", cell: str = "peer-down") -> list[dict]:
+    def samples(
+        self,
+        role: str = "candidate",
+        cell: str = "peer-down",
+        profile: str = "smoke-uc",
+        clients: int = 2,
+    ) -> list[dict]:
+        if cell == "widen" and profile == "smoke-uc":
+            profile = "smoke-vpn"
+        seed, additions = receipt.PROFILES[profile]
+        additions = additions if cell == "widen" else (0, 0, 0, 0)
         rows = []
         for phase in receipt.PHASES:
             cg = {name: 0 for name in receipt.SCALARS}
@@ -54,28 +64,45 @@ class RecoveryReceiptTests(unittest.TestCase):
                     "memory.events.oom_group_kill": 0,
                 }
             )
-            metrics = {"bgp_update_group_residue_entries": 0}
-            if role == "candidate":
-                metrics.update(dict.fromkeys(receipt.GAUGES, 0))
-                metrics[receipt.GAUGES[1]] = 56
-                metrics[receipt.GAUGES[2]] = 56
-                metrics["bgp_evpn_recovery_provenance_exhausted_total"] = 0
             held = phase in ("retained", "operation_end")
             terminal = phase == "settled" and cell == "peer-down"
+            metrics = {"bgp_update_group_residue_entries": 0}
+            if role != "baseline":
+                metrics.update(dict.fromkeys(receipt.GAUGES, 0))
+                metrics[receipt.GAUGES[0]] = (
+                    clients * sum(a + b for a, b in zip(seed, additions)) if held else 0
+                )
+                metrics[receipt.GAUGES[1]] = 4096 if held else 56
+                metrics[receipt.GAUGES[2]] = 4096
+                metrics["bgp_evpn_recovery_provenance_exhausted_total"] = 0
+            families = {
+                name: {
+                    "present": 0
+                    if terminal
+                    else clients * (seed[f] + (additions[f] if phase == "settled" else 0)),
+                    "announces": clients * (seed[f] + (additions[f] if phase == "settled" else 0)),
+                    "withdrawals": clients * seed[f] if terminal else 0,
+                }
+                for f, name in enumerate(receipt.FAMILIES)
+            }
             rows.append(
                 {
-                    "schema": "rustbgpd.recovery-memory.v1",
+                    "schema": "rustbgpd.recovery-memory.v2",
+                    "profile": profile,
                     "cell": cell,
                     "phase": phase,
-                    "clients": 2,
-                    "prefixes": 100,
+                    "clients": clients,
+                    "seed": dict(zip(receipt.FAMILIES, seed)),
+                    "additions": dict(zip(receipt.FAMILIES, additions)),
                     "receiver_queue_capacity": 8,
-                    "receiver_bitmap_bytes": 32,
-                    "folded_routes": 0 if terminal else 200,
-                    "announces": 200,
-                    "withdrawals": 200 if terminal else 0,
-                    "dirty_peers": 2 if held else 0,
-                    "group_dirty_members": 2 if held else 0,
+                    "receiver_bitmap_bytes": clients
+                    * sum((a + b + 63) // 64 * 8 for a, b in zip(seed, additions)),
+                    "families": families,
+                    "folded_routes": sum(row["present"] for row in families.values()),
+                    "announces": sum(row["announces"] for row in families.values()),
+                    "withdrawals": sum(row["withdrawals"] for row in families.values()),
+                    "dirty_peers": clients if held else 0,
+                    "group_dirty_members": clients if held else 0,
                     "fallback_causes": {
                         "peer_limit": 0,
                         "daemon_limit": 0,
@@ -88,19 +115,43 @@ class RecoveryReceiptTests(unittest.TestCase):
             )
         return rows
 
-    def log(self, rows: list[dict], cell: str = "peer-down", complete: bool = True) -> Path:
-        lines = [
-            'recovery_identity {"pid": 10, "start_ticks": 123, "cgroup": "/sys/fs/cgroup/test.scope", "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "instrumentation_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}'
-        ]
+    def log(
+        self,
+        rows: list[dict],
+        cell: str = "peer-down",
+        complete: bool = True,
+        role: str = "candidate",
+    ) -> Path:
+        source = (
+            receipt.BASELINE
+            if role == "baseline"
+            else receipt.INTERMEDIATE
+            if role == "intermediate"
+            else "a" * 40
+        )
+        identity = {
+            "pid": 10,
+            "start_ticks": 123,
+            "cgroup": "/sys/fs/cgroup/test.scope",
+            "source_sha": source,
+            "instrumentation_sha256": "d" * 64,
+        }
+        lines = ["recovery_identity " + json.dumps(identity)]
         lines += ["recovery_sample " + json.dumps(row) for row in rows]
         if complete:
+            row = rows[-1]
+            expected = {
+                name: 0 if cell == "peer-down" else row["seed"][name] + row["additions"][name]
+                for name in receipt.FAMILIES
+            }
             lines.append(
                 "recovery_complete "
                 + json.dumps(
                     {
                         "cell": cell,
-                        "expected_routes_per_receiver": 0 if cell == "peer-down" else 100,
-                        "actual_receivers": 2,
+                        "profile": row["profile"],
+                        "expected_families_per_receiver": expected,
+                        "actual_receivers": row["clients"],
                     }
                 )
             )
@@ -109,7 +160,9 @@ class RecoveryReceiptTests(unittest.TestCase):
         return path
 
     def validate(self, rows: list[dict], role: str = "candidate", cell: str = "peer-down") -> dict:
-        return receipt.validate_log(self.log(rows, cell), role, cell, clients=2, prefixes=100)
+        return receipt.validate_log(
+            self.log(rows, cell, role=role), role, cell, rows[0]["clients"], rows[0]["profile"]
+        )
 
     def test_valid_scope_retains_bytes(self) -> None:
         self.assertEqual(receipt.scope_values(self.scope())["memory.peak"], 456)
@@ -188,18 +241,18 @@ class RecoveryReceiptTests(unittest.TestCase):
     def test_missing_completion_is_rejected(self) -> None:
         with self.assertRaisesRegex(receipt.InvalidReceipt, "completion"):
             receipt.validate_log(
-                self.log(self.samples(), complete=False), "candidate", "peer-down", 2, 100
+                self.log(self.samples(), complete=False), "candidate", "peer-down", 2, "smoke-uc"
             )
 
     def test_extra_withdrawals_are_rejected(self) -> None:
         rows = self.samples()
         rows[-1]["withdrawals"] += 1
-        with self.assertRaisesRegex(receipt.InvalidReceipt, "withdrawal inventory"):
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "aggregate/family"):
             self.validate(rows)
 
     def test_wrong_shape_and_duplicate_barriers_are_rejected(self) -> None:
         rows = self.samples()
-        rows[0]["prefixes"] = 101
+        rows[0]["seed"]["ipv4_unicast"] += 1
         with self.assertRaisesRegex(receipt.InvalidReceipt, "shape"):
             self.validate(rows)
         rows = self.samples()
@@ -213,6 +266,62 @@ class RecoveryReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(receipt.InvalidReceipt, "causes"):
             self.validate(rows)
 
+    def test_family_counts_cannot_be_exchanged_without_changing_total(self) -> None:
+        rows = self.samples(profile="smoke-vpn")
+        rows[-1]["families"]["vpnv4"]["withdrawals"] -= 1
+        rows[-1]["families"]["vpnv6"]["withdrawals"] += 1
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "withdrawal inventory"):
+            self.validate(rows)
+
+    def test_candidate_full_table_requires_all_logical_keys(self) -> None:
+        rows = self.samples(profile="full-vpn", clients=4)
+        self.validate(rows)
+        rows[1]["metrics"][receipt.GAUGES[0]] -= 1
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "complete admitted"):
+            self.validate(rows)
+
+    def test_dirty_widen_requires_admitted_additions_not_only_desired_rows(self) -> None:
+        rows = self.samples(cell="widen", profile="smoke-mixed")
+        self.validate(rows, cell="widen")
+        rows[1]["metrics"][receipt.GAUGES[0]] = 400
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "complete admitted"):
+            self.validate(rows, cell="widen")
+
+    def test_candidate_budget_fallback_cannot_qualify_even_after_convergence(self) -> None:
+        rows = self.samples()
+        rows[1]["fallback_causes"]["peer_limit"] = 1
+        rows[1]["metrics"]["bgp_update_group_recovery_fallback_total"] = 1
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "fallback disqualifies"):
+            self.validate(rows)
+
+    def test_unchanged_policy_withdraw_announce_flap_is_not_end_state_parity(self) -> None:
+        rows = self.samples(cell="dataset-reevaluate", profile="smoke-vpn")
+        rows[-1]["families"]["vpnv4"]["withdrawals"] = 1
+        rows[-1]["families"]["vpnv4"]["announces"] += 1
+        rows[-1]["withdrawals"] = 1
+        rows[-1]["announces"] += 1
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "unchanged-policy flap"):
+            self.validate(rows, cell="dataset-reevaluate")
+
+    def test_full_intermediate_control_requires_actual_refusal(self) -> None:
+        rows = self.samples(role="intermediate", profile="full-vpn", clients=4)
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "refusal control did not refuse"):
+            self.validate(rows, role="intermediate")
+        for row in rows:
+            row["fallback_causes"]["peer_limit"] = 4
+            row["metrics"]["bgp_update_group_recovery_fallback_total"] = 4
+        self.validate(rows, role="intermediate")
+
+    def test_pilot_is_explicit_feasibility_not_100_member_qualification(self) -> None:
+        self.assertTrue(all(case["clients"] == 4 for case in receipt.campaign_cases("pilot")))
+        self.assertEqual(
+            {case["clients"] for case in receipt.campaign_cases("qualified")}, {100, 256}
+        )
+        self.assertEqual(
+            receipt.campaign_cases("qualified", ["mixed-widen"]),
+            [{"profile": "mixed-widen", "clients": 100, "cell": "widen"}],
+        )
+
     def observer_tree(self) -> Path:
         for name, anchor, indent in (
             ("crates/rib/src/update.rs", receipt.VARIANT, "    "),
@@ -220,7 +329,8 @@ class RecoveryReceiptTests(unittest.TestCase):
         ):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(indent + "#[cfg(test)]\n" + anchor + "\n", encoding="utf-8")
+            header = receipt.RIB_UPDATE_DECLARATION + "\n" if name.endswith("update.rs") else ""
+            path.write_text(header + indent + "#[cfg(test)]\n" + anchor + "\n", encoding="utf-8")
         return self.root
 
     def test_observer_transformation_is_minimal_and_idempotent(self) -> None:
@@ -230,6 +340,7 @@ class RecoveryReceiptTests(unittest.TestCase):
         receipt.instrument_observer(tree)
         self.assertEqual((tree / "crates/rib/src/update.rs").read_bytes(), original)
         self.assertIn(receipt.VARIANT.encode(), original)
+        self.assertIn(receipt.BENCH_ACKNOWLEDGEMENT.encode(), original)
         self.assertIn(b'#[cfg(any(test, feature = "bench-internals"))]', original)
 
     def test_observer_drift_refuses_both_changes(self) -> None:
@@ -244,6 +355,52 @@ class RecoveryReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(receipt.InvalidReceipt, "observer body"):
             receipt.instrument_observer(tree)
         self.assertEqual(update.read_bytes(), original)
+
+    def test_credit_transaction_drift_refuses_both_instrumentation_changes(self) -> None:
+        tree = self.observer_tree()
+        receipt.instrument_observer(tree)
+        update = tree / "crates/rib/src/update.rs"
+        original = update.read_bytes()
+        manager = tree / "crates/rib/src/manager/mod.rs"
+        manager.write_text(
+            manager.read_text(encoding="utf-8").replace(
+                "self.handle_update(*update);", "drop(update);"
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "credit transaction body"):
+            receipt.instrument_observer(tree)
+        self.assertEqual(update.read_bytes(), original)
+
+    def test_missing_credit_acknowledgement_alias_refuses_partial_instrumentation(self) -> None:
+        tree = self.observer_tree()
+        receipt.instrument_observer(tree)
+        update = tree / "crates/rib/src/update.rs"
+        update.write_text(
+            update.read_text(encoding="utf-8").replace(receipt.BENCH_ACKNOWLEDGEMENT + "\n\n", ""),
+            encoding="utf-8",
+        )
+        original = update.read_bytes()
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "acknowledgement alias"):
+            receipt.instrument_observer(tree)
+        self.assertEqual(update.read_bytes(), original)
+
+    def test_wrong_credit_acknowledgement_alias_refuses_both_changes(self) -> None:
+        tree = self.observer_tree()
+        receipt.instrument_observer(tree)
+        update = tree / "crates/rib/src/update.rs"
+        update.write_text(
+            update.read_text(encoding="utf-8").replace(
+                receipt.BENCH_ACKNOWLEDGEMENT,
+                receipt.BENCH_ACKNOWLEDGEMENT.replace("Mutex<", "RwLock<"),
+            ),
+            encoding="utf-8",
+        )
+        manager = tree / "crates/rib/src/manager/mod.rs"
+        original = manager.read_bytes()
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "acknowledgement alias"):
+            receipt.instrument_observer(tree)
+        self.assertEqual(manager.read_bytes(), original)
 
     def test_driver_refuses_dev_host_before_any_host_probe(self) -> None:
         env = dict(os.environ)
@@ -288,11 +445,12 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_end_peak_must_cover_before_and_every_phase(self) -> None:
         rows = self.samples()
-        rows[1]["cgroup"]["memory.peak"] = 999
+        for row in rows[1:]:
+            row["cgroup"]["memory.peak"] = 999
         with self.assertRaisesRegex(receipt.InvalidReceipt, "high-water"):
             receipt.check_peak_coverage({"memory.peak": 456}, rows, {"memory.peak": 456})
         with self.assertRaisesRegex(receipt.InvalidReceipt, "high-water"):
-            receipt.check_peak_coverage({"memory.peak": 1000}, self.samples(), {"memory.peak": 456})
+            receipt.check_peak_coverage({"memory.peak": 1000}, [], {"memory.peak": 456})
 
     def campaign(self) -> Path:
         root = self.root / "campaign"
@@ -307,17 +465,24 @@ class RecoveryReceiptTests(unittest.TestCase):
         inputs.write_text("\n".join(entries) + "\n", encoding="utf-8")
         instrumentation = receipt.file_digest(inputs)
         manifest = {
+            "schema": "rustbgpd.recovery-memory.campaign.v2",
             "baseline": receipt.BASELINE,
+            "intermediate": receipt.INTERMEDIATE,
             "candidate": "a" * 40,
             "instrumentation_manifest_sha256": instrumentation,
-            "clients": 256,
-            "prefixes": 100000,
+            "phase": "qualified",
+            "profiles": ["ipv4-100k"],
+            "cases": receipt.campaign_cases("qualified", ["ipv4-100k"]),
             "build_jobs": 4,
-            "cells": list(receipt.CELLS),
-            "order_per_cell": ["baseline", "candidate", "candidate", "baseline"],
+            "comparators": ["baseline", "intermediate"],
+            "order_per_cell": ["control", "candidate", "candidate", "control"],
         }
         receipt.write_json(root / "manifest.json", manifest)
-        for role, digest in (("baseline", "b" * 64), ("candidate", "c" * 64)):
+        for role, digest in (
+            ("baseline", "b" * 64),
+            ("intermediate", "d" * 64),
+            ("candidate", "c" * 64),
+        ):
             for name, value in (
                 ("sha", manifest[role]),
                 ("build.exit", "0"),
@@ -334,124 +499,167 @@ class RecoveryReceiptTests(unittest.TestCase):
             (root / name).write_text("0\n", encoding="utf-8")
         raw_scope = self.scope()
         ordinal = 0
-        for cell in receipt.CELLS:
-            for leg, role in enumerate(manifest["order_per_cell"], 1):
-                ordinal += 1
-                directory = root / f"{cell}-{leg}-{role}"
-                directory.mkdir()
-                cgroup = f"/sys/fs/cgroup/test-{ordinal}.scope"
+        legs = (
+            (case, comparator, leg, role)
+            for case in manifest["cases"]
+            for comparator in ("baseline", "intermediate")
+            for leg, role in enumerate((comparator, "candidate", "candidate", comparator), 1)
+        )
+        for case, comparator, leg, role in legs:
+            cell, profile, clients = case["cell"], case["profile"], case["clients"]
+            ordinal += 1
+            directory = root / f"{profile}-{cell}-{comparator}-{leg}-{role}"
+            directory.mkdir()
+            cgroup = f"/sys/fs/cgroup/test-{ordinal}.scope"
 
-                def process(
-                    pid, parent, executable, digest, start_ticks=123 + ordinal, member_path=cgroup
-                ):
-                    return {
-                        "pid": pid,
-                        "parent_pid": parent,
-                        "start_ticks": start_ticks,
-                        "executable": executable,
-                        "exe_sha256": digest,
-                        "cgroup": "0::" + member_path.removeprefix("/sys/fs/cgroup") + "\n",
-                    }
-
-                launcher = process(1000 + ordinal, 1, "/usr/bin/bash", "e" * 64)
-                checker = process(2000 + ordinal, launcher["pid"], "/usr/bin/python3.12", "f" * 64)
-                workload = process(
-                    3000 + ordinal,
-                    checker["pid"],
-                    f"/build/{role}/rrharness",
-                    "b" * 64 if role == "baseline" else "c" * 64,
-                )
-                identity = {
-                    "pid": workload["pid"],
-                    "start_ticks": workload["start_ticks"],
-                    "cgroup": cgroup,
-                    "source_sha": manifest[role],
-                    "instrumentation_sha256": instrumentation,
+            def process(
+                pid, parent, executable, digest, start_ticks=123 + ordinal, member_path=cgroup
+            ):
+                return {
+                    "pid": pid,
+                    "parent_pid": parent,
+                    "start_ticks": start_ticks,
+                    "executable": executable,
+                    "exe_sha256": digest,
+                    "cgroup": "0::" + member_path.removeprefix("/sys/fs/cgroup") + "\n",
                 }
-                for name, value in (
-                    ("launcher-process.json", launcher),
-                    ("scope-process.json", checker),
-                    ("binary-process.json", workload),
-                    (
-                        "status.json",
-                        {
-                            "exit": 0,
-                            "timeout": False,
-                            "cgroup_valid": True,
-                            "ownership_valid": True,
-                        },
-                    ),
-                ):
-                    receipt.write_json(directory / name, value)
-                (directory / "cgroup-path.txt").write_text(cgroup + "\n", encoding="utf-8")
-                (directory / "launcher.exit").write_text("0\n", encoding="utf-8")
-                ownership = []
-                for phase, processes in (
-                    ("before", [launcher, checker]),
-                    ("active", [launcher, checker, workload]),
-                    ("after", [launcher, checker]),
-                ):
-                    members = [row["pid"] for row in processes]
-                    ownership.append(
-                        {
-                            "phase": phase,
-                            "members": members,
-                            "cgroup_procs_raw": "\n".join(map(str, members)) + "\n",
-                            "processes": processes,
-                            "descendants": [],
-                        }
-                    )
-                (directory / "ownership.jsonl").write_text(
-                    "\n".join(map(json.dumps, ownership)) + "\n", encoding="utf-8"
+
+            launcher = process(1000 + ordinal, 1, "/usr/bin/bash", "e" * 64)
+            checker = process(2000 + ordinal, launcher["pid"], "/usr/bin/python3.12", "f" * 64)
+            workload = process(
+                3000 + ordinal,
+                checker["pid"],
+                f"/build/{role}/rrharness",
+                "b" * 64
+                if role == "baseline"
+                else "d" * 64
+                if role == "intermediate"
+                else "c" * 64,
+            )
+            identity = {
+                "pid": workload["pid"],
+                "start_ticks": workload["start_ticks"],
+                "cgroup": cgroup,
+                "source_sha": manifest[role],
+                "instrumentation_sha256": instrumentation,
+            }
+            for name, value in (
+                ("launcher-process.json", launcher),
+                ("scope-process.json", checker),
+                ("binary-process.json", workload),
+                (
+                    "status.json",
+                    {
+                        "exit": 0,
+                        "timeout": False,
+                        "cgroup_valid": True,
+                        "ownership_valid": True,
+                    },
+                ),
+            ):
+                receipt.write_json(directory / name, value)
+            (directory / "cgroup-path.txt").write_text(cgroup + "\n", encoding="utf-8")
+            (directory / "launcher.exit").write_text("0\n", encoding="utf-8")
+            ownership = []
+            for phase, processes in (
+                ("before", [launcher, checker]),
+                ("active", [launcher, checker, workload]),
+                ("after", [launcher, checker]),
+            ):
+                members = [row["pid"] for row in processes]
+                ownership.append(
+                    {
+                        "phase": phase,
+                        "members": members,
+                        "cgroup_procs_raw": "\n".join(map(str, members)) + "\n",
+                        "processes": processes,
+                        "descendants": [],
+                    }
                 )
-                rows = self.samples(role, cell)
-                for row in rows:
-                    row.update(
-                        {
-                            "clients": 256,
-                            "prefixes": 100000,
-                            "receiver_bitmap_bytes": 256 * 1563 * 8,
-                            "announces": 25600000,
-                            "folded_routes": 0
-                            if cell == "peer-down" and row["phase"] == "settled"
-                            else 25600000,
-                            "withdrawals": 25600000
-                            if cell == "peer-down" and row["phase"] == "settled"
-                            else 0,
-                            "dirty_peers": 256
-                            if row["phase"] in ("retained", "operation_end")
-                            else 0,
-                            "group_dirty_members": 256
-                            if row["phase"] in ("retained", "operation_end")
-                            else 0,
-                        }
-                    )
-                lines = ["recovery_identity " + json.dumps(identity)]
-                lines.extend("recovery_sample " + json.dumps(row) for row in rows)
-                lines.append(
-                    "recovery_complete "
-                    + json.dumps(
-                        {
-                            "cell": cell,
-                            "actual_receivers": 256,
-                            "expected_routes_per_receiver": 0 if cell == "peer-down" else 100000,
-                        }
-                    )
+            (directory / "ownership.jsonl").write_text(
+                "\n".join(map(json.dumps, ownership)) + "\n", encoding="utf-8"
+            )
+            rows = self.samples(role, cell, profile, clients)
+            lines = ["recovery_identity " + json.dumps(identity)]
+            lines.extend("recovery_sample " + json.dumps(row) for row in rows)
+            lines.append(
+                "recovery_complete "
+                + json.dumps(
+                    {
+                        "cell": cell,
+                        "profile": profile,
+                        "actual_receivers": clients,
+                        "expected_families_per_receiver": dict(
+                            zip(
+                                receipt.FAMILIES,
+                                (0, 0, 0, 0)
+                                if cell == "peer-down"
+                                else receipt.PROFILES[profile][0],
+                            )
+                        ),
+                    }
                 )
-                (directory / "harness.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
-                for phase in ("before", "after"):
-                    shutil.copytree(raw_scope, directory / phase)
+            )
+            (directory / "harness.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            for phase in ("before", "after"):
+                shutil.copytree(raw_scope, directory / phase)
         return root
 
-    def test_full_campaign_binds_eight_distinct_owned_workloads(self) -> None:
+    def test_campaign_binds_all_distinct_owned_workloads(self) -> None:
         root = self.campaign()
         receipt.summarize(root)
         result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(result["rows"]), 8)
+        self.assertEqual(len(result["rows"]), 16)
+
+    def test_historical_failure_is_retained_without_a_comparison_claim(self) -> None:
+        root = self.campaign()
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-1-baseline/harness.log"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = [line for line in lines if not line.startswith("recovery_complete ")]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        receipt.summarize(root)
+        result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
+        self.assertFalse(result["rows"][0]["strict_validation"]["passed"])
+        self.assertIsNone(result["summaries"][0]["candidate_to_control_mean_peak_ratio"])
+        self.assertEqual(result["candidate_failures"], [])
+
+    def test_candidate_failure_remains_red_and_comparison_artifact_is_retained(self) -> None:
+        root = self.campaign()
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate/harness.log"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        path.write_text(
+            "\n".join(line for line in lines if not line.startswith("recovery_complete ")) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "candidate qualification failed"):
+            receipt.summarize(root)
+        result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(result["rows"]), 16)
+        self.assertEqual(len(result["candidate_failures"]), 1)
+
+    def test_historical_route_failure_does_not_excuse_phase_swap(self) -> None:
+        root = self.campaign()
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-1-baseline/harness.log"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        samples = [
+            json.loads(line.removeprefix("recovery_sample "))
+            for line in lines
+            if line.startswith("recovery_sample ")
+        ]
+        samples[1]["cgroup"]["memory.swap.current"] = 1
+        path.write_text(
+            lines[0]
+            + "\n"
+            + "\n".join("recovery_sample " + json.dumps(row) for row in samples)
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "phase swap"):
+            receipt.summarize(root)
 
     def test_wrong_executed_binary_hash_is_rejected(self) -> None:
         root = self.campaign()
-        path = root / "dataset-reevaluate-2-candidate/binary-process.json"
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate/binary-process.json"
         process = json.loads(path.read_text(encoding="utf-8"))
         process["exe_sha256"] = "d" * 64
         receipt.write_json(path, process)
@@ -460,7 +668,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_wrong_compiled_original_source_is_rejected(self) -> None:
         root = self.campaign()
-        path = root / "dataset-reevaluate-2-candidate/harness.log"
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate/harness.log"
         path.write_text(
             path.read_text(encoding="utf-8").replace(
                 '"source_sha": "' + "a" * 40, '"source_sha": "' + "b" * 40
@@ -472,7 +680,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_foreign_scoped_member_is_rejected(self) -> None:
         root = self.campaign()
-        path = root / "dataset-reevaluate-2-candidate/ownership.jsonl"
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate/ownership.jsonl"
         rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         rows[1]["members"].append(99999)
         rows[1]["cgroup_procs_raw"] += "99999\n"
@@ -482,7 +690,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_populated_descendant_is_rejected(self) -> None:
         root = self.campaign()
-        path = root / "dataset-reevaluate-2-candidate/ownership.jsonl"
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate/ownership.jsonl"
         rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         rows[1]["descendants"] = [{"path": "child", "procs": "99999\n", "threads": "99999\n"}]
         path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
@@ -491,7 +699,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_end_snapshot_cannot_underreport_retained_peak(self) -> None:
         root = self.campaign()
-        (root / "dataset-reevaluate-2-candidate/after/memory.peak").write_text(
+        (root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate/after/memory.peak").write_text(
             "455\n", encoding="utf-8"
         )
         with self.assertRaisesRegex(receipt.InvalidReceipt, "high-water"):
@@ -499,7 +707,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_reusing_a_scope_for_another_leg_is_rejected(self) -> None:
         root = self.campaign()
-        directory = root / "dataset-reevaluate-2-candidate"
+        directory = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate"
         for path in directory.rglob("*"):
             if path.is_file():
                 path.write_text(
@@ -511,7 +719,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_reusing_a_workload_start_identity_is_rejected(self) -> None:
         root = self.campaign()
-        directory = root / "dataset-reevaluate-2-candidate"
+        directory = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate"
         process_path = directory / "binary-process.json"
         process = json.loads(process_path.read_text(encoding="utf-8"))
         process.update({"pid": 3001, "start_ticks": 124})
@@ -535,7 +743,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_wrong_instrumentation_identity_is_rejected(self) -> None:
         root = self.campaign()
-        path = root / "dataset-reevaluate-2-candidate/harness.log"
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate/harness.log"
         lines = path.read_text(encoding="utf-8").splitlines()
         identity = json.loads(lines[0].removeprefix("recovery_identity "))
         identity["instrumentation_sha256"] = "e" * 64
@@ -566,7 +774,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_changed_process_start_identity_is_rejected(self) -> None:
         root = self.campaign()
-        path = root / "dataset-reevaluate-2-candidate/ownership.jsonl"
+        path = root / "ipv4-100k-dataset-reevaluate-baseline-2-candidate/ownership.jsonl"
         rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         rows[1]["processes"][-1]["start_ticks"] += 1
         path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")

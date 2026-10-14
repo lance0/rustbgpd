@@ -15,7 +15,43 @@ import sys
 import time
 
 BASELINE = "c862af9338aa828b7462f3cf85781f63b0e79fe8"
-CELLS = ("dataset-reevaluate", "peer-down")
+INTERMEDIATE = "bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00"
+CELLS = ("dataset-reevaluate", "peer-down", "widen")
+FAMILIES = ("ipv4_unicast", "ipv6_unicast", "vpnv4", "vpnv6")
+PROFILES = {
+    "ipv4-100k": ((100000, 0, 0, 0), (0, 0, 0, 0)),
+    "full-uc": ((1000000, 230000, 0, 0), (0, 0, 0, 0)),
+    "full-vpn": ((0, 0, 1000000, 230000), (0, 0, 100000, 23000)),
+    "mixed-widen": ((1000000, 230000, 0, 0), (0, 0, 100000, 23000)),
+    "smoke-uc": ((160, 40, 0, 0), (0, 0, 0, 0)),
+    "smoke-vpn": ((0, 0, 160, 40), (0, 0, 16, 4)),
+    "smoke-mixed": ((160, 40, 0, 0), (0, 0, 16, 4)),
+}
+
+
+def campaign_cases(phase: str, profiles: list[str] | None = None) -> list[dict]:
+    require(phase in ("pilot", "qualified"), "unknown campaign phase")
+    selected = profiles or (
+        ["full-uc", "full-vpn"]
+        if phase == "pilot"
+        else ["ipv4-100k", "full-uc", "full-vpn", "mixed-widen"]
+    )
+    require(
+        len(selected) == len(set(selected))
+        and set(selected) <= {"ipv4-100k", "full-uc", "full-vpn", "mixed-widen"},
+        "invalid campaign profiles",
+    )
+    cases = []
+    for profile in selected:
+        clients = 4 if phase == "pilot" else (256 if profile == "ipv4-100k" else 100)
+        cells = ["widen"] if profile == "mixed-widen" else ["dataset-reevaluate", "peer-down"]
+        if profile == "full-vpn" and phase == "qualified":
+            cells.append("widen")
+        for cell in cells:
+            cases.append({"profile": profile, "clients": clients, "cell": cell})
+    return cases
+
+
 PHASES = ("population_ready", "retained", "operation_end", "settled")
 GAUGES = (
     "bgp_update_group_recovery_entries",
@@ -66,6 +102,59 @@ HANDLER = """            RibUpdate::TestQueryOutboundHealth { reply } => {
                 ));
             }"""
 
+RIB_UPDATE_DECLARATION = (
+    "/// Messages sent from peer sessions to the RIB manager.\npub enum RibUpdate {"
+)
+BENCH_ACKNOWLEDGEMENT = """// The actor input is borrowed across awaits, so its owned bench receiver needs Sync.
+#[cfg(feature = "bench-internals")]
+type BenchCreditAcknowledgement = std::sync::Mutex<std::sync::mpsc::Receiver<Result<(), String>>>;"""
+
+BENCH_VARIANT = """    /// Benchmark-only transaction: grant one owned receiver credit, then run
+    /// the ordinary VPN receipt handler without an intervening retry timer.
+    #[cfg(feature = "bench-internals")]
+    BenchVpnAdmissionWithCredit {
+        /// Each receiver acknowledges exactly one harmless queue filler drain.
+        grants: Vec<(oneshot::Sender<()>, BenchCreditAcknowledgement)>,
+        /// Must be an ordinary `VpnRoutesReceived` input, never a nested transaction.
+        update: Box<RibUpdate>,
+        /// Reply after the ordinary handler has observed queue admission.
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
+    },"""
+BENCH_HANDLER = """            #[cfg(feature = "bench-internals")]
+            RibUpdate::BenchVpnAdmissionWithCredit {
+                grants,
+                update,
+                reply,
+            } => {
+                let result = (|| {
+                    if !matches!(&*update, RibUpdate::VpnRoutesReceived { .. }) {
+                        return Err(crate::update::RibCommandError::internal(
+                            "benchmark credit requires a VPN receipt",
+                        ));
+                    }
+                    for (grant, acknowledged) in grants {
+                        grant.send(()).map_err(|()| {
+                            crate::update::RibCommandError::internal("benchmark receiver closed")
+                        })?;
+                        // Benchmark consumers run on a separate runtime. This bounded
+                        // one-shot wait prevents a retry timer stealing the granted credit.
+                        acknowledged
+                            .lock()
+                            .map_err(|error| {
+                                crate::update::RibCommandError::internal(error.to_string())
+                            })?
+                            .recv_timeout(std::time::Duration::from_secs(30))
+                            .map_err(|error| {
+                                crate::update::RibCommandError::internal(error.to_string())
+                            })?
+                            .map_err(crate::update::RibCommandError::internal)?;
+                    }
+                    self.handle_update(*update);
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }"""
+
 
 class InvalidReceipt(ValueError):
     """An input is insufficient to qualify the fixed memory receipt."""
@@ -89,7 +178,7 @@ def write_json(path: Path, value: object) -> None:
 
 
 def instrument_observer(tree: Path) -> None:
-    """Broaden only two existing cfg gates; refuse a changed observer body."""
+    """Freeze two observer gates and one feature-only atomic credit transaction."""
     changes = []
     for name, anchor, indent in (
         ("crates/rib/src/update.rs", VARIANT, "    "),
@@ -101,7 +190,26 @@ def instrument_observer(tree: Path) -> None:
         old = indent + "#[cfg(test)]\n" + anchor
         new = indent + '#[cfg(any(test, feature = "bench-internals"))]\n' + anchor
         require(text.count(old) + text.count(new) == 1, f"unexpected observer gate in {name}")
-        changes.append((path, text.replace(old, new)))
+        text = text.replace(old, new)
+        if name.endswith("update.rs"):
+            require(text.count(RIB_UPDATE_DECLARATION) == 1, "unexpected RibUpdate declaration")
+            installed = "BenchVpnAdmissionWithCredit" in text
+            has_alias = "type BenchCreditAcknowledgement" in text
+            require(
+                installed == has_alias
+                and (not has_alias or text.count(BENCH_ACKNOWLEDGEMENT) == 1),
+                "unexpected credit acknowledgement alias",
+            )
+            if not installed:
+                text = text.replace(
+                    RIB_UPDATE_DECLARATION, BENCH_ACKNOWLEDGEMENT + "\n\n" + RIB_UPDATE_DECLARATION
+                )
+        seam = BENCH_VARIANT if name.endswith("update.rs") else BENCH_HANDLER
+        if "BenchVpnAdmissionWithCredit" in text:
+            require(text.count(seam) == 1, f"unexpected credit transaction body in {name}")
+        else:
+            text = text.replace(anchor, anchor + "\n" + seam)
+        changes.append((path, text))
     # Validate both before changing either file.
     for path, text in changes:
         path.write_text(text, encoding="utf-8")
@@ -275,7 +383,15 @@ def capture_ownership(
     return sample
 
 
-def run_scope(binary: Path, output: Path, cell: str, cgroup: Path, expected_digest: str) -> None:
+def run_scope(
+    binary: Path,
+    output: Path,
+    cell: str,
+    cgroup: Path,
+    expected_digest: str,
+    profile: str,
+    clients: int,
+) -> None:
     """Run inside the already fenced scope; capture before its owner exits."""
     output.mkdir(parents=True, exist_ok=True)
     require(bool(re.fullmatch(r"[0-9a-f]{64}", expected_digest)), "invalid expected binary digest")
@@ -294,7 +410,8 @@ def run_scope(binary: Path, output: Path, cell: str, cgroup: Path, expected_dige
     (output / "cgroup-path.txt").write_text(str(cgroup) + "\n", encoding="utf-8")
     snapshot_scope(cgroup, output / "before")
     capture_ownership(cgroup, output, owned, "before")
-    command = [str(binary), "recovery-memory", cell, "256", "100000"]
+    require(profile in PROFILES and clients > 0, "invalid workload profile")
+    command = [str(binary), "recovery-memory", cell, str(clients), profile]
     write_json(output / "command.json", command)
     env = dict(os.environ, RRHARNESS_RECOVERY_CGROUP=str(cgroup))
     status = {"exit": None, "timeout": False, "cgroup_valid": False, "ownership_valid": False}
@@ -312,12 +429,12 @@ def run_scope(binary: Path, output: Path, cell: str, cgroup: Path, expected_dige
                     )
                     active = owned.copy()
                     active[child.pid] = workload
-                    deadline = time.monotonic() + 600
+                    deadline = time.monotonic() + 1830
                     previous = capture_ownership(cgroup, output, active, "active", child)
                     while True:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
-                            raise subprocess.TimeoutExpired(command, 600)
+                            raise subprocess.TimeoutExpired(command, 1830)
                         try:
                             status["exit"] = child.wait(timeout=min(0.25, remaining))
                             break
@@ -352,7 +469,7 @@ def run_scope(binary: Path, output: Path, cell: str, cgroup: Path, expected_dige
 
 
 def validate_log(
-    path: Path, role: str, cell: str, clients: int = 256, prefixes: int = 100000
+    path: Path, role: str, cell: str, clients: int = 256, profile: str = "ipv4-100k"
 ) -> dict[str, object]:
     samples, completed, identities = [], [], []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -385,35 +502,73 @@ def validate_log(
         and bool(re.fullmatch(r"[0-9a-f]{64}", identity.get("instrumentation_sha256", ""))),
         "missing compiled source/instrumentation identity",
     )
-    expected = clients * prefixes
+    require(profile in PROFILES and cell in CELLS and clients > 0, "unknown receipt shape")
+    seed, additions = PROFILES[profile]
+    additions = additions if cell == "widen" else (0, 0, 0, 0)
+    require(cell != "widen" or sum(additions) > 0, "profile cannot widen")
+    limits = tuple(a + b for a, b in zip(seed, additions))
     gauges_absent = role == "baseline"
+    require(
+        identity["source_sha"] == (BASELINE if role == "baseline" else INTERMEDIATE)
+        if role in ("baseline", "intermediate")
+        else identity["source_sha"] not in (BASELINE, INTERMEDIATE),
+        "wrong role source identity",
+    )
     previous_peak = 0
     for row in samples:
         require(
-            row.get("schema") == "rustbgpd.recovery-memory.v1" and row.get("cell") == cell,
+            row.get("schema") == "rustbgpd.recovery-memory.v2" and row.get("cell") == cell,
             "wrong sample schema or cell",
         )
         require(
-            row.get("clients") == clients and row.get("prefixes") == prefixes, "wrong receipt shape"
+            row.get("clients") == clients
+            and row.get("profile") == profile
+            and row.get("seed") == dict(zip(FAMILIES, seed))
+            and row.get("additions") == dict(zip(FAMILIES, additions)),
+            "wrong receipt shape",
         )
         require(row.get("receiver_queue_capacity") == 8, "wrong receiver queue capacity")
         require(
-            row.get("receiver_bitmap_bytes") == clients * ((prefixes + 63) // 64) * 8,
+            row.get("receiver_bitmap_bytes") == clients * sum((n + 63) // 64 * 8 for n in limits),
             "unexpected receiver storage",
         )
         phase = row["phase"]
-        present = uint(row.get("folded_routes"), "folded routes")
-        uint(row.get("announces"), "announces")
-        withdrawals = uint(row.get("withdrawals"), "withdrawals")
+        families = row.get("families")
         require(
-            present == (0 if cell == "peer-down" and phase == "settled" else expected),
-            "nonconverged receiver inventory",
+            isinstance(families, dict) and set(families) == set(FAMILIES),
+            "missing exact family inventory",
         )
-        require(
-            withdrawals == (expected if cell == "peer-down" and phase == "settled" else 0),
-            "withdrawal inventory mismatch",
-        )
-        require(row["announces"] >= expected, "population did not deliver all routes")
+        for f, name in enumerate(FAMILIES):
+            actual = families[name]
+            present = uint(actual.get("present"), "family present")
+            announces = uint(actual.get("announces"), "family announces")
+            withdrawals = uint(actual.get("withdrawals"), "family withdrawals")
+            target = (
+                0
+                if phase == "settled" and cell == "peer-down"
+                else clients * (limits[f] if phase == "settled" else seed[f])
+            )
+            require(present == target, "nonconverged exact family receiver inventory")
+            require(
+                withdrawals
+                == (clients * seed[f] if phase == "settled" and cell == "peer-down" else 0),
+                "withdrawal inventory mismatch or unchanged-policy flap",
+            )
+            require(
+                announces >= (clients * limits[f] if phase == "settled" else clients * seed[f]),
+                "population did not deliver all family routes",
+            )
+            if limits[f] == 0:
+                require(announces == 0, "unexpected family announcement")
+        for scalar, field in (
+            ("folded_routes", "present"),
+            ("announces", "announces"),
+            ("withdrawals", "withdrawals"),
+        ):
+            require(
+                uint(row.get(scalar), scalar) == sum(families[name][field] for name in FAMILIES),
+                "nonconverged aggregate/family inventory mismatch",
+            )
         dirty = clients if phase in ("retained", "operation_end") else 0
         require(
             row.get("dirty_peers") == row.get("group_dirty_members") == dirty,
@@ -454,6 +609,21 @@ def validate_log(
                     metrics[GAUGES[1]] == samples[0]["metrics"][GAUGES[1]],
                     "settled recovery charge did not restore the initial empty-proof charge",
                 )
+        if role == "candidate":
+            require(sum(causes.values()) == 0, "candidate budget/proof fallback disqualifies shape")
+            if phase in ("retained", "operation_end"):
+                require(
+                    metrics[GAUGES[0]] == clients * sum(limits),
+                    "candidate lacks complete admitted recovery proofs",
+                )
+        elif (
+            role == "intermediate"
+            and profile in ("full-uc", "full-vpn", "mixed-widen")
+            and phase in ("retained", "operation_end")
+        ):
+            require(
+                sum(causes.values()) > 0, "intermediate full-table refusal control did not refuse"
+            )
         require("bgp_update_group_residue_entries" in metrics, "missing ordinary residue gauge")
         if phase == "settled":
             require(
@@ -488,15 +658,21 @@ def validate_log(
             all(cg[f"memory.events.{key}"] == 0 for key in ("oom", "oom_kill", "oom_group_kill")),
             "phase OOM invalidates the receipt",
         )
-    terminal = 0 if cell == "peer-down" else prefixes
+    terminal = (0, 0, 0, 0) if cell == "peer-down" else limits
     require(
         completed[0]
-        == {"cell": cell, "expected_routes_per_receiver": terminal, "actual_receivers": clients},
+        == {
+            "cell": cell,
+            "profile": profile,
+            "expected_families_per_receiver": dict(zip(FAMILIES, terminal)),
+            "actual_receivers": clients,
+        },
         "wrong terminal completion",
     )
     return {
         "cell": cell,
         "role": role,
+        "profile": profile,
         "recovery_gauges": "absent-baseline" if gauges_absent else "required-present",
         "evpn_reset_counter": "present-inactive-zero"
         if "bgp_evpn_recovery_provenance_exhausted_total" in samples[0]["metrics"]
@@ -507,9 +683,35 @@ def validate_log(
 
 
 def check_peak_coverage(before: dict, samples: list[dict], after: dict) -> None:
+    # This runs even when a historical control failed its route/proof contract.
+    # A failed route assertion never licenses invalid phase memory accounting.
+    previous = before["memory.peak"]
+    for row in samples:
+        cg = row.get("cgroup")
+        require(isinstance(cg, dict), "missing phase cgroup accounting")
+        for name in (
+            *SCALARS,
+            "memory.events.oom",
+            "memory.events.oom_kill",
+            "memory.events.oom_group_kill",
+        ):
+            uint(cg.get(name), name)
+        require(
+            cg["memory.peak"] >= cg["memory.current"] and cg["memory.peak"] >= previous,
+            "decreasing phase memory peak",
+        )
+        previous = cg["memory.peak"]
+        require(
+            cg["memory.swap.max"] == cg["memory.swap.current"] == cg["memory.swap.peak"] == 0,
+            "phase swap invalidates the receipt",
+        )
+        require(
+            all(cg[f"memory.events.{key}"] == 0 for key in ("oom", "oom_kill", "oom_group_kill")),
+            "phase OOM invalidates the receipt",
+        )
     require(
         after["memory.peak"]
-        >= max(before["memory.peak"], *(row["cgroup"]["memory.peak"] for row in samples)),
+        >= max([before["memory.peak"], *(row["cgroup"]["memory.peak"] for row in samples)]),
         "scope peak lost a before/phase high-water mark",
     )
 
@@ -556,16 +758,24 @@ def validate_ownership_log(directory: Path, cgroup: str, workload: dict) -> None
 
 def summarize(root: Path) -> None:
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    require(manifest["baseline"] == BASELINE, "wrong baseline")
     require(
-        bool(re.fullmatch(r"[0-9a-f]{40}", manifest["candidate"])), "candidate is not a source SHA"
+        manifest.get("schema") == "rustbgpd.recovery-memory.campaign.v2", "wrong campaign schema"
     )
     require(
-        manifest.get("clients") == 256
-        and manifest.get("prefixes") == 100000
+        manifest["baseline"] == BASELINE and manifest["intermediate"] == INTERMEDIATE,
+        "wrong historical controls",
+    )
+    require(
+        bool(re.fullmatch(r"[0-9a-f]{40}", manifest["candidate"]))
+        and manifest["candidate"] not in (BASELINE, INTERMEDIATE),
+        "candidate is not a distinct source SHA",
+    )
+    cases = campaign_cases(manifest["phase"], manifest["profiles"])
+    require(
+        manifest.get("cases") == cases
         and manifest.get("build_jobs") == 4
-        and manifest.get("cells") == list(CELLS)
-        and manifest.get("order_per_cell") == ["baseline", "candidate", "candidate", "baseline"],
+        and manifest.get("comparators") == ["baseline", "intermediate"]
+        and manifest.get("order_per_cell") == ["control", "candidate", "candidate", "control"],
         "campaign shape or build/order fence differs",
     )
     inputs = root / "instrumentation.sha256"
@@ -588,7 +798,7 @@ def summarize(root: Path) -> None:
         entries[name] = digest
     require(set(entries) == set(INSTRUMENT_INPUTS), "incomplete frozen instrumentation")
     binary_hashes = {}
-    for role in ("baseline", "candidate"):
+    for role in ("baseline", "intermediate", "candidate"):
         require(
             (root / f"{role}.sha").read_text(encoding="utf-8").strip() == manifest[role],
             "source SHA receipt mismatch",
@@ -613,94 +823,149 @@ def summarize(root: Path) -> None:
     require(before_oom.isdigit() and before_oom == after_oom, "host OOM invalidates the receipt")
     rows = []
     scopes, workloads = set(), set()
-    for cell in CELLS:
-        for index, role in enumerate(("baseline", "candidate", "candidate", "baseline")):
-            directory = root / f"{cell}-{index + 1}-{role}"
-            status = json.loads((directory / "status.json").read_text(encoding="utf-8"))
-            require(
-                status
-                == {"exit": 0, "timeout": False, "cgroup_valid": True, "ownership_valid": True},
-                f"unsuccessful {directory.name}",
-            )
-            result = validate_log(directory / "harness.log", role, cell)
-            identity = result["workload_identity"]
-            process = json.loads((directory / "binary-process.json").read_text(encoding="utf-8"))
-            require(
-                identity["source_sha"] == manifest[role]
-                and identity["instrumentation_sha256"]
-                == manifest["instrumentation_manifest_sha256"],
-                "compiled role source/instrumentation identity mismatch",
-            )
-            require(process["exe_sha256"] == binary_hashes[role], "executed binary digest mismatch")
-            require(
-                (identity["pid"], identity["start_ticks"])
-                == (process["pid"], process["start_ticks"]),
-                "workload identity differs from the launched binary",
-            )
-            expected_cgroup = (directory / "cgroup-path.txt").read_text(encoding="utf-8").strip()
-            require(
-                identity["cgroup"] == expected_cgroup,
-                "workload scope differs from the observed scope",
-            )
-            require(
-                process["cgroup"].strip() == "0::" + expected_cgroup.removeprefix("/sys/fs/cgroup"),
-                "launched binary is not in the observed unified scope",
-            )
-            validate_ownership_log(directory, expected_cgroup, process)
-            workload_key = (identity["pid"], identity["start_ticks"])
-            require(
-                expected_cgroup not in scopes and workload_key not in workloads,
-                "reused scope or workload identity across legs",
-            )
-            scopes.add(expected_cgroup)
-            workloads.add(workload_key)
-            require(
-                (directory / "launcher.exit").read_text(encoding="utf-8").strip() == "0",
-                "scope launcher failed",
-            )
-            before = scope_values(directory / "before")
-            end = scope_values(directory / "after")
-            check_peak_coverage(before, result["samples"], end)
-            result.update(
-                {
-                    "leg": index + 1,
-                    "scope_memory_peak_bytes": end["memory.peak"],
-                    "scope_memory_current_bytes": end["memory.current"],
-                }
-            )
-            write_json(directory / "validated.json", result)
-            rows.append(result)
-    summaries = []
-    for cell in CELLS:
-        peaks = {
-            role: [
-                row["scope_memory_peak_bytes"]
-                for row in rows
-                if row["cell"] == cell and row["role"] == role
-            ]
-            for role in ("baseline", "candidate")
-        }
+    candidate_failures = []
+    legs = (
+        (case, comparator, index, role)
+        for case in cases
+        for comparator in ("baseline", "intermediate")
+        for index, role in enumerate((comparator, "candidate", "candidate", comparator))
+    )
+    for case, comparator, index, role in legs:
+        cell, profile, clients = case["cell"], case["profile"], case["clients"]
+        directory = root / f"{profile}-{cell}-{comparator}-{index + 1}-{role}"
+        status = json.loads((directory / "status.json").read_text(encoding="utf-8"))
         require(
-            all(value > 0 for values in peaks.values() for value in values),
-            "missing positive scope peaks",
+            set(status) == {"exit", "timeout", "cgroup_valid", "ownership_valid"}
+            and status["timeout"] is False
+            and status["cgroup_valid"] is True
+            and status["ownership_valid"] is True
+            and isinstance(status["exit"], int),
+            f"invalid scope lifetime {directory.name}",
         )
-        summaries.append(
-            {
+        strict_error = None
+        try:
+            require(status["exit"] == 0, f"workload failed with exit {status['exit']}")
+            result = validate_log(directory / "harness.log", role, cell, clients, profile)
+        except InvalidReceipt as error:
+            strict_error = str(error)
+            lines = (directory / "harness.log").read_text(encoding="utf-8").splitlines()
+            identities = [
+                json.loads(line.removeprefix("recovery_identity "))
+                for line in lines
+                if line.startswith("recovery_identity ")
+            ]
+            require(len(identities) == 1, "failed control lacks workload identity")
+            result = {
                 "cell": cell,
-                "peaks_bytes": peaks,
-                "candidate_to_baseline_mean_peak_ratio": sum(peaks["candidate"])
-                / sum(peaks["baseline"]),
-                "verdict": "measured memory only; no timing or automatic capacity threshold",
+                "profile": profile,
+                "role": role,
+                "samples": [
+                    json.loads(line.removeprefix("recovery_sample "))
+                    for line in lines
+                    if line.startswith("recovery_sample ")
+                ],
+                "workload_identity": identities[0],
+            }
+            if role == "candidate":
+                candidate_failures.append(f"{directory.name}: {error}")
+        result["strict_validation"] = {"passed": strict_error is None, "error": strict_error}
+        identity = result["workload_identity"]
+        process = json.loads((directory / "binary-process.json").read_text(encoding="utf-8"))
+        require(
+            identity["source_sha"] == manifest[role]
+            and identity["instrumentation_sha256"] == manifest["instrumentation_manifest_sha256"],
+            "compiled role source/instrumentation identity mismatch",
+        )
+        require(process["exe_sha256"] == binary_hashes[role], "executed binary digest mismatch")
+        require(
+            (identity["pid"], identity["start_ticks"]) == (process["pid"], process["start_ticks"]),
+            "workload identity differs from the launched binary",
+        )
+        expected_cgroup = (directory / "cgroup-path.txt").read_text(encoding="utf-8").strip()
+        require(
+            identity["cgroup"] == expected_cgroup,
+            "workload scope differs from the observed scope",
+        )
+        require(
+            process["cgroup"].strip() == "0::" + expected_cgroup.removeprefix("/sys/fs/cgroup"),
+            "launched binary is not in the observed unified scope",
+        )
+        validate_ownership_log(directory, expected_cgroup, process)
+        workload_key = (identity["pid"], identity["start_ticks"])
+        require(
+            expected_cgroup not in scopes and workload_key not in workloads,
+            "reused scope or workload identity across legs",
+        )
+        scopes.add(expected_cgroup)
+        workloads.add(workload_key)
+        launcher_exit = (directory / "launcher.exit").read_text(encoding="utf-8").strip()
+        require(
+            launcher_exit.isdigit() and (launcher_exit == "0" or strict_error is not None),
+            "scope launcher failed without retained workload failure",
+        )
+        before = scope_values(directory / "before")
+        end = scope_values(directory / "after")
+        check_peak_coverage(before, result["samples"], end)
+        result.update(
+            {
+                "leg": index + 1,
+                "comparator": comparator,
+                "clients": clients,
+                "scope_memory_peak_bytes": end["memory.peak"],
+                "scope_memory_current_bytes": end["memory.current"],
             }
         )
+        write_json(directory / "validated.json", result)
+        rows.append(result)
+    summaries = []
+    for case in cases:
+        for comparator in ("baseline", "intermediate"):
+            selected = [
+                row
+                for row in rows
+                if row["cell"] == case["cell"]
+                and row["profile"] == case["profile"]
+                and row["comparator"] == comparator
+            ]
+            peaks = {
+                role: [row["scope_memory_peak_bytes"] for row in selected if row["role"] == role]
+                for role in (comparator, "candidate")
+            }
+            require(
+                all(value > 0 for values in peaks.values() for value in values),
+                "missing positive scope peaks",
+            )
+            summaries.append(
+                {
+                    **case,
+                    "comparator": comparator,
+                    "peaks_bytes": peaks,
+                    "candidate_to_control_mean_peak_ratio": sum(peaks["candidate"])
+                    / sum(peaks[comparator])
+                    if all(row["strict_validation"]["passed"] for row in selected)
+                    else None,
+                    "all_strict_checks_passed": all(
+                        row["strict_validation"]["passed"] for row in selected
+                    ),
+                    "verdict": "feasibility only"
+                    if manifest["phase"] == "pilot"
+                    else "measured memory only; strict candidate qualification required",
+                }
+            )
     write_json(
         root / "comparison.json",
         {
+            "schema": "rustbgpd.recovery-memory.comparison.v2",
+            "phase": manifest["phase"],
             "primary": "scope memory.peak bytes",
-            "scope": "manager-direct RIB, production exact-export preflight, harness consumers",
+            "scope": "manager-direct RIB, production exact-export preflight, harness consumers; no final wire/TCP",
             "rows": rows,
             "summaries": summaries,
+            "candidate_failures": candidate_failures,
         },
+    )
+    require(
+        not candidate_failures, "candidate qualification failed: " + "; ".join(candidate_failures)
     )
 
 
@@ -720,6 +985,8 @@ def main() -> None:
     run.add_argument("cell", choices=CELLS)
     run.add_argument("cgroup", type=Path)
     run.add_argument("expected_digest")
+    run.add_argument("profile", choices=PROFILES)
+    run.add_argument("clients", type=int)
     compare = sub.add_parser("summarize")
     compare.add_argument("root", type=Path)
     args = parser.parse_args()
@@ -731,7 +998,15 @@ def main() -> None:
         elif args.command == "scope-snapshot":
             snapshot_scope(args.path, args.output)
         elif args.command == "run-scope":
-            run_scope(args.binary, args.output, args.cell, args.cgroup, args.expected_digest)
+            run_scope(
+                args.binary,
+                args.output,
+                args.cell,
+                args.cgroup,
+                args.expected_digest,
+                args.profile,
+                args.clients,
+            )
         else:
             summarize(args.root)
     except (InvalidReceipt, OSError, ValueError, KeyError) as error:

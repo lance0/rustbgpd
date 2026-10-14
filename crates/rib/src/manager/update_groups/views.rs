@@ -43,7 +43,7 @@ impl RibManager {
         is_force: bool,
         baseline: Option<&FastMap<(Prefix, u32), Route>>,
         extras: Option<&HashSet<(Prefix, u32)>>,
-        admitted: Option<&super::admitted_recovery::AdmittedKeys>,
+        admitted: Option<super::admitted_recovery::AdmittedKeyView<'_>>,
         announce: &mut Vec<Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<NextHopAction>>,
@@ -132,17 +132,24 @@ impl RibManager {
         }
         if let Some(admitted) = admitted {
             checkpoint(true);
-            keys.extend(admitted.iter().filter_map(|key| {
-                checkpoint(false);
-                match key {
-                    ExactExportKey::Unicast(prefix, path_id)
-                        if !member_retains(&(prefix, path_id)) =>
-                    {
-                        Some((prefix, path_id))
-                    }
-                    _ => None,
-                }
-            }));
+            {
+                let checkpoint = std::cell::RefCell::new(&mut *checkpoint);
+                keys.extend(
+                    admitted
+                        .iter_with_checkpoint(|force| checkpoint.borrow_mut()(force))
+                        .filter_map(|key| {
+                            checkpoint.borrow_mut()(false);
+                            match key {
+                                ExactExportKey::Unicast(prefix, path_id)
+                                    if !member_retains(&(prefix, path_id)) =>
+                                {
+                                    Some((prefix, path_id))
+                                }
+                                _ => None,
+                            }
+                        }),
+                );
+            }
             checkpoint(true);
             keys.retain(|(prefix, path_id)| {
                 checkpoint(false);
@@ -178,7 +185,7 @@ impl RibManager {
         is_force: bool,
         baseline: Option<&FastMap<VpnRouteKey, VpnRibRoute>>,
         extras: Option<&HashSet<VpnRouteKey>>,
-        admitted: Option<&super::admitted_recovery::AdmittedKeys>,
+        admitted: Option<super::admitted_recovery::AdmittedKeyView<'_>>,
         vpn_announce: &mut Vec<VpnRibRoute>,
         vpn_withdraw: &mut Vec<VpnRibRouteKey>,
         checkpoint: &mut impl FnMut(bool),
@@ -235,15 +242,22 @@ impl RibManager {
         }
         if let Some(admitted) = admitted {
             checkpoint(true);
-            keys.extend(admitted.iter().filter_map(|key| {
-                checkpoint(false);
-                match key {
-                    ExactExportKey::Vpn(key) if !member_retains(&key.nlri_key) => {
-                        Some(key.nlri_key)
-                    }
-                    _ => None,
-                }
-            }));
+            {
+                let checkpoint = std::cell::RefCell::new(&mut *checkpoint);
+                keys.extend(
+                    admitted
+                        .iter_with_checkpoint(|force| checkpoint.borrow_mut()(force))
+                        .filter_map(|key| {
+                            checkpoint.borrow_mut()(false);
+                            match key {
+                                ExactExportKey::Vpn(key) if !member_retains(&key.nlri_key) => {
+                                    Some(key.nlri_key)
+                                }
+                                _ => None,
+                            }
+                        }),
+                );
+            }
             checkpoint(true);
             keys.retain(|nlri_key| {
                 checkpoint(false);
