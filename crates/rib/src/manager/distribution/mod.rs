@@ -3007,19 +3007,6 @@ impl RibManager {
         }
         if let Some(proof) = self.pending_group_admitted.get(&peer) {
             use super::update_groups::admitted_recovery::Key;
-            if proof.is_empty() {
-                self.prepare_empty_group_recovery_admission(
-                    peer,
-                    batch
-                        .unicast
-                        .announce
-                        .iter()
-                        .inspect(|_| checkpoint())
-                        .filter(|route| batch.announce_source_exclusion != Some(route.peer))
-                        .count()
-                        .saturating_add(batch.vpn_announce.len()),
-                );
-            }
             let admitted = batch
                 .unicast
                 .announce
@@ -3031,6 +3018,9 @@ impl RibManager {
                     let key = route.key();
                     Key::Vpn(key.nlri_key, key.path_id)
                 }));
+            if proof.is_empty() {
+                self.prepare_empty_group_recovery_admission(peer, admitted.clone());
+            }
             if let Err(error) = self
                 .pending_group_admitted
                 .reserve_admitted_with_checkpoint(peer, admitted, &mut |force| {
