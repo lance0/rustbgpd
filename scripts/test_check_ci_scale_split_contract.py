@@ -72,6 +72,17 @@ class ScaleSplitContractTests(unittest.TestCase):
             with self.subTest(seam=old, replacement=new):
                 self.mutate(old, new)
 
+    def test_recovery_memory_receipt_requires_an_actual_toolchain_input(self) -> None:
+        tail = "      - name: Check recovery receipt negative fixtures\n"
+        original = "        with:\n          toolchain: stable\n      - uses: ./.github/actions/install-protobuf\n" + tail
+        for replacement in (
+            "",
+            "        with:\n          toolchain: '1.95'\n",
+            "        env:\n          toolchain: stable\n",
+        ):
+            with self.subTest(replacement=replacement):
+                self.mutate(original, replacement + "      - uses: ./.github/actions/install-protobuf\n" + tail)
+
     def test_scale_profile_and_membership_are_required(self) -> None:
         for old, new in (
             ("lto = false\ncodegen-units = 16\nstrip = false\ndebug = 1", "lto = true\ncodegen-units = 1\nstrip = false\ndebug = 1"),

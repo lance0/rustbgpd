@@ -217,6 +217,11 @@ def check(root: Path) -> list[str]:
         errors.append("recovery_memory_receipt must keep its dispatch and exact receipt-branch selector")
     if re.findall(r"(?m)^ {4}runs-on:[ \t]*(.*?)[ \t]*$", recovery) != ["ubuntu-24.04"]:
         errors.append("recovery_memory_receipt must use the fresh ubuntu-24.04 hosted runner")
+    if len(re.findall(
+        r"(?m)^ {6}- uses: dtolnay/rust-toolchain@v1[^\n]*\n {8}with:\n {10}toolchain: stable[ \t]*$",
+        recovery,
+    )) != 1:
+        errors.append("recovery_memory_receipt must provide the stable toolchain input")
 
     scale_commands = Counter(command for _, command in _cargo_commands(jobs.get("scale_receipts", "")))
     for command in SCALE_COMMANDS:
