@@ -140,6 +140,7 @@ struct Record {
     state: State,
     keys: Keys,
     universe: Option<UniverseHandle>,
+    // Full referenced cost; the peer total includes each universe only once.
     universe_charge: usize,
     words: Words,
     masked: usize,
@@ -153,7 +154,6 @@ impl Record {
         size_of::<Self>()
             + self.keys.capacity() * size_of::<EvpnRouteKey>()
             + self.words.capacity() * size_of::<u64>()
-            + self.universe_charge
     }
 }
 
@@ -615,6 +615,12 @@ impl EvpnRecoveryProvenance {
             .ok()
     }
 
+    fn peer_references_universe(&self, peer: IpAddr, universe: UniverseHandle) -> bool {
+        self.records[self.peer_range(peer)]
+            .iter()
+            .any(|record| record.universe == Some(universe))
+    }
+
     fn view(&self, index: usize) -> EvpnProofView<'_> {
         let record = &self.records[index];
         let universe = record
@@ -765,7 +771,14 @@ impl EvpnRecoveryProvenance {
                 .references
                 .checked_add(1)
                 .ok_or_else(Self::overflow)?;
-            (universe.keys.len(), universe.charge())
+            (
+                universe.keys.len(),
+                if self.peer_references_universe(handle.owner.peer, hint) {
+                    0
+                } else {
+                    universe.charge()
+                },
+            )
         } else {
             (
                 count,
@@ -843,13 +856,15 @@ impl EvpnRecoveryProvenance {
         let position = self
             .universe_index(universe)
             .expect("owned universe exists");
+        let additional = if self.peer_references_universe(handle.owner.peer, universe) {
+            0
+        } else {
+            self.universes[position].charge()
+        };
         self.universes[position].references += 1;
         self.records[index].universe = Some(universe);
         self.records[index].universe_charge = self.universes[position].charge();
-        self.set_peer_retained(
-            handle.owner.peer,
-            retained + bytes + self.records[index].universe_charge,
-        );
+        self.set_peer_retained(handle.owner.peer, retained + bytes + additional);
         Ok(Some(universe))
     }
 
@@ -932,12 +947,19 @@ impl EvpnRecoveryProvenance {
                     checkpoint(false);
                     let address = self.records[start].handle.owner.peer;
                     let range = self.peer_range(address);
-                    let copies = self.records[range.clone()].iter().try_fold(
+                    let records = &self.records[range.clone()];
+                    let copies = records.iter().enumerate().try_fold(
                         0_usize,
-                        |copies, record| {
+                        |copies, (index, record)| {
                             checkpoint(false);
+                            let first_reference = record.universe.is_some_and(|universe| {
+                                !records[..index].iter().any(|prior| {
+                                    checkpoint(false);
+                                    prior.universe == Some(universe)
+                                })
+                            });
                             copies
-                                .checked_add(if record.universe.is_some() {
+                                .checked_add(if first_reference {
                                     size_of::<Universe>()
                                 } else {
                                     0
@@ -1241,10 +1263,9 @@ impl EvpnRecoveryProvenance {
                 .checked_add(size_of::<Words>())
                 .ok_or_else(Self::overflow)?;
             let retained = self.peer_usage(handle.owner.peer).retained;
-            let peer = retained
-                .checked_add(universe_charge)
-                .and_then(|n| n.checked_add(extra))
-                .ok_or_else(Self::overflow)?;
+            // The source already charges this physical universe to the same
+            // peer. A snapshot owns only its record, sparse keys and mask.
+            let peer = retained.checked_add(extra).ok_or_else(Self::overflow)?;
             let daemon = self
                 .daemon_used
                 .checked_add(extra)
@@ -1276,7 +1297,7 @@ impl EvpnRecoveryProvenance {
                     .expect("snapshot universe remains owned");
                 self.universes[position].references += 1;
             }
-            self.set_peer_retained(handle.owner.peer, retained + bytes + universe_charge);
+            self.set_peer_retained(handle.owner.peer, retained + bytes);
             let source = self.index(handle).expect("snapshot source remains owned");
             let (before, after) = self.records.split_at_mut(destination);
             after[0]
@@ -1749,7 +1770,7 @@ impl EvpnRecoveryProvenance {
         let bytes = record.keys.capacity() * size_of::<EvpnRouteKey>()
             + record.words.capacity() * size_of::<u64>();
         let peer = record.handle.owner.peer;
-        let charge = bytes + record.universe_charge;
+        let universe_charge = record.universe_charge;
         let universe = record.universe.take();
         record.universe_charge = 0;
         record.masked = 0;
@@ -1764,6 +1785,14 @@ impl EvpnRecoveryProvenance {
             .try_grow(0)
             .expect("empty pinned SmallVec deallocation cannot fail");
         self.daemon_used -= bytes;
+        let charge = bytes
+            + universe.map_or(0, |universe| {
+                if self.peer_references_universe(peer, universe) {
+                    0
+                } else {
+                    universe_charge
+                }
+            });
         self.set_peer_retained(peer, self.peer_usage(peer).retained - charge);
         if let Some(universe) = universe {
             let position = self
@@ -1886,12 +1915,29 @@ mod tests {
         for record in &ledger.records {
             daemon += record.keys.capacity() * size_of::<EvpnRouteKey>()
                 + record.words.capacity() * size_of::<u64>();
-            let expected: usize = ledger
+            let mut expected = 0;
+            let mut referenced = Vec::new();
+            for other in ledger
                 .records
                 .iter()
                 .filter(|other| other.handle.owner.peer == record.handle.owner.peer)
-                .map(Record::charge)
-                .sum();
+            {
+                expected += size_of::<Record>()
+                    + other.keys.capacity() * size_of::<EvpnRouteKey>()
+                    + other.words.capacity() * size_of::<u64>();
+                if let Some(handle) = other.universe {
+                    let universe = &ledger.universes[ledger.universe_index(handle).unwrap()];
+                    let charge = size_of::<Universe>()
+                        + universe.keys.capacity() * size_of::<EvpnRouteKey>();
+                    assert_eq!(other.universe_charge, charge);
+                    if !referenced.contains(&handle) {
+                        referenced.push(handle);
+                        expected += charge;
+                    }
+                } else {
+                    assert_eq!(other.universe_charge, 0);
+                }
+            }
             assert_eq!(record.peer_retained, expected);
             assert_eq!(
                 ledger.peer_usage(record.handle.owner.peer).retained,
@@ -2993,6 +3039,133 @@ mod tests {
             size_of::<EvpnRecoveryProvenance>()
         );
         assert_running_charges(&ledger);
+    }
+
+    #[test]
+    fn shared_snapshot_peer_credit_fits_exact_mask_overlap() {
+        for refuse in [false, true] {
+            let mut ledger = EvpnRecoveryProvenance::new();
+            let first = ledger.register(owner(1, 7)).unwrap();
+            let raw: Vec<_> = (1..=4096).map(key).collect();
+            let hint = shared_capture(&mut ledger, first, None, &raw, &raw[..64]);
+            let other = ledger.register(owner(2, 7)).unwrap();
+            shared_capture(&mut ledger, other, Some(hint), &raw, &raw[64..128]);
+            let spare = ledger.register(owner(3, 7)).unwrap();
+            assert!(ledger.retire_member(spare));
+            assert!(ledger.records.len() < ledger.records.capacity());
+            assert_running_charges(&ledger);
+            let retained = ledger.peer_usage(first.owner.peer).retained;
+            let daemon = ledger.daemon_usage().retained;
+            let mask = ledger.records[ledger.index(first).unwrap()].words.len() * size_of::<u64>();
+            // The vacant metadata slot makes the mask-copy overlap the
+            // limiting allocation, after admitting the constructor record.
+            assert!(mask + size_of::<Words>() > size_of::<Record>());
+            let overlap = retained + size_of::<Record>() + mask + size_of::<Words>();
+            ledger.peer_limit = overlap - usize::from(refuse);
+            let copied = ledger.snapshot(first);
+            if refuse {
+                let error = copied.unwrap_err();
+                assert_eq!(error.cause, ExhaustionCause::PeerLimit);
+                assert_eq!(error.limiting_peer, Some(first.owner.peer));
+                assert_eq!(error.attempted_peer_bytes, overlap);
+                assert_eq!(ledger.proof_keys(first), Err(error));
+                assert_eq!(ledger.peer_usage(first.owner.peer).retained, retained);
+                assert_eq!(ledger.daemon_usage().retained, daemon);
+                assert_eq!(ledger.universes[0].references, 2);
+            } else {
+                let snapshot = copied
+                    .expect("one universe credit leaves room for the exact mask overlap")
+                    .unwrap();
+                assert_eq!(
+                    ledger.proof_keys(snapshot).unwrap(),
+                    Some(raw[..64].to_vec())
+                );
+                assert_eq!(
+                    ledger.peer_usage(first.owner.peer).retained,
+                    retained + size_of::<Record>() + mask
+                );
+                assert_eq!(ledger.daemon_usage().retained, daemon + mask);
+                assert_eq!(ledger.universes[0].references, 3);
+            }
+            assert_eq!(
+                ledger.proof_keys(other).unwrap(),
+                Some(raw[64..128].to_vec())
+            );
+            assert_running_charges(&ledger);
+            assert!(ledger.retire_member(first));
+            assert_eq!(ledger.universes[0].references, 1);
+            assert!(ledger.retire_member(other));
+            assert_eq!(
+                ledger.daemon_usage().retained,
+                size_of::<EvpnRecoveryProvenance>()
+            );
+        }
+    }
+
+    #[test]
+    fn shared_snapshot_peer_credit_survives_detach_and_retirement_orders() {
+        for snapshot_first in [false, true] {
+            let mut ledger = EvpnRecoveryProvenance::new();
+            let first = ledger.register(owner(1, 7)).unwrap();
+            let raw: Vec<_> = (1..=128).map(key).collect();
+            let hint = shared_capture(&mut ledger, first, None, &raw, &[key(1)]);
+            let sibling = ledger.register(owner(1, 8)).unwrap();
+            shared_capture(&mut ledger, sibling, Some(hint), &raw, &[key(2)]);
+            let other = ledger.register(owner(2, 7)).unwrap();
+            shared_capture(&mut ledger, other, Some(hint), &raw, &[key(3)]);
+            let snapshot = ledger.snapshot(first).unwrap().unwrap();
+            assert_running_charges(&ledger);
+            assert_eq!(ledger.universes[0].references, 4);
+            let before = ledger.peer_usage(first.owner.peer).retained;
+            let mask = ledger.records[ledger.index(first).unwrap()]
+                .words
+                .capacity()
+                * size_of::<u64>();
+            assert!(ledger.finish_recovery(first).unwrap());
+            assert_eq!(ledger.peer_usage(first.owner.peer).retained, before - mask);
+            assert_eq!(ledger.universes[0].references, 3);
+            assert_running_charges(&ledger);
+            assert!(ledger.begin_capture(first).unwrap());
+            assert_eq!(
+                ledger
+                    .share_capture(
+                        first,
+                        Some(hint),
+                        raw.len(),
+                        raw.iter().copied(),
+                        (1, 0),
+                        &mut |_| {}
+                    )
+                    .unwrap(),
+                Some(hint)
+            );
+            assert!(ledger.capture_key(first, key(4)).unwrap());
+            assert!(ledger.seal_capture(first).unwrap());
+            assert_eq!(ledger.peer_usage(first.owner.peer).retained, before);
+            assert_eq!(ledger.proof_keys(snapshot).unwrap(), Some(vec![key(1)]));
+            assert_running_charges(&ledger);
+            let retiring = if snapshot_first {
+                [snapshot, first]
+            } else {
+                [first, snapshot]
+            };
+            for handle in retiring {
+                assert!(ledger.retire(handle));
+                assert_running_charges(&ledger);
+                assert_eq!(ledger.proof_keys(sibling).unwrap(), Some(vec![key(2)]));
+            }
+            assert_eq!(ledger.universes[0].references, 2);
+            assert!(ledger.retire_member(sibling));
+            assert_eq!(ledger.peer_usage(first.owner.peer).retained, 0);
+            assert_eq!(ledger.universes[0].references, 1);
+            assert_eq!(ledger.proof_keys(other).unwrap(), Some(vec![key(3)]));
+            assert_running_charges(&ledger);
+            assert!(ledger.retire_member(other));
+            assert_eq!(
+                ledger.daemon_usage().retained,
+                size_of::<EvpnRecoveryProvenance>()
+            );
+        }
     }
 
     #[test]
