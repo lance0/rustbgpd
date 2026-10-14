@@ -1708,7 +1708,8 @@ per-route view; use the explicit
 
 This is attribute inspection. It does not validate endpoint behavior against
 the route family, select a service, originate SRv6 routes, or program forwarding.
-EVPN remains alpha.
+The EVPN `prefix_sid` field remains alpha, outside the scoped
+[EVPN reflector boundary](v1-stable-contract.md#evpn-route-reflector-boundary).
 
 ### Runtime observability surfaces
 

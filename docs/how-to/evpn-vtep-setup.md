@@ -312,7 +312,8 @@ Incoming GW-IP/ESI overlay-index resolution through bundle members and
 non-zero-tag Type 5 remain unsupported. The
 [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
 qualifies routed bundle members against SR Linux 25.10.1, including Type 5
-withdrawal and binding reloads. EVPN and Linux dataplane behavior remain alpha.
+withdrawal and binding reloads. EVPN VTEP/IRB and Linux dataplane behavior
+remain alpha.
 
 ## IP-VRF / L3VNI VTEP (Type 5 / symmetric IRB)
 

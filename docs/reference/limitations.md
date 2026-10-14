@@ -145,7 +145,7 @@ Known EVPN gaps:
   multi-homing, locally assigned VNIs, non-zero Ethernet Tag Type 5, and
   GW-IP/ESI overlay-index recursion through bundle members remain unsupported.
   The binding does not provision Linux SVI/VRF attachments or add Type 2
-  symmetric host routing. EVPN remains alpha.
+  symmetric host routing. EVPN VTEP and IRB behavior remains alpha.
 - VXLAN local-bias split-horizon for all-active shared segments remains an
   ASIC/offload-dependent limitation of the Linux softswitch path. RFC 9746
   §2.2 makes local bias the only split-horizon mechanism for VXLAN (the ESI
