@@ -1533,3 +1533,161 @@ async fn labeled_llgr_gate_stops_stale_route_toward_non_llgr_ebgp_peer() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Register an iBGP peer synchronously with an outbound queue of `capacity`.
+/// The registration End-of-RIB stays queued, so a capacity of one leaves the
+/// peer's next send refused.
+fn grouped_resync_peer_up(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    capacity: usize,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (outbound_tx, outbound_rx) = mpsc::channel(capacity);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    outbound_rx
+}
+
+/// Explain and the advertised listing for one peer, read in the same actor
+/// state. `None` is a refusal: `FAILED_PRECONDITION` from explain, or
+/// `ResyncInProgress` from the listing.
+fn grouped_resync_views(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    prefix: Prefix,
+) -> (Option<bool>, Option<Vec<Prefix>>) {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+        peer,
+        prefix,
+        rd: None,
+        labeled: false,
+        source: None,
+        reply,
+    });
+    let explain = match response.try_recv().unwrap() {
+        Ok(explain) => Some(explain.already_advertised),
+        Err(crate::update::ExplainAdvertisedRouteError::FailedPrecondition(_)) => None,
+        Err(other) => panic!("unexpected explain error: {other}"),
+    };
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_routes_page_versioned(
+        RouteQueryScope::Advertised { peer },
+        None,
+        None,
+        None,
+        16,
+        reply,
+    );
+    let listing = match response.try_recv().unwrap() {
+        Ok(page) => Some(page.routes.iter().map(|route| route.prefix).collect()),
+        Err(crate::update::RoutePageError::ResyncInProgress) => None,
+        Err(other) => panic!("unexpected listing error: {other:?}"),
+    };
+    (explain, listing)
+}
+
+/// A grouped member whose send was refused has no record of which group
+/// entries it missed. Unicast export explain and `ListAdvertisedRoutes` must
+/// give the same answer in that window: both refuse while no admitted
+/// baseline exists, both read a retained baseline, and both report the
+/// group view once the resync is admitted. A clean sibling is unaffected.
+///
+/// Mutation proofs: dropping the listing's refusal makes the full member list
+/// a prefix it never received; dropping the explain refusal reports it as
+/// already advertised; listing the group view instead of a retained baseline
+/// shows a prefix the baseline does not hold.
+#[test]
+fn grouped_resync_window_keeps_explain_and_advertised_listing_in_agreement() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let full = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let clean = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut full_rx = grouped_resync_peer_up(&mut manager, full, 1);
+    let mut clean_rx = grouped_resync_peer_up(&mut manager, clean, 64);
+    assert_eq!(clean_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let Prefix::V4(v4) = prefix else {
+        unreachable!()
+    };
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced: vec![make_route(v4, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+
+    let group = manager.grouped_member_of(full);
+    assert!(
+        group.is_some(),
+        "the fixture must exercise a grouped member"
+    );
+    assert_eq!(group, manager.grouped_member_of(clean));
+    assert!(
+        manager.dirty_peers.contains(&full),
+        "the full queue refused"
+    );
+    assert!(!manager.pending_regroup_baseline.contains_key(&full));
+    assert!(!manager.dirty_peers.contains(&clean));
+
+    assert_eq!(
+        grouped_resync_views(&mut manager, clean, prefix),
+        (Some(true), Some(vec![prefix])),
+        "a clean member's group view is its admitted state"
+    );
+    assert_eq!(
+        grouped_resync_views(&mut manager, full, prefix),
+        (None, None),
+        "unknown admitted state: neither surface may present desired state"
+    );
+
+    // A retained regroup baseline is the admitted state: both surfaces read
+    // it, so a prefix the baseline lacks is neither listed nor advertised.
+    manager.pending_regroup_baseline.insert(
+        full,
+        crate::manager::update_groups::RegroupBaseline::default(),
+    );
+    assert_eq!(
+        grouped_resync_views(&mut manager, full, prefix),
+        (Some(false), Some(vec![])),
+    );
+    manager.pending_regroup_baseline.remove(&full);
+
+    while full_rx.try_recv().is_ok() {}
+    while manager.resync_dirty_peers_bounded() {}
+    assert!(!manager.dirty_peers.contains(&full), "resync admitted");
+    assert_eq!(
+        grouped_resync_views(&mut manager, full, prefix),
+        (Some(true), Some(vec![prefix])),
+        "after recovery both surfaces report the admitted route"
+    );
+    assert!(
+        full_rx
+            .try_recv()
+            .is_ok_and(|update| update.announce.iter().any(|route| route.prefix == prefix)),
+        "the resync delivered the route the listing now reports"
+    );
+}

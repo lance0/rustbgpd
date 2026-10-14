@@ -3493,8 +3493,9 @@ An action change that produces the same UPDATE bytes for that peer needs no
 extra announcement. This also applies to a per-client-best runner-up becoming
 the winning route; no withdrawal is inserted between the two next-hop forms.
 For a grouped peer whose advertised projection is resynchronizing without an
-admitted baseline, unicast export explain returns `FAILED_PRECONDITION` until
-recovery finishes; it does not report the desired action as already advertised.
+admitted baseline, unicast export explain and `ListAdvertisedRoutes` both
+return `FAILED_PRECONDITION` until recovery finishes. Neither reports the
+desired action as already advertised.
 
 `set_next_hop` never applies to a labeled-unicast or VPN route
 (`ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l3vpn_ipv4_unicast`,
