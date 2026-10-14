@@ -86,7 +86,8 @@ impl PeerManager {
                         return;
                     }
                 }
-                Err(oneshot::error::TryRecvError::Empty) => {}
+                // Transport can close outbound before sending this receipt.
+                Err(oneshot::error::TryRecvError::Empty) => return,
                 Err(oneshot::error::TryRecvError::Closed) => {
                     // Dropping the RIB reply retains the distinction from
                     // a positive execution receipt; the RIB owns its retry.

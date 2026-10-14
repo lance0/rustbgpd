@@ -77,6 +77,48 @@ async fn evpn_recovery_full_queue_keeps_receipt_pending_until_execution() {
 }
 
 #[tokio::test]
+async fn evpn_recovery_outbound_closure_keeps_pending_execution_receipt() {
+    let peer = "192.0.2.1".parse().unwrap();
+    let mut manager = test_peer_manager();
+    let (handle, mut commands) = controlled_handle();
+    insert_test_managed_peer(&mut manager, peer, handle, false);
+    let (outbound, routes) = mpsc::channel(1);
+    let reset = request(peer, 1, outbound);
+    let mut receipt = submit(&mut manager, reset.clone());
+    let PeerCommand::ResetEvpnRecoverySession { reply, .. } = commands.try_recv().unwrap() else {
+        panic!("expected guarded reset command");
+    };
+
+    // SessionDown closes outbound before awaiting the RIB teardown event.
+    drop(routes);
+    assert!(reset.outbound.is_closed());
+    for _ in 0..2 {
+        manager.retry_evpn_recovery_resets();
+        assert!(matches!(
+            receipt.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(manager.peers.recovery_reset_sessions().count(), 1);
+        assert!(manager.evpn_recovery_retry_at.is_some());
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    reply.send(EvpnRecoveryResetOutcome::Executed).unwrap();
+    manager.retry_evpn_recovery_resets();
+    assert_eq!(receipt.await.unwrap(), EvpnRecoveryResetOutcome::Executed);
+    assert_eq!(manager.peers.recovery_reset_sessions().count(), 0);
+    assert!(manager.evpn_recovery_retry_at.is_none());
+    assert!(manager.peers.contains_key(&key(peer)));
+    assert!(matches!(
+        commands.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn evpn_recovery_receipt_distinguishes_dropped_rejected_and_executed_commands() {
     let peer = "192.0.2.1".parse().unwrap();
     let mut manager = test_peer_manager();
