@@ -1,0 +1,46 @@
+# Lint and wire-compatibility checks for the rustbgpd gRPC schemas.
+# Run with `just proto-lint` (scripts/check-proto.sh); CONTRIBUTING.md
+# describes the pinned buf version and how to add a justified ignore.
+version: v2
+modules:
+  # The vendored OpenConfig gNMI tree stays in the module so the dial-out
+  # schema's import resolves; lint and breaking skip it below.
+  - path: proto
+lint:
+  ignore:
+    - proto/github.com
+  # A narrow, explicit rule set rather than DEFAULT. PACKAGE_DIRECTORY_MATCH
+  # is left out: moving the files into package-shaped directories would change
+  # the import paths used by the build scripts and the documented grpcurl
+  # examples. Pre-existing deviations are ignored per enum with a
+  # `buf:lint:ignore` comment in proto/rustbgpd.proto; a file-level
+  # `ignore_only` entry here would disable a rule for the whole schema.
+  use:
+    - ENUM_PASCAL_CASE
+    - ENUM_VALUE_PREFIX
+    - ENUM_VALUE_UPPER_SNAKE_CASE
+    - ENUM_ZERO_VALUE_SUFFIX
+    - FIELD_LOWER_SNAKE_CASE
+    - FILE_LOWER_SNAKE_CASE
+    - MESSAGE_PASCAL_CASE
+    - ONEOF_LOWER_SNAKE_CASE
+    - PACKAGE_DEFINED
+    - PACKAGE_LOWER_SNAKE_CASE
+    - PACKAGE_SAME_DIRECTORY
+    - PACKAGE_VERSION_SUFFIX
+    - RPC_PASCAL_CASE
+    - SERVICE_PASCAL_CASE
+breaking:
+  ignore:
+    - proto/github.com
+  # WIRE_JSON rather than WIRE: operators drive the API with grpcurl and other
+  # proto3 JSON clients, so field and enum value names are part of the
+  # contract alongside field numbers and wire types. WIRE_JSON does not cover
+  # removed services or RPCs, so the package-scoped deletion rules are added;
+  # unlike the FILE category they allow moving a definition between files of
+  # the same package.
+  use:
+    - WIRE_JSON
+    - PACKAGE_NO_DELETE
+    - PACKAGE_SERVICE_NO_DELETE
+    - RPC_NO_DELETE
