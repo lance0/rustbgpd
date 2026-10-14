@@ -892,16 +892,17 @@ impl RibManager {
         let exact_export_encoder = self
             .pending_peer_export_encoders
             .remove(&(peer, session_id));
-        let gr_context = self.pending_peer_gr_context.remove(&(peer, session_id));
 
         let previous_session = self.live_sessions.get(&peer).and_then(|sessions| {
             sessions
                 .iter()
                 .find(|record| record.session_id == session_id)
         });
-        let evpn_recovery_reset = previous_session
+        let (evpn_recovery_reset, group_recovery_fallback) = previous_session
             .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
-            .and_then(|record| record.evpn_recovery_reset);
+            .map_or((None, None), |old| {
+                (old.evpn_recovery_reset, old.group_recovery_fallback)
+            });
         let record = LiveSessionRecord {
             session_id,
             source_context: self
@@ -934,10 +935,11 @@ impl RibManager {
             add_path_send_limits: std::collections::HashMap::new(),
             negotiated_orf_recv,
             negotiated_llgr_families,
-            gr_context,
+            gr_context: self.pending_peer_gr_context.remove(&(peer, session_id)),
             exact_export_encoder,
             evpn_end_of_rib: false,
             evpn_recovery_reset,
+            group_recovery_fallback,
         };
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0
@@ -1427,7 +1429,16 @@ impl RibManager {
         // A fresh session has admitted no route, even when its group table
         // already contains routes learned from other peers.
         if self.grouped_member_of(peer).is_some() {
-            self.pending_group_admitted.entry(peer).or_default();
+            let readiness = self.replacement_readiness.clone();
+            if let Err(error) =
+                self.pending_group_admitted
+                    .insert_empty_with_checkpoint(peer, &mut |force| {
+                        super::replacement_readiness_checkpoint(&readiness, force);
+                    })
+            {
+                self.record_group_recovery_refusal(peer, error);
+            }
+            self.refresh_group_recovery_gauges();
         }
         self.register_evpn_recovery(peer, true);
         true

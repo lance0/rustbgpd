@@ -58,6 +58,162 @@ fn source_update(manager: &mut RibManager, announce: &[u8], withdraw: &[u8]) {
     while manager.process_next_route_chunk() {}
 }
 
+#[test]
+fn non_full_encoder_refusal_retains_the_owed_withdrawal_for_recovery() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    source_update(&mut manager, &[1], &[]);
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 1).into();
+    let (outbound, mut receiver) = mpsc::channel(16);
+    manager.handle_update(peer_up(member, outbound, None));
+    let initial = receiver.try_recv().unwrap();
+    assert_eq!(initial.announce.len(), 1);
+    assert_eq!(initial.announce[0].prefix, Prefix::V4(prefix(1)));
+    while receiver.try_recv().is_ok() {}
+    assert!(!manager.outbound_channel_full(member));
+    let encoder = manager.peer_export_encoders.remove(&member).unwrap();
+    source_update(&mut manager, &[], &[1]);
+    assert!(manager.dirty_peers.contains(&member));
+    assert!(manager.pending_group_admitted.get(&member).is_none());
+    assert_eq!(
+        manager.group_recovery_fallback(member),
+        Some(crate::manager::update_groups::RecoveryFallbackCause::MissingProof)
+    );
+    assert!(!manager.outbound_channel_full(member));
+    assert!(receiver.try_recv().is_err());
+    manager.peer_export_encoders.insert(member, encoder);
+    while manager.resync_dirty_peers_bounded() {}
+    let recovered = receiver.try_recv().unwrap();
+    assert_eq!(recovered.withdraw, vec![(Prefix::V4(prefix(1)), 0)]);
+    assert!(!manager.dirty_peers.contains(&member));
+    assert_eq!(manager.group_recovery_fallback(member), None);
+}
+
+fn gauge(manager: &RibManager, name: &str) -> f64 {
+    manager
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == name)
+        .unwrap()
+        .get_metric()[0]
+        .get_gauge()
+        .get_value()
+}
+
+#[test]
+fn common_recovery_charge_is_truthful_at_startup_capture_and_release() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let header = f64::from(u32::try_from(manager.pending_group_admitted.bytes()).unwrap());
+    assert!(header > 0.0);
+    assert_eq!(gauge(&manager, "bgp_update_group_recovery_entries"), 0.0);
+    assert_eq!(gauge(&manager, "bgp_update_group_recovery_bytes"), header);
+    assert_eq!(
+        gauge(&manager, "bgp_update_group_recovery_peak_bytes"),
+        header
+    );
+    source_update(&mut manager, &[1, 2], &[]);
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 2).into();
+    let (outbound, mut receiver) = mpsc::channel(16);
+    manager.handle_update(peer_up(member, outbound, None));
+    while receiver.try_recv().is_ok() {}
+    manager.mark_outbound_dirty(member);
+    assert_eq!(gauge(&manager, "bgp_update_group_recovery_entries"), 2.0);
+    assert_eq!(
+        gauge(&manager, "bgp_update_group_recovery_bytes"),
+        f64::from(u32::try_from(manager.pending_group_admitted.bytes()).unwrap())
+    );
+    assert!(gauge(&manager, "bgp_update_group_recovery_bytes") > header);
+    while manager.resync_dirty_peers_bounded() {}
+    assert!(receiver.try_recv().is_ok());
+    assert_eq!(gauge(&manager, "bgp_update_group_recovery_entries"), 0.0);
+    assert_eq!(gauge(&manager, "bgp_update_group_recovery_bytes"), header);
+    assert!(gauge(&manager, "bgp_update_group_recovery_peak_bytes") > header);
+}
+
+#[test]
+fn common_recovery_cap_refusal_keeps_owed_withdrawals_without_reset() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    source_update(&mut manager, &[1, 2], &[]);
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 3).into();
+    let (outbound, mut receiver) = mpsc::channel(16);
+    manager.handle_update(peer_up(member, outbound, None));
+    while receiver.try_recv().is_ok() {}
+    manager.pending_group_admitted =
+        crate::manager::update_groups::admitted_recovery::AdmittedRecovery::with_test_limits(
+            0,
+            512 * 1024 * 1024,
+        );
+    manager.mark_outbound_dirty(member);
+    assert!(manager.pending_group_admitted.get(&member).is_none());
+    assert_eq!(
+        manager.group_recovery_fallback(member),
+        Some(crate::manager::update_groups::RecoveryFallbackCause::PeerLimit)
+    );
+    source_update(&mut manager, &[], &[1]);
+    while manager.resync_dirty_peers_bounded() {}
+    let recovered = receiver.try_recv().unwrap();
+    assert!(recovered.withdraw.contains(&(Prefix::V4(prefix(1)), 0)));
+    assert!(manager.outbound_peers.contains_key(&member));
+    assert!(!manager.dirty_peers.contains(&member));
+    assert_eq!(manager.group_recovery_fallback(member), None);
+}
+
+#[test]
+fn common_recovery_fallback_does_not_invent_private_flowspec_delivery() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    source_update(&mut manager, &[1], &[]);
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 5).into();
+    let (outbound, mut receiver) = mpsc::channel(16);
+    let mut registration = peer_up(member, outbound, None);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut registration
+    {
+        sendable_families.push((Afi::Ipv4, Safi::FlowSpec));
+    }
+    manager.handle_update(registration);
+    while receiver.try_recv().is_ok() {}
+    manager.pending_group_admitted =
+        crate::manager::update_groups::admitted_recovery::AdmittedRecovery::with_test_limits(
+            0,
+            512 * 1024 * 1024,
+        );
+    manager.mark_outbound_dirty(member);
+    assert_eq!(
+        manager.group_recovery_fallback(member),
+        Some(crate::manager::update_groups::RecoveryFallbackCause::PeerLimit)
+    );
+
+    let flowspec = make_flowspec_route(Ipv4Addr::new(192, 0, 2, 1));
+    let key = ExactExportKey::FlowSpec(flowspec.selection_key());
+    let encoder = MockExactExportEncoder::accepting(1);
+    encoder.set_profile(1, [key.clone()]);
+    manager.peer_export_encoders.insert(member, encoder);
+    assert!(manager.try_send_and_commit_outbound_update(
+        member,
+        crate::manager::distribution::OutboundCommitBatch {
+            flowspec_announce: vec![flowspec],
+            ..crate::manager::distribution::OutboundCommitBatch::with_unicast(
+                vec![make_route(prefix(1), Ipv4Addr::new(192, 0, 2, 1))].into(),
+                vec![None].into(),
+            )
+        },
+    ));
+    let update = receiver.try_recv().unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert!(update.flowspec_announce.is_empty());
+    assert_eq!(
+        update.flowspec_withdraw,
+        [] as [crate::route::FlowSpecKey; 0]
+    );
+    assert!(manager.peer_unexportable[&member].contains(&key));
+}
+
 fn policy(denied: u8, marker: u32) -> PolicyChain {
     let deny = PolicyStatement {
         prefix: Some(Prefix::V4(prefix(denied))),
@@ -230,6 +386,54 @@ fn a_batched_refusal_retains_source_keys_for_targeted_recovery() {
         assert!(!manager.dirty_peers.contains(&member));
         assert!(!manager.pending_group_admitted.contains_key(&member));
     }
+}
+
+#[test]
+fn budget_refused_batched_narrowing_keeps_current_withdrawal_duties() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 4).into();
+    let (outbound, mut receiver) = mpsc::channel(16);
+    manager.handle_update(peer_up(member, outbound, Some(policy(3, 1))));
+    while receiver.try_recv().is_ok() {}
+    source_update(&mut manager, &[1, 2, 3], &[]);
+    let initial = receiver.try_recv().unwrap();
+    assert!(
+        initial
+            .announce
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(prefix(1)))
+    );
+    let encoder = manager.peer_export_encoders.remove(&member).unwrap();
+    manager.pending_group_admitted =
+        crate::manager::update_groups::admitted_recovery::AdmittedRecovery::with_test_limits(
+            0,
+            512 * 1024 * 1024,
+        );
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: vec![PeerExportPolicyReplacement {
+            peer: member,
+            export_policy: Some(policy(1, 2)),
+        }],
+        reply,
+    });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(
+        manager
+            .policy_transition_stats
+            .batched_authoritative_shared_members,
+        1
+    );
+    assert!(manager.dirty_peers.contains(&member));
+    assert!(manager.pending_group_admitted.get(&member).is_none());
+    manager.peer_export_encoders.insert(member, encoder);
+    while manager.resync_dirty_peers_bounded() {}
+    let recovered = receiver.try_recv().unwrap();
+    assert!(recovered.withdraw.contains(&(Prefix::V4(prefix(1)), 0)));
+    assert!(!manager.dirty_peers.contains(&member));
+    assert!(manager.outbound_peers.contains_key(&member));
+    assert_eq!(manager.group_recovery_fallback(member), None);
 }
 
 fn rejected_prior_slot_is_withdrawn(lane_only: bool) {

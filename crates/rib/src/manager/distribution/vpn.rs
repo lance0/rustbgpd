@@ -989,8 +989,14 @@ impl RibManager {
                     group_prior,
                     None,
                 ) {
-                    if self.mark_outbound_dirty(peer) {
-                        warn!(%peer, "outbound channel full — VPN update deferred");
+                    if !self.pending_group_admitted.contains_key(&peer) {
+                        self.set_group_recovery_fallback(
+                            peer,
+                            super::super::update_groups::RecoveryFallbackCause::MissingProof,
+                        );
+                    }
+                    if self.mark_outbound_dirty_inner(peer, false) {
+                        warn!(%peer, "outbound VPN update deferred without admission");
                     }
                     // The member missed this pass's withdrawals: record
                     // them as VPN tombstones so its resync can

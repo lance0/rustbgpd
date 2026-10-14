@@ -2832,9 +2832,9 @@ pub enum RibUpdate {
         /// Response channel: `(Debug-formatted VpnRouteKey, source peer)`.
         reply: oneshot::Sender<Vec<(String, IpAddr)>>,
     },
-    /// TEST ONLY: transient outbound-distribution state that must be
+    /// Test/benchmark transient outbound-distribution state that must be
     /// empty after a differential-oracle scenario reaches quiescence.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-internals"))]
     TestQueryOutboundHealth {
         /// Response channel: dirty peers, forced peers, group-dirty members,
         /// group tombstones, regroup baselines, and carried extra-withdraw

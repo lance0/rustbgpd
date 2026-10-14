@@ -470,6 +470,7 @@ fn lazy_clean_group_prior_defers_only_for_a_resolved_eligible_stage() {
             path_id: route.path_id,
             new: Some((route.clone(), None)),
             old_source: Some(source),
+            prior_source_attrs: None,
             prior: None,
             policy_label: None,
             source_attrs: None,
@@ -1160,6 +1161,7 @@ fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() 
         path_id: route.path_id,
         new: Some((route.clone(), None)),
         old_source: Some(source),
+        prior_source_attrs: None,
         prior: None,
         policy_label: None,
         source_attrs: None,
@@ -1191,6 +1193,10 @@ fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() 
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture keeps prior delivery, grouped ownership, cached rejection and the owed withdrawal together"
+)]
 fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
     let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 43));
     let limited = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44));
@@ -1231,6 +1237,17 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
         .loc_rib
         .recompute(old_route.prefix, std::iter::once(&old_route));
     manager.ensure_group_table(7, limited);
+    manager.update_groups.members.insert(
+        limited,
+        crate::manager::update_groups::GroupMembership::Grouped(7),
+    );
+    manager
+        .group_ribs
+        .get_mut(&7)
+        .unwrap()
+        .members
+        .insert(limited);
+    assert_eq!(manager.grouped_member_of(limited), Some(7));
     manager
         .loc_rib
         .recompute(route.prefix, std::iter::once(&route));
@@ -1239,16 +1256,15 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
         .remove(&7)
         .unwrap()
         .deltas;
-    assert!(crate::manager::helpers::routes_equal(
-        deltas[0]
-            .prior
-            .as_ref()
-            .unwrap()
-            .adv_entry(limited)
-            .unwrap()
-            .route,
-        &old_route,
-    ));
+    assert!(
+        deltas[0].prior.is_none(),
+        "plain groups retain no boxed old slot"
+    );
+    assert_eq!(deltas[0].old_source, Some(old_route.peer));
+    assert!(
+        deltas[0].prior_source_attrs.is_none(),
+        "untagged source has no sparse control residue"
+    );
     manager.adj_ribs_out.remove(&limited);
     let announce: Arc<Vec<Route>> = vec![route].into();
     let next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>> = vec![None].into();
@@ -1315,6 +1331,7 @@ fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
         path_id: route.path_id,
         new: Some((route.clone(), None)),
         old_source: Some(source),
+        prior_source_attrs: None,
         prior: None,
         policy_label: None,
         source_attrs: None,

@@ -16,7 +16,12 @@ ROSTER = {
     "check",
     "msrv",
     "evpn_bum_filter_kernel",
+    "recovery_memory_receipt",
 }
+RECOVERY_MEMORY_SELECTOR = (
+    "${{ github.event_name == 'workflow_dispatch' && "
+    "github.ref == 'refs/heads/fix/update-group-recovery-bounds' }}"
+)
 RESULTS = ("CORE", "CORE_TESTS", "SCALE_RECEIPTS")
 RETIRED_PRIVILEGED_WORKFLOW = ".github/workflows/privileged-interop.yml"
 WORKFLOWS = tuple(
@@ -204,6 +209,14 @@ def check(root: Path) -> list[str]:
         errors.append("Cargo.toml: scale harnesses must stay outside default-members")
     if set(jobs) != ROSTER:
         errors.append("exact CI job roster drifted")
+
+    # This receipt is optional at dispatch; it must never run on main/release
+    # re-tests or consume the reserved self-hosted soak runner.
+    recovery = jobs.get("recovery_memory_receipt", "")
+    if re.findall(r"(?m)^ {4}if:[ \t]*(.*?)[ \t]*$", recovery) != [RECOVERY_MEMORY_SELECTOR]:
+        errors.append("recovery_memory_receipt must keep its dispatch and exact receipt-branch selector")
+    if re.findall(r"(?m)^ {4}runs-on:[ \t]*(.*?)[ \t]*$", recovery) != ["ubuntu-24.04"]:
+        errors.append("recovery_memory_receipt must use the fresh ubuntu-24.04 hosted runner")
 
     scale_commands = Counter(command for _, command in _cargo_commands(jobs.get("scale_receipts", "")))
     for command in SCALE_COMMANDS:

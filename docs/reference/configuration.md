@@ -2502,6 +2502,24 @@ member is dirty; returns to zero when its resync completes), and
 lane entries across groups, ADR-0126 — grows with announcement
 overlap, never with member count).
 
+Dirty unicast/VPN members retain a compact proof of the keys actually admitted
+before the shared desired view advances. Healthy members release that proof.
+Internal recovery capacity limits are 64 MiB per peer and 512 MiB per process;
+these limits account for exact reserved key and metadata capacity, owned
+headers, and overlapping replacement allocations before growth. They are not
+configuration settings or RSS limits. Allocator bookkeeping and the daemon's
+other storage need separate memory headroom.
+
+If a limit, allocation failure, or unavailable pre-commit proof prevents a
+complete proof, recovery preserves the legacy conservative withdrawal duties.
+It may withdraw a candidate the receiver never held, instead of leaving an
+owed withdrawal unsent. This fallback does not reset the session and does not
+change EVPN recovery. `bgp_update_group_recovery_fallback_total` records the
+bounded cause; `bgp_update_group_recovery_entries`,
+`bgp_update_group_recovery_bytes`, and `bgp_update_group_recovery_peak_bytes`
+expose retained keys, current charge, and peak reservation charge. A healthy
+empty ledger still contributes its fixed header to the byte gauges.
+
 The registry releases compiled policy contents after their final live group
 and transition disappear. Small chain-ID slots and group keys remain as
 historical identity metadata; IDs are never reassigned. A content-equal reload

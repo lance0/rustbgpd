@@ -651,6 +651,7 @@ fn announce_delta(p: Prefix, src: IpAddr, old: Option<IpAddr>) -> GroupDelta {
         path_id: 0,
         new: Some((new, None)),
         old_source: old,
+        prior_source_attrs: None,
         prior: None,
         policy_label: None,
         source_attrs,
@@ -664,6 +665,7 @@ fn withdraw_delta(p: Prefix, old: Option<IpAddr>) -> GroupDelta {
         path_id: 0,
         new: None,
         old_source: old,
+        prior_source_attrs: None,
         prior: None,
         policy_label: None,
         source_attrs: None,
@@ -1744,6 +1746,7 @@ fn adv_entry_derivation_matrix() {
         path_id: 0,
         new: Some((route_with_comm(p, OTHER1, 7), Some(NextHopAction::Self_))),
         old_source: None,
+        prior_source_attrs: None,
         prior: None,
         policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: Some(AttrSet::new(vec![PathAttribute::Communities(vec![7])])),
@@ -1902,6 +1905,7 @@ fn pcb_family_counts_lane_term_is_per_family() {
         path_id: 0,
         new: Some((w6.clone(), None)),
         old_source: None,
+        prior_source_attrs: None,
         prior: None,
         policy_label: None,
         source_attrs: None,
@@ -2086,6 +2090,7 @@ fn pcb_join_counters_replay_lane_permit() {
         path_id: 0,
         new: Some((route(p1, MEMBER), None)),
         old_source: None,
+        prior_source_attrs: None,
         prior: None,
         policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: None,
@@ -2105,6 +2110,7 @@ fn pcb_join_counters_replay_lane_permit() {
         path_id: 0,
         new: Some((route(p2, OTHER1), None)),
         old_source: None,
+        prior_source_attrs: None,
         prior: None,
         policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: None,
@@ -2868,11 +2874,13 @@ fn dirty_resync_replays_table_and_tombstones() {
     group.tombstones.insert((k3, 0)); // gone — withdraw
     group.tombstones.insert((k4, 0)); // formerly foreign, member-sourced now
     group.tombstones.insert((prefix(5), 0)); // never admitted — no withdraw
-    let admitted = HashSet::from([
+    let admitted: super::admitted_recovery::AdmittedKeys = [
         ExactExportKey::Unicast(k1, 0),
         ExactExportKey::Unicast(k3, 0),
         ExactExportKey::Unicast(k4, 0),
-    ]);
+    ]
+    .into_iter()
+    .collect();
 
     let mut announce = Vec::new();
     let mut withdraw = Vec::new();
@@ -2889,6 +2897,7 @@ fn dirty_resync_replays_table_and_tombstones() {
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
+        &mut |_| {},
     );
     let announced: HashSet<Prefix> = announce.iter().map(|r| r.prefix).collect();
     assert_eq!(
@@ -2932,6 +2941,7 @@ fn regroup_baseline_diff_and_force() {
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
+        &mut |_| {},
     );
     let announced: HashSet<Prefix> = announce.iter().map(|r| r.prefix).collect();
     assert_eq!(announced, HashSet::from([k6]));
@@ -2954,6 +2964,7 @@ fn regroup_baseline_diff_and_force() {
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
+        &mut |_| {},
     );
     let announced: HashSet<Prefix> = announce.iter().map(|r| r.prefix).collect();
     assert_eq!(announced, HashSet::from([k1, k6]));
@@ -3108,10 +3119,12 @@ fn extra_withdraws_respect_retained_keys() {
     let (k1, k7) = (prefix(1), prefix(7));
     group.apply_delta(&announce_delta(k1, OTHER1, None));
     let extras: HashSet<(Prefix, u32)> = HashSet::from([(k1, 0), (k7, 0), (prefix(8), 0)]);
-    let admitted = HashSet::from([
+    let admitted: super::admitted_recovery::AdmittedKeys = [
         ExactExportKey::Unicast(k1, 0),
         ExactExportKey::Unicast(k7, 0),
-    ]);
+    ]
+    .into_iter()
+    .collect();
 
     let mut announce = Vec::new();
     let mut withdraw = Vec::new();
@@ -3128,6 +3141,7 @@ fn extra_withdraws_respect_retained_keys() {
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
+        &mut |_| {},
     );
     let withdrawn: HashSet<(Prefix, u32)> = withdraw.into_iter().collect();
     assert_eq!(
@@ -3169,6 +3183,7 @@ fn resync(
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
+        &mut |_| {},
     );
     assert_eq!(
         nh_flags.len(),
@@ -3927,6 +3942,7 @@ fn pcb_member_view_snapshot_records_substitution_for_regroup_diff() {
             &mut announce,
             &mut withdraw,
             &mut nh_flags,
+            &mut |_| {},
         );
         (announce, withdraw)
     };
@@ -4008,6 +4024,72 @@ fn vpn_withdraw_delta(n: u8, old: Option<IpAddr>) -> VpnGroupDelta {
     }
 }
 
+#[test]
+fn grouped_vpn_non_full_encoder_refusal_keeps_the_owed_withdrawal() {
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+    let mut manager = RibManager::new(
+        rx,
+        query_rx,
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        rustbgpd_telemetry::BgpMetrics::new(),
+    );
+    let families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)];
+    let (outbound, mut receiver) = tokio::sync::mpsc::channel(16);
+    manager.handle_update(crate::update::RibUpdate::PeerUp {
+        peer: MEMBER,
+        session_id: 0,
+        peer_asn: TARGET_ASN,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: outbound,
+        export_policy: None,
+        sendable_families: families.clone(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while receiver.try_recv().is_ok() {}
+    assert_eq!(manager.peer_sendable_families[&MEMBER], families);
+    let group = &manager.group_ribs[&manager.vpn_grouped_member_of(MEMBER).unwrap()];
+    assert!(group.stages_vpn() && group.is_rr_client);
+    let route = vpn_route(1, OTHER1);
+    let key = route.key();
+    assert_eq!(route.origin_type, crate::route::RouteOrigin::Ibgp);
+    manager.handle_update(crate::update::RibUpdate::VpnRoutesReceived {
+        peer: OTHER1,
+        session_id: 0,
+        announced: vec![route],
+        withdrawn: vec![],
+    });
+    let delivered = receiver.try_recv().unwrap();
+    assert_eq!(delivered.vpn_announce.len(), 1);
+    assert_eq!(delivered.vpn_announce[0].key(), key);
+    while receiver.try_recv().is_ok() {}
+    assert!(!manager.outbound_channel_full(MEMBER));
+    let encoder = manager.peer_export_encoders.remove(&MEMBER).unwrap();
+    manager.handle_update(crate::update::RibUpdate::VpnRoutesReceived {
+        peer: OTHER1,
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![key.clone()],
+    });
+    assert!(manager.dirty_peers.contains(&MEMBER));
+    assert!(!manager.outbound_channel_full(MEMBER));
+    assert!(receiver.try_recv().is_err());
+    manager.peer_export_encoders.insert(MEMBER, encoder);
+    while manager.resync_dirty_peers_bounded() {}
+    let recovered = receiver.try_recv().unwrap();
+    assert_eq!(recovered.vpn_withdraw, vec![key]);
+    assert!(!manager.dirty_peers.contains(&MEMBER));
+}
+
 /// Risk-2 exhaustive VPN source-flip matrix: every combination of
 /// `{old source} × {new source | withdraw}` for a fixed member,
 /// asserted against the per-peer-path reference semantics (design
@@ -4077,11 +4159,13 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
     group.vpn_tombstones.insert(vpn_key(3)); // gone — withdraw
     group.vpn_tombstones.insert(vpn_key(2)); // formerly foreign, member-sourced now
     group.vpn_tombstones.insert(vpn_key(4)); // never admitted — no withdraw
-    let admitted = HashSet::from([
+    let admitted: super::admitted_recovery::AdmittedKeys = [
         ExactExportKey::Vpn(vpn_route(1, OTHER1).key()),
         ExactExportKey::Vpn(vpn_route(2, OTHER1).key()),
         ExactExportKey::Vpn(vpn_route(3, OTHER1).key()),
-    ]);
+    ]
+    .into_iter()
+    .collect();
 
     let mut announce = Vec::new();
     let mut withdraw = Vec::new();
@@ -4096,6 +4180,7 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
         Some(&admitted),
         &mut announce,
         &mut withdraw,
+        &mut |_| {},
     );
     let announced: HashSet<VpnRouteKey> = announce.iter().map(|r| r.nlri.key()).collect();
     assert_eq!(
@@ -4124,6 +4209,7 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
         None,
         &mut announce,
         &mut withdraw,
+        &mut |_| {},
     );
     assert!(announce.is_empty(), "baseline-equal entries suppressed");
     let withdrawn: HashSet<VpnRouteKey> = withdraw.iter().map(|k| k.nlri_key).collect();
@@ -4143,6 +4229,7 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
         None,
         &mut announce,
         &mut withdraw,
+        &mut |_| {},
     );
     let announced: HashSet<VpnRouteKey> = announce.iter().map(|r| r.nlri.key()).collect();
     assert_eq!(announced, HashSet::from([vpn_key(1)]));
@@ -4482,7 +4569,8 @@ fn vpn_dirty_resync_rt_filter_dimension() {
     // Φ-passing table and withdraws the residue (Φ-aware retention:
     // a staged-but-Φ-failing key is NOT retained).
     let extras: HashSet<VpnRouteKey> = HashSet::from([out_phi.nlri.key()]);
-    let admitted = HashSet::from([ExactExportKey::Vpn(out_phi.key())]);
+    let admitted: super::admitted_recovery::AdmittedKeys =
+        [ExactExportKey::Vpn(out_phi.key())].into_iter().collect();
     let mut announce = Vec::new();
     let mut withdraw = Vec::new();
     RibManager::assemble_group_vpn_resync(
@@ -4496,6 +4584,7 @@ fn vpn_dirty_resync_rt_filter_dimension() {
         Some(&admitted),
         &mut announce,
         &mut withdraw,
+        &mut |_| {},
     );
     let announced: HashSet<VpnRouteKey> = announce.iter().map(|r| r.nlri.key()).collect();
     assert_eq!(announced, HashSet::from([in_phi.nlri.key()]));
@@ -4567,6 +4656,7 @@ fn source_control_passthrough_keeps_dense_residue_empty() {
         path_id: 0,
         new: Some((source.clone(), None)),
         old_source: None,
+        prior_source_attrs: None,
         prior: None,
         policy_label: None,
         source_attrs: capture_source_attrs(&source),
@@ -4610,6 +4700,7 @@ fn source_control_modifying_mode_preserves_historical_residue_and_transition() {
         path_id: 0,
         new: Some((staged, None)),
         old_source: None,
+        prior_source_attrs: None,
         prior: None,
         policy_label,
         source_attrs: capture_source_attrs(&source),
@@ -4735,6 +4826,34 @@ fn plain_group_denied_best_does_not_restage_on_candidate_withdrawal() {
     );
     let (announced, withdrawn) = folded_outbound(&mut rx);
     assert!(announced.is_empty() && withdrawn.is_empty());
+}
+
+#[test]
+fn plain_best_source_flip_keeps_old_source_on_shared_encoding() {
+    let mut manager = staging_manager();
+    let p = prefix(1);
+    let _receiver = register_pcb_member(&mut manager, OTHER1, plain_group_with_chain(None));
+    seed(&mut manager, cand(p, OTHER1, 300));
+    seed(&mut manager, cand(p, OTHER2, 200));
+    let changed = manager.recompute_best(&HashSet::from([p]));
+    manager.stage_update_groups(
+        &changed,
+        &HashSet::from([p]),
+        &mut super::super::distribution::ExportMemo::default(),
+    );
+    unseed(&mut manager, OTHER1, p);
+    let changed = manager.recompute_best(&HashSet::from([p]));
+    let stages = manager.stage_update_groups(
+        &changed,
+        &HashSet::from([p]),
+        &mut super::super::distribution::ExportMemo::default(),
+    );
+    let stage = &stages[&PCB_GID];
+    assert!(stage.deltas.iter().all(|delta| delta.prior.is_none()));
+    assert!(!stage.exceptions.contains(&OTHER1));
+    assert!(stage.shared_applies_with_source_exclusion(OTHER1));
+    assert_eq!(stage.shared_announce.len(), 1);
+    assert_eq!(stage.shared_announce[0].peer, OTHER2);
 }
 
 /// The lane-stale shape from the `OpenBGPD` issue-#21 family: the
@@ -5239,6 +5358,44 @@ fn pcb_otc_transition_emission_matches_ungrouped_per_client_best() {
         DrainedWire::default(),
         "a same-session join replay of the steady blocked state stays silent"
     );
+}
+
+#[test]
+fn pcb_otc_budget_refused_dirty_recovery_keeps_the_owed_withdrawal() {
+    let p = prefix(1);
+    let mut manager = staging_manager();
+    let mut receiver = register_pcb_member(&mut manager, MEMBER, per_client_best_customer_group());
+    manager
+        .peer_local_roles
+        .insert(MEMBER, Some(BgpRole::Customer));
+    receive_routes(&mut manager, OTHER1, vec![cand(p, OTHER1, 300)]);
+    assert_eq!(drain_wire(&mut receiver).announced, vec![(p, OTHER1)]);
+    manager.pending_group_admitted =
+        admitted_recovery::AdmittedRecovery::with_test_limits(0, 512 * 1024 * 1024);
+    let sender = manager.outbound_peers[&MEMBER].clone();
+    while sender
+        .try_send(crate::update::OutboundRouteUpdate::default())
+        .is_ok()
+    {}
+    receive_routes(
+        &mut manager,
+        OTHER1,
+        vec![with_otc_attr(cand(p, OTHER1, 300))],
+    );
+    assert!(manager.dirty_peers.contains(&MEMBER));
+    assert!(manager.pending_group_admitted.get(&MEMBER).is_none());
+    assert_eq!(
+        manager.group_recovery_fallback(MEMBER),
+        Some(RecoveryFallbackCause::PeerLimit),
+    );
+    let _ = drain_wire(&mut receiver);
+    while manager.resync_dirty_peers_bounded() {}
+    let recovered = drain_wire(&mut receiver);
+    assert_eq!(recovered.announced, [] as [(Prefix, IpAddr); 0]);
+    assert_eq!(recovered.withdrawn, vec![(p, 0)]);
+    assert!(!manager.dirty_peers.contains(&MEMBER));
+    assert_eq!(manager.group_recovery_fallback(MEMBER), None);
+    assert!(manager.outbound_peers.contains_key(&MEMBER));
 }
 
 /// A newly blocked identity that was never delivered reports its diagnostic
@@ -5799,6 +5956,7 @@ fn announce_route_delta(new: Route) -> GroupDelta {
         path_id: 0,
         new: Some((new, None)),
         old_source: None,
+        prior_source_attrs: None,
         prior: None,
         policy_label: None,
         source_attrs,

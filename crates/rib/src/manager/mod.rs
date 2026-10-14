@@ -1044,9 +1044,11 @@ pub struct RibManager {
     /// on resync success.
     pending_extra_withdraws: HashMap<IpAddr, update_groups::ExtraWithdraws>,
     /// Actual admitted unicast/VPN keys while a member's shared desired view
-    /// can advance without delivery. Bounded by its admitted inventory, and
-    /// released after recovery; routes remain shared in the group table.
-    pending_group_admitted: HashMap<IpAddr, HashSet<crate::update::ExactExportKey>>,
+    /// can advance without delivery. Exact capacity charge is capped at
+    /// 64 MiB per peer and 512 MiB per daemon (provisional qualification
+    /// sizing); refusal preserves existing conservative withdrawal duties.
+    /// Released after recovery; healthy members retain no key proof.
+    pending_group_admitted: update_groups::admitted_recovery::AdmittedRecovery,
     /// Charged EVPN history only for explicitly group-owned EVPN. Negotiated
     /// families and unicast group membership do not establish that ownership.
     evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance,
@@ -1523,6 +1525,7 @@ pub(super) struct LiveSessionRecord {
     evpn_end_of_rib: bool,
     /// Failed reset admission remains in this bounded existing session record.
     evpn_recovery_reset: Option<evpn_recovery::PendingReset>,
+    group_recovery_fallback: Option<update_groups::RecoveryFallbackCause>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2004,6 +2007,14 @@ impl RibManager {
                  (fail-stop supervision fault injection — test use only)"
             );
         }
+        let pending_group_admitted = update_groups::admitted_recovery::AdmittedRecovery::new();
+        metrics.set_update_group_recovery_entries(0);
+        metrics.set_update_group_recovery_bytes(
+            i64::try_from(pending_group_admitted.bytes()).unwrap_or(i64::MAX),
+        );
+        metrics.set_update_group_recovery_peak_bytes(
+            i64::try_from(pending_group_admitted.peak_bytes()).unwrap_or(i64::MAX),
+        );
         Self {
             ribs: HashMap::new(),
             attr_intern: crate::attr_intern::AttrInternTable::new(),
@@ -2103,7 +2114,7 @@ impl RibManager {
             group_ribs: HashMap::new(),
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
-            pending_group_admitted: HashMap::new(),
+            pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
             evpn_recovery_reset: None,
             #[cfg(test)]
@@ -3856,7 +3867,7 @@ impl RibManager {
             RibUpdate::TestQueryVpnAdvertised { peer, reply } => {
                 self.handle_test_query_vpn_advertised(peer, reply);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "bench-internals"))]
             RibUpdate::TestQueryOutboundHealth { reply } => {
                 let group_dirty = self
                     .group_ribs

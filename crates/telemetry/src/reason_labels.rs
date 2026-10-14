@@ -31,6 +31,41 @@
 //! distinguishes the two RFC 4456 §8 loop signals via
 //! [`RrLoopReason`].
 
+/// Causes for conservative unicast/VPN update-group recovery when complete
+/// admitted-key proof is unavailable. EVPN recovery uses its own contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateGroupRecoveryFallbackCause {
+    /// The owned peer's recovery allocation would exceed its internal cap.
+    PeerLimit,
+    /// Recovery allocations would exceed the process-wide internal cap.
+    DaemonLimit,
+    /// An allocation or checked capacity calculation failed.
+    AllocationFailure,
+    /// A truthful pre-commit proof or valid admitted batch was unavailable.
+    MissingProof,
+}
+
+impl UpdateGroupRecoveryFallbackCause {
+    /// Every bounded fallback cause.
+    pub const ALL: [Self; 4] = [
+        Self::PeerLimit,
+        Self::DaemonLimit,
+        Self::AllocationFailure,
+        Self::MissingProof,
+    ];
+
+    /// Canonical cause label shared by metrics and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PeerLimit => "peer_limit",
+            Self::DaemonLimit => "daemon_limit",
+            Self::AllocationFailure => "allocation_failure",
+            Self::MissingProof => "missing_proof",
+        }
+    }
+}
+
 /// Bounded causes reported while processing a malformed UPDATE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MalformedUpdateReason {

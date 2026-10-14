@@ -444,6 +444,46 @@ fn probe_exact_export_announcements(
     )
 }
 
+impl RibManager {
+    fn clean_group_delta_was_admitted(
+        &self,
+        peer: IpAddr,
+        delta: &super::update_groups::GroupDelta,
+    ) -> bool {
+        if let Some(prior) = &delta.prior {
+            return prior.adv_entry(peer).is_some_and(|entry| {
+                self.clean_group_route_was_admitted(peer, entry.route, entry.source_attrs)
+            });
+        }
+        let Some(group) = self
+            .grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))
+        else {
+            return false;
+        };
+        if group.per_client_best || delta.old_source.is_none_or(|source| source == peer) {
+            return false;
+        }
+        let key = crate::update::ExactExportKey::Unicast(delta.prefix, delta.path_id);
+        let control = self
+            .peer_rs_control
+            .get(&peer)
+            .copied()
+            .zip(self.peer_asn.get(&peer).copied());
+        let (communities, large) =
+            super::update_groups::source_control_input(delta.prior_source_attrs.as_ref());
+        !rs_control::rs_control_suppressed(communities, large, control)
+            && !self
+                .peer_unexportable
+                .get(&peer)
+                .is_some_and(|keys| keys.contains(&key))
+            && self
+                .outbound_prefix_limits
+                .get(&peer)
+                .is_none_or(|limits| limits.admits_grouped(&delta.prefix))
+    }
+}
+
 #[inline(never)]
 fn materialize_clean_group_prior(
     manager: &RibManager,
@@ -453,9 +493,8 @@ fn materialize_clean_group_prior(
         .iter()
         .inspect(|_| manager.replacement_checkpoint(false))
         .filter_map(|delta| {
-            let entry = delta.prior.as_ref()?.adv_entry(lazy.peer)?;
             manager
-                .clean_group_route_was_admitted(lazy.peer, entry.route, entry.source_attrs)
+                .clean_group_delta_was_admitted(lazy.peer, delta)
                 .then_some(crate::update::ExactExportKey::Unicast(
                     delta.prefix,
                     delta.path_id,
@@ -2745,6 +2784,28 @@ impl RibManager {
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             return false;
         }
+        if self.pending_group_admitted.contains_key(&peer) {
+            use super::update_groups::admitted_recovery::Key;
+            let admitted = batch
+                .unicast
+                .announce
+                .iter()
+                .filter(|route| batch.announce_source_exclusion != Some(route.peer))
+                .map(|route| Key::Unicast(route.prefix, route.path_id))
+                .chain(batch.vpn_announce.iter().map(|route| {
+                    let key = route.key();
+                    Key::Vpn(key.nlri_key, key.path_id)
+                }));
+            if let Err(error) = self
+                .pending_group_admitted
+                .reserve_admitted_with_checkpoint(peer, admitted, &mut |force| {
+                    super::replacement_readiness_checkpoint(&readiness, force);
+                })
+            {
+                self.record_group_recovery_refusal(peer, error);
+            }
+            self.refresh_group_recovery_gauges();
+        }
         // Validate the trust boundary before consuming any durable pending
         // state (OTC diagnostics or the rejected-route overlay). A failed
         // precommit leaves those structures intact for the retry.
@@ -2808,11 +2869,21 @@ impl RibManager {
         // Same for VPN when the member's group stages VPN (non-RTC
         // groups, v2 slice 1). Other families always commit per peer.
         let grouped_unicast_count = self.grouped_advertised_count(peer);
+        // Plain untagged, unrejected and unlimited emitters already resolved
+        // source exclusion. Their withdrawals need no per-member prior set.
+        let plain_withdraws_prechecked = self
+            .grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))
+            .is_some_and(|group| !group.per_client_best)
+            && !self.peer_rs_control.contains_key(&peer)
+            && !self.peer_unexportable.contains_key(&peer)
+            && !self.outbound_prefix_limits.contains_key(&peer);
         if grouped_unicast_count.is_some() && !withdraw.is_empty() {
             if defer_grouped_refresh_prior {
                 captured_refresh_prior |= self.capture_group_admitted_keys(peer);
             }
-            if !self.pending_group_admitted.contains_key(&peer)
+            if !plain_withdraws_prechecked
+                && !self.pending_group_admitted.contains_key(&peer)
                 && let Some(lazy) = shared_unicast_precommit
                     .as_ref()
                     .and_then(|precommit| precommit.lazy_group_prior)
@@ -2873,14 +2944,18 @@ impl RibManager {
                     permitted.push(route.clone());
                     permitted_next_hops.push(next_hop.clone());
                 } else if otc_egress_blocked(route, local_role) {
-                    // Diagnostic presence is not proof of delivery: a virgin
-                    // blocked slot has never appeared on this receiver's wire.
+                    // Complete proof excludes virgin blocked slots. An
+                    // exhausted common-family recovery uses the conservative
+                    // legacy duty until that receiver settles.
                     let key = crate::update::ExactExportKey::Unicast(route.prefix, route.path_id);
                     let group_wire_may_hold = per_client_best_member
-                        && self
-                            .pending_group_admitted
-                            .get(&peer)
-                            .map_or_else(|| group_prior.contains(&key), |keys| keys.contains(&key));
+                        && self.pending_group_admitted.get(&peer).map_or_else(
+                            || {
+                                self.group_recovery_fallback(peer).is_some()
+                                    || group_prior.contains(&key)
+                            },
+                            |keys| keys.contains(&key),
+                        );
                     if (group_wire_may_hold
                         || self
                             .adj_ribs_out
@@ -3215,6 +3290,17 @@ impl RibManager {
                     captured_refresh_prior |= self.capture_group_admitted_keys(peer);
                 }
                 let mut previously_advertised = group_prior;
+                if self.group_recovery_fallback(peer).is_some() {
+                    previously_advertised.extend(
+                        candidate_keys
+                            .iter()
+                            .inspect(|_| checkpoint())
+                            .filter(|key| {
+                                matches!(key, ExactExportKey::Unicast(..) | ExactExportKey::Vpn(_))
+                            })
+                            .cloned(),
+                    );
+                }
                 if has_probe_failure {
                     if defer_grouped_refresh_prior
                         && let Some(routes) = self.grouped_advertised_routes_iter(peer)
@@ -3245,8 +3331,7 @@ impl RibManager {
                     previously_advertised.retain(|key| {
                         !matches!(key, ExactExportKey::Unicast(..) | ExactExportKey::Vpn(_))
                     });
-                    previously_advertised
-                        .extend(admitted.iter().inspect(|_| checkpoint()).cloned());
+                    previously_advertised.extend(admitted.iter().inspect(|_| checkpoint()));
                 }
                 let decision = reconcile_exact_export_overlay(
                     self.peer_unexportable.entry(peer).or_default(),
@@ -3452,7 +3537,11 @@ impl RibManager {
         // grouped admitted set, or the wire. Withdrawals are untouched.
         // Shared tombstones and regroup duties are candidate keys, not proof
         // of delivery. Deduplicate and intersect them with the admitted view.
-        if grouped_unicast_count.is_some() && !self.pending_group_admitted.contains_key(&peer) {
+        if grouped_unicast_count.is_some()
+            && !plain_withdraws_prechecked
+            && !self.pending_group_admitted.contains_key(&peer)
+            && self.group_recovery_fallback(peer).is_none()
+        {
             let mut seen = HashSet::new();
             withdraw.retain(|(prefix, path_id)| {
                 checkpoint();
@@ -3750,41 +3839,43 @@ impl RibManager {
         }
         #[cfg(feature = "bench-internals")]
         let bench_enqueue_started = bench_per_client_best_resync.then(std::time::Instant::now);
-        if let Some(admitted) = self.pending_group_admitted.get_mut(&peer) {
-            use crate::update::ExactExportKey;
-            for &(prefix, path_id) in &withdraw {
+        if self.pending_group_admitted.contains_key(&peer) {
+            use super::update_groups::admitted_recovery::Key;
+            super::replacement_readiness_checkpoint(&readiness, true);
+            withdraw.sort_unstable_by(|left, right| {
                 checkpoint();
-                admitted.remove(&ExactExportKey::Unicast(prefix, path_id));
-            }
-            for key in &vpn_withdraw {
+                left.cmp(right)
+            });
+            vpn_withdraw.sort_unstable_by(|left, right| {
                 checkpoint();
-                admitted.remove(&ExactExportKey::Vpn(key.clone()));
-            }
-            let additional = announce
+                (left.nlri_key, left.path_id).cmp(&(right.nlri_key, right.path_id))
+            });
+            super::replacement_readiness_checkpoint(&readiness, true);
+            let admitted = announce
                 .iter()
                 .filter(|route| announce_source_exclusion != Some(route.peer))
-                .filter(|route| {
-                    !admitted.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-                })
-                .count()
-                + vpn_announce
-                    .iter()
-                    .filter(|route| !admitted.contains(&ExactExportKey::Vpn(route.key())))
-                    .count();
-            super::replacement_readiness_checkpoint(&readiness, true);
-            admitted.reserve(additional);
-            super::replacement_readiness_checkpoint(&readiness, true);
-            for route in announce
+                .map(|route| Key::Unicast(route.prefix, route.path_id))
+                .chain(vpn_announce.iter().map(|route| {
+                    let key = route.key();
+                    Key::Vpn(key.nlri_key, key.path_id)
+                }));
+            let removed = withdraw
                 .iter()
-                .filter(|route| announce_source_exclusion != Some(route.peer))
-            {
-                checkpoint();
-                admitted.insert(ExactExportKey::Unicast(route.prefix, route.path_id));
+                .map(|&(prefix, path_id)| Key::Unicast(prefix, path_id))
+                .chain(
+                    vpn_withdraw
+                        .iter()
+                        .map(|key| Key::Vpn(key.nlri_key, key.path_id)),
+                );
+            if let Err(error) = self.pending_group_admitted.apply_admitted_with_checkpoint(
+                peer,
+                admitted,
+                removed,
+                &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
+            ) {
+                self.record_group_recovery_refusal(peer, error);
             }
-            for route in &vpn_announce {
-                checkpoint();
-                admitted.insert(ExactExportKey::Vpn(route.key()));
-            }
+            self.refresh_group_recovery_gauges();
         }
         self.admit_evpn_recovery_batch(peer, &evpn_announce, &evpn_withdraw);
         enqueue_outbound_update(
@@ -4701,8 +4792,35 @@ impl RibManager {
             .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
         receipt.lagging_members += lagging.len();
         let phase = std::time::Instant::now();
+        // A refused proof cannot reconstruct source inventory after this
+        // membership commit. Retain common duties once in the destination;
+        // complete proofs still intersect them with actual admission later.
+        if !lagging.is_empty()
+            && let Some(group) = self.group_ribs.get_mut(&destination)
+        {
+            checkpoint();
+            group
+                .tombstones
+                .extend(inventory.withdraw.iter().inspect(|_| checkpoint()).copied());
+            checkpoint();
+        }
         for &peer in members {
             checkpoint();
+            if lagging.contains(&peer)
+                && let Some(supplement) = inventory.supplements.get(&peer)
+            {
+                self.pending_extra_withdraws
+                    .entry(peer)
+                    .or_default()
+                    .unicast
+                    .extend(
+                        supplement
+                            .withdraw
+                            .iter()
+                            .inspect(|_| checkpoint())
+                            .copied(),
+                    );
+            }
             if lagging.contains(&peer) && !source_tombstones.is_empty() {
                 let extras = self.pending_extra_withdraws.entry(peer).or_default();
                 extras
@@ -6464,7 +6582,7 @@ impl RibManager {
                     all.extend(admitted.iter().filter_map(|key| {
                         checkpoint();
                         match key {
-                            crate::update::ExactExportKey::Unicast(prefix, _) => Some(*prefix),
+                            crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
                             _ => None,
                         }
                     }));
@@ -6989,13 +7107,15 @@ impl RibManager {
                     .get(&peer)
                     .copied()
                     .zip(self.peer_asn.get(&peer).copied());
+                if resync && !self.pending_group_admitted.contains_key(&peer) {
+                    self.set_group_recovery_fallback(
+                        peer,
+                        super::update_groups::RecoveryFallbackCause::MissingProof,
+                    );
+                }
                 if let Some(group) = self.group_ribs.get(&gid) {
                     unicast_otc_prechecked = !group.per_client_best;
                     if resync {
-                        debug_assert!(
-                            self.pending_group_admitted.contains_key(&peer),
-                            "a grouped resync requires an admitted-key proof"
-                        );
                         Self::assemble_group_resync(
                             group,
                             peer,
@@ -7012,6 +7132,7 @@ impl RibManager {
                             &mut unicast.announce,
                             &mut unicast.withdraw,
                             &mut unicast.next_hop_override,
+                            &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
                         );
                         // VPN portion of the resync, from the group's VPN
                         // maps under the member's Φ; the per-peer VPN
@@ -7033,6 +7154,9 @@ impl RibManager {
                                 self.pending_group_admitted.get(&peer),
                                 &mut vpn_announce,
                                 &mut vpn_withdraw,
+                                &mut |force| {
+                                    super::replacement_readiness_checkpoint(&readiness, force);
+                                },
                             );
                         }
                     } else if let Some(stage) = group_stage.get(&gid) {
@@ -7578,19 +7702,19 @@ impl RibManager {
                     .chain(vpn_withdraw.iter().cloned().map(ExactExportKey::Vpn))
                     .inspect(|_| checkpoint())
                     .collect();
-                for key in admitted {
+                for key in admitted.iter() {
                     checkpoint();
-                    if announced.contains(key) || staged.contains(key) {
+                    if announced.contains(&key) || staged.contains(&key) {
                         continue;
                     }
                     match key {
                         ExactExportKey::Unicast(prefix, path_id)
-                            if rib_out.get(prefix, *path_id).is_none() =>
+                            if rib_out.get(&prefix, path_id).is_none() =>
                         {
-                            unicast.withdraw.push((*prefix, *path_id));
+                            unicast.withdraw.push((prefix, path_id));
                         }
-                        ExactExportKey::Vpn(key) if rib_out.get_vpn(key).is_none() => {
-                            vpn_withdraw.push(key.clone());
+                        ExactExportKey::Vpn(key) if rib_out.get_vpn(&key).is_none() => {
+                            vpn_withdraw.push(key);
                         }
                         _ => {}
                     }
@@ -7718,19 +7842,12 @@ impl RibManager {
                     let mut prior = HashSet::new();
                     if is_dirty || is_force {
                         if let Some(admitted) = self.pending_group_admitted.get(&peer) {
-                            prior.extend(admitted.iter().inspect(|_| checkpoint()).cloned());
+                            prior.extend(admitted.iter().inspect(|_| checkpoint()));
                         }
                     } else if !defer_clean_group_prior && let Some(stage) = group_stage.get(&gid) {
                         for delta in &stage.deltas {
                             checkpoint();
-                            if let Some(entry) =
-                                delta.prior.as_ref().and_then(|prior| prior.adv_entry(peer))
-                                && self.clean_group_route_was_admitted(
-                                    peer,
-                                    entry.route,
-                                    entry.source_attrs,
-                                )
-                            {
+                            if self.clean_group_delta_was_admitted(peer, delta) {
                                 prior.insert(crate::update::ExactExportKey::Unicast(
                                     delta.prefix,
                                     delta.path_id,

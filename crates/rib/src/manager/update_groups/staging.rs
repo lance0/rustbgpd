@@ -177,6 +177,11 @@ impl RibManager {
                         .drain(..)
                         .zip(per_client_best_result.next_hop_override.drain(..))
                     {
+                        let prior_source_attrs = super::payload::capture_prior_source_attrs(
+                            group,
+                            *prefix,
+                            route.path_id,
+                        );
                         let prior =
                             PriorGroupSlots::capture(group, *prefix, route.path_id, &mut |force| {
                                 self.replacement_checkpoint(force);
@@ -186,6 +191,7 @@ impl RibManager {
                             path_id: route.path_id,
                             new: Some((route, nh)),
                             old_source,
+                            prior_source_attrs,
                             prior,
                             policy_label: stage.winner_label.clone(),
                             source_attrs: stage.winner_source_attrs.clone(),
@@ -198,6 +204,9 @@ impl RibManager {
                             path_id,
                             new: None,
                             old_source,
+                            prior_source_attrs: super::payload::capture_prior_source_attrs(
+                                group, p, path_id,
+                            ),
                             prior: PriorGroupSlots::capture(group, p, path_id, &mut |force| {
                                 self.replacement_checkpoint(force);
                             }),
@@ -344,6 +353,8 @@ impl RibManager {
                     .drain(..)
                     .zip(result.next_hop_override.drain(..))
                 {
+                    let prior_source_attrs =
+                        super::payload::capture_prior_source_attrs(group, *prefix, route.path_id);
                     let prior =
                         PriorGroupSlots::capture(group, *prefix, route.path_id, &mut |force| {
                             self.replacement_checkpoint(force);
@@ -353,6 +364,7 @@ impl RibManager {
                         path_id: route.path_id,
                         new: Some((route, nh)),
                         old_source,
+                        prior_source_attrs,
                         prior,
                         policy_label: label.clone(),
                         source_attrs: source_attrs.clone(),
@@ -365,6 +377,9 @@ impl RibManager {
                         path_id,
                         new: None,
                         old_source,
+                        prior_source_attrs: super::payload::capture_prior_source_attrs(
+                            group, p, path_id,
+                        ),
                         prior: PriorGroupSlots::capture(group, p, path_id, &mut |force| {
                             self.replacement_checkpoint(force);
                         }),

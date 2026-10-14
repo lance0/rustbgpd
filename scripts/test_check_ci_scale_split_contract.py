@@ -54,6 +54,24 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_live_contract(self) -> None:
         self.assertEqual([], check(ROOT))
 
+    def test_recovery_memory_receipt_stays_optional_and_hosted(self) -> None:
+        selector = f"    if: {contract.RECOVERY_MEMORY_SELECTOR}\n"
+        cases = (
+            ("  recovery_memory_receipt:\n", "  renamed_recovery_memory_receipt:\n"),
+            (selector, ""),
+            (selector, selector.replace("'workflow_dispatch'", "'pull_request'")),
+            (selector, selector.replace("refs/heads/fix/update-group-recovery-bounds", "refs/heads/main")),
+            (selector, "    if: ${{ github.event_name == 'workflow_dispatch' }}\n"),
+            (selector, f"    env:\n      RECEIPT_SELECTOR: {contract.RECOVERY_MEMORY_SELECTOR}\n"),
+            ("    runs-on: ubuntu-24.04\n", ""),
+            ("    runs-on: ubuntu-24.04\n", "    runs-on: self-hosted\n"),
+            ("    runs-on: ubuntu-24.04\n", "    runs-on: [self-hosted, Linux]\n"),
+            ("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-latest\n"),
+        )
+        for old, new in cases:
+            with self.subTest(seam=old, replacement=new):
+                self.mutate(old, new)
+
     def test_scale_profile_and_membership_are_required(self) -> None:
         for old, new in (
             ("lto = false\ncodegen-units = 16\nstrip = false\ndebug = 1", "lto = true\ncodegen-units = 1\nstrip = false\ndebug = 1"),

@@ -676,6 +676,10 @@ struct BgpMetricsInner {
     update_group_regroups: IntCounter,
     update_group_fallback_peers: IntGauge,
     update_group_residue_entries: IntGauge,
+    update_group_recovery_entries: IntGauge,
+    update_group_recovery_bytes: IntGauge,
+    update_group_recovery_peak_bytes: IntGauge,
+    update_group_recovery_fallback: IntCounterVec,
     update_group_runner_up_entries: IntGauge,
     update_group_interned_chains: IntGauge,
     update_group_keys: IntGauge,
@@ -1803,6 +1807,27 @@ impl BgpMetrics {
              never clears.",
         )
         .expect("valid metric definition");
+
+        let update_group_recovery_entries = IntGauge::new(
+            "bgp_update_group_recovery_entries",
+            "Unicast/VPN admitted keys currently retained by transient update-group recovery, including captures in progress.",
+        ).expect("valid metric definition");
+        let update_group_recovery_bytes = IntGauge::new(
+            "bgp_update_group_recovery_bytes",
+            "Retained unicast/VPN recovery capacity charge: ledger and owned headers plus exact reserved metadata/key capacities; excludes allocator bookkeeping and RSS.",
+        ).expect("valid metric definition");
+        let update_group_recovery_peak_bytes = IntGauge::new(
+            "bgp_update_group_recovery_peak_bytes",
+            "Highest unicast/VPN recovery capacity reservation charge, including overlapping replacement allocations and reservations rolled back on allocation refusal; not measured RSS.",
+        ).expect("valid metric definition");
+        let update_group_recovery_fallback = IntCounterVec::new(
+            Opts::new("bgp_update_group_recovery_fallback_total",
+                "Update-group recoveries entering conservative unicast/VPN withdrawal fallback because complete admitted proof is unavailable."),
+            &["cause"],
+        ).expect("valid metric definition");
+        for cause in crate::reason_labels::UpdateGroupRecoveryFallbackCause::ALL {
+            update_group_recovery_fallback.with_label_values(&[cause.as_str()]);
+        }
 
         let update_group_runner_up_entries = IntGauge::new(
             "bgp_update_group_runner_up_entries",
@@ -3197,6 +3222,18 @@ impl BgpMetrics {
             .register(Box::new(update_group_residue_entries.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(update_group_recovery_entries.clone()))
+            .expect("register update group recovery entries");
+        registry
+            .register(Box::new(update_group_recovery_bytes.clone()))
+            .expect("register update group recovery bytes");
+        registry
+            .register(Box::new(update_group_recovery_peak_bytes.clone()))
+            .expect("register update group recovery peak bytes");
+        registry
+            .register(Box::new(update_group_recovery_fallback.clone()))
+            .expect("register update group recovery fallback");
+        registry
             .register(Box::new(update_group_runner_up_entries.clone()))
             .expect("metric not already registered");
         registry
@@ -3678,6 +3715,10 @@ impl BgpMetrics {
             update_group_regroups,
             update_group_fallback_peers,
             update_group_residue_entries,
+            update_group_recovery_entries,
+            update_group_recovery_bytes,
+            update_group_recovery_peak_bytes,
+            update_group_recovery_fallback,
             update_group_runner_up_entries,
             update_group_interned_chains,
             update_group_keys,
@@ -5117,6 +5158,32 @@ impl BgpMetrics {
     /// members.
     pub fn set_update_group_residue_entries(&self, count: i64) {
         self.0.update_group_residue_entries.set(count);
+    }
+
+    /// Set the transient common-family recovery key inventory.
+    pub fn set_update_group_recovery_entries(&self, count: i64) {
+        self.0.update_group_recovery_entries.set(count);
+    }
+
+    /// Set the retained recovery capacity charge, not allocator bytes or RSS.
+    pub fn set_update_group_recovery_bytes(&self, count: i64) {
+        self.0.update_group_recovery_bytes.set(count);
+    }
+
+    /// Set the high-water capacity reservation charge, including overlap.
+    pub fn set_update_group_recovery_peak_bytes(&self, count: i64) {
+        self.0.update_group_recovery_peak_bytes.set(count);
+    }
+
+    /// Record entry into a conservative common-family recovery fallback.
+    pub fn record_update_group_recovery_fallback(
+        &self,
+        cause: crate::reason_labels::UpdateGroupRecoveryFallbackCause,
+    ) {
+        self.0
+            .update_group_recovery_fallback
+            .with_label_values(&[cause.as_str()])
+            .inc();
     }
 
     /// Set the total exception-lane runner-up entry count across
@@ -10256,5 +10323,52 @@ mod tests {
                 ),
             ]
         );
+    }
+    #[test]
+    fn common_recovery_metrics_use_exact_bounded_causes_and_charges() {
+        use crate::reason_labels::UpdateGroupRecoveryFallbackCause;
+        let metrics = BgpMetrics::new();
+        metrics.set_update_group_recovery_entries(3);
+        metrics.set_update_group_recovery_bytes(128);
+        metrics.set_update_group_recovery_peak_bytes(256);
+        metrics
+            .record_update_group_recovery_fallback(UpdateGroupRecoveryFallbackCause::MissingProof);
+        let families = metrics.registry().gather();
+        for (name, expected) in [
+            ("bgp_update_group_recovery_entries", 3.0),
+            ("bgp_update_group_recovery_bytes", 128.0),
+            ("bgp_update_group_recovery_peak_bytes", 256.0),
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == name)
+                .unwrap();
+            assert_eq!(family.get_metric().len(), 1);
+            assert_eq!(family.get_metric()[0].get_label(), []);
+            assert_eq!(family.get_metric()[0].get_gauge().get_value(), expected);
+        }
+        let family = families
+            .iter()
+            .find(|family| family.name() == "bgp_update_group_recovery_fallback_total")
+            .unwrap();
+        assert_eq!(
+            family.get_metric().len(),
+            UpdateGroupRecoveryFallbackCause::ALL.len()
+        );
+        for cause in UpdateGroupRecoveryFallbackCause::ALL {
+            let metric = family
+                .get_metric()
+                .iter()
+                .find(|metric| metric.get_label()[0].value() == cause.as_str())
+                .unwrap();
+            assert_eq!(metric.get_label().len(), 1);
+            assert_eq!(metric.get_label()[0].name(), "cause");
+            let expected = if cause == UpdateGroupRecoveryFallbackCause::MissingProof {
+                1.0
+            } else {
+                0.0
+            };
+            assert_eq!(metric.get_counter().get_value(), expected);
+        }
     }
 }
