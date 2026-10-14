@@ -2130,6 +2130,10 @@ pub struct EvpnSessionsSync {
     pub synced: bool,
 }
 
+// The actor input is borrowed across awaits, so its owned bench receiver needs Sync.
+#[cfg(feature = "bench-internals")]
+type BenchCreditAcknowledgement = std::sync::Mutex<std::sync::mpsc::Receiver<Result<(), String>>>;
+
 /// Messages sent from peer sessions to the RIB manager.
 pub enum RibUpdate {
     /// Final configured-owner publication on the primary mutation lane.
@@ -2840,6 +2844,17 @@ pub enum RibUpdate {
         /// group tombstones, regroup baselines, and carried extra-withdraw
         /// residue, respectively.
         reply: oneshot::Sender<(usize, usize, usize, usize, usize, usize)>,
+    },
+    /// Benchmark-only transaction: grant one owned receiver credit, then run
+    /// the ordinary VPN receipt handler without an intervening retry timer.
+    #[cfg(feature = "bench-internals")]
+    BenchVpnAdmissionWithCredit {
+        /// Each receiver acknowledges exactly one harmless queue filler drain.
+        grants: Vec<(oneshot::Sender<()>, BenchCreditAcknowledgement)>,
+        /// Must be an ordinary `VpnRoutesReceived` input, never a nested transaction.
+        update: Box<RibUpdate>,
+        /// Reply after the ordinary handler has observed queue admission.
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// TEST ONLY: distinguish a scheduled recovery from an ordinary queue drain.
     #[cfg(test)]

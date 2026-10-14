@@ -435,6 +435,11 @@ Adj-RIB-In snapshots and BMP's successfully written UPDATE feed remain unchanged
 
 ### F. One parity contract and a closed recovery list
 
+> Amended 2026-10-14: the shipped unicast/VPN conservative no-proof fallback is
+> the sole named unknown-withdrawal exception. See the
+> [bounded-proof amendment](#amendment-2026-10-14-bounded-unicastvpn-recovery-proofs)
+> for its causes and limits; complete proofs and EVPN keep targeted withdrawals.
+
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
 withdraws equals the per-peer path, with exact NLRI and prepared attribute bytes.
@@ -530,3 +535,56 @@ and quiet-host resource gates must pass before production activation. Publish
 the resulting operational envelope with its receipt, not an extrapolated or
 loaded-host speedup. No runtime code, measurement, inventory or promotion change
 is part of this design amendment.
+
+## Amendment (2026-10-14): bounded unicast/VPN recovery proofs
+
+The shipped unicast/VPN path has one named exception to section F's prohibition
+on unknown withdrawals: **conservative recovery without a complete admitted-key
+proof**. A peer enters this counted fallback when proof capture or growth fails
+with `peer_limit`, `daemon_limit` or `allocation_failure`, or when a dirty resync
+finds `missing_proof`. The exception prevents a failed export from silently
+losing an owed withdrawal. It permits unknown withdrawals from retained
+baselines, tombstones and member withdrawal duties, restricted to keys no longer
+retained in the current member view. It does not permit withdrawing that entire
+view, omitting owed withdrawals or announcements, changing attributes, or sending
+EoR before the routes it covers. Fallback is sticky through recovery and is
+cleared with the completed proof when that session becomes clean.
+
+This is the legacy unicast/VPN fail-safe, not an additional steady-state
+exception or permission for EVPN to guess withdrawals. Complete proofs retain
+section F's targeted withdrawal rule. EVPN retains section E's counted,
+generation-matched reset fallback and its independent activation gates. The
+shared oracle must distinguish this explicitly forced legacy exception from
+proof-backed recovery; ordinary recovery still rejects unknown withdrawals.
+
+Unicast/VPN proofs share an immutable sorted key universe for a group generation.
+Each member retains its own admission bits and bounded sparse additions; a key
+in the universe alone proves nothing about that receiver. Capture populates only
+the authoritative old member projection, and successful queue admissions update
+that member's proof. Key-set changes invalidate the group's cache hint. A hint
+owns no memory and cannot revive a released snapshot; the last referencing
+member frees the snapshot. Regroup/private captures can instead reserve their
+known cardinality directly in a flat proof.
+
+Keep the internal **64 MiB per-peer / 512 MiB daemon** limits. The daemon charge
+counts shared key storage once plus all reserved member masks, sparse additions,
+pool and record capacities and temporary old/new allocation overlap. Each
+referencing peer is conservatively charged the complete shared snapshot plus its
+own storage and metadata. Retained entries remain a logical per-member count;
+shared physical storage does not reduce that gauge. These charges exclude
+allocator overhead, route bodies and other existing recovery residues, which
+remain part of the separately measured cgroup envelope. Sharing targets dense
+cohorts: a sparsely filtered member can reference a larger key universe than its
+own flat proof, and new keys retain per-member sparse storage. A dense-cohort
+receipt does not establish a memory improvement for every RTC/filter shape.
+
+The prior sequential flat representation refused a fresh capture at 1,048,576
+keys under the production peer limit because the next geometric allocation
+charged both old and new capacities. Exact-cardinality reservation and shared
+keys remove that particular full-table boundary; neither establishes a universal
+safe route count. Mixed-family full-table proofs, later admitted additions,
+allocation refusals and final-reference release require regression controls.
+Qualify mass reevaluation and peer-down with matched off-box cgroup receipts
+against the original parent and the bounded-flat implementation before accepting
+the release memory envelope. Do not replace the earlier receipt or extrapolate a
+modelled component charge into a whole-daemon memory claim.

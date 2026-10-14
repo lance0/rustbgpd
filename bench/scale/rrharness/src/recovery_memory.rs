@@ -3,97 +3,276 @@
 
 use super::*;
 
+use std::net::Ipv6Addr;
+
+use rustbgpd_rib::route::{VpnRibRoute, VpnRibRouteKey};
+use rustbgpd_wire::{Ipv6Prefix, MplsLabelEntry, RouteDistinguisher, VpnNlri, VpnPrefix};
+
 const RECOVERY_QUEUE_CAPACITY: usize = 8;
+const RECOVERY_CELL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cell {
     DatasetReevaluate,
     PeerDown,
+    Widen,
 }
-
 impl Cell {
     fn name(self) -> &'static str {
         match self {
             Self::DatasetReevaluate => "dataset-reevaluate",
             Self::PeerDown => "peer-down",
+            Self::Widen => "widen",
         }
     }
 }
 
-#[derive(Default, Clone, Copy)]
+const FAMILY_NAMES: [&str; 4] = ["ipv4_unicast", "ipv6_unicast", "vpnv4", "vpnv6"];
+const FAMILIES: [(Afi, Safi); 4] = [
+    (Afi::Ipv4, Safi::Unicast),
+    (Afi::Ipv6, Safi::Unicast),
+    (Afi::Ipv4, Safi::MplsVpn),
+    (Afi::Ipv6, Safi::MplsVpn),
+];
+#[derive(Clone, Copy, Debug)]
+struct Spec {
+    name: &'static str,
+    seed: [usize; 4],
+    additions: [usize; 4],
+}
+impl Spec {
+    fn named(name: &str) -> Self {
+        let (name, seed, additions) = match name {
+            "ipv4-100k" => ("ipv4-100k", [100_000, 0, 0, 0], [0; 4]),
+            "full-uc" => ("full-uc", [1_000_000, 230_000, 0, 0], [0; 4]),
+            "full-vpn" => (
+                "full-vpn",
+                [0, 0, 1_000_000, 230_000],
+                [0, 0, 100_000, 23_000],
+            ),
+            "mixed-widen" => (
+                "mixed-widen",
+                [1_000_000, 230_000, 0, 0],
+                [0, 0, 100_000, 23_000],
+            ),
+            "smoke-uc" => ("smoke-uc", [160, 40, 0, 0], [0; 4]),
+            "smoke-vpn" => ("smoke-vpn", [0, 0, 160, 40], [0, 0, 16, 4]),
+            "smoke-mixed" => ("smoke-mixed", [160, 40, 0, 0], [0, 0, 16, 4]),
+            _ => panic!("unknown recovery profile"),
+        };
+        Self {
+            name,
+            seed,
+            additions,
+        }
+    }
+    fn counts(self, widened: bool) -> [usize; 4] {
+        std::array::from_fn(|f| self.seed[f] + if widened { self.additions[f] } else { 0 })
+    }
+    fn families(self) -> Vec<(Afi, Safi)> {
+        FAMILIES
+            .into_iter()
+            .enumerate()
+            .filter_map(|(f, family)| (self.seed[f] + self.additions[f] > 0).then_some(family))
+            .collect()
+    }
+}
+#[derive(Default, Clone, Copy, Debug)]
 struct Counts {
-    present: usize,
-    announces: u64,
-    withdraws: u64,
+    present: [usize; 4],
+    announces: [u64; 4],
+    withdraws: [u64; 4],
+}
+impl Counts {
+    fn json(self) -> String {
+        format!(
+            "{{{}}}",
+            (0..4)
+                .map(|f| format!(
+                    "\"{}\":{{\"present\":{},\"announces\":{},\"withdrawals\":{}}}",
+                    FAMILY_NAMES[f], self.present[f], self.announces[f], self.withdraws[f]
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+}
+fn family_counts_json(counts: [usize; 4]) -> String {
+    format!(
+        "{{{}}}",
+        (0..4)
+            .map(|f| format!("\"{}\":{}", FAMILY_NAMES[f], counts[f]))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn v6_prefix(index: usize) -> Ipv6Prefix {
+    Ipv6Prefix::new(
+        Ipv6Addr::from(
+            u128::from("2001:db8:100::".parse::<Ipv6Addr>().unwrap()) + ((index as u128) << 16),
+        ),
+        112,
+    )
+}
+fn fixture_prefix(family: usize, index: usize) -> Prefix {
+    match family {
+        0 => Prefix::V4(flood_prefix(index as u64)),
+        1 => Prefix::V6(v6_prefix(index)),
+        _ => unreachable!(),
+    }
+}
+fn prefix_index(prefix: Prefix) -> (usize, usize) {
+    let (family, index) = match prefix {
+        Prefix::V4(p) => (
+            0,
+            usize::try_from(
+                u32::from(p.addr)
+                    .checked_sub(u32::from(Ipv4Addr::new(20, 0, 0, 0)))
+                    .expect("unknown prefix")
+                    >> 8,
+            )
+            .unwrap(),
+        ),
+        Prefix::V6(p) => (
+            1,
+            usize::try_from(
+                u128::from(p.addr)
+                    .checked_sub(u128::from(v6_prefix(0).addr))
+                    .expect("unknown prefix")
+                    >> 16,
+            )
+            .unwrap(),
+        ),
+    };
+    assert_eq!(
+        prefix,
+        fixture_prefix(family, index),
+        "noncanonical or wrong prefix length"
+    );
+    (family, index)
+}
+// The two legal encodings have the same display text, but distinct wire identity.
+const RDS: [RouteDistinguisher; 2] = [
+    RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+    RouteDistinguisher([0, 2, 0, 0, 0xfd, 0xe8, 0, 100]),
+];
+fn vpn_nlri(family: usize, index: usize) -> VpnNlri {
+    let prefix = match fixture_prefix(family, index / 2) {
+        Prefix::V4(p) => VpnPrefix::v4(p.addr, p.len).unwrap(),
+        Prefix::V6(p) => VpnPrefix::v6(p.addr, p.len).unwrap(),
+    };
+    VpnNlri {
+        labels: vec![MplsLabelEntry::try_new(
+            16_000 + u32::try_from(index % 1_000_000).unwrap(),
+            0,
+            true,
+        )
+        .unwrap()],
+        route_distinguisher: RDS[index % 2],
+        prefix,
+    }
+}
+fn vpn_index(key: &VpnRibRouteKey) -> (usize, usize) {
+    assert_eq!(key.path_id, 0, "the fixture did not negotiate Add-Path");
+    let rd = RDS
+        .iter()
+        .position(|rd| *rd == key.nlri_key.route_distinguisher)
+        .expect("unknown raw RD");
+    let prefix = match key.nlri_key.prefix {
+        VpnPrefix::V4 { addr, len } => Prefix::V4(Ipv4Prefix { addr, len }),
+        VpnPrefix::V6 { addr, len } => Prefix::V6(Ipv6Prefix { addr, len }),
+    };
+    let (family, inner) = prefix_index(prefix);
+    (family, inner.checked_mul(2).unwrap() + rd)
+}
+fn fixture_next_hop(family: usize) -> IpAddr {
+    if family == 0 {
+        source_addr(0).into()
+    } else {
+        "2001:db8::1".parse().unwrap()
+    }
+}
+fn expected_attributes(vpn: bool, family: usize) -> Arc<AttrSet> {
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+    ];
+    if !vpn && family == 0 {
+        attrs.push(PathAttribute::NextHop(source_addr(0)));
+    }
+    attrs.push(PathAttribute::LocalPref(100));
+    AttrSet::new(attrs)
+}
+fn fixture_route(family: usize, index: usize) -> Route {
+    let mut value = route(flood_prefix(0), source_addr(0), 100);
+    value.prefix = fixture_prefix(family, index);
+    value.next_hop = fixture_next_hop(family);
+    value.attributes = expected_attributes(false, family);
+    value
+}
+fn fixture_vpn_route(family: usize, index: usize) -> VpnRibRoute {
+    VpnRibRoute {
+        nlri: vpn_nlri(family, index),
+        next_hop: fixture_next_hop(family),
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: source_addr(0).into(),
+        attributes: expected_attributes(true, family),
+        received_at: Instant::now(),
+        origin_type: RouteOrigin::Ibgp,
+        peer_router_id: source_addr(0),
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    }
 }
 
 struct Inventory {
-    words: Vec<u64>,
-    prefixes: usize,
+    words: [Vec<u64>; 4],
+    limits: [usize; 4],
+    expected_attrs: [Arc<AttrSet>; 4],
     counts: Counts,
 }
-
 impl Inventory {
-    fn new(prefixes: usize) -> Self {
+    fn new(limits: [usize; 4]) -> Self {
         Self {
-            words: vec![0; prefixes.div_ceil(64)],
-            prefixes,
+            words: limits.map(|n| vec![0; n.div_ceil(64)]),
+            limits,
+            expected_attrs: std::array::from_fn(|f| expected_attributes(f >= 2, f % 2)),
             counts: Counts::default(),
         }
     }
-
-    fn index(&self, prefix: Prefix, path_id: u32) -> usize {
-        assert_eq!(path_id, 0, "the fixture did not negotiate Add-Path");
-        let Prefix::V4(prefix) = prefix else {
-            panic!("unexpected non-IPv4 route")
-        };
-        let base = u32::from(Ipv4Addr::new(20, 0, 0, 0));
-        let offset = u32::from(prefix.addr)
-            .checked_sub(base)
-            .expect("unknown prefix")
-            >> 8;
-        let index = usize::try_from(offset).unwrap();
+    fn event(&mut self, family: usize, index: usize, announce: bool) {
         assert!(
-            index < self.prefixes && prefix == flood_prefix(u64::from(offset)),
+            index < self.limits[family],
             "route outside the exact finite inventory"
         );
-        index
-    }
-
-    fn apply(&mut self, update: OutboundRouteUpdate) {
-        // Transport applies the frozen source exclusion to shared inventories.
-        for &(prefix, path_id) in &update.withdraw {
-            let index = self.index(prefix, path_id);
-            let bit = 1_u64 << (index % 64);
-            assert_ne!(
-                self.words[index / 64] & bit,
-                0,
-                "withdrawal of an unadmitted exact key"
-            );
-            self.words[index / 64] &= !bit;
-            self.counts.present -= 1;
-            self.counts.withdraws += 1;
-        }
-        for route in update
-            .announce
-            .iter()
-            .filter(|route| update.announce_source_exclusion != Some(route.peer))
-        {
-            let index = self.index(route.prefix, route.path_id);
-            let bit = 1_u64 << (index % 64);
-            if self.words[index / 64] & bit == 0 {
-                self.counts.present += 1;
+        let bit = 1_u64 << (index % 64);
+        let word = &mut self.words[family][index / 64];
+        if announce {
+            if *word & bit == 0 {
+                self.counts.present[family] += 1;
             }
-            self.words[index / 64] |= bit;
-            self.counts.announces += 1;
+            *word |= bit;
+            self.counts.announces[family] += 1;
+        } else {
+            assert_ne!(*word & bit, 0, "withdrawal of an unadmitted exact key");
+            *word &= !bit;
+            self.counts.present[family] -= 1;
+            self.counts.withdraws[family] += 1;
         }
+    }
+    fn apply(&mut self, update: OutboundRouteUpdate) {
+        assert!(
+            !update.request_refresh_all_negotiated,
+            "unexpected receiver registration reset/refresh"
+        );
         assert!(
             update.flowspec_announce.is_empty()
                 && update.flowspec_withdraw.is_empty()
                 && update.evpn_announce.is_empty()
                 && update.evpn_withdraw.is_empty()
-                && update.vpn_announce.is_empty()
-                && update.vpn_withdraw.is_empty()
                 && update.bgpls_announce.is_empty()
                 && update.bgpls_withdraw.is_empty()
                 && update.labeled_announce.is_empty()
@@ -102,10 +281,62 @@ impl Inventory {
                 && update.rtc_withdraw.is_empty(),
             "unexpected fixture family"
         );
+        for (prefix, path_id) in update.withdraw {
+            assert_eq!(path_id, 0, "the fixture did not negotiate Add-Path");
+            let (family, index) = prefix_index(prefix);
+            self.event(family, index, false);
+        }
+        for key in &update.vpn_withdraw {
+            let (family, index) = vpn_index(key);
+            self.event(family + 2, index, false);
+        }
+        for value in update
+            .announce
+            .iter()
+            .filter(|route| update.announce_source_exclusion != Some(route.peer))
+        {
+            assert_eq!(value.path_id, 0, "the fixture did not negotiate Add-Path");
+            let (family, index) = prefix_index(value.prefix);
+            assert_eq!(value.next_hop, fixture_next_hop(family), "wrong next hop");
+            assert_eq!(value.peer, IpAddr::V4(source_addr(0)), "wrong route source");
+            assert_eq!(
+                value.attributes, self.expected_attrs[family],
+                "wrong expected attributes"
+            );
+            assert!(
+                value.link_local_next_hop.is_none() && value.next_hop_scope.is_none(),
+                "unexpected scoped next hop"
+            );
+            self.event(family, index, true);
+        }
+        for value in update.vpn_announce {
+            let (family, index) = vpn_index(&value.key());
+            assert_eq!(
+                value.nlri,
+                vpn_nlri(family, index),
+                "wrong VPN label or NLRI data"
+            );
+            assert_eq!(value.next_hop, fixture_next_hop(family), "wrong next hop");
+            assert_eq!(value.peer, IpAddr::V4(source_addr(0)), "wrong route source");
+            assert_eq!(
+                value.attributes,
+                self.expected_attrs[family + 2],
+                "wrong expected attributes"
+            );
+            assert!(
+                value.link_local_next_hop.is_none() && value.next_hop_scope.is_none(),
+                "unexpected scoped next hop"
+            );
+            self.event(family + 2, index, true);
+        }
     }
 }
 
 enum Control {
+    Credit {
+        request: oneshot::Receiver<()>,
+        acknowledged: std::sync::mpsc::Sender<Result<(), String>>,
+    },
     Snapshot(oneshot::Sender<Counts>),
     Pause {
         ready: oneshot::Sender<Counts>,
@@ -148,9 +379,9 @@ impl Receiver {
 async fn consume(
     mut outbound: mpsc::Receiver<OutboundRouteUpdate>,
     mut control: mpsc::Receiver<Control>,
-    prefixes: usize,
+    limits: [usize; 4],
 ) {
-    let mut inventory = Inventory::new(prefixes);
+    let mut inventory = Inventory::new(limits);
     loop {
         tokio::select! {
             biased;
@@ -159,16 +390,88 @@ async fn consume(
                     while let Ok(update) = outbound.try_recv() { inventory.apply(update); }
                     let _ = reply.send(inventory.counts);
                 }
-                Some(Control::Pause { ready, resume }) => {
+                Some(Control::Pause { ready, mut resume }) => {
                     while let Ok(update) = outbound.try_recv() { inventory.apply(update); }
                     let _ = ready.send(inventory.counts);
-                    resume.await.expect("receiver barrier must be released");
+                    loop {
+                        tokio::select! {
+                            // After resume, snapshots must drain queued route events.
+                            biased;
+                            _ = &mut resume => break,
+                            command = control.recv() => match command {
+                                Some(Control::Snapshot(reply)) => {
+                                    if paused_snapshot(&mut inventory, &mut outbound, &mut resume, reply) {
+                                        break;
+                                    }
+                                }
+                                Some(Control::Credit { request, acknowledged }) => {
+                                    let result = async {
+                                        request.await.map_err(|_| "credit owner closed".to_owned())?;
+                                        let filler = outbound.try_recv().map_err(|e| e.to_string())?;
+                                        // No fabricated route or marker is allowed to consume a credit.
+                                        assert_empty_credit(&filler);
+                                        inventory.apply(filler);
+                                        Ok(())
+                                    }.await;
+                                    let _ = acknowledged.send(result);
+                                }
+                                _ => panic!("only snapshots and owned credit grants are allowed while paused"),
+                            }
+                        }
+                    }
                 }
+                Some(Control::Credit { .. }) => panic!("credit requires a paused receiver"),
                 None => break,
             },
             update = outbound.recv() => match update { Some(update) => inventory.apply(update), None => break },
         }
     }
+}
+
+fn paused_snapshot(
+    inventory: &mut Inventory,
+    outbound: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    resume: &mut oneshot::Receiver<()>,
+    reply: oneshot::Sender<Counts>,
+) -> bool {
+    // Resume may arrive between select's branch polls; recheck before a cached reply.
+    let resumed = !matches!(resume.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    if resumed {
+        while let Ok(update) = outbound.try_recv() {
+            inventory.apply(update);
+        }
+    }
+    let _ = reply.send(inventory.counts);
+    resumed
+}
+
+fn assert_empty_credit(update: &OutboundRouteUpdate) {
+    assert!(
+        update.announce.is_empty()
+            && update.withdraw.is_empty()
+            && update.flowspec_announce.is_empty()
+            && update.flowspec_withdraw.is_empty()
+            && update.evpn_announce.is_empty()
+            && update.evpn_withdraw.is_empty()
+            && update.bgpls_announce.is_empty()
+            && update.bgpls_withdraw.is_empty()
+            && update.vpn_announce.is_empty()
+            && update.vpn_withdraw.is_empty()
+            && update.labeled_announce.is_empty()
+            && update.labeled_withdraw.is_empty()
+            && update.rtc_announce.is_empty()
+            && update.rtc_withdraw.is_empty()
+            && update.otc_blocked.is_empty()
+            && update.end_of_rib.is_empty()
+            && update.refresh_markers.is_empty()
+            && update.next_hop_override.is_empty()
+            && !update.request_refresh_all_negotiated
+            && update.replay.is_none()
+            && update.exact_export_snapshot.is_none()
+            && update.announce_source_exclusion.is_none()
+            && update.shared_group_encode.is_none(),
+        "credit must drain an empty filler"
+    );
 }
 
 struct RecoveryHarness {
@@ -181,7 +484,7 @@ struct RecoveryHarness {
 }
 
 impl RecoveryHarness {
-    async fn setup(clients: u32, prefixes: usize) -> Self {
+    async fn setup(clients: u32, spec: Spec, limits: [usize; 4]) -> Self {
         let (tx, rx) = mpsc::channel(1024);
         let (query_tx, query_rx) = mpsc::channel(1);
         let metrics = BgpMetrics::new();
@@ -215,20 +518,20 @@ impl RecoveryHarness {
             _query_tx: query_tx,
         };
         for i in 0..clients {
-            harness.register(client_addr(i), true, prefixes).await;
+            harness.register(client_addr(i), true, spec, limits).await;
         }
         // The source is registered for a real generation-matched PeerDown.
         // Its non-client profile has an empty second group; receivers share
         // exactly one plain client group and no private fallback.
-        harness.register(source, false, 0).await;
+        harness.register(source, false, spec, [0; 4]).await;
         harness.source_receiver = harness.receivers.pop();
         harness
     }
 
-    async fn register(&mut self, peer: IpAddr, rr_client: bool, prefixes: usize) {
+    async fn register(&mut self, peer: IpAddr, rr_client: bool, spec: Spec, limits: [usize; 4]) {
         let (outbound, receiver) = mpsc::channel(RECOVERY_QUEUE_CAPACITY);
         let (control, commands) = mpsc::channel(1);
-        tokio::spawn(consume(receiver, commands, prefixes));
+        tokio::spawn(consume(receiver, commands, limits));
         self.tx
             .send(RibUpdate::SetPeerExportEncoder {
                 peer,
@@ -248,7 +551,7 @@ impl RecoveryHarness {
                 },
                 outbound_tx: outbound.clone(),
                 export_policy: None,
-                sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                sendable_families: spec.families(),
                 is_ebgp: false,
                 route_reflector_client: rr_client,
                 orr_vantage: None,
@@ -277,7 +580,7 @@ impl RecoveryHarness {
         result.await.unwrap()
     }
 
-    async fn staged(&self) -> HashMap<IpAddr, u64> {
+    async fn staged(&self) -> HashMap<IpAddr, [u64; 4]> {
         let (reply, result) = oneshot::channel();
         self.tx
             .send(RibUpdate::QueryBmpPeerStats { reply })
@@ -289,13 +592,13 @@ impl RecoveryHarness {
             .adj_rib_out_post
             .into_iter()
             .map(|(peer, families)| {
-                (
-                    peer,
+                let counts = FAMILIES.map(|wanted| {
                     families
                         .iter()
-                        .find(|(family, _)| *family == (Afi::Ipv4, Safi::Unicast))
-                        .map_or(0, |(_, count)| *count),
-                )
+                        .find(|(family, _)| *family == wanted)
+                        .map_or(0, |(_, count)| *count)
+                });
+                (peer, counts)
             })
             .collect()
     }
@@ -308,8 +611,8 @@ impl RecoveryHarness {
         counts
     }
 
-    async fn settle(&self, expected: usize) -> Vec<Counts> {
-        tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
+    async fn settle(&self, expected: [usize; 4]) -> Vec<Counts> {
+        tokio::time::timeout(RECOVERY_CELL_TIMEOUT, async {
             loop {
                 let health = self.health().await;
                 let staged = self.staged().await;
@@ -321,11 +624,12 @@ impl RecoveryHarness {
                         .snapshot()
                         .await
                         .present,
-                    0
+                    [0; 4]
                 );
                 if health == (0, 0, 0, 0, 0, 0)
                     && self.receivers.iter().all(|receiver| {
-                        staged.get(&receiver.peer).copied().unwrap_or(0) == expected as u64
+                        staged.get(&receiver.peer).copied().unwrap_or([0; 4])
+                            == expected.map(|n| n as u64)
                     })
                     && counts.iter().all(|count| count.present == expected)
                 {
@@ -537,148 +841,226 @@ fn cgroup_json(path: Option<&std::path::Path>) -> String {
 async fn sample(
     harness: &RecoveryHarness,
     cell: Cell,
+    spec: Spec,
     phase: &str,
-    clients: u32,
-    prefixes: usize,
     memory: Option<&std::path::Path>,
     counts: &[Counts],
 ) {
     let health = harness.health().await;
-    println!("recovery_sample {{\"schema\":\"rustbgpd.recovery-memory.v1\",\"cell\":\"{}\",\"phase\":\"{phase}\",\"clients\":{clients},\"prefixes\":{prefixes},\"receiver_queue_capacity\":{RECOVERY_QUEUE_CAPACITY},\"receiver_bitmap_bytes\":{},\"folded_routes\":{},\"announces\":{},\"withdrawals\":{},\"dirty_peers\":{},\"group_dirty_members\":{},\"metrics\":{},\"fallback_causes\":{},\"cgroup\":{}}}",
-        cell.name(), clients as usize * prefixes.div_ceil(64) * 8,
-        counts.iter().map(|count| count.present).sum::<usize>(),
-        counts.iter().map(|count| count.announces).sum::<u64>(),
-        counts.iter().map(|count| count.withdraws).sum::<u64>(), health.0, health.2,
-        metrics_json(&harness.metrics), fallback_causes_json(&harness.metrics), cgroup_json(memory));
+    let mut total = Counts::default();
+    for count in counts {
+        for f in 0..4 {
+            total.present[f] += count.present[f];
+            total.announces[f] += count.announces[f];
+            total.withdraws[f] += count.withdraws[f];
+        }
+    }
+    let limits = spec.counts(cell == Cell::Widen);
+    let clients = harness.receivers.len();
+    println!(
+        "recovery_sample {{\"schema\":\"rustbgpd.recovery-memory.v2\",\"cell\":\"{}\",\"profile\":\"{}\",\"phase\":\"{phase}\",\"clients\":{clients},\"seed\":{},\"additions\":{},\"receiver_queue_capacity\":{RECOVERY_QUEUE_CAPACITY},\"receiver_bitmap_bytes\":{},\"families\":{},\"folded_routes\":{},\"announces\":{},\"withdrawals\":{},\"dirty_peers\":{},\"group_dirty_members\":{},\"metrics\":{},\"fallback_causes\":{},\"cgroup\":{}}}",
+        cell.name(),
+        spec.name,
+        family_counts_json(spec.seed),
+        family_counts_json(if cell == Cell::Widen {
+            spec.additions
+        } else {
+            [0; 4]
+        }),
+        clients * limits.iter().map(|n| n.div_ceil(64) * 8).sum::<usize>(),
+        total.json(),
+        total.present.iter().sum::<usize>(),
+        total.announces.iter().sum::<u64>(),
+        total.withdraws.iter().sum::<u64>(),
+        health.0,
+        health.2,
+        metrics_json(&harness.metrics),
+        fallback_causes_json(&harness.metrics),
+        cgroup_json(memory)
+    );
 }
 
-async fn run(cell: Cell, clients: u32, prefixes: usize, memory: Option<&std::path::Path>) {
-    assert!(clients > 0 && prefixes > 0);
-    let harness = RecoveryHarness::setup(clients, prefixes).await;
-    harness.verify_group().await;
-    for start in (0..prefixes).step_by(BATCH) {
-        let routes = (start..(start + BATCH).min(prefixes))
-            .map(|i| route(flood_prefix(i as u64), source_addr(0), 100))
-            .collect();
-        let mut update = empty_routes_received(harness.source, routes);
-        if let RibUpdate::RoutesReceived { session_id, .. } = &mut update {
-            *session_id = 1;
-        }
-        harness.tx.send(update).await.unwrap();
+fn vpn_receipt(source: IpAddr, announced: Vec<VpnRibRoute>) -> RibUpdate {
+    RibUpdate::VpnRoutesReceived {
+        peer: source,
+        session_id: 1,
+        announced,
+        withdrawn: Vec::new(),
     }
-    let initial = harness.settle(prefixes).await;
-    assert!(initial
-        .iter()
-        .all(|count| count.announces >= prefixes as u64 && count.withdraws == 0));
-    sample(
-        &harness,
-        cell,
-        "population_ready",
-        clients,
-        prefixes,
-        memory,
-        &initial,
-    )
-    .await;
+}
+async fn populate(harness: &RecoveryHarness, seed: [usize; 4]) {
+    for (family, n) in seed.into_iter().enumerate() {
+        for start in (0..n).step_by(BATCH) {
+            let end = (start + BATCH).min(n);
+            let update = if family >= 2 {
+                vpn_receipt(
+                    harness.source,
+                    (start..end)
+                        .map(|i| fixture_vpn_route(family % 2, i))
+                        .collect(),
+                )
+            } else {
+                let mut update = empty_routes_received(
+                    harness.source,
+                    (start..end).map(|i| fixture_route(family, i)).collect(),
+                );
+                if let RibUpdate::RoutesReceived { session_id, .. } = &mut update {
+                    *session_id = 1;
+                }
+                update
+            };
+            harness.tx.send(update).await.unwrap();
+        }
+    }
+}
+async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Path>) {
+    assert!(clients > 0 && spec.seed.iter().sum::<usize>() > 0);
+    if cell == Cell::Widen {
+        assert!(
+            spec.additions.iter().sum::<usize>() > 0,
+            "profile has no widening cell"
+        );
+    }
+    let harness = RecoveryHarness::setup(clients, spec, spec.counts(cell == Cell::Widen)).await;
+    harness.verify_group().await;
+    populate(&harness, spec.seed).await;
+    let initial = harness.settle(spec.seed).await;
+    assert!(initial.iter().all(|count| count.withdraws == [0; 4]
+        && (0..4).all(|f| count.announces[f] >= spec.seed[f] as u64)));
+    sample(&harness, cell, spec, "population_ready", memory, &initial).await;
     let mut release = Vec::new();
     for receiver in &harness.receivers {
         release.push(receiver.pause().await);
     }
-    let expected = match cell {
-        Cell::DatasetReevaluate => {
-            let (reply, accepted) = oneshot::channel();
-            harness
-                .tx
-                .send(RibUpdate::ReevaluatePeerExportPolicies {
-                    peers: vec![harness.receivers[0].peer],
-                    reply,
-                })
-                .await
-                .unwrap();
-            accepted
-                .await
-                .unwrap()
-                .expect("reevaluation must be accepted");
-            prefixes
-        }
-        Cell::PeerDown => {
-            harness
-                .tx
-                .send(RibUpdate::PeerDown {
-                    peer: harness.source,
-                    session_id: 1,
-                })
-                .await
-                .unwrap();
-            let (reply, barrier) = oneshot::channel();
-            harness
-                .tx
-                .send(RibUpdate::QueryLocRibCount { reply })
-                .await
-                .unwrap();
-            assert_eq!(
-                barrier.await.unwrap(),
-                0,
-                "source PeerDown removes the entire actual table"
-            );
-            0
-        }
+    let expected = if cell == Cell::PeerDown {
+        harness
+            .tx
+            .send(RibUpdate::PeerDown {
+                peer: harness.source,
+                session_id: 1,
+            })
+            .await
+            .unwrap();
+        // BMP query is an actor FIFO barrier and covers VPN as well as unicast.
+        let staged = harness.staged().await;
+        assert!(
+            harness.receivers.iter().all(|receiver| staged
+                .get(&receiver.peer)
+                .copied()
+                .unwrap_or([0; 4])
+                == [0; 4]),
+            "actual source withdrawal must remove every family"
+        );
+        [0; 4]
+    } else {
+        let (reply, accepted) = oneshot::channel();
+        harness
+            .tx
+            .send(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![harness.receivers[0].peer],
+                reply,
+            })
+            .await
+            .unwrap();
+        accepted
+            .await
+            .unwrap()
+            .expect("reevaluation must be accepted");
+        spec.seed
     };
     let health = harness.health().await;
     assert_eq!(
-        health.0, clients as usize,
-        "actual simultaneous dirty receivers"
+        (health.0, health.2),
+        (clients as usize, clients as usize),
+        "actual simultaneous dirty/group-dirty receivers"
     );
-    assert_eq!(
-        health.2, clients as usize,
-        "actual simultaneous dirty group members"
-    );
-    // These consumers remain paused; their acknowledged inventory cannot change.
-    sample(
-        &harness, cell, "retained", clients, prefixes, memory, &initial,
-    )
-    .await;
-    sample(
-        &harness,
-        cell,
-        "operation_end",
-        clients,
-        prefixes,
-        memory,
-        &initial,
-    )
-    .await;
+    if cell == Cell::Widen {
+        let mut grants = Vec::new();
+        for receiver in &harness.receivers {
+            let (grant, request) = oneshot::channel();
+            let (acknowledged, ack) = std::sync::mpsc::channel();
+            receiver
+                .control
+                .send(Control::Credit {
+                    request,
+                    acknowledged,
+                })
+                .await
+                .unwrap();
+            grants.push((grant, std::sync::Mutex::new(ack)));
+        }
+        let announced = (2..4)
+            .flat_map(|f| {
+                (spec.seed[f]..spec.seed[f] + spec.additions[f])
+                    .map(move |i| fixture_vpn_route(f % 2, i))
+            })
+            .collect();
+        let (reply, accepted) = oneshot::channel();
+        harness
+            .tx
+            .send(RibUpdate::BenchVpnAdmissionWithCredit {
+                grants,
+                update: Box::new(vpn_receipt(harness.source, announced)),
+                reply,
+            })
+            .await
+            .unwrap();
+        accepted
+            .await
+            .unwrap()
+            .expect("one-shot VPN admission must complete");
+        let health = harness.health().await;
+        assert_eq!(
+            (health.0, health.2),
+            (clients as usize, clients as usize),
+            "new admitted keys must remain inside dirty recovery"
+        );
+        // Consumers still hold the seed fold. Only the production admitted-key
+        // gauge, observed behind the synchronous receipt, proves sparse admission.
+        // The measured checker applies capability-specific assertions to each SHA.
+    }
+    sample(&harness, cell, spec, "retained", memory, &initial).await;
+    sample(&harness, cell, spec, "operation_end", memory, &initial).await;
     for resume in release {
         resume.send(()).unwrap();
     }
-    let final_counts = harness.settle(expected).await;
-    if cell == Cell::PeerDown {
-        assert!(final_counts
-            .iter()
-            .all(|count| count.withdraws == prefixes as u64 && count.present == 0));
-    }
-    sample(
-        &harness,
-        cell,
-        "settled",
-        clients,
-        prefixes,
-        memory,
-        &final_counts,
-    )
-    .await;
-    println!("recovery_complete {{\"cell\":\"{}\",\"expected_routes_per_receiver\":{expected},\"actual_receivers\":{clients}}}", cell.name());
+    let terminal = if cell == Cell::Widen {
+        spec.counts(true)
+    } else {
+        expected
+    };
+    let final_counts = harness.settle(terminal).await;
+    assert!(
+        final_counts.iter().all(|count| count.withdraws
+            == if cell == Cell::PeerDown {
+                spec.seed.map(|n| n as u64)
+            } else {
+                [0; 4]
+            }),
+        "wrong exact withdrawal duties or unchanged-policy withdrawal flap"
+    );
+    sample(&harness, cell, spec, "settled", memory, &final_counts).await;
+    println!(
+        "recovery_complete {{\"cell\":\"{}\",\"profile\":\"{}\",\"expected_families_per_receiver\":{},\"actual_receivers\":{clients}}}",
+        cell.name(),
+        spec.name,
+        family_counts_json(terminal)
+    );
 }
 
 pub(super) fn main(args: &[String]) {
-    assert!(args.len() == 3 || (args.len() == 4 && args[3] == "--correctness-only"), "usage: rrharness recovery-memory <dataset-reevaluate|peer-down> <clients> <prefixes> [--correctness-only]");
+    assert!(
+        args.len() == 3 || (args.len() == 4 && args[3] == "--correctness-only"),
+        "usage: rrharness recovery-memory <dataset-reevaluate|peer-down|widen> <clients> <profile> [--correctness-only]"
+    );
     let cell = match args[0].as_str() {
         "dataset-reevaluate" => Cell::DatasetReevaluate,
         "peer-down" => Cell::PeerDown,
+        "widen" => Cell::Widen,
         _ => panic!("unknown recovery cell"),
     };
     let clients = args[1].parse().expect("clients must be a u32");
-    let prefixes = args[2].parse().expect("prefixes must be a usize");
+    let spec = Spec::named(&args[2]);
     let path = if args.len() == 4 {
         None
     } else {
@@ -687,10 +1069,9 @@ pub(super) fn main(args: &[String]) {
                 .expect("measured mode requires the swap-fenced launcher"),
         ))
     };
-    // Validate the scope before creating the workload or reading any RSS.
-    if path.is_some() {
-        verify_memory_identity(path.as_deref().unwrap());
-        cgroup_json(path.as_deref());
+    if let Some(path) = &path {
+        verify_memory_identity(path);
+        cgroup_json(Some(path));
     }
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -699,8 +1080,8 @@ pub(super) fn main(args: &[String]) {
         .unwrap()
         .block_on(async {
             tokio::time::timeout(
-                CONVERGENCE_TIMEOUT,
-                run(cell, clients, prefixes, path.as_deref()),
+                RECOVERY_CELL_TIMEOUT,
+                run(cell, clients, spec, path.as_deref()),
             )
             .await
             .expect("recovery cell did not complete all acceptance and drain barriers");
@@ -710,28 +1091,233 @@ pub(super) fn main(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_rechecks_release_after_a_pending_resume_poll() {
+        let (outbound, mut updates) = mpsc::channel(1);
+        outbound
+            .try_send(OutboundRouteUpdate {
+                announce: vec![fixture_route(0, 0)].into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let (release, mut resume) = oneshot::channel();
+        let mut inventory = Inventory::new([1, 0, 0, 0]);
+        let (reply, snapshot) = oneshot::channel();
+        assert!(!paused_snapshot(
+            &mut inventory,
+            &mut updates,
+            &mut resume,
+            reply
+        ));
+        assert_eq!(snapshot.await.unwrap().present, [0; 4]);
+        assert_eq!(outbound.capacity(), 0);
+        std::future::poll_fn(|context| {
+            assert!(
+                std::future::Future::poll(std::pin::Pin::new(&mut resume), context).is_pending()
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        let (reply, snapshot) = oneshot::channel();
+        assert!(paused_snapshot(
+            &mut inventory,
+            &mut updates,
+            &mut resume,
+            reply
+        ));
+        assert_eq!(snapshot.await.unwrap().present, [1, 0, 0, 0]);
+        assert_eq!(outbound.capacity(), 1);
+    }
+
+    #[tokio::test]
+    async fn paused_snapshot_preserves_backpressure_until_resume() {
+        for _ in 0..32 {
+            let (outbound, updates) = mpsc::channel(RECOVERY_QUEUE_CAPACITY);
+            let (control, commands) = mpsc::channel(4);
+            let consumer = tokio::spawn(consume(updates, commands, [1, 0, 0, 0]));
+            let receiver = Receiver {
+                peer: IpAddr::V4(source_addr(1)),
+                outbound,
+                control,
+            };
+            let (ready, paused) = oneshot::channel();
+            let (release, resume) = oneshot::channel();
+            receiver
+                .control
+                .send(Control::Pause { ready, resume })
+                .await
+                .unwrap();
+            paused.await.unwrap();
+            receiver
+                .outbound
+                .try_send(OutboundRouteUpdate {
+                    announce: vec![fixture_route(0, 0)].into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            while receiver.outbound.capacity() > 0 {
+                receiver
+                    .outbound
+                    .try_send(OutboundRouteUpdate::default())
+                    .unwrap();
+            }
+            assert_eq!(receiver.snapshot().await.present, [0; 4]);
+            assert_eq!(receiver.outbound.capacity(), 0);
+            release.send(()).unwrap();
+            // Current-thread execution makes resume and Snapshot ready together.
+            assert_eq!(receiver.snapshot().await.present, [1, 0, 0, 0]);
+            assert_eq!(receiver.outbound.capacity(), RECOVERY_QUEUE_CAPACITY);
+            drop(receiver);
+            consumer.await.unwrap();
+        }
+    }
+
     #[test]
-    fn bitmap_tracks_exact_known_keys_without_route_copies() {
-        let mut inventory = Inventory::new(100);
-        let value = route(flood_prefix(99), source_addr(0), 100);
-        inventory.apply(OutboundRouteUpdate {
-            announce: vec![value].into(),
-            ..Default::default()
-        });
-        assert_eq!(inventory.counts.present, 1);
-        assert_eq!(inventory.words.len() * 8, 16);
-        inventory.apply(OutboundRouteUpdate {
-            withdraw: vec![(Prefix::V4(flood_prefix(99)), 0)],
-            ..Default::default()
-        });
-        assert_eq!(inventory.counts.present, 0);
+    fn bitmap_tracks_full_family_and_raw_rd_identity() {
+        let mut inventory = Inventory::new([100; 4]);
+        for f in 0..2 {
+            inventory.apply(OutboundRouteUpdate {
+                announce: vec![fixture_route(f, 99)].into(),
+                vpn_announce: vec![fixture_vpn_route(f, 98), fixture_vpn_route(f, 99)],
+                ..Default::default()
+            });
+        }
+        assert_eq!(RDS[0].to_string(), RDS[1].to_string());
+        assert_ne!(RDS[0], RDS[1]);
+        assert_eq!(inventory.counts.present, [1, 1, 2, 2]);
+        assert_eq!(
+            inventory.words.iter().map(|w| w.len() * 8).sum::<usize>(),
+            64
+        );
+        for f in 0..2 {
+            inventory.apply(OutboundRouteUpdate {
+                withdraw: vec![(fixture_prefix(f, 99), 0)],
+                vpn_withdraw: vec![
+                    fixture_vpn_route(f, 98).key(),
+                    fixture_vpn_route(f, 99).key(),
+                ],
+                ..Default::default()
+            });
+        }
+        assert_eq!(inventory.counts.present, [0; 4]);
     }
     #[test]
     #[should_panic(expected = "unadmitted exact key")]
     fn bitmap_rejects_unknown_withdrawal() {
-        Inventory::new(100).apply(OutboundRouteUpdate {
-            withdraw: vec![(Prefix::V4(flood_prefix(1)), 0)],
+        Inventory::new([100; 4]).apply(OutboundRouteUpdate {
+            withdraw: vec![(fixture_prefix(0, 1), 0)],
             ..Default::default()
         });
+    }
+    #[test]
+    #[should_panic(expected = "unadmitted exact key")]
+    fn bitmap_rejects_repeated_vpn_withdrawal() {
+        let mut inventory = Inventory::new([100; 4]);
+        let value = fixture_vpn_route(1, 1);
+        inventory.apply(OutboundRouteUpdate {
+            vpn_announce: vec![value.clone()],
+            ..Default::default()
+        });
+        for _ in 0..2 {
+            inventory.apply(OutboundRouteUpdate {
+                vpn_withdraw: vec![value.key()],
+                ..Default::default()
+            });
+        }
+    }
+    #[test]
+    #[should_panic(expected = "wrong VPN label")]
+    fn bitmap_rejects_wrong_vpn_label() {
+        let mut value = fixture_vpn_route(0, 0);
+        value.nlri.labels[0].label += 1;
+        Inventory::new([100; 4]).apply(OutboundRouteUpdate {
+            vpn_announce: vec![value],
+            ..Default::default()
+        });
+    }
+    #[test]
+    #[should_panic(expected = "wrong expected attributes")]
+    fn bitmap_rejects_wrong_attributes() {
+        let mut value = fixture_vpn_route(0, 0);
+        value.attributes = expected_attributes(false, 0);
+        Inventory::new([100; 4]).apply(OutboundRouteUpdate {
+            vpn_announce: vec![value],
+            ..Default::default()
+        });
+    }
+    #[test]
+    #[should_panic(expected = "outside the exact finite inventory")]
+    fn bitmap_rejects_unnegotiated_family() {
+        Inventory::new([100, 0, 0, 0]).apply(OutboundRouteUpdate {
+            announce: vec![fixture_route(1, 0)].into(),
+            ..Default::default()
+        });
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn widening_retains_new_admitted_keys_while_dirty() {
+        let spec = Spec::named("smoke-mixed");
+        let harness = RecoveryHarness::setup(1, spec, spec.counts(true)).await;
+        populate(&harness, spec.seed).await;
+        harness.settle(spec.seed).await;
+        let resume = harness.receivers[0].pause().await;
+        let (reply, accepted) = oneshot::channel();
+        harness
+            .tx
+            .send(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![harness.receivers[0].peer],
+                reply,
+            })
+            .await
+            .unwrap();
+        accepted.await.unwrap().unwrap();
+        let before = harness
+            .metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|m| m.name() == "bgp_update_group_recovery_entries")
+            .unwrap()
+            .get_metric()[0]
+            .get_gauge()
+            .get_value();
+        let (grant, request) = oneshot::channel();
+        let (acknowledged, ack) = std::sync::mpsc::channel();
+        harness.receivers[0]
+            .control
+            .send(Control::Credit {
+                request,
+                acknowledged,
+            })
+            .await
+            .unwrap();
+        let (reply, accepted) = oneshot::channel();
+        harness
+            .tx
+            .send(RibUpdate::BenchVpnAdmissionWithCredit {
+                grants: vec![(grant, std::sync::Mutex::new(ack))],
+                update: Box::new(vpn_receipt(harness.source, vec![fixture_vpn_route(0, 0)])),
+                reply,
+            })
+            .await
+            .unwrap();
+        accepted.await.unwrap().unwrap();
+        let after = harness
+            .metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|m| m.name() == "bgp_update_group_recovery_entries")
+            .unwrap()
+            .get_metric()[0]
+            .get_gauge()
+            .get_value();
+        assert_eq!(before, 200.0);
+        assert_eq!(after, before + 1.0);
+        let health = harness.health().await;
+        assert_eq!((health.0, health.2), (1, 1));
+        resume.send(()).unwrap();
+        harness.settle([160, 40, 1, 0]).await;
     }
 }

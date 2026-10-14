@@ -60,7 +60,7 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("  recovery_memory_receipt:\n", "  renamed_recovery_memory_receipt:\n"),
             (selector, ""),
             (selector, selector.replace("'workflow_dispatch'", "'pull_request'")),
-            (selector, selector.replace("refs/heads/fix/update-group-recovery-bounds", "refs/heads/main")),
+            (selector, selector.replace("refs/heads/fix/update-group-recovery-memory", "refs/heads/main")),
             (selector, "    if: ${{ github.event_name == 'workflow_dispatch' }}\n"),
             (selector, f"    env:\n      RECEIPT_SELECTOR: {contract.RECOVERY_MEMORY_SELECTOR}\n"),
             ("    runs-on: ubuntu-24.04\n", ""),

@@ -10,6 +10,7 @@ source "$script_dir/provenance.sh"
 checker=$script_dir/recovery_memory.py
 driver=$script_dir/compare-recovery-memory.sh
 baseline=c862af9338aa828b7462f3cf85781f63b0e79fe8
+intermediate=bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00
 
 fail() { echo "recovery-memory: $*" >&2; exit 1; }
 
@@ -23,19 +24,31 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe ]]; then
         python3 "$checker" scope-snapshot "$cgroup" "$1/raw"
         record_scope_peak "$cgroup" "$1/compatibility-peak.txt"
     else
-        [[ $# == 4 ]] || fail 'invalid scope worker arguments'
+        [[ $# == 6 ]] || fail 'invalid scope worker arguments'
         status=0
-        python3 "$checker" run-scope "$1" "$2" "$3" "$cgroup" "$4" || status=$?
+        python3 "$checker" run-scope "$1" "$2" "$3" "$cgroup" "$4" "$5" "$6" || status=$?
         record_scope_peak "$cgroup" "$2/compatibility-peak.txt" || status=1
         exit "$status"
     fi
     exit 0
 fi
 
-[[ $# == 4 && $1 == --head && $3 == --output-dir ]] ||
-    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR'
+[[ $# -ge 4 && $1 == --head && $3 == --output-dir ]] ||
+    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--phase pilot|qualified] [--profile PROFILE] [--cell all|dataset-reevaluate|peer-down|widen]'
 head=$2
 output=$4
+shift 4
+phase=pilot
+profile=all
+selected_cell=all
+while [[ $# -gt 0 ]]; do
+    [[ $# -ge 2 ]] || fail 'missing selector value'
+    case $1 in --phase) phase=$2 ;; --profile) profile=$2 ;; --cell) selected_cell=$2 ;; *) fail 'unknown selector' ;; esac
+    shift 2
+done
+[[ $phase == pilot || $phase == qualified ]] || fail 'invalid campaign phase'
+[[ $profile == all || $profile == ipv4-100k || $profile == full-uc || $profile == full-vpn || $profile == mixed-widen ]] || fail 'invalid campaign profile'
+[[ $selected_cell == all || $selected_cell == dataset-reevaluate || $selected_cell == peer-down || $selected_cell == widen ]] || fail 'invalid campaign cell'
 [[ $head =~ ^[0-9a-f]{40}$ ]] || fail 'head must be an exact source SHA'
 [[ ${GITHUB_ACTIONS:-} == true && ${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}} == github-hosted && ${RUNNER_OS:-} == Linux ]] ||
     fail 'this receipt requires a fresh GitHub-hosted Linux VM; do not measure on the dev or soak host'
@@ -48,13 +61,14 @@ repository=$(git -C "$script_dir" rev-parse --show-toplevel)
 [[ -z $(git -C "$repository" status --porcelain --untracked-files=normal) ]] ||
     fail 'receipt instrumentation and candidate must be committed and clean'
 git -C "$repository" cat-file -e "$baseline^{commit}"
+git -C "$repository" cat-file -e "$intermediate^{commit}"
 work_root=$(mktemp -d "$RUNNER_TEMP/recovery-memory-work.XXXXXXXX")
 finish() {
     local status=$?
     trap - EXIT
     printf '%s\n' "$status" > "$output/driver.exit"
     awk '$1 == "oom_kill" { print $2 }' /proc/vmstat > "$output/host-oom.after" || true
-    for role in baseline candidate; do
+    for role in baseline intermediate candidate; do
         if [[ -d $work_root/$role ]]; then
             git -C "$repository" worktree remove --force "$work_root/$role" || true
         fi
@@ -65,6 +79,7 @@ finish() {
 }
 trap finish EXIT
 printf '%s\n' "$baseline" > "$output/baseline.sha"
+printf '%s\n' "$intermediate" > "$output/intermediate.sha"
 printf '%s\n' "$head" > "$output/candidate.sha"
 uname -a > "$output/kernel.txt"
 rustc -Vv > "$output/rustc.txt"
@@ -98,23 +113,31 @@ for path in "${inputs[@]}"; do
     printf '%s  %s\n' "$(provenance_sha256_file "$repository/$path")" "$path" >> "$output/instrumentation.sha256"
 done
 instrumentation=$(provenance_sha256_file "$output/instrumentation.sha256")
-python3 - "$output/manifest.json" "$baseline" "$head" "$instrumentation" <<'PY'
+python3 - "$output/manifest.json" "$baseline" "$intermediate" "$head" "$instrumentation" "$phase" "$profile" "$checker" "$selected_cell" <<'PYCODE'
+import importlib.util
 import json
 from pathlib import Path
 import sys
+spec = importlib.util.spec_from_file_location("receipt", sys.argv[8])
+receipt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(receipt)
+profiles = None if sys.argv[7] == "all" else [sys.argv[7]]
+cases = receipt.campaign_cases(sys.argv[6], profiles, sys.argv[9])
+profiles = list(dict.fromkeys(case["profile"] for case in cases))
 Path(sys.argv[1]).write_text(json.dumps({
-    "schema": "rustbgpd.recovery-memory.campaign.v1",
-    "baseline": sys.argv[2], "candidate": sys.argv[3],
-    "instrumentation_manifest_sha256": sys.argv[4],
-    "clients": 256, "prefixes": 100000, "build_jobs": 4,
-    "cells": ["dataset-reevaluate", "peer-down"],
-    "order_per_cell": ["baseline", "candidate", "candidate", "baseline"],
-    "scope": "manager-direct RIB and production exact-export preflight; no TCP/session output",
+    "schema": "rustbgpd.recovery-memory.campaign.v2",
+    "baseline": sys.argv[2], "intermediate": sys.argv[3], "candidate": sys.argv[4],
+    "instrumentation_manifest_sha256": sys.argv[5], "phase": sys.argv[6],
+    "profiles": profiles, "selected_cell": sys.argv[9], "cases": cases, "build_jobs": 4,
+    "comparators": ["baseline", "intermediate"],
+    "order_per_cell": ["control", "candidate", "candidate", "control"],
+    "scope": "manager-direct RIB and production exact-export preflight; no final wire/TCP",
 }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
-for role in baseline candidate; do
+PYCODE
+for role in baseline intermediate candidate; do
     revision=$head
     [[ $role != baseline ]] || revision=$baseline
+    [[ $role != intermediate ]] || revision=$intermediate
     tree=$work_root/$role
     record_command git worktree add --detach "$tree" "$revision"
     git -C "$repository" worktree add --detach "$tree" "$revision" > "$output/$role-worktree.log" 2>&1
@@ -143,20 +166,33 @@ for role in baseline candidate; do
     [[ $status == 0 ]] || fail "$role build failed; retain its log"
     provenance_sha256_file "$work_root/target-$role/scale/rrharness" > "$output/$role-binary.sha256"
 done
-for cell in dataset-reevaluate peer-down; do
-    leg=0
-    for role in baseline candidate candidate baseline; do
-        leg=$((leg + 1))
-        directory=$output/$cell-$leg-$role
-        mkdir "$directory"
-        status=0
-        launch_scope "recovery-memory-$$-$cell-$leg.scope" bash "$driver" --scope-worker \
-            "$work_root/target-$role/scale/rrharness" "$directory" "$cell" "$(cat "$output/$role-binary.sha256")" \
-            > "$directory/launcher.log" 2>&1 || status=$?
-        printf '%s\n' "$status" > "$directory/launcher.exit"
-        [[ $status == 0 ]] || fail "$cell leg $leg failed; retain all artifacts"
+free -b > "$output/host-memory.post-build.txt"
+python3 - "$output/manifest.json" > "$output/cases.tsv" <<'PYCODE'
+import json
+import sys
+for case in json.load(open(sys.argv[1]))["cases"]:
+    print(case["profile"], case["cell"], case["clients"], sep="\t")
+PYCODE
+ordinal=0
+while IFS=$'\t' read -r selected cell clients; do
+    for comparator in baseline intermediate; do
+        leg=0
+        for role in "$comparator" candidate candidate "$comparator"; do
+            leg=$((leg + 1))
+            ordinal=$((ordinal + 1))
+            directory=$output/$selected-$cell-$comparator-$leg-$role
+            mkdir "$directory"
+            free -b > "$directory/host-memory.before.txt"
+            status=0
+            launch_scope "recovery-memory-$$-$ordinal.scope" bash "$driver" --scope-worker \
+                "$work_root/target-$role/scale/rrharness" "$directory" "$cell" "$(cat "$output/$role-binary.sha256")" "$selected" "$clients" \
+                > "$directory/launcher.log" 2>&1 || status=$?
+            printf '%s\n' "$status" > "$directory/launcher.exit"
+            # Continue every matched leg, including historical contract failures.
+            # The final checker fails any invalid candidate while retaining all raw evidence.
+        done
     done
-done
+done < "$output/cases.tsv"
 awk '$1 == "oom_kill" { print $2 }' /proc/vmstat > "$output/host-oom.after"
 [[ $(cat "$output/host-oom.before") == "$(cat "$output/host-oom.after")" ]] || fail 'host OOM invalidates the campaign'
 python3 "$checker" summarize "$output"

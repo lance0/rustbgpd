@@ -11,7 +11,7 @@ fn prefix(octet: u8) -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32)
 }
 
-fn peer_up(
+pub(super) fn peer_up(
     peer: IpAddr,
     tx: mpsc::Sender<OutboundRouteUpdate>,
     policy: Option<PolicyChain>,
@@ -89,6 +89,103 @@ fn non_full_encoder_refusal_retains_the_owed_withdrawal_for_recovery() {
     assert_eq!(manager.group_recovery_fallback(member), None);
 }
 
+#[test]
+fn missing_completed_proof_resync_counts_fallback_and_keeps_the_owed_withdrawal() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    source_update(&mut manager, &[1], &[]);
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 6).into();
+    let (outbound, mut receiver) = mpsc::channel(16);
+    let mut registration = peer_up(member, outbound, None);
+    if let RibUpdate::PeerUp {
+        per_client_best,
+        is_ebgp,
+        ..
+    } = &mut registration
+    {
+        *per_client_best = true;
+        *is_ebgp = true;
+    }
+    manager.handle_update(registration);
+    let key = (Prefix::V4(prefix(1)), 0);
+    let delivered = receiver.try_recv().unwrap();
+    assert_eq!(delivered.announce.len(), 1);
+    assert_eq!(
+        (delivered.announce[0].prefix, delivered.announce[0].path_id),
+        key
+    );
+    while receiver.try_recv().is_ok() {}
+    assert!(manager.mark_outbound_dirty(member));
+    assert!(
+        manager
+            .pending_group_admitted
+            .get(&member)
+            .unwrap()
+            .contains(&ExactExportKey::Unicast(key.0, key.1))
+    );
+
+    // Stage the real withdrawal without emitting; then lose only its proof.
+    let source: IpAddr = Ipv4Addr::new(192, 0, 2, 1).into();
+    assert!(
+        manager
+            .ribs
+            .get_mut(&source)
+            .unwrap()
+            .withdraw(&key.0, key.1)
+    );
+    let affected = HashSet::from([key.0]);
+    let changed = manager.recompute_best(&affected);
+    let gid = manager.grouped_member_of(member).unwrap();
+    let stage = manager.stage_update_groups(
+        &changed,
+        &affected,
+        &mut crate::manager::distribution::ExportMemo::default(),
+    );
+    assert!(
+        stage[&gid]
+            .deltas
+            .iter()
+            .any(|delta| delta.prefix == key.0 && delta.new.is_none())
+    );
+    assert!(manager.group_ribs[&gid].tombstones.contains(&key));
+    assert!(manager.pending_group_admitted.remove(&member));
+    assert!(manager.pending_group_admitted.get(&member).is_none());
+    assert_eq!(manager.group_recovery_fallback(member), None);
+    assert_eq!(fallback_count(&manager, "missing_proof"), 0.0);
+    assert!(!manager.outbound_channel_full(member));
+    assert!(receiver.try_recv().is_err());
+
+    while manager.resync_dirty_peers_bounded() {}
+    let recovered = receiver.try_recv().unwrap();
+    assert_eq!(recovered.withdraw, vec![key]);
+    assert_eq!(fallback_count(&manager, "missing_proof"), 1.0);
+    assert!(!manager.dirty_peers.contains(&member));
+    assert_eq!(manager.group_recovery_fallback(member), None);
+    assert!(manager.outbound_peers.contains_key(&member));
+    assert!(receiver.try_recv().is_err());
+}
+
+fn fallback_count(manager: &RibManager, cause: &str) -> f64 {
+    manager
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_update_group_recovery_fallback_total")
+        .unwrap()
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "cause" && label.value() == cause)
+        })
+        .unwrap()
+        .get_counter()
+        .get_value()
+}
+
 fn gauge(manager: &RibManager, name: &str) -> f64 {
     manager
         .metrics
@@ -131,6 +228,167 @@ fn common_recovery_charge_is_truthful_at_startup_capture_and_release() {
     assert_eq!(gauge(&manager, "bgp_update_group_recovery_entries"), 0.0);
     assert_eq!(gauge(&manager, "bgp_update_group_recovery_bytes"), header);
     assert!(gauge(&manager, "bgp_update_group_recovery_peak_bytes") > header);
+}
+
+#[test]
+fn proof_refused_initial_dump_settles_without_a_second_replay() {
+    use crate::manager::update_groups::admitted_recovery::AdmittedRecovery;
+
+    for refuse_seed in [true, false] {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let prefixes = if refuse_seed {
+            vec![1, 2]
+        } else {
+            (1..=128).collect()
+        };
+        source_update(&mut manager, &prefixes, &[]);
+        let member: IpAddr = Ipv4Addr::new(10, 220, 4, 10).into();
+        manager.pending_group_admitted = AdmittedRecovery::with_test_limits(
+            if refuse_seed { 0 } else { 1024 },
+            512 * 1024 * 1024,
+        );
+        let healthy_bytes = manager.pending_group_admitted.bytes();
+        if !refuse_seed {
+            // The fresh session has admitted nothing. The seed fits while
+            // its full announcement exceeds the same peer budget.
+            manager
+                .pending_group_admitted
+                .insert_empty_with_checkpoint(member, &mut |_| {})
+                .unwrap();
+        }
+        let (outbound, mut receiver) = mpsc::channel(16);
+        manager.handle_update(peer_up(member, outbound, None));
+        let gid = manager.grouped_member_of(member).unwrap();
+
+        let initial = receiver.try_recv().unwrap();
+        assert_eq!(initial.announce.len(), prefixes.len());
+        assert!(initial.withdraw.is_empty() && initial.end_of_rib.is_empty());
+        let eor = receiver.try_recv().unwrap();
+        assert!(eor.announce.is_empty() && eor.withdraw.is_empty());
+        assert_eq!(eor.end_of_rib, ipv4_sendable());
+        assert_eq!(fallback_count(&manager, "peer_limit"), 1.0);
+        assert!(!manager.dirty_peers.contains(&member));
+        assert!(!manager.group_ribs[&gid].dirty_members.contains(&member));
+        assert!(!manager.pending_group_admitted.contains_record(member));
+        assert_eq!(manager.group_recovery_fallback(member), None);
+        assert_eq!(manager.pending_group_admitted.bytes(), healthy_bytes);
+        assert!(!manager.resync_dirty_peers_bounded());
+        assert!(
+            receiver.try_recv().is_err(),
+            "the completed dump must not replay"
+        );
+    }
+}
+
+#[test]
+fn proof_refused_refresh_settles_only_its_own_recovery_state() {
+    use crate::manager::route_refresh::{FamilyReplayKind, FamilyReplayOutcome};
+    use crate::manager::update_groups::admitted_recovery::AdmittedRecovery;
+    use rustbgpd_wire::RouteRefreshSubtype;
+
+    for already_dirty in [false, true] {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        source_update(&mut manager, &[1, 2], &[]);
+        let member: IpAddr = Ipv4Addr::new(10, 220, 4, 11).into();
+        let (outbound, mut receiver) = mpsc::channel(16);
+        let mut registration = peer_up(member, outbound, None);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut registration
+        {
+            sendable_families.push((Afi::Ipv6, Safi::Unicast));
+        }
+        manager.handle_update(registration);
+        assert_eq!(receiver.try_recv().unwrap().announce.len(), 2);
+        assert_eq!(receiver.try_recv().unwrap().end_of_rib.len(), 2);
+        let gid = manager.grouped_member_of(member).unwrap();
+        manager.pending_group_admitted = AdmittedRecovery::with_test_limits(0, 512 * 1024 * 1024);
+        let healthy_bytes = manager.pending_group_admitted.bytes();
+        if already_dirty {
+            assert!(manager.mark_outbound_dirty(member));
+            manager
+                .pending_eor
+                .entry(member)
+                .or_default()
+                .insert((Afi::Ipv6, Safi::Unicast));
+        }
+        let encoder = MockExactExportEncoder::accepting(1);
+        encoder.set_profile(2, [ExactExportKey::Unicast(Prefix::V4(prefix(1)), 0)]);
+        manager.peer_export_encoders.insert(member, encoder);
+        assert_eq!(
+            manager.send_route_refresh_response_inner(
+                member,
+                Afi::Ipv4,
+                Safi::Unicast,
+                FamilyReplayKind::PeerRefresh {
+                    suppress_eor: false
+                },
+            ),
+            FamilyReplayOutcome::Committed
+        );
+        let response = receiver.try_recv().unwrap();
+        assert_eq!(response.announce.len(), 1);
+        assert_eq!(response.announce[0].prefix, Prefix::V4(prefix(2)));
+        assert_eq!(response.withdraw, vec![(Prefix::V4(prefix(1)), 0)]);
+        assert_eq!(response.end_of_rib, ipv4_sendable());
+        assert_eq!(
+            response.refresh_markers,
+            vec![
+                (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR),
+                (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR),
+            ]
+        );
+        assert_eq!(fallback_count(&manager, "peer_limit"), 1.0);
+        if already_dirty {
+            assert!(manager.dirty_peers.contains(&member));
+            assert!(manager.group_ribs[&gid].dirty_members.contains(&member));
+            assert!(manager.group_recovery_fallback(member).is_some());
+            assert!(manager.pending_eor[&member].contains(&(Afi::Ipv6, Safi::Unicast)));
+        } else {
+            assert!(!manager.dirty_peers.contains(&member));
+            assert!(!manager.group_ribs[&gid].dirty_members.contains(&member));
+            assert!(!manager.pending_group_admitted.contains_record(member));
+            assert_eq!(manager.group_recovery_fallback(member), None);
+            assert_eq!(manager.pending_group_admitted.bytes(), healthy_bytes);
+            assert!(!manager.resync_dirty_peers_bounded());
+        }
+        assert!(
+            receiver.try_recv().is_err(),
+            "the refresh must enqueue once"
+        );
+    }
+}
+
+#[test]
+fn proof_refused_initial_dump_still_retries_a_failed_eor() {
+    use crate::manager::update_groups::admitted_recovery::AdmittedRecovery;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    source_update(&mut manager, &[1, 2], &[]);
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 12).into();
+    manager.pending_group_admitted = AdmittedRecovery::with_test_limits(0, 512 * 1024 * 1024);
+    let (outbound, mut receiver) = mpsc::channel(1);
+    manager.handle_update(peer_up(member, outbound, None));
+    assert_eq!(receiver.try_recv().unwrap().announce.len(), 2);
+    assert!(manager.dirty_peers.contains(&member));
+    assert!(manager.pending_eor[&member].contains(&(Afi::Ipv4, Safi::Unicast)));
+    let mut delivered_eor = Vec::new();
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+        while let Ok(update) = receiver.try_recv() {
+            delivered_eor.extend(update.end_of_rib);
+        }
+        if !manager.dirty_peers.contains(&member) {
+            break;
+        }
+    }
+    assert_eq!(delivered_eor, ipv4_sendable());
+    assert!(!manager.dirty_peers.contains(&member));
+    assert!(!manager.pending_eor.contains_key(&member));
+    assert_eq!(manager.group_recovery_fallback(member), None);
 }
 
 #[test]
@@ -261,7 +519,13 @@ fn a_failed_initial_dump_has_no_admitted_withdrawal_duties() {
     outbound.try_send(OutboundRouteUpdate::default()).unwrap();
     manager.handle_update(peer_up(member, outbound, None));
     assert!(manager.dirty_peers.contains(&member));
-    assert!(manager.pending_group_admitted[&member].is_empty());
+    assert!(
+        manager
+            .pending_group_admitted
+            .get(&member)
+            .unwrap()
+            .is_empty()
+    );
     source_update(&mut manager, &[], &[1]);
     receiver.try_recv().unwrap();
     while manager.resync_dirty_peers_bounded() {}

@@ -522,6 +522,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// used. This IS the equality-suppression baseline: `routes_equal`
     /// runs once per group against it.
     pub(in crate::manager) table: AdjRibOut,
+    /// Non-owning hint; immutable key storage lives only in the recovery ledger.
+    recovery_snapshot: Option<admitted_recovery::SnapshotHandle>,
     /// Received RTC/reflection input beside the single post-policy EVPN body.
     evpn_inputs: FastMap<rustbgpd_wire::EvpnRouteKey, EvpnGroupInput>,
     pub(in crate::manager) evpn_policy_denied:
@@ -744,6 +746,7 @@ impl GroupRibOut {
             .map(|_| chain_default_permit_label());
         Self {
             table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity),
+            recovery_snapshot: None,
             evpn_inputs: FastMap::default(),
             evpn_policy_denied: FastMap::default(),
             nh_overrides: FastMap::default(),
@@ -971,6 +974,9 @@ impl GroupRibOut {
     /// source-count and next-hop-override residue in sync.
     fn apply_delta(&mut self, delta: &GroupDelta) {
         let key = (delta.prefix, delta.path_id);
+        if self.table.get(&delta.prefix, delta.path_id).is_some() != delta.new.is_some() {
+            self.recovery_snapshot = None;
+        }
         if let Some(log) = &mut self.inventory_log {
             log.insert(key);
         }
@@ -1065,6 +1071,9 @@ impl GroupRibOut {
             nlri_key: delta.key,
             path_id: 0,
         };
+        if self.table.get_vpn(&rib_key).is_some() != delta.new.is_some() {
+            self.recovery_snapshot = None;
+        }
         let slot = Self::vpn_count_slot(&delta.key);
         if let Some(old) = self.table.get_vpn(&rib_key) {
             let old_peer = old.peer;
@@ -1725,13 +1734,16 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         error: admitted_recovery::Failure,
+        mark_dirty_on_refusal: bool,
     ) {
         self.set_group_recovery_fallback(peer, RecoveryFallbackCause::from(error.cause));
         warn!(%peer, limiting_peer = ?error.limiting_peer,
             cause = error.cause.as_str(), attempted_peer_bytes = error.attempted_peer_bytes,
             attempted_daemon_bytes = error.attempted_daemon_bytes,
             "admitted-key recovery proof unavailable; using conservative withdrawal fallback");
-        self.mark_outbound_dirty_inner(peer, false);
+        if mark_dirty_on_refusal {
+            self.mark_outbound_dirty_inner(peer, false);
+        }
         self.refresh_group_recovery_gauges();
     }
 
@@ -1757,11 +1769,28 @@ impl RibManager {
     /// Capture the actual OLD admitted projection before any desired mutation.
     /// A dirty member without proof must retain fallback, never reconstruct
     /// from its already-advanced desired table.
+    pub(in crate::manager) fn capture_group_admitted_keys(&mut self, peer: IpAddr) -> bool {
+        self.capture_group_admitted_keys_inner(peer, true)
+    }
+
+    /// A proof refusal does not mean this send missed an update. Its caller
+    /// retains fallback until admission succeeds or schedules the actual retry.
+    pub(in crate::manager) fn capture_group_admitted_keys_for_send(
+        &mut self,
+        peer: IpAddr,
+    ) -> bool {
+        self.capture_group_admitted_keys_inner(peer, false)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "keep the fallible old-view capture and its failure publication in one actor transaction"
     )]
-    pub(in crate::manager) fn capture_group_admitted_keys(&mut self, peer: IpAddr) -> bool {
+    fn capture_group_admitted_keys_inner(
+        &mut self,
+        peer: IpAddr,
+        mark_dirty_on_refusal: bool,
+    ) -> bool {
         use admitted_recovery::Key;
         if self.pending_group_admitted.contains_record(peer)
             || self.group_recovery_fallback(peer).is_some()
@@ -1783,87 +1812,231 @@ impl RibManager {
             .pending_group_admitted
             .begin_capture_with_checkpoint(peer, &mut checkpoint)
         {
-            self.record_group_recovery_refusal(peer, error);
+            self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
-        let admitted = &mut self.pending_group_admitted;
-        let mut record = |key| {
-            super::replacement_readiness_checkpoint(&readiness, false);
-            admitted.push_capture_with_checkpoint(peer, key, &mut checkpoint)
-        };
-        let result = (|| {
-            if let Some(base) = self.pending_regroup_baseline.get(&peer) {
-                for &(prefix, path_id) in base.unicast.keys() {
-                    record(Key::Unicast(prefix, path_id))?;
-                }
-                for &key in base.vpn.keys() {
-                    record(Key::Vpn(key, 0))?;
-                }
-            } else if let Some(group) = gid.and_then(|gid| self.group_ribs.get(&gid)) {
-                let rejected = self.peer_unexportable.get(&peer);
-                let limits = self.outbound_prefix_limits.get(&peer);
-                for staged in group.table.iter() {
-                    super::replacement_readiness_checkpoint(&readiness, false);
-                    let Some(entry) =
-                        group.adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)
-                    else {
-                        continue;
-                    };
-                    let route = entry.route;
-                    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
-                    if rejected.is_some_and(|keys| keys.contains(&key))
-                        || limits.is_some_and(|limits| !limits.admits_grouped(&route.prefix))
-                    {
-                        continue;
-                    }
-                    let (communities, large) =
-                        group.source_control_for_route(route, entry.source_attrs);
-                    if !super::distribution::rs_control::rs_control_suppressed(
-                        communities,
-                        large,
-                        rs_control,
-                    ) {
-                        record(Key::Unicast(route.prefix, route.path_id))?;
-                    }
-                }
-                if group.stages_vpn() {
-                    for route in group.table.iter_vpn() {
-                        super::replacement_readiness_checkpoint(&readiness, false);
-                        if route.peer != peer
-                            && rt_passes(filter.as_ref(), route)
-                            && !rejected.is_some_and(|keys| {
-                                keys.contains(&ExactExportKey::Vpn(route.key()))
-                            })
-                        {
+        let result =
+            if self.pending_regroup_baseline.contains_key(&peer) || gid.is_none() {
+                let count = self.pending_regroup_baseline.get(&peer).map_or_else(
+                    || {
+                        self.adj_ribs_out
+                            .get(&peer)
+                            .map_or(0, |rib| rib.len().saturating_add(rib.vpn_len()))
+                    },
+                    |base| base.unicast.len().saturating_add(base.vpn.len()),
+                );
+                let ledger = &mut self.pending_group_admitted;
+                (|| {
+                    ledger.reserve_capture_with_checkpoint(peer, count, &mut checkpoint)?;
+                    if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                        for &(prefix, path_id) in base.unicast.keys() {
+                            checkpoint(false);
+                            ledger.push_capture_with_checkpoint(
+                                peer,
+                                Key::Unicast(prefix, path_id),
+                                &mut checkpoint,
+                            )?;
+                        }
+                        for &key in base.vpn.keys() {
+                            checkpoint(false);
+                            ledger.push_capture_with_checkpoint(
+                                peer,
+                                Key::Vpn(key, 0),
+                                &mut checkpoint,
+                            )?;
+                        }
+                    } else if let Some(rib) = self.adj_ribs_out.get(&peer) {
+                        for route in rib.iter() {
+                            checkpoint(false);
+                            ledger.push_capture_with_checkpoint(
+                                peer,
+                                Key::Unicast(route.prefix, route.path_id),
+                                &mut checkpoint,
+                            )?;
+                        }
+                        for route in rib.iter_vpn() {
+                            checkpoint(false);
                             let key = route.key();
-                            record(Key::Vpn(key.nlri_key, key.path_id))?;
+                            ledger.push_capture_with_checkpoint(
+                                peer,
+                                Key::Vpn(key.nlri_key, key.path_id),
+                                &mut checkpoint,
+                            )?;
                         }
                     }
+                    Ok(())
+                })()
+            } else if let Some(group) = gid.and_then(|gid| self.group_ribs.get_mut(&gid)) {
+                let rejected = self.peer_unexportable.get(&peer);
+                let limits = self.outbound_prefix_limits.get(&peer);
+                let projected: &GroupRibOut = group;
+                let projection_readiness = &readiness;
+                let old_filter = filter.as_ref();
+                let actual = move || {
+                    projected
+                        .table
+                        .iter()
+                        .inspect(move |_| {
+                            super::replacement_readiness_checkpoint(projection_readiness, false);
+                        })
+                        .filter_map(move |staged| {
+                            let entry = projected.adv_entry_post_backstop(
+                                peer,
+                                &staged.prefix,
+                                staged.path_id,
+                            )?;
+                            let route = entry.route;
+                            let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+                            if rejected.is_some_and(|keys| keys.contains(&key))
+                                || limits
+                                    .is_some_and(|limits| !limits.admits_grouped(&route.prefix))
+                            {
+                                return None;
+                            }
+                            let (communities, large) =
+                                projected.source_control_for_route(route, entry.source_attrs);
+                            (!super::distribution::rs_control::rs_control_suppressed(
+                                communities,
+                                large,
+                                rs_control,
+                            ))
+                            .then_some(Key::Unicast(route.prefix, route.path_id))
+                        })
+                        .chain(
+                            projected
+                                .table
+                                .iter_vpn()
+                                .inspect(move |_| {
+                                    super::replacement_readiness_checkpoint(
+                                        projection_readiness,
+                                        false,
+                                    );
+                                })
+                                .filter(move |route| {
+                                    projected.stages_vpn()
+                                        && route.peer != peer
+                                        && rt_passes(old_filter, route)
+                                        && !rejected.is_some_and(|keys| {
+                                            keys.contains(&ExactExportKey::Vpn(route.key()))
+                                        })
+                                })
+                                .map(|route| {
+                                    let key = route.key();
+                                    Key::Vpn(key.nlri_key, key.path_id)
+                                }),
+                        )
+                };
+                let count = actual().count();
+                let raw_count = group.table.len().saturating_add(if group.stages_vpn() {
+                    group.table.vpn_len()
+                } else {
+                    0
+                });
+                let raw =
+                    group
+                        .table
+                        .iter()
+                        .map(|route| Key::Unicast(route.prefix, route.path_id))
+                        .chain(group.table.iter_vpn().filter(|_| group.stages_vpn()).map(
+                            |route| {
+                                let key = route.key();
+                                Key::Vpn(key.nlri_key, key.path_id)
+                            },
+                        ));
+                let ledger = &mut self.pending_group_admitted;
+                let shared = ledger.share_capture_with_checkpoint(
+                    peer,
+                    group.recovery_snapshot,
+                    raw_count,
+                    raw,
+                    count,
+                    &mut checkpoint,
+                );
+                let handle = shared.ok().flatten();
+                let captured = (|| {
+                    // An oversized unfiltered hint or failed optional allocation
+                    // must not reject a smaller authoritative flat proof.
+                    if handle.is_none() {
+                        ledger.reserve_capture_with_checkpoint(peer, count, &mut checkpoint)?;
+                    }
+                    for key in actual() {
+                        ledger.push_capture_with_checkpoint(peer, key, &mut checkpoint)?;
+                    }
+                    Ok(())
+                })();
+                if captured.is_ok()
+                    && let Some(handle) = handle
+                {
+                    group.recovery_snapshot = Some(handle);
                 }
-            } else if let Some(rib) = self.adj_ribs_out.get(&peer) {
-                for route in rib.iter() {
-                    record(Key::Unicast(route.prefix, route.path_id))?;
-                }
-                for route in rib.iter_vpn() {
-                    let key = route.key();
-                    record(Key::Vpn(key.nlri_key, key.path_id))?;
-                }
-            }
-            Ok::<(), admitted_recovery::Failure>(())
-        })();
+                captured
+            } else {
+                Ok(())
+            };
         if let Err(error) = result {
-            self.record_group_recovery_refusal(peer, error);
+            self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
         if let Err(error) = self
             .pending_group_admitted
             .seal_capture_with_checkpoint(peer, &mut checkpoint)
         {
-            self.record_group_recovery_refusal(peer, error);
+            self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
         self.refresh_group_recovery_gauges();
         true
+    }
+
+    pub(in crate::manager) fn prepare_empty_group_recovery_admission(
+        &mut self,
+        peer: IpAddr,
+        candidates: usize,
+    ) {
+        use admitted_recovery::Key;
+        if self
+            .pending_group_admitted
+            .get(&peer)
+            .is_none_or(|proof| !proof.is_empty())
+        {
+            return;
+        }
+        let Some(gid) = self.grouped_member_of(peer) else {
+            return;
+        };
+        let Some(group) = self.group_ribs.get_mut(&gid) else {
+            return;
+        };
+        let count = group.table.len().saturating_add(if group.stages_vpn() {
+            group.table.vpn_len()
+        } else {
+            0
+        });
+        let raw = group
+            .table
+            .iter()
+            .map(|route| Key::Unicast(route.prefix, route.path_id))
+            .chain(
+                group
+                    .table
+                    .iter_vpn()
+                    .filter(|_| group.stages_vpn())
+                    .map(|route| {
+                        let key = route.key();
+                        Key::Vpn(key.nlri_key, key.path_id)
+                    }),
+            );
+        let readiness = self.replacement_readiness.clone();
+        if let Ok(Some(handle)) = self.pending_group_admitted.share_capture_with_checkpoint(
+            peer,
+            group.recovery_snapshot,
+            count,
+            raw,
+            candidates,
+            &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
+        ) {
+            group.recovery_snapshot = Some(handle);
+        }
     }
 
     pub(in crate::manager) fn release_group_admitted_keys(&mut self, peer: IpAddr) {

@@ -112,11 +112,11 @@ fn owned_capture_is_retained_across_rtc_changes_and_generic_cleanup() {
         manager.evpn_recovery.proof(handle).unwrap(),
         Some([old].as_slice())
     );
-    let prior_uc = manager.pending_group_admitted.get(&peer).cloned();
+    let prior_uc = manager.pending_group_admitted.owned_proof(&peer);
     manager.dirty_peers.remove(&peer);
     manager.clear_grouped_member_synced(peer);
     assert!(manager.dirty_peers.contains(&peer));
-    assert_eq!(manager.pending_group_admitted.get(&peer), prior_uc.as_ref());
+    assert_eq!(manager.pending_group_admitted.owned_proof(&peer), prior_uc);
     assert_eq!(
         manager.evpn_recovery.proof(handle).unwrap(),
         Some([old].as_slice())
@@ -151,7 +151,7 @@ fn outbound_queue_credit_precedes_provenance_growth_and_reset_handoff() {
         .unwrap()
         .limit = std::num::NonZeroU32::new(1);
     assert!(manager.capture_group_admitted_keys(peer));
-    let admitted_before = manager.pending_group_admitted[&peer].clone();
+    let admitted_before = manager.pending_group_admitted.owned_proof(&peer).unwrap();
     let batch = || OutboundCommitBatch {
         evpn_announce: vec![route(1)],
         ..OutboundCommitBatch::with_unicast(Arc::new(vec![unicast.clone()]), Arc::new(vec![None]))
@@ -169,7 +169,10 @@ fn outbound_queue_credit_precedes_provenance_growth_and_reset_handoff() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(manager.evpn_recovery_reset_pending(peer));
     assert!(output.try_recv().is_err());
-    assert_eq!(manager.pending_group_admitted[&peer], admitted_before);
+    assert_eq!(
+        manager.pending_group_admitted.owned_proof(&peer).unwrap(),
+        admitted_before
+    );
     assert!(
         manager.adj_ribs_out[&peer]
             .get(&unicast.prefix, unicast.path_id)

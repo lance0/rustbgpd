@@ -3888,6 +3888,40 @@ impl RibManager {
                     self.pending_extra_withdraws.len(),
                 ));
             }
+            #[cfg(feature = "bench-internals")]
+            RibUpdate::BenchVpnAdmissionWithCredit {
+                grants,
+                update,
+                reply,
+            } => {
+                let result = (|| {
+                    if !matches!(&*update, RibUpdate::VpnRoutesReceived { .. }) {
+                        return Err(crate::update::RibCommandError::internal(
+                            "benchmark credit requires a VPN receipt",
+                        ));
+                    }
+                    for (grant, acknowledged) in grants {
+                        grant.send(()).map_err(|()| {
+                            crate::update::RibCommandError::internal("benchmark receiver closed")
+                        })?;
+                        // Benchmark consumers run on a separate runtime. This bounded
+                        // one-shot wait prevents a retry timer stealing the granted credit.
+                        acknowledged
+                            .lock()
+                            .map_err(|error| {
+                                crate::update::RibCommandError::internal(error.to_string())
+                            })?
+                            .recv_timeout(std::time::Duration::from_secs(30))
+                            .map_err(|error| {
+                                crate::update::RibCommandError::internal(error.to_string())
+                            })?
+                            .map_err(crate::update::RibCommandError::internal)?;
+                    }
+                    self.handle_update(*update);
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }
             #[cfg(test)]
             RibUpdate::TestQueryPeerOutboundDirty { peer, reply } => {
                 let _ = reply.send(self.dirty_peers.contains(&peer));
