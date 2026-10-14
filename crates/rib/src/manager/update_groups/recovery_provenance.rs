@@ -670,12 +670,72 @@ impl EvpnRecoveryProvenance {
         })
     }
 
+    /// The current empty record's base takes precedence over a group hint.
+    pub(in crate::manager) fn candidate_universe_contains(
+        &self,
+        handle: ProvenanceHandle,
+        hint: Option<UniverseHandle>,
+        key: &EvpnRouteKey,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Option<bool> {
+        let index = self.index(handle)?;
+        let universe = self.records[index].universe.or(hint)?;
+        let index = self.universe_index(universe)?;
+        Some(
+            self.universes[index]
+                .keys
+                .binary_search_by(|prior| {
+                    checkpoint(false);
+                    prior.cmp(key)
+                })
+                .is_ok(),
+        )
+    }
+
+    /// Sparse capacity precedes optional pool publication. Refusal frees only
+    /// an empty representation, leaving authoritative flat admission available.
+    pub(in crate::manager) fn share_capture<A: Iterator<Item = EvpnRouteKey>>(
+        &mut self,
+        handle: ProvenanceHandle,
+        hint: Option<UniverseHandle>,
+        count: usize,
+        keys: A,
+        shape: (usize, usize),
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<Option<UniverseHandle>, Exhaustion> {
+        let Some(index) = self.checked_handle_index(handle)? else {
+            return Ok(None);
+        };
+        let record = &self.records[index];
+        if !record.primary || !matches!(record.state, State::Capturing | State::Ready) {
+            return Ok(None);
+        }
+        if record.masked != 0 || !record.keys.is_empty() {
+            return Ok(record.universe);
+        }
+        if record.universe.is_none() && count == 0 {
+            return Ok(None);
+        }
+        checkpoint(true);
+        let capacity = self.grow_keys(handle, shape.1);
+        checkpoint(true);
+        let attached = capacity
+            .and_then(|()| self.attach_universe(handle, hint, count, keys, shape.0, checkpoint));
+        if matches!(attached, Ok(Some(_))) {
+            return attached;
+        }
+        checkpoint(true);
+        self.free_keys(index);
+        checkpoint(true);
+        attached
+    }
+
     /// Optional sharing refuses without exhausting the authoritative flat fallback.
     #[expect(
         clippy::too_many_lines,
         reason = "mask allocation and optional universe construction roll back before exposing one captured owner"
     )]
-    pub(in crate::manager) fn share_capture<A: Iterator<Item = EvpnRouteKey>>(
+    fn attach_universe<A: Iterator<Item = EvpnRouteKey>>(
         &mut self,
         handle: ProvenanceHandle,
         hint: Option<UniverseHandle>,
@@ -2651,7 +2711,7 @@ mod tests {
                 hint,
                 raw.len(),
                 raw.iter().copied(),
-                count,
+                (count, additions),
                 &mut |_| {},
             )
             .unwrap()
@@ -2744,7 +2804,14 @@ mod tests {
         ledger.begin_capture(second).unwrap();
         assert_eq!(
             ledger
-                .share_capture(second, Some(shared), 3, actual.into_iter(), 3, &mut |_| {})
+                .share_capture(
+                    second,
+                    Some(shared),
+                    3,
+                    actual.into_iter(),
+                    (3, 2),
+                    &mut |_| {}
+                )
                 .unwrap(),
             Some(shared)
         );
@@ -2860,7 +2927,7 @@ mod tests {
                     None,
                     raw.len(),
                     raw.iter().copied(),
-                    raw.len(),
+                    (raw.len(), 0),
                     &mut |_| {},
                 )
                 .unwrap_err();

@@ -4,6 +4,7 @@ use crate::manager::distribution::OutboundCommitBatch;
 use crate::manager::helpers::evpn_routes_equal;
 use crate::manager::update_groups::{EvpnGroupStageOutput, emit_evpn_group_deltas_for_member};
 use crate::update::ExactExportKey;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) fn fixture() -> (
     RibManager,
@@ -902,4 +903,289 @@ fn shared_capture_caller_optional_refusal_uses_smaller_truthful_flat_projection(
     }
     assert_eq!(manager.evpn_recovery.exhaustion(handle), None);
     assert!(manager.group_ribs[&gid].evpn_recovery_universe.is_none());
+}
+
+const DISJOINT_ROUTES: u32 = 64;
+
+fn disjoint_routes(start: u32) -> Vec<EvpnRibRoute> {
+    (start..start + DISJOINT_ROUTES)
+        .map(|tag| make_evpn_imet("192.0.2.10".parse().unwrap(), tag))
+        .collect()
+}
+
+fn disjoint_peer_budget() -> usize {
+    usize::try_from(DISJOINT_ROUTES).unwrap()
+        * std::mem::size_of::<rustbgpd_wire::EvpnRouteKey>()
+        * 3
+        / 2
+        + 1024
+}
+
+fn transfer_test_evpn_bodies(manager: &mut RibManager, peer: IpAddr, routes: &[EvpnRibRoute]) {
+    let gid = manager.evpn_grouped_member_of(peer).unwrap();
+    assert!(manager.group_ribs[&gid].evpn_projection_complete());
+    // Central admission still maintains the private mirror while grouping is
+    // dormant. Complete this synthetic ownership transfer only after delivery.
+    for route in routes {
+        assert!(evpn_routes_equal(
+            manager.group_ribs[&gid]
+                .table
+                .get_evpn(&route.key())
+                .unwrap(),
+            route,
+        ));
+        let private = manager.adj_ribs_out.get_mut(&peer).unwrap();
+        assert!(evpn_routes_equal(
+            private.get_evpn(&route.key()).unwrap(),
+            route
+        ));
+        assert!(private.remove_evpn(&route.key()));
+    }
+}
+
+fn older_universe_fixture() -> (
+    RibManager,
+    IpAddr,
+    IpAddr,
+    usize,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    use crate::manager::update_groups::recovery_provenance::EvpnRecoveryProvenance;
+    let (mut manager, first, gid, mut first_output) = fixture();
+    manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(
+        disjoint_peer_budget(),
+        4 * disjoint_peer_budget(),
+    );
+    assert!(manager.register_evpn_recovery(first, false));
+    let second = "192.0.2.31".parse().unwrap();
+    let (sender, mut second_output) = mpsc::channel(8);
+    register(&mut manager, second, sender);
+    while second_output.try_recv().is_ok() {}
+    assert_eq!(manager.evpn_grouped_member_of(second), Some(gid));
+    let second_handle = manager.evpn_recovery_handle(second).unwrap();
+    assert!(
+        manager
+            .evpn_recovery
+            .proof(second_handle)
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    // Both registrations had a known empty table. This storage control sets
+    // that initial clean state without claiming a production feed settlement.
+    for peer in [first, second] {
+        manager.dirty_peers.remove(&peer);
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .dirty_members
+            .remove(&peer);
+    }
+    let old = disjoint_routes(1);
+    for route in &old {
+        stage(&mut manager, gid, route);
+    }
+    assert!(manager.try_send_and_commit_outbound_update(
+        first,
+        OutboundCommitBatch {
+            evpn_announce: old.clone(),
+            ..OutboundCommitBatch::default()
+        }
+    ));
+    assert_eq!(
+        first_output
+            .try_recv()
+            .unwrap()
+            .evpn_announce
+            .iter()
+            .map(EvpnRibRoute::key)
+            .collect::<Vec<_>>(),
+        old.iter().map(EvpnRibRoute::key).collect::<Vec<_>>()
+    );
+    transfer_test_evpn_bodies(&mut manager, first, &old);
+    assert!(manager.capture_shared_evpn_admitted(first));
+    for route in old {
+        manager.loc_rib.recompute_evpn(route.key(), [].into_iter());
+        manager.stage_group_evpn_keys(gid, &HashSet::from([route.key()]));
+    }
+    for route in disjoint_routes(1000) {
+        stage(&mut manager, gid, &route);
+    }
+    (manager, first, second, gid, first_output, second_output)
+}
+
+fn assert_disjoint_flat_fits(routes: &[EvpnRibRoute]) {
+    use crate::manager::update_groups::recovery_provenance::{EvpnRecoveryProvenance, PeerSession};
+    let mut flat = EvpnRecoveryProvenance::with_test_limits(
+        disjoint_peer_budget(),
+        4 * disjoint_peer_budget(),
+    );
+    let handle = flat
+        .register(PeerSession {
+            peer: "192.0.2.31".parse().unwrap(),
+            session_id: 7,
+        })
+        .unwrap();
+    assert!(
+        flat.reserve_admission(handle, routes.iter().map(EvpnRibRoute::key), &[])
+            .unwrap()
+    );
+    assert!(
+        flat.apply_admitted(handle, routes.iter().map(EvpnRibRoute::key), &[])
+            .unwrap()
+    );
+    assert_eq!(
+        flat.proof_keys(handle).unwrap().unwrap(),
+        routes.iter().map(EvpnRibRoute::key).collect::<Vec<_>>()
+    );
+}
+
+fn no_reset_counter(manager: &mut RibManager) -> Arc<AtomicUsize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = calls.clone();
+    manager.evpn_recovery_reset = Some(Arc::new(move |_, _| {
+        captured.fetch_add(1, Ordering::SeqCst);
+        false
+    }));
+    calls
+}
+
+#[test]
+fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
+    let (mut manager, first, second, gid, _first_output, mut output) = older_universe_fixture();
+    let fresh = disjoint_routes(1000);
+    assert_disjoint_flat_fits(&fresh);
+    let handle = manager.evpn_recovery_handle(second).unwrap();
+    assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
+    assert!(manager.try_send_and_commit_outbound_update(
+        second,
+        OutboundCommitBatch {
+            evpn_announce: fresh.clone(),
+            ..OutboundCommitBatch::default()
+        }
+    ));
+    assert_eq!(
+        output
+            .try_recv()
+            .unwrap()
+            .evpn_announce
+            .iter()
+            .map(EvpnRibRoute::key)
+            .collect::<Vec<_>>(),
+        fresh.iter().map(EvpnRibRoute::key).collect::<Vec<_>>()
+    );
+    transfer_test_evpn_bodies(&mut manager, second, &fresh);
+    let first_handle = manager.evpn_recovery_handle(first).unwrap();
+    let old = manager.evpn_recovery.proof_keys(first_handle).unwrap();
+    let hint = manager.group_ribs[&gid].evpn_recovery_universe;
+    let retained = manager.evpn_recovery.daemon_usage().retained;
+    let header = manager.evpn_recovery.peer_usage(second).retained;
+    let resets = no_reset_counter(&mut manager);
+    assert!(
+        manager.capture_shared_evpn_admitted(second),
+        "a complete flat OLD proof fits the same cap"
+    );
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(handle).unwrap().unwrap(),
+        fresh.iter().map(EvpnRibRoute::key).collect::<Vec<_>>()
+    );
+    assert_eq!(manager.evpn_recovery.exhaustion(handle), None);
+    assert!(!manager.dirty_peers.contains(&second));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+    let key_bytes = fresh.len() * std::mem::size_of::<rustbgpd_wire::EvpnRouteKey>();
+    assert_eq!(
+        manager.evpn_recovery.daemon_usage().retained,
+        retained + key_bytes
+    );
+    assert_eq!(
+        manager.evpn_recovery.peer_usage(second).retained,
+        header + key_bytes
+    );
+    assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, hint);
+    manager.retire_evpn_recovery(second);
+    assert_eq!(manager.evpn_recovery.proof_keys(first_handle).unwrap(), old);
+    manager.retire_evpn_recovery(first);
+    assert_eq!(
+        manager.evpn_recovery.daemon_usage().retained,
+        std::mem::size_of_val(&manager.evpn_recovery)
+    );
+}
+
+#[test]
+fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_universe() {
+    for existing in [false, true] {
+        let (mut manager, first, second, gid, _first_output, mut output) = older_universe_fixture();
+        let fresh = disjoint_routes(1000);
+        assert_disjoint_flat_fits(&fresh);
+        let handle = manager.evpn_recovery_handle(second).unwrap();
+        let retained = manager.evpn_recovery.daemon_usage().retained;
+        let header = manager.evpn_recovery.peer_usage(second).retained;
+        if existing {
+            assert!(manager.try_send_and_commit_outbound_update(
+                second,
+                OutboundCommitBatch {
+                    evpn_announce: vec![fresh[0].clone()],
+                    ..OutboundCommitBatch::default()
+                }
+            ));
+            assert_eq!(output.try_recv().unwrap().evpn_announce.len(), 1);
+            assert!(manager.try_send_and_commit_outbound_update(
+                second,
+                OutboundCommitBatch {
+                    evpn_withdraw: vec![fresh[0].key()],
+                    ..OutboundCommitBatch::default()
+                }
+            ));
+            assert_eq!(output.try_recv().unwrap().evpn_withdraw, [fresh[0].key()]);
+        }
+        assert!(
+            manager
+                .evpn_recovery
+                .proof(handle)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        let first_handle = manager.evpn_recovery_handle(first).unwrap();
+        let old = manager.evpn_recovery.proof_keys(first_handle).unwrap();
+        let hint = manager.group_ribs[&gid].evpn_recovery_universe;
+        let resets = no_reset_counter(&mut manager);
+        assert!(
+            manager.try_send_and_commit_outbound_update(
+                second,
+                OutboundCommitBatch {
+                    evpn_announce: fresh.clone(),
+                    ..OutboundCommitBatch::default()
+                }
+            ),
+            "flat candidate union fits; existing empty universe: {existing}"
+        );
+        assert_eq!(output.try_recv().unwrap().evpn_announce.len(), fresh.len());
+        assert_eq!(
+            manager.evpn_recovery.proof_keys(handle).unwrap().unwrap(),
+            fresh.iter().map(EvpnRibRoute::key).collect::<Vec<_>>()
+        );
+        assert_eq!(manager.evpn_recovery.exhaustion(handle), None);
+        assert!(!manager.dirty_peers.contains(&second));
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+        let key_bytes = fresh.len() * std::mem::size_of::<rustbgpd_wire::EvpnRouteKey>();
+        assert_eq!(
+            manager.evpn_recovery.daemon_usage().retained,
+            retained + key_bytes
+        );
+        assert_eq!(
+            manager.evpn_recovery.peer_usage(second).retained,
+            header + key_bytes
+        );
+        assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, hint);
+        manager.retire_evpn_recovery(second);
+        assert_eq!(manager.evpn_recovery.proof_keys(first_handle).unwrap(), old);
+        manager.retire_evpn_recovery(first);
+        assert_eq!(
+            manager.evpn_recovery.daemon_usage().retained,
+            std::mem::size_of_val(&manager.evpn_recovery)
+        );
+    }
 }

@@ -249,7 +249,7 @@ impl RibManager {
                             group.evpn_recovery_universe,
                             group.table.evpn_len(),
                             group.table.iter_evpn().map(EvpnRibRoute::key),
-                            count,
+                            (count, additions),
                             &mut allocation_checkpoint,
                         )
                         .ok()
@@ -513,7 +513,7 @@ impl RibManager {
             .proof(handle)
             .is_ok_and(|proof| proof.is_some_and(EvpnProofView::is_empty))
         {
-            self.prepare_empty_evpn_admission(peer, handle, announce.len());
+            self.prepare_empty_evpn_admission(peer, handle, announce);
         }
         let Ok(Some(proof)) = self.evpn_recovery.proof(handle) else {
             self.evpn_recovery.fail_admission(handle);
@@ -546,20 +546,37 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         handle: ProvenanceHandle,
-        candidates: usize,
+        candidates: &[EvpnRibRoute],
     ) {
         let Some(gid) = self.evpn_grouped_member_of(peer) else {
             return;
         };
         let group = self.group_ribs.get_mut(&gid).expect("owned group exists");
         let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = |force| super::replacement_readiness_checkpoint(&readiness, force);
+        let sparse = candidates
+            .iter()
+            .filter(|route| {
+                checkpoint(false);
+                let key = route.key();
+                !self
+                    .evpn_recovery
+                    .candidate_universe_contains(
+                        handle,
+                        group.evpn_recovery_universe,
+                        &key,
+                        &mut checkpoint,
+                    )
+                    .unwrap_or_else(|| group.table.get_evpn(&key).is_some())
+            })
+            .count();
         if let Ok(Some(universe)) = self.evpn_recovery.share_capture(
             handle,
             group.evpn_recovery_universe,
             group.table.evpn_len(),
             group.table.iter_evpn().map(EvpnRibRoute::key),
-            candidates,
-            &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
+            (candidates.len(), sparse),
+            &mut checkpoint,
         ) {
             group.evpn_recovery_universe = Some(universe);
         }
