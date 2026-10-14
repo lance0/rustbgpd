@@ -1387,6 +1387,23 @@ mod tests {
     }
 
     #[test]
+    fn paged_family_route_reads_require_sensitive_read() {
+        for method in [
+            "ListVpnRoutesPage",
+            "ListLabeledRoutesPage",
+            "ListRtcRoutesPage",
+            "ListEvpnRoutesPage",
+        ] {
+            let path = format!("/rustbgpd.v1.RibService/{method}");
+            assert_eq!(
+                method_authz(&path).map(|entry| entry.tier),
+                Some(AuthTier::SensitiveRead),
+                "{method} exposes route topology and must require sensitive_read",
+            );
+        }
+    }
+
+    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "one assertion per pinned tier decision; splitting would scatter the pins"
