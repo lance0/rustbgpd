@@ -216,6 +216,23 @@ class EvpnReflectorRoleTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_best_set_cannot_lose_or_widen_its_request_profile(self):
+        for profile in [None, {}, {"ListBestEvpnRoutesRequest.route_type_filter": [0, 1, 2, 3, 4, 5, 6]}]:
+            with self.subTest(profile=profile):
+                inventory = copy.deepcopy(self.inventory)
+                entry = next(
+                    entry for entry in inventory["grpc"]["scoped_rr_only_method_sets"]
+                    if "ListBestEvpnRoutes" in entry["methods"]
+                )
+                if profile is None:
+                    entry.pop("stable_request_values")
+                else:
+                    entry["stable_request_values"] = profile
+                self.rejected(
+                    lambda: checker.check_method_sets(inventory, self.services, self.definitions),
+                    "stable request profile",
+                )
+
     def test_profiled_request_field_must_exist(self):
         definitions = self.edited(
             "ListPeerEvpnRoutesRequest", "route_type_filter = 2", "route_types = 2"

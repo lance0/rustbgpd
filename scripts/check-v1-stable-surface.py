@@ -757,6 +757,7 @@ METHOD_SET_KEYS = {
 # this profile (the route-reflector-evpn Types 1-5 boundary).
 EXPECTED_STABLE_REQUEST_VALUES = {
     "ListPeerEvpnRoutesRequest": {"ListPeerEvpnRoutesRequest.route_type_filter": [1, 2, 3, 4, 5]},
+    "ListBestEvpnRoutesRequest": {"ListBestEvpnRoutesRequest.route_type_filter": [1, 2, 3, 4, 5]},
 }
 
 
