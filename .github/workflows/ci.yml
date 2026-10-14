@@ -29,6 +29,12 @@ on:
         type: boolean
         default: false
         required: false
+      recovery_receipt_mode:
+        description: Select memory or component scan qualification
+        type: choice
+        options: [memory, scan]
+        default: memory
+        required: false
 
 jobs:
   core:
@@ -63,6 +69,12 @@ jobs:
                   description: Run the hosted recovery memory qualification
                   type: boolean
                   default: false
+                  required: false
+                recovery_receipt_mode:
+                  description: Select memory or component scan qualification
+                  type: choice
+                  options: [memory, scan]
+                  default: memory
                   required: false'
           if [[ "$actual" != "$expected" ]]; then
             diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
@@ -768,31 +780,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - profile: ipv4-100k
-            cell: dataset-reevaluate
-          - profile: ipv4-100k
-            cell: peer-down
-          - profile: full-uc
-            cell: dataset-reevaluate
-          - profile: full-uc
-            cell: peer-down
-          - profile: full-vpn
-            cell: dataset-reevaluate
-          - profile: full-vpn
-            cell: peer-down
-          - profile: full-vpn
-            cell: widen
-          - profile: mixed-widen
-            cell: widen
-          - profile: full-uc
-            cell: unsynchronized-dirty
-          - profile: full-vpn
-            cell: unsynchronized-dirty
+        include: ${{ fromJSON(inputs.recovery_receipt_mode == 'scan' && '[{"profile":"full-uc","cell":"capture-scan"},{"profile":"full-vpn","cell":"capture-scan"},{"profile":"evpn-soak","cell":"capture-scan"}]' || '[{"profile":"ipv4-100k","cell":"dataset-reevaluate"},{"profile":"ipv4-100k","cell":"peer-down"},{"profile":"full-uc","cell":"dataset-reevaluate"},{"profile":"full-uc","cell":"peer-down"},{"profile":"full-vpn","cell":"dataset-reevaluate"},{"profile":"full-vpn","cell":"peer-down"},{"profile":"full-vpn","cell":"widen"},{"profile":"mixed-widen","cell":"widen"},{"profile":"full-uc","cell":"unsynchronized-dirty"},{"profile":"full-vpn","cell":"unsynchronized-dirty"}]') }}
     env:
       CARGO_BUILD_JOBS: "4"
       # Each complete qualified cell runs on its own fresh VM.
       RECOVERY_MEMORY_PHASE: qualified
+      RECOVERY_RECEIPT_MODE: ${{ inputs.recovery_receipt_mode || 'memory' }}
       RECOVERY_MEMORY_PROFILE: ${{ matrix.profile }}
       RECOVERY_MEMORY_CELL: ${{ matrix.cell }}
     steps:
@@ -835,6 +828,7 @@ jobs:
               bash bench/scale/compare-recovery-memory.sh \
               --head "$GITHUB_SHA" \
               --output-dir "$evidence/campaign" \
+              --mode "$RECOVERY_RECEIPT_MODE" \
               --phase "$RECOVERY_MEMORY_PHASE" \
               --profile "$RECOVERY_MEMORY_PROFILE" \
               --cell "$RECOVERY_MEMORY_CELL" \
@@ -846,9 +840,10 @@ jobs:
           printf '%s\n' "$status" > "$evidence/driver-invocation.exit"
           if [[ $status != 0 ]]; then
             summary_status=0
+            summary=(summarize "$evidence/campaign" --failed-driver-exit "$status")
+            [[ $RECOVERY_RECEIPT_MODE != scan ]] || summary=(summarize-scan "$evidence/campaign")
             timeout --signal=TERM --kill-after=5s 30s \
-              python3 bench/scale/recovery_memory.py summarize "$evidence/campaign" \
-              --failed-driver-exit "$status" \
+              python3 bench/scale/recovery_memory.py "${summary[@]}" \
               > "$evidence/failure-summary.log" 2>&1 || summary_status=$?
             printf '%s\n' "$summary_status" > "$evidence/failure-summary.exit"
           fi

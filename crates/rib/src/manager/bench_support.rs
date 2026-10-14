@@ -31,6 +31,383 @@ use crate::update::{
     RouteQueryScope,
 };
 
+/// Component-only inputs; no live group ownership or route delivery is enabled.
+#[derive(Clone, Copy, Debug)]
+pub struct RecoveryScanSpec {
+    pub family: &'static str,
+    pub keys: usize,
+    pub records: usize,
+    pub sparse: bool,
+    pub shared: bool,
+}
+
+/// Proof-checked capture result, separate from timing collected by the caller.
+#[derive(Clone, Debug, Default)]
+pub struct RecoveryScanReceipt {
+    pub old_keys: usize,
+    pub additions: usize,
+    pub shape_callbacks: usize,
+    pub proof_keys: usize,
+    pub retained_bytes: usize,
+    pub peak_bytes: usize,
+    pub empty_bytes: usize,
+    pub settled_bytes: usize,
+    pub shared: bool,
+    pub refusal: Option<&'static str>,
+}
+
+fn scan_peer(index: usize) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::from(
+        0xc000_0200_u32 + u32::try_from(index).expect("bounded scan owner index"),
+    ))
+}
+
+fn scan_old(spec: RecoveryScanSpec) -> impl Iterator<Item = usize> {
+    let additions = if spec.sparse {
+        spec.records.min(spec.keys)
+    } else {
+        0
+    };
+    additions..spec.keys + additions
+}
+
+fn scan_common_key(
+    spec: RecoveryScanSpec,
+    n: usize,
+) -> super::update_groups::admitted_recovery::Key {
+    use super::update_groups::admitted_recovery::Key;
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, RouteDistinguisher, VpnPrefix, VpnRouteKey};
+    let v4 = if spec.keys == 1_230_000 {
+        1_000_000
+    } else {
+        spec.keys * 4 / 5
+    };
+    let prefix = if n < v4 {
+        rustbgpd_wire::Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::from(u32::try_from(n).unwrap()),
+            32,
+        ))
+    } else {
+        rustbgpd_wire::Prefix::V6(Ipv6Prefix::new(std::net::Ipv6Addr::from(n as u128), 128))
+    };
+    if spec.family == "full-uc" {
+        Key::Unicast(prefix, 0)
+    } else {
+        Key::Vpn(
+            VpnRouteKey {
+                route_distinguisher: RouteDistinguisher::ZERO,
+                prefix: match prefix {
+                    rustbgpd_wire::Prefix::V4(prefix) => VpnPrefix::V4 {
+                        addr: prefix.addr,
+                        len: prefix.len,
+                    },
+                    rustbgpd_wire::Prefix::V6(prefix) => VpnPrefix::V6 {
+                        addr: prefix.addr,
+                        len: prefix.len,
+                    },
+                },
+            },
+            0,
+        )
+    }
+}
+
+fn scan_evpn_key(n: usize) -> rustbgpd_wire::EvpnRouteKey {
+    use rustbgpd_wire::{
+        EthernetTagId, EvpnIpPrefixValue, EvpnRouteKey, Ipv4Prefix, MacAddress, RouteDistinguisher,
+    };
+    let n = u32::try_from(n).expect("bounded scan key");
+    if n.is_multiple_of(5) {
+        EvpnRouteKey::IpPrefix {
+            rd: RouteDistinguisher::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            prefix: EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)),
+        }
+    } else {
+        let octets = n.to_be_bytes();
+        EvpnRouteKey::MacIp {
+            rd: RouteDistinguisher::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress([2, 0, octets[0], octets[1], octets[2], octets[3]]),
+            ip: None,
+        }
+    }
+}
+
+/// Exercise the production count/reserve/populate/seal paths with a live older
+/// universe. `phase` brackets only target work: fixture setup and proof checking
+/// are outside it. A counted pass is deliberately distinct from a timed pass.
+///
+/// # Panics
+///
+/// Panics for unsupported profiles, out-of-range key/record counts, or a proof
+/// that differs from the authoritative fixture or fails to release its credit.
+pub fn bench_recovery_capture_scan(
+    spec: RecoveryScanSpec,
+    counted: bool,
+    mut phase: impl FnMut(&'static str, bool),
+) -> RecoveryScanReceipt {
+    assert!(matches!(spec.family, "full-uc" | "full-vpn" | "evpn-soak"));
+    assert!((2..=480).contains(&spec.records) && (1..=1_230_000).contains(&spec.keys));
+    let mut receipt = RecoveryScanReceipt::default();
+    let mut callbacks = 0;
+    let mut checkpoint = |force: bool| {
+        if !force {
+            callbacks += 1;
+        }
+    };
+    let result = if counted {
+        run_recovery_scan(spec, &mut receipt, &mut phase, &mut checkpoint)
+    } else {
+        run_recovery_scan(spec, &mut receipt, &mut phase, &mut |_| {})
+    };
+    receipt.shape_callbacks = callbacks;
+    receipt.refusal = result.err();
+    receipt
+}
+
+fn run_recovery_scan(
+    spec: RecoveryScanSpec,
+    receipt: &mut RecoveryScanReceipt,
+    phase: &mut impl FnMut(&'static str, bool),
+    checkpoint: &mut impl FnMut(bool),
+) -> Result<(), &'static str> {
+    if spec.family == "evpn-soak" {
+        run_evpn_recovery_scan(spec, receipt, phase, checkpoint)
+    } else {
+        run_common_recovery_scan(spec, receipt, phase, checkpoint)
+    }
+}
+
+fn run_common_recovery_scan(
+    spec: RecoveryScanSpec,
+    receipt: &mut RecoveryScanReceipt,
+    phase: &mut impl FnMut(&'static str, bool),
+    shape_checkpoint: &mut impl FnMut(bool),
+) -> Result<(), &'static str> {
+    use super::update_groups::admitted_recovery::AdmittedRecovery;
+    let mut ledger = AdmittedRecovery::new();
+    receipt.empty_bytes = ledger.bytes();
+    // Keep the universe alive under a different owner in both arms. Empty
+    // records isolate record-count scaling without a fleet of full proofs.
+    for index in 1..spec.records - 1 {
+        ledger
+            .insert_empty_with_checkpoint(scan_peer(index), &mut |_| {})
+            .map_err(|e| e.cause.as_str())?;
+    }
+    let anchor = scan_peer(0);
+    ledger
+        .begin_capture_with_checkpoint(anchor, &mut |_| {})
+        .map_err(|e| e.cause.as_str())?;
+    let hint = ledger
+        .share_capture_with_checkpoint(
+            anchor,
+            None,
+            spec.keys,
+            (0..spec.keys).map(|n| scan_common_key(spec, n)),
+            (spec.keys, 0),
+            &mut |_| {},
+        )
+        .map_err(|e| e.cause.as_str())?
+        .ok_or("anchor_not_shared")?;
+    for n in 0..spec.keys {
+        ledger
+            .push_capture_with_checkpoint(anchor, scan_common_key(spec, n), &mut |_| {})
+            .map_err(|e| e.cause.as_str())?;
+    }
+    ledger
+        .seal_capture_with_checkpoint(anchor, &mut |_| {})
+        .map_err(|e| e.cause.as_str())?;
+    let peer = scan_peer(spec.records - 1);
+    let mut old = scan_old(spec)
+        .map(|n| scan_common_key(spec, n))
+        .collect::<Vec<_>>();
+    old.sort_unstable();
+    phase("capture", true);
+    let captured = (|| {
+        ledger
+            .begin_capture_with_checkpoint(peer, &mut |_| {})
+            .map_err(|e| e.cause.as_str())?;
+        phase("shape", true);
+        let shape = ledger.capture_shape_with_checkpoint(
+            spec.shared.then_some(hint),
+            old.iter().copied(),
+            shape_checkpoint,
+        );
+        phase("shape", false);
+        (receipt.old_keys, receipt.additions) = shape;
+        if spec.shared {
+            receipt.shared = ledger
+                .share_capture_with_checkpoint(
+                    peer,
+                    Some(hint),
+                    spec.keys,
+                    (0..spec.keys).map(|n| scan_common_key(spec, n)),
+                    shape,
+                    &mut |_| {},
+                )
+                .map_err(|e| e.cause.as_str())?
+                .is_some();
+        }
+        // Flat control skips sharing explicitly; None alone creates a universe.
+        ledger
+            .reserve_capture_with_checkpoint(
+                peer,
+                if receipt.shared { shape.1 } else { shape.0 },
+                &mut |_| {},
+            )
+            .map_err(|e| e.cause.as_str())?;
+        for &key in &old {
+            ledger
+                .push_capture_with_checkpoint(peer, key, &mut |_| {})
+                .map_err(|e| e.cause.as_str())?;
+        }
+        ledger
+            .seal_capture_with_checkpoint(peer, &mut |_| {})
+            .map_err(|e| e.cause.as_str())
+    })();
+    phase("capture", false);
+    receipt.retained_bytes = ledger.bytes();
+    receipt.peak_bytes = ledger.peak_bytes();
+    if captured.is_ok() {
+        let proof = ledger.get(&peer).expect("sealed target proof");
+        receipt.proof_keys = proof.len();
+        assert_eq!(proof.len(), spec.keys);
+        assert!(old.iter().all(|&key| proof.contains(&key.into())));
+        if spec.sparse {
+            assert!(!proof.contains(&scan_common_key(spec, 0).into()));
+        }
+    }
+    for index in 0..spec.records {
+        ledger.remove_with_checkpoint(&scan_peer(index), &mut |_| {});
+    }
+    receipt.settled_bytes = ledger.bytes();
+    assert_eq!(receipt.settled_bytes, receipt.empty_bytes);
+    captured
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the component fixture keeps untimed setup, measured capture and proof settlement in one ordered path"
+)]
+fn run_evpn_recovery_scan(
+    spec: RecoveryScanSpec,
+    receipt: &mut RecoveryScanReceipt,
+    phase: &mut impl FnMut(&'static str, bool),
+    shape_checkpoint: &mut impl FnMut(bool),
+) -> Result<(), &'static str> {
+    use super::update_groups::recovery_provenance::{EvpnRecoveryProvenance, PeerSession};
+    let mut ledger = EvpnRecoveryProvenance::new();
+    receipt.empty_bytes = ledger.daemon_usage().retained;
+    let owner = |index| PeerSession {
+        peer: scan_peer(index),
+        session_id: 1,
+    };
+    for index in 0..spec.records {
+        ledger
+            .register(owner(index))
+            .map_err(|e| e.cause.as_str())?;
+    }
+    let anchor = ledger.primary_handle(owner(0)).unwrap();
+    ledger
+        .finish_recovery(anchor)
+        .map_err(|e| e.cause.as_str())?;
+    ledger.begin_capture(anchor).map_err(|e| e.cause.as_str())?;
+    let hint = ledger
+        .share_capture(
+            anchor,
+            None,
+            spec.keys,
+            (0..spec.keys).map(scan_evpn_key),
+            (spec.keys, 0),
+            &mut |_| {},
+        )
+        .map_err(|e| e.cause.as_str())?
+        .ok_or("anchor_not_shared")?;
+    for n in 0..spec.keys {
+        ledger
+            .capture_key_with_checkpoint(anchor, scan_evpn_key(n), &mut |_| {})
+            .map_err(|e| e.cause.as_str())?;
+    }
+    ledger
+        .seal_capture_with_checkpoint(anchor, &mut |_| {})
+        .map_err(|e| e.cause.as_str())?;
+    let target = ledger.primary_handle(owner(spec.records - 1)).unwrap();
+    let mut old = scan_old(spec).map(scan_evpn_key).collect::<Vec<_>>();
+    old.sort_unstable();
+    phase("capture", true);
+    let captured = (|| {
+        ledger
+            .finish_recovery(target)
+            .map_err(|e| e.cause.as_str())?;
+        ledger.begin_capture(target).map_err(|e| e.cause.as_str())?;
+        phase("shape", true);
+        let shape = ledger.capture_shape(
+            spec.shared.then_some(hint),
+            old.iter().copied(),
+            shape_checkpoint,
+        );
+        phase("shape", false);
+        let shape = shape.map_err(|e| e.cause.as_str())?;
+        (receipt.old_keys, receipt.additions) = shape;
+        if spec.shared {
+            receipt.shared = ledger
+                .share_capture(
+                    target,
+                    Some(hint),
+                    spec.keys,
+                    (0..spec.keys).map(scan_evpn_key),
+                    shape,
+                    &mut |_| {},
+                )
+                .map_err(|e| e.cause.as_str())?
+                .is_some();
+        }
+        assert!(
+            ledger
+                .reserve_capture(
+                    target,
+                    if receipt.shared { shape.1 } else { shape.0 },
+                    &mut |_| {}
+                )
+                .map_err(|e| e.cause.as_str())?
+        );
+        for &key in &old {
+            assert!(
+                ledger
+                    .capture_key_with_checkpoint(target, key, &mut |_| {})
+                    .map_err(|e| e.cause.as_str())?
+            );
+        }
+        assert!(
+            ledger
+                .seal_capture_with_checkpoint(target, &mut |_| {})
+                .map_err(|e| e.cause.as_str())?
+        );
+        Ok(())
+    })();
+    phase("capture", false);
+    receipt.retained_bytes = ledger.daemon_usage().retained;
+    receipt.peak_bytes = ledger.daemon_usage().peak;
+    if captured.is_ok() {
+        let proof = ledger.proof(target).unwrap().expect("sealed target proof");
+        receipt.proof_keys = proof.len();
+        assert_eq!(proof.len(), spec.keys);
+        assert!(old.iter().all(|key| proof.contains(key)));
+        if spec.sparse {
+            assert!(!proof.contains(&scan_evpn_key(0)));
+        }
+    }
+    for index in 0..spec.records {
+        if let Some(handle) = ledger.primary_handle(owner(index)) {
+            assert!(ledger.retire(handle));
+        }
+    }
+    receipt.settled_bytes = ledger.daemon_usage().retained;
+    assert_eq!(receipt.settled_bytes, receipt.empty_bytes);
+    captured
+}
+
 /// Structural receipt for the production prefix-to-announcing-peers index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnicastPrefixPeersMemoryReceipt {

@@ -98,6 +98,20 @@ class ScaleSplitContractTests(unittest.TestCase):
                 self.mutate(original, replacement)
         self.mutate("  cancel-in-progress: true\n", "  cancel-in-progress: false\n")
 
+    def test_component_scan_mode_is_explicit_and_preserves_memory_matrix(self) -> None:
+        for old, new in (
+            ("        default: memory\n", "        default: scan\n"),
+            ("        options: [memory, scan]\n", "        options: [scan]\n"),
+            ("        type: choice\n", "        type: boolean\n"),
+            ("      recovery_receipt_mode:\n", "      ignored_mode:\n"),
+            ("inputs.recovery_receipt_mode == 'scan'", "github.event_name == 'workflow_dispatch'"),
+            ('{"profile":"evpn-soak","cell":"capture-scan"}', '{"profile":"full-uc","cell":"capture-scan"}'),
+            ('{"profile":"full-vpn","cell":"unsynchronized-dirty"}', '{"profile":"full-vpn","cell":"peer-down"}'),
+            ('--mode "$RECOVERY_RECEIPT_MODE"', '--mode memory'),
+        ):
+            with self.subTest(old=old, replacement=new):
+                self.mutate(old, new)
+
     def test_recovery_memory_receipt_requires_an_actual_toolchain_input(self) -> None:
         tail = "      - name: Check recovery receipt negative fixtures\n"
         original = "        with:\n          toolchain: stable\n      - uses: ./.github/actions/install-protobuf\n" + tail

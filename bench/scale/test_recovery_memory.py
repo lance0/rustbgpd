@@ -865,6 +865,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             GITHUB_SHA="a" * 40,
             RECOVERY_MEMORY_DRIVER_DEADLINE=str(time.monotonic() + (-1 if expired else 6600)),
             RECOVERY_MEMORY_PHASE="qualified",
+            RECOVERY_RECEIPT_MODE="memory",
             RECOVERY_MEMORY_PROFILE="full-vpn",
             RECOVERY_MEMORY_CELL="widen",
         )
@@ -1208,6 +1209,124 @@ class RecoveryReceiptTests(unittest.TestCase):
         path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
         with self.assertRaisesRegex(receipt.InvalidReceipt, "identity or membership changed"):
             receipt.summarize(root)
+
+
+class RecoveryScanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def rows(self, profile="evpn-soak"):
+        keys = receipt.SCAN_PROFILES[profile]
+        return [dict(schema=receipt.SCAN_SCHEMA, profile=profile, keys=keys, records=records,
+                     layout=layout, arm=arm, leg=leg, measured=True, old_keys=keys,
+                     additions=records if layout == "older-sparse" and arm == "shared" else 0,
+                     shape_callbacks=keys * (keys.bit_length() + 1) if arm == "shared" else keys,
+                     comparisons=keys * keys.bit_length() if arm == "shared" else 0,
+                     proof_keys=keys, shared=arm == "shared", retained_bytes=8192,
+                     peak_bytes=9000, empty_bytes=56, settled_bytes=56, refusal=None,
+                     phases={"shape": {"wall_ns": 1000, "cpu_ticks": 1},
+                             "capture": {"wall_ns": 2000, "cpu_ticks": 2}})
+                for records in (2, 64, 480) for layout in ("dense", "older-sparse")
+                for leg, arm in enumerate(("flat", "shared", "shared", "flat"))]
+
+    def log(self, rows):
+        profile = rows[0]["profile"]
+        lines = ["recovery_identity " + json.dumps({"pid": 123, "start_ticks": 456}),
+                 "recovery_scan_environment " + json.dumps({"schema": receipt.SCAN_SCHEMA,
+                    "cpu_ticks_per_second": 100,
+                    "phase_passes": "independent shape and capture invocations",
+                    "credit_scope": "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS"})]
+        lines += ["recovery_scan " + json.dumps(row) for row in rows]
+        lines += ["recovery_scan_complete " + json.dumps({"profile": profile, "cells": 6, "legs": 24})]
+        path = self.root / "scan.log"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def test_scan_profiles_and_same_runtime_paired_ratios(self):
+        for profile in receipt.SCAN_PROFILES:
+            result = receipt.validate_scan_log(self.log(self.rows(profile)), profile)
+            self.assertEqual(24, len(result["samples"]))
+            self.assertEqual(6, len(result["comparisons"]))
+            self.assertTrue(all(row["eligible"] for row in result["comparisons"]))
+            self.assertEqual(1.0, result["comparisons"][0]["shared_over_flat"]["shape"]["wall_ns"])
+
+    def test_scan_rejects_false_proof_work_and_measurement_claims(self):
+        cases = [(1, "old_keys", 0), (1, "proof_keys", 1), (1, "comparisons", 0),
+                 (0, "comparisons", 1), (0, "shared", True), (1, "shared", False),
+                 (1, "shape_callbacks", 0), (1, "measured", False), (1, "settled_bytes", 57),
+                 (5, "additions", 0), (0, "phases", {}), (1, "leg", 0),
+                 (1, "refusal", "unrecognized")]
+        for index, field, value in cases:
+            with self.subTest(field=field, value=value):
+                rows = self.rows()
+                rows[index][field] = value
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        with self.assertRaises(receipt.InvalidReceipt):
+            receipt.validate_scan_log(self.log(self.rows()[:-1]), "evpn-soak")
+
+    def test_scan_refusal_is_retained_without_a_ratio(self):
+        rows = self.rows()
+        rows[1].update(refusal="peer_limit", proof_keys=0, phases={})
+        result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        self.assertEqual("peer_limit", result["samples"][1]["refusal"])
+        self.assertFalse(result["comparisons"][0]["eligible"])
+        self.assertIsNone(result["comparisons"][0]["shared_over_flat"])
+
+    def test_scan_zero_tick_denominator_has_no_cpu_ratio(self):
+        rows = self.rows()
+        for row in rows:
+            row["phases"]["shape"]["cpu_ticks"] = 0
+        result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        self.assertIsNone(result["comparisons"][0]["shared_over_flat"]["shape"]["cpu_ticks"])
+
+    def test_independent_shape_can_exceed_capture_without_fake_tick_minimum(self):
+        rows = self.rows()
+        for row in rows:
+            row["phases"]["shape"].update(wall_ns=3000, cpu_ticks=1)
+            row["phases"]["capture"].update(wall_ns=2000, cpu_ticks=0)
+        result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        self.assertTrue(all(row["eligible"] for row in result["comparisons"]))
+        self.assertIsNone(result["comparisons"][0]["shared_over_flat"]["capture"]["cpu_ticks"])
+
+    def test_memory_entrypoint_derivation_is_exact_and_verifiable(self):
+        path = self.root / "frozen-instrumentation/bench/scale/rrharness/src/main.rs"
+        path.parent.mkdir(parents=True)
+        original = "// fixture\n" + "".join(receipt.SCAN_DISPATCH) + "// memory path\n"
+        path.write_text(original)
+        metadata = self.root / "memory-entrypoint-derivation.json"
+        receipt.normalize_memory_entrypoint(path, metadata)
+        digest = receipt.hashlib.sha256(metadata.read_bytes()).hexdigest()
+        receipt.validate_memory_derivation(self.root, digest)
+        self.assertEqual("// fixture\n// memory path\n", path.read_text())
+        path.write_text(path.read_text() + "// unrelated removal\n")
+        with self.assertRaises(receipt.InvalidReceipt):
+            receipt.validate_memory_derivation(self.root, digest)
+
+    def test_memory_entrypoint_missing_duplicate_or_mutated_anchor_fails_closed(self):
+        original = "".join(receipt.SCAN_DISPATCH)
+        for block in receipt.SCAN_DISPATCH:
+            for broken in (original.replace(block, ""), original + block,
+                           original.replace(block, block.replace("recovery_scan", "wrong_scan"))):
+                with self.subTest(block=block, broken=broken):
+                    path = self.root / "main.rs"
+                    path.write_text(broken)
+                    with self.assertRaises(receipt.InvalidReceipt):
+                        receipt.normalize_memory_entrypoint(path, self.root / "derivation.json")
+                    self.assertEqual(broken, path.read_text())
+
+    def test_live_memory_entrypoint_derives_without_other_source_changes(self):
+        source = Path(__file__).parent / "rrharness/src/main.rs"
+        path = self.root / "main.rs"
+        original = source.read_text()
+        path.write_text(original)
+        receipt.normalize_memory_entrypoint(path, self.root / "derivation.json")
+        expected = original
+        for block in receipt.SCAN_DISPATCH:
+            expected = expected.replace(block, "", 1)
+        self.assertEqual(expected, path.read_text())
 
 
 if __name__ == "__main__":
