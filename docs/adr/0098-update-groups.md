@@ -118,6 +118,15 @@ up, with a key built only from RIB-staging inputs.
   healing via the dirty resync — vs the per-peer path's
   commit-after-send discipline. Three lifecycle tests pin the per-peer
   discipline unchanged.
+
+  > Amended 2026-10-14: intended state no longer leaks into the unicast
+  > advertised listing while a member is resynchronizing. A dirty member that
+  > retains a regroup baseline is listed from that baseline. Without one, the
+  > listing returns `FAILED_PRECONDITION` until the resync is admitted. The
+  > group view does not record which entries such a member missed, so listing
+  > it would report undelivered routes as advertised. Unicast export explain
+  > applies the same rule. See the
+  > [API reference](../reference/api.md#explain-one-advertised-route-decision).
 - **Counter semantics.** Per-peer export-policy counters are replayed
   from group verdicts as aggregated integer adds rather than recorded
   per (prefix × peer); joins and refreshes reconstruct from per-entry

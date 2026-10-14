@@ -107,6 +107,15 @@ not add per-member route bodies or promise wire-acknowledged grouped query state
 only the bounded admitted-prefix overlay changes at the reserved member
 commit/enqueue seam.
 
+> Amended 2026-10-14: a grouped member that is mid-resync no longer lists
+> intended state. It lists its regroup baseline, or returns
+> `FAILED_PRECONDITION` when it has none (the
+> [ADR-0098 amendment](0098-update-groups.md#as-built-deviations-from-the-design-report)
+> gives the reason). A limited member's baseline holds only prefixes it already
+> admitted. Unicast export explain checks the outbound limit against that same
+> admitted set, so in this window the listing and the limit gate agree. See the
+> [API reference](../reference/api.md#explain-one-advertised-route-decision).
+
 ### State without update-group fragmentation
 
 For an ungrouped limited peer, its private `AdjRibOut` prefix index is the
