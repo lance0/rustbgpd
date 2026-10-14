@@ -956,10 +956,12 @@ fn outbound_resync_check(identity: &str, n: &crate::proto::NeighborState) -> Opt
             ),
         )
     } else if n.outbound_dirty_seconds.unwrap_or(0) >= OUTBOUND_RESYNC_WARN_SECS {
+        // Metric `peer` labels carry the bare IP, never the `%interface` scope.
+        let label = n.config.as_ref().map_or(identity, |c| c.address.as_str());
         (
             CheckStatus::Warn,
             format!(
-                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{identity}\"}} and the peer's receive path"
+                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{label}\"}} and the peer's receive path"
             ),
         )
     } else {
@@ -6224,6 +6226,25 @@ paths = ["x"]
             long.detail.contains("pending for 00:01:00"),
             "{}",
             long.detail
+        );
+
+        // A link-local neighbor keeps its scope in the name and description,
+        // but the metric selector must use the bare `peer` label value.
+        let mut scoped = n.clone();
+        scoped.config = Some(crate::proto::NeighborConfig {
+            address: "fe80::1".to_string(),
+            interface: "eth0".to_string(),
+            ..Default::default()
+        });
+        let scoped = outbound_resync_check("fe80::1%eth0", &scoped).unwrap();
+        assert_eq!(scoped.name, "peer.fe80::1%eth0.outbound_resync");
+        assert!(scoped.detail.starts_with("peer fe80::1%eth0 "));
+        assert!(
+            scoped
+                .detail
+                .contains("bgp_peer_outbound_queue_depth{peer=\"fe80::1\"}"),
+            "{}",
+            scoped.detail
         );
 
         n.outbound_dirty_seconds = Some(1);
