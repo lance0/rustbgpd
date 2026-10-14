@@ -52,7 +52,11 @@ fn register_with_rtc(
     sender: mpsc::Sender<OutboundRouteUpdate>,
     rtc: bool,
 ) {
-    let mut sendable_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)];
+    let mut sendable_families = vec![
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::L2Vpn, Safi::Evpn),
+    ];
     if rtc {
         sendable_families.push((Afi::Ipv4, Safi::RtConstrain));
     }
@@ -404,8 +408,8 @@ fn exact_export_overlay_filters_admitted_views_but_changed_candidates_are_reprob
 }
 
 #[test]
-fn first_full_capture_precedes_staging_and_survives_rtc_change_and_repeated_regroup() {
-    let (mut manager, member, gid, _output) = fixture_with_rtc(true);
+fn first_full_capture_precedes_staging_and_survives_stale_membership_and_repeated_regroup() {
+    let (mut manager, member, gid, _output) = fixture();
     let old = received(100);
     stage(&mut manager, gid, &old);
     manager.peer_rt_membership.insert(member, membership(100));
@@ -446,31 +450,134 @@ fn first_full_capture_precedes_staging_and_survives_rtc_change_and_repeated_regr
 }
 
 #[test]
-fn shared_capture_with_negotiated_rtc_and_missing_membership_is_strict_empty() {
-    let (mut manager, member, gid, _output) = fixture_with_rtc(true);
+fn negotiated_rtc_excludes_shared_ownership_and_keeps_private_missing_membership_strict_empty() {
+    let (mut manager, member, gid, mut output) = fixture_with_rtc(true);
     assert!(manager.peer_sendable_families[&member].contains(&(Afi::Ipv4, Safi::RtConstrain)));
+    assert_eq!(manager.grouped_member_of(member), Some(gid));
+    assert_eq!(manager.vpn_grouped_member_of(member), Some(gid));
+    assert!(manager.group_ribs[&gid].owns_evpn);
+    assert!(manager.evpn_grouped_member_of(member).is_none());
+    assert!(manager.evpn_recovery_handle(member).is_none());
     manager.peer_rt_membership.remove(&member);
     let old = received(100);
-    stage(&mut manager, gid, &old);
-    assert_eq!(manager.group_ribs[&gid].table.evpn_len(), 1);
+    assert!(stage(&mut manager, gid, &old).deltas.is_empty());
+    assert_eq!(manager.group_ribs[&gid].table.evpn_len(), 0);
     assert!(!manager.peer_rt_membership.contains_key(&member));
-    assert!(manager.capture_shared_evpn_admitted(member));
-    let owner = manager.evpn_recovery_handle(member).unwrap();
-    assert!(!manager.evpn_recovery.is_dormant(owner));
+    assert!(!manager.capture_shared_evpn_admitted(member));
     assert_eq!(
-        manager.evpn_recovery.proof_keys(owner).unwrap(),
-        Some([].to_vec())
+        manager.member_rt_filter(member).unwrap().entries,
+        Vec::<rustbgpd_wire::RtcNlri>::new()
     );
+    let keys = HashSet::from([old.key()]);
+    manager.distribute_evpn_keys_to_peer(member, &keys, &mut || {});
+    assert!(
+        output.try_recv().is_err(),
+        "missing negotiated membership admits no EVPN route"
+    );
+    assert_eq!(manager.adj_ribs_out[&member].evpn_len(), 0);
+    manager.set_rt_membership(member, Some(membership(100)));
+    let delivered = output.try_recv().expect("matching RT reaches private EVPN");
+    assert_eq!(delivered.evpn_announce.len(), 1);
+    assert!(evpn_routes_equal(&delivered.evpn_announce[0], &old));
+    assert_eq!(manager.adj_ribs_out[&member].evpn_len(), 1);
+    assert!(manager.evpn_recovery_handle(member).is_none());
+    manager.set_rt_membership(member, Some(RtcMembership::default()));
+    let withdrawn = output
+        .try_recv()
+        .expect("removing interest withdraws private EVPN");
+    assert_eq!(withdrawn.evpn_withdraw, vec![old.key()]);
+    assert_eq!(manager.adj_ribs_out[&member].evpn_len(), 0);
+    assert!(manager.evpn_grouped_member_of(member).is_none());
+    assert_eq!(manager.vpn_grouped_member_of(member), Some(gid));
+    assert!(
+        output.try_recv().is_err(),
+        "RTC correction emits only the private EVPN delta"
+    );
+}
+
+fn assert_negotiated_rtc_evpn_stays_private(manager: &mut RibManager, member: IpAddr, gid: usize) {
+    assert!(manager.group_ribs[&gid].rtc_negotiated());
+    assert!(manager.group_ribs[&gid].owns_evpn);
+    assert_eq!(manager.grouped_member_of(member), Some(gid));
+    assert_eq!(manager.vpn_grouped_member_of(member), Some(gid));
+    assert!(manager.evpn_grouped_member_of(member).is_none());
+    assert!(manager.register_evpn_recovery(member, true));
+    assert!(manager.evpn_recovery_handle(member).is_none());
+    assert!(stage(manager, gid, &received(100)).deltas.is_empty());
+    assert_eq!(manager.group_ribs[&gid].table.evpn_len(), 0);
+    assert!(!manager.capture_shared_evpn_admitted(member));
+}
+
+#[test]
+fn negotiated_rtc_exclusion_survives_registration_replay_and_regroup() {
+    let (mut manager, member, gid, mut output) = fixture_with_rtc(true);
+    assert_negotiated_rtc_evpn_stays_private(&mut manager, member, gid);
+    // A second real registration retains the original group during replay,
+    // so a fresh disabled constructor cannot make the replay check vacuous.
+    let second: IpAddr = Ipv4Addr::new(192, 0, 2, 31).into();
+    let (sender, mut second_output) = mpsc::channel(8);
+    register_with_rtc(&mut manager, second, sender, true);
+    assert_eq!(manager.grouped_member_of(second), Some(gid));
+    let initial = second_output
+        .try_recv()
+        .expect("second registration admits its initial feed");
+    assert!(initial.evpn_announce.is_empty());
+    while let Ok(update) = second_output.try_recv() {
+        assert!(update.evpn_announce.is_empty());
+    }
+    assert_negotiated_rtc_evpn_stays_private(&mut manager, second, gid);
+
+    let sender = manager.outbound_peers[&member].clone();
+    register_with_rtc(&mut manager, member, sender, true);
+    assert_eq!(manager.grouped_member_of(member), Some(gid));
+    assert_negotiated_rtc_evpn_stays_private(&mut manager, member, gid);
+    let replay = output
+        .try_recv()
+        .expect("same-connection registration admits its replay");
+    assert!(replay.evpn_announce.is_empty());
+    while let Ok(update) = output.try_recv() {
+        assert!(update.evpn_announce.is_empty());
+    }
+
+    manager.peer_interpret_rfc1997.remove(&member);
+    manager.recompute_update_group(member);
+    let moved = manager.grouped_member_of(member).unwrap();
+    assert_ne!(moved, gid);
+    assert!(!manager.group_ribs[&moved].owns_evpn);
+    manager.group_ribs.get_mut(&moved).unwrap().owns_evpn = true;
+    assert_negotiated_rtc_evpn_stays_private(&mut manager, member, moved);
+    manager.peer_interpret_rfc1997.insert(member);
+    manager.recompute_update_group(member);
+    assert_eq!(manager.grouped_member_of(member), Some(gid));
+    assert_negotiated_rtc_evpn_stays_private(&mut manager, member, gid);
+    assert!(manager.evpn_recovery_handle(second).is_none());
 }
 
 #[test]
 fn shared_capture_without_negotiated_rtc_ignores_empty_and_stale_membership() {
     for stale in [RtcMembership::default(), membership(200)] {
-        let (mut manager, member, gid, _output) = fixture();
+        let (mut manager, member, gid, mut output) = fixture();
         assert!(!manager.peer_sendable_families[&member].contains(&(Afi::Ipv4, Safi::RtConstrain)));
+        assert_eq!(manager.vpn_grouped_member_of(member), Some(gid));
+        assert_eq!(manager.evpn_grouped_member_of(member), Some(gid));
         let old = received(100);
         stage(&mut manager, gid, &old);
         manager.peer_rt_membership.insert(member, stale);
+        assert!(manager.member_rt_filter(member).is_none());
+        // The existing private tail also remains unfiltered for a peer that
+        // did not negotiate RTC, regardless of a stale membership map row.
+        let keys = HashSet::from([old.key()]);
+        manager.distribute_evpn_keys_to_peer(member, &keys, &mut || {});
+        let delivered = output
+            .try_recv()
+            .expect("non-RTC private tail stays unfiltered");
+        assert_eq!(delivered.evpn_announce.len(), 1);
+        assert!(evpn_routes_equal(&delivered.evpn_announce[0], &old));
+        manager
+            .adj_ribs_out
+            .get_mut(&member)
+            .unwrap()
+            .remove_evpn(&old.key());
         assert!(manager.capture_shared_evpn_admitted(member));
         let owner = manager.evpn_recovery_handle(member).unwrap();
         assert!(!manager.evpn_recovery.is_dormant(owner));

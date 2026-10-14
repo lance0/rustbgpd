@@ -27,6 +27,7 @@ use tonic::{Request, Response, Status};
 
 use crate::audit::{apply_evpn_runtime_summary, set_request_summary};
 use crate::proto;
+use crate::route_distinguisher::format_rd;
 use crate::server::{AccessMode, read_only_rejection};
 
 /// Read-side hook for per-instance local-MAC origination counts.
@@ -1001,7 +1002,7 @@ fn evpn_instance_to_proto(
 ) -> proto::EvpnInstanceState {
     let mut state = proto::EvpnInstanceState {
         vni: inst.id.as_u32(),
-        rd: inst.rd.to_string(),
+        rd: format_rd(inst.rd),
         route_targets: inst.route_targets.iter().map(ToString::to_string).collect(),
         local_vtep_ip: inst.local_vtep_ip.to_string(),
         bridge: inst.bridge.clone().unwrap_or_default(),
@@ -1200,7 +1201,7 @@ fn ip_vrf_to_proto(
     let mut state = proto::IpVrfState {
         name: vrf.name.clone(),
         vni: vrf.id.as_u32(),
-        rd: vrf.rd.to_string(),
+        rd: format_rd(vrf.rd),
         route_targets: vrf.route_targets.iter().map(ToString::to_string).collect(),
         local_vtep_ip: vrf.local_vtep_ip.to_string(),
         router_mac: vrf.router_mac.to_string(),

@@ -2160,11 +2160,9 @@ with `prefix_filter_length`, as in unicast listings. Host bits are normalized.
 match is exact. An empty prefix selects all prefixes, requires length 0,
 and makes `longer_prefixes` irrelevant.
 
-VPN also accepts an exact typed `rd_filter`. VPN, EVPN Best and EVPN peer
-pages accept structured RD text or `0x` plus 16 hexadecimal digits for the
-exact eight wire bytes. Use raw bytes to distinguish Type 0 and Type 2
-encodings with the same small ASN. This does not change legacy unpaged or
-explain RD parsing or the displayed RD format.
+VPN also accepts an exact typed `rd_filter`, using the same
+[lossless RD grammar](#route-distinguisher-identity) as legacy EVPN reads,
+peer pages, explain, event filters and injection.
 
 RTC accepts `ADDRESS_FAMILY_UNSPECIFIED` (0) or
 `ADDRESS_FAMILY_IPV4_RT_CONSTRAIN` (12). It uses native membership fields
@@ -2221,6 +2219,26 @@ Existing unpaged list commands keep their JSON arrays. `--page-token`
 continues the selected page; `--page-size` aliases `--limit`. New per-peer
 views and filtered queries default to 100 rows and never request an old
 whole-table RPC.
+
+### Route Distinguisher identity
+
+Every RD-typed API request accepts structured text (`65000:100` or
+`192.0.2.1:100`) or `0x`/`0X` followed by exactly 16 hexadecimal digits
+for the complete eight wire bytes. This includes legacy EVPN lists,
+paged VPN and EVPN reads, export explain, exact EVPN selectors, event
+filters, and EVPN injection or withdrawal. Empty optional filters select
+any RD; an empty VPN export-explain RD still selects unicast. An exact
+selector or injection requires a nonempty RD.
+
+API and CLI output renders a Type 2 RD whose ASN is at most 65535 in
+canonical lowercase raw hexadecimal: `0x00020000fde80064` is distinct from
+the Type 0 RD `65000:100`. Other RD display forms remain unchanged. Feed
+the returned RD text into a filter or selector to retain the same identity.
+The published wire crate's text parsing and display behavior are unchanged.
+
+Existing persisted event labels and payloads keep their historical spelling;
+they are not migrated or made newly distinguishable by this correction.
+New EVPN event envelopes and payloads use the same lossless spelling.
 
 ### List EVPN routes
 

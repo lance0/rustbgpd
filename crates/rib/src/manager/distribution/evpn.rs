@@ -880,7 +880,11 @@ impl RibManager {
             EvpnGroupDelta, EvpnGroupEntry, EvpnGroupInput, EvpnGroupStageOutput,
         };
         let mut out = EvpnGroupStageOutput::default();
-        let Some(group) = self.group_ribs.get(&gid).filter(|group| group.owns_evpn) else {
+        let Some(group) = self
+            .group_ribs
+            .get(&gid)
+            .filter(|group| group.owns_evpn_routes())
+        else {
             return out;
         };
         // Production owns_evpn is false. Activation additionally needs the

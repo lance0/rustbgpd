@@ -4965,9 +4965,11 @@ impl RibManager {
             // resolves to strict empty — the `rtc_export_filter` rule.
             let old = old.unwrap_or_default();
             self.apply_rtc_membership_delta_to_grouped_member(peer, gid, &old, &new);
-            // EVPN is never group-staged, so the VPN delta walk does not
-            // cover it: restage the peer's EVPN view under the new Φ. A
-            // dirty peer's pending resync already does. While EVPN
+            // Negotiated RTC excludes EVPN group ownership even when UC/VPN
+            // remain grouped, so this VPN delta walk does not cover EVPN:
+            // restage its private view under the new Φ. Future grouped RTC
+            // needs OLD Φ capture before publication and separate qualification.
+            // A dirty peer's pending resync already does. While EVPN
             // selection is deferred nothing EVPN has been selected or
             // advertised (the startup gate is one-shot and the only Loc-RIB
             // EVPN writer returns early), and release distributes every key

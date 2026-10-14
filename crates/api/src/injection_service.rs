@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::proto;
+use crate::route_distinguisher::parse_rd;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{
@@ -895,55 +896,6 @@ fn flowspec_action_to_ec(
     Ok(Some(ExtendedCommunity::from_flowspec_action(&wire_action)))
 }
 
-/// Parse an RFC 4364 Route Distinguisher from its display form:
-///   Type 0: `"<asn-u16>:<assigned-u32>"` — e.g. "65000:100"
-///   Type 1: `"<ipv4>:<assigned-u16>"`    — e.g. "10.0.0.1:100"
-///   Type 2: `"<asn-u32>:<assigned-u16>"` — e.g. "4200000000:100"
-/// Heuristic: IPv4 form has 4 dot-separated octets before the colon;
-/// numeric > 65535 signals type 2; otherwise type 0.
-fn parse_rd(s: &str) -> Result<RouteDistinguisher, Status> {
-    let (admin, assigned) = s.split_once(':').ok_or_else(|| {
-        Status::invalid_argument(format!("RD must be \"admin:assigned\"; got {s:?}"))
-    })?;
-    if admin.matches('.').count() == 3 {
-        let ip: Ipv4Addr = admin
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("RD ipv4 admin: {e}")))?;
-        let val: u16 = assigned
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("RD type 1 assigned: {e}")))?;
-        let o = ip.octets();
-        let v = val.to_be_bytes();
-        return Ok(RouteDistinguisher::new([
-            0x00, 0x01, o[0], o[1], o[2], o[3], v[0], v[1],
-        ]));
-    }
-    let admin_num: u64 = admin
-        .parse()
-        .map_err(|e| Status::invalid_argument(format!("RD admin: {e}")))?;
-    if let Ok(admin16) = u16::try_from(admin_num) {
-        let val: u32 = assigned
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("RD type 0 assigned: {e}")))?;
-        let a = admin16.to_be_bytes();
-        let v = val.to_be_bytes();
-        Ok(RouteDistinguisher::new([
-            0x00, 0x00, a[0], a[1], v[0], v[1], v[2], v[3],
-        ]))
-    } else {
-        let admin32 = u32::try_from(admin_num)
-            .map_err(|_| Status::invalid_argument("RD type 2 admin ASN exceeds 32 bits"))?;
-        let val: u16 = assigned
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("RD type 2 assigned: {e}")))?;
-        let a = admin32.to_be_bytes();
-        let v = val.to_be_bytes();
-        Ok(RouteDistinguisher::new([
-            0x00, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
-        ]))
-    }
-}
-
 /// Parse a request MAC through the grammar shared with the configuration
 /// loader, reporting a refusal as `INVALID_ARGUMENT` with the offending
 /// input.
@@ -1764,6 +1716,53 @@ mod tests {
         assert!(parse_mac("2:0:0:0:0:1").is_err());
         assert!(parse_mac("+2:+0:+0:+0:+0:+1").is_err());
         assert!(parse_mac("00f:00:00:00:00:01").is_err());
+    }
+
+    #[tokio::test]
+    async fn raw_rd_round_trips_add_and_delete_evpn_route() {
+        let rd = RouteDistinguisher([0, 2, 0, 0, 0xfd, 0xe8, 0, 100]);
+        let (tx, mut rx) = mpsc::channel(2);
+        let service = InjectionService::new(tx, AccessMode::ReadWrite);
+        let actor = tokio::spawn(async move {
+            let Some(RibUpdate::InjectEvpn { route, reply }) = rx.recv().await else {
+                panic!("expected injection");
+            };
+            let key = route.key();
+            assert_eq!(rustbgpd_rib::event::evpn_key_rd(&key), Some(rd));
+            let output = crate::rib_service::evpn_route_to_proto(&route);
+            assert_eq!(output.rd, "0x00020000fde80064");
+            reply.send(Ok(())).unwrap();
+            let Some(RibUpdate::WithdrawEvpn {
+                key: removed,
+                reply,
+            }) = rx.recv().await
+            else {
+                panic!("expected withdrawal");
+            };
+            assert_eq!(removed, key);
+            reply.send(Ok(())).unwrap();
+        });
+        service
+            .add_evpn_route(Request::new(proto::AddEvpnRouteRequest {
+                route_type: 2,
+                rd: "0X00020000FDE80064".into(),
+                mac: "02:00:00:00:00:01".into(),
+                label: 100,
+                next_hop: "192.0.2.1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        service
+            .delete_evpn_route(Request::new(proto::DeleteEvpnRouteRequest {
+                route_type: 2,
+                rd: crate::route_distinguisher::format_rd(rd),
+                mac: "02:00:00:00:00:01".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        actor.await.unwrap();
     }
 
     #[tokio::test]

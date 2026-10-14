@@ -2388,7 +2388,7 @@ enum EvpnAction {
 
 #[derive(Args)]
 struct EvpnExplainArgs {
-    /// Exact Route Distinguisher, "asn:value" or "ip:value".
+    /// Exact Route Distinguisher: text or 0x plus 16 raw hex digits.
     #[arg(long, value_parser = commands::evpn::parse_rd)]
     rd: String,
     /// Look up this accepted source; absence does not explain import rejection.
@@ -9055,6 +9055,25 @@ printf '%s\n' "${COMPREPLY[@]}"
                     ..Default::default()
                 }
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn evpn_explain_forwards_an_unambiguous_raw_rd() {
+        let server = spawn_mock_server(None).await;
+        for rd in ["0x00020000fde80064", "0X00020000FDE80064"] {
+            let args = format!(
+                "rbgp --addr {} --json evpn explain smet --rd {rd} --source * --group * --originator-ip 192.0.2.9",
+                server.addr
+            );
+            run(
+                Cli::try_parse_from(args.split_whitespace()).unwrap(),
+                BINARY_NAME,
+            )
+            .await
+            .unwrap();
+            let request = server.state.last_explain_evpn.lock().await.clone().unwrap();
+            assert_eq!(request.key.unwrap().rd, "0x00020000fde80064");
         }
     }
 
