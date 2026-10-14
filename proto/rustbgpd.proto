@@ -2176,7 +2176,10 @@ service RibService {
   // Live route deltas stream through EventService.WatchEvents
   // (EVENT_CATEGORY_ROUTE); durable replay through SubscribeFromEvent.
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
-  rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
+  // Deprecated whole-table best view; use bounded ListBestEvpnRoutes.
+  rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse) {
+    option deprecated = true;
+  }
   // Accepted post-policy EVPN Adj-RIB-In for one source neighbor.
   rpc ListReceivedEvpnRoutes(ListPeerEvpnRoutesRequest) returns (ListPeerEvpnRoutesResponse);
   // Committed EVPN Adj-RIB-Out for one destination neighbor. Each row's
@@ -2185,17 +2188,26 @@ service RibService {
   // Exact typed EVPN selection and export diagnostics; outside narrow v1.
   rpc ExplainEvpnRoute(ExplainEvpnRouteRequest) returns (ExplainEvpnRouteResponse);
   rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
-  rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
-  rpc ListLabeledRoutes(ListLabeledRoutesRequest) returns (ListLabeledRoutesResponse);
-  rpc ListRtcRoutes(ListRtcRoutesRequest) returns (ListRtcRoutesResponse);
-  // Bounded, mutation-fenced VPN route query; outside the current v1 inventory.
+  // Deprecated whole-table best view; use bounded ListVpnRibRoutes.
+  rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse) {
+    option deprecated = true;
+  }
+  // Deprecated whole-table best view; use bounded ListLabeledRibRoutes.
+  rpc ListLabeledRoutes(ListLabeledRoutesRequest) returns (ListLabeledRoutesResponse) {
+    option deprecated = true;
+  }
+  // Deprecated whole-table best view; use bounded ListRtcRibRoutes.
+  rpc ListRtcRoutes(ListRtcRoutesRequest) returns (ListRtcRoutesResponse) {
+    option deprecated = true;
+  }
+  // Bounded, mutation-fenced VPN route query within the scoped RR-only role.
   // Group-owned advertised state returns FAILED_PRECONDITION during resync.
   rpc ListVpnRibRoutes(ListVpnRibRoutesRequest) returns (ListVpnRibRoutesResponse);
-  // Bounded, mutation-fenced Labeled route query; outside the current v1 inventory.
+  // Bounded, mutation-fenced labeled route query within the scoped RR-only role.
   rpc ListLabeledRibRoutes(ListLabeledRibRoutesRequest) returns (ListLabeledRibRoutesResponse);
-  // Bounded, mutation-fenced Rtc route query; outside the current v1 inventory.
+  // Bounded, mutation-fenced RTC route query within the scoped RR-only role.
   rpc ListRtcRibRoutes(ListRtcRibRoutesRequest) returns (ListRtcRibRoutesResponse);
-  // Bounded, mutation-fenced Evpn route query; outside the current v1 inventory.
+  // Bounded, mutation-fenced EVPN best query; scoped RR-only for Types 1–5.
   rpc ListBestEvpnRoutes(ListBestEvpnRoutesRequest) returns (ListBestEvpnRoutesResponse);
 
   // RFC 9107 ORR topology graph, built on demand from every peer's BGP-LS
@@ -3858,6 +3870,9 @@ message ListEvpnResponse {
 
 // Bounded EVPN peer-table query. These methods are separate from unicast
 // listings so older servers return UNIMPLEMENTED instead of the wrong family.
+// For any MAC/ESI/VNI filter, require the response metadata acknowledgement
+// x-rustbgpd-evpn-peer-filters: mac,esi,vni before using rows or counts:
+// older servers can silently ignore these additive request fields.
 message ListPeerEvpnRoutesRequest {
   // Required source (received) or destination (advertised) neighbor IP.
   string neighbor_address = 1;
@@ -3865,7 +3880,7 @@ message ListPeerEvpnRoutesRequest {
   uint32 route_type_filter = 2;
   // Exact typed RD: structured text or 0x plus 16 raw hex digits. Empty = any.
   string rd_filter = 3;
-  // 0 defaults to 100. Values above 1000 are rejected.
+  // 0 defaults to 100. Values above 1000 are clamped to 1000.
   uint32 page_size = 4;
   // Opaque process-local continuation, bound to scope, filters, and version.
   // Restart with an empty token after ABORTED (a table mutation).
@@ -4172,7 +4187,7 @@ message ListVpnRibRoutesRequest {
   FamilyRouteView view = 1;
   // Required source/destination neighbor for received/advertised; invalid for best.
   string neighbor_address = 2;
-  // 0 defaults to 100; maximum 1000. Tokens bind scope, filters and table version.
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind scope, filters and version.
   uint32 page_size = 3;
   string page_token = 4;
   AddressFamily afi_safi = 5; // UNSPECIFIED selects both VPN address families.
@@ -4194,7 +4209,7 @@ message ListLabeledRibRoutesRequest {
   FamilyRouteView view = 1;
   // Required source/destination neighbor for received/advertised; invalid for best.
   string neighbor_address = 2;
-  // 0 defaults to 100; maximum 1000. Tokens bind scope, filters and table version.
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind scope, filters and version.
   uint32 page_size = 3;
   string page_token = 4;
   AddressFamily afi_safi = 5; // UNSPECIFIED selects both labeled address families.
@@ -4215,7 +4230,7 @@ message ListRtcRibRoutesRequest {
   FamilyRouteView view = 1;
   // Required source/destination neighbor for received/advertised; invalid for best.
   string neighbor_address = 2;
-  // 0 defaults to 100; maximum 1000. Tokens bind scope, filters and table version.
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind scope, filters and version.
   uint32 page_size = 3;
   string page_token = 4;
   optional uint32 origin_as_filter = 5;
@@ -4238,6 +4253,7 @@ message ListBestEvpnRoutesRequest {
   string mac_filter = 4; // Exact Type 2 MAC; other types do not match.
   string esi_filter = 5; // Exact 10-byte ESI; types without an ESI do not match.
   optional uint32 vni_filter = 6; // VXLAN (tunnel type 8), NLRI/PMSI VNI, 0..16777215.
+  // 0 defaults to 100; values above 1000 clamp to 1000.
   uint32 page_size = 7;
   string page_token = 8;
 }

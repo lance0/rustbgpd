@@ -541,6 +541,7 @@ fn materialize_clean_group_prior(
         .collect()
 }
 
+#[derive(Default)]
 struct ExactExportOverlayDecision {
     keep: Vec<bool>,
     owed_withdrawals: HashSet<crate::update::ExactExportKey>,
@@ -977,53 +978,89 @@ impl PendingCleanPolicyTransition {
     }
 }
 
+fn stage_exact_export_overlay_change(
+    rejected: Option<&HashSet<crate::update::ExactExportKey>>,
+    changes: &mut HashMap<crate::update::ExactExportKey, bool>,
+    key: crate::update::ExactExportKey,
+    next: bool,
+) -> bool {
+    let original = rejected.is_some_and(|rejected| rejected.contains(&key));
+    let previous = changes.get(&key).copied().unwrap_or(original);
+    if original == next {
+        changes.remove(&key);
+    } else {
+        changes.insert(key, next);
+    }
+    previous
+}
+
+impl ExactExportOverlayDecision {
+    fn reconcile(
+        &mut self,
+        rejected: Option<&HashSet<crate::update::ExactExportKey>>,
+        changes: &mut HashMap<crate::update::ExactExportKey, bool>,
+        key: &crate::update::ExactExportKey,
+        result: &Result<crate::update::ExactExportResult, crate::update::ExactExportError>,
+        source_excluded: bool,
+        previously_advertised: bool,
+    ) -> bool {
+        match (source_excluded, result) {
+            (true, _) | (false, Ok(_)) => {
+                stage_exact_export_overlay_change(rejected, changes, key.clone(), false);
+                true
+            }
+            (false, Err(error)) => {
+                let newly_rejected =
+                    !stage_exact_export_overlay_change(rejected, changes, key.clone(), true);
+                if newly_rejected && previously_advertised {
+                    self.owed_withdrawals.insert(key.clone());
+                }
+                if newly_rejected {
+                    self.new_rejections.push((key.clone(), error.clone()));
+                }
+                false
+            }
+        }
+    }
+}
+
 #[inline(never)]
 fn reconcile_exact_export_overlay(
-    rejected: &mut HashSet<crate::update::ExactExportKey>,
-    candidate_keys: Vec<crate::update::ExactExportKey>,
-    probe_results: Vec<Result<crate::update::ExactExportResult, crate::update::ExactExportError>>,
-    source_excluded: Vec<bool>,
+    rejected: Option<&HashSet<crate::update::ExactExportKey>>,
+    changes: &mut HashMap<crate::update::ExactExportKey, bool>,
+    candidate_keys: &[crate::update::ExactExportKey],
+    probe_results: &[Result<crate::update::ExactExportResult, crate::update::ExactExportError>],
+    source_excluded: &[bool],
     previously_advertised: &HashSet<crate::update::ExactExportKey>,
 ) -> ExactExportOverlayDecision {
     debug_assert_eq!(candidate_keys.len(), source_excluded.len());
-    let mut owed_withdrawals = HashSet::new();
-    let mut new_rejections = Vec::new();
-    let keep = candidate_keys
-        .into_iter()
+    let mut decision = ExactExportOverlayDecision::default();
+    for ((key, result), &excluded) in candidate_keys
+        .iter()
         .zip(probe_results)
         .zip(source_excluded)
-        .map(
-            |((key, result), source_excluded)| match (source_excluded, result) {
-                (true, _) => {
-                    // Transport removes this route before encoding. A conservative
-                    // shared probe may still have inspected it, but its result is
-                    // not part of this peer's wire view and must not create or
-                    // retain a sparse rejection entry.
-                    rejected.remove(&key);
-                    true
-                }
-                (false, Ok(_)) => {
-                    rejected.remove(&key);
-                    true
-                }
-                (false, Err(error)) => {
-                    let newly_rejected = rejected.insert(key.clone());
-                    if newly_rejected && previously_advertised.contains(&key) {
-                        owed_withdrawals.insert(key.clone());
-                    }
-                    if newly_rejected {
-                        new_rejections.push((key, error));
-                    }
-                    false
-                }
-            },
-        )
-        .collect();
-    ExactExportOverlayDecision {
-        keep,
-        owed_withdrawals,
-        new_rejections,
+    {
+        // The keep mask is independent of prior admission. Defer UC/VPN
+        // overlay/withdrawal effects until their real capture/reserve outcome
+        // is known; EVPN's final gate still sees its exact filtered subset.
+        let keep = if matches!(
+            key,
+            crate::update::ExactExportKey::Unicast(..) | crate::update::ExactExportKey::Vpn(_)
+        ) {
+            excluded || result.is_ok()
+        } else {
+            decision.reconcile(
+                rejected,
+                changes,
+                key,
+                result,
+                excluded,
+                previously_advertised.contains(key),
+            )
+        };
+        decision.keep.push(keep);
     }
+    decision
 }
 
 #[inline(never)]
@@ -2958,8 +2995,8 @@ impl RibManager {
         };
 
         let local_role = self.peer_local_roles.get(&peer).copied().flatten();
-        if let Some(prefixes) = otc_reconcile_prefixes {
-            let blocked = batch
+        let otc_reconcile = otc_reconcile_prefixes.map(|_| {
+            batch
                 .unicast
                 .announce
                 .iter()
@@ -2969,9 +3006,8 @@ impl RibManager {
                         && otc_egress_blocked(route, local_role)
                 })
                 .cloned()
-                .collect();
-            self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
-        }
+                .collect::<Vec<_>>()
+        });
         // Validate the trust boundary before consuming any durable pending
         // state (OTC diagnostics or the rejected-route overlay). A failed
         // precommit leaves those structures intact for the retry.
@@ -3028,13 +3064,37 @@ impl RibManager {
             && batch.labeled_withdraw.is_empty()
             && batch.rtc_announce.is_empty()
             && batch.rtc_withdraw.is_empty()
-            && !self.pending_otc_blocked.contains_key(&peer)
+            && match (otc_reconcile_prefixes, otc_reconcile.as_ref()) {
+                (Some(prefixes), Some(blocked)) => {
+                    !self.pending_otc_blocked.get(&peer).is_some_and(|pending| {
+                        pending.keys().any(|(prefix, _)| {
+                            checkpoint();
+                            !prefixes.contains(prefix)
+                        })
+                    }) && !blocked.iter().any(|route| {
+                        checkpoint();
+                        prefixes.contains(&route.prefix)
+                            && (self
+                                .peer_otc_blocked
+                                .get(&peer)
+                                .and_then(|current| current.get(&route.prefix))
+                                .is_none_or(|paths| !paths.contains(&route.path_id))
+                                || self.pending_otc_blocked.get(&peer).is_some_and(|pending| {
+                                    pending.contains_key(&(route.prefix, route.path_id))
+                                }))
+                    })
+                }
+                _ => !self.pending_otc_blocked.contains_key(&peer),
+            }
         {
             // A fully suppressed envelope is a successful no-op commit. Like
             // the successful enqueue tail below, it needs no forced readiness
             // service: the suppression scan and these retires already run a
             // budgeted checkpoint per route, which serves readiness whenever
             // the budget elapses. Forcing only serves earlier.
+            if let (Some(prefixes), Some(blocked)) = (otc_reconcile_prefixes, otc_reconcile) {
+                self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
+            }
             batch.retire_with(&mut || checkpoint());
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             return Ok(());
@@ -3057,33 +3117,10 @@ impl RibManager {
                 OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
             );
         }
-        if let Some(proof) = self.pending_group_admitted.get(&peer) {
-            use super::update_groups::admitted_recovery::Key;
-            let admitted = batch
-                .unicast
-                .announce
-                .iter()
-                .inspect(|_| checkpoint())
-                .filter(|route| batch.announce_source_exclusion != Some(route.peer))
-                .map(|route| Key::Unicast(route.prefix, route.path_id))
-                .chain(batch.vpn_announce.iter().map(|route| {
-                    let key = route.key();
-                    Key::Vpn(key.nlri_key, key.path_id)
-                }));
-            if proof.is_empty() {
-                self.prepare_empty_group_recovery_admission(peer, admitted.clone());
-            }
-            if let Err(error) = self
-                .pending_group_admitted
-                .reserve_admitted_with_checkpoint(peer, admitted, &mut |force| {
-                    super::replacement_readiness_checkpoint(&readiness, force);
-                })
-            {
-                self.record_group_recovery_refusal(peer, error, false);
-            }
-            self.refresh_group_recovery_gauges();
-        }
-
+        // Retain the existing Arc and slow-path candidate-key vector for the
+        // original reservation bound; no route body or OLD proof is copied.
+        let common_unicast_candidates = Arc::clone(&batch.unicast.announce);
+        let mut common_probe_input = None;
         let OutboundCommitBatch {
             unicast:
                 AlignedUnicastPayload {
@@ -3127,23 +3164,17 @@ impl RibManager {
             && !self.peer_rs_control.contains_key(&peer)
             && !self.peer_unexportable.contains_key(&peer)
             && !self.outbound_prefix_limits.contains_key(&peer);
-        if grouped_unicast_count.is_some() && !withdraw.is_empty() {
-            if defer_grouped_refresh_prior {
-                let had_prior = self.pending_group_admitted.contains_record(peer)
-                    || self.group_recovery_fallback(peer).is_some();
-                self.capture_group_admitted_keys_for_send(peer);
-                owns_refresh_prior |= !had_prior
-                    && (self.pending_group_admitted.contains_record(peer)
-                        || self.group_recovery_fallback(peer).is_some());
-            }
-            if !plain_withdraws_prechecked
-                && !self.pending_group_admitted.contains_key(&peer)
-                && let Some(lazy) = shared_unicast_precommit
-                    .as_ref()
-                    .and_then(|precommit| precommit.lazy_group_prior)
-            {
-                group_prior.extend(materialize_clean_group_prior(self, lazy));
-            }
+        let mut capture_refresh_prior =
+            defer_grouped_refresh_prior && grouped_unicast_count.is_some() && !withdraw.is_empty();
+        if grouped_unicast_count.is_some()
+            && !withdraw.is_empty()
+            && !plain_withdraws_prechecked
+            && !self.pending_group_admitted.contains_key(&peer)
+            && let Some(lazy) = shared_unicast_precommit
+                .as_ref()
+                .and_then(|precommit| precommit.lazy_group_prior)
+        {
+            group_prior.extend(materialize_clean_group_prior(self, lazy));
         }
 
         // RFC 9234 egress enforcement for every concrete-peer selection
@@ -3231,14 +3262,6 @@ impl RibManager {
             // pre-encoded bytes no longer describe this envelope.
             shared_group_encode = None;
         }
-        let otc_blocked: Vec<crate::route::Route> = self
-            .pending_otc_blocked
-            .get(&peer)
-            .into_iter()
-            .inspect(|_| checkpoint())
-            .flat_map(HashMap::values)
-            .cloned()
-            .collect();
 
         // A route rejected on an earlier pass was never advertised (or its
         // prior advertisement was withdrawn by that transition). Suppress a
@@ -3246,31 +3269,65 @@ impl RibManager {
         // sparse rejection entry. This runs before deciding whether the
         // envelope is route-bearing, so a rejected-only withdrawal needs no
         // transport snapshot or empty wire message.
-        if let Some(rejected) = self.peer_unexportable.get_mut(&peer) {
-            withdraw.retain(|(prefix, path_id)| {
-                !rejected.remove(&crate::update::ExactExportKey::Unicast(*prefix, *path_id))
-            });
-            flowspec_withdraw.retain(|key| {
-                !rejected.remove(&crate::update::ExactExportKey::FlowSpec(key.clone()))
-            });
-            evpn_withdraw
-                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::Evpn(*key)));
-            bgpls_withdraw
-                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::BgpLs(key.clone())));
-            vpn_withdraw
-                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::Vpn(key.clone())));
-            labeled_withdraw
-                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::Labeled(*key)));
-            rtc_withdraw
-                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::Rtc(key.clone())));
-        }
-        if self
-            .peer_unexportable
-            .get(&peer)
-            .is_some_and(HashSet::is_empty)
-        {
-            self.peer_unexportable.remove(&peer);
-        }
+        let mut overlay_changes = HashMap::new();
+        let mut exact_rejections = Vec::new();
+        let rejected = self.peer_unexportable.get(&peer);
+        withdraw.retain(|(prefix, path_id)| {
+            !stage_exact_export_overlay_change(
+                rejected,
+                &mut overlay_changes,
+                crate::update::ExactExportKey::Unicast(*prefix, *path_id),
+                false,
+            )
+        });
+        flowspec_withdraw.retain(|key| {
+            !stage_exact_export_overlay_change(
+                rejected,
+                &mut overlay_changes,
+                crate::update::ExactExportKey::FlowSpec(key.clone()),
+                false,
+            )
+        });
+        evpn_withdraw.retain(|key| {
+            !stage_exact_export_overlay_change(
+                rejected,
+                &mut overlay_changes,
+                crate::update::ExactExportKey::Evpn(*key),
+                false,
+            )
+        });
+        bgpls_withdraw.retain(|key| {
+            !stage_exact_export_overlay_change(
+                rejected,
+                &mut overlay_changes,
+                crate::update::ExactExportKey::BgpLs(key.clone()),
+                false,
+            )
+        });
+        vpn_withdraw.retain(|key| {
+            !stage_exact_export_overlay_change(
+                rejected,
+                &mut overlay_changes,
+                crate::update::ExactExportKey::Vpn(key.clone()),
+                false,
+            )
+        });
+        labeled_withdraw.retain(|key| {
+            !stage_exact_export_overlay_change(
+                rejected,
+                &mut overlay_changes,
+                crate::update::ExactExportKey::Labeled(*key),
+                false,
+            )
+        });
+        rtc_withdraw.retain(|key| {
+            !stage_exact_export_overlay_change(
+                rejected,
+                &mut overlay_changes,
+                crate::update::ExactExportKey::Rtc(key.clone()),
+                false,
+            )
+        });
 
         let has_candidate_announcement_payload = !announce.is_empty()
             || !flowspec_announce.is_empty()
@@ -3540,14 +3597,7 @@ impl RibManager {
                     .iter()
                     .inspect(|_| checkpoint())
                     .any(Result::is_err);
-                if defer_grouped_refresh_prior && has_probe_failure {
-                    let had_prior = self.pending_group_admitted.contains_record(peer)
-                        || self.group_recovery_fallback(peer).is_some();
-                    self.capture_group_admitted_keys_for_send(peer);
-                    owns_refresh_prior |= !had_prior
-                        && (self.pending_group_admitted.contains_record(peer)
-                            || self.group_recovery_fallback(peer).is_some());
-                }
+                capture_refresh_prior |= defer_grouped_refresh_prior && has_probe_failure;
                 let mut previously_advertised = group_prior;
                 if self.group_recovery_fallback(peer).is_some() {
                     previously_advertised.extend(
@@ -3593,10 +3643,11 @@ impl RibManager {
                     previously_advertised.extend(admitted.iter_with_checkpoint(|_| checkpoint()));
                 }
                 let decision = reconcile_exact_export_overlay(
-                    self.peer_unexportable.entry(peer).or_default(),
-                    candidate_keys,
-                    probe_results,
-                    source_excluded,
+                    self.peer_unexportable.get(&peer),
+                    &mut overlay_changes,
+                    &candidate_keys,
+                    &probe_results,
+                    &source_excluded,
                     &previously_advertised,
                 );
                 group_prior = previously_advertised;
@@ -3758,25 +3809,197 @@ impl RibManager {
                     super::retire_hash_set(&mut rtc_withdrawn, &mut || checkpoint());
                     self.replacement_checkpoint(true);
                 }
-                for (key, error) in decision.new_rejections {
-                    checkpoint();
-                    self.metrics.record_exact_export_rejection(
-                        &peer.to_string(),
-                        key.family_label(),
-                        error.code().reason(),
-                    );
-                    warn!(
-                        %peer,
-                        identity = %key.bounded_log_identity(),
-                        reason = error.code().as_str(),
-                        detail = error.detail(),
-                        profile_generation = snapshot.generation(),
-                        "route rejected before Adj-RIB-Out commit because its exact wire form is unexportable"
-                    );
-                }
+                exact_rejections = decision.new_rejections;
+                common_probe_input = Some((candidate_keys, probe_results, source_excluded));
             }
         }
 
+        // Until this decision succeeds, only owned batch inputs and the
+        // touched-key overlay plan have changed. Failure retains every
+        // common-family proof, diagnostic and advertised state for retry.
+        self.retain_evpn_recovery_withdrawals(peer, &mut evpn_withdraw);
+        if !self.preflight_final_evpn_recovery(peer, &mut evpn_announce, &mut evpn_withdraw)
+            || !self.admit_evpn_recovery_batch(peer, &evpn_announce, &evpn_withdraw)
+        {
+            return self.outbound_commit_failed(
+                peer,
+                OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
+            );
+        }
+
+        if capture_refresh_prior {
+            let had_prior = self.pending_group_admitted.contains_record(peer)
+                || self.group_recovery_fallback(peer).is_some();
+            self.capture_group_admitted_keys_for_send(peer);
+            owns_refresh_prior = !had_prior
+                && (self.pending_group_admitted.contains_record(peer)
+                    || self.group_recovery_fallback(peer).is_some());
+        }
+        let common_candidate_keys = common_probe_input.as_ref().map(|(keys, ..)| keys);
+        if let Some(proof) = self.pending_group_admitted.get(&peer) {
+            use super::update_groups::admitted_recovery::Key;
+            let admitted = common_unicast_candidates
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|route| announce_source_exclusion != Some(route.peer))
+                .map(|route| Key::Unicast(route.prefix, route.path_id))
+                .chain(
+                    common_candidate_keys
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|key| {
+                            checkpoint();
+                            if let crate::update::ExactExportKey::Vpn(key) = key {
+                                Some(Key::Vpn(key.nlri_key, key.path_id))
+                            } else {
+                                None
+                            }
+                        }),
+                )
+                .chain(
+                    vpn_announce
+                        .iter()
+                        .filter(|_| common_candidate_keys.is_none())
+                        .map(|route| {
+                            let key = route.key();
+                            Key::Vpn(key.nlri_key, key.path_id)
+                        }),
+                );
+            if proof.is_empty() {
+                self.prepare_empty_group_recovery_admission(peer, admitted.clone());
+            }
+            if let Err(error) = self
+                .pending_group_admitted
+                .reserve_admitted_with_checkpoint(peer, admitted, &mut |force| {
+                    super::replacement_readiness_checkpoint(&readiness, force);
+                })
+            {
+                self.record_group_recovery_refusal(peer, error, false);
+            }
+            self.refresh_group_recovery_gauges();
+        }
+
+        // Common refusal precedes OTC pruning in the original transaction.
+        // Revisit its blocked PCB candidates before any UC/VPN exact verdict,
+        // so a later same-key announcement can still supersede that pruning.
+        if self.group_recovery_fallback(peer).is_some()
+            && !unicast_otc_prechecked
+            && self
+                .grouped_member_of(peer)
+                .and_then(|gid| self.group_ribs.get(&gid))
+                .is_some_and(|group| group.per_client_best)
+        {
+            let mut seen: HashSet<_> = withdraw.iter().inspect(|_| checkpoint()).copied().collect();
+            for route in common_unicast_candidates.iter() {
+                checkpoint();
+                if announce_source_exclusion == Some(route.peer)
+                    || !otc_egress_blocked(route, local_role)
+                {
+                    continue;
+                }
+                let key = crate::update::ExactExportKey::Unicast(route.prefix, route.path_id);
+                let originally_rejected = self
+                    .peer_unexportable
+                    .get(&peer)
+                    .is_some_and(|overlay| overlay.contains(&key));
+                stage_exact_export_overlay_change(
+                    self.peer_unexportable.get(&peer),
+                    &mut overlay_changes,
+                    key,
+                    false,
+                );
+                if !originally_rejected && seen.insert((route.prefix, route.path_id)) {
+                    withdraw.push((route.prefix, route.path_id));
+                }
+            }
+            super::retire_hash_set(&mut seen, &mut || checkpoint());
+        }
+        if let Some((keys, results, exclusions)) = common_probe_input.take() {
+            let mut decision = ExactExportOverlayDecision::default();
+            let admitted = self.pending_group_admitted.get(&peer);
+            let fallback = self.group_recovery_fallback(peer).is_some();
+            for ((key, result), excluded) in keys.into_iter().zip(results).zip(exclusions) {
+                checkpoint();
+                if !matches!(
+                    key,
+                    crate::update::ExactExportKey::Unicast(..)
+                        | crate::update::ExactExportKey::Vpn(_)
+                ) {
+                    continue;
+                }
+                let prior = admitted.map_or_else(
+                    || fallback || group_prior.contains(&key),
+                    |proof| proof.contains(&key),
+                );
+                decision.reconcile(
+                    self.peer_unexportable.get(&peer),
+                    &mut overlay_changes,
+                    &key,
+                    &result,
+                    excluded,
+                    prior,
+                );
+            }
+            let mut unicast_seen: HashSet<_> =
+                withdraw.iter().inspect(|_| checkpoint()).copied().collect();
+            let mut vpn_seen: HashSet<_> = vpn_withdraw
+                .iter()
+                .inspect(|_| checkpoint())
+                .cloned()
+                .collect();
+            for key in decision.owed_withdrawals {
+                checkpoint();
+                match key {
+                    crate::update::ExactExportKey::Unicast(prefix, path_id) => {
+                        if unicast_seen.insert((prefix, path_id)) {
+                            withdraw.push((prefix, path_id));
+                        }
+                    }
+                    crate::update::ExactExportKey::Vpn(key) => {
+                        if vpn_seen.insert(key.clone()) {
+                            vpn_withdraw.push(key);
+                        }
+                    }
+                    _ => unreachable!("only common-family candidates were reconciled"),
+                }
+            }
+            exact_rejections.extend(decision.new_rejections);
+            super::retire_hash_set(&mut unicast_seen, &mut || checkpoint());
+            super::retire_hash_set(&mut vpn_seen, &mut || checkpoint());
+        }
+        for (key, rejected) in overlay_changes {
+            checkpoint();
+            if rejected {
+                self.peer_unexportable.entry(peer).or_default().insert(key);
+            } else if let Some(overlay) = self.peer_unexportable.get_mut(&peer) {
+                overlay.remove(&key);
+            }
+        }
+        if let Some(snapshot) = &exact_export_snapshot {
+            for (key, error) in exact_rejections {
+                checkpoint();
+                self.metrics.record_exact_export_rejection(
+                    &peer.to_string(),
+                    key.family_label(),
+                    error.code().reason(),
+                );
+                warn!(%peer, identity = %key.bounded_log_identity(),
+                    reason = error.code().as_str(), detail = error.detail(),
+                    profile_generation = snapshot.generation(),
+                    "route rejected before Adj-RIB-Out commit because its exact wire form is unexportable");
+            }
+        }
+        if let (Some(prefixes), Some(blocked)) = (otc_reconcile_prefixes, otc_reconcile) {
+            self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
+        }
+        let otc_blocked: Vec<crate::route::Route> = self
+            .pending_otc_blocked
+            .get(&peer)
+            .into_iter()
+            .inspect(|_| checkpoint())
+            .flat_map(HashMap::values)
+            .cloned()
+            .collect();
         if self
             .peer_unexportable
             .get(&peer)
@@ -3826,15 +4049,6 @@ impl RibManager {
             super::retire_hash_set(&mut vpn_seen, &mut || checkpoint());
         }
         let limited = self.outbound_prefix_limits.contains_key(&peer);
-        self.retain_evpn_recovery_withdrawals(peer, &mut evpn_withdraw);
-        if !self.preflight_final_evpn_recovery(peer, &mut evpn_announce, &mut evpn_withdraw)
-            || !self.admit_evpn_recovery_batch(peer, &evpn_announce, &evpn_withdraw)
-        {
-            return self.outbound_commit_failed(
-                peer,
-                OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
-            );
-        }
         let capacity_filtered = self.enforce_outbound_prefix_limits(
             peer,
             grouped_unicast_count.is_some(),

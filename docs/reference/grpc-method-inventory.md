@@ -185,18 +185,18 @@ shape itself does not raise the tier.
 | `ListFibTables` | `sensitive_read` | Configured FIB table set + runtime availability. |
 | `ListRouteEvents` | `sensitive_read` | Bounded route-event history. |
 | `ListFlowSpecRoutes` | `sensitive_read` | RFC 8955 flow-spec routes — discloses traffic filter installations. |
-| `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
+| `ListEvpnRoutes` | `sensitive_read` | Deprecated whole-table selected EVPN view, outside v1; use `ListBestEvpnRoutes` for bounded best pages. |
 | `ListReceivedEvpnRoutes` | `sensitive_read` | Bounded accepted post-policy EVPN routes from one source neighbor. |
 | `ListAdvertisedEvpnRoutes` | `sensitive_read` | Bounded committed EVPN routes to one destination neighbor, retaining route source identity. |
 | `ExplainEvpnRoute` | `sensitive_read` | Exact EVPN candidate selection and export diagnostics, including policy gates and committed outbound topology. |
 | `ListBgpLsRoutes` | `sensitive_read` | RFC 9552 BGP-LS / BGP-LS VPN routes — controller-facing topology graph objects exposed as opaque NLRI/TLV bytes. |
-| `ListVpnRoutes` | `sensitive_read` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, MPLS labels. |
-| `ListLabeledRoutes` | `sensitive_read` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability. |
-| `ListRtcRoutes` | `sensitive_read` | RFC 4684 RT-Constrain membership NLRI — reveals which Route Targets each peer imports (VPN topology metadata). |
-| `ListVpnRibRoutes` | `sensitive_read` | Bounded, filtered, mutation-fenced Vpn page; exposes route topology. Outside current v1 inventory. |
-| `ListLabeledRibRoutes` | `sensitive_read` | Bounded, filtered, mutation-fenced Labeled page; exposes route topology. Outside current v1 inventory. |
-| `ListRtcRibRoutes` | `sensitive_read` | Bounded, filtered, mutation-fenced Rtc page; exposes route topology. Outside current v1 inventory. |
-| `ListBestEvpnRoutes` | `sensitive_read` | Bounded, filtered, mutation-fenced Evpn page; exposes route topology. Outside current v1 inventory. |
+| `ListVpnRoutes` | `sensitive_read` | Deprecated whole-table selected VPNv4/VPNv6 view, outside v1; use `ListVpnRibRoutes` with `view = BEST`. |
+| `ListLabeledRoutes` | `sensitive_read` | Deprecated whole-table selected labeled-unicast view, outside v1; use `ListLabeledRibRoutes` with `view = BEST`. |
+| `ListRtcRoutes` | `sensitive_read` | Deprecated whole-table selected RT-Constrain view, outside v1; use `ListRtcRibRoutes` with `view = BEST`. |
+| `ListVpnRibRoutes` | `sensitive_read` | Scoped RR-only L3VPN: bounded, filtered, mutation-fenced best/received/advertised pages; exposes RD-scoped route topology. |
+| `ListLabeledRibRoutes` | `sensitive_read` | Scoped RR-only labeled-unicast: bounded, filtered, mutation-fenced best/received/advertised pages; exposes label stacks and reachability. |
+| `ListRtcRibRoutes` | `sensitive_read` | Scoped RR-only RT-Constrain: bounded, filtered, mutation-fenced best/received/advertised pages; exposes membership topology. |
+| `ListBestEvpnRoutes` | `sensitive_read` | Scoped RR-only EVPN Types 1–5: bounded, filtered, mutation-fenced selected best pages. All-types and Type 6 calls remain outside v1. |
 | `ListTopologyNodes` | `sensitive_read` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union — discloses IGP node identity (AS, router-IDs). |
 | `ListTopologyLinks` | `sensitive_read` | RFC 9107 ORR topology links — discloses IGP adjacencies, link addresses, and metrics (the SPF input). |
 | `ListOrrStatus` | `sensitive_read` | RFC 9107 ORR per-vantage status — discloses configured vantage IPs (IGP locations), their resolved topology nodes, and the peers bound to them. |

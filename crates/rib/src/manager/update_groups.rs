@@ -680,6 +680,13 @@ pub(in crate::manager) struct GroupRibOut {
 const GROUP_FILTERED_PLACEHOLDER: IpAddr = LOCAL_PEER;
 
 impl GroupRibOut {
+    #[cfg(test)]
+    pub(in crate::manager) fn recovery_snapshot_for_test(
+        &self,
+    ) -> Option<admitted_recovery::SnapshotHandle> {
+        self.recovery_snapshot
+    }
+
     /// Every unicast prefix a per-member residue query can return:
     /// export-policy denials, OTC-blocked winners and runner-up lane
     /// entries. A grouped join scopes its inventory to these.

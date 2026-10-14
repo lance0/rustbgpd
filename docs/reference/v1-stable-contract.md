@@ -37,7 +37,7 @@ for affected operators and needs migration guidance.
 | **Scoped RR-only** | `route-reflector-l3vpn` — VPNv4/VPNv6 | Route reflection and controller-feed use only. No PE VRF import, CE attachment, MPLS forwarding, or dataplane programming promise. |
 | **Scoped RR-only** | `route-reflector-labeled-unicast` — IPv4/IPv6 labeled-unicast | Receive, reflect, and query. Labels are not installed in a forwarding plane. |
 | **Scoped RR-only** | `route-reflector-rtc` — RT-Constrain | Receive, reflect, query, and VPN export membership within the RR boundary. |
-| **Scoped RR-only** | `route-reflector-evpn` — EVPN Types 1–5 | Receive, reflect, and query through the [type-filtered peer views](#evpn-route-reflector-boundary). No local EVI, Ethernet segment, VTEP, IRB, or dataplane promise. |
+| **Scoped RR-only** | `route-reflector-evpn` — EVPN Types 1–5 | Receive, reflect, and query through the [type-filtered best and peer views](#evpn-route-reflector-boundary). No local EVI, Ethernet segment, VTEP, IRB, or dataplane promise. |
 | **Stable** | `flowspec-controller` — IPv4/IPv6 FlowSpec controller backend | Local origination, retained local-intent reconciliation, selected routes, and committed post-export-policy advertised views through the three inventoried RPCs. Receive-side validation and dataplane enforcement remain outside this role. |
 | **Alpha** | `evpn` — EVPN Type 6 SMET relay, VTEP, IRB, multi-homing | Functional and interop-tested slices exist, but everything outside the `route-reflector-evpn` boundary remains outside this v1 compatibility promise, including all Linux dataplane behavior. |
 | **Alpha** | `linux-dataplane` — Linux FIB and managed netdev roles | Opt-in and tested, but not part of the control-plane RS/RR v1 contract. |
@@ -128,6 +128,36 @@ The existing consecutive-release configuration fixture chain remains the
 upgrade check; it is not a FlowSpec RPC qualification receipt. Release
 preparation advances that chain normally.
 
+### Bounded reflected-family queries
+
+The scoped L3VPN, labeled-unicast and RT-Constrain roles use
+`RibService.ListVpnRibRoutes`, `ListLabeledRibRoutes` and `ListRtcRibRoutes`,
+respectively. Their explicit `FamilyRouteView` selects `BEST`, `RECEIVED` or
+`ADVERTISED`; `UNSPECIFIED` and unknown values return `INVALID_ARGUMENT`.
+Received and advertised require `neighbor_address`, identifying the source or
+destination. Best permits only `source_peer_filter`, selecting the winner's
+source; an unknown source returns an empty page, while an unknown received or
+advertised neighbor returns `NOT_FOUND`. Labeled-unicast remains separate
+from unicast `ListRoutesRequest`.
+
+These calls and the bounded EVPN calls below default `page_size` to 100 and
+clamp values above 1000 to 1000. They clone only the page's rows, but still
+scan the selected table; this bounds response allocation, not scan work.
+Their process-local tokens bind scope, filters and table version. A mutation
+returns `ABORTED`; restart with an empty token. Advertised rows retain their
+source `peer_address` and prove outbound admission, not remote receipt.
+Group-owned advertised views may return `FAILED_PRECONDITION` until resync
+completes. The [API reference](api.md#bounded-vpn-labeled-rtc-and-evpn-best-pages)
+defines the typed family selectors, filters and continuation behavior.
+
+Before the v1 freeze, the inventory replaces the unbounded `ListVpnRoutes`,
+`ListLabeledRoutes` and `ListRtcRoutes` calls with those bounded methods.
+The older calls are deprecated and outside v1, as is `ListEvpnRoutes`;
+`ListBestEvpnRoutes` is its bounded replacement. Every older method retains
+its signature and behavior. This change removes no RPC and sets no removal
+schedule. Existing plain CLI listings retain their whole-table behavior and
+JSON arrays; promoting the RPCs does not promote additional CLI dimensions.
+
 ### EVPN route-reflector boundary
 
 The `route-reflector-evpn` role covers an iBGP route reflector that receives,
@@ -140,15 +170,16 @@ behavior.
 | Surface | Included | Still outside v1 |
 |---|---|---|
 | Configuration | The `l2vpn_evpn` value in the already inventoried `families` and `required_families` keys of a neighbor or peer group, with the inventoried `route_reflector_client`, `cluster_id`, and GR/LLGR keys. No EVPN-specific key is added. | `Config.evpn_instances`, `Config.evpn_ip_vrfs`, `Config.ethernet_segments`, `Config.evpn_core_isolation`, `Config.managed_netdevs`, and every dataplane key. |
-| `RibService.ListReceivedEvpnRoutes`, `RibService.ListAdvertisedEvpnRoutes` | Calls with `route_type_filter` 1–5: accepted post-policy Adj-RIB-In from a source peer, or committed Adj-RIB-Out toward a destination peer, with `rd_filter`, `page_size` (default 100, maximum 1000) and process-local `page_token` continuation. An advertised row's `peer_address` remains its source peer. | `route_type_filter` 0 (all types) or 6. A committed row proves outbound admission, not remote receipt. |
+| `RibService.ListReceivedEvpnRoutes`, `RibService.ListAdvertisedEvpnRoutes` | Calls with `route_type_filter` 1–5: accepted post-policy Adj-RIB-In from a source peer, or committed Adj-RIB-Out toward a destination peer, with `rd_filter`, `page_size` (default 100, values above 1000 clamp to 1000) and process-local `page_token` continuation. An advertised row's `peer_address` remains its source peer. | `route_type_filter` 0 (all types) or 6. A committed row proves outbound admission, not remote receipt. |
+| `RibService.ListBestEvpnRoutes` | Installed best/Loc-RIB rows with `route_type_filter` 1–5, optional winner-source, typed RD, MAC, ESI and VNI filters, and bounded mutation-fenced paging. | `route_type_filter` 0 (all types) or 6. This does not promote the base CLI or additional CLI JSON. |
 | `EvpnRouteEntry` | Fields 1–16, `route_type` through `tunnel_type`. Labels, gateway and tunnel type are route data for query and reflection, not a programming promise. | Field 17 `prefix_sid` (SRv6 inspection) and field 18 `smet` (Type 6), both explicitly unstable. |
 | CLI | Command paths `rbgp evpn received PEER` and `rbgp evpn advertised PEER` used with `--route-type` 1–5, and the `evpn-peer-page-v1` key/type floor of their `--json` page: `view`, `neighbor`, `routes`, `next_page_token`, `total_count`, `page_version` (`epoch`, `generation`), and each row's 17 route keys. | Other flags, human-readable output, unfiltered or Type 6 output, the conditional `prefix_sid` and `smet` row keys, base `rbgp evpn`, `rbgp evpn explain`, and injection, runtime, instance, segment and dataplane commands. |
 | Metrics | Names, types and label sets of the nine series in the inventory's `metrics.scoped_rr_only_series`, including `afi_safi="evpn"` on `bgp_rib_prefixes`, `bgp_rib_loc_prefixes` and `bgp_rib_adj_out_prefixes`, and `afi_safi="l2vpn_evpn"` on `bgp_route_refresh_stale_entries`. | The EVPN table gauges count the whole table, including any Type 6 routes. `bgp_gr_stale_routes` sums the routes a peer currently holds GR- or LLGR-stale across all families; it falls as routes are re-advertised, withdrawn or swept, and no per-route EVPN stale query exists. VTEP `evpn_*` series stay alpha. |
 
-The selected Loc-RIB view is deferred. `RibService.ListEvpnRoutes` and base
+`RibService.ListBestEvpnRoutes` supplies the bounded selected Loc-RIB view.
+The deprecated `RibService.ListEvpnRoutes` and base
 `rbgp evpn` are not paginated: they scan the EVPN table and clone every
-matching row, and a route-type filter bounds neither. They stay outside v1
-until an explicit cost decision or a bounded replacement.
+matching row, and a route-type filter bounds neither. They remain outside v1.
 `RibService.ExplainEvpnRoute` references a Type 6 selector and an optional
 SRv6 Argument companion, and EVPN events (`EventService.ListEvpnEvents` and
 the `BgpEvent.evpn` payload) remain alpha.
@@ -160,10 +191,12 @@ A change to entry fields 1–16, the inventoried request fields, the page or
 `RoutePageVersion` fails it; a change confined to the excluded fields does
 not. An excluded entry-field change still trips the stable event
 graph's review tripwire, which reaches `EvpnRouteEntry` through the alpha
-`BgpEvent.evpn` payload; that does not promote the event. The set's
-`stable_request_values` records the 1–5 call profile and rejects any method
-that takes a different request message. A digest cannot verify a value
-restriction: the daemon still answers type 0 and 6 calls, as alpha behavior.
+`BgpEvent.evpn` payload; that does not promote the event. Each EVPN method
+set's `stable_request_values` records the 1–5 call profile
+and rejects any method that takes a different request message. Best uses a
+separate set for `ListBestEvpnRoutesRequest`; its filters are inventoried,
+while the additional peer filters remain excluded. A digest cannot verify a
+value restriction: the daemon still answers type 0 and 6 calls, as alpha behavior.
 `evpn_peer_page_json_matches_inventory_floor` executes the CLI floor. The
 metric floor is checked against the metric definitions, and each pinned label
 value must be passed by a production call site of that metric's setter, either
@@ -183,9 +216,9 @@ convergence-time or forwarding guarantee. Memory scales with receivers ×
 reflected routes, because each receiver keeps its own EVPN Adj-RIB-Out; the
 soak receipt records the per-route envelope at its shape.
 
-This promotion changes no configuration shape, default, RPC behavior or CLI
-output. Clients that use unfiltered or Type 6 peer-view calls, base
-`rbgp evpn`, or EVPN events keep alpha behavior; to stay inside the role,
+This boundary changes no configuration shape or default. Bounded RPCs clamp
+oversized page requests as described above. Clients that use unfiltered or
+Type 6 calls, base `rbgp evpn`, or EVPN events keep alpha behavior; to stay inside the role,
 query each of Types 1–5 separately.
 
 ## Stable surfaces
@@ -286,8 +319,9 @@ it requires at a production emission site.
 
 - **Protobuf:** stable RPC names, streaming modes, top-level request/response
   types, existing field numbers/types, and enum numeric values do not change in
-  v1. Additive optional fields and new RPCs are allowed. Removed field numbers
-  and names stay reserved.
+  v1. Additive optional fields, appended enum values with new numbers, and new
+  RPCs are allowed; existing enum names, numbers and meanings remain unchanged.
+  Removed field numbers and names stay reserved.
 - **Config:** a stable field may gain optional siblings with documented safe
   defaults. Removing, renaming, changing the type, changing the effective
   default, changing required-field membership, or changing whether unknown

@@ -27,12 +27,20 @@ In particular:
 
 - EVPN route reflection of Types 1–5 is the scoped RR-only
   `route-reflector-evpn` role: the `l2vpn_evpn` family, the type-filtered
-  received/advertised peer views and their CLI JSON page, and named metrics,
+  best and received/advertised peer views, the peer-view CLI JSON page, and
+  named metrics,
   within the [EVPN reflector boundary](v1-stable-contract.md#evpn-route-reflector-boundary).
   The unpaged `ListEvpnRoutes` query and base `rbgp evpn` command, EVPN explain
   and events, Type 6 SMET relay, VTEP, IRB (including
   [interface-less IRB on bundle members](../how-to/evpn-vtep-setup.md#vlan-aware-bundle-members)),
   multi-homing, and every Linux dataplane behavior remain alpha.
+- The scoped L3VPN, labeled-unicast and RT-Constrain roles inventory the
+  bounded `ListVpnRibRoutes`, `ListLabeledRibRoutes` and `ListRtcRibRoutes`
+  queries, with explicit best/received/advertised views. EVPN best uses
+  `ListBestEvpnRoutes` with a Type 1–5 filter. The older whole-table
+  `ListVpnRoutes`, `ListLabeledRoutes`, `ListRtcRoutes` and `ListEvpnRoutes`
+  remain functional but are deprecated and outside v1; use their bounded
+  replacements for new integrations. This does not change plain CLI output.
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.

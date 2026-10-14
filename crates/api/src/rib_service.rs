@@ -291,9 +291,6 @@ impl RibService {
         let peer = req.neighbor_address.parse::<IpAddr>().map_err(|error| {
             Status::invalid_argument(format!("invalid neighbor_address: {error}"))
         })?;
-        if req.page_size > 1000 {
-            return Err(Status::invalid_argument("page_size must be at most 1000"));
-        }
         let scope = if advertised {
             RouteQueryScope::Advertised { peer }
         } else {
@@ -320,7 +317,7 @@ impl RibService {
         let page_size = if req.page_size == 0 {
             DEFAULT_ROUTE_PAGE_SIZE
         } else {
-            req.page_size as usize
+            req.page_size.min(1000) as usize
         };
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutesPage {
             scope,
@@ -1340,13 +1337,10 @@ fn family_page_params<K>(
     identity: &str,
     parse: impl FnOnce(&str) -> Result<K, Status>,
 ) -> Result<(usize, Option<K>, Option<RoutePageVersion>), Status> {
-    if size > 1000 {
-        return Err(Status::invalid_argument("page_size must be at most 1000"));
-    }
     let size = if size == 0 {
         DEFAULT_ROUTE_PAGE_SIZE
     } else {
-        size as usize
+        size.min(1000) as usize
     };
     if token.is_empty() {
         return Ok((size, None, None));
@@ -3247,9 +3241,6 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListBestEvpnRoutesRequest>,
     ) -> Result<Response<proto::ListBestEvpnRoutesResponse>, Status> {
         let req = request.into_inner();
-        if req.page_size > 1000 {
-            return Err(Status::invalid_argument("page_size must be at most 1000"));
-        }
         let (filter, identity) = evpn_loc_filter(&req)?;
         let scope = RouteQueryScope::Best;
         let (after, expected_version) = if req.page_token.is_empty() {
@@ -3266,7 +3257,7 @@ impl proto::rib_service_server::RibService for RibService {
         let page_size = if req.page_size == 0 {
             DEFAULT_ROUTE_PAGE_SIZE
         } else {
-            req.page_size as usize
+            req.page_size.min(1000) as usize
         };
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutesPage {
             scope,
@@ -6499,10 +6490,6 @@ mod tests {
             },
             proto::ListPeerEvpnRoutesRequest {
                 rd_filter: "bad".into(),
-                ..request.clone()
-            },
-            proto::ListPeerEvpnRoutesRequest {
-                page_size: 1001,
                 ..request.clone()
             },
         ] {
