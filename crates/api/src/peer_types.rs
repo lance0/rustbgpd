@@ -1112,6 +1112,8 @@ pub enum PeerManagerCommand {
     ResetEvpnRecoverySession {
         /// Exact EVPN recovery owner and bounded exhaustion evidence.
         request: rustbgpd_rib::EvpnRecoveryReset,
+        /// Receipt for actual guarded execution, including refusal.
+        reply: oneshot::Sender<rustbgpd_rib::EvpnRecoveryResetOutcome>,
     },
     /// Trigger a soft inbound reset (route refresh) for the given families.
     SoftResetIn {

@@ -18,24 +18,15 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-/// Fixed causes for a bounded EVPN recovery-provenance refusal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EvpnRecoveryExhaustionCause {
-    PeerLimit,
-    DaemonLimit,
-    AllocationFailure,
-}
+pub use rustbgpd_telemetry::reason_labels::EvpnRecoveryExhaustionCause;
 
-impl EvpnRecoveryExhaustionCause {
-    /// Stable metric/log vocabulary, without peer-derived labels.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::PeerLimit => "peer_limit",
-            Self::DaemonLimit => "daemon_limit",
-            Self::AllocationFailure => "allocation_failure",
-        }
-    }
+/// Actual execution result from the captured session, not queue admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvpnRecoveryResetOutcome {
+    /// The session accepted the guard and completed its reset command.
+    Executed,
+    /// The lifecycle/session owner refused the captured request.
+    Rejected,
 }
 
 /// Ask the session lifecycle owner to reset exactly the exhausted generation.
@@ -58,7 +49,8 @@ pub struct EvpnRecoveryReset {
 
 /// Nonblocking admission to the existing session lifecycle owner. A refused
 /// admission stays owned by the RIB and is retried; it is not a reset receipt.
-pub type EvpnRecoveryResetFn = Arc<dyn Fn(EvpnRecoveryReset) -> bool + Send + Sync>;
+pub type EvpnRecoveryResetFn =
+    Arc<dyn Fn(EvpnRecoveryReset, oneshot::Sender<EvpnRecoveryResetOutcome>) -> bool + Send + Sync>;
 
 /// Failure returned by the dedicated, type-narrow RIB readiness lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

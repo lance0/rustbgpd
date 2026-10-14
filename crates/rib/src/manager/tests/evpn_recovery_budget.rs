@@ -3,7 +3,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::manager::distribution::OutboundCommitBatch;
 use crate::manager::update_groups::recovery_provenance::EvpnRecoveryProvenance;
-use crate::update::{EvpnRecoveryReset, RoutePageError};
+use crate::update::{EvpnRecoveryReset, EvpnRecoveryResetOutcome, RoutePageError};
+
+type ResetRequests =
+    Arc<std::sync::Mutex<Vec<(EvpnRecoveryReset, oneshot::Sender<EvpnRecoveryResetOutcome>)>>>;
+
+fn capture_reset_requests(manager: &mut RibManager) -> ResetRequests {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    manager.evpn_recovery_reset = Some(Arc::new(move |request, reply| {
+        captured.lock().unwrap().push((request, reply));
+        true
+    }));
+    requests
+}
 
 fn fixture(capacity: usize) -> (RibManager, IpAddr, mpsc::Receiver<OutboundRouteUpdate>) {
     let (_tx, rx) = mpsc::channel(8);
@@ -135,7 +148,7 @@ fn outbound_queue_credit_precedes_provenance_growth_and_reset_handoff() {
     own(&mut manager, peer, true);
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
-    manager.evpn_recovery_reset = Some(Arc::new(move |_| {
+    manager.evpn_recovery_reset = Some(Arc::new(move |_, _reply| {
         seen.fetch_add(1, Ordering::SeqCst);
         false
     }));
@@ -192,10 +205,15 @@ fn reset_refusal_retries_once_accepted_and_stays_exhausted_until_teardown() {
     own(&mut manager, peer, true);
     let requests = Arc::new(std::sync::Mutex::new(Vec::<EvpnRecoveryReset>::new()));
     let captured = requests.clone();
-    manager.evpn_recovery_reset = Some(Arc::new(move |request| {
+    manager.evpn_recovery_reset = Some(Arc::new(move |request, reply| {
         let mut requests = captured.lock().unwrap();
         requests.push(request);
-        requests.len() >= 2
+        if requests.len() >= 2 {
+            reply.send(EvpnRecoveryResetOutcome::Executed).unwrap();
+            true
+        } else {
+            false
+        }
     }));
     manager.evpn_recovery.fail_next_allocation_for_test();
     assert!(!manager.try_send_and_commit_outbound_update(
@@ -220,6 +238,108 @@ fn reset_refusal_retries_once_accepted_and_stays_exhausted_until_teardown() {
     assert!(!manager.settle_evpn_recovery(peer, [].into_iter()));
     manager.clear_outbound_peer_state(peer);
     assert!(manager.evpn_recovery.proof(handle).unwrap().is_none());
+}
+
+#[test]
+fn reset_execution_receipt_bounds_inflight_and_retries_rejection_and_drop() {
+    let (mut manager, peer, mut output) = fixture(8);
+    own(&mut manager, peer, true);
+    let requests = capture_reset_requests(&mut manager);
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    manager.evpn_recovery.fail_next_allocation_for_test();
+    assert!(!manager.try_send_and_commit_outbound_update(
+        peer,
+        OutboundCommitBatch {
+            evpn_announce: vec![route(1)],
+            ..OutboundCommitBatch::default()
+        }
+    ));
+    assert!(!manager.evpn_recovery.reset_admitted(handle));
+    manager.retry_evpn_recovery_reset(peer);
+    assert_eq!(requests.lock().unwrap().len(), 1, "one inflight receipt");
+    let (_, reply) = requests.lock().unwrap().pop().unwrap();
+    reply.send(EvpnRecoveryResetOutcome::Rejected).unwrap();
+    manager.retry_evpn_recovery_reset(peer);
+    assert!(!manager.evpn_recovery.reset_admitted(handle));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let (_, reply) = requests.lock().unwrap().pop().unwrap();
+    drop(reply);
+    manager.retry_evpn_recovery_reset(peer);
+    assert!(!manager.evpn_recovery.reset_admitted(handle));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let (_, reply) = requests.lock().unwrap().pop().unwrap();
+    reply.send(EvpnRecoveryResetOutcome::Executed).unwrap();
+    manager.retry_evpn_recovery_reset(peer);
+    assert!(manager.evpn_recovery.reset_admitted(handle));
+    for _ in 0..5 {
+        manager.retry_evpn_recovery_reset(peer);
+    }
+    assert!(requests.lock().unwrap().is_empty());
+    assert!(
+        output.try_recv().is_err(),
+        "no route admission while exhausted"
+    );
+    assert!(
+        manager.live_sessions[&peer]
+            .last()
+            .unwrap()
+            .evpn_recovery_reset_retry_reported
+    );
+}
+
+#[test]
+fn exact_replay_moves_the_pending_execution_receipt_without_a_second_attempt() {
+    let (mut manager, peer, _output) = fixture(8);
+    manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(0, 1024 * 1024);
+    let gid = manager.grouped_member_of(peer).unwrap();
+    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    let requests = capture_reset_requests(&mut manager);
+    assert!(!manager.register_evpn_recovery(peer, true));
+    let (_, reply) = requests.lock().unwrap().pop().unwrap();
+    let same_sender = manager.outbound_peers[&peer].clone();
+    register(&mut manager, peer, same_sender);
+    manager.retry_evpn_recovery_reset(peer);
+    assert!(requests.lock().unwrap().is_empty());
+    reply.send(EvpnRecoveryResetOutcome::Executed).unwrap();
+    manager.retry_evpn_recovery_reset(peer);
+    let record = manager.live_sessions[&peer].last().unwrap();
+    assert!(record.evpn_recovery_reset.is_some());
+    assert!(record.evpn_recovery_reset_receipt.is_none());
+    manager.retry_evpn_recovery_reset(peer);
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "executed receipt suppresses retry"
+    );
+}
+
+#[test]
+fn replaced_connection_discards_old_execution_receipt_with_the_same_actor_id() {
+    let (mut manager, peer, _output) = fixture(8);
+    manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(0, 1024 * 1024);
+    let gid = manager.grouped_member_of(peer).unwrap();
+    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    let requests = capture_reset_requests(&mut manager);
+    assert!(!manager.register_evpn_recovery(peer, true));
+    let (old, old_reply) = requests.lock().unwrap().pop().unwrap();
+    let (replacement, _replacement_output) = mpsc::channel(8);
+    register(&mut manager, peer, replacement);
+    assert!(!old.outbound.same_channel(&manager.outbound_peers[&peer]));
+    assert_eq!(
+        old_reply.send(EvpnRecoveryResetOutcome::Executed),
+        Err(EvpnRecoveryResetOutcome::Executed)
+    );
+    let gid = manager.grouped_member_of(peer).unwrap();
+    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    assert!(!manager.register_evpn_recovery(peer, true));
+    manager.retry_evpn_recovery_reset(peer);
+    let record = manager.live_sessions[&peer].last().unwrap();
+    assert!(record.evpn_recovery_reset.is_some());
+    assert!(record.evpn_recovery_reset_receipt.is_some());
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "fresh token owns its own attempt"
+    );
 }
 
 #[test]
@@ -276,8 +396,8 @@ fn reconnect_reuses_actor_id_but_retires_the_old_channel_owner() {
 }
 
 #[test]
-fn clean_owned_same_connection_replay_refuses_incomplete_projection_transfer() {
-    let (mut manager, peer, _output) = fixture(8);
+fn same_connection_capture_refusal_resets_instead_of_stalling_across_five_resync_rounds() {
+    let (mut manager, peer, mut output) = fixture(8);
     own(&mut manager, peer, true);
     let owner = manager.evpn_recovery_handle(peer).unwrap();
     assert!(manager.settle_evpn_recovery(peer, [].into_iter()));
@@ -287,15 +407,143 @@ fn clean_owned_same_connection_replay_refuses_incomplete_projection_transfer() {
         .get_mut(&peer)
         .unwrap()
         .insert_evpn(route(1));
+    let requests = capture_reset_requests(&mut manager);
     let same_sender = manager.outbound_peers[&peer].clone();
     register(&mut manager, peer, same_sender);
     assert_eq!(manager.evpn_recovery_handle(peer), Some(owner));
-    assert!(!manager.evpn_recovery.is_dormant(owner));
-    assert!(manager.evpn_recovery.proof(owner).unwrap().is_none());
-    assert!(manager.dirty_peers.contains(&peer));
-    assert!(manager.evpn_advertised_resync_in_progress(peer));
+    let error = manager.evpn_recovery.exhaustion(owner).unwrap();
+    assert_eq!(
+        error.cause,
+        crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable
+    );
+    assert_eq!(manager.evpn_recovery.proof(owner), Err(error));
+    for _ in 0..5 {
+        manager.resync_dirty_peers_bounded();
+        assert!(manager.dirty_peers.contains(&peer));
+        assert!(manager.evpn_recovery_reset_pending(peer));
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "one execution receipt remains owned"
+        );
+        assert_eq!(manager.evpn_recovery.exhaustion(owner), Some(error));
+        assert!(!manager.evpn_recovery.reset_admitted(owner));
+        let families = manager.metrics.registry().gather();
+        let resets = families
+            .iter()
+            .find(|family| family.name() == "bgp_evpn_recovery_provenance_exhausted_total")
+            .expect("reset counter is precreated");
+        assert_eq!(
+            resets.get_metric().len(),
+            crate::update::EvpnRecoveryExhaustionCause::ALL.len()
+        );
+        assert!(
+            resets
+                .get_metric()
+                .iter()
+                .all(|metric| metric.get_counter().get_value().abs() < f64::EPSILON),
+            "queue admission never counts executed resets"
+        );
+        while let Ok(update) = output.try_recv() {
+            assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
+        }
+    }
+    let (request, reply) = requests.lock().unwrap().pop().unwrap();
+    assert_eq!(request.session_id, 7);
+    assert!(
+        request
+            .outbound
+            .same_channel(&manager.outbound_peers[&peer])
+    );
+    reply.send(EvpnRecoveryResetOutcome::Executed).unwrap();
+    manager.resync_dirty_peers_bounded();
+    assert!(manager.evpn_recovery.reset_admitted(owner));
+    assert!(requests.lock().unwrap().is_empty());
     assert!(!manager.finish_evpn_recovery(peer));
     assert!(!manager.settle_evpn_recovery(peer, [].into_iter()));
+    // The executed reset stays fail-closed until actual owner teardown.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 7,
+    });
+    assert_eq!(manager.evpn_recovery.proof(owner).unwrap(), None);
+    let (replacement, _replacement_output) = mpsc::channel(8);
+    register_session(&mut manager, peer, replacement, 8);
+    own(&mut manager, peer, true);
+    let fresh = manager.evpn_recovery_handle(peer).unwrap();
+    assert_ne!(fresh, owner);
+    assert_eq!(
+        manager.evpn_recovery.proof(fresh).unwrap(),
+        Some([].as_slice())
+    );
+    assert!(!manager.evpn_recovery.reset_admitted(fresh));
+}
+
+#[test]
+fn missing_shared_received_input_retains_capture_reset_duty_without_guessing_empty_proof() {
+    let (mut manager, peer, gid, _output) = super::evpn_group_storage::fixture();
+    let owner = manager.evpn_recovery_handle(peer).unwrap();
+    assert!(manager.evpn_recovery.is_dormant(owner));
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .table
+        .insert_evpn(route(1));
+    let requests = capture_reset_requests(&mut manager);
+    assert!(!manager.capture_shared_evpn_admitted(peer));
+    let error = manager.evpn_recovery.exhaustion(owner).unwrap();
+    assert_eq!(
+        error.cause,
+        crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable
+    );
+    assert_eq!(manager.evpn_recovery.proof(owner), Err(error));
+    for _ in 0..5 {
+        assert!(!manager.capture_shared_evpn_admitted(peer));
+        manager.resync_dirty_peers_bounded();
+        assert_eq!(manager.evpn_recovery.exhaustion(owner), Some(error));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+    let (request, _) = requests.lock().unwrap().pop().unwrap();
+    assert_eq!(
+        request.cause,
+        crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable
+    );
+}
+
+#[test]
+fn duplicate_candidate_announcements_refuse_the_whole_mixed_family_batch_without_panic() {
+    let (mut manager, peer, mut output) = fixture(8);
+    own(&mut manager, peer, true);
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    let requests = capture_reset_requests(&mut manager);
+    let unicast = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32),
+        Ipv4Addr::new(192, 0, 2, 10),
+    );
+    assert!(!manager.try_send_and_commit_outbound_update(
+        peer,
+        OutboundCommitBatch {
+            evpn_announce: vec![route(1), route(1)],
+            ..OutboundCommitBatch::with_unicast(
+                Arc::new(vec![unicast.clone()]),
+                Arc::new(vec![None])
+            )
+        }
+    ));
+    let error = manager.evpn_recovery.exhaustion(handle).unwrap();
+    assert_eq!(
+        error.cause,
+        crate::update::EvpnRecoveryExhaustionCause::AdmissionInvariant
+    );
+    assert!(
+        manager.adj_ribs_out[&peer]
+            .get(&unicast.prefix, unicast.path_id)
+            .is_none()
+    );
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert!(output.try_recv().is_err());
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -349,12 +597,13 @@ fn ownership_registration_refusal_has_bounded_session_reset_control() {
     manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
-    manager.evpn_recovery_reset = Some(Arc::new(move |request| {
+    manager.evpn_recovery_reset = Some(Arc::new(move |request, reply| {
         assert_eq!(
             request.cause,
             crate::update::EvpnRecoveryExhaustionCause::PeerLimit
         );
         seen.fetch_add(1, Ordering::SeqCst);
+        reply.send(EvpnRecoveryResetOutcome::Executed).unwrap();
         true
     }));
     assert!(!manager.register_evpn_recovery(peer, true));

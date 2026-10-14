@@ -1416,17 +1416,18 @@ impl PeerSession {
                 self.timers.stop_all();
                 ControlFlow::Break(())
             }
-            PeerCommand::ResetEvpnRecoverySession { request } => {
+            PeerCommand::ResetEvpnRecoverySession { request, reply } => {
                 if self.fsm.state() != SessionState::Established
                     || request.peer != self.peer_ip
                     || request.session_id != self.session_identity.id
                     || request.outbound.is_closed()
                     || !request.outbound.same_channel(&self.outbound_tx)
                 {
+                    let _ = reply.send(rustbgpd_rib::EvpnRecoveryResetOutcome::Rejected);
                     return ControlFlow::Continue(());
                 }
                 self.metrics
-                    .record_evpn_recovery_provenance_exhausted(request.cause.as_str());
+                    .record_evpn_recovery_provenance_exhausted(request.cause);
                 warn!(peer = %self.peer_label, session_id = request.session_id,
                     reason = "recovery_provenance_exhausted", cause = request.cause.as_str(),
                     limiting_peer = ?request.limiting_peer,
@@ -1439,6 +1440,7 @@ impl PeerSession {
                     "recovery_provenance_exhausted",
                 );
                 self.administrative_reset(Some(reason)).await;
+                let _ = reply.send(rustbgpd_rib::EvpnRecoveryResetOutcome::Executed);
                 ControlFlow::Continue(())
             }
             PeerCommand::AdministrativeReset { reason } => {

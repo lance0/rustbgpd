@@ -515,6 +515,8 @@ pub enum PeerCommand {
     ResetEvpnRecoverySession {
         /// Connection token and bounded resource-exhaustion evidence.
         request: rustbgpd_rib::EvpnRecoveryReset,
+        /// Receipt for actual guarded execution, including refusal.
+        reply: oneshot::Sender<rustbgpd_rib::EvpnRecoveryResetOutcome>,
     },
     /// Query the current session state.
     QueryState {

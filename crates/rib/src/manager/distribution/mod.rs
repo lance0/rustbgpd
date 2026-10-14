@@ -3785,6 +3785,11 @@ impl RibManager {
         }
         let limited = self.outbound_prefix_limits.contains_key(&peer);
         self.retain_evpn_recovery_withdrawals(peer, &mut evpn_withdraw);
+        if !self.preflight_final_evpn_recovery(peer, &mut evpn_announce, &mut evpn_withdraw)
+            || !self.admit_evpn_recovery_batch(peer, &evpn_announce, &evpn_withdraw)
+        {
+            return false;
+        }
         let capacity_filtered = self.enforce_outbound_prefix_limits(
             peer,
             grouped_unicast_count.is_some(),
@@ -4100,7 +4105,6 @@ impl RibManager {
             }
             self.refresh_group_recovery_gauges();
         }
-        self.admit_evpn_recovery_batch(peer, &evpn_announce, &evpn_withdraw);
         enqueue_outbound_update(
             permit,
             OutboundRouteUpdate {

@@ -2069,8 +2069,8 @@ impl BgpMetrics {
             &["cause"],
         )
         .expect("valid metric definition");
-        for cause in ["peer_limit", "daemon_limit", "allocation_failure"] {
-            evpn_recovery_provenance_exhausted.with_label_values(&[cause]);
+        for cause in crate::reason_labels::EvpnRecoveryExhaustionCause::ALL {
+            evpn_recovery_provenance_exhausted.with_label_values(&[cause.as_str()]);
         }
 
         let update_malformed = IntCounterVec::new(
@@ -5562,13 +5562,14 @@ impl BgpMetrics {
 
     /// Count a reset accepted by its captured EVPN connection, never a
     /// queued, stale or refused request. The cause vocabulary is closed.
-    pub fn record_evpn_recovery_provenance_exhausted(&self, cause: &str) {
-        if matches!(cause, "peer_limit" | "daemon_limit" | "allocation_failure") {
-            self.0
-                .evpn_recovery_provenance_exhausted
-                .with_label_values(&[cause])
-                .inc();
-        }
+    pub fn record_evpn_recovery_provenance_exhausted(
+        &self,
+        cause: crate::reason_labels::EvpnRecoveryExhaustionCause,
+    ) {
+        self.0
+            .evpn_recovery_provenance_exhausted
+            .with_label_values(&[cause.as_str()])
+            .inc();
     }
 
     /// Record a malformed UPDATE by the RFC 7606 disposition applied.
@@ -9372,27 +9373,43 @@ mod tests {
     }
 
     #[test]
-    fn evpn_recovery_reset_counter_has_only_three_fixed_causes() {
+    fn evpn_recovery_reset_counter_has_only_typed_fixed_causes() {
+        use crate::reason_labels::EvpnRecoveryExhaustionCause;
         let metrics = BgpMetrics::new();
-        metrics.record_evpn_recovery_provenance_exhausted("peer_limit");
-        metrics.record_evpn_recovery_provenance_exhausted("unknown");
+        metrics.record_evpn_recovery_provenance_exhausted(EvpnRecoveryExhaustionCause::PeerLimit);
+        metrics.record_evpn_recovery_provenance_exhausted(
+            EvpnRecoveryExhaustionCause::CaptureUnavailable,
+        );
         let families = metrics.0.registry.gather();
         let family = families
             .iter()
             .find(|family| family.name() == "bgp_evpn_recovery_provenance_exhausted_total")
             .unwrap();
-        assert_eq!(family.get_metric().len(), 3);
+        assert_eq!(
+            family.get_metric().len(),
+            EvpnRecoveryExhaustionCause::ALL.len()
+        );
         for metric in family.get_metric() {
             assert_eq!(metric.get_label().len(), 1);
             assert_eq!(metric.get_label()[0].name(), "cause");
             let cause = metric.get_label()[0].value();
-            assert!(matches!(
-                cause,
-                "peer_limit" | "daemon_limit" | "allocation_failure"
-            ));
+            assert!(
+                EvpnRecoveryExhaustionCause::ALL
+                    .iter()
+                    .any(|known| known.as_str() == cause)
+            );
             assert_eq!(
                 metric.get_counter().get_value(),
-                if cause == "peer_limit" { 1.0 } else { 0.0 }
+                if [
+                    EvpnRecoveryExhaustionCause::PeerLimit.as_str(),
+                    EvpnRecoveryExhaustionCause::CaptureUnavailable.as_str()
+                ]
+                .contains(&cause)
+                {
+                    1.0
+                } else {
+                    0.0
+                }
             );
         }
     }
