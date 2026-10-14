@@ -1,0 +1,1446 @@
+{
+  "primary": "scope memory.peak bytes",
+  "rows": [
+    {
+      "cell": "dataset-reevaluate",
+      "evpn_reset_counter": "absent",
+      "leg": 1,
+      "recovery_gauges": "absent-baseline",
+      "role": "baseline",
+      "samples": [
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 171646976,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 171646976,
+            "memory.stat.anon": 167235584,
+            "memory.stat.file": 1916928,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "population_ready",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 171646976,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 171646976,
+            "memory.stat.anon": 167235584,
+            "memory.stat.file": 1916928,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "retained",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 171646976,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 171646976,
+            "memory.stat.anon": 167235584,
+            "memory.stat.file": 1916928,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "operation_end",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 51200000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 156188672,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 200949760,
+            "memory.stat.anon": 135450624,
+            "memory.stat.file": 1916928,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "settled",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        }
+      ],
+      "scope_memory_current_bytes": 13094912,
+      "scope_memory_peak_bytes": 200949760,
+      "workload_identity": {
+        "cgroup": "scope-01",
+        "instrumentation_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+        "pid": 18781,
+        "source_sha": "c862af9338aa828b7462f3cf85781f63b0e79fe8",
+        "start_ticks": 61829
+      }
+    },
+    {
+      "cell": "dataset-reevaluate",
+      "evpn_reset_counter": "present-inactive-zero",
+      "leg": 2,
+      "recovery_gauges": "required-present",
+      "role": "candidate",
+      "samples": [
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 173862912,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 173862912,
+            "memory.stat.anon": 171188224,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 56,
+            "bgp_update_group_recovery_entries": 0,
+            "bgp_update_group_recovery_fallback_total": 0,
+            "bgp_update_group_recovery_peak_bytes": 256,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "population_ready",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 804327424,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 829325312,
+            "memory.stat.anon": 680148992,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 532699192,
+            "bgp_update_group_recovery_entries": 12700000,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "retained",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 804327424,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 829325312,
+            "memory.stat.anon": 680148992,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 532699192,
+            "bgp_update_group_recovery_entries": 12700000,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "operation_end",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 51200000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 319520768,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 846053376,
+            "memory.stat.anon": 251994112,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 56,
+            "bgp_update_group_recovery_entries": 0,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "settled",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        }
+      ],
+      "scope_memory_current_bytes": 10665984,
+      "scope_memory_peak_bytes": 846053376,
+      "workload_identity": {
+        "cgroup": "scope-02",
+        "instrumentation_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+        "pid": 18803,
+        "source_sha": "ee50db161b98def127629eca8a30d9fc23a0320a",
+        "start_ticks": 63262
+      }
+    },
+    {
+      "cell": "dataset-reevaluate",
+      "evpn_reset_counter": "present-inactive-zero",
+      "leg": 3,
+      "recovery_gauges": "required-present",
+      "role": "candidate",
+      "samples": [
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 168775680,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 169811968,
+            "memory.stat.anon": 164438016,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 56,
+            "bgp_update_group_recovery_entries": 0,
+            "bgp_update_group_recovery_fallback_total": 0,
+            "bgp_update_group_recovery_peak_bytes": 256,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "population_ready",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 801746944,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 821846016,
+            "memory.stat.anon": 687550464,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 532699192,
+            "bgp_update_group_recovery_entries": 12700000,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "retained",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 801746944,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 821846016,
+            "memory.stat.anon": 687550464,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 532699192,
+            "bgp_update_group_recovery_entries": 12700000,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "operation_end",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 51200000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 335101952,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 842416128,
+            "memory.stat.anon": 268652544,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 56,
+            "bgp_update_group_recovery_entries": 0,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "settled",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        }
+      ],
+      "scope_memory_current_bytes": 10358784,
+      "scope_memory_peak_bytes": 842416128,
+      "workload_identity": {
+        "cgroup": "scope-03",
+        "instrumentation_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+        "pid": 18831,
+        "source_sha": "ee50db161b98def127629eca8a30d9fc23a0320a",
+        "start_ticks": 67946
+      }
+    },
+    {
+      "cell": "dataset-reevaluate",
+      "evpn_reset_counter": "absent",
+      "leg": 4,
+      "recovery_gauges": "absent-baseline",
+      "role": "baseline",
+      "samples": [
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 179814400,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 179814400,
+            "memory.stat.anon": 175579136,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "population_ready",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 176668672,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 181911552,
+            "memory.stat.anon": 172441600,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "retained",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 176668672,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 181911552,
+            "memory.stat.anon": 172441600,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "operation_end",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 51200000,
+          "cell": "dataset-reevaluate",
+          "cgroup": {
+            "memory.current": 154955776,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 208117760,
+            "memory.stat.anon": 133324800,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "settled",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        }
+      ],
+      "scope_memory_current_bytes": 10973184,
+      "scope_memory_peak_bytes": 208117760,
+      "workload_identity": {
+        "cgroup": "scope-04",
+        "instrumentation_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+        "pid": 18856,
+        "source_sha": "c862af9338aa828b7462f3cf85781f63b0e79fe8",
+        "start_ticks": 72604
+      }
+    },
+    {
+      "cell": "peer-down",
+      "evpn_reset_counter": "absent",
+      "leg": 1,
+      "recovery_gauges": "absent-baseline",
+      "role": "baseline",
+      "samples": [
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 171118592,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 173830144,
+            "memory.stat.anon": 168443904,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "population_ready",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 164782080,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 223547392,
+            "memory.stat.anon": 158531584,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_update_group_residue_entries": 100000,
+            "bgp_update_groups": 1
+          },
+          "phase": "retained",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 164782080,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 223547392,
+            "memory.stat.anon": 158531584,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_update_group_residue_entries": 100000,
+            "bgp_update_groups": 1
+          },
+          "phase": "operation_end",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 146198528,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 223547392,
+            "memory.stat.anon": 128225280,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 0,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 1
+          },
+          "phase": "settled",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 25600000
+        }
+      ],
+      "scope_memory_current_bytes": 11235328,
+      "scope_memory_peak_bytes": 223547392,
+      "workload_identity": {
+        "cgroup": "scope-05",
+        "instrumentation_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+        "pid": 18877,
+        "source_sha": "c862af9338aa828b7462f3cf85781f63b0e79fe8",
+        "start_ticks": 74042
+      }
+    },
+    {
+      "cell": "peer-down",
+      "evpn_reset_counter": "present-inactive-zero",
+      "leg": 2,
+      "recovery_gauges": "required-present",
+      "role": "candidate",
+      "samples": [
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 165830656,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 172900352,
+            "memory.stat.anon": 163151872,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 56,
+            "bgp_update_group_recovery_entries": 0,
+            "bgp_update_group_recovery_fallback_total": 0,
+            "bgp_update_group_recovery_peak_bytes": 256,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "population_ready",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 820084736,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 888643584,
+            "memory.stat.anon": 708825088,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 532699192,
+            "bgp_update_group_recovery_entries": 12700000,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 100000,
+            "bgp_update_groups": 1
+          },
+          "phase": "retained",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 820084736,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 888643584,
+            "memory.stat.anon": 708825088,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 532699192,
+            "bgp_update_group_recovery_entries": 12700000,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 100000,
+            "bgp_update_groups": 1
+          },
+          "phase": "operation_end",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 271953920,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 888643584,
+            "memory.stat.anon": 215953408,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 0,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 56,
+            "bgp_update_group_recovery_entries": 0,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 1
+          },
+          "phase": "settled",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 25600000
+        }
+      ],
+      "scope_memory_current_bytes": 11440128,
+      "scope_memory_peak_bytes": 888643584,
+      "workload_identity": {
+        "cgroup": "scope-06",
+        "instrumentation_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+        "pid": 18898,
+        "source_sha": "ee50db161b98def127629eca8a30d9fc23a0320a",
+        "start_ticks": 75088
+      }
+    },
+    {
+      "cell": "peer-down",
+      "evpn_reset_counter": "present-inactive-zero",
+      "leg": 3,
+      "recovery_gauges": "required-present",
+      "role": "candidate",
+      "samples": [
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 182235136,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 182235136,
+            "memory.stat.anon": 179789824,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 56,
+            "bgp_update_group_recovery_entries": 0,
+            "bgp_update_group_recovery_fallback_total": 0,
+            "bgp_update_group_recovery_peak_bytes": 256,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "population_ready",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 823824384,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 903512064,
+            "memory.stat.anon": 718606336,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 532699192,
+            "bgp_update_group_recovery_entries": 12700000,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 100000,
+            "bgp_update_groups": 1
+          },
+          "phase": "retained",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 824086528,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 903512064,
+            "memory.stat.anon": 718606336,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 532699192,
+            "bgp_update_group_recovery_entries": 12700000,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 100000,
+            "bgp_update_groups": 1
+          },
+          "phase": "operation_end",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 262037504,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 903512064,
+            "memory.stat.anon": 211570688,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 129,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 0,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_evpn_recovery_provenance_exhausted_total": 0,
+            "bgp_update_group_recovery_bytes": 56,
+            "bgp_update_group_recovery_entries": 0,
+            "bgp_update_group_recovery_fallback_total": 129,
+            "bgp_update_group_recovery_peak_bytes": 535844944,
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 1
+          },
+          "phase": "settled",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 25600000
+        }
+      ],
+      "scope_memory_current_bytes": 10702848,
+      "scope_memory_peak_bytes": 903512064,
+      "workload_identity": {
+        "cgroup": "scope-07",
+        "instrumentation_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+        "pid": 18921,
+        "source_sha": "ee50db161b98def127629eca8a30d9fc23a0320a",
+        "start_ticks": 77791
+      }
+    },
+    {
+      "cell": "peer-down",
+      "evpn_reset_counter": "absent",
+      "leg": 4,
+      "recovery_gauges": "absent-baseline",
+      "role": "baseline",
+      "samples": [
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 168615936,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 169652224,
+            "memory.stat.anon": 166170624,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 2
+          },
+          "phase": "population_ready",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 168685568,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 229695488,
+            "memory.stat.anon": 157655040,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_update_group_residue_entries": 100000,
+            "bgp_update_groups": 1
+          },
+          "phase": "retained",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 168685568,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 229695488,
+            "memory.stat.anon": 157655040,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 256,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 25600000,
+          "group_dirty_members": 256,
+          "metrics": {
+            "bgp_update_group_residue_entries": 100000,
+            "bgp_update_groups": 1
+          },
+          "phase": "operation_end",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 0
+        },
+        {
+          "announces": 25600000,
+          "cell": "peer-down",
+          "cgroup": {
+            "memory.current": 146640896,
+            "memory.events.oom": 0,
+            "memory.events.oom_group_kill": 0,
+            "memory.events.oom_kill": 0,
+            "memory.peak": 229695488,
+            "memory.stat.anon": 135507968,
+            "memory.stat.file": 65536,
+            "memory.stat.file_mapped": 0,
+            "memory.swap.current": 0,
+            "memory.swap.max": 0,
+            "memory.swap.peak": 0
+          },
+          "clients": 256,
+          "dirty_peers": 0,
+          "fallback_causes": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "folded_routes": 0,
+          "group_dirty_members": 0,
+          "metrics": {
+            "bgp_update_group_residue_entries": 0,
+            "bgp_update_groups": 1
+          },
+          "phase": "settled",
+          "prefixes": 100000,
+          "receiver_bitmap_bytes": 3201024,
+          "receiver_queue_capacity": 8,
+          "schema": "rustbgpd.recovery-memory.v1",
+          "withdrawals": 25600000
+        }
+      ],
+      "scope_memory_current_bytes": 10969088,
+      "scope_memory_peak_bytes": 229695488,
+      "workload_identity": {
+        "cgroup": "scope-08",
+        "instrumentation_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+        "pid": 18945,
+        "source_sha": "c862af9338aa828b7462f3cf85781f63b0e79fe8",
+        "start_ticks": 80472
+      }
+    }
+  ],
+  "scope": "manager-direct RIB, production exact-export preflight, harness consumers",
+  "summaries": [
+    {
+      "candidate_to_baseline_mean_peak_ratio": 4.12760588765395,
+      "cell": "dataset-reevaluate",
+      "peaks_bytes": {
+        "baseline": [
+          200949760,
+          208117760
+        ],
+        "candidate": [
+          846053376,
+          842416128
+        ]
+      },
+      "verdict": "measured memory only; no timing or automatic capacity threshold"
+    },
+    {
+      "candidate_to_baseline_mean_peak_ratio": 3.9540734716009216,
+      "cell": "peer-down",
+      "peaks_bytes": {
+        "baseline": [
+          223547392,
+          229695488
+        ],
+        "candidate": [
+          888643584,
+          903512064
+        ]
+      },
+      "verdict": "measured memory only; no timing or automatic capacity threshold"
+    }
+  ]
+}
