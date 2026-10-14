@@ -4676,9 +4676,12 @@ async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
                 o.group_label(C).await.starts_with("group:"),
                 !force_ungrouped
             );
+            // Both queued announcements were admitted before the refusal, so
+            // they drain as normal admissions; only the retry that follows
+            // runs inside the recovery interval.
+            o.drain_one(C).await;
             o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
                 .await;
-            o.drain_one(C).await;
             tokio::time::advance(Duration::from_secs(2)).await;
             o.quiesce().await;
             o.end_recovery(C).await;
