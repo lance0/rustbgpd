@@ -193,10 +193,10 @@ shape itself does not raise the tier.
 | `ListVpnRoutes` | `sensitive_read` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, MPLS labels. |
 | `ListLabeledRoutes` | `sensitive_read` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability. |
 | `ListRtcRoutes` | `sensitive_read` | RFC 4684 RT-Constrain membership NLRI — reveals which Route Targets each peer imports (VPN topology metadata). |
-| `ListVpnRoutesPage` | `sensitive_read` | Bounded, filtered, mutation-fenced Vpn page; exposes route topology. Outside current v1 inventory. |
-| `ListLabeledRoutesPage` | `sensitive_read` | Bounded, filtered, mutation-fenced Labeled page; exposes route topology. Outside current v1 inventory. |
-| `ListRtcRoutesPage` | `sensitive_read` | Bounded, filtered, mutation-fenced Rtc page; exposes route topology. Outside current v1 inventory. |
-| `ListEvpnRoutesPage` | `sensitive_read` | Bounded, filtered, mutation-fenced Evpn page; exposes route topology. Outside current v1 inventory. |
+| `ListVpnRibRoutes` | `sensitive_read` | Bounded, filtered, mutation-fenced Vpn page; exposes route topology. Outside current v1 inventory. |
+| `ListLabeledRibRoutes` | `sensitive_read` | Bounded, filtered, mutation-fenced Labeled page; exposes route topology. Outside current v1 inventory. |
+| `ListRtcRibRoutes` | `sensitive_read` | Bounded, filtered, mutation-fenced Rtc page; exposes route topology. Outside current v1 inventory. |
+| `ListBestEvpnRoutes` | `sensitive_read` | Bounded, filtered, mutation-fenced Evpn page; exposes route topology. Outside current v1 inventory. |
 | `ListTopologyNodes` | `sensitive_read` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union — discloses IGP node identity (AS, router-IDs). |
 | `ListTopologyLinks` | `sensitive_read` | RFC 9107 ORR topology links — discloses IGP adjacencies, link addresses, and metrics (the SPF input). |
 | `ListOrrStatus` | `sensitive_read` | RFC 9107 ORR per-vantage status — discloses configured vantage IPs (IGP locations), their resolved topology nodes, and the peers bound to them. |

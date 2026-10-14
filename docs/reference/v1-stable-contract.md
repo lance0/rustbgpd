@@ -154,9 +154,11 @@ SRv6 Argument companion, and EVPN events (`EventService.ListEvpnEvents` and
 the `BgpEvent.evpn` payload) remain alpha.
 
 The checker computes this method set's message-graph digest after removing
-the two excluded `EvpnRouteEntry` fields, so a change to fields 1–16, the
-request, the page or `RoutePageVersion` fails it, while a change confined to
-`prefix_sid` or `smet` does not. Such a change still trips the stable event
+the two excluded `EvpnRouteEntry` fields and the explicitly unstable
+`ListPeerEvpnRoutesRequest.mac_filter`, `esi_filter` and `vni_filter` fields.
+A change to entry fields 1–16, the inventoried request fields, the page or
+`RoutePageVersion` fails it; a change confined to the excluded fields does
+not. An excluded entry-field change still trips the stable event
 graph's review tripwire, which reaches `EvpnRouteEntry` through the alpha
 `BgpEvent.evpn` payload; that does not promote the event. The set's
 `stable_request_values` records the 1–5 call profile and rejects any method
