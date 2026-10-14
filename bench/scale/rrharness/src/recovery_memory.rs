@@ -395,8 +395,15 @@ async fn consume(
                     let _ = ready.send(inventory.counts);
                     loop {
                         tokio::select! {
+                            // After resume, snapshots must drain queued route events.
+                            biased;
                             _ = &mut resume => break,
                             command = control.recv() => match command {
+                                Some(Control::Snapshot(reply)) => {
+                                    if paused_snapshot(&mut inventory, &mut outbound, &mut resume, reply) {
+                                        break;
+                                    }
+                                }
                                 Some(Control::Credit { request, acknowledged }) => {
                                     let result = async {
                                         request.await.map_err(|_| "credit owner closed".to_owned())?;
@@ -408,7 +415,7 @@ async fn consume(
                                     }.await;
                                     let _ = acknowledged.send(result);
                                 }
-                                _ => panic!("only owned credit grants are allowed while paused"),
+                                _ => panic!("only snapshots and owned credit grants are allowed while paused"),
                             }
                         }
                     }
@@ -420,6 +427,24 @@ async fn consume(
         }
     }
 }
+
+fn paused_snapshot(
+    inventory: &mut Inventory,
+    outbound: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    resume: &mut oneshot::Receiver<()>,
+    reply: oneshot::Sender<Counts>,
+) -> bool {
+    // Resume may arrive between select's branch polls; recheck before a cached reply.
+    let resumed = !matches!(resume.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    if resumed {
+        while let Ok(update) = outbound.try_recv() {
+            inventory.apply(update);
+        }
+    }
+    let _ = reply.send(inventory.counts);
+    resumed
+}
+
 fn assert_empty_credit(update: &OutboundRouteUpdate) {
     assert!(
         update.announce.is_empty()
@@ -1066,6 +1091,89 @@ pub(super) fn main(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_rechecks_release_after_a_pending_resume_poll() {
+        let (outbound, mut updates) = mpsc::channel(1);
+        outbound
+            .try_send(OutboundRouteUpdate {
+                announce: vec![fixture_route(0, 0)].into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let (release, mut resume) = oneshot::channel();
+        let mut inventory = Inventory::new([1, 0, 0, 0]);
+        let (reply, snapshot) = oneshot::channel();
+        assert!(!paused_snapshot(
+            &mut inventory,
+            &mut updates,
+            &mut resume,
+            reply
+        ));
+        assert_eq!(snapshot.await.unwrap().present, [0; 4]);
+        assert_eq!(outbound.capacity(), 0);
+        std::future::poll_fn(|context| {
+            assert!(
+                std::future::Future::poll(std::pin::Pin::new(&mut resume), context).is_pending()
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        let (reply, snapshot) = oneshot::channel();
+        assert!(paused_snapshot(
+            &mut inventory,
+            &mut updates,
+            &mut resume,
+            reply
+        ));
+        assert_eq!(snapshot.await.unwrap().present, [1, 0, 0, 0]);
+        assert_eq!(outbound.capacity(), 1);
+    }
+
+    #[tokio::test]
+    async fn paused_snapshot_preserves_backpressure_until_resume() {
+        for _ in 0..32 {
+            let (outbound, updates) = mpsc::channel(RECOVERY_QUEUE_CAPACITY);
+            let (control, commands) = mpsc::channel(4);
+            let consumer = tokio::spawn(consume(updates, commands, [1, 0, 0, 0]));
+            let receiver = Receiver {
+                peer: IpAddr::V4(source_addr(1)),
+                outbound,
+                control,
+            };
+            let (ready, paused) = oneshot::channel();
+            let (release, resume) = oneshot::channel();
+            receiver
+                .control
+                .send(Control::Pause { ready, resume })
+                .await
+                .unwrap();
+            paused.await.unwrap();
+            receiver
+                .outbound
+                .try_send(OutboundRouteUpdate {
+                    announce: vec![fixture_route(0, 0)].into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            while receiver.outbound.capacity() > 0 {
+                receiver
+                    .outbound
+                    .try_send(OutboundRouteUpdate::default())
+                    .unwrap();
+            }
+            assert_eq!(receiver.snapshot().await.present, [0; 4]);
+            assert_eq!(receiver.outbound.capacity(), 0);
+            release.send(()).unwrap();
+            // Current-thread execution makes resume and Snapshot ready together.
+            assert_eq!(receiver.snapshot().await.present, [1, 0, 0, 0]);
+            assert_eq!(receiver.outbound.capacity(), RECOVERY_QUEUE_CAPACITY);
+            drop(receiver);
+            consumer.await.unwrap();
+        }
+    }
+
     #[test]
     fn bitmap_tracks_full_family_and_raw_rd_identity() {
         let mut inventory = Inventory::new([100; 4]);
