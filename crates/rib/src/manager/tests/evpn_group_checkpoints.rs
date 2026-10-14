@@ -70,7 +70,7 @@ fn evpn_projection_checkpoints_wholly_excluded_rtc_source_and_rejection_rows() {
 }
 
 #[test]
-fn evpn_shared_empty_capture_threads_real_checkpoints_through_both_walks() {
+fn evpn_shared_empty_capture_checkpoints_completeness_count_and_population() {
     let (mut manager, member, gid, _output) = fixture_with_rtc(true);
     let routes = install_routes(&mut manager, gid, 7);
     manager
@@ -88,16 +88,20 @@ fn evpn_shared_empty_capture_threads_real_checkpoints_through_both_walks() {
     assert!(
         manager.with_replacement_readiness(|manager| manager.capture_shared_evpn_admitted(member))
     );
-    assert_eq!(visits.load(Ordering::SeqCst), routes.len() * 2);
+    assert_eq!(
+        visits.load(Ordering::SeqCst),
+        routes.len() * 3,
+        "completeness, filtered cardinality and population each visit every excluded row"
+    );
     let handle = manager.evpn_recovery_handle(member).unwrap();
     assert_eq!(
-        manager.evpn_recovery.proof(handle).unwrap().unwrap(),
+        manager.evpn_recovery.proof_keys(handle).unwrap().unwrap(),
         [] as [rustbgpd_wire::EvpnRouteKey; 0]
     );
 }
 
 #[test]
-fn evpn_private_capture_preserves_keys_and_one_checkpoint_per_row() {
+fn evpn_private_capture_preserves_keys_and_checkpoints_projection_and_insertion() {
     let (mut manager, member, _gid, _output) = fixture();
     let routes: Vec<_> = (1..=7)
         .map(|suffix| make_evpn_imet(Ipv4Addr::new(198, 51, 100, suffix), 1))
@@ -121,11 +125,15 @@ fn evpn_private_capture_preserves_keys_and_one_checkpoint_per_row() {
     assert!(
         manager.with_replacement_readiness(|manager| manager.capture_private_evpn_admitted(member))
     );
-    assert_eq!(visits.load(Ordering::SeqCst), routes.len());
+    assert_eq!(
+        visits.load(Ordering::SeqCst),
+        routes.len() * 2,
+        "both the actual-key producer and ledger insertion visit every row"
+    );
     let handle = manager.evpn_recovery_handle(member).unwrap();
     let proof: HashSet<_> = manager
         .evpn_recovery
-        .proof(handle)
+        .proof_keys(handle)
         .unwrap()
         .unwrap()
         .iter()
@@ -166,4 +174,34 @@ fn evpn_denial_replacement_checkpoints_retained_and_inserted_rows() {
     assert!(!group.evpn_policy_denied.contains_key(&routes[1].key()));
     assert_eq!(group.evpn_policy_denied[&routes[2].key()], old);
     assert_eq!(group.evpn_policy_denied[&new.key()], inserted);
+}
+
+#[test]
+fn shared_capture_proof_iteration_checkpoints_masked_and_trailing_rows() {
+    let (mut manager, member, gid, _output) = fixture();
+    let routes = install_routes(&mut manager, gid, 32);
+    manager.peer_unexportable.insert(
+        member,
+        routes[1..]
+            .iter()
+            .map(|route| ExactExportKey::Evpn(route.key()))
+            .collect(),
+    );
+    assert!(manager.capture_shared_evpn_admitted(member));
+    let handle = manager.evpn_recovery_handle(member).unwrap();
+    let view = manager.evpn_recovery.proof(handle).unwrap().unwrap();
+    let mut visits = 0;
+    let keys = view
+        .iter_with_checkpoint(|force| {
+            assert!(!force);
+            visits += 1;
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keys, [routes[0].key()]);
+    assert!(manager.group_ribs[&gid].evpn_recovery_universe.is_some());
+    assert_eq!(
+        visits,
+        routes.len(),
+        "all unmarked and trailing universe rows need checkpoints"
+    );
 }

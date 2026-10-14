@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::manager::distribution::OutboundCommitBatch;
 use crate::manager::update_groups::recovery_provenance::EvpnRecoveryProvenance;
-use crate::update::{EvpnRecoveryReset, EvpnRecoveryResetOutcome, RoutePageError};
+use crate::update::{
+    EvpnRecoveryExhaustionCause, EvpnRecoveryReset, EvpnRecoveryResetOutcome, RoutePageError,
+};
 
 type ResetRequests =
     Arc<std::sync::Mutex<Vec<(EvpnRecoveryReset, oneshot::Sender<EvpnRecoveryResetOutcome>)>>>;
@@ -116,14 +118,14 @@ fn owned_capture_is_retained_across_rtc_changes_and_generic_cleanup() {
     );
     manager.set_rt_membership(peer, Some(RtcMembership::default()));
     assert_eq!(
-        manager.evpn_recovery.proof(handle).unwrap(),
-        Some([old].as_slice())
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some([old].to_vec())
     );
     // A new desired iterator must not overwrite an already-owned old-Φ proof.
     assert!(manager.capture_evpn_recovery_before_projection(peer, [route(2).key()].into_iter()));
     assert_eq!(
-        manager.evpn_recovery.proof(handle).unwrap(),
-        Some([old].as_slice())
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some([old].to_vec())
     );
     let prior_uc = manager.pending_group_admitted.owned_proof(&peer);
     manager.dirty_peers.remove(&peer);
@@ -131,8 +133,8 @@ fn owned_capture_is_retained_across_rtc_changes_and_generic_cleanup() {
     assert!(manager.dirty_peers.contains(&peer));
     assert_eq!(manager.pending_group_admitted.owned_proof(&peer), prior_uc);
     assert_eq!(
-        manager.evpn_recovery.proof(handle).unwrap(),
-        Some([old].as_slice())
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some([old].to_vec())
     );
     assert!(!manager.settle_evpn_recovery(peer, [route(2).key()].into_iter()));
     assert!(manager.settle_evpn_recovery(peer, [old].into_iter()));
@@ -200,6 +202,72 @@ fn outbound_queue_credit_precedes_provenance_growth_and_reset_handoff() {
 }
 
 #[test]
+fn incomplete_owned_capture_requests_one_fenced_reset_before_mixed_family_admission() {
+    let (mut manager, peer, mut output) = fixture(8);
+    own(&mut manager, peer, true);
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
+    assert!(manager.evpn_recovery.begin_capture(handle).unwrap());
+    assert!(manager.evpn_recovery.proof(handle).unwrap().is_none());
+    // Inject an unfinished producer. Ordinary capture completes synchronously;
+    // this control pins the refusal if that internal invariant is ever broken.
+    let requests = capture_reset_requests(&mut manager);
+    let unicast = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32),
+        Ipv4Addr::new(192, 0, 2, 10),
+    );
+    let batch = || OutboundCommitBatch {
+        evpn_announce: vec![route(1)],
+        ..OutboundCommitBatch::with_unicast(Arc::new(vec![unicast.clone()]), Arc::new(vec![None]))
+    };
+    assert!(!manager.try_send_and_commit_outbound_update(peer, batch()));
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "incomplete proof must produce a real reset handoff, not a silent refusal"
+        );
+        let request = &requests[0].0;
+        assert_eq!(request.peer, peer);
+        assert_eq!(request.session_id, 7);
+        assert_eq!(request.session_id, manager.outbound_session_ids[&peer]);
+        assert!(
+            request
+                .outbound
+                .same_channel(&manager.outbound_peers[&peer])
+        );
+        assert_eq!(
+            request.cause,
+            EvpnRecoveryExhaustionCause::AdmissionInvariant
+        );
+    }
+    for _ in 0..5 {
+        assert!(!manager.try_send_and_commit_outbound_update(peer, batch()));
+        manager.retry_evpn_recovery_reset(peer);
+        assert_eq!(requests.lock().unwrap().len(), 1, "one inflight receipt");
+        assert!(manager.dirty_peers.contains(&peer));
+        assert!(output.try_recv().is_err(), "no UC or EVPN batch admitted");
+    }
+    assert!(
+        manager.adj_ribs_out[&peer]
+            .get(&unicast.prefix, unicast.path_id)
+            .is_none()
+    );
+    assert_eq!(
+        manager.evpn_recovery.exhaustion(handle).unwrap().cause,
+        EvpnRecoveryExhaustionCause::AdmissionInvariant
+    );
+    let (_, reply) = requests.lock().unwrap().pop().unwrap();
+    reply.send(EvpnRecoveryResetOutcome::Executed).unwrap();
+    manager.retry_evpn_recovery_reset(peer);
+    assert!(manager.evpn_recovery.reset_admitted(handle));
+    manager.retry_evpn_recovery_reset(peer);
+    assert!(requests.lock().unwrap().is_empty());
+    assert!(output.try_recv().is_err());
+}
+
+#[test]
 fn reset_refusal_retries_once_accepted_and_stays_exhausted_until_teardown() {
     let (mut manager, peer, _output) = fixture(8);
     own(&mut manager, peer, true);
@@ -237,7 +305,7 @@ fn reset_refusal_retries_once_accepted_and_stays_exhausted_until_teardown() {
     assert!(manager.evpn_recovery_reset_pending(peer));
     assert!(!manager.settle_evpn_recovery(peer, [].into_iter()));
     manager.clear_outbound_peer_state(peer);
-    assert!(manager.evpn_recovery.proof(handle).unwrap().is_none());
+    assert!(manager.evpn_recovery.proof_keys(handle).unwrap().is_none());
 }
 
 #[test]
@@ -357,8 +425,8 @@ fn final_admission_filters_unknown_withdrawals_and_releases_only_after_settlemen
     output.try_recv().unwrap();
     let handle = manager.evpn_recovery_handle(peer).unwrap();
     assert_eq!(
-        manager.evpn_recovery.proof(handle).unwrap(),
-        Some([known.key()].as_slice())
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some([known.key()].to_vec())
     );
     assert!(manager.try_send_and_commit_outbound_update(
         peer,
@@ -384,14 +452,14 @@ fn reconnect_reuses_actor_id_but_retires_the_old_channel_owner() {
     let (replacement, mut output) = mpsc::channel(8);
     register(&mut manager, peer, replacement.clone());
     while output.try_recv().is_ok() {}
-    assert!(manager.evpn_recovery.proof(old).unwrap().is_none());
+    assert!(manager.evpn_recovery.proof_keys(old).unwrap().is_none());
     assert!(!old_sender.same_channel(&replacement));
     own(&mut manager, peer, true);
     let new = manager.evpn_recovery_handle(peer).unwrap();
     assert_ne!(old, new);
     assert_eq!(
-        manager.evpn_recovery.proof(new).unwrap(),
-        Some([].as_slice())
+        manager.evpn_recovery.proof_keys(new).unwrap(),
+        Some([].to_vec())
     );
 }
 
@@ -416,7 +484,7 @@ fn same_connection_capture_refusal_resets_instead_of_stalling_across_five_resync
         error.cause,
         crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable
     );
-    assert_eq!(manager.evpn_recovery.proof(owner), Err(error));
+    assert_eq!(manager.evpn_recovery.proof_keys(owner), Err(error));
     for _ in 0..5 {
         manager.resync_dirty_peers_bounded();
         assert!(manager.dirty_peers.contains(&peer));
@@ -466,15 +534,15 @@ fn same_connection_capture_refusal_resets_instead_of_stalling_across_five_resync
         peer,
         session_id: 7,
     });
-    assert_eq!(manager.evpn_recovery.proof(owner).unwrap(), None);
+    assert_eq!(manager.evpn_recovery.proof_keys(owner).unwrap(), None);
     let (replacement, _replacement_output) = mpsc::channel(8);
     register_session(&mut manager, peer, replacement, 8);
     own(&mut manager, peer, true);
     let fresh = manager.evpn_recovery_handle(peer).unwrap();
     assert_ne!(fresh, owner);
     assert_eq!(
-        manager.evpn_recovery.proof(fresh).unwrap(),
-        Some([].as_slice())
+        manager.evpn_recovery.proof_keys(fresh).unwrap(),
+        Some([].to_vec())
     );
     assert!(!manager.evpn_recovery.reset_admitted(fresh));
 }
@@ -497,7 +565,7 @@ fn missing_shared_received_input_retains_capture_reset_duty_without_guessing_emp
         error.cause,
         crate::update::EvpnRecoveryExhaustionCause::CaptureUnavailable
     );
-    assert_eq!(manager.evpn_recovery.proof(owner), Err(error));
+    assert_eq!(manager.evpn_recovery.proof_keys(owner), Err(error));
     for _ in 0..5 {
         assert!(!manager.capture_shared_evpn_admitted(peer));
         manager.resync_dirty_peers_bounded();

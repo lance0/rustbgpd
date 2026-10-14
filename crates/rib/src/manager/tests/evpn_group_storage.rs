@@ -329,7 +329,10 @@ fn exact_export_overlay_filters_admitted_views_but_changed_candidates_are_reprob
         assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
     }
     assert!(manager.peer_unexportable[&member].contains(&ExactExportKey::Evpn(a.key())));
-    assert_eq!(manager.evpn_recovery.proof(owner).unwrap().unwrap(), []);
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(owner).unwrap().unwrap(),
+        []
+    );
     assert_eq!(
         manager.group_ribs[&gid]
             .evpn_member_projection(
@@ -380,8 +383,8 @@ fn exact_export_overlay_filters_admitted_views_but_changed_candidates_are_reprob
             .is_none_or(|overlay| { !overlay.contains(&ExactExportKey::Evpn(replacement.key())) })
     );
     assert_eq!(
-        manager.evpn_recovery.proof(owner).unwrap(),
-        Some([replacement.key()].as_slice())
+        manager.evpn_recovery.proof_keys(owner).unwrap(),
+        Some([replacement.key()].to_vec())
     );
     let mut projection = manager.group_ribs[&gid].evpn_member_projection(
         member,
@@ -409,8 +412,8 @@ fn first_full_capture_precedes_staging_and_survives_rtc_change_and_repeated_regr
     let displaced = stage(&mut manager, gid, &received(200));
     let owner = manager.evpn_recovery_handle(member).unwrap();
     assert_eq!(
-        manager.evpn_recovery.proof(owner).unwrap(),
-        Some([old.key()].as_slice())
+        manager.evpn_recovery.proof_keys(owner).unwrap(),
+        Some([old.key()].to_vec())
     );
     assert_eq!(
         displaced.deltas[0].old.as_ref().unwrap().input.attributes,
@@ -424,16 +427,16 @@ fn first_full_capture_precedes_staging_and_survives_rtc_change_and_repeated_regr
     }
     stage(&mut manager, gid, &new);
     assert_eq!(
-        manager.evpn_recovery.proof(owner).unwrap(),
-        Some([old.key()].as_slice())
+        manager.evpn_recovery.proof_keys(owner).unwrap(),
+        Some([old.key()].to_vec())
     );
     manager.peer_interpret_rfc1997.remove(&member);
     manager.recompute_update_group(member);
     manager.peer_interpret_rfc1997.insert(member);
     manager.recompute_update_group(member);
     assert_eq!(
-        manager.evpn_recovery.proof(owner).unwrap(),
-        Some([old.key()].as_slice())
+        manager.evpn_recovery.proof_keys(owner).unwrap(),
+        Some([old.key()].to_vec())
     );
 }
 
@@ -450,8 +453,8 @@ fn shared_capture_with_negotiated_rtc_and_missing_membership_is_strict_empty() {
     let owner = manager.evpn_recovery_handle(member).unwrap();
     assert!(!manager.evpn_recovery.is_dormant(owner));
     assert_eq!(
-        manager.evpn_recovery.proof(owner).unwrap(),
-        Some([].as_slice())
+        manager.evpn_recovery.proof_keys(owner).unwrap(),
+        Some([].to_vec())
     );
 }
 
@@ -467,8 +470,8 @@ fn shared_capture_without_negotiated_rtc_ignores_empty_and_stale_membership() {
         let owner = manager.evpn_recovery_handle(member).unwrap();
         assert!(!manager.evpn_recovery.is_dormant(owner));
         assert_eq!(
-            manager.evpn_recovery.proof(owner).unwrap(),
-            Some([old.key()].as_slice())
+            manager.evpn_recovery.proof_keys(owner).unwrap(),
+            Some([old.key()].to_vec())
         );
     }
 }
@@ -569,8 +572,8 @@ fn private_capture_reads_only_actual_admitted_keys_without_settling_the_shared_f
     assert!(manager.capture_private_evpn_admitted(member));
     let owner = manager.evpn_recovery_handle(member).unwrap();
     assert_eq!(
-        manager.evpn_recovery.proof(owner).unwrap(),
-        Some([old.key()].as_slice())
+        manager.evpn_recovery.proof_keys(owner).unwrap(),
+        Some([old.key()].to_vec())
     );
     assert!(
         !manager.finish_evpn_recovery(member),
@@ -591,8 +594,8 @@ fn same_token_replay_captures_old_shared_projection_without_guessing_an_empty_he
     register(&mut manager, member, sender);
     assert_eq!(manager.evpn_recovery_handle(member), Some(owner));
     assert_eq!(
-        manager.evpn_recovery.proof(owner).unwrap(),
-        Some([old.key()].as_slice())
+        manager.evpn_recovery.proof_keys(owner).unwrap(),
+        Some([old.key()].to_vec())
     );
     assert!(manager.dirty_peers.contains(&member));
     assert!(!manager.finish_evpn_recovery(member));
@@ -774,4 +777,129 @@ fn gr_llgr_transitions_refresh_flags_and_link_local_metadata_without_ordinary_ev
         let ordinary = events(&manager, gid, &staged, member, None, None);
         assert!(ordinary.0.is_empty() && ordinary.1.is_empty());
     }
+}
+
+#[test]
+fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exact() {
+    let (mut manager, first, gid, _first_output) = fixture();
+    let second: IpAddr = "192.0.2.31".parse().unwrap();
+    let third: IpAddr = "192.0.2.32".parse().unwrap();
+    let mut outputs = Vec::new();
+    for peer in [second, third] {
+        let (sender, mut output) = mpsc::channel(8);
+        register(&mut manager, peer, sender);
+        while output.try_recv().is_ok() {}
+        assert_eq!(manager.evpn_grouped_member_of(peer), Some(gid));
+        let handle = manager.evpn_recovery_handle(peer).unwrap();
+        assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
+        // The synthetic owned registration had an empty table; this storage
+        // control begins from that known empty clean projection.
+        manager.dirty_peers.remove(&peer);
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .dirty_members
+            .remove(&peer);
+        outputs.push(output);
+    }
+    let routes = (1..=16)
+        .map(|tag| {
+            let route = make_evpn_imet("192.0.2.10".parse().unwrap(), tag);
+            stage(&mut manager, gid, &route);
+            route
+        })
+        .collect::<Vec<_>>();
+    assert!(manager.capture_shared_evpn_admitted(first));
+    let hint = manager.group_ribs[&gid].evpn_recovery_universe.unwrap();
+    let first_handle = manager.evpn_recovery_handle(first).unwrap();
+    let first_proof = manager.evpn_recovery.proof_keys(first_handle).unwrap();
+    manager
+        .loc_rib
+        .recompute_evpn(routes[0].key(), [].into_iter());
+    manager.stage_group_evpn_keys(gid, &HashSet::from([routes[0].key()]));
+    let extra = make_evpn_imet("192.0.2.10".parse().unwrap(), 17);
+    stage(&mut manager, gid, &extra);
+    manager
+        .peer_unexportable
+        .entry(second)
+        .or_default()
+        .insert(ExactExportKey::Evpn(routes[1].key()));
+    assert!(manager.capture_shared_evpn_admitted(second));
+    assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
+    let second_handle = manager.evpn_recovery_handle(second).unwrap();
+    let second_proof = manager
+        .evpn_recovery
+        .proof_keys(second_handle)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_proof.len(), 15);
+    assert!(!second_proof.contains(&routes[0].key()));
+    assert!(!second_proof.contains(&routes[1].key()));
+    assert!(second_proof.contains(&extra.key()));
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(first_handle).unwrap(),
+        first_proof
+    );
+    let extra2 = make_evpn_imet("192.0.2.10".parse().unwrap(), 18);
+    stage(&mut manager, gid, &extra2);
+    // One mask allocation and one exact sparse reservation must suffice.
+    // Removing the caller reservation makes geometric sparse growth fail.
+    manager
+        .evpn_recovery
+        .fail_allocation_after_for_test(Some(2));
+    assert!(manager.capture_shared_evpn_admitted(third));
+    assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
+    let third_handle = manager.evpn_recovery_handle(third).unwrap();
+    let third_proof = manager
+        .evpn_recovery
+        .proof_keys(third_handle)
+        .unwrap()
+        .unwrap();
+    assert_eq!(third_proof.len(), 17);
+    assert!(!third_proof.contains(&routes[0].key()));
+    assert!(third_proof.contains(&routes[1].key()));
+    assert!(third_proof.contains(&extra.key()) && third_proof.contains(&extra2.key()));
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(second_handle).unwrap(),
+        Some(second_proof)
+    );
+    // This exercises the dormant projection producer, not feed settlement.
+    for peer in [first, second, third] {
+        manager.retire_evpn_recovery(peer);
+    }
+    assert_eq!(
+        manager.evpn_recovery.daemon_usage().retained,
+        std::mem::size_of_val(&manager.evpn_recovery)
+    );
+    assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
+    // The allocation hook has served its population boundary assertion.
+    manager.evpn_recovery.fail_allocation_after_for_test(None);
+    assert!(manager.capture_shared_evpn_admitted(first));
+    assert_ne!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
+}
+
+#[test]
+fn shared_capture_caller_optional_refusal_uses_smaller_truthful_flat_projection() {
+    use crate::manager::update_groups::recovery_provenance::EvpnRecoveryProvenance;
+    let (mut manager, member, gid, _output) = fixture();
+    manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(8 * 1024, 256 * 1024 * 1024);
+    assert!(manager.register_evpn_recovery(member, false));
+    for tag in 0..2000 {
+        let mut route = make_evpn_imet("192.0.2.10".parse().unwrap(), tag);
+        if tag >= 16 {
+            route.peer = member;
+        }
+        stage(&mut manager, gid, &route);
+    }
+    assert!(manager.capture_shared_evpn_admitted(member));
+    let handle = manager.evpn_recovery_handle(member).unwrap();
+    let proof = manager.evpn_recovery.proof_keys(handle).unwrap().unwrap();
+    assert_eq!(proof.len(), 16);
+    for tag in 0..2000 {
+        let key = make_evpn_imet("192.0.2.10".parse().unwrap(), tag).key();
+        assert_eq!(proof.contains(&key), tag < 16);
+    }
+    assert_eq!(manager.evpn_recovery.exhaustion(handle), None);
+    assert!(manager.group_ribs[&gid].evpn_recovery_universe.is_none());
 }

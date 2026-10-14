@@ -539,6 +539,8 @@ pub(in crate::manager) struct GroupRibOut {
     recovery_snapshot: Option<admitted_recovery::SnapshotHandle>,
     /// Received RTC/reflection input beside the single post-policy EVPN body.
     evpn_inputs: FastMap<rustbgpd_wire::EvpnRouteKey, EvpnGroupInput>,
+    /// Weak older key universe; admission remains in each owned member record.
+    pub(in crate::manager) evpn_recovery_universe: Option<recovery_provenance::UniverseHandle>,
     pub(in crate::manager) evpn_policy_denied:
         FastMap<rustbgpd_wire::EvpnRouteKey, VpnDenialRecord>,
     /// Captured pre-policy SOURCE attributes per staged entry for a policy
@@ -757,6 +759,7 @@ impl GroupRibOut {
             table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity),
             recovery_snapshot: None,
             evpn_inputs: FastMap::default(),
+            evpn_recovery_universe: None,
             evpn_policy_denied: FastMap::default(),
             source_attrs: FastMap::default(),
             source_control_passthrough,
