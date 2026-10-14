@@ -4681,9 +4681,9 @@ async fn run<T>(
         .with_readiness_queries(rib_readiness_rx)
         .with_summary_queries(rib_summary_rx)
         .with_dampening_capacity_notices(dampening_capacity_tx)
-        .with_evpn_recovery_reset_handler(Arc::new(move |request| {
+        .with_evpn_recovery_reset_handler(Arc::new(move |request, reply| {
             recovery_peer_mgr_tx
-                .try_send(PeerManagerCommand::ResetEvpnRecoverySession { request })
+                .try_send(PeerManagerCommand::ResetEvpnRecoverySession { request, reply })
                 .is_ok()
         }));
     // GetPolicyStats reads the RIB's published export roster (ADR-0136)

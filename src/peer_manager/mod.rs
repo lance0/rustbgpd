@@ -1937,8 +1937,8 @@ impl PeerManager {
                 let result = self.reset_peer(peer, reason).await;
                 let _ = reply.send(result);
             }
-            PeerManagerCommand::ResetEvpnRecoverySession { request } => {
-                self.reset_evpn_recovery_session(request);
+            PeerManagerCommand::ResetEvpnRecoverySession { request, reply } => {
+                self.reset_evpn_recovery_session(request, reply);
             }
             PeerManagerCommand::SoftResetIn {
                 peer,

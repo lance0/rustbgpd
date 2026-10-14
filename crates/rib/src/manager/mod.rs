@@ -1525,6 +1525,10 @@ pub(super) struct LiveSessionRecord {
     evpn_end_of_rib: bool,
     /// Failed reset admission remains in this bounded existing session record.
     evpn_recovery_reset: Option<evpn_recovery::PendingReset>,
+    /// One nonblocking execution receipt, fixed lifecycle control metadata.
+    evpn_recovery_reset_receipt: Option<evpn_recovery::ResetReceipt>,
+    /// Bound refusal/drop diagnostics to one warning per connection episode.
+    evpn_recovery_reset_retry_reported: bool,
     group_recovery_fallback: Option<update_groups::RecoveryFallbackCause>,
 }
 

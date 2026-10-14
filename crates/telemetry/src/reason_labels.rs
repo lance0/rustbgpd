@@ -31,6 +31,44 @@
 //! distinguishes the two RFC 4456 §8 loop signals via
 //! [`RrLoopReason`].
 
+/// Fixed causes for refusing an EVPN recovery-provenance operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvpnRecoveryExhaustionCause {
+    /// The peer's charged capacity would exceed its admission budget.
+    PeerLimit,
+    /// The daemon's charged capacity would exceed its admission budget.
+    DaemonLimit,
+    /// A fallible metadata or key allocation failed.
+    AllocationFailure,
+    /// The old admitted projection could not be captured.
+    CaptureUnavailable,
+    /// The admitted batch no longer matches its capacity reservation.
+    AdmissionInvariant,
+}
+
+impl EvpnRecoveryExhaustionCause {
+    /// Every stable metric cause, also used to initialize the series.
+    pub const ALL: [Self; 5] = [
+        Self::PeerLimit,
+        Self::DaemonLimit,
+        Self::AllocationFailure,
+        Self::CaptureUnavailable,
+        Self::AdmissionInvariant,
+    ];
+
+    /// Canonical bounded metric and log vocabulary.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PeerLimit => "peer_limit",
+            Self::DaemonLimit => "daemon_limit",
+            Self::AllocationFailure => "allocation_failure",
+            Self::CaptureUnavailable => "capture_unavailable",
+            Self::AdmissionInvariant => "admission_invariant",
+        }
+    }
+}
+
 /// Causes for conservative unicast/VPN update-group recovery when complete
 /// admitted-key proof is unavailable. EVPN recovery uses its own contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -628,8 +666,9 @@ impl std::fmt::Display for ExactExportReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExactExportReason, ImportRejectReason, MalformedUpdateDisposition, MalformedUpdateReason,
-        NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason, SessionDownReason,
+        EvpnRecoveryExhaustionCause, ExactExportReason, ImportRejectReason,
+        MalformedUpdateDisposition, MalformedUpdateReason, NextHopOwnershipBlockReason,
+        OtcBlockReason, RrLoopReason, SessionDownReason,
     };
 
     fn assert_snake_case(label: &str) {
@@ -742,6 +781,29 @@ mod tests {
         for reason in ExactExportReason::ALL {
             assert_snake_case(reason.as_str());
             assert!(seen.insert(reason.as_str()), "duplicate label");
+        }
+    }
+
+    #[test]
+    fn evpn_recovery_causes_are_pinned_and_distinct() {
+        let recovery: Vec<_> = EvpnRecoveryExhaustionCause::ALL
+            .iter()
+            .map(|cause| cause.as_str())
+            .collect();
+        assert_eq!(
+            recovery,
+            [
+                "peer_limit",
+                "daemon_limit",
+                "allocation_failure",
+                "capture_unavailable",
+                "admission_invariant"
+            ]
+        );
+        let mut seen = std::collections::HashSet::new();
+        for label in recovery {
+            assert_snake_case(label);
+            assert!(seen.insert(label), "duplicate recovery cause");
         }
     }
 

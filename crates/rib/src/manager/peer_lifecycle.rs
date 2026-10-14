@@ -808,7 +808,8 @@ impl RibManager {
     #[expect(
         clippy::fn_params_excessive_bools,
         clippy::too_many_arguments,
-        reason = "PeerUp mirrors the transport session registration payload"
+        clippy::too_many_lines,
+        reason = "PeerUp mirrors registration payload and keeps connection ownership transfer in one pass"
     )]
     pub(super) fn handle_peer_up(
         &mut self,
@@ -893,6 +894,10 @@ impl RibManager {
             .pending_peer_export_encoders
             .remove(&(peer, session_id));
 
+        // Receipt ownership moves only across an exact actor/channel replay.
+        // A replacement never receives the prior connection's acknowledgement.
+        let (evpn_recovery_reset_receipt, evpn_recovery_reset_retry_reported) =
+            self.take_evpn_recovery_reset_receipt(peer, session_id, &outbound_tx);
         let previous_session = self.live_sessions.get(&peer).and_then(|sessions| {
             sessions
                 .iter()
@@ -939,6 +944,8 @@ impl RibManager {
             exact_export_encoder,
             evpn_end_of_rib: false,
             evpn_recovery_reset,
+            evpn_recovery_reset_receipt,
+            evpn_recovery_reset_retry_reported,
             group_recovery_fallback,
         };
         let sessions = self.live_sessions.entry(peer).or_default();

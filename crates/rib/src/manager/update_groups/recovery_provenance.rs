@@ -62,6 +62,8 @@ struct Record {
     state: State,
     keys: Keys,
     peer_peak: usize,
+    // Duplicated within the charged peer range; mutations maintain one total.
+    peer_retained: usize,
 }
 
 impl Record {
@@ -134,15 +136,33 @@ impl EvpnRecoveryProvenance {
 
     /// Charges aggregate all retained generations and snapshots at an address.
     pub(in crate::manager) fn peer_usage(&self, peer: IpAddr) -> Usage {
-        let mut usage = Usage {
-            retained: 0,
-            peak: 0,
-        };
-        for record in self.records.iter().filter(|r| r.handle.owner.peer == peer) {
-            usage.retained += record.charge();
-            usage.peak = usage.peak.max(record.peer_peak);
-        }
-        usage
+        self.records
+            .get(self.peer_range(peer).start)
+            .filter(|r| r.handle.owner.peer == peer)
+            .map_or(
+                Usage {
+                    retained: 0,
+                    peak: 0,
+                },
+                |record| Usage {
+                    retained: record.peer_retained,
+                    peak: record.peer_peak,
+                },
+            )
+    }
+
+    fn peer_range(&self, peer: IpAddr) -> std::ops::Range<usize> {
+        let start = self.records.partition_point(|r| r.handle.owner.peer < peer);
+        let end = self
+            .records
+            .partition_point(|r| r.handle.owner.peer <= peer);
+        start..end
+    }
+
+    fn owner_range(&self, owner: PeerSession) -> std::ops::Range<usize> {
+        let start = self.records.partition_point(|r| r.handle.owner < owner);
+        let end = self.records.partition_point(|r| r.handle.owner <= owner);
+        start..end
     }
 
     fn index(&self, handle: ProvenanceHandle) -> Option<usize> {
@@ -151,27 +171,34 @@ impl EvpnRecoveryProvenance {
             .ok()
     }
 
-    /// Snapshot-only ownership does not make a peer an active member.
+    /// Snapshot-only ownership does not make a peer an active member. The
+    /// sorted owner range excludes every unrelated peer and session.
     pub(in crate::manager) fn primary_handle(
         &self,
         owner: PeerSession,
     ) -> Option<ProvenanceHandle> {
-        self.records.iter().find_map(|record| {
-            (record.handle.owner == owner && record.primary).then_some(record.handle)
-        })
+        self.records[self.owner_range(owner)]
+            .iter()
+            .find_map(|record| record.primary.then_some(record.handle))
     }
 
     pub(in crate::manager) fn exhaustion(&self, handle: ProvenanceHandle) -> Option<Exhaustion> {
-        self.records.iter().find_map(|record| {
-            if record.handle.owner == handle.owner
-                && record.handle.generation == handle.generation
-                && record.primary
-                && let State::Exhausted(error) = record.state
-            {
-                return Some(error);
+        let index = self.index(handle)?;
+        let record = &self.records[index];
+        let primary = if record.primary {
+            record
+        } else {
+            let owner = self.primary_handle(handle.owner)?;
+            if owner.generation != handle.generation {
+                return None;
             }
+            &self.records[self.index(owner)?]
+        };
+        if let State::Exhausted(error) = primary.state {
+            Some(error)
+        } else {
             None
-        })
+        }
     }
 
     pub(in crate::manager) fn is_dormant(&self, handle: ProvenanceHandle) -> bool {
@@ -199,21 +226,31 @@ impl EvpnRecoveryProvenance {
     }
 
     fn checked_handle_index(&self, handle: ProvenanceHandle) -> Result<Option<usize>, Exhaustion> {
-        if let Some(error) = self.exhaustion(handle) {
+        let Some(index) = self.index(handle) else {
+            return Ok(None);
+        };
+        // Capturing primary keys use only this exact logarithmic lookup.
+        // Snapshots also inherit refusal from their matching primary episode.
+        if self.records[index].primary {
+            if let State::Exhausted(error) = self.records[index].state {
+                return Err(error);
+            }
+        } else if let Some(error) = self.exhaustion(handle) {
             return Err(error);
         }
-        Ok(self.index(handle))
+        Ok(Some(index))
     }
 
-    fn mark_exhausted(&mut self, handle: ProvenanceHandle, error: Exhaustion) -> Exhaustion {
-        for record in &mut self.records {
-            if record.handle.owner == handle.owner
-                && record.handle.generation == handle.generation
-                && record.primary
-            {
-                record.state = State::Exhausted(error);
-                break;
-            }
+    fn mark_exhausted(&mut self, handle: ProvenanceHandle, mut error: Exhaustion) -> Exhaustion {
+        if error.cause == ExhaustionCause::AdmissionInvariant {
+            error.attempted_peer_bytes = self.peer_usage(handle.owner.peer).retained;
+            error.attempted_daemon_bytes = self.daemon_used;
+        }
+        if let Some(primary) = self.primary_handle(handle.owner)
+            && primary.generation == handle.generation
+            && let Some(index) = self.index(primary)
+        {
+            self.records[index].state = State::Exhausted(error);
         }
         error
     }
@@ -225,6 +262,48 @@ impl EvpnRecoveryProvenance {
             attempted_peer_bytes: usize::MAX,
             attempted_daemon_bytes: usize::MAX,
         }
+    }
+
+    fn admission_invariant() -> Exhaustion {
+        Exhaustion {
+            cause: ExhaustionCause::AdmissionInvariant,
+            limiting_peer: None,
+            attempted_peer_bytes: 0,
+            attempted_daemon_bytes: 0,
+        }
+    }
+
+    pub(in crate::manager) fn fail_admission(&mut self, handle: ProvenanceHandle) -> bool {
+        self.fail_control(handle, ExhaustionCause::AdmissionInvariant, false)
+    }
+
+    pub(in crate::manager) fn abort_capture(&mut self, handle: ProvenanceHandle) -> bool {
+        self.fail_control(handle, ExhaustionCause::CaptureUnavailable, true)
+    }
+
+    fn fail_control(
+        &mut self,
+        handle: ProvenanceHandle,
+        cause: ExhaustionCause,
+        capturing_only: bool,
+    ) -> bool {
+        let Some(index) = self.index(handle) else {
+            return false;
+        };
+        if !self.records[index].primary
+            || matches!(self.records[index].state, State::Exhausted(_))
+            || (capturing_only && !matches!(self.records[index].state, State::Capturing))
+        {
+            return false;
+        }
+        let error = Exhaustion {
+            cause,
+            limiting_peer: None,
+            attempted_peer_bytes: self.peer_usage(handle.owner.peer).retained,
+            attempted_daemon_bytes: self.daemon_used,
+        };
+        self.mark_exhausted(handle, error);
+        true
     }
 
     fn check(&self, address: IpAddr, peer: usize, daemon: usize) -> Result<(), Exhaustion> {
@@ -262,12 +341,16 @@ impl EvpnRecoveryProvenance {
     }
 
     fn note_peer_peak(&mut self, peer: IpAddr, attempted: usize) {
-        for record in self
-            .records
-            .iter_mut()
-            .filter(|r| r.handle.owner.peer == peer)
-        {
+        let range = self.peer_range(peer);
+        for record in &mut self.records[range] {
             record.peer_peak = record.peer_peak.max(attempted);
+        }
+    }
+
+    fn set_peer_retained(&mut self, peer: IpAddr, retained: usize) {
+        let range = self.peer_range(peer);
+        for record in &mut self.records[range] {
+            record.peer_retained = retained;
         }
     }
 
@@ -276,11 +359,7 @@ impl EvpnRecoveryProvenance {
         resizing: bool,
         additional: usize,
     ) -> Result<usize, Exhaustion> {
-        let retained = records.iter().try_fold(0_usize, |total, record| {
-            total
-                .checked_add(record.charge())
-                .ok_or_else(Self::overflow)
-        })?;
+        let retained = records.first().map_or(0, |record| record.peer_retained);
         let copies = if resizing {
             records
                 .len()
@@ -296,13 +375,18 @@ impl EvpnRecoveryProvenance {
     }
 
     /// The constructor record and, during resize, both metadata arrays overlap.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Metadata preflight and ownership transfer form one atomic admission."
+    )]
     fn insert_record(
         &mut self,
         owner: PeerSession,
         generation: Option<u64>,
     ) -> Result<ProvenanceHandle, Exhaustion> {
         let next_id = self.next_id.checked_add(1).ok_or_else(Self::overflow)?;
-        let prior_peak = self.peer_usage(owner.peer).peak;
+        let prior_usage = self.peer_usage(owner.peer);
+        let prior_peak = prior_usage.peak;
         let old_cap = self.records.capacity();
         let new_cap = if self.records.len() == old_cap {
             old_cap.checked_mul(2).ok_or_else(Self::overflow)?.max(1)
@@ -331,9 +415,12 @@ impl EvpnRecoveryProvenance {
             .checked_mul(2)
             .ok_or_else(Self::overflow)?;
         let mut target_peak = target_extra;
-        for records in self
-            .records
-            .as_slice()
+        let credited_range = if resizing {
+            0..self.records.len()
+        } else {
+            self.peer_range(owner.peer)
+        };
+        for records in self.records[credited_range.clone()]
             .chunk_by(|a, b| a.handle.owner.peer == b.handle.owner.peer)
         {
             let peer = records[0].handle.owner.peer;
@@ -348,11 +435,11 @@ impl EvpnRecoveryProvenance {
         self.daemon_used = daemon;
         self.daemon_peak = self.daemon_peak.max(daemon);
         // Peaks include the old metadata copies, before ownership moves.
-        let mut start = 0;
-        while start < self.records.len() {
+        let mut start = credited_range.start;
+        while start < credited_range.end {
             let peer = self.records[start].handle.owner.peer;
             let mut end = start + 1;
-            while end < self.records.len() && self.records[end].handle.owner.peer == peer {
+            while end < credited_range.end && self.records[end].handle.owner.peer == peer {
                 end += 1;
             }
             let additional = if peer == owner.peer { target_extra } else { 0 };
@@ -393,8 +480,10 @@ impl EvpnRecoveryProvenance {
                 state: State::Ready,
                 keys: Keys::new(),
                 peer_peak: target_peak.max(prior_peak),
+                peer_retained: prior_usage.retained + size_of::<Record>(),
             },
         );
+        self.set_peer_retained(owner.peer, prior_usage.retained + size_of::<Record>());
         self.next_id = next_id;
         self.daemon_used -= size_of::<Record>();
         Ok(handle)
@@ -447,6 +536,9 @@ impl EvpnRecoveryProvenance {
         }
         // Pinned SmallVec has freed the old allocation before returning.
         self.daemon_used -= old_cap * size_of::<EvpnRouteKey>() + size_of::<Keys>();
+        let retained = self.peer_usage(handle.owner.peer).retained + new_bytes
+            - old_cap * size_of::<EvpnRouteKey>();
+        self.set_peer_retained(handle.owner.peer, retained);
         Ok(())
     }
 
@@ -563,16 +655,14 @@ impl EvpnRecoveryProvenance {
     where
         A: Iterator<Item = EvpnRouteKey> + Clone,
     {
-        assert!(
-            withdrawals.windows(2).all(|w| w[0] < w[1]),
-            "withdrawals must be sorted and unique"
-        );
+        if !withdrawals.windows(2).all(|w| w[0] < w[1]) {
+            return Err(Self::admission_invariant());
+        }
         let mut previous = None;
         for key in announcements.clone() {
-            assert!(
-                previous.is_none_or(|old| old < key),
-                "announcements must be sorted and unique"
-            );
+            if previous.is_some_and(|old| old >= key) {
+                return Err(Self::admission_invariant());
+            }
             previous = Some(key);
         }
         let mut old = 0;
@@ -580,10 +670,9 @@ impl EvpnRecoveryProvenance {
             while old < keys.len() && keys[old] < *key {
                 old += 1;
             }
-            assert!(
-                keys.get(old) == Some(key),
-                "withdrawal requires an admitted key"
-            );
+            if keys.get(old) != Some(key) {
+                return Err(Self::admission_invariant());
+            }
         }
         let mut old = 0;
         let mut withdrawn = 0;
@@ -673,7 +762,8 @@ impl EvpnRecoveryProvenance {
             Ok(length) => length,
             Err(error) => return Err(self.mark_exhausted(handle, error)),
         };
-        if let Err(error) = self.grow_keys(handle, final_len) {
+        if final_len > self.records[index].keys.capacity() {
+            let error = Self::admission_invariant();
             return Err(self.mark_exhausted(handle, error));
         }
         let keys = &mut self.records[index].keys;
@@ -717,6 +807,35 @@ impl EvpnRecoveryProvenance {
         Ok(true)
     }
 
+    /// Final gates must preserve the reserved capacity contract. Check this
+    /// before any other-family advertised/capacity state is committed.
+    pub(in crate::manager) fn preflight_admitted<A>(
+        &mut self,
+        handle: ProvenanceHandle,
+        announcements: A,
+        withdrawals: &[EvpnRouteKey],
+    ) -> Result<bool, Exhaustion>
+    where
+        A: DoubleEndedIterator<Item = EvpnRouteKey> + ExactSizeIterator + Clone,
+    {
+        let Some(index) = self.checked_handle_index(handle)? else {
+            return Ok(false);
+        };
+        if !self.records[index].primary || !matches!(self.records[index].state, State::Ready) {
+            return Ok(false);
+        }
+        match Self::planned_len(
+            self.records[index].keys.as_slice(),
+            announcements,
+            withdrawals,
+            true,
+        ) {
+            Ok(length) if length <= self.records[index].keys.capacity() => Ok(true),
+            Ok(_) => Err(self.mark_exhausted(handle, Self::admission_invariant())),
+            Err(error) => Err(self.mark_exhausted(handle, error)),
+        }
+    }
+
     fn free_keys(&mut self, index: usize) {
         let bytes = self.records[index].keys.capacity() * size_of::<EvpnRouteKey>();
         self.records[index].keys.clear();
@@ -725,6 +844,9 @@ impl EvpnRecoveryProvenance {
             .try_grow(0)
             .expect("empty pinned SmallVec deallocation cannot fail");
         self.daemon_used -= bytes;
+        let peer = self.records[index].handle.owner.peer;
+        let retained = self.peer_usage(peer).retained - bytes;
+        self.set_peer_retained(peer, retained);
     }
 
     /// Free the allocation before returning its credits. Empty clear alone
@@ -753,10 +875,12 @@ impl EvpnRecoveryProvenance {
         if !self.records[index].primary {
             return false;
         }
-        while let Some(owned) = self.records.iter().find_map(|record| {
-            (record.handle.owner == handle.owner && record.handle.generation == handle.generation)
-                .then_some(record.handle)
-        }) {
+        while let Some(owned) = self.records[self.owner_range(handle.owner)]
+            .iter()
+            .find_map(|record| {
+                (record.handle.generation == handle.generation).then_some(record.handle)
+            })
+        {
             self.retire(owned);
         }
         true
@@ -769,7 +893,9 @@ impl EvpnRecoveryProvenance {
             return false;
         };
         self.free_keys(index);
+        let retained = self.peer_usage(handle.owner.peer).retained - self.records[index].charge();
         drop(self.records.remove(index));
+        self.set_peer_retained(handle.owner.peer, retained);
         // Vacant outer capacity remains daemon-charged until it is freed.
         if self.records.is_empty() {
             let bytes = self.records.capacity() * size_of::<Record>();
@@ -823,6 +949,81 @@ mod tests {
             .capacity()
     }
 
+    fn assert_running_charges(ledger: &EvpnRecoveryProvenance) {
+        let mut daemon =
+            size_of::<EvpnRecoveryProvenance>() + ledger.records.capacity() * size_of::<Record>();
+        for record in &ledger.records {
+            daemon += record.keys.capacity() * size_of::<EvpnRouteKey>();
+            let expected: usize = ledger
+                .records
+                .iter()
+                .filter(|other| other.handle.owner.peer == record.handle.owner.peer)
+                .map(Record::charge)
+                .sum();
+            assert_eq!(record.peer_retained, expected);
+            assert_eq!(
+                ledger.peer_usage(record.handle.owner.peer).retained,
+                expected
+            );
+            assert!(record.peer_peak >= expected);
+        }
+        assert_eq!(ledger.daemon_usage().retained, daemon);
+    }
+
+    #[test]
+    fn cached_peer_totals_follow_growth_snapshot_failure_and_retirement() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let first = ledger.register(owner(1, 7)).unwrap();
+        let second = ledger.register(owner(1, 8)).unwrap();
+        let other = ledger.register(owner(2, 9)).unwrap();
+        assert_running_charges(&ledger);
+        capture(&mut ledger, first, &[key(1), key(2), key(3)]);
+        assert_running_charges(&ledger);
+        let snapshot = ledger.snapshot(first).unwrap().unwrap();
+        assert_running_charges(&ledger);
+        let before = ledger.daemon_usage().retained;
+        ledger.fail_next_allocation_for_test();
+        let error = ledger.snapshot(first).unwrap_err();
+        assert_eq!(error.cause, ExhaustionCause::AllocationFailure);
+        assert_eq!(ledger.daemon_usage().retained, before);
+        assert_running_charges(&ledger);
+        assert_eq!(
+            ledger.proof(snapshot),
+            Err(error),
+            "matching snapshots inherit primary refusal"
+        );
+        assert!(ledger.retire_member(first));
+        assert_running_charges(&ledger);
+        capture(&mut ledger, second, &[key(4), key(5)]);
+        assert_running_charges(&ledger);
+        assert!(ledger.finish_recovery(second).unwrap());
+        assert_running_charges(&ledger);
+        assert!(ledger.retire_member(second));
+        assert_running_charges(&ledger);
+        assert!(ledger.retire_member(other));
+        assert_running_charges(&ledger);
+        assert_eq!(ledger.peer_usage(owner(1, 7).peer).retained, 0);
+    }
+
+    #[test]
+    fn exact_handle_lookup_keeps_old_snapshot_exhaustion_off_replacement() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let first = ledger.register(owner(1, 7)).unwrap();
+        capture(&mut ledger, first, &[key(1)]);
+        let snapshot = ledger.snapshot(first).unwrap().unwrap();
+        assert!(ledger.fail_admission(first));
+        assert!(ledger.proof(snapshot).is_err());
+        assert!(ledger.retire(first));
+        let replacement = ledger.register(first.owner).unwrap();
+        assert_eq!(ledger.primary_handle(first.owner), Some(replacement));
+        assert_eq!(ledger.exhaustion(snapshot), None);
+        assert_eq!(ledger.proof(snapshot).unwrap(), Some([key(1)].as_slice()));
+        assert_eq!(ledger.proof(replacement).unwrap(), Some([].as_slice()));
+        assert!(!ledger.abort_capture(snapshot));
+        assert!(!ledger.mark_reset_admitted(snapshot));
+        assert!(ledger.retire(snapshot));
+        assert_running_charges(&ledger);
+    }
     #[test]
     fn fresh_proof_capture_and_retained_capacity_have_distinct_lifetimes() {
         let mut ledger = EvpnRecoveryProvenance::new();
@@ -901,7 +1102,7 @@ mod tests {
         assert_eq!(ledger.daemon_usage(), before);
         assert!(ledger.fail_next_allocation);
         let error = ledger
-            .apply_admitted(handle, [key(5), key(6)].into_iter(), &[])
+            .reserve_admission(handle, [key(5), key(6)].into_iter(), &[])
             .unwrap_err();
         assert_eq!(error.cause, ExhaustionCause::AllocationFailure);
         assert!(!ledger.fail_next_allocation);
@@ -923,6 +1124,11 @@ mod tests {
     fn candidate_reservation_ignores_withdraw_credit_and_final_apply_does_not_allocate() {
         let mut ledger = EvpnRecoveryProvenance::new();
         let handle = ledger.register(owner(1, 7)).unwrap();
+        assert!(
+            ledger
+                .reserve_admission(handle, [key(1), key(3), key(5)].into_iter(), &[])
+                .unwrap()
+        );
         assert!(
             ledger
                 .apply_admitted(handle, [key(1), key(3), key(5)].into_iter(), &[])
@@ -971,6 +1177,11 @@ mod tests {
         let handle = ledger.register(owner(1, 7)).unwrap();
         assert!(!ledger.is_dormant(handle));
         assert!(!ledger.mark_reset_admitted(handle));
+        assert!(
+            ledger
+                .reserve_admission(handle, [key(1)].into_iter(), &[])
+                .unwrap()
+        );
         assert!(
             ledger
                 .apply_admitted(handle, [key(1)].into_iter(), &[])
@@ -1039,7 +1250,17 @@ mod tests {
                     let handle = ledger.register(owner(1, 7)).unwrap();
                     assert!(
                         ledger
+                            .reserve_admission(handle, old.iter().copied(), &[])
+                            .unwrap()
+                    );
+                    assert!(
+                        ledger
                             .apply_admitted(handle, old.iter().copied(), &[])
+                            .unwrap()
+                    );
+                    assert!(
+                        ledger
+                            .reserve_admission(handle, announced.iter().copied(), &withdrawn)
                             .unwrap()
                     );
                     assert!(
@@ -1196,6 +1417,11 @@ mod tests {
         let keys: Vec<_> = (1..=64).map(key).collect();
         assert!(
             ledger
+                .reserve_admission(first, keys.iter().copied(), &[])
+                .unwrap()
+        );
+        assert!(
+            ledger
                 .apply_admitted(first, keys.iter().copied(), &[])
                 .unwrap()
         );
@@ -1239,6 +1465,16 @@ mod tests {
         let first = ledger.register(owner(1, 7)).unwrap();
         let second = ledger.register(owner(2, 7)).unwrap();
         let keys: Vec<_> = (1..=64).map(key).collect();
+        assert!(
+            ledger
+                .reserve_admission(first, keys.iter().copied(), &[])
+                .unwrap()
+        );
+        assert!(
+            ledger
+                .reserve_admission(second, keys.iter().copied(), &[])
+                .unwrap()
+        );
         assert!(
             ledger
                 .apply_admitted(first, keys.iter().copied(), &[])
@@ -1319,35 +1555,126 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "withdrawal requires an admitted key")]
     fn unknown_withdrawal_is_not_admitted() {
         let mut ledger = EvpnRecoveryProvenance::new();
         let handle = ledger.register(owner(1, 7)).unwrap();
-        ledger
-            .apply_admitted(handle, [].into_iter(), &[key(1)])
-            .unwrap();
+        assert_eq!(
+            ledger
+                .apply_admitted(handle, [].into_iter(), &[key(1)])
+                .unwrap_err()
+                .cause,
+            ExhaustionCause::AdmissionInvariant
+        );
     }
 
     #[test]
-    #[should_panic(expected = "withdrawals must be sorted and unique")]
     fn duplicate_withdrawal_is_not_admitted() {
         let mut ledger = EvpnRecoveryProvenance::new();
         let handle = ledger.register(owner(1, 7)).unwrap();
+        assert!(
+            ledger
+                .reserve_admission(handle, [key(1)].into_iter(), &[])
+                .unwrap()
+        );
         ledger
             .apply_admitted(handle, [key(1)].into_iter(), &[])
             .unwrap();
-        ledger
-            .apply_admitted(handle, [].into_iter(), &[key(1), key(1)])
-            .unwrap();
+        assert_eq!(
+            ledger
+                .apply_admitted(handle, [].into_iter(), &[key(1), key(1)])
+                .unwrap_err()
+                .cause,
+            ExhaustionCause::AdmissionInvariant
+        );
     }
 
     #[test]
-    #[should_panic(expected = "announcements must be sorted and unique")]
     fn unordered_accepted_batch_is_not_admitted() {
         let mut ledger = EvpnRecoveryProvenance::new();
         let handle = ledger.register(owner(1, 7)).unwrap();
+        assert_eq!(
+            ledger
+                .apply_admitted(handle, [key(2), key(1)].into_iter(), &[])
+                .unwrap_err()
+                .cause,
+            ExhaustionCause::AdmissionInvariant
+        );
+    }
+    #[test]
+    fn final_preflight_rejects_unreserved_growth_without_growing_storage() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let handle = ledger.register(owner(1, 7)).unwrap();
         ledger
-            .apply_admitted(handle, [key(2), key(1)].into_iter(), &[])
+            .reserve_admission(handle, [key(1)].into_iter(), &[])
             .unwrap();
+        ledger
+            .apply_admitted(handle, [key(1)].into_iter(), &[])
+            .unwrap();
+        let before = ledger.daemon_usage();
+        let too_many: Vec<_> = (1..=128).map(key).collect();
+        assert_eq!(
+            ledger
+                .preflight_admitted(handle, too_many.into_iter(), &[])
+                .unwrap_err()
+                .cause,
+            ExhaustionCause::AdmissionInvariant
+        );
+        assert_eq!(ledger.daemon_usage(), before);
+        assert_eq!(
+            ledger.proof(handle).unwrap_err().cause,
+            ExhaustionCause::AdmissionInvariant
+        );
+    }
+
+    #[test]
+    fn unavailable_capture_has_a_distinct_sticky_cause_and_cannot_abort_ready_proof() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let ready = ledger.register(owner(1, 7)).unwrap();
+        assert!(!ledger.abort_capture(ready));
+        let capturing = ledger.register(owner(2, 7)).unwrap();
+        assert!(ledger.finish_recovery(capturing).unwrap());
+        assert!(ledger.begin_capture(capturing).unwrap());
+        assert!(ledger.abort_capture(capturing));
+        assert_eq!(
+            ledger.proof(capturing).unwrap_err().cause,
+            ExhaustionCause::CaptureUnavailable
+        );
+        assert!(!ledger.abort_capture(capturing));
+        assert_eq!(ledger.proof(ready).unwrap().unwrap(), []);
+    }
+    #[test]
+    fn final_apply_unreserved_growth_is_typed_and_preserves_storage_without_allocating() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let handle = ledger.register(owner(1, 7)).unwrap();
+        capture(&mut ledger, handle, &[key(1)]);
+        assert!(
+            ledger
+                .reserve_admission(handle, [key(1)].into_iter(), &[])
+                .unwrap()
+        );
+        let before = ledger.daemon_usage();
+        ledger.fail_next_allocation_for_test();
+        let expanded: Vec<_> = (1..=128).map(key).collect();
+        let error = ledger
+            .apply_admitted(handle, expanded.into_iter(), &[])
+            .unwrap_err();
+        assert_eq!(error.cause, ExhaustionCause::AdmissionInvariant);
+        assert_eq!(
+            error.attempted_peer_bytes,
+            ledger.peer_usage(handle.owner.peer).retained
+        );
+        assert_eq!(error.attempted_daemon_bytes, before.retained);
+        assert!(
+            ledger.fail_next_allocation,
+            "application never tries to allocate"
+        );
+        assert_eq!(ledger.daemon_usage(), before);
+        assert_eq!(
+            ledger.records[ledger.index(handle).unwrap()]
+                .keys
+                .as_slice(),
+            &[key(1)]
+        );
+        assert_running_charges(&ledger);
     }
 }

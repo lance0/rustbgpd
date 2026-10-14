@@ -1,5 +1,5 @@
 use super::*;
-use rustbgpd_rib::{EvpnRecoveryExhaustionCause, EvpnRecoveryReset};
+use rustbgpd_rib::{EvpnRecoveryExhaustionCause, EvpnRecoveryReset, EvpnRecoveryResetOutcome};
 
 fn request(session: &PeerSession) -> EvpnRecoveryReset {
     EvpnRecoveryReset {
@@ -13,6 +13,20 @@ fn request(session: &PeerSession) -> EvpnRecoveryReset {
         peer_limit_bytes: 16,
         daemon_limit_bytes: 256,
     }
+}
+
+async fn execute_reset(
+    session: &mut PeerSession,
+    request: EvpnRecoveryReset,
+) -> EvpnRecoveryResetOutcome {
+    let (reply, receipt) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::ResetEvpnRecoverySession { request, reply })
+            .await,
+        ControlFlow::Continue(())
+    );
+    receipt.await.expect("session execution receipt")
 }
 
 fn accepted_resets(session: &PeerSession) -> f64 {
@@ -31,10 +45,8 @@ async fn evpn_recovery_guard_current_idle_token_does_not_start_or_count() {
     let reset = request(&session);
     assert!(!reset.outbound.is_closed());
     assert_eq!(
-        session
-            .handle_command(PeerCommand::ResetEvpnRecoverySession { request: reset })
-            .await,
-        ControlFlow::Continue(())
+        execute_reset(&mut session, reset).await,
+        EvpnRecoveryResetOutcome::Rejected
     );
     assert_eq!(session.fsm.state(), SessionState::Idle);
     assert_eq!(accepted_resets(&session), 0.0);
@@ -53,12 +65,8 @@ async fn evpn_recovery_queued_before_tcp_loss_cannot_reset_same_actor_reconnect(
     assert_eq!(session.fsm.state(), SessionState::Idle);
     while rib.try_recv().is_ok() {}
     assert_eq!(
-        session
-            .handle_command(PeerCommand::ResetEvpnRecoverySession {
-                request: reset.clone(),
-            })
-            .await,
-        ControlFlow::Continue(())
+        execute_reset(&mut session, reset.clone()).await,
+        EvpnRecoveryResetOutcome::Rejected
     );
     assert_eq!(session.fsm.state(), SessionState::Idle);
     assert_eq!(accepted_resets(&session), 0.0);
@@ -67,10 +75,8 @@ async fn evpn_recovery_queued_before_tcp_loss_cannot_reset_same_actor_reconnect(
     establish_test_session(&mut session, 65002).await;
     assert_eq!(session.session_identity.id, reset.session_id);
     assert_eq!(
-        session
-            .handle_command(PeerCommand::ResetEvpnRecoverySession { request: reset })
-            .await,
-        ControlFlow::Continue(())
+        execute_reset(&mut session, reset).await,
+        EvpnRecoveryResetOutcome::Rejected
     );
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert_eq!(accepted_resets(&session), 0.0);
@@ -85,12 +91,8 @@ async fn evpn_recovery_guard_reset_counts_once_and_fences_same_actor_reconnect()
     while rib.try_recv().is_ok() {}
     let reset = request(&session);
     assert_eq!(
-        session
-            .handle_command(PeerCommand::ResetEvpnRecoverySession {
-                request: reset.clone(),
-            })
-            .await,
-        ControlFlow::Continue(())
+        execute_reset(&mut session, reset.clone()).await,
+        EvpnRecoveryResetOutcome::Executed
     );
     let notification = read_until_notification(&mut server).await;
     assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_RESET);
@@ -102,12 +104,8 @@ async fn evpn_recovery_guard_reset_counts_once_and_fences_same_actor_reconnect()
     assert_eq!(session.fsm.state(), SessionState::Idle);
     assert!(reset.outbound.is_closed());
     assert_eq!(
-        session
-            .handle_command(PeerCommand::ResetEvpnRecoverySession {
-                request: reset.clone(),
-            })
-            .await,
-        ControlFlow::Continue(())
+        execute_reset(&mut session, reset.clone()).await,
+        EvpnRecoveryResetOutcome::Rejected
     );
     assert_eq!(
         session.fsm.state(),
@@ -122,19 +120,15 @@ async fn evpn_recovery_guard_reset_counts_once_and_fences_same_actor_reconnect()
     assert_eq!(session.session_identity.id, reset.session_id);
     assert!(!session.outbound_tx.same_channel(&reset.outbound));
     assert_eq!(
-        session
-            .handle_command(PeerCommand::ResetEvpnRecoverySession { request: reset })
-            .await,
-        ControlFlow::Continue(())
+        execute_reset(&mut session, reset).await,
+        EvpnRecoveryResetOutcome::Rejected
     );
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert_eq!(accepted_resets(&session), 1.0);
     let fresh = request(&session);
     assert_eq!(
-        session
-            .handle_command(PeerCommand::ResetEvpnRecoverySession { request: fresh })
-            .await,
-        ControlFlow::Continue(())
+        execute_reset(&mut session, fresh).await,
+        EvpnRecoveryResetOutcome::Executed
     );
     assert_eq!(session.fsm.state(), SessionState::Idle);
     assert_eq!(accepted_resets(&session), 2.0);
@@ -171,10 +165,8 @@ async fn evpn_recovery_guard_rejects_wrong_actor_peer_or_connection() {
             }
         };
         assert_eq!(
-            session
-                .handle_command(PeerCommand::ResetEvpnRecoverySession { request: reset })
-                .await,
-            ControlFlow::Continue(())
+            execute_reset(&mut session, reset).await,
+            EvpnRecoveryResetOutcome::Rejected
         );
         assert_eq!(session.fsm.state(), SessionState::Established, "{wrong}");
         assert_eq!(accepted_resets(&session), 0.0, "{wrong}");

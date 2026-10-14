@@ -11,7 +11,8 @@ use super::update_groups::recovery_provenance::{Exhaustion, PeerSession, Provena
 use super::{IpAddr, RibManager};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::EvpnRibRoute;
-use crate::update::EvpnRecoveryReset;
+use crate::update::{EvpnRecoveryReset, EvpnRecoveryResetOutcome, OutboundRouteUpdate};
+use tokio::sync::{mpsc, oneshot};
 
 /// Registration failed before a charged primary record existed. This bounded
 /// inline session control state retains reset handoff, not recovery keys. Its
@@ -22,7 +23,37 @@ pub(super) struct PendingReset {
     admitted: bool,
 }
 
+/// One receipt on the existing actor record, separate from charged route-key
+/// provenance. Its channel and handle fence every completion after a replay.
+pub(super) struct ResetReceipt {
+    pub(super) handle: Option<ProvenanceHandle>,
+    pub(super) outbound: mpsc::Sender<OutboundRouteUpdate>,
+    pub(super) receiver: oneshot::Receiver<EvpnRecoveryResetOutcome>,
+}
+
 impl RibManager {
+    pub(in crate::manager) fn take_evpn_recovery_reset_receipt(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        outbound: &mpsc::Sender<OutboundRouteUpdate>,
+    ) -> (Option<ResetReceipt>, bool) {
+        self.live_sessions
+            .get_mut(&peer)
+            .and_then(|sessions| {
+                sessions
+                    .iter_mut()
+                    .find(|record| record.session_id == session_id)
+            })
+            .filter(|record| record.outbound_tx.same_channel(outbound))
+            .map_or((None, false), |record| {
+                (
+                    record.evpn_recovery_reset_receipt.take(),
+                    record.evpn_recovery_reset_retry_reported,
+                )
+            })
+    }
+
     pub(in crate::manager) fn evpn_grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
         let gid = self.grouped_member_of(peer)?;
         self.group_ribs.get(&gid)?.owns_evpn.then_some(gid)
@@ -133,10 +164,15 @@ impl RibManager {
             .expect("registered EVPN owner");
         match self.evpn_recovery.begin_capture(handle) {
             Ok(false) => {
-                return self
+                if self
                     .evpn_recovery
                     .proof(handle)
-                    .is_ok_and(|proof| proof.is_some());
+                    .is_ok_and(|proof| proof.is_some())
+                {
+                    return true;
+                }
+                self.refuse_evpn_capture(peer, handle);
+                return false;
             }
             Err(_) => {
                 self.retry_evpn_recovery_reset(peer);
@@ -185,12 +221,11 @@ impl RibManager {
                     &mut || checkpoint.borrow_mut()(),
                 )
         };
-        if !captured {
-            self.mark_outbound_dirty(peer);
-            self.retry_evpn_recovery_reset(peer);
+        if !captured || self.evpn_recovery.seal_capture(handle) != Ok(true) {
+            self.refuse_evpn_capture(peer, handle);
             return false;
         }
-        self.evpn_recovery.seal_capture(handle).unwrap_or(false)
+        true
     }
 
     /// G2's pre-mutation capture seam. The iterator is already filtered for
@@ -219,10 +254,15 @@ impl RibManager {
             .expect("registered EVPN owner");
         match self.evpn_recovery.begin_capture(handle) {
             Ok(false) => {
-                return self
+                if self
                     .evpn_recovery
                     .proof(handle)
-                    .is_ok_and(|proof| proof.is_some());
+                    .is_ok_and(|proof| proof.is_some())
+                {
+                    return true;
+                }
+                self.refuse_evpn_capture(peer, handle);
+                return false;
             }
             Err(_) => {
                 self.retry_evpn_recovery_reset(peer);
@@ -238,7 +278,19 @@ impl RibManager {
                 return false;
             }
         }
-        self.evpn_recovery.seal_capture(handle).unwrap_or(false)
+        if self.evpn_recovery.seal_capture(handle) != Ok(true) {
+            self.refuse_evpn_capture(peer, handle);
+            return false;
+        }
+        true
+    }
+
+    fn refuse_evpn_capture(&mut self, peer: IpAddr, handle: ProvenanceHandle) {
+        // Preserve any allocation/capacity refusal already recorded. A lost
+        // producer must never remain Capturing with no reset duty.
+        self.evpn_recovery.abort_capture(handle);
+        self.mark_outbound_dirty(peer);
+        self.retry_evpn_recovery_reset(peer);
     }
 
     pub(in crate::manager) fn evpn_recovery_reset_pending(&self, peer: IpAddr) -> bool {
@@ -248,11 +300,43 @@ impl RibManager {
                 .is_some_and(|handle| self.evpn_recovery.exhaustion(handle).is_some())
     }
 
-    /// The callback only admits to the lifecycle owner's existing queue.
-    /// Success suppresses duplicate requests; transport execution validates
-    /// both session ID and channel token and owns the counter/warning receipt.
+    /// Queue admission retains one receipt; only actual guarded execution
+    /// suppresses retries. Polling never waits on the lifecycle/session actor.
     pub(in crate::manager) fn retry_evpn_recovery_reset(&mut self, peer: IpAddr) {
         let handle = self.evpn_recovery_handle(peer);
+        let (Some(owner), Some(outbound)) = (
+            self.evpn_recovery_owner(peer),
+            self.outbound_peers.get(&peer).cloned(),
+        ) else {
+            return;
+        };
+        let mut failed = None;
+        let mut executed = false;
+        if let Some(record) = self.newest_live_session_mut(peer, owner.session_id)
+            && let Some(receipt) = record.evpn_recovery_reset_receipt.as_mut()
+        {
+            if receipt.handle != handle || !receipt.outbound.same_channel(&outbound) {
+                record.evpn_recovery_reset_receipt = None;
+            } else {
+                match receipt.receiver.try_recv() {
+                    Ok(EvpnRecoveryResetOutcome::Executed) => executed = true,
+                    Ok(EvpnRecoveryResetOutcome::Rejected) => failed = Some("execution_rejected"),
+                    Err(oneshot::error::TryRecvError::Closed) => failed = Some("execution_dropped"),
+                    Err(oneshot::error::TryRecvError::Empty) => return,
+                }
+                record.evpn_recovery_reset_receipt = None;
+            }
+        }
+        if executed {
+            if let Some(handle) = handle {
+                self.evpn_recovery.mark_reset_admitted(handle);
+            } else if let Some(record) = self.newest_live_session_mut(peer, owner.session_id)
+                && let Some(pending) = record.evpn_recovery_reset.as_mut()
+            {
+                pending.admitted = true;
+            }
+            return;
+        }
         let error = if let Some(handle) = handle {
             if self.evpn_recovery.reset_admitted(handle) {
                 return;
@@ -263,35 +347,56 @@ impl RibManager {
                 .filter(|pending| !pending.admitted)
                 .map(|pending| pending.error)
         };
-        let (Some(error), Some(handler), Some(owner), Some(outbound)) = (
-            error,
-            self.evpn_recovery_reset.as_ref(),
-            self.evpn_recovery_owner(peer),
-            self.outbound_peers.get(&peer),
-        ) else {
+        let (Some(error), Some(handler)) = (error, self.evpn_recovery_reset.clone()) else {
             return;
         };
-        let (peer_limit_bytes, daemon_limit_bytes) = self.evpn_recovery.limits();
-        let admitted = handler(EvpnRecoveryReset {
-            peer,
-            session_id: owner.session_id,
-            outbound: outbound.clone(),
-            cause: error.cause,
-            limiting_peer: error.limiting_peer,
-            attempted_peer_bytes: error.attempted_peer_bytes,
-            attempted_daemon_bytes: error.attempted_daemon_bytes,
-            peer_limit_bytes,
-            daemon_limit_bytes,
-        });
-        if admitted {
-            if let Some(handle) = handle {
-                self.evpn_recovery.mark_reset_admitted(handle);
-            } else if let Some(record) = self.newest_live_session_mut(peer, owner.session_id)
-                && let Some(pending) = record.evpn_recovery_reset.as_mut()
-            {
-                pending.admitted = true;
-            }
+        if let Some(failure) = failed {
+            self.report_evpn_reset_retry(peer, owner.session_id, error, failure);
         }
+        let (peer_limit_bytes, daemon_limit_bytes) = self.evpn_recovery.limits();
+        let (reply, receiver) = oneshot::channel();
+        if handler(
+            EvpnRecoveryReset {
+                peer,
+                session_id: owner.session_id,
+                outbound: outbound.clone(),
+                cause: error.cause,
+                limiting_peer: error.limiting_peer,
+                attempted_peer_bytes: error.attempted_peer_bytes,
+                attempted_daemon_bytes: error.attempted_daemon_bytes,
+                peer_limit_bytes,
+                daemon_limit_bytes,
+            },
+            reply,
+        ) {
+            if let Some(record) = self.newest_live_session_mut(peer, owner.session_id) {
+                record.evpn_recovery_reset_receipt = Some(ResetReceipt {
+                    handle,
+                    outbound,
+                    receiver,
+                });
+            }
+        } else {
+            self.report_evpn_reset_retry(peer, owner.session_id, error, "owner_queue_refused");
+        }
+    }
+
+    fn report_evpn_reset_retry(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        error: Exhaustion,
+        failure: &'static str,
+    ) {
+        let Some(record) = self.newest_live_session_mut(peer, session_id) else {
+            return;
+        };
+        if record.evpn_recovery_reset_retry_reported {
+            return;
+        }
+        record.evpn_recovery_reset_retry_reported = true;
+        tracing::warn!(%peer, session_id, cause = error.cause.as_str(), failure,
+            "EVPN recovery reset lacks an execution receipt; retaining bounded retry");
     }
 
     pub(in crate::manager) fn evpn_advertised_resync_in_progress(&self, peer: IpAddr) -> bool {
@@ -355,12 +460,12 @@ impl RibManager {
         peer: IpAddr,
         announce: &[EvpnRibRoute],
         withdraw: &[EvpnRouteKey],
-    ) {
+    ) -> bool {
         let Some(handle) = self.evpn_recovery_handle(peer) else {
-            return;
+            return true;
         };
         if self.evpn_recovery.is_dormant(handle) {
-            return;
+            return true;
         }
         // Candidate capacity was reserved before any commit-side mutation;
         // final gates only remove announces or add admitted withdrawals.
@@ -369,10 +474,41 @@ impl RibManager {
             announce.iter().map(EvpnRibRoute::key),
             withdraw,
         );
-        assert!(
-            admitted == Ok(true),
-            "EVPN pre-reserved admission must complete"
-        );
+        if admitted == Ok(true) {
+            return true;
+        }
+        self.evpn_recovery.fail_admission(handle);
+        self.retry_evpn_recovery_reset(peer);
+        self.mark_outbound_dirty(peer);
+        false
+    }
+
+    pub(in crate::manager) fn preflight_final_evpn_recovery(
+        &mut self,
+        peer: IpAddr,
+        announce: &mut [EvpnRibRoute],
+        withdraw: &mut Vec<EvpnRouteKey>,
+    ) -> bool {
+        let Some(handle) = self.evpn_recovery_handle(peer) else {
+            return true;
+        };
+        if self.evpn_recovery.is_dormant(handle) {
+            return true;
+        }
+        announce.sort_unstable_by_key(EvpnRibRoute::key);
+        withdraw.sort_unstable();
+        withdraw.dedup();
+        if self.evpn_recovery.preflight_admitted(
+            handle,
+            announce.iter().map(EvpnRibRoute::key),
+            withdraw,
+        ) == Ok(true)
+        {
+            return true;
+        }
+        self.retry_evpn_recovery_reset(peer);
+        self.mark_outbound_dirty(peer);
+        false
     }
 
     pub(in crate::manager) fn retain_evpn_recovery_withdrawals(
@@ -470,6 +606,8 @@ impl RibManager {
             })
         {
             record.evpn_recovery_reset = None;
+            record.evpn_recovery_reset_receipt = None;
+            record.evpn_recovery_reset_retry_reported = false;
         }
     }
 }

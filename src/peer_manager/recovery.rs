@@ -2,41 +2,61 @@
 
 use std::time::Duration;
 
-use rustbgpd_rib::EvpnRecoveryReset;
+use rustbgpd_rib::{EvpnRecoveryReset, EvpnRecoveryResetOutcome};
 use rustbgpd_transport::PeerCommand;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::PeerManager;
 
 pub(super) struct SessionRecoveryReset {
     pub(super) request: EvpnRecoveryReset,
     pub(super) queued: bool,
+    reply: Option<oneshot::Sender<EvpnRecoveryResetOutcome>>,
+    execution: Option<oneshot::Receiver<EvpnRecoveryResetOutcome>>,
 }
 
 impl PeerManager {
-    pub(super) fn reset_evpn_recovery_session(&mut self, request: EvpnRecoveryReset) {
+    pub(super) fn reset_evpn_recovery_session(
+        &mut self,
+        request: EvpnRecoveryReset,
+        reply: oneshot::Sender<EvpnRecoveryResetOutcome>,
+    ) {
         if request.outbound.is_closed() {
+            let _ = reply.send(EvpnRecoveryResetOutcome::Rejected);
             return;
         }
         let Some(key) = self.peer_key_for_session(request.session_id) else {
+            let _ = reply.send(EvpnRecoveryResetOutcome::Rejected);
             return;
         };
         if key.address != request.peer {
+            let _ = reply.send(EvpnRecoveryResetOutcome::Rejected);
             return;
         }
         let session_id = request.session_id;
         let Some((_, slot)) = self.peers.recovery_session_mut(&key, session_id) else {
+            let _ = reply.send(EvpnRecoveryResetOutcome::Rejected);
             return;
         };
-        if slot
-            .as_ref()
-            .is_some_and(|reset| reset.request.outbound.same_channel(&request.outbound))
+        if let Some(reset) = slot.as_mut()
+            && reset.request.outbound.same_channel(&request.outbound)
         {
+            if reset.queued && reset.execution.is_none() {
+                let _ = reply.send(EvpnRecoveryResetOutcome::Executed);
+            } else if reset.reply.as_ref().is_none_or(oneshot::Sender::is_closed) {
+                // A retry whose old receipt receiver disappeared can join
+                // the one existing command; it never queues another reset.
+                reset.reply = Some(reply);
+            } else {
+                let _ = reply.send(EvpnRecoveryResetOutcome::Rejected);
+            }
             return;
         }
         *slot = Some(SessionRecoveryReset {
             request,
             queued: false,
+            reply: Some(reply),
+            execution: None,
         });
         self.try_evpn_recovery_reset(session_id);
         self.rearm_evpn_recovery_retry();
@@ -52,6 +72,30 @@ impl PeerManager {
         let Some(reset) = slot.as_mut() else {
             return;
         };
+        // Poll execution before checking the token: a successful reset
+        // itself closes that outbound connection.
+        if let Some(execution) = reset.execution.as_mut() {
+            match execution.try_recv() {
+                Ok(outcome) => {
+                    reset.execution = None;
+                    if let Some(reply) = reset.reply.take() {
+                        let _ = reply.send(outcome);
+                    }
+                    if outcome == EvpnRecoveryResetOutcome::Rejected {
+                        *slot = None;
+                        return;
+                    }
+                }
+                // Transport can close outbound before sending this receipt.
+                Err(oneshot::error::TryRecvError::Empty) => return,
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    // Dropping the RIB reply retains the distinction from
+                    // a positive execution receipt; the RIB owns its retry.
+                    *slot = None;
+                    return;
+                }
+            }
+        }
         if reset.request.outbound.is_closed() {
             *slot = None;
             return;
@@ -59,14 +103,24 @@ impl PeerManager {
         if reset.queued {
             return;
         }
+        let (reply, execution) = oneshot::channel();
         match handle
             .commands_sender()
             .try_send(PeerCommand::ResetEvpnRecoverySession {
                 request: reset.request.clone(),
+                reply,
             }) {
-            Ok(()) => reset.queued = true,
+            Ok(()) => {
+                reset.queued = true;
+                reset.execution = Some(execution);
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {}
-            Err(mpsc::error::TrySendError::Closed(_)) => *slot = None,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                if let Some(reply) = reset.reply.take() {
+                    let _ = reply.send(EvpnRecoveryResetOutcome::Rejected);
+                }
+                *slot = None;
+            }
         }
     }
 
