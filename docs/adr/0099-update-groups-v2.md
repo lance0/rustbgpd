@@ -545,6 +545,19 @@ ordinary backpressure must not introduce fleet-wide session resets absent from
 the matching per-peer control. A run that exceeds a cap and resets peers fails
 qualification rather than establishing an acceptable recovery envelope.
 
+Count execution-confirmed resets for every fixed cause: `peer_limit`,
+`daemon_limit`, `allocation_failure`, `capture_unavailable` and
+`admission_invariant`. A run with a capture or admission-invariant reset fails
+qualification just as a cap-induced reset does; queue admission alone does not
+prove that a reset executed.
+
+Add a **whole-fleet policy-regroup cell at the same shape**. Prove that the
+members actually move between groups and every receiver converges under section
+F, preserving the per-key event contract for clean regroup. Require zero resets
+for all five causes, report retained/peak charge and headroom, and verify that
+settled members release their recovery duties and charge. An ordinary policy
+edit must not retain a fleet of recovery proofs indefinitely.
+
 Run convergence/readiness and soak-shape qualification on a quiet host. Correctness
 and quiet-host resource gates must pass before production activation. Publish
 the resulting operational envelope with its receipt, not an extrapolated or

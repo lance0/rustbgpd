@@ -818,6 +818,12 @@ impl GroupRibOut {
         self.sendable.contains(&(Afi::Ipv4, Safi::RtConstrain))
     }
 
+    /// RTC EVPN keeps its private projection until OLD membership capture
+    /// and separate RTC qualification are implemented.
+    pub(in crate::manager) fn owns_evpn_routes(&self) -> bool {
+        self.owns_evpn && !self.rtc_negotiated()
+    }
+
     fn record_otc_blocked<S: std::hash::BuildHasher>(
         &mut self,
         prefixes: &HashSet<Prefix, S>,

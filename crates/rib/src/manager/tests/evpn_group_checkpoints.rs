@@ -1,4 +1,4 @@
-use super::evpn_group_storage::{fixture, fixture_with_rtc, received, stage};
+use super::evpn_group_storage::{fixture, received, stage};
 use super::*;
 use crate::update::ExactExportKey;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -71,11 +71,15 @@ fn evpn_projection_checkpoints_wholly_excluded_rtc_source_and_rejection_rows() {
 
 #[test]
 fn evpn_shared_empty_capture_checkpoints_completeness_count_and_population() {
-    let (mut manager, member, gid, _output) = fixture_with_rtc(true);
+    let (mut manager, member, gid, _output) = fixture();
     let routes = install_routes(&mut manager, gid, 7);
-    manager
-        .peer_rt_membership
-        .insert(member, RtcMembership::default());
+    manager.peer_unexportable.insert(
+        member,
+        routes
+            .iter()
+            .map(|route| ExactExportKey::Evpn(route.key()))
+            .collect(),
+    );
     let visits = Arc::new(AtomicUsize::new(0));
     manager.replacement_readiness_test_hook = Some(Arc::new({
         let visits = visits.clone();
