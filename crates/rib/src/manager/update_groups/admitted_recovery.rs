@@ -1072,6 +1072,31 @@ impl AdmittedRecovery {
         checkpoint(true);
     }
 
+    /// A sorted stream keeps its matched position; only its first lookup needs
+    /// a lower bound, so a small withdrawal does not walk the whole universe.
+    fn sorted_match(
+        keys: &[Key],
+        cursor: &mut Option<usize>,
+        key: Key,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Option<usize> {
+        let position = cursor.get_or_insert_with(|| {
+            keys.partition_point(|prior| {
+                checkpoint(false);
+                *prior < key
+            })
+        });
+        while let Some(prior) = keys.get(*position) {
+            checkpoint(false);
+            match prior.cmp(&key) {
+                std::cmp::Ordering::Less => *position += 1,
+                std::cmp::Ordering::Equal => return Some(*position),
+                std::cmp::Ordering::Greater => return None,
+            }
+        }
+        None
+    }
+
     /// Unique ANN may be unordered; W is sorted/unique. Reservation makes this allocation-free.
     pub(in crate::manager) fn apply_admitted_with_checkpoint<A, W>(
         &mut self,
@@ -1087,12 +1112,27 @@ impl AdmittedRecovery {
         let Some(index) = self.complete_index(peer, checkpoint)? else {
             return Ok(false);
         };
+        let universe = self.records[index]
+            .snapshot
+            .and_then(|handle| self.snapshot_index(handle))
+            .map_or(&[][..], |snapshot| self.snapshots[snapshot].keys.as_slice());
+        let record = &self.records[index];
         let mut previous = None;
+        let mut base_cursor = None;
+        let mut sparse_cursor = None;
         for key in withdrawals.clone() {
             checkpoint(false);
-            if previous.is_some_and(|prior| prior >= key)
-                || !self.get(&peer).is_some_and(|proof| proof.contains_key(key))
+            if previous.is_some_and(|prior| prior >= key) {
+                return Err(self.fail(index, self.missing_proof(peer), checkpoint));
+            }
+            let admitted = if let Some(position) =
+                Self::sorted_match(universe, &mut base_cursor, key, checkpoint)
             {
+                record.words[position / 64] & (1_u64 << (position % 64)) != 0
+            } else {
+                Self::sorted_match(&record.keys.0, &mut sparse_cursor, key, checkpoint).is_some()
+            };
+            if !admitted {
                 return Err(self.fail(index, self.missing_proof(peer), checkpoint));
             }
             previous = Some(key);
@@ -1105,9 +1145,13 @@ impl AdmittedRecovery {
             .and_then(|handle| self.snapshot_index(handle))
             .map_or(&[][..], |snapshot| self.snapshots[snapshot].keys.as_slice());
         let record = &mut self.records[index];
+        // Replay only after complete validation and reservation. Each direct
+        // position is retained for clearing; no matched-position allocation.
+        let mut base_cursor = None;
         for key in withdrawals.clone() {
             checkpoint(false);
-            if let Ok(position) = universe.binary_search(&key) {
+            if let Some(position) = Self::sorted_match(universe, &mut base_cursor, key, checkpoint)
+            {
                 record.words[position / 64] &= !(1_u64 << (position % 64));
                 record.masked -= 1;
             }
@@ -1897,6 +1941,247 @@ mod tests {
         assert_eq!(error.cause, FailureCause::MissingProof);
         assert!(ledger.get(&peer(1)).is_none());
         assert!(ledger.snapshots.is_empty());
+    }
+
+    fn bulk_vpn_key(n: u8) -> Key {
+        Key::Vpn(
+            VpnRouteKey {
+                route_distinguisher: RouteDistinguisher::new([0, 0, 0, 1, 0, 0, 0, 2]),
+                prefix: VpnPrefix::V4 {
+                    addr: Ipv4Addr::new(10, 0, 0, n),
+                    len: 32,
+                },
+            },
+            u32::from(n),
+        )
+    }
+
+    #[test]
+    fn bulk_withdraw_merges_masked_and_sparse_uc_vpn_without_adopting_unset_bits() {
+        let mut ledger = AdmittedRecovery::new();
+        let raw = [
+            key(2),
+            key(4),
+            key(6),
+            bulk_vpn_key(2),
+            bulk_vpn_key(4),
+            bulk_vpn_key(6),
+        ];
+        shared_capture(
+            &mut ledger,
+            peer(1),
+            None,
+            &raw,
+            &[key(2), key(6), bulk_vpn_key(4)],
+        );
+        ledger
+            .apply_admitted(
+                peer(1),
+                [key(1), key(5), bulk_vpn_key(1), bulk_vpn_key(5)].into_iter(),
+                [].into_iter(),
+            )
+            .unwrap();
+        let ann = [bulk_vpn_key(5), key(3), key(2)];
+        ledger.reserve_admitted(peer(1), ann.into_iter()).unwrap();
+        let before = ledger.bytes();
+        ledger.fail_next_allocation_for_test();
+        ledger
+            .apply_admitted(
+                peer(1),
+                ann.into_iter(),
+                [key(1), key(2), key(5), bulk_vpn_key(4), bulk_vpn_key(5)].into_iter(),
+            )
+            .unwrap();
+        let remaining = [key(2), key(3), key(6), bulk_vpn_key(1), bulk_vpn_key(5)];
+        assert_eq!(
+            ledger.get(&peer(1)).unwrap().iter().collect::<Vec<_>>(),
+            remaining.map(ExactExportKey::from)
+        );
+        assert_eq!(ledger.records[0].masked, 2);
+        assert_eq!(
+            ledger.records[0].keys.0.as_slice(),
+            &[key(3), bulk_vpn_key(1), bulk_vpn_key(5)]
+        );
+        ledger
+            .apply_admitted(peer(1), [].into_iter(), remaining.into_iter())
+            .unwrap();
+        assert!(ledger.get(&peer(1)).unwrap().is_empty());
+        assert_eq!(ledger.records[0].masked, 0);
+        assert!(ledger.records[0].keys.0.is_empty());
+        assert_eq!(ledger.bytes(), before);
+        assert!(ledger.fail_next_allocation);
+    }
+
+    #[test]
+    fn bulk_withdraw_invalid_suffix_fails_before_reservation_and_keeps_other_masks() {
+        let raw = [key(2), key(4), bulk_vpn_key(2), bulk_vpn_key(4)];
+        for withdrawals in [
+            vec![key(2), key(2)],
+            vec![bulk_vpn_key(2), key(2)],
+            vec![key(2), key(3)],
+            vec![key(2), key(4)],
+            vec![key(2), bulk_vpn_key(3)],
+            vec![key(2), bulk_vpn_key(4)],
+        ] {
+            let mut ledger = AdmittedRecovery::new();
+            let handle =
+                shared_capture(&mut ledger, peer(1), None, &raw, &[key(2), bulk_vpn_key(2)]);
+            shared_capture(&mut ledger, peer(2), Some(handle), &raw, &raw);
+            ledger
+                .apply_admitted(
+                    peer(1),
+                    [key(1), bulk_vpn_key(1)].into_iter(),
+                    [].into_iter(),
+                )
+                .unwrap();
+            let other = ledger.owned_proof(&peer(2)).unwrap();
+            ledger.fail_next_allocation_for_test();
+            let error = ledger
+                .apply_admitted(peer(1), [key(7)].into_iter(), withdrawals.into_iter())
+                .unwrap_err();
+            assert_eq!(error.cause, FailureCause::MissingProof);
+            assert!(
+                ledger.fail_next_allocation,
+                "invalid W must fail before ANN reservation"
+            );
+            assert!(
+                ledger.get(&peer(1)).is_none(),
+                "a partial proof must never be published"
+            );
+            assert_eq!(ledger.begin_capture(peer(1)), Err(error));
+            assert_eq!(ledger.owned_proof(&peer(2)).unwrap(), other);
+            assert_eq!(ledger.snapshots[0].references, 1);
+        }
+    }
+
+    #[test]
+    fn bulk_withdraw_reservation_refusal_keeps_other_masks_and_fails_closed() {
+        for cause in [FailureCause::AllocationFailure, FailureCause::PeerLimit] {
+            let mut ledger = AdmittedRecovery::new();
+            let raw = [key(2), key(4), bulk_vpn_key(2), bulk_vpn_key(4)];
+            let handle =
+                shared_capture(&mut ledger, peer(1), None, &raw, &[key(2), bulk_vpn_key(2)]);
+            shared_capture(&mut ledger, peer(2), Some(handle), &raw, &raw);
+            ledger
+                .apply_admitted(peer(1), [key(1)].into_iter(), [].into_iter())
+                .unwrap();
+            let other = ledger.owned_proof(&peer(2)).unwrap();
+            if cause == FailureCause::AllocationFailure {
+                ledger.fail_next_allocation_for_test();
+            } else {
+                ledger.peer_limit = ledger.peer_charge(0);
+            }
+            let visited = std::cell::Cell::new(0);
+            let withdrawals = [key(2), bulk_vpn_key(2)];
+            let removed = withdrawals.iter().copied().inspect(|_| {
+                visited.set(visited.get() + 1);
+            });
+            let error = ledger
+                .apply_admitted_with_checkpoint(
+                    peer(1),
+                    [key(3)].into_iter(),
+                    removed,
+                    &mut |force| {
+                        if force {
+                            assert_eq!(
+                                visited.get(),
+                                withdrawals.len(),
+                                "failed reservation must consume W only for validation"
+                            );
+                        }
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.cause, cause);
+            assert!(ledger.get(&peer(1)).is_none());
+            assert_eq!(ledger.begin_capture(peer(1)), Err(error));
+            assert_eq!(ledger.owned_proof(&peer(2)).unwrap(), other);
+            assert_eq!(ledger.snapshots[0].references, 1);
+        }
+    }
+
+    #[test]
+    fn bulk_withdraw_match_comparisons_are_linear_and_tiny_ranges_skip_the_prefix() {
+        fn full_key(n: u32) -> Key {
+            Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0)
+        }
+        for count in [256, 2048, 16_384] {
+            let raw: Vec<_> = (0..count).map(full_key).collect();
+            let mut cursor = None;
+            let mut comparisons = 0;
+            for (position, key) in raw.iter().copied().enumerate() {
+                assert_eq!(
+                    AdmittedRecovery::sorted_match(&raw, &mut cursor, key, &mut |force| {
+                        assert!(!force);
+                        comparisons += 1;
+                    }),
+                    Some(position),
+                );
+            }
+            assert!(comparisons >= raw.len());
+            assert!(
+                comparisons <= 2 * raw.len() + 64,
+                "{comparisons} comparisons for {} keys",
+                raw.len()
+            );
+            cursor = None;
+            comparisons = 0;
+            for (position, key) in raw.iter().copied().enumerate().skip(raw.len() - 2) {
+                assert_eq!(
+                    AdmittedRecovery::sorted_match(&raw, &mut cursor, key, &mut |force| {
+                        assert!(!force);
+                        comparisons += 1;
+                    }),
+                    Some(position),
+                );
+            }
+            assert!(comparisons <= 64, "tiny suffix walked {comparisons} keys");
+        }
+    }
+
+    #[test]
+    fn bulk_withdraw_full_mixed_proof_has_bounded_visits_without_allocating() {
+        fn full_key(n: u32) -> Key {
+            Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0)
+        }
+        for count in [256, 2048, 16_384] {
+            let mut ledger = AdmittedRecovery::new();
+            let raw: Vec<_> = (0..count).map(|n| full_key(4 * n)).collect();
+            let masked: Vec<_> = raw.iter().step_by(2).copied().collect();
+            shared_capture(&mut ledger, peer(1), None, &raw, &masked);
+            let sparse: Vec<_> = (0..count).map(|n| full_key(4 * n + 1)).collect();
+            ledger
+                .apply_admitted(peer(1), sparse.iter().copied(), [].into_iter())
+                .unwrap();
+            let mut withdrawals: Vec<_> = masked.iter().chain(&sparse).copied().collect();
+            withdrawals.sort_unstable();
+            let before = ledger.bytes();
+            ledger.fail_next_allocation_for_test();
+            let mut visits = 0;
+            ledger
+                .apply_admitted_with_checkpoint(
+                    peer(1),
+                    [].into_iter(),
+                    withdrawals.iter().copied(),
+                    &mut |force| {
+                        if !force {
+                            visits += 1;
+                        }
+                    },
+                )
+                .unwrap();
+            assert!(visits >= withdrawals.len());
+            assert!(
+                visits <= 4 * (raw.len() + sparse.len() + withdrawals.len()) + 128,
+                "{visits} visits for {} universe / {} sparse / {} W",
+                raw.len(),
+                sparse.len(),
+                withdrawals.len()
+            );
+            assert!(ledger.get(&peer(1)).unwrap().is_empty());
+            assert_eq!(ledger.bytes(), before);
+            assert!(ledger.fail_next_allocation);
+        }
     }
 
     #[test]
