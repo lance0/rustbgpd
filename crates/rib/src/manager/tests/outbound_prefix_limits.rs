@@ -424,6 +424,44 @@ fn export_explain_allows_admitted_prefix_at_outbound_limit() {
     }
 }
 
+/// A limited grouped member in a regroup-baseline window: the advertised
+/// listing reads the baseline and explain applies the outbound limit to the
+/// same admitted state, so an admitted prefix is listed and already
+/// advertised while the withheld one is neither listed nor admitted.
+#[test]
+fn baseline_window_listing_and_explain_agree_at_outbound_limit() {
+    use crate::update::{ExplainDecision, OUTBOUND_PREFIX_LIMIT_REACHED};
+
+    for per_client_best in [false, true] {
+        let (mut manager, peer, advertised) = export_explain_limit_fixture(false, per_client_best);
+        // Capture the admitted projection as a regroup does, then hold the
+        // member dirty so both surfaces must read the baseline.
+        let mut baseline = crate::manager::update_groups::RegroupBaseline::default();
+        for route in manager.grouped_advertised_routes(peer).unwrap() {
+            baseline
+                .unicast
+                .insert((route.prefix, route.path_id), route);
+        }
+        manager.pending_regroup_baseline.insert(peer, baseline);
+        manager.dirty_peers.insert(peer);
+        assert_eq!(advertised_prefixes(&mut manager, peer), advertised);
+        for prefix in [v4(1), v4(2), v4(3)] {
+            let explanation = explain_export(&mut manager, peer, prefix);
+            if advertised.contains(&prefix) {
+                assert_eq!(explanation.decision, ExplainDecision::Advertise);
+                assert!(explanation.already_advertised, "{prefix}");
+            } else {
+                assert_eq!(explanation.decision, ExplainDecision::Deny);
+                assert!(!explanation.already_advertised);
+                assert_eq!(
+                    explanation.gates.last().unwrap().code,
+                    OUTBOUND_PREFIX_LIMIT_REACHED
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn export_explain_outbound_limit_preserves_earlier_exact_rejection() {
     for ungrouped in [false, true] {

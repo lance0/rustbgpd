@@ -163,6 +163,15 @@ peer's outbound prefix limit. A net-new prefix held at capacity ends with
 detail naming the family, limit, and current usage. An already admitted
 prefix can still be updated at capacity. Grouped peers use their own admitted
 advertised view, so explain agrees with `rbgp rib advertised <peer>`.
+
+A grouped peer can briefly have no record of what it admitted. This happens
+when its outbound queue was full for a send and no pre-regroup baseline is
+held. Until its next resync is accepted, unicast export explain and
+`rbgp rib advertised <peer>` both fail with `FAILED_PRECONDITION`. They do not
+report the group's intended routes as already advertised. The refusal is
+transient: retry once the peer's queue drains and the resync completes. A
+regrouped peer that still holds its baseline is not refused. Both commands
+read that baseline until the resync replaces it.
 `--rd <rd>` explains the VPNv4/VPNv6 (RD, prefix) ladder including the RFC 4684
 RT-Constrain membership gate; `--labeled` explains the RFC 8277
 labeled-unicast ladder. Rung-by-rung semantics:

@@ -734,6 +734,22 @@ impl RibManager {
             let _ = reply.send(Err(RoutePageError::Invalidated));
             return;
         }
+        // A grouped member that missed delivery lists what it admitted, the
+        // same state unicast export explain reads: its regroup baseline, or
+        // a refusal when no admitted record exists.
+        if let RouteQueryScope::Advertised { peer } = scope {
+            if self.grouped_unicast_admission_unknown(peer) {
+                let _ = reply.send(Err(RoutePageError::ResyncInProgress));
+                return;
+            }
+            if let Some(baseline) = self.grouped_dirty_unicast_baseline(peer) {
+                // The baseline is unordered, so each page scans it whole;
+                // it exists only until the member's next successful resync.
+                let page = page_routes(baseline.unicast.values(), filter, after, page_size);
+                let _ = reply.send(Ok(RoutePage { version, ..page }));
+                return;
+            }
+        }
         // Arbitrary API route predicates still need the full scope to preserve
         // the cursor-independent filtered total. Unfiltered listings resume
         // through persistent ordered indices and clone only one page plus a
@@ -1461,12 +1477,7 @@ impl RibManager {
                 return;
             }
         }
-        if rd.is_none()
-            && !labeled
-            && self.grouped_member_of(peer).is_some()
-            && self.dirty_peers.contains(&peer)
-            && !self.pending_regroup_baseline.contains_key(&peer)
-        {
+        if rd.is_none() && !labeled && self.grouped_unicast_admission_unknown(peer) {
             let _ = reply.send(Err(ExplainAdvertisedRouteError::FailedPrecondition(
                 "grouped advertised state is resynchronizing; no admitted baseline is available"
                     .to_string(),
@@ -1774,13 +1785,41 @@ impl RibManager {
         explanation
     }
 
+    /// Whether `peer` is a grouped member whose admitted unicast state is
+    /// unknown: it missed delivery (dirty) and retains no regroup baseline.
+    /// Its group view is then desired state, and no per-key record says
+    /// which entries changed after the missed send, so unicast export explain
+    /// and the advertised listing both refuse until the resync completes.
+    fn grouped_unicast_admission_unknown(&self, peer: IpAddr) -> bool {
+        self.grouped_member_of(peer).is_some()
+            && self.dirty_peers.contains(&peer)
+            && !self.pending_regroup_baseline.contains_key(&peer)
+    }
+
+    /// The admitted unicast state of a dirty grouped member that retains a
+    /// regroup baseline; `None` when the group view is authoritative or the
+    /// state is unknown.
+    fn grouped_dirty_unicast_baseline(
+        &self,
+        peer: IpAddr,
+    ) -> Option<&update_groups::RegroupBaseline> {
+        self.grouped_member_of(peer)?;
+        if !self.dirty_peers.contains(&peer) {
+            return None;
+        }
+        self.pending_regroup_baseline.get(&peer)
+    }
+
     /// Materialize the member-specific wire view used to explain a grouped
     /// unicast export — `adv(m)` per staged key (ADR-0126 Decision 4): the
     /// staged entry minus own-sourced slots, with the exception-lane
     /// runner-up substituting at an own-sourced slot of a per-client-best
     /// group. The shared advertised iterator applies the member's OTC
-    /// backstop, exact-export rejections and outbound capacity admission,
-    /// so this view agrees with the advertised listing.
+    /// backstop, exact-export rejections and outbound capacity admission.
+    /// A dirty member is explained against its retained regroup baseline;
+    /// without one, the caller has already refused
+    /// ([`Self::grouped_unicast_admission_unknown`]). The advertised listing
+    /// applies the same rule, so the two agree.
     fn grouped_unicast_explain_view(&self, peer: IpAddr) -> Option<AdjRibOut> {
         self.grouped_member_of(peer)?;
         let mut view = AdjRibOut::new(peer);

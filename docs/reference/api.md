@@ -1801,6 +1801,17 @@ identity returns `NOT_FOUND`; a source selector without negotiated unicast
 Add-Path send returns `FAILED_PRECONDITION`. `source` is mutually exclusive
 with `rd` and `labeled`.
 
+A grouped peer's unicast explain and `ListAdvertisedRoutes` read the same
+admitted state. If the peer missed an update because its outbound queue was
+full, and no pre-regroup baseline exists, nothing records which group entries
+it missed. Both RPCs then return `FAILED_PRECONDITION` instead of reporting
+the group's desired routes as advertised. The listing's message is
+`advertised routes are unavailable until outbound resynchronization
+completes`. The refusal is transient and clears when the peer's next resync is
+admitted, so retry after its queue drains. A peer that retains a regroup
+baseline is answered from that baseline by both RPCs. VPN and labeled-unicast
+explain do not apply this refusal.
+
 Best-path explain is also available via `ExplainBestPath` RPC — it returns all
 candidates for a prefix with the decisive comparison reason for each. Set
 `peer_address` on the request to scope the response to that peer's Add-Path
