@@ -299,8 +299,11 @@ remain responsible for shell scripts.
 enum zero values end in `_UNSPECIFIED`, enum values carry the enum-name prefix,
 and enum, field, message, oneof, service, RPC, file, and package names follow
 the usual case and package-version rules. `buf breaking` uses the `WIRE_JSON`
-category, so a renumbered field, a changed wire type, or a renamed field or
-enum value fails against the base. Run both with:
+category plus `PACKAGE_NO_DELETE`, `PACKAGE_SERVICE_NO_DELETE`, and
+`RPC_NO_DELETE`, so a renumbered field, a changed wire type, a renamed field or
+enum value, or a deleted package, service, or RPC fails against the base.
+Moving a definition between files of the same package is allowed. Run both
+with:
 
 ```bash
 just proto-lint                # compare against origin/main
@@ -314,7 +317,7 @@ checksum-verified release into
 install buf 1.73.0 on `PATH`, for example with
 `go install github.com/bufbuild/buf/cmd/buf@v1.73.0`. CI runs the same script
 in the `core` job: pull requests compare against the base they merge into, and
-pushes to `main` compare against the previous commit.
+pushes to `main` compare against the commit `main` pointed to before the push.
 
 New schema elements follow the rules; do not add an ignore to avoid naming a
 new enum value `_UNSPECIFIED`. When an existing name has to stay because
@@ -328,10 +331,11 @@ enum EvpnRuntimeLifecycle {
 ```
 
 Do not add `lint.ignore_only` entries to `buf.yaml`: they work per file and
-would disable a rule for the whole schema. A deliberate pre-v1 breaking change
-adds a `breaking.ignore_only` entry naming the failing rule and file in the same
-pull request, records the break in the changelog and upgrade notes, and removes
-the entry in a follow-up once the change is on `main`.
+would disable a rule for the whole schema. A deliberate pre-v1 breaking change,
+including removing an RPC or service, adds a `breaking.ignore_only` entry naming
+the failing rule (for example `RPC_NO_DELETE`) and file in the same pull
+request, records the break in the changelog and upgrade notes, and removes the
+entry in a follow-up once the change is on `main`.
 
 ### Pre-commit hooks
 

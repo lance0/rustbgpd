@@ -35,6 +35,12 @@ breaking:
     - proto/github.com
   # WIRE_JSON rather than WIRE: operators drive the API with grpcurl and other
   # proto3 JSON clients, so field and enum value names are part of the
-  # contract alongside field numbers and wire types.
+  # contract alongside field numbers and wire types. WIRE_JSON does not cover
+  # removed services or RPCs, so the package-scoped deletion rules are added;
+  # unlike the FILE category they allow moving a definition between files of
+  # the same package.
   use:
     - WIRE_JSON
+    - PACKAGE_NO_DELETE
+    - PACKAGE_SERVICE_NO_DELETE
+    - RPC_NO_DELETE
