@@ -176,11 +176,19 @@ fn outbound_queue_credit_precedes_provenance_growth_and_reset_handoff() {
         .unwrap();
     let before = manager.evpn_recovery.daemon_usage();
     manager.evpn_recovery.fail_next_allocation_for_test();
-    assert!(!manager.try_send_and_commit_outbound_update(peer, batch()));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(peer, batch())
+            .is_err()
+    );
     assert_eq!(manager.evpn_recovery.daemon_usage(), before);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     output.try_recv().unwrap();
-    assert!(!manager.try_send_and_commit_outbound_update(peer, batch()));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(peer, batch())
+            .is_err()
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(manager.evpn_recovery_reset_pending(peer));
     assert!(output.try_recv().is_err());
@@ -220,7 +228,11 @@ fn incomplete_owned_capture_requests_one_fenced_reset_before_mixed_family_admiss
         evpn_announce: vec![route(1)],
         ..OutboundCommitBatch::with_unicast(Arc::new(vec![unicast.clone()]), Arc::new(vec![None]))
     };
-    assert!(!manager.try_send_and_commit_outbound_update(peer, batch()));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(peer, batch())
+            .is_err()
+    );
     {
         let requests = requests.lock().unwrap();
         assert_eq!(
@@ -243,7 +255,11 @@ fn incomplete_owned_capture_requests_one_fenced_reset_before_mixed_family_admiss
         );
     }
     for _ in 0..5 {
-        assert!(!manager.try_send_and_commit_outbound_update(peer, batch()));
+        assert!(
+            manager
+                .try_send_and_commit_outbound_update(peer, batch())
+                .is_err()
+        );
         manager.retry_evpn_recovery_reset(peer);
         assert_eq!(requests.lock().unwrap().len(), 1, "one inflight receipt");
         assert!(manager.dirty_peers.contains(&peer));
@@ -284,13 +300,17 @@ fn reset_refusal_retries_once_accepted_and_stays_exhausted_until_teardown() {
         }
     }));
     manager.evpn_recovery.fail_next_allocation_for_test();
-    assert!(!manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_announce: vec![route(1)],
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: vec![route(1)],
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_err()
+    );
     manager.resync_dirty_peers_bounded();
     manager.resync_dirty_peers_bounded();
     let handle = manager.evpn_recovery_handle(peer).unwrap();
@@ -315,13 +335,17 @@ fn reset_execution_receipt_bounds_inflight_and_retries_rejection_and_drop() {
     let requests = capture_reset_requests(&mut manager);
     let handle = manager.evpn_recovery_handle(peer).unwrap();
     manager.evpn_recovery.fail_next_allocation_for_test();
-    assert!(!manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_announce: vec![route(1)],
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: vec![route(1)],
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_err()
+    );
     assert!(!manager.evpn_recovery.reset_admitted(handle));
     manager.retry_evpn_recovery_reset(peer);
     assert_eq!(requests.lock().unwrap().len(), 1, "one inflight receipt");
@@ -415,26 +439,34 @@ fn final_admission_filters_unknown_withdrawals_and_releases_only_after_settlemen
     let (mut manager, peer, mut output) = fixture(8);
     own(&mut manager, peer, true);
     let known = route(1);
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_announce: vec![known.clone()],
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: vec![known.clone()],
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     output.try_recv().unwrap();
     let handle = manager.evpn_recovery_handle(peer).unwrap();
     assert_eq!(
         manager.evpn_recovery.proof_keys(handle).unwrap(),
         Some([known.key()].to_vec())
     );
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_withdraw: vec![route(2).key(), known.key(), known.key()],
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_withdraw: vec![route(2).key(), known.key(), known.key()],
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     assert_eq!(output.try_recv().unwrap().evpn_withdraw, vec![known.key()]);
     let retained = manager.evpn_recovery.daemon_usage().retained;
     assert!(manager.settle_evpn_recovery(peer, [].into_iter()));
@@ -589,16 +621,20 @@ fn duplicate_candidate_announcements_refuse_the_whole_mixed_family_batch_without
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32),
         Ipv4Addr::new(192, 0, 2, 10),
     );
-    assert!(!manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_announce: vec![route(1), route(1)],
-            ..OutboundCommitBatch::with_unicast(
-                Arc::new(vec![unicast.clone()]),
-                Arc::new(vec![None])
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: vec![route(1), route(1)],
+                    ..OutboundCommitBatch::with_unicast(
+                        Arc::new(vec![unicast.clone()]),
+                        Arc::new(vec![None])
+                    )
+                }
             )
-        }
-    ));
+            .is_err()
+    );
     let error = manager.evpn_recovery.exhaustion(handle).unwrap();
     assert_eq!(
         error.cause,

@@ -330,7 +330,7 @@ impl RibManager {
             );
 
             if (!bgpls_announce.is_empty() || !bgpls_withdraw.is_empty())
-                && !self.try_send_and_commit_outbound_update(
+                && let Err(failure) = self.try_send_and_commit_outbound_update(
                     peer,
                     OutboundCommitBatch {
                         bgpls_announce,
@@ -339,6 +339,7 @@ impl RibManager {
                     },
                 )
                 && self.mark_outbound_dirty(peer)
+                && failure == super::OutboundCommitFailure::WriterUnavailable
             {
                 warn!(%peer, "outbound channel full — BGP-LS update deferred");
             }

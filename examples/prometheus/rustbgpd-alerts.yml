@@ -626,23 +626,71 @@ groups:
             dashboard p99 and transition state before retrying a reload.
 
       - alert: BgpOutboundRouteDrops
-        # This counter records terminal outbound work loss. Temporary
-        # collision-failback ROUTE-REFRESH saturation is retained and retried,
-        # so it does not increment this family.
+        # Every family counts here when the peer writer channel is full or
+        # closed. The RIB marks the peer dirty and resyncs it, so this is a
+        # warning; BgpOutboundResyncStalled covers a resync that does not
+        # converge. Fail-closed refusals use bgp_outbound_commit_refusals_total.
         expr: increase(bgp_outbound_route_drops_total[10m]) > 0
         for: 0m
         labels:
-          severity: critical
+          severity: warning
         annotations:
-          summary: "Outbound BGP work dropped for {{ $labels.peer }}"
+          summary: "Outbound BGP work deferred for {{ $labels.peer }}"
           description: >-
             bgp_outbound_route_drops_total for peer {{ $labels.peer }} on
             {{ $labels.instance }} increased by
-            {{ $value | printf "%.0f" }} in the last 10 minutes. Outbound BGP
-            work was terminally lost before reaching the peer writer; inspect
-            the writer, peer, daemon log, and last error to identify the failed
-            path. Once healthy, refresh outbound if the peer missed an
-            advertised view.
+            {{ $value | printf "%.0f" }} in the last 10 minutes. The peer
+            writer channel was full or closed, so outbound work was not
+            handed to it. The daemon marked the peer dirty and resyncs it
+            automatically; a closed channel means the session is going down,
+            and its next session receives a full initial advertisement. No
+            manual refresh is needed. Check bgp_peer_slow and
+            bgp_peer_outbound_queue_depth for a slow receiver.
+
+      - alert: BgpOutboundResyncStalled
+        # The resync timer records still_dirty each tick while outbound
+        # recovery work remains and cleared once it drains. Still-dirty ticks
+        # with no cleared tick, held for 15 minutes, mean automatic recovery
+        # is not converging. The process-wide counter has no peer label.
+        expr: >-
+          increase(bgp_rib_dirty_resync_total{outcome="still_dirty"}[5m]) > 0
+          unless on(instance, job)
+          increase(bgp_rib_dirty_resync_total{outcome="cleared"}[5m]) > 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbound resync is not converging on {{ $labels.instance }}"
+          description: >-
+            The dirty-peer resync timer on {{ $labels.instance }} has kept
+            re-arming with outbound work pending for at least 15 minutes
+            without draining once. At least one peer may still hold a stale
+            advertised view. Look for BgpPeerSlow, BgpOutboundCommitRefused,
+            and an RFC 4724 selection deferral that has not released, and
+            check the daemon log for outbound deferred and not-sent warnings
+            to find the peer.
+
+      - alert: BgpOutboundCommitRefused
+        # A selection_gate refusal is expected while RFC 4724 selection is
+        # deferred, and evpn_recovery refusals are bounded EVPN recovery
+        # admission decisions; both resync once the condition clears, and
+        # BgpOutboundResyncStalled covers one that does not. A missing exact
+        # export encoder does not clear without a new session registration.
+        expr: increase(bgp_outbound_commit_refusals_total{reason="missing_encoder"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound updates refused for {{ $labels.peer }} ({{ $labels.reason }})"
+          description: >-
+            bgp_outbound_commit_refusals_total for peer {{ $labels.peer }} on
+            {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 10 minutes
+            (reason={{ $labels.reason }}). The peer is registered without an
+            exact export encoder, so route-bearing outbound updates fail
+            closed and the peer receives no announcements until its session
+            registers again. Check the daemon log for the registration
+            warning and reset the session.
 
       - alert: BgpSendHoldExpired
         # RFC 9687 expiry means the remote peer stopped draining TCP long

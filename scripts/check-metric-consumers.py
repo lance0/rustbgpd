@@ -243,6 +243,16 @@ CLOSED_LABEL_SOURCES = (
         (("fn", REASON_LABELS, "ExactExportReason", "as_str"),),
     ),
     (
+        ("bgp_outbound_commit_refusals_total",),
+        "reason",
+        (("fn", REASON_LABELS, "OutboundCommitRefusal", "as_str"),),
+    ),
+    (
+        ("bgp_rib_dirty_resync_total",),
+        "outcome",
+        (("call", "record_rib_dirty_resync", 0),),
+    ),
+    (
         ("bgp_exact_export_rejections_total",),
         "family",
         (("fn", TELEMETRY, None, "exact_export_family_label"),),

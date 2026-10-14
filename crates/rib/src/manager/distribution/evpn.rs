@@ -840,7 +840,7 @@ impl RibManager {
         );
 
         if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
-            && !self.try_send_and_commit_outbound_update(
+            && let Err(failure) = self.try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
                     evpn_announce,
@@ -849,6 +849,7 @@ impl RibManager {
                 },
             )
             && self.mark_outbound_dirty(peer)
+            && failure == super::OutboundCommitFailure::WriterUnavailable
         {
             warn!(%peer, "outbound channel full — EVPN update deferred");
         }

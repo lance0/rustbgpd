@@ -914,6 +914,7 @@ fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
             HashSet::new(),
             None,
         )
+        .is_ok()
     );
     let update = outbound.try_recv().unwrap();
     assert_eq!(update.announce_source_exclusion, Some(peer));
@@ -9943,7 +9944,11 @@ fn replacement_readiness_services_each_family_commit_without_changing_loc_rib_co
         fleet
             .manager
             .with_replacement_readiness_age(Duration::ZERO, |manager| {
-                assert!(manager.try_send_and_commit_outbound_update(peer, batch));
+                assert!(
+                    manager
+                        .try_send_and_commit_outbound_update(peer, batch)
+                        .is_ok()
+                );
             });
         assert_eq!(visits.load(Ordering::Relaxed), 12);
         assert_eq!(

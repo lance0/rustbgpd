@@ -5894,10 +5894,13 @@ fn per_client_best_pending_diagnostic_does_not_invent_withdrawal() {
         .insert((prefix(1), 0), blocked.clone());
     let announce: Arc<Vec<Route>> = vec![blocked].into();
     let nh: Arc<Vec<Option<NextHopAction>>> = vec![None].into();
-    assert!(m.try_send_and_commit_outbound_update(
-        MEMBER,
-        OutboundCommitBatch::with_unicast(announce, nh),
-    ));
+    assert!(
+        m.try_send_and_commit_outbound_update(
+            MEMBER,
+            OutboundCommitBatch::with_unicast(announce, nh),
+        )
+        .is_ok()
+    );
     let update = outbound_rx.try_recv().unwrap();
     assert!(
         update.announce.is_empty(),
