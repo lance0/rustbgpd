@@ -467,18 +467,22 @@ exception; compare its events against the corresponding per-peer operation.
 Exceptions do not excuse missing announcements, missing withdrawals, changed
 attributes or premature EoR.
 
-The existing `update_groups_oracle.rs` compares sorted unicast/VPN RIB-level
-batches for most scenarios; several dirty, source-flip, interrupted-regroup and
-failed-force scenarios compare only folded state. It also has a folded-only
-steady-state per-client-best source-promotion exception. Its folds accept unknown
-withdrawals, its comments permit tombstone over-withdraw, and its normalized
-records contain neither EVPN events nor final encoded attribute bytes. These
-are gaps against this clarified contract, not evidence that it already passes.
-Tighten the shared oracle to flatten events by session/receiver/family/key and
-compare the ordered per-key sequences **and** folded receiver state. Assert that
-each withdrawal removes a currently present key, even in recovery scenarios.
-Pin EoR barriers and final-byte transport checks, and remove the steady-state
-promotion exemption. Preserve the original ADR's dated
+The shared oracle (`update_groups_oracle.rs`, also run by the fault corpus)
+flattens unicast, VPN and EVPN RIB events by session, receiver, family and key.
+It compares the ordered per-key sequences, the EoR, BoRR and EoRR barriers with
+the per-key progress they cover, and folded receiver state. Every withdrawal
+must remove a currently admitted key, including inside a recovery interval.
+Inside a recovery interval, each announce must repeat the value it replaces or
+equal the key's value when the interval ends. An intermediate value, or a
+return to a replaced value, fails even when the end states match. The
+steady-state per-client-best promotion exemption has been removed.
+
+The oracle compares normalized routes and next-hop actions, not encoded bytes.
+The transport shared-encoding tests give every member the same envelope. They
+compare the elected encoder's and the shared follower's per-key NLRI and
+attribute bytes with the private encoder's output, which shows encoder parity
+only. No test yet feeds grouped and per-peer RIB output through transport
+encoding and compares the final bytes per key. Preserve the original ADR's dated
 as-built history while correcting affected shared recovery behavior before the
 EVPN classifier is enabled. An exception must be named here, not inferred from
 a failing test.

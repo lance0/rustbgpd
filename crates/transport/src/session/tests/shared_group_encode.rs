@@ -2048,12 +2048,18 @@ fn prefix_attr_map(frames: &[Vec<u8>]) -> std::collections::BTreeMap<String, Vec
     map
 }
 
+/// Encoder parity only: every member receives the same handcrafted envelope,
+/// and the elected encoder and shared follower must produce the per-key NLRI
+/// and attribute bytes, ordered events and `EoR` coverage that the private
+/// encoder produces for it. This does not show that grouped RIB output equals
+/// per-peer RIB output; the RIB oracle owns that comparison, on normalized
+/// routes rather than bytes.
 #[expect(
     clippy::too_many_lines,
     reason = "pins elected encoder, follower and private wire events plus EoR coverage in one sequence"
 )]
 #[tokio::test]
-async fn shared_group_per_key_wire_events_and_eor_match_private_path() {
+async fn shared_group_encode_per_key_wire_bytes_and_eor_match_private_encode() {
     let (initial, _) = mixed_failover_pass();
     let mut replacement = initial[0].clone();
     replacement.attributes = AttrSet::new(vec![
