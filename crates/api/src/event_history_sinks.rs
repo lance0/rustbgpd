@@ -437,6 +437,21 @@ fn afi_safi_label(v: i32) -> Option<String> {
         proto::AddressFamily::L2vpnEvpn => Some("address_family_l2vpn_evpn".to_string()),
         proto::AddressFamily::BgpLs => Some("address_family_bgp_ls".to_string()),
         proto::AddressFamily::BgpLsVpn => Some("address_family_bgp_ls_vpn".to_string()),
+        proto::AddressFamily::L3vpnIpv4Unicast => {
+            Some("address_family_l3vpn_ipv4_unicast".to_string())
+        }
+        proto::AddressFamily::L3vpnIpv6Unicast => {
+            Some("address_family_l3vpn_ipv6_unicast".to_string())
+        }
+        proto::AddressFamily::Ipv4LabeledUnicast => {
+            Some("address_family_ipv4_labeled_unicast".to_string())
+        }
+        proto::AddressFamily::Ipv6LabeledUnicast => {
+            Some("address_family_ipv6_labeled_unicast".to_string())
+        }
+        proto::AddressFamily::Ipv4RtConstrain => {
+            Some("address_family_ipv4_rt_constrain".to_string())
+        }
     }
 }
 
@@ -577,6 +592,26 @@ mod tests {
             (proto::AddressFamily::L2vpnEvpn, "address_family_l2vpn_evpn"),
             (proto::AddressFamily::BgpLs, "address_family_bgp_ls"),
             (proto::AddressFamily::BgpLsVpn, "address_family_bgp_ls_vpn"),
+            (
+                proto::AddressFamily::L3vpnIpv4Unicast,
+                "address_family_l3vpn_ipv4_unicast",
+            ),
+            (
+                proto::AddressFamily::L3vpnIpv6Unicast,
+                "address_family_l3vpn_ipv6_unicast",
+            ),
+            (
+                proto::AddressFamily::Ipv4LabeledUnicast,
+                "address_family_ipv4_labeled_unicast",
+            ),
+            (
+                proto::AddressFamily::Ipv6LabeledUnicast,
+                "address_family_ipv6_labeled_unicast",
+            ),
+            (
+                proto::AddressFamily::Ipv4RtConstrain,
+                "address_family_ipv4_rt_constrain",
+            ),
         ];
 
         for (family, expected) in cases {
