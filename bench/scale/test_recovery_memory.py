@@ -10,8 +10,10 @@ import shutil
 from pathlib import Path
 import tempfile
 import subprocess
+import textwrap
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import recovery_memory as receipt
 
@@ -686,6 +688,161 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(len(result["rows"]), 16)
         self.assertEqual(len(result["candidate_failures"]), 1)
 
+    def assert_failure_envelope(self, root: Path, status: int) -> None:
+        result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
+        self.assertFalse(result["qualification_passed"])
+        self.assertEqual(result["driver_invocation_exit"], status)
+        self.assertEqual(result["rows"], [])
+        self.assertEqual(result["summaries"], [])
+        self.assertTrue(result["candidate_failures"])
+        self.assertNotIn("ratio", json.dumps(result))
+
+    def test_failure_finalization_retains_absent_or_incomplete_evidence(self) -> None:
+        for failure in ("absent", "missing-leg", "early-build", "timeout"):
+            with self.subTest(failure=failure):
+                if failure == "absent":
+                    root = self.root / "not-started"
+                else:
+                    root = self.campaign()
+                    leg = root / "ipv4-100k-dataset-reevaluate-baseline-1-baseline"
+                    if failure == "missing-leg":
+                        shutil.rmtree(leg)
+                    elif failure == "early-build":
+                        (root / "candidate-build.exit").write_text("1\n", encoding="utf-8")
+                        (root / "candidate-binary.sha256").unlink()
+                    else:
+                        status = json.loads((leg / "status.json").read_text(encoding="utf-8"))
+                        status["timeout"] = True
+                        receipt.write_json(leg / "status.json", status)
+                    with self.assertRaises((receipt.InvalidReceipt, OSError)):
+                        receipt.summarize(root)
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "raw evidence is unqualified"):
+                    receipt.summarize_failed(root, 124)
+                self.assert_failure_envelope(root, 124)
+                shutil.rmtree(root)
+
+    def test_complete_campaign_cannot_qualify_a_failed_invocation(self) -> None:
+        root = self.campaign()
+        receipt.summarize(root)
+        result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
+        self.assertTrue(all(row["all_strict_checks_passed"] for row in result["summaries"]))
+        self.assertTrue(
+            all(
+                row["candidate_to_control_mean_peak_ratio"] is not None
+                for row in result["summaries"]
+            )
+        )
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "exit 137"):
+            receipt.summarize_failed(root, 137)
+        self.assert_failure_envelope(root, 137)
+
+    def test_failure_finalization_cli_stays_red_for_timeout_and_kill(self) -> None:
+        for status in (124, 137):
+            with self.subTest(status=status):
+                root = self.root / str(status)
+                result = subprocess.run(
+                    [
+                        shutil.which("python3"),
+                        str(Path(receipt.__file__).resolve()),
+                        "summarize",
+                        str(root),
+                        "--failed-driver-exit",
+                        str(status),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assert_failure_envelope(root, status)
+
+    def test_failure_finalization_refuses_a_success_status(self) -> None:
+        root = self.root / "successful"
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "nonzero"):
+            receipt.summarize_failed(root, 0)
+        self.assertFalse(root.exists())
+
+    def workflow_script(self, name: str) -> str:
+        workflow = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
+        step = workflow.read_text(encoding="utf-8").split(f"      - name: {name}\n", 1)[1]
+        script = step.split("        run: |\n", 1)[1].split("\n      - ", 1)[0]
+        return textwrap.dedent(script)
+
+    def run_workflow_failure(self, status: int, *, expired: bool = False) -> Path:
+        commands = self.root / f"commands-{status}-{expired}"
+        commands.mkdir()
+        timeout_command = commands / "timeout"
+        timeout_command.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "if sys.argv[1:3] == ['--signal=TERM', '--kill-after=30s']:\n"
+            "    with open(os.environ['MOCK_DRIVER_ARGUMENTS'], 'w') as output:\n"
+            "        json.dump(sys.argv[1:], output)\n"
+            "    sys.exit(int(os.environ['MOCK_DRIVER_EXIT']))\n"
+            "os.execv(os.environ['REAL_TIMEOUT'], [os.environ['REAL_TIMEOUT'], *sys.argv[1:]])\n",
+            encoding="utf-8",
+        )
+        timeout_command.chmod(0o755)
+        temporary = self.root / f"runner-{status}-{expired}"
+        temporary.mkdir()
+        arguments = temporary / "driver-arguments.json"
+        environment = dict(
+            os.environ,
+            PATH=str(commands) + os.pathsep + os.environ["PATH"],
+            REAL_TIMEOUT=shutil.which("timeout"),
+            MOCK_DRIVER_EXIT=str(status),
+            MOCK_DRIVER_ARGUMENTS=str(arguments),
+            RUNNER_TEMP=str(temporary),
+            GITHUB_SHA="a" * 40,
+            RECOVERY_MEMORY_DRIVER_DEADLINE=str(time.monotonic() + (-1 if expired else 6600)),
+            RECOVERY_MEMORY_PHASE="qualified",
+            RECOVERY_MEMORY_PROFILE="full-vpn",
+            RECOVERY_MEMORY_CELL="widen",
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-e",
+                "-o",
+                "pipefail",
+                "-c",
+                self.workflow_script("Run frozen-source cgroup memory comparison"),
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        expected_status = 124 if expired else status
+        self.assertEqual(result.returncode, expected_status, result.stderr)
+        evidence = temporary / "update-group-recovery-memory"
+        self.assertEqual(
+            (evidence / "driver-invocation.exit").read_text().strip(), str(expected_status)
+        )
+        self.assertEqual((evidence / "failure-summary.exit").read_text().strip(), "1")
+        self.assert_failure_envelope(evidence / "campaign", expected_status)
+        if expired:
+            self.assertFalse(arguments.exists())
+        else:
+            invocation = json.loads(arguments.read_text(encoding="utf-8"))
+            self.assertGreater(int(invocation[2].removesuffix("s")), 0)
+            self.assertLessEqual(int(invocation[2].removesuffix("s")), 6600)
+            self.assertEqual(invocation[3:5], ["bash", "bench/scale/compare-recovery-memory.sh"])
+        return evidence
+
+    def test_workflow_finalizes_timeout_and_kill_preserving_original_exit(self) -> None:
+        for status in (124, 137):
+            with self.subTest(status=status):
+                self.run_workflow_failure(status)
+
+    def test_workflow_expired_setup_budget_does_not_start_driver(self) -> None:
+        self.run_workflow_failure(124, expired=True)
+
     def test_historical_route_failure_does_not_excuse_phase_swap(self) -> None:
         root = self.campaign()
         path = root / "ipv4-100k-dataset-reevaluate-baseline-1-baseline/harness.log"
@@ -820,6 +977,160 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(
             len((self.root / "ownership.jsonl").read_text(encoding="utf-8").splitlines()), 1
         )
+
+    def owned_capture(self, members: tuple[int, ...]) -> tuple[Path, dict, Mock]:
+        scope = self.scope()
+        (scope / "cgroup.procs").write_text(
+            "".join(f"{pid}\n" for pid in members), encoding="utf-8"
+        )
+        expected = {
+            pid: {
+                "pid": pid,
+                "start_ticks": 123,
+                "executable": "/usr/bin/tool",
+                "cgroup": "0::" + str(scope) + "\n",
+            }
+            for pid in (10, 20, 30)
+        }
+        child = Mock(pid=30)
+        child.poll.return_value = None
+        child.wait.return_value = 0
+        return scope, expected, child
+
+    def test_missing_child_wait_proves_exit_before_fresh_after_capture(self) -> None:
+        scope, expected, child = self.owned_capture((10, 20))
+        with patch.object(receipt, "proc_identity", side_effect=lambda pid: expected[pid].copy()):
+            sample = receipt.capture_ownership(scope, self.root, expected, "active", child)
+        child.wait.assert_called_once_with(timeout=0.25)
+        self.assertEqual(sample["phase"], "after")
+        self.assertEqual(sample["members"], [10, 20])
+        self.assertEqual(set(expected), {10, 20, 30})
+
+    def test_absent_live_child_cannot_be_classified_as_exited(self) -> None:
+        scope, expected, child = self.owned_capture((10, 20))
+        child.wait.side_effect = subprocess.TimeoutExpired("owned-child", 0.25)
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "did not exit"):
+            receipt.capture_ownership(scope, self.root, expected, "active", child)
+
+    def test_child_stat_disappearance_waits_then_rereads_membership(self) -> None:
+        scope, expected, child = self.owned_capture((10, 20, 30))
+
+        def identity(pid: int) -> dict:
+            if pid == 30:
+                (scope / "cgroup.procs").write_text("10\n20\n", encoding="utf-8")
+                raise FileNotFoundError("owned child stat disappeared")
+            return expected[pid].copy()
+
+        with patch.object(receipt, "proc_identity", side_effect=identity):
+            sample = receipt.capture_ownership(scope, self.root, expected, "active", child)
+        child.wait.assert_called_once_with(timeout=0.25)
+        self.assertEqual(sample["phase"], "after")
+        self.assertEqual(sample["members"], [10, 20])
+
+    def test_child_stat_disappearance_without_exit_proof_is_rejected(self) -> None:
+        scope, expected, child = self.owned_capture((10, 20, 30))
+        child.wait.side_effect = subprocess.TimeoutExpired("owned-child", 0.25)
+        with patch.object(receipt, "proc_identity", side_effect=FileNotFoundError("stat vanished")):
+            with self.assertRaisesRegex(receipt.InvalidReceipt, "did not exit"):
+                receipt.capture_ownership(scope, self.root, expected, "active", child)
+
+    def test_missing_other_owner_stat_is_not_excused_by_child_exit(self) -> None:
+        scope, expected, child = self.owned_capture((10, 20, 30))
+
+        def identity(pid: int) -> dict:
+            if pid == 10:
+                (scope / "cgroup.procs").write_text("20\n", encoding="utf-8")
+                raise FileNotFoundError("launcher stat disappeared")
+            return expected[pid].copy()
+
+        with patch.object(receipt, "proc_identity", side_effect=identity):
+            with self.assertRaisesRegex(receipt.InvalidReceipt, "foreign or missing"):
+                receipt.capture_ownership(scope, self.root, expected, "active", child)
+        child.wait.assert_called_once_with(timeout=0.25)
+
+    def test_exit_proof_does_not_excuse_foreign_or_missing_remaining_owner(self) -> None:
+        for members in ((10, 20, 99), (10,)):
+            with self.subTest(members=members):
+                scope, expected, child = self.owned_capture((10, 20))
+
+                def exited(*, timeout: float, scope=scope, members=members) -> int:
+                    self.assertEqual(timeout, 0.25)
+                    (scope / "cgroup.procs").write_text(
+                        "".join(f"{pid}\n" for pid in members), encoding="utf-8"
+                    )
+                    return 0
+
+                child.wait.side_effect = exited
+                with patch.object(
+                    receipt,
+                    "proc_identity",
+                    side_effect=lambda pid, scope=scope: {
+                        "pid": pid,
+                        "start_ticks": 123,
+                        "executable": "/usr/bin/tool",
+                        "cgroup": "0::" + str(scope) + "\n",
+                    },
+                ):
+                    with self.assertRaisesRegex(receipt.InvalidReceipt, "foreign or missing"):
+                        receipt.capture_ownership(scope, self.root, expected, "active", child)
+
+    def test_exit_reread_rejects_populated_descendant_and_changed_identity(self) -> None:
+        for failure in ("descendant", "identity"):
+            with self.subTest(failure=failure):
+                scope, expected, child = self.owned_capture((10, 20))
+
+                def exited(*, timeout: float, scope=scope, failure=failure) -> int:
+                    self.assertEqual(timeout, 0.25)
+                    if failure == "descendant":
+                        descendant = scope / "nested"
+                        descendant.mkdir()
+                        (descendant / "cgroup.procs").write_text("99\n", encoding="utf-8")
+                        (descendant / "cgroup.threads").write_text("99\n", encoding="utf-8")
+                    return 0
+
+                def identity(pid: int, expected=expected, failure=failure) -> dict:
+                    row = expected[pid].copy()
+                    if failure == "identity":
+                        row["start_ticks"] += 1
+                    return row
+
+                child.wait.side_effect = exited
+                with patch.object(receipt, "proc_identity", side_effect=identity):
+                    with self.assertRaises(receipt.InvalidReceipt):
+                        receipt.capture_ownership(scope, self.root, expected, "active", child)
+                if failure == "descendant":
+                    shutil.rmtree(scope / "nested")
+
+    def test_initial_bad_ownership_cannot_be_hidden_by_exit_reread(self) -> None:
+        for failure in ("descendant", "missing-owner"):
+            with self.subTest(failure=failure):
+                members = (10, 20) if failure == "descendant" else (10,)
+                scope, expected, child = self.owned_capture(members)
+                if failure == "descendant":
+                    descendant = scope / "nested"
+                    descendant.mkdir()
+                    (descendant / "cgroup.procs").write_text("99\n", encoding="utf-8")
+                    (descendant / "cgroup.threads").write_text("99\n", encoding="utf-8")
+
+                def exited(*, timeout: float, scope=scope, failure=failure) -> int:
+                    self.assertEqual(timeout, 0.25)
+                    if failure == "descendant":
+                        shutil.rmtree(scope / "nested")
+                    else:
+                        (scope / "cgroup.procs").write_text("10\n20\n", encoding="utf-8")
+                    return 0
+
+                child.wait.side_effect = exited
+                with patch.object(
+                    receipt,
+                    "proc_identity",
+                    side_effect=lambda pid, expected=expected: expected[pid].copy(),
+                ):
+                    with self.assertRaises(receipt.InvalidReceipt):
+                        receipt.capture_ownership(scope, self.root, expected, "active", child)
+                child.wait.assert_not_called()
+                if failure == "descendant":
+                    shutil.rmtree(scope / "nested")
 
     def test_changed_process_start_identity_is_rejected(self) -> None:
         root = self.campaign()

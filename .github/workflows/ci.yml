@@ -751,6 +751,15 @@ jobs:
       RECOVERY_MEMORY_PROFILE: ${{ matrix.profile }}
       RECOVERY_MEMORY_CELL: ${{ matrix.cell }}
     steps:
+      - name: Reserve time for recovery evidence finalization
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import time
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"RECOVERY_MEMORY_DRIVER_DEADLINE={time.monotonic() + 110 * 60}\n")
+          PY
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -767,14 +776,38 @@ jobs:
         env:
           RECOVERY_MEMORY_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
-          mkdir -p "$RUNNER_TEMP/update-group-recovery-memory"
-          bash bench/scale/compare-recovery-memory.sh \
-            --head "$GITHUB_SHA" \
-            --output-dir "$RUNNER_TEMP/update-group-recovery-memory/campaign" \
-            --phase "$RECOVERY_MEMORY_PHASE" \
-            --profile "$RECOVERY_MEMORY_PROFILE" \
-            --cell "$RECOVERY_MEMORY_CELL" \
-            > "$RUNNER_TEMP/update-group-recovery-memory/driver.log" 2>&1
+          evidence="$RUNNER_TEMP/update-group-recovery-memory"
+          mkdir -p "$evidence"
+          remaining=$(python3 - <<'PY'
+          import os
+          import time
+          print(max(0, int(float(os.environ["RECOVERY_MEMORY_DRIVER_DEADLINE"]) - time.monotonic())))
+          PY
+          )
+          status=0
+          if [[ $remaining -gt 0 ]]; then
+            timeout --signal=TERM --kill-after=30s "${remaining}s" \
+              bash bench/scale/compare-recovery-memory.sh \
+              --head "$GITHUB_SHA" \
+              --output-dir "$evidence/campaign" \
+              --phase "$RECOVERY_MEMORY_PHASE" \
+              --profile "$RECOVERY_MEMORY_PROFILE" \
+              --cell "$RECOVERY_MEMORY_CELL" \
+              > "$evidence/driver.log" 2>&1 || status=$?
+          else
+            status=124
+            printf '%s\n' 'aggregate driver deadline expired during setup' > "$evidence/driver.log"
+          fi
+          printf '%s\n' "$status" > "$evidence/driver-invocation.exit"
+          if [[ $status != 0 ]]; then
+            summary_status=0
+            timeout --signal=TERM --kill-after=5s 30s \
+              python3 bench/scale/recovery_memory.py summarize "$evidence/campaign" \
+              --failed-driver-exit "$status" \
+              > "$evidence/failure-summary.log" 2>&1 || summary_status=$?
+            printf '%s\n' "$summary_status" > "$evidence/failure-summary.exit"
+          fi
+          exit "$status"
       - name: Upload recovery evidence even after refusal or failure
         if: always()
         uses: actions/upload-artifact@v7

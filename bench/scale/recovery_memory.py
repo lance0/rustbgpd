@@ -330,6 +330,16 @@ def check_ownership(sample: dict, expected: dict[int, dict], cgroup: str) -> Non
     )
 
 
+def require_workload_exit(workload: subprocess.Popen) -> None:
+    """Distinguish a disappearing exited child from a live child leaving its scope."""
+    if workload.poll() is None:
+        try:
+            status = workload.wait(timeout=0.25)
+        except subprocess.TimeoutExpired as error:
+            raise InvalidReceipt("missing scoped workload did not exit") from error
+        require(isinstance(status, int), "missing scoped workload lacks terminal status")
+
+
 def capture_ownership(
     cgroup: Path,
     output: Path,
@@ -338,16 +348,18 @@ def capture_ownership(
     workload: subprocess.Popen | None = None,
     previous: dict | None = None,
 ) -> dict:
-    raw = (cgroup / "cgroup.procs").read_text(encoding="utf-8")
-    members = [int(line) for line in raw.splitlines()]
     sample = {
         "phase": phase,
-        "cgroup_procs_raw": raw,
-        "members": members,
+        "cgroup_procs_raw": "",
+        "members": [],
         "processes": [],
         "descendants": [],
     }
-    try:
+
+    def read_membership() -> list[int]:
+        raw = (cgroup / "cgroup.procs").read_text(encoding="utf-8")
+        members = [int(line) for line in raw.splitlines()]
+        sample.update({"cgroup_procs_raw": raw, "members": members, "descendants": []})
         for path in sorted(cgroup.rglob("cgroup.procs")):
             if path.parent == cgroup:
                 continue
@@ -358,27 +370,37 @@ def capture_ownership(
                     "threads": path.with_name("cgroup.threads").read_text(encoding="utf-8"),
                 }
             )
-        require(set(members) <= set(expected), "foreign scoped process")
-        if workload is not None and workload.pid not in members and workload.poll() is not None:
+        required = set(expected)
+        if workload is not None:
+            required.discard(workload.pid)
+        require(required <= set(members) <= set(expected), "foreign or missing scoped process")
+        require(
+            all(
+                not row["procs"].strip() and not row["threads"].strip()
+                for row in sample["descendants"]
+            ),
+            "populated descendant cgroup",
+        )
+        return members
+
+    try:
+        members = read_membership()
+        if workload is not None and workload.pid not in members:
+            require_workload_exit(workload)
             expected = {pid: row for pid, row in expected.items() if pid != workload.pid}
             sample["phase"] = "after"
+            members = read_membership()
         try:
             sample["processes"] = [proc_identity(pid) for pid in members]
         except FileNotFoundError:
             # The one owned child may exit between membership and its stat read.
-            if workload is None or workload.poll() is None:
+            if workload is None:
                 raise
+            require_workload_exit(workload)
             expected = {pid: row for pid, row in expected.items() if pid != workload.pid}
-            raw = (cgroup / "cgroup.procs").read_text(encoding="utf-8")
-            members = [int(line) for line in raw.splitlines()]
-            sample.update(
-                {
-                    "phase": "after",
-                    "cgroup_procs_raw": raw,
-                    "members": members,
-                    "processes": [proc_identity(pid) for pid in members],
-                }
-            )
+            sample["phase"] = "after"
+            members = read_membership()
+            sample["processes"] = [proc_identity(pid) for pid in members]
         check_ownership(sample, expected, str(cgroup))
     finally:
 
@@ -984,6 +1006,30 @@ def summarize(root: Path) -> None:
     )
 
 
+def summarize_failed(root: Path, driver_exit: int) -> None:
+    """Retain an explicitly unqualified envelope after an aborted invocation."""
+    require(1 <= driver_exit <= 255, "failure finalization requires a nonzero driver exit")
+    root.mkdir(parents=True, exist_ok=True)
+    error = f"driver invocation failed with exit {driver_exit}; raw evidence is unqualified"
+    # Do not validate partial legs or preserve ratios from an earlier summary.
+    # Failure finalization is evidence retention, never a qualification fallback.
+    write_json(
+        root / "comparison.json",
+        {
+            "schema": "rustbgpd.recovery-memory.comparison.v2",
+            "phase": None,
+            "primary": "scope memory.peak bytes",
+            "scope": "manager-direct RIB, production exact-export preflight, harness consumers; no final wire/TCP",
+            "rows": [],
+            "summaries": [],
+            "candidate_failures": [error],
+            "qualification_passed": False,
+            "driver_invocation_exit": driver_exit,
+        },
+    )
+    raise InvalidReceipt(error)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1004,6 +1050,7 @@ def main() -> None:
     run.add_argument("clients", type=int)
     compare = sub.add_parser("summarize")
     compare.add_argument("root", type=Path)
+    compare.add_argument("--failed-driver-exit", type=int)
     args = parser.parse_args()
     try:
         if args.command == "instrument-observer":
@@ -1023,7 +1070,10 @@ def main() -> None:
                 args.clients,
             )
         else:
-            summarize(args.root)
+            if args.failed_driver_exit is not None:
+                summarize_failed(args.root, args.failed_driver_exit)
+            else:
+                summarize(args.root)
     except (InvalidReceipt, OSError, ValueError, KeyError) as error:
         print(f"invalid recovery receipt: {error}", file=sys.stderr)
         sys.exit(1)
