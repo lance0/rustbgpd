@@ -229,7 +229,7 @@ class EvpnReflectorRoleTests(unittest.TestCase):
                 else:
                     entry["stable_request_values"] = profile
                 self.rejected(
-                    lambda: checker.check_method_sets(inventory, self.services, self.definitions),
+                    lambda inventory=inventory: checker.check_method_sets(inventory, self.services, self.definitions),
                     "stable request profile",
                 )
 
