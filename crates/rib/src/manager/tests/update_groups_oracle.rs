@@ -4,11 +4,13 @@
 //! fallback. Compare ordered per-session/receiver/family/key events and final
 //! admitted state; batch boundaries and cross-key order are unconstrained.
 //! Explicit peer-scoped recovery intervals use end-state comparison, but every
-//! withdrawal must remove a currently admitted key in every interval. Clean
+//! withdrawal must remove a currently admitted key in every interval, and every
+//! announce must repeat the value it replaces or equal the key's value at End. Clean
 //! promotion, refresh and regroup have no recovery exemption.
 //!
-//! These normalized RIB values are not final encoded-byte evidence. Transport
-//! checks own preparation, packet encoding and final wire-order qualification.
+//! These normalized RIB values are not final encoded-byte evidence. The
+//! transport shared-encoding tests compare shared and private encoding of one
+//! envelope; they do not encode grouped and per-peer RIB output.
 
 use std::collections::BTreeMap;
 
@@ -446,6 +448,9 @@ struct Trace {
     markers: BTreeMap<(SessionKey, Family), Vec<Marker>>,
     recovery: BTreeMap<SessionKey, Vec<(RecoveryBoundary, Admitted)>>,
     terminal: BTreeMap<SessionKey, Admitted>,
+    /// Announces inside the open recovery interval with the value each one
+    /// replaced; checked and drained at End, so always empty between streams.
+    recovery_announces: Vec<(EventKey, Announced, Option<Announced>)>,
 }
 
 fn unicast_key(prefix: Prefix, path_id: u32) -> EventKey {
@@ -515,7 +520,12 @@ fn record_event(
     );
     match &event {
         KeyEvent::Announce(value) => {
-            admitted.insert(key.clone(), value.clone());
+            let replaced = admitted.insert(key.clone(), value.clone());
+            if recovering.is_some() {
+                trace
+                    .recovery_announces
+                    .push((key.clone(), value.clone(), replaced));
+            }
         }
         KeyEvent::Withdraw => {
             assert!(
@@ -620,6 +630,17 @@ fn trace(streams: &Streams) -> Trace {
                     }
                     RecoveryBoundary::End => {
                         assert!(recovering.take().is_some(), "recovery ended without begin");
+                        // Only idempotent replay or convergence to the final
+                        // value: each announce repeats the value it replaced
+                        // or equals the key's state at End.
+                        for (key, value, replaced) in result.recovery_announces.drain(..) {
+                            assert!(
+                                replaced.as_ref() == Some(&value)
+                                    || admitted.get(&key) == Some(&value),
+                                "non-idempotent recovery announce in {session:?}: {key:?} \
+                                 replaced {replaced:?} with {value:?}"
+                            );
+                        }
                         epoch += 1;
                     }
                 }
@@ -887,6 +908,55 @@ fn per_key_trace_recovery_is_explicit_and_never_relaxes_withdrawal_presence() {
             assert!(std::panic::catch_unwind(|| trace(&unclosed)).is_err());
             let double_end = one_receiver(vec![begin, announce, end.clone(), end]);
             assert!(std::panic::catch_unwind(|| trace(&double_end)).is_err());
+        }
+    }
+}
+
+/// Recovery permits only idempotent replay and convergence to the final value.
+/// An intermediate value, or a return to a replaced value, is a per-key
+/// transient the private path does not produce and must fail even though
+/// both streams agree at End.
+#[test]
+fn per_key_trace_recovery_rejects_non_idempotent_announces() {
+    let unicast: fn(u32) -> NormMsg = |local_pref| {
+        normalize(&OutboundRouteUpdate {
+            announce: vec![ibgp_route(pfx(40, 0), A, local_pref, vec![])].into(),
+            ..Default::default()
+        })
+    };
+    let vpn: fn(u32) -> NormMsg = |local_pref| {
+        normalize(&OutboundRouteUpdate {
+            vpn_announce: vec![vpn_route(vpn_nlri(40, 16000), A, local_pref, vec![])],
+            ..Default::default()
+        })
+    };
+    let begin = NormMsg {
+        recovery: Some(RecoveryBoundary::Begin(RecoveryPath::QueueDeferral)),
+        ..Default::default()
+    };
+    let end = NormMsg {
+        recovery: Some(RecoveryBoundary::End),
+        ..Default::default()
+    };
+    for value in [unicast, vpn] {
+        let window = |inside: &[u32]| {
+            let mut messages = vec![value(100), begin.clone()];
+            messages.extend(inside.iter().map(|lp| value(*lp)));
+            messages.push(end.clone());
+            one_receiver(messages)
+        };
+        let private = window(&[200]);
+        // Replaying the admitted value before converging stays permitted.
+        assert_route_parity(&window(&[100, 200]), &private);
+        assert_route_parity(&window(&[200, 200]), &private);
+        // Same End state as the private stream, so only the in-window
+        // transient (an unknown value, or a return to a replaced one) fails.
+        for invalid in [&[999, 200][..], &[200, 100, 200]] {
+            assert!(
+                std::panic::catch_unwind(|| assert_route_parity(&window(invalid), &private))
+                    .is_err(),
+                "non-idempotent recovery announce accepted: {invalid:?}"
+            );
         }
     }
 }
