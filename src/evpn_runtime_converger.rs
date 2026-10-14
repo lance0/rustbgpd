@@ -291,6 +291,10 @@ pub(crate) struct EvpnRuntimeReloadApply {
     /// link-drain coordinator consumes the receiver.
     es_link_bindings_tx:
         Option<Arc<tokio::sync::watch::Sender<crate::evpn_es_link_drain::EsLinkBindings>>>,
+    /// ADR-0140: the core-isolation controller's config, republished at
+    /// the same chokepoint as the ADR-0085 bindings.
+    core_isolation_tx:
+        Option<Arc<tokio::sync::watch::Sender<Arc<crate::config::CoreIsolationSnapshot>>>>,
     /// Bond → derived ESI table for `auto-lacp` segments, published by
     /// [`Self::publish_auto_lacp_round`] under the apply lock. Every
     /// apply and binding publish resolves through it.
@@ -322,6 +326,7 @@ impl EvpnRuntimeReloadApply {
             committed_config: Arc::new(Mutex::new(committed_config)),
             forwarding_state: None,
             es_link_bindings_tx: None,
+            core_isolation_tx: None,
             auto_lacp_esis: AutoLacpEsis::default(),
             auto_esi_probe: None,
             #[cfg(test)]
@@ -383,6 +388,16 @@ impl EvpnRuntimeReloadApply {
         self
     }
 
+    /// Attach the ADR-0140 core-isolation publisher, fed with every
+    /// binding publish.
+    pub(crate) fn with_core_isolation_publisher(
+        mut self,
+        tx: Arc<tokio::sync::watch::Sender<Arc<crate::config::CoreIsolationSnapshot>>>,
+    ) -> Self {
+        self.core_isolation_tx = Some(tx);
+        self
+    }
+
     fn committed_config_locked(&self) -> Config {
         match self.committed_config.lock() {
             Ok(guard) => guard.clone(),
@@ -406,6 +421,16 @@ impl EvpnRuntimeReloadApply {
     /// and lands here, where the link-drain coordinator picks it up
     /// and re-evaluates immediately.
     fn publish_es_link_bindings(&self, config: &Config) {
+        if let Some(tx) = self.core_isolation_tx.as_ref() {
+            let snapshot = config.core_isolation_snapshot(&self.auto_lacp_esis);
+            tx.send_if_modified(|current| {
+                if **current == snapshot {
+                    return false;
+                }
+                *current = Arc::new(snapshot);
+                true
+            });
+        }
         let Some(tx) = self.es_link_bindings_tx.as_ref() else {
             return;
         };

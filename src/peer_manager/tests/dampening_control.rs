@@ -212,6 +212,15 @@ impl CapacityFixture {
     }
 }
 
+/// An admission that a real RIB blocked for source capacity. Only the RIB can
+/// set the block, so other suites borrow it from here.
+pub(super) async fn capacity_blocked_admission() -> DampeningAdmission {
+    let mut fixture = CapacityFixture::new().await;
+    fixture.exhaust().await;
+    fixture.rib_task.abort();
+    fixture.admission
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -253,6 +262,7 @@ async fn capacity_disable_joins_both_producers_before_primary_barrier() {
         .get_mut(&fixture.peer)
         .unwrap()
         .pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
         handle: candidate,
         session_id: 2,
     });
@@ -535,6 +545,7 @@ async fn dynamic_retirement_waits_for_queued_wire_capacity_decision() {
             .get_mut(&fixture.peer)
             .unwrap()
             .pending_inbound = Some(PendingInbound {
+            recovery_reset: None,
             handle: candidate,
             session_id: 2,
         });

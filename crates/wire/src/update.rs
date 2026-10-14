@@ -1153,6 +1153,232 @@ mod tests {
         assert_eq!(mp.evpn_withdrawn.len(), 1);
     }
 
+    /// Type 2 for MAC 00:11:22:33:44:55, tag 100, no IP, with the given MAC
+    /// Address Length.
+    fn type2(mac_len: u8) -> Vec<u8> {
+        let mut nlri = vec![2, 33];
+        nlri.extend(EVPN_RD);
+        nlri.extend([0; 10]);
+        nlri.extend([0, 0, 0, 100, mac_len, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        nlri.extend([0, 0, 0x06, 0x41]); // IP length 0, label1
+        nlri
+    }
+
+    /// RFC 9135 §9.1.1: a Type 2 with MAC Address Length 0 is
+    /// treat-as-withdraw. RFC 7432 §7.2 includes the MAC Address Length in
+    /// the route key, so the route is dropped rather than keyed as the
+    /// 48-bit route for the same MAC: an announcement withdraws only its
+    /// well-formed siblings, and a withdrawal removes only its siblings.
+    /// Neither is session-reset. The legacy structural parser still rejects
+    /// it.
+    #[test]
+    fn parse_revised_zero_length_mac_type2_never_aliases_the_48_bit_key() {
+        let sibling = zero_esi_type1([0, 0, 0, 100], [0, 0x06, 0x41]);
+        let nlri = [type2(0), sibling.clone()].concat();
+        let expected = crate::evpn::decode_evpn_nlri(&sibling).unwrap();
+
+        let msg = evpn_update(true, &nlri);
+        assert!(msg.parse(true, false, &[]).is_err());
+        let parsed = msg
+            .parse_revised(true, false, false, &[])
+            .expect("zero-length MAC must not be session-reset");
+        assert_eq!(parsed.malformed.len(), 1);
+        assert_eq!(parsed.malformed[0].type_code, 14);
+        assert_eq!(
+            parsed.malformed[0].disposition,
+            crate::ErrorDisposition::TreatAsWithdraw
+        );
+        let PathAttribute::MpReachNlri(mp) = &parsed.update.attributes[0] else {
+            panic!("MP_REACH retained");
+        };
+        assert_eq!(mp.evpn_announced, expected);
+
+        let parsed = evpn_update(false, &nlri)
+            .parse_revised(true, false, false, &[])
+            .expect("zero-length MAC withdrawal must not be session-reset");
+        assert_eq!(parsed.malformed, Vec::new());
+        let PathAttribute::MpUnreachNlri(mp) = &parsed.update.attributes[0] else {
+            panic!("MP_UNREACH retained");
+        };
+        assert_eq!(mp.evpn_withdrawn, expected);
+
+        // The same route with MAC Address Length 48 is accepted.
+        let parsed = evpn_update(true, &type2(48))
+            .parse_revised(true, false, false, &[])
+            .unwrap();
+        assert_eq!(parsed.malformed, Vec::new());
+    }
+
+    /// RFC 9136 §3.2: a Type 5 with a non-zero ESI and a non-zero GW IP
+    /// "SHOULD be treat as withdraw". The route stays extractable for the
+    /// UPDATE-wide withdrawal; its withdrawal decodes normally.
+    #[test]
+    fn parse_revised_type5_esi_and_gateway_is_treat_as_withdraw() {
+        let mut type5 = vec![5, 34];
+        type5.extend(EVPN_RD);
+        type5.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // ESI
+        type5.extend([0, 0, 0, 0, 24, 10, 0, 0, 0]); // tag 0, 10.0.0.0/24
+        type5.extend([192, 0, 2, 1, 0, 0x06, 0x41]); // GW IP, label
+        let parsed = evpn_update(true, &type5)
+            .parse_revised(true, false, false, &[])
+            .expect("ESI + gateway Type 5 must not be session-reset");
+        assert_eq!(parsed.malformed.len(), 1);
+        assert_eq!(
+            parsed.malformed[0].disposition,
+            crate::ErrorDisposition::TreatAsWithdraw
+        );
+        let PathAttribute::MpReachNlri(mp) = &parsed.update.attributes[0] else {
+            panic!("MP_REACH retained");
+        };
+        assert_eq!(mp.evpn_announced.len(), 1);
+
+        let parsed = evpn_update(false, &type5)
+            .parse_revised(true, false, false, &[])
+            .unwrap();
+        assert_eq!(parsed.malformed, Vec::new());
+
+        // Either Overlay Index alone is valid.
+        for (offset, len) in [(10, 10), (29, 4)] {
+            let mut one = type5.clone();
+            one[offset..offset + len].fill(0);
+            let parsed = evpn_update(true, &one)
+                .parse_revised(true, false, false, &[])
+                .unwrap();
+            assert_eq!(parsed.malformed, Vec::new());
+        }
+    }
+
+    /// RFC 9136 §3.2: "A route where ESI, GW IP, MAC, and Label are all zero
+    /// at the same time SHOULD be treat as withdraw", where MAC is the EVPN
+    /// Router's MAC Extended Community (type 0x06, subtype 0x03). Absent, or
+    /// present with an all-zero MAC (as FRR reads it), counts as zero; the
+    /// community may precede or follow `MP_REACH_NLRI`. A non-zero Router's
+    /// MAC or any non-zero label octet (a VNI per RFC 8365) is accepted, and
+    /// a withdrawal decodes normally. Both address families.
+    ///
+    /// RFC 9136 Table 1 note: "The route MUST be treat as withdraw in case of
+    /// an invalid MAC address", such as a broadcast or multicast Router's
+    /// MAC. That applies to every Type 5 announcement, whatever its ESI, GW
+    /// IP and label; a unicast MAC, globally or locally administered, is
+    /// accepted. Only the first Router's MAC counts (RFC 9135 §8.1), and the
+    /// note does not reach a Type 2.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one byte-level matrix pins both Router's MAC rules across families, \
+                  overlay indexes, labels and attribute order"
+    )]
+    fn parse_revised_type5_zero_or_invalid_router_mac_is_treat_as_withdraw() {
+        const RMAC: [u8; 2] = [0x06, 0x03];
+        const ROUTE_TARGET: [u8; 8] = [0x00, 0x02, 0xfd, 0xe8, 0, 0, 0, 100];
+        let mut v4 = vec![5, 34];
+        v4.extend(EVPN_RD);
+        v4.extend([0; 10]); // ESI 0
+        v4.extend([0, 0, 0, 0, 24, 10, 0, 0, 0]); // tag 0, 10.0.0.0/24
+        v4.extend([0; 4 + 3]); // GW IP 0, label 0
+        let mut v6 = vec![5, 58];
+        v6.extend(EVPN_RD);
+        v6.extend([0; 10]); // ESI 0
+        v6.extend([0, 0, 0, 0, 64, 0x20, 0x01, 0x0d, 0xb8]); // tag 0, 2001:db8::/64
+        v6.extend([0; 12 + 16 + 3]); // rest of prefix, GW IP 0, label 0
+        let ext = |communities: &[[u8; 8]]| {
+            let mut attr = vec![0xc0, 16, u8::try_from(communities.len() * 8).unwrap()];
+            attr.extend(communities.concat());
+            attr
+        };
+        let rmac = |mac: [u8; 6]| -> [u8; 8] {
+            [RMAC.as_slice(), mac.as_slice()]
+                .concat()
+                .try_into()
+                .unwrap()
+        };
+        let with = |msg: UpdateMessage, attr: &[u8], before: bool| {
+            let mp = msg.path_attributes.to_vec();
+            let attrs = if before {
+                [attr, mp.as_slice()].concat()
+            } else {
+                [mp.as_slice(), attr].concat()
+            };
+            UpdateMessage {
+                path_attributes: Bytes::from(attrs),
+                ..msg
+            }
+        };
+        let assert_withdraw = |msg: &UpdateMessage| {
+            let parsed = msg
+                .parse_revised(true, false, false, &[])
+                .expect("Type 5 Router's MAC rules must not be session-reset");
+            assert_eq!(parsed.malformed.len(), 1, "{:?}", parsed.malformed);
+            assert_eq!(parsed.malformed[0].type_code, 14);
+            assert_eq!(
+                parsed.malformed[0].disposition,
+                crate::ErrorDisposition::TreatAsWithdraw
+            );
+            let mp = parsed
+                .update
+                .attributes
+                .iter()
+                .find_map(|attr| match attr {
+                    PathAttribute::MpReachNlri(mp) => Some(mp),
+                    _ => None,
+                })
+                .expect("MP_REACH retained");
+            assert_eq!(mp.evpn_announced.len(), 1);
+        };
+        let assert_clean = |msg: &UpdateMessage| {
+            let parsed = msg.parse_revised(true, false, false, &[]).unwrap();
+            assert_eq!(parsed.malformed, Vec::new());
+        };
+        let broadcast = ext(&[ROUTE_TARGET, rmac([0xff; 6])]);
+        for type5 in [v4, v6] {
+            let label_at = type5.len() - 3;
+            assert_withdraw(&evpn_update(true, &type5));
+            for before in [true, false] {
+                let zero_rmac = ext(&[ROUTE_TARGET, rmac([0; 6])]);
+                assert_withdraw(&with(evpn_update(true, &type5), &zero_rmac, before));
+                let rt_only = ext(&[ROUTE_TARGET]);
+                assert_withdraw(&with(evpn_update(true, &type5), &rt_only, before));
+                let rmac_set = ext(&[ROUTE_TARGET, rmac([0x02, 0, 0, 0, 0, 1])]);
+                assert_clean(&with(evpn_update(true, &type5), &rmac_set, before));
+            }
+            for label in [[0, 0, 1], [0, 0x06, 0x40], [1, 0, 0]] {
+                let mut labelled = type5.clone();
+                labelled[label_at..].copy_from_slice(&label);
+                assert_clean(&evpn_update(true, &labelled));
+            }
+            assert_clean(&evpn_update(false, &type5));
+
+            let mut labelled = type5.clone();
+            labelled[label_at..].copy_from_slice(&[0, 0x06, 0x40]);
+            let mut esi = labelled.clone();
+            esi[19] = 1; // ESI type 0, non-zero value
+            for route in [&type5, &labelled, &esi] {
+                for before in [true, false] {
+                    for mac in [
+                        [0xff; 6],
+                        [0x01, 0x00, 0x5e, 0, 0, 1],
+                        [0x33, 0x33, 0, 0, 0, 1],
+                        [0x03, 0, 0, 0, 0, 1], // locally administered multicast
+                    ] {
+                        let invalid = ext(&[ROUTE_TARGET, rmac(mac)]);
+                        assert_withdraw(&with(evpn_update(true, route), &invalid, before));
+                    }
+                    for mac in [
+                        [0x02, 0, 0, 0, 0, 1], // locally administered unicast
+                        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+                    ] {
+                        let unicast = ext(&[ROUTE_TARGET, rmac(mac)]);
+                        assert_clean(&with(evpn_update(true, route), &unicast, before));
+                    }
+                }
+            }
+            let first_unicast = ext(&[rmac([0x02, 0, 0, 0, 0, 1]), rmac([0xff; 6])]);
+            assert_clean(&with(evpn_update(true, &labelled), &first_unicast, false));
+            assert_clean(&with(evpn_update(false, &labelled), &broadcast, false));
+        }
+        assert_clean(&with(evpn_update(true, &type2(48)), &broadcast, false));
+    }
+
     #[test]
     fn revised_fatal_context_preserves_type_and_notification_data() {
         for (attributes, nlri, type_code) in [

@@ -38,6 +38,8 @@ class ReceiptTest(unittest.TestCase):
                 "link_carrier",
                 "bond_lacp",
                 "auto_lacp_daemon",
+                "core_isolation",
+                "core_isolation_daemon",
                 "ac_gate",
                 "nexthop_raw",
                 "foreign_state_l2",

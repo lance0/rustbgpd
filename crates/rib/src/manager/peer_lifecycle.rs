@@ -662,6 +662,13 @@ impl RibManager {
     /// classification (`peer_is_rr_client`) stay out: GR keeps them for stale
     /// routes and the returning peer; terminal `PeerDown` removes them.
     pub(super) fn clear_outbound_peer_state(&mut self, peer: IpAddr) {
+        self.clear_outbound_peer_state_inner(peer, false);
+    }
+
+    fn clear_outbound_peer_state_inner(&mut self, peer: IpAddr, same_connection_replay: bool) {
+        if !same_connection_replay {
+            self.retire_evpn_recovery(peer);
+        }
         let was_registered = self.outbound_peers.remove(&peer).is_some();
         self.outbound_session_ids.remove(&peer);
         self.pending_inbound_refresh.remove(&peer);
@@ -758,6 +765,10 @@ impl RibManager {
         // The GR-deferred EoR is per-session too: the deferral pairs with
         // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
         self.gr_deferred_eor.remove(&peer);
+        // So is the RFC 4684 §6 hold: its EoRs leave with `pending_eor`, and
+        // `PeerUp` arms a fresh cap for the new session.
+        self.rtc_eor_hold.remove(&peer);
+        self.rtc_eor_hold_ready.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
         self.selection_deferred_refresh.remove(&peer);
@@ -783,6 +794,7 @@ impl RibManager {
         self.export_policy_stats.remove(&peer);
         self.pending_regroup_baseline.remove(&peer);
         self.pending_extra_withdraws.remove(&peer);
+        self.release_group_admitted_keys(peer);
         self.remove_update_group_member(peer);
         // The extra-withdraw drop above mutates residue even for a peer
         // whose membership removal doesn't touch a group.
@@ -854,7 +866,19 @@ impl RibManager {
                 self.clear_policy_filtered_routes_for_peer(peer);
                 self.clear_peer_adj_rib_in(peer);
             }
-            self.clear_outbound_peer_state(peer);
+            // Legacy emitters can reannounce the same actor/channel. Their
+            // existing admission proof and accepted reset handoff still
+            // belong to that connection, even while this ordinary replay
+            // rebuilds the other outbound registration state.
+            let same_connection_replay = self.outbound_session_ids.get(&peer) == Some(&session_id)
+                && self
+                    .outbound_peers
+                    .get(&peer)
+                    .is_some_and(|previous| previous.same_channel(&outbound_tx));
+            if same_connection_replay {
+                self.prepare_evpn_registration_replay(peer);
+            }
+            self.clear_outbound_peer_state_inner(peer, same_connection_replay);
         }
 
         let local_role = self
@@ -875,6 +899,9 @@ impl RibManager {
                 .iter()
                 .find(|record| record.session_id == session_id)
         });
+        let evpn_recovery_reset = previous_session
+            .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
+            .and_then(|record| record.evpn_recovery_reset);
         let record = LiveSessionRecord {
             session_id,
             source_context: self
@@ -910,6 +937,7 @@ impl RibManager {
             gr_context,
             exact_export_encoder,
             evpn_end_of_rib: false,
+            evpn_recovery_reset,
         };
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0
@@ -1135,6 +1163,38 @@ impl RibManager {
             } else {
                 super::RtcMembership::default()
             };
+            // RFC 4684 §6: with no interest known yet, the VPN/EVPN initial
+            // update is not complete until the peer's RT membership is, so
+            // their EoR waits for its RT-Constrain EoR (bounded by the
+            // cap). A peer acting as GR helper for this session would
+            // otherwise sweep the VPN routes it kept from us (RFC 4724
+            // §4.2) before we re-send them. A membership re-derived from
+            // retained routes is already known: no hold.
+            //
+            // A peer whose OPEN sets the Restart State bit is exempt. RFC
+            // 4724 §4.1 has it defer route selection until it has every
+            // peer's EoR, and with it its own RTC routes and RTC EoR
+            // (GoBGP skips its RTC deferral for a restarting peer for this
+            // reason). Holding our VPN EoR would only stall it to the cap
+            // and then trigger the same sweep. Without the staged OPEN
+            // context the peer is treated as not restarting.
+            let peer_restarting = gr_context
+                .as_ref()
+                .is_some_and(|context| context.peer_restart_state);
+            // A new session's hold never inherits an earlier EoR.
+            self.rtc_eor_hold_ready.remove(&peer);
+            let rtc_gated_negotiated = sendable_families
+                .iter()
+                .any(|&family| Self::rtc_gated_family(family));
+            if rtc_gated_negotiated
+                && !peer_restarting
+                && membership == super::RtcMembership::default()
+            {
+                self.rtc_eor_hold
+                    .insert(peer, tokio::time::Instant::now() + super::RTC_EOR_HOLD_CAP);
+            } else {
+                self.rtc_eor_hold.remove(&peer);
+            }
             // Single Φ-write function (design risk 1); pre-registration,
             // so no corrective emit — the initial dump replays under Φ.
             self.set_rt_membership(peer, Some(membership));
@@ -1142,6 +1202,8 @@ impl RibManager {
             // A replacement session that dropped the family must not
             // inherit its predecessor's filter (not-negotiated ⇒ unfiltered).
             self.set_rt_membership(peer, None);
+            self.rtc_eor_hold.remove(&peer);
+            self.rtc_eor_hold_ready.remove(&peer);
         }
 
         // Classify only the startup-frozen waiter already present for this
@@ -1273,6 +1335,19 @@ impl RibManager {
             exact_export_encoder.or_else(|| Some(super::permissive_test_exact_export_encoder()));
 
         debug!(%peer, "peer up — registering for outbound updates");
+        if self
+            .outbound_session_ids
+            .get(&peer)
+            .is_some_and(|previous| *previous != session_id)
+            || self
+                .outbound_peers
+                .get(&peer)
+                .is_some_and(|previous| !previous.same_channel(&outbound_tx))
+        {
+            // Actor IDs can be reused on reconnect. Retire the predecessor's
+            // charged owner while its channel/session maps still identify it.
+            self.retire_evpn_recovery(peer);
+        }
         let peer_label = peer.to_string();
         self.metrics.set_rib_prefixes(&peer_label, "all", 0);
         // Selective steady-state refresh relies on every family series already
@@ -1349,6 +1424,12 @@ impl RibManager {
         // it is over one. `recompute_update_group` above decided whether the
         // bounded member set or the private prefix index is authoritative.
         self.install_registration_outbound_limits(peer);
+        // A fresh session has admitted no route, even when its group table
+        // already contains routes learned from other peers.
+        if self.grouped_member_of(peer).is_some() {
+            self.pending_group_admitted.entry(peer).or_default();
+        }
+        self.register_evpn_recovery(peer, true);
         true
     }
 
@@ -1473,9 +1554,12 @@ impl RibManager {
     /// source or the post-policy route (the LAN-474 emit-filter
     /// predicate). Membership is re-checked after each joiner installs.
     ///
+    /// At most [`MAX_JOIN_COHORT`] registrations complete, leader included.
     /// One turn's admission work is bounded: at most one control-tag pass
     /// over the group table, whatever the number of distinct RS ASNs, and
-    /// at most [`MAX_JOIN_COHORT_EXAMINED`] queued entries examined.
+    /// at most [`MAX_JOIN_COHORT_EXAMINED`] queued entries checked against
+    /// the leader's profile. Every other entry is moved back to the queue
+    /// unexamined, so the requeue itself is linear in the queue length.
     fn take_join_cohort(&mut self, leader: IpAddr) -> Vec<IpAddr> {
         if self.pending_initial_registrations.is_empty() {
             return Vec::new();
@@ -1512,9 +1596,10 @@ impl RibManager {
         let queued = std::mem::take(&mut self.pending_initial_registrations);
         let mut members = Vec::new();
         for (examined, peer) in queued.into_iter().enumerate() {
-            // The leader is the cohort's first registration.
+            // The leader is the cohort's first registration, so at most
+            // `MAX_JOIN_COHORT - 1` members join it.
             let joins = examined < MAX_JOIN_COHORT_EXAMINED
-                && members.len() + 1 < MAX_JOIN_COHORT
+                && members.len() < MAX_JOIN_COHORT - 1
                 && self
                     .live_sessions
                     .get(&peer)
@@ -1804,6 +1889,11 @@ impl RibManager {
         let metrics = self.metrics.clone();
 
         let member_of = self.grouped_member_of(peer);
+        if member_of.is_some() {
+            // Fresh registration retains its empty seed; an existing-session
+            // replay retains the actual current advertised baseline instead.
+            self.capture_group_admitted_keys(peer);
+        }
         let all_prefixes: HashSet<Prefix> =
             if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
                 self.grouped_join_prefix_scope(peer, group, &mut || {
@@ -2402,10 +2492,12 @@ impl RibManager {
         // survivor has replayed its Adj-RIB-In. Send those staged routes, but
         // keep the family EoR queued until an associated peer EoRR (or the
         // original Selection_Deferral_Timer) proves convergence.
+        // The RFC 4684 §6 RT-membership hold (`rtc_eor_hold`) queues VPN/EVPN
+        // EoR the same way, until the peer's RT-Constrain EoR or the cap.
         let convergence_held: HashSet<_> = eor_families
             .iter()
             .copied()
-            .filter(|family| self.selection_convergence_held(*family))
+            .filter(|family| self.eor_held(peer, *family))
             .collect();
         if !convergence_held.is_empty() {
             eor_families.retain(|family| !convergence_held.contains(family));
@@ -2496,6 +2588,9 @@ impl RibManager {
             &all_prefixes,
             &current_policy_filtered_routes,
         );
+        if !self.dirty_peers.contains(&peer) && self.finish_evpn_recovery(peer) {
+            self.release_group_admitted_keys(peer);
+        }
 
         // Send End-of-RIB markers for all sendable families
         if !eor_families.is_empty()

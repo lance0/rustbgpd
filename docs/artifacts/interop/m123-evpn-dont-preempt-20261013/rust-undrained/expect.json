@@ -1,0 +1,30 @@
+{
+  "rust_advertised": [
+    200,
+    true
+  ],
+  "rust_decoded_srl": [
+    300,
+    true
+  ],
+  "rust_drained": false,
+  "rust_own_type4": [
+    200,
+    true
+  ],
+  "rust_recovery_pending": false,
+  "rust_role": "nondf",
+  "srl_decoded_rust": [
+    200,
+    true
+  ],
+  "srl_df": {
+    "10.0.123.1": false,
+    "192.0.2.2": true
+  },
+  "srl_oper": [
+    300,
+    true
+  ],
+  "srl_role_unchanged_since": "2026-10-13T13:37:02.649Z"
+}

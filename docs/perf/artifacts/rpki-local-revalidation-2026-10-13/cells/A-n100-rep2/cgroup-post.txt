@@ -1,0 +1,3 @@
+post_current=484233216
+lifetime_peak=535916544
+swap_peak=0

@@ -10,4 +10,5 @@ ignore = ["B904", "B905"]
 
 [tool.ruff.lint.per-file-ignores]
 "docs/perf/artifacts/v0.61.0-final-performance-2026-07/verify.py" = ["F401"]
+"docs/perf/artifacts/rpki-local-revalidation-2026-10-13/real-fixture.py" = ["F841", "B007"]
 "scripts/test_check_fuzz_target_inventory.py" = ["B023"]

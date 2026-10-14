@@ -5,6 +5,26 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- `UpdateMessage::parse_revised` (and `parse_revised_observed*`) now report
+  an EVPN Type 5 announcement whose ESI, gateway IP, Router's MAC and label
+  are all zero as an RFC 7606 treat-as-withdraw `MalformedAttribute` on
+  `MP_REACH_NLRI` (RFC 9136 §3.2) instead of accepting it. The Router's MAC
+  is the first EVPN Router's MAC Extended Community (type 0x06, subtype
+  0x03); absent or all-zero counts as zero. The label is the raw 3-octet
+  field, so any non-zero label or VNI is accepted. The route stays in
+  `evpn_announced` for the UPDATE-wide withdrawal, and withdrawals still
+  decode it. `validate_evpn_announcements` is unchanged because it sees
+  only the NLRI. No public item or signature changes. This is a validation
+  behavior change and ships in the next minor release.
+- The same parsers now also report an EVPN Type 5 announcement whose first
+  Router's MAC Extended Community carries a multicast or broadcast MAC (I/G
+  bit set) as a treat-as-withdraw `MalformedAttribute` on `MP_REACH_NLRI`
+  (RFC 9136 §3.2, Table 1 note), whatever the route's ESI, gateway IP and
+  label. A unicast Router's MAC is accepted, and Type 2 routes are not
+  checked. No public item or signature changes.
+
+## 0.25.0 - 2026-10-12
+
 - `decode_evpn_nlri` (and the UPDATE parsers built on it) now accepts an
   all-zero ESI in EVPN Type 1 and Type 4 routes instead of returning an
   error. A single-homed VPWS per-EVI Ethernet A-D route carries ESI 0
@@ -14,7 +34,25 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   treat-as-withdraw `MalformedAttribute` rather than a session-reset error.
   Withdrawals and the legacy `parse` path decode it structurally. No public
   item or signature changes. This is a decode-behavior change, so under the
-  crate's semver policy it ships in the next minor release, not a patch.
+  crate's semver policy it ships in a minor release, not a patch.
+- `UpdateMessage::parse_revised` (and `parse_revised_observed*`) now treat
+  an EVPN Type 2 route with MAC Address Length 0 as RFC 7606
+  treat-as-withdraw (RFC 9135 §9.1.1) instead of returning a session-reset
+  error. RFC 7432 §7.2 includes the MAC Address Length in the route key and
+  `EvpnMacIp` has no field for it, so the route is dropped from
+  `evpn_announced` / `evpn_withdrawn` rather than keyed as the 48-bit route
+  for the same MAC. In `MP_REACH_NLRI` the attribute is reported as a
+  treat-as-withdraw `MalformedAttribute` and its other routes stay
+  available for the UPDATE-wide withdrawal; in `MP_UNREACH_NLRI` the route
+  withdraws nothing. `decode_evpn_nlri`, `decode_evpn_nlri_counted` and the
+  legacy `parse` path still return an error for it, as before.
+  `validate_evpn_announcements` now also rejects a Type 5 announcement with
+  both a non-zero ESI and a non-zero gateway IP (RFC 9136 §3.2), so
+  `parse_revised` reports it as treat-as-withdraw; withdrawals still decode
+  it. No public item or signature changes. These are decode and validation
+  behavior changes and ship in a minor release.
+- Pair this wire compatibility line with FSM 0.12 and RPKI 0.7 when sharing
+  public wire types.
 
 ## 0.24.0 - 2026-10-11
 

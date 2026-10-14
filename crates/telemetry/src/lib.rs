@@ -21,5 +21,8 @@ pub mod metrics;
 pub mod reason_labels;
 
 pub use logging::{LoggingError, init_logging, reload_per_peer_directives};
-pub use metrics::{BgpMetrics, evpn_es_auto_esi_states, non_canonical_peer_labels, peer_label};
+pub use metrics::{
+    BgpMetrics, evpn_es_auto_esi_states, evpn_es_core_isolation_states, non_canonical_peer_labels,
+    peer_label,
+};
 pub use reason_labels::{NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason};

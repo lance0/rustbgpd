@@ -873,8 +873,10 @@ message OutboundPrefixLimitState {
 // One finite inbound max-prefix bound's live capacity for a neighbor
 // (ADR-0108 amendment).
 message InboundPrefixLimitState {
-  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received", or
-  // "ipv6_unicast_received".
+  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received",
+  // "ipv6_unicast_received", or a non-unicast family label ("l3vpn_ipv4_unicast",
+  // "l3vpn_ipv6_unicast", "ipv4_labeled_unicast", "ipv6_labeled_unicast",
+  // "l2vpn_evpn", "ipv4_flowspec", "ipv6_flowspec", "rtc").
   string scope = 1;
   // The session actor's enforcement count for the scope.
   uint64 usage = 2;

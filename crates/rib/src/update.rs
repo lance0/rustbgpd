@@ -18,6 +18,48 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+/// Fixed causes for a bounded EVPN recovery-provenance refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvpnRecoveryExhaustionCause {
+    PeerLimit,
+    DaemonLimit,
+    AllocationFailure,
+}
+
+impl EvpnRecoveryExhaustionCause {
+    /// Stable metric/log vocabulary, without peer-derived labels.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PeerLimit => "peer_limit",
+            Self::DaemonLimit => "daemon_limit",
+            Self::AllocationFailure => "allocation_failure",
+        }
+    }
+}
+
+/// Ask the session lifecycle owner to reset exactly the exhausted generation.
+#[derive(Clone, Debug)]
+pub struct EvpnRecoveryReset {
+    pub peer: IpAddr,
+    pub session_id: u64,
+    /// The outbound channel changes on reconnect even when the actor ID stays
+    /// the same. The session validates this token when executing the reset.
+    pub outbound: mpsc::Sender<OutboundRouteUpdate>,
+    pub cause: EvpnRecoveryExhaustionCause,
+    /// The peer whose temporary metadata/key charge refused admission. This
+    /// can differ from the initiating peer during a shared metadata resize.
+    pub limiting_peer: Option<IpAddr>,
+    pub attempted_peer_bytes: usize,
+    pub attempted_daemon_bytes: usize,
+    pub peer_limit_bytes: usize,
+    pub daemon_limit_bytes: usize,
+}
+
+/// Nonblocking admission to the existing session lifecycle owner. A refused
+/// admission stays owned by the RIB and is retried; it is not a reset receipt.
+pub type EvpnRecoveryResetFn = Arc<dyn Fn(EvpnRecoveryReset) -> bool + Send + Sync>;
+
 /// Failure returned by the dedicated, type-narrow RIB readiness lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RibReadinessError {
@@ -730,6 +772,9 @@ pub enum ExactExportErrorCode {
     Ipv4RequiresExtendedNextHop,
     /// The one-route UPDATE exceeds the negotiated message ceiling.
     MessageTooLong,
+    /// A labeled-unicast or VPN route binds more than one label, and the peer
+    /// has not negotiated the RFC 8277 Multiple Labels Capability.
+    MultipleLabelsNotNegotiated,
 }
 
 impl ExactExportErrorCode {
@@ -742,6 +787,7 @@ impl ExactExportErrorCode {
             Self::MissingIpv6NextHop => ExactExportReason::MissingIpv6NextHop,
             Self::Ipv4RequiresExtendedNextHop => ExactExportReason::Ipv4RequiresExtendedNextHop,
             Self::MessageTooLong => ExactExportReason::MessageTooLong,
+            Self::MultipleLabelsNotNegotiated => ExactExportReason::MultipleLabelsNotNegotiated,
         }
     }
 
@@ -1680,6 +1726,10 @@ pub struct RoutePageVersion {
 /// A route-page continuation could not be served safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoutePageError {
+    /// A group-owned advertised projection is still settling after missed
+    /// delivery. Callers must retry after recovery rather than read desired
+    /// state as admitted output.
+    ResyncInProgress,
     /// The requested scope class changed after the preceding page. Callers
     /// must restart from an empty token rather than risk skipped or duplicate
     /// rows.
@@ -2052,6 +2102,32 @@ impl WireRoutesReceived {
             validated_with,
         }
     }
+}
+
+/// Reply to [`RibUpdate::QueryEvpnEsSnapshot`]: the session state and the
+/// Type 4 rows read in one RIB turn, so no session teardown and its route
+/// flush can fall between the two (ADR-0140 decision 4).
+#[derive(Debug, Clone, Default)]
+pub struct EvpnEsSnapshot {
+    /// The same counts [`RibUpdate::QueryEvpnSessionsSynced`] reports.
+    pub sessions: EvpnSessionsSync,
+    /// Every best Type 4 (Ethernet Segment) route in the Loc-RIB, read in
+    /// O(Type 4) through an index, never by walking the EVPN table.
+    pub es_routes: Vec<EvpnRibRoute>,
+}
+
+/// Reply to [`RibUpdate::QueryEvpnSessionsSynced`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvpnSessionsSync {
+    /// Peers whose newest live session negotiated L2VPN/EVPN.
+    pub established: usize,
+    /// Peers whose L2VPN/EVPN routes are retained as stale under
+    /// graceful restart or long-lived graceful restart.
+    pub stale: usize,
+    /// At least one L2VPN/EVPN session is established, every such
+    /// session has sent End-of-RIB, and GR selection deferral does not
+    /// hold the family.
+    pub synced: bool,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -2765,6 +2841,14 @@ pub enum RibUpdate {
         /// residue, respectively.
         reply: oneshot::Sender<(usize, usize, usize, usize, usize, usize)>,
     },
+    /// TEST ONLY: distinguish a scheduled recovery from an ordinary queue drain.
+    #[cfg(test)]
+    TestQueryPeerOutboundDirty {
+        /// The target peer.
+        peer: IpAddr,
+        /// Whether the peer has a deferred outbound update.
+        reply: oneshot::Sender<bool>,
+    },
     /// TEST ONLY: evidence that the clean policy transition scales with plans
     /// and compatible wire cohorts rather than members.
     #[cfg(test)]
@@ -3140,13 +3224,24 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
     },
-    /// Whether every established L2VPN/EVPN session has sent End-of-RIB
-    /// for the family and graceful-restart selection deferral is not
-    /// holding L2VPN/EVPN; `false` while none is established. Gates the
-    /// RFC 9785 §4.3 boot-time Designated Forwarder recovery decision.
+    /// L2VPN/EVPN session state: the established and stale-retained
+    /// session counts, and whether every established session has sent
+    /// End-of-RIB for the family while graceful-restart selection
+    /// deferral is not holding L2VPN/EVPN (`synced` is `false` while
+    /// none is established). Gates the RFC 9785 §4.3 boot-time
+    /// Designated Forwarder recovery decision and feeds the ADR-0140
+    /// core-isolation signal.
     QueryEvpnSessionsSynced {
         /// Response channel.
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<EvpnSessionsSync>,
+    },
+    /// The L2VPN/EVPN session state together with every best Type 4 route,
+    /// answered in one actor turn. Feeds the ADR-0140 core-isolation peer
+    /// latch at a per-second cadence, so it reads Type 4 rows through an
+    /// index rather than the whole EVPN Loc-RIB.
+    QueryEvpnEsSnapshot {
+        /// Response channel.
+        reply: oneshot::Sender<EvpnEsSnapshot>,
     },
     /// Query one bounded, version-fenced EVPN table page. Each page scans the
     /// scope but copies at most the clamped page size, ordered by typed key.

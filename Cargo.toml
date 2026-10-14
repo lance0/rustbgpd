@@ -53,7 +53,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.76.0"
+version = "0.77.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -64,20 +64,20 @@ categories = ["network-programming"]
 
 [workspace.dependencies]
 # Internal crates
-rustbgpd-wire = { path = "crates/wire", version = "0.24.0" }
-rustbgpd-bfd = { path = "crates/bfd", version = "0.76.0" }
-rustbgpd-fsm = { path = "crates/fsm", version = "0.11.0" }
-rustbgpd-transport = { path = "crates/transport", version = "0.76.0" }
-rustbgpd-rib = { path = "crates/rib", version = "0.76.0" }
-rustbgpd-policy = { path = "crates/policy", version = "0.76.0" }
-rustbgpd-api = { path = "crates/api", version = "0.76.0" }
-rustbgpd-telemetry = { path = "crates/telemetry", version = "0.76.0" }
-rustbgpd-rpki = { path = "crates/rpki", version = "0.6.0" }
-rustbgpd-bmp = { path = "crates/bmp", version = "0.76.0" }
-rustbgpd-mrt = { path = "crates/mrt", version = "0.76.0" }
-rustbgpd-evpn = { path = "crates/evpn", version = "0.76.0" }
-rustbgpd-evpn-linux = { path = "crates/evpn-linux", version = "0.76.0" }
-rustbgpd-event-history = { path = "crates/event-history", version = "0.76.0" }
+rustbgpd-wire = { path = "crates/wire", version = "0.25.0" }
+rustbgpd-bfd = { path = "crates/bfd", version = "0.77.0" }
+rustbgpd-fsm = { path = "crates/fsm", version = "0.12.0" }
+rustbgpd-transport = { path = "crates/transport", version = "0.77.0" }
+rustbgpd-rib = { path = "crates/rib", version = "0.77.0" }
+rustbgpd-policy = { path = "crates/policy", version = "0.77.0" }
+rustbgpd-api = { path = "crates/api", version = "0.77.0" }
+rustbgpd-telemetry = { path = "crates/telemetry", version = "0.77.0" }
+rustbgpd-rpki = { path = "crates/rpki", version = "0.7.0" }
+rustbgpd-bmp = { path = "crates/bmp", version = "0.77.0" }
+rustbgpd-mrt = { path = "crates/mrt", version = "0.77.0" }
+rustbgpd-evpn = { path = "crates/evpn", version = "0.77.0" }
+rustbgpd-evpn-linux = { path = "crates/evpn-linux", version = "0.77.0" }
+rustbgpd-event-history = { path = "crates/event-history", version = "0.77.0" }
 
 # External dependencies — pinned across workspace
 bytes = "1"
@@ -118,7 +118,10 @@ serde_json = "1"
 # Consumed by tools/rs-config-render: `arouteserver template-context`
 # output is YAML (JSON parses through the same path, YAML being a
 # superset). Generate-time tooling only — never a daemon dependency.
-serde_yaml = "0.9"
+# `yaml_serde` is the YAML organization's maintained continuation of the
+# deprecated `serde_yaml` 0.9 (same API and libyaml port); the rename
+# keeps the `serde_yaml::` paths unchanged.
+serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 sha2 = "0.11"
 owo-colors = { version = "4", features = ["supports-colors"] }
 criterion = { version = "0.8", features = ["html_reports"] }

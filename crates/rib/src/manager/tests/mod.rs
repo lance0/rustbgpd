@@ -1122,8 +1122,10 @@ async fn drain_strict_vpn_rtc_initial_dump(out_rx: &mut mpsc::Receiver<OutboundR
         "empty RTC membership must withhold every VPN route from the initial dump"
     );
     assert_eq!(dump.vpn_withdraw.len(), 0);
+    // RFC 4684 §6: the VPN End-of-RIB waits for the peer's RT membership
+    // End-of-RIB (or the cap); only RT-Constrain's own marker is immediate.
     let eor = out_rx.recv().await.unwrap();
-    assert_eq!(eor.end_of_rib, vpn_rtc_sendable());
+    assert_eq!(eor.end_of_rib, rtc_sendable());
 }
 
 /// A `VPNv6` route from `peer` carrying the given extended communities.
@@ -1418,7 +1420,10 @@ mod events_metrics;
 mod evpn;
 mod evpn_dataplane_query;
 mod evpn_explain;
+mod evpn_group_checkpoints;
+mod evpn_group_storage;
 mod evpn_peer_pages;
+mod evpn_recovery_budget;
 mod exact_export_lifecycle;
 mod explain_mrt;
 mod export_explain;
@@ -1448,9 +1453,11 @@ mod rs_control;
 mod rtc;
 mod selection_deferral;
 mod session_export_policy;
+mod timer_cutoffs;
 mod unicast;
 mod unicast_prefix_peers;
 mod update_groups;
 mod update_groups_fault_corpus;
 mod update_groups_oracle;
+mod update_groups_recovery;
 mod vpn;

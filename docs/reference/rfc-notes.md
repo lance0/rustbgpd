@@ -25,9 +25,9 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; role-derived forwarding-state bits |
-| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim (a received IPv6 link-local next hop only toward its own link); no VRF import, no MPLS FIB, no local BGP-LS production |
+| VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim (a received IPv6 link-local next hop only toward its own link); routes with more than one label are not reflected (no RFC 8277 Multiple Labels Capability); no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap), RFC 9251 (SMET relay) | Route types 1–6; Type 6 SMET relay only; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
-| Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
+| Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), RFC 9324 (opt-in), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention; local VRP/ASPA re-evaluation without Route Refresh when `[rpki] local_revalidation` is set |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
 | FlowSpec / blackhole | RFC 8955/8956 and RFC 9117 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Opt-in FlowSpec feasibility; opt-in BLACKHOLE Linux FIB discard |
 | Liveness | RFC 5880/5881/5882/5883 (BFD), RFC 9384 (BFD Down Cease subcode), RFC 9687 (Send Hold Timer) | Single-hop and multihop async BFD for static neighbors; typed Cease/10 teardown on a genuine BFD Down |
@@ -940,6 +940,38 @@ not add a neighbor-discovery monitor or make stale next hops reachable.
   extended communities never match, even against the default membership.
 - The outbound RT membership gate applies this to VPN and EVPN advertisements
   toward a peer that negotiated RT-Constrain.
+- §6 says "The exchange of VPN NLRI should follow the receipt of the
+  End-of-RIB markers" and that a speaker delaying VPN advertisement for that
+  marker "MUST limit that delay to an upper bound. By default, a 60 second
+  value should be used." A session that starts with an empty membership (a
+  new session, or a re-establish whose RT-Constrain routes were not
+  retained) sends VPN routes as the peer's interest arrives, but holds the
+  VPNv4, VPNv6 and EVPN End-of-RIB until the peer's RT-Constrain End-of-RIB
+  (or, after a collision failover, the RT-Constrain End-of-Route-Refresh
+  that closes an active refresh). The hold ends after 60 seconds without
+  one; the cap is fixed. Once the cap is due, only the inbound updates
+  already queued at that moment, and the route batches they started, are
+  processed ahead of the release, so continuing traffic cannot extend it.
+  While rustbgpd's own RT-Constrain route selection is still deferred after
+  a restart, membership is rebuilt only when that deferral releases, so a
+  marker that arrives during the deferral ends the hold at that release,
+  after the VPN and EVPN routes the rebuilt membership admits. A peer
+  acting as graceful-restart helper for the session therefore does not take
+  our End-of-RIB as the end of the initial update and sweep the VPN routes
+  it kept from us (RFC 4724 §4.2) before its interest has been re-applied.
+  RT-Constrain's own End-of-RIB and every other family's are not held. When
+  the membership is re-derived from retained RT-Constrain routes, it is
+  already known and nothing is held.
+- A peer whose OPEN sets the graceful-restart Restart State bit is not held.
+  RFC 4724 §4.1 has a restarting speaker defer route selection until it has
+  the End-of-RIB from all its peers, and in practice it advertises nothing,
+  its own RT-Constrain routes and End-of-RIB included, before then. Holding
+  our VPN End-of-RIB would only stall it until the cap and then trigger the
+  same sweep. GoBGP likewise skips its own RT-Constrain deferral toward a
+  restarting peer.
+- A peer that sends no RT-Constrain End-of-RIB receives the held markers at
+  the cap. GoBGP, for example, sends End-of-RIB only on sessions with
+  graceful restart enabled.
 
 ---
 
@@ -1057,6 +1089,55 @@ may reject them, but this is not v1 scope.
 
 ---
 
+## RFC 8277 — Label stacks on labeled-unicast and VPN routes
+
+rustbgpd does not support the Multiple Labels Capability (code 8, §2.1).
+It does not advertise the capability, and a peer's copy is ignored, so no
+session negotiates it for any AFI/SAFI. Without the capability, only single-label NLRI may be
+exchanged (§2.2), and a route whose NLRI binds more than one label MUST NOT
+be propagated (§3.2.1).
+
+- Receive: labeled-unicast (SAFI 4) and VPN (SAFI 128) NLRI are read up to
+  the entry with the bottom-of-stack bit set, as RFC 3107 specified, so an
+  RFC 3107 sender's multi-label NLRI decodes to its real prefix and the
+  whole stack is stored and shown. §2.2 says a receiver without the
+  capability ignores the S bit. rustbgpd does not, so a single label sent
+  with S clear, which §2.2 forbids on transmission, is not read as the
+  one-label form.
+  This interpretation is retained deliberately. The bytes
+  `30 00 06 40 cb 00 71` can encode either label 100 with S clear and
+  `203.0.113.0/24`, or two labels (100 and 831495) and `0.0.0.0/0`.
+  Both consume the declared length; a prefix-length heuristic cannot
+  distinguish them. Reading exactly one label would silently change the
+  legacy stack's route key and evade the multi-label export refusal.
+  A stack whose boundary cannot be located remains a session-reset error
+  under [RFC 7606 §3(j)](https://www.rfc-editor.org/rfc/rfc7606.html#section-3).
+  Byte fixtures pin both interpretations, real stacks, and MP announce/withdraw
+  errors with and without Add-Path for IPv4/IPv6 SAFI 4/128.
+- Pinned source comparison, rather than a live malformed-peer receipt:
+  [FRR 10.7.1 labeled-unicast](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_label.c#L425-L475)
+  walks to BOS, while its
+  [VPN parser](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_mplsvpn.c#L174-L196)
+  consumes one three-octet label regardless of S.
+  [GoBGP 4.10.0](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/packet/bgp/bgp.go#L1925-L1958)
+  walks to BOS except when a Prefix-SID attribute selects its single-label
+  interpretation; that exception applies to both LU and VPN.
+  [BIRD 3.3.3](https://github.com/CZ-NIC/bird/blob/v3.3.3/proto/bgp/packets.c#L1676-L1705)
+  and [BIRD 2.19.3](https://github.com/CZ-NIC/bird/blob/v2.19.3/proto/bgp/packets.c#L1641-L1660)
+  walk to BOS for both families. None of these pins negotiates the Multiple
+  Labels Capability. The differing parsers do not establish one interoperable
+  interpretation for an S-clear single label.
+- Export: a route with more than one label is withheld from every peer
+  and counted in
+  `bgp_exact_export_rejections_total{reason="multiple_labels_not_negotiated"}`.
+  When a route already advertised with one label is replaced by a
+  multi-label route for the same key, the advertised copy is withdrawn
+  (§3.2.1). The stack is never truncated to one label: a route propagated
+  with its next hop unchanged keeps its label field unchanged (§3.2.1).
+  Earlier releases reflected multi-label stacks unchanged.
+
+---
+
 ## RFC 4724 — Graceful Restart Mechanism for BGP
 
 rustbgpd implements the **receiving speaker** role and a planned-restart
@@ -1165,6 +1246,10 @@ families have received EoR, GR completes and state is cleaned up.
 
 **Timer expiry:** Remaining stale routes are swept as withdrawals. GR
 state is cleaned up. `bgp_gr_timer_expired_total` metric incremented.
+The GR, LLGR, enhanced route refresh window and selection-deferral timers
+fire after only the updates already queued when the deadline was first seen
+due (and the route batches they started); updates that arrive later cannot
+postpone them.
 
 ### End-of-RIB Detection
 
@@ -1174,7 +1259,11 @@ state is cleaned up. `bgp_gr_timer_expired_total` metric incremented.
 ### End-of-RIB Sending
 
 After sending the initial table to a new peer, EoR markers are sent for
-each negotiated family via `OutboundRouteUpdate.end_of_rib`.
+each negotiated family via `OutboundRouteUpdate.end_of_rib`. Toward a peer
+that negotiated RT-Constrain with an empty membership and is not itself
+restarting, the VPN and EVPN markers wait for the peer's RT-Constrain
+End-of-RIB for up to 60 seconds; see
+[RFC 4684](#rfc-4684--rt-constrain-membership-matching).
 
 ### Metrics
 
@@ -1619,6 +1708,41 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ---
 
+## RFC 9324 — Route Refresh avoidance for RPKI-based policy
+
+- Section 5 requires a speaker performing ROV to keep the full Adj-RIB-In or,
+  per Section 4, at least the routes dropped by ROV, so new RPKI data is
+  evaluated without asking neighbors for Route Refresh.
+- **Default: deviation.** `[rpki] local_revalidation` defaults to `false`. A
+  changed VRP or ASPA snapshot then sends inbound Route Refresh for every
+  negotiated family to each Established peer whose import policy matches
+  validation state, and routes dropped by validation are recovered only by
+  that replay.
+- **Opt-in: conforming for IPv4/IPv6 unicast.** With
+  `local_revalidation = true` (one global control, as Section 4 requires),
+  sessions with a validation-dependent import policy keep their pre-policy
+  unicast input: accepted routes and the rejects some other validation outcome
+  would admit. A VRP change re-runs import policy over the retained routes
+  under the changed VRP prefixes, an ASPA change over routes whose `AS_PATH`
+  contains a changed customer ASN, through the ordinary inbound path. No
+  Route Refresh is sent. The retained input is the received attributes, so
+  validation-based policy sees them before any policy rewrite (Section 4).
+- Limits of the opt-in mode: each session retains at most 65,536 validation
+  rejects; beyond that it falls back to Route Refresh until the session resets
+  (`bgp_validation_import_refreshes_total{outcome="fallback_refresh"}` plus a
+  warning). When retention starts mid-session, it falls back the same way
+  until an enhanced Route Refresh (RFC 7313) has replayed every negotiated
+  unicast family. FlowSpec routes are not retained, so negotiated FlowSpec families
+  keep Route Refresh on a VRP change. IRR and other dataset swaps are outside
+  RFC 9324 and keep Route Refresh.
+- ASPA: the normative MUSTs in Sections 4 and 5 name ROV. ASPA appears in
+  Section 3 and in Section 4's ordering requirement as a future RPKI-based
+  policy; the ASPA verification draft (Section 5.7 of -28) points to
+  RFC 9324 for keeping ASPA-invalid routes. The opt-in store covers ASPA on
+  that basis. See [ASPA conformance](aspa-conformance.md).
+
+---
+
 ## RFC 8955/8956 — FlowSpec
 
 - SAFI 133. IPv4 and IPv6 unicast FlowSpec.
@@ -1885,12 +2009,27 @@ carries inactive (absent), unlimited (zero), or finite.
     semantic collapse.
   - **Type 2 MAC/IP Advertisement.** IP Addr Length is in **bits**
     (0 / 32 / 128). Label2 is optional — either 0 or 3 trailing bytes
-    after the primary label.
+    after the primary label. A MAC Address Length of 0 is RFC 7606
+    treat-as-withdraw (RFC 9135 §9.1.1), not a session reset. The MAC
+    Address Length is part of the route key (RFC 7432 §7.2), so such a
+    route is dropped rather than keyed as the 48-bit route for the same
+    MAC: it never removes that route and is never reflected.
   - **Type 3 IMET.** IP length is in bits (32 / 128).
   - **Type 4 ES.** IP length in bits.
   - **Type 5 IP Prefix (RFC 9136).** Fixed total length disambiguates
     IPv4 (34 bytes) from IPv6 (58 bytes) — prefix-length byte alone
-    cannot distinguish since 32 is valid for both.
+    cannot distinguish since 32 is valid for both. An announcement with
+    both a non-zero ESI and a non-zero GW IP is treat-as-withdraw
+    (RFC 9136 §3.2). So is an announcement whose ESI, GW IP, Router's MAC
+    and label are all zero (also RFC 9136 §3.2). The Router's MAC is the
+    EVPN Router's MAC Extended Community (RFC 9135 §8.1); absent or
+    all-zero counts as zero. The label is the raw 3-octet field, so any
+    non-zero MPLS label or VNI keeps the route. An announcement whose
+    Router's MAC is multicast or broadcast is treat-as-withdraw whatever
+    its ESI, GW IP and label (RFC 9136 Table 1 note: "The route MUST be
+    treat as withdraw in case of an invalid MAC address"). Only the first
+    Router's MAC counts (RFC 9135 §8.1). Type 2 routes are not checked:
+    the note covers Type 5 only, and RFC 9135 sets no such rule.
 - Route Distinguisher (RFC 4364) displays as `<asn16>:<u32>` (Type 0),
   `<ipv4>:<u16>` (Type 1), `<asn32>:<u16>` (Type 2). Unknown RD types
   fall back to hex.
@@ -2307,7 +2446,7 @@ implemented service procedures.
 | [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: service-aware reflection | Recognized malformed L3/L2 Service framing follows §7 treat-as-withdraw; see the [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid). Structurally valid routes with no semantically valid applicable SID remain retained but are excluded from selection, Add-Path, ORR, and ECMP; see the [service eligibility contract](path-attribute-registry.md#srv6-service-eligibility). Unchanged-next-hop reflection preserves eligible raw attributes; [transport regressions](../../crates/transport/src/session/tests/outbound_attrs.rs) cover raw receive/export. PE import, service origination, next-hop rewriting, and SRv6 forwarding are not implemented; VPN and EVPN views may show an optional display-only [`reconstructed_sid`](api.md#prefix-sid-inspection-on-vpn-and-evpn-routes) from a single route's transposition, unused by selection. This is not full RFC 9252 service support. |
 | [RFC 9251](https://www.rfc-editor.org/rfc/rfc9251.html#section-9) | Partial: Type 6 SMET relay, alpha | Typed Type 6 receive/reflect/withdraw and inspection are implemented. The [M113 controlled raw-peer proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md) checks reflected bytes and recovery with an independent TShark decoder; vendor interoperability is unproven. Types 7/8 remain unsupported typed NLRIs, counted and discarded under RFC 7606 §5.4. No SMET origination, IGMP/MLD proxy, or multicast forwarding; see the [SMET boundary](#type-6-smet-reflection). |
 | RFC 9746 (Mar 2025; updates RFC 7432, RFC 8365) | Not implemented | Split Horizon Type (SHT) bits in the ESI Label extended community. §2.2: an egress NVE MUST NOT use an SHT other than 00 with VXLAN (tunnel type 8), so local bias is the only multi-homing split-horizon mechanism for VXLAN. This is the normative backing for the Linux softswitch local-bias limitation in [docs/reference/limitations.md](limitations.md); the ESI Label decoder reads only the single-active flag. |
-| RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. Don't-Preempt recovery (§4.3) derives operational preference/DP from remote Type 4 routes after a three-second wait; the §4.3(5) boot timer additionally holds any recovery started within 30 seconds of daemon start until an L2VPN/EVPN session is established, every established one has sent End-of-RIB, and graceful-restart selection deferral no longer holds L2VPN/EVPN, bounded by those 30 seconds. DP wins equal-preference ties. Mixed DP does not trigger algorithm fallback. Explicit administrative preference changes override inheritance. No per-Ethernet-Tag algorithm override (§4.2), cross-vendor DP validation, or guarantee when reference routes arrive after the recovery wait (for example, from a session established after the others have synced, or a peer that sends no End-of-RIB within the 30-second bound). The configured default preference is the RFC's 32767. |
+| RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. Don't-Preempt recovery (§4.3) derives operational preference/DP from remote Type 4 routes after a three-second wait; the §4.3(5) boot timer additionally holds any recovery started within 30 seconds of daemon start until an L2VPN/EVPN session is established, every established one has sent End-of-RIB, and graceful-restart selection deferral no longer holds L2VPN/EVPN, bounded by those 30 seconds. DP wins equal-preference ties. Mixed DP does not trigger algorithm fallback. Explicit administrative preference changes override inheritance. No per-Ethernet-Tag algorithm override (§4.2) or guarantee when reference routes arrive after the recovery wait (for example, from a session established after the others have synced, or a peer that sends no End-of-RIB within the 30-second bound). The configured default preference is the RFC's 32767. The [M123 receipt](../artifacts/interop/m123-evpn-dont-preempt-20261013/README.md) qualifies Highest-Preference Don't-Preempt against SR Linux 25.10.1 on one two-PE all-active Ethernet Segment behind a Linux LACP CE: a booting or restarted rustbgpd inherits SR Linux's preference with DP=0 and SR Linux stays DF (with DP off on both, rustbgpd preempts); SR Linux recovering from a CE-link failure inherits rustbgpd's preference; the survivor of a reference-PE withdrawal restores its administrative values. Each side decodes the other's DF Election extended community. That receipt does not cover Lowest-Preference, more than two PEs, an SR Linux node restart, or forwarding. |
 | RFC 9722 (May 2025; updates RFC 8584) | Not implemented | Fast DF recovery: a Service Carving Time extended community on the Type 4 route synchronizes the DF election timer across the segment's PEs so they carve at the same instant. rustbgpd runs each election on its own timer. |
 | RFC 9721 (Apr 2025; extends the RFC 7432 and RFC 9135 IRB procedures) | Partial | Extended IRB mobility. Implemented: a local bridge-port move of a MAC advertised as MAC+IP re-advertises every (MAC, IP) Type 2 for that MAC with the MAC Mobility sequence incremented (§5.1 parent/child, §6.2 inheritance; `LocalMacIpOriginator::on_local_mac_moved` in `crates/evpn/src/origination_macip.rs`). The MAC-only and per-(MAC, IP) mobility ratchets otherwise remain independent; the local-move cascade is a bump-all operation. §6.4/§6.5 peer-sync, partial: a Type 2 received from a PE on the VNI's own non-zero Ethernet Segment is a peer-sync route, excluded from mobility contention and both duplicate detectors. For an already locally learned MAC, the daemon adopts a higher peer sequence exactly, without adding one, and synchronizes locally learned MAC/IP children to the highest peer or retained local sequence. This applies in either arrival order, requires a matching configured import RT, VNI, tag zero, and a nonlocal next hop, and preserves local sticky state and lifecycle suppression (`is_same_segment_peer` and the originators' `adopt_peer_sequence` methods in `crates/evpn/src/`, coordinated in `src/evpn_originator/rib_polling.rs`). A healthy bound ES installs an owned local-port FDB row for an imported peer Type 2 with matching EAD-per-ES/EVI reachability, when it wins the existing MAC Mobility ordering and the MAC is not quarantined. Existing local learns and foreign rows observed before apply retain priority. This forwarding state does not originate a MAC or MAC/IP learned only from the ES peer (Peer-Sync-Local), and does not install peer-only IP adjacencies; see the [ADR-0085 amendment](../adr/0085-evpn-es-interface-binding.md#amendment-2026-10-11-peer-synchronized-local-fdb-forwarding). Not applicable: §7/§8.3 RT-5 mobility — Type 5 routes carry no MAC Mobility extended community (RFC 9136 defines none for the route type; `crates/evpn/src/ip_vrf/origination.rs` builds ORIGIN, AS_PATH, and extended communities only, and the receive-side mobility comparison in `crates/rib/src/loc_rib.rs` is gated to route type 2). Mobility reaches Type 5 only through GW-IP overlay-index resolution, which already selects the highest-sequence Type 2 and fails closed when distinct MACs tie at the top sequence. §6.1 third rule: a newly activated local IPv4 or IPv6 MAC/IP binding adopts at least one above the effective maximum sequence of different imported remote MACs holding that IP, saturating at `u32::MAX`. This floor also preserves higher local and exact ES-peer sequences and synchronizes the MAC and its local IP children. Both local arrival orders are supported; duplicate observations, remote-only changes, and suppression recovery do not create another ownership event. Scope recreation refreshes the remote view before replay; initial or failed snapshots defer local activations in a bounded queue, which backpressures further observations when full. This is bounded local activation, not full simultaneous-move convergence. Absent: §6.3/§6.7 stale-entry procedures, full §8.2 duplicate-address procedures, and §6.8 probing. Optional §8.2 detect-only IP accounting is implemented: conflicting local/local or local/remote MAC ownership uses a per-(VNI, IP) M/N window, excludes sticky and duplicate-MAC-quarantined contenders, and reports counters/warnings without suppression or sequence changes. |
 | RFC 9786 (Jun 2025) | Not implemented | Port-active multi-homing redundancy mode (per-port active/standby). Demand-shaped alongside the other redundancy modes outside all-active and single-active. |

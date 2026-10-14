@@ -1,0 +1,41 @@
+pin 7dc289613dc680d4328806870da2701c59779c0e tree e2b781200f5dd1616d3b85888f8c9212776121db (PR #3080 head)
+rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: x86_64-unknown-linux-gnu
+release: 1.99.0
+LLVM version: 23.1.1
+cargo 1.99.0 (5f94df478 2026-08-27)
+be6ad48a72c7e9b2b1607c3e5938ae1e18346a586c0e950528748899ab8b78b0  rustbgpd
+c8937a192df76d7316eb0f1e9b28fd52842a4536e4eeee54849f3075c0043680  rbgp
+cccbd239eaf4952405c15750aab04e6116064def03eb6ad5af39e606a9431f67  reloadstall
+b029ef6134c6bf807d33107818878584d13905ac88a94bde6d2863a8557d375a  poll.py
+043097fee905ae47c79a24a8e2be8d1a389ed1478898c0ae9aba8223a274f1b4  viewdigest.py
+e563659beef5857ee79ddac40e1cff5730c34e424b5ca074a3f9007b5dc0ab42  bench/scale/reloadstall/gen-scenario.py
+e9d87bbd693de35e42e7ae66ad3e45ce7914c0ab2797503381b3451f36e431ac  bench/scale/reloadstall/src/main.rs
+e18ab0d0544c944a5cd628cbb2dbb2c74ad3decca4ede17f97816c3207649c37  bench/scale/rpki-cell/rpki_cell.py
+abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd  bench/scale/host-quiet.sh
+64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a  bench/scale/cgroup-memory.sh
+f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658  tests/soak/host-lock.sh
+f55832b71079cdcd0f708fe3b764cf35d020dfe4ab894ff81191c436a4d04b2b  tests/soak/fd-headroom.sh
+da4332f3b4467e3148d343059a59237196d9d5f3460a183bafb5bb7ca322abf6  <prep-dir>/prep/job.sh
+cd8a8c45b87842eaa502d8bf52c10023e10323b4bdc55becfae7d952af413139  <prep-dir>/prep/job-baseline.orig.sh
+4329e50d4762ff922e68e3b2117057b0ea36779c52f1b4031d3f27386829173b  <prep-dir>/prep/job-r1.orig.sh
+65c2a7c0aa181a40da8b94db9fff12f8f89218022661b33174dbdc455c472d01  <prep-dir>/prep/summarize.py
+983693cf2b6f6128a65536109b2a56fe792eda4006f1c3207b5a21ff27460158  <prep-dir>/prep/real-fixture.py
+dc8860456224cb08082f1e79ba5c70d5ed5d5ab844b86bc56caec812130ec1b7  <prep-dir>/prep/reloadstall-import-rejected.patch
+base 7dc289613dc680d4328806870da2701c59779c0e
+dc8860456224cb08082f1e79ba5c70d5ed5d5ab844b86bc56caec812130ec1b7  <prep-dir>/prep/reloadstall-import-rejected.patch
+27734ba8e948674eac6e0083b7f5947c33ca3c39b133a592f2c1857784357f42  ./base.json
+ead2e0c963d6dbe39e2c5951ad019739ed871aefafecb073a793c8ffc54713ad  ./delta-1000.json
+56be08acdb0c079d3a61aae7ef4dc81ea526c3eeddfa339d5c2cf92e62a02a47  ./delta-100.json
+c61a251109587c3168b33272f0a1977f8acbf1ee3104612511053c1aaf6ac789  ./delta-10.json
+1daf925fe3cb7ff3e33b72a63c98c872c2446e1b9515729d66621dab2ee24709  ./share.json
+36c855b9fd7001c8ffb73d400bff4e6f99a5e0479725ad0e1b44e69d2c2d5749  ./import-rejected.txt
+vrp_snapshot {"source": "https://ftp.ripe.net/rpki/<ta>.tal/2026/08/08/roas.csv.xz", "date": "2026-08-08", "sha256": {"afrinic": "639fab2e6572162ccce106b9e76d1a4ee2489aeafb9a64286b9449446329c561", "apnic": "dce7bd7ef7fe7f4fb0d76ba317f9688b3fd42e04cdcd7b87587b5fe6e4e4daf9", "arin": "6f6511ebde145d414b2869dadb815a6b4b1e06844920130cef1018b614ddaa1b", "lacnic": "8ed140a2319a365933b09fe68a558683b086d5ab897206fdc0a97d22ab56f231", "ripencc": "e5d2f1b936ab322de020b8cc21b13112eab568773edc9227ca6684c4d8dd09bd"}, "unique_vrps": 988293}
+invalid_share ipv4 0.002479738989860801 ipv6 0.005383879256429384
+scenario {"peers": 700, "prefixes": 400400, "ipv4": 200200, "vrps": 500000, "covering_vrps": 301014, "assigned": {"ipv4": {"routes": 200200, "invalid": 496, "notfound": 62108, "valid": 137596}, "ipv6": {"routes": 200200, "invalid": 1078, "notfound": 37278, "valid": 161844}}, "rejected_total": 1574, "deltas": {"10": {"ipv4": 5, "ipv6": 5, "invalid_vrps_touched": 0}, "100": {"ipv4": 50, "ipv6": 50, "invalid_vrps_touched": 2}, "1000": {"ipv4": 500, "ipv6": 500, "invalid_vrps_touched": 7}}, "invalid_asn_base": 4200001000}
+stayrtr rpki/stayrtr@sha256:cdb93c0b661d97179a5525e00caf7d9e693a04da3b9002f7e24bebb194d9a77b id sha256:cdb93c0b661d97179a5525e00caf7d9e693a04da3b9002f7e24bebb194d9a77b
+daemon_cpus 12-32,34-39 engine_cpus 40-63 rtr_cpus 8-11 kernel 7.0.0-30-generic clk_tck 100
+shape peers=700 prefixes=400400 v4=200200 vrps=500000 deltas='10 100 1000' repeats=2 hold=240 idle=10 poll=0.25 tail=10 view_at=60 busy_window=50

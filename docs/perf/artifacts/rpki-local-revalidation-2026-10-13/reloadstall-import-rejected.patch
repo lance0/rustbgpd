@@ -1,0 +1,43 @@
+diff --git a/bench/scale/reloadstall/src/main.rs b/bench/scale/reloadstall/src/main.rs
+index c64f1ba00..dc088cfe2 100644
+--- a/bench/scale/reloadstall/src/main.rs
++++ b/bench/scale/reloadstall/src/main.rs
+@@ -4372,6 +4372,38 @@ fn main() {
+         let targets6: Vec<u64> = (0..n_peers)
+             .map(|i| u64::from(total6 - member_slice(total6, n_peers, i).1))
+             .collect();
++        // Queue-local patch: base indexes the daemon's import policy
++        // rejects (RPKI-Invalid in the fixture) never reach any observer, so each
++        // observer's completion target excludes those outside its own slice.
++        let (targets, targets6) = {
++            let (mut targets, mut targets6) = (targets, targets6);
++            if let Some(path) = std::env::var_os("RELOADSTALL_IMPORT_REJECTED") {
++                let text = std::fs::read_to_string(&path).expect("RELOADSTALL_IMPORT_REJECTED");
++                for line in text.lines().filter(|line| !line.is_empty()) {
++                    let (family, index) = line.split_once(' ').expect("family index");
++                    let index: u32 = index.parse().expect("index");
++                    let (family_total, family_targets) = match family {
++                        "4" => (total, &mut targets),
++                        "6" => (total6, &mut targets6),
++                        other => panic!("RELOADSTALL_IMPORT_REJECTED family {other}"),
++                    };
++                    assert!(index < family_total, "rejected index {index} outside the table");
++                    for (i, target) in family_targets.iter_mut().enumerate() {
++                        let (start, len) = member_slice(family_total, n_peers, i as u32);
++                        let extra = family == "4" && ctx.extras[i].contains(&index);
++                        if !(start..start + len).contains(&index) && !extra {
++                            *target -= 1;
++                        }
++                    }
++                }
++                println!(
++                    "import_rejected_targets,ipv4_min={},ipv6_min={}",
++                    targets.iter().min().unwrap(),
++                    targets6.iter().min().unwrap_or(&0)
++                );
++            }
++            (targets, targets6)
++        };
+         let exact_initial = convergence_only || needs_first_exact_bitmap(reloads, flapstorm); // FIRST_EXACT_ARM:
+         // The iBGP-RR soak gates its initial convergence on the same
+         // exact bitmap (its terminal verification re-arms it later).

@@ -1,0 +1,14 @@
+bgp_validation_import_refreshes_total{dependency="aspa",outcome="eligible"} 0
+bgp_validation_import_refreshes_total{dependency="aspa",outcome="failed"} 0
+bgp_validation_import_refreshes_total{dependency="aspa",outcome="fallback_refresh"} 0
+bgp_validation_import_refreshes_total{dependency="aspa",outcome="refreshed"} 0
+bgp_validation_import_refreshes_total{dependency="aspa",outcome="revalidated_locally"} 0
+bgp_validation_import_refreshes_total{dependency="aspa",outcome="skipped_not_established"} 0
+bgp_validation_import_refreshes_total{dependency="aspa",outcome="skipped_state_unknown"} 0
+bgp_validation_import_refreshes_total{dependency="rpki",outcome="eligible"} 1400
+bgp_validation_import_refreshes_total{dependency="rpki",outcome="failed"} 0
+bgp_validation_import_refreshes_total{dependency="rpki",outcome="fallback_refresh"} 0
+bgp_validation_import_refreshes_total{dependency="rpki",outcome="refreshed"} 0
+bgp_validation_import_refreshes_total{dependency="rpki",outcome="revalidated_locally"} 700
+bgp_validation_import_refreshes_total{dependency="rpki",outcome="skipped_not_established"} 700
+bgp_validation_import_refreshes_total{dependency="rpki",outcome="skipped_state_unknown"} 0

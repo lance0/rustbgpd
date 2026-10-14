@@ -66,12 +66,17 @@ impl PeerManager {
 
         // The aborted actor cannot execute SessionDown. Fence its exact RIB
         // generation before a later Enable can emit PeerUp from the replacement.
+        // Reads stay queued while the peer's session identity is mid-swap.
         if self
-            .rib_tx
-            .send(rustbgpd_rib::RibUpdate::PeerDown {
-                peer: peer_key.address,
-                session_id: old_session_id,
-            })
+            .send_rib_update(
+                rustbgpd_rib::RibUpdate::PeerDown {
+                    peer: peer_key.address,
+                    session_id: old_session_id,
+                },
+                super::OperatorReadAdmission::Fenced {
+                    reason: "the replaced primary's session is not yet unregistered",
+                },
+            )
             .await
             .is_err()
         {

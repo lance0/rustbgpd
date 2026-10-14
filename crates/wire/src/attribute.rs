@@ -968,6 +968,7 @@ pub fn decode_path_attributes_counted(
             add_path_families,
             &mut bgpls_discarded,
             &mut evpn_discarded,
+            None,
         )?;
         attrs.push(attr);
     }
@@ -1271,6 +1272,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
             });
             continue;
         }
+        let mut zero_mac_type2 = 0_u32;
         match decode_attribute_value(
             flags,
             type_code,
@@ -1279,16 +1281,32 @@ pub(crate) fn decode_path_attributes_revised_observed(
             add_path_families,
             &mut bgpls_discarded,
             &mut evpn_discarded,
+            Some(&mut zero_mac_type2),
         ) {
             Ok(attr) => {
+                // RFC 9251 §9.7: canonical SMET keys remain extractable
+                // when announcement flags are invalid, as do zero-ESI Type 4
+                // keys (RFC 7432 §8.1.1) and Type 5 routes with both
+                // Overlay Indexes set (RFC 9136 §3.2). Retain all NLRI for
+                // RFC 7606 UPDATE-wide treat-as-withdraw, including valid
+                // siblings. MP_UNREACH deliberately bypasses these checks.
+                //
+                // RFC 9135 §9.1.1: a Type 2 with MAC Address Length 0 is
+                // treat-as-withdraw. The decoder dropped it from MP_REACH and
+                // MP_UNREACH alike: its RFC 7432 §7.2 key is not the 48-bit
+                // route's and is never stored, so withdrawing it must not
+                // touch the 48-bit route for the same MAC. In MP_UNREACH it
+                // withdraws nothing.
                 if let PathAttribute::MpReachNlri(mp) = &attr
-                    && let Err(error) = crate::evpn::validate_evpn_announcements(&mp.evpn_announced)
+                    && let Err(error) = if zero_mac_type2 > 0 {
+                        Err(DecodeError::MalformedField {
+                            message_type: "UPDATE",
+                            detail: "EVPN Type 2 MAC Address Length 0 (RFC 9135 §9.1.1)".into(),
+                        })
+                    } else {
+                        crate::evpn::validate_evpn_announcements(&mp.evpn_announced)
+                    }
                 {
-                    // RFC 9251 §9.7: canonical SMET keys remain extractable
-                    // when announcement flags are invalid, as do zero-ESI
-                    // Type 4 keys (RFC 7432 §8.1.1). Retain all NLRI
-                    // for RFC 7606 UPDATE-wide treat-as-withdraw, including
-                    // valid siblings. MP_UNREACH deliberately bypasses this.
                     malformed.push(MalformedAttribute {
                         type_code,
                         disposition: ErrorDisposition::TreatAsWithdraw,
@@ -1352,6 +1370,31 @@ pub(crate) fn decode_path_attributes_revised_observed(
                 });
             }
         }
+    }
+    // RFC 9136 §3.2 Type 5 Router's MAC rules: the Router's MAC Extended
+    // Community may follow MP_REACH_NLRI, so check once every attribute is
+    // decoded. Like
+    // the per-attribute EVPN checks above, the routes stay extractable for
+    // the UPDATE-wide withdrawal; skip if MP_REACH is already reported.
+    if !malformed
+        .iter()
+        .any(|m| m.type_code == attr_type::MP_REACH_NLRI)
+        && let Some(PathAttribute::MpReachNlri(mp)) = attrs
+            .iter()
+            .find(|attr| matches!(attr, PathAttribute::MpReachNlri(_)))
+        && let Err(error) = crate::evpn::validate_type5_router_mac(
+            &mp.evpn_announced,
+            attrs
+                .iter()
+                .find_map(PathAttribute::extended_communities)
+                .unwrap_or_default(),
+        )
+    {
+        malformed.push(MalformedAttribute {
+            type_code: attr_type::MP_REACH_NLRI,
+            disposition: ErrorDisposition::TreatAsWithdraw,
+            error,
+        });
     }
     malformed.extend(
         normalize_as4_attributes(&mut attrs, four_octet_as, true)
@@ -1765,6 +1808,10 @@ fn as_path_contains_zero(mut value: &[u8], asn_width: usize) -> bool {
     clippy::too_many_lines,
     reason = "single attribute decoder keeps type-specific validation and error mapping together"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "MP NLRI observation out-parameters are threaded to the per-family decoders"
+)]
 fn decode_attribute_value(
     flags: u8,
     type_code: u8,
@@ -1773,6 +1820,7 @@ fn decode_attribute_value(
     add_path_families: &[(Afi, Safi)],
     bgpls_discarded: &mut u32,
     evpn_discarded: &mut crate::evpn::EvpnNlriDiscardObservations,
+    evpn_zero_mac_type2: Option<&mut u32>,
 ) -> Result<PathAttribute, DecodeError> {
     // Validate the required flags for known attribute types (RFC 4271 §6.3).
     // RFC 4271 §4.3 requires Partial=0 for optional non-transitive
@@ -2059,13 +2107,18 @@ fn decode_attribute_value(
                     detail: format!("MP_REACH_NLRI length {} (minimum 5)", value.len()),
                 });
             }
-            decode_mp_reach_nlri(value, add_path_families, bgpls_discarded, evpn_discarded).map_err(
-                |error| DecodeError::UpdateAttributeError {
-                    subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
-                    data: attr_error_data(flags, type_code, value),
-                    detail: error.to_string(),
-                },
+            decode_mp_reach_nlri(
+                value,
+                add_path_families,
+                bgpls_discarded,
+                evpn_discarded,
+                evpn_zero_mac_type2,
             )
+            .map_err(|error| DecodeError::UpdateAttributeError {
+                subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                data: attr_error_data(flags, type_code, value),
+                detail: error.to_string(),
+            })
         }
         attr_type::MP_UNREACH_NLRI => {
             if value.len() < 3 {
@@ -2075,12 +2128,18 @@ fn decode_attribute_value(
                     detail: format!("MP_UNREACH_NLRI length {} (minimum 3)", value.len()),
                 });
             }
-            decode_mp_unreach_nlri(value, add_path_families, bgpls_discarded, evpn_discarded)
-                .map_err(|error| DecodeError::UpdateAttributeError {
-                    subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
-                    data: attr_error_data(flags, type_code, value),
-                    detail: error.to_string(),
-                })
+            decode_mp_unreach_nlri(
+                value,
+                add_path_families,
+                bgpls_discarded,
+                evpn_discarded,
+                evpn_zero_mac_type2,
+            )
+            .map_err(|error| DecodeError::UpdateAttributeError {
+                subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                data: attr_error_data(flags, type_code, value),
+                detail: error.to_string(),
+            })
         }
         attr_type::PMSI_TUNNEL => {
             let pmsi = crate::pmsi::PmsiTunnel::decode(value)?;
@@ -2175,6 +2234,7 @@ fn decode_mp_reach_nlri(
     add_path_families: &[(Afi, Safi)],
     bgpls_discarded: &mut u32,
     evpn_discarded: &mut crate::evpn::EvpnNlriDiscardObservations,
+    evpn_zero_mac_type2: Option<&mut u32>,
 ) -> Result<PathAttribute, DecodeError> {
     if value.len() < 5 {
         return Err(DecodeError::MalformedField {
@@ -2322,7 +2382,11 @@ fn decode_mp_reach_nlri(
     }
     // EVPN (AFI 25 / SAFI 70): NLRI is typed EVPN routes, not prefixes
     if family == MpNlriFamily::Evpn {
-        let routes = crate::evpn::decode_evpn_nlri_observed(nlri_bytes, evpn_discarded)?;
+        let routes = crate::evpn::decode_evpn_nlri_observed(
+            nlri_bytes,
+            evpn_discarded,
+            evpn_zero_mac_type2,
+        )?;
         return Ok(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi,
             safi,
@@ -2504,6 +2568,7 @@ fn decode_mp_unreach_nlri(
     add_path_families: &[(Afi, Safi)],
     bgpls_discarded: &mut u32,
     evpn_discarded: &mut crate::evpn::EvpnNlriDiscardObservations,
+    evpn_zero_mac_type2: Option<&mut u32>,
 ) -> Result<PathAttribute, DecodeError> {
     if value.len() < 3 {
         return Err(DecodeError::MalformedField {
@@ -2540,7 +2605,11 @@ fn decode_mp_unreach_nlri(
     }
     // EVPN (AFI 25 / SAFI 70): withdrawn is typed EVPN routes, not prefixes
     if family == MpNlriFamily::Evpn {
-        let routes = crate::evpn::decode_evpn_nlri_observed(withdrawn_bytes, evpn_discarded)?;
+        let routes = crate::evpn::decode_evpn_nlri_observed(
+            withdrawn_bytes,
+            evpn_discarded,
+            evpn_zero_mac_type2,
+        )?;
         return Ok(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi,
             safi,
@@ -6258,7 +6327,7 @@ mod tests {
             0, // reserved
             3, 0, // EVPN-style NLRI (route type 3, length 0)
         ];
-        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0, &mut Vec::new()).unwrap_err();
+        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0, &mut Vec::new(), None).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -6276,7 +6345,7 @@ mod tests {
             70,   // SAFI = Evpn
             3, 0, // EVPN-style withdrawal (route type 3, length 0)
         ];
-        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0, &mut Vec::new()).unwrap_err();
+        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0, &mut Vec::new(), None).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -6456,7 +6525,7 @@ mod tests {
             40, // invalid IPv4 prefix length if parsed as unicast
             10, 0, 0, 0, 0,
         ];
-        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0, &mut Vec::new()).unwrap_err();
+        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0, &mut Vec::new(), None).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -6481,7 +6550,7 @@ mod tests {
             129,  // invalid IPv6 prefix length if parsed as unicast
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0, &mut Vec::new()).unwrap_err();
+        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0, &mut Vec::new(), None).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -6504,7 +6573,7 @@ mod tests {
             0,    // NH-Len = 0
             0,    // reserved
         ];
-        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0, &mut Vec::new()).unwrap_err();
+        let err = decode_mp_reach_nlri(&bytes, &[], &mut 0, &mut Vec::new(), None).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(
@@ -6521,7 +6590,7 @@ mod tests {
             0x00, 0x19, // AFI = L2VPN
             133,  // SAFI = FlowSpec
         ];
-        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0, &mut Vec::new()).unwrap_err();
+        let err = decode_mp_unreach_nlri(&bytes, &[], &mut 0, &mut Vec::new(), None).unwrap_err();
         match err {
             DecodeError::MalformedField { detail, .. } => {
                 assert!(

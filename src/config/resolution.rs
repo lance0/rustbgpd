@@ -490,11 +490,30 @@ impl Config {
     /// # Errors
     /// Returns only [`ConfigError::PolicyChainTooLarge`].
     pub(crate) fn validate_effective_policy_chain_nodes(&self) -> Result<(), ConfigError> {
+        self.validate_effective_policy_chains(false)
+    }
+
+    /// [`Self::validate_effective_policy_chain_nodes`], plus, with
+    /// `export_families`, the family-aware export check: an effective export
+    /// chain whose `set_next_hop` can reach a labeled-unicast or VPN family
+    /// the binding carries is refused. The rewrite would keep the received
+    /// labels, which are valid only at the received next hop (RFC 8277
+    /// §3.2.2), and rustbgpd allocates none. `Config::validate` runs this
+    /// form, so startup, SIGHUP and API-driven commits all refuse it.
+    pub(crate) fn validate_effective_policy_chains(
+        &self,
+        export_families: bool,
+    ) -> Result<(), ConfigError> {
         let mut stores = ChunkedSetStore::default();
         for neighbor in &self.neighbors {
-            chain_budget_only(
-                self.effective_policy_for_neighbor_in(neighbor, false, stores.next_store())
-                    .err(),
+            let binding = || match &neighbor.peer_group {
+                Some(group) => format!("neighbor {} (peer_group {group:?})", neighbor.address),
+                None => format!("neighbor {}", neighbor.address),
+            };
+            self.validate_effective_chains_of(
+                neighbor,
+                export_families.then_some(binding),
+                stores.next_store(),
             )?;
         }
         for range in &self.dynamic_neighbors {
@@ -505,10 +524,66 @@ impl Config {
                     range.description.as_deref().unwrap_or(&range.peer_group),
                     &range.peer_group,
                 );
-                chain_budget_only(
-                    self.effective_policy_for_neighbor_in(&neighbor, false, stores.next_store())
-                        .err(),
+                let binding = || {
+                    format!(
+                        "dynamic_neighbors range {} (peer_group {:?})",
+                        range.prefix, range.peer_group
+                    )
+                };
+                self.validate_effective_chains_of(
+                    &neighbor,
+                    export_families.then_some(binding),
+                    stores.next_store(),
                 )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One binding of [`Self::validate_effective_policy_chains`]. Resolution
+    /// errors other than the node budget are left to the named-chain checks;
+    /// `binding` (present only for the family check) labels the error.
+    fn validate_effective_chains_of(
+        &self,
+        neighbor: &Neighbor,
+        binding: Option<impl FnOnce() -> String>,
+        store: &mut SetStore,
+    ) -> Result<(), ConfigError> {
+        let chains = match self.effective_policy_for_neighbor_in(neighbor, false, store) {
+            Ok(chains) => chains,
+            Err(error) => return chain_budget_only(Some(error)),
+        };
+        let (Some(binding), Some(export)) = (binding, chains.export.as_ref()) else {
+            return Ok(());
+        };
+        let Ok(peer_addr) = neighbor.address.parse::<IpAddr>() else {
+            return Ok(());
+        };
+        let group = self.peer_group_for_neighbor(neighbor)?;
+        for (afi, safi) in Self::resolved_families(neighbor, group, peer_addr)? {
+            let Some(family) = rustbgpd_policy::RouteFamily::from_afi_safi(afi, safi)
+                .filter(|family| family.carries_labels())
+            else {
+                continue;
+            };
+            if let Some((policy, term)) = export.set_next_hop_reaching(family) {
+                let policy = policy.map_or_else(
+                    || "inline export_policy".to_string(),
+                    |name| format!("export policy {name:?}"),
+                );
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "{}: {policy} ({term}) can apply set_next_hop to {} routes; a \
+                         labeled-unicast or VPN route keeps its received labels, which are \
+                         valid only at the received next hop (RFC 8277 §3.2.2), so \
+                         set_next_hop is refused for ipv4_labeled_unicast, \
+                         ipv6_labeled_unicast, l3vpn_ipv4_unicast and l3vpn_ipv6_unicast. \
+                         Bind the policy only to unicast peers, or in .rpol guard the action \
+                         with `route.family == ipv4-unicast` or `route.family == ipv6-unicast`",
+                        binding(),
+                        rustbgpd_wire::family_label(afi, safi).unwrap_or(family.as_str()),
+                    ),
+                });
             }
         }
         Ok(())
@@ -966,6 +1041,33 @@ impl Config {
         transport.max_prefixes_received_ipv6 = neighbor
             .max_prefixes_received_ipv6
             .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6));
+        // Indexed by `PrefixLimitFamily`, in `PrefixLimitFamily::ALL` order.
+        transport.max_prefixes_family = rustbgpd_transport::FamilyPrefixLimits([
+            neighbor
+                .max_prefixes_l3vpn_ipv4_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_l3vpn_ipv4_unicast)),
+            neighbor
+                .max_prefixes_l3vpn_ipv6_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_l3vpn_ipv6_unicast)),
+            neighbor
+                .max_prefixes_ipv4_labeled_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4_labeled_unicast)),
+            neighbor
+                .max_prefixes_ipv6_labeled_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6_labeled_unicast)),
+            neighbor
+                .max_prefixes_l2vpn_evpn
+                .or_else(|| group.and_then(|g| g.max_prefixes_l2vpn_evpn)),
+            neighbor
+                .max_prefixes_ipv4_flowspec
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4_flowspec)),
+            neighbor
+                .max_prefixes_ipv6_flowspec
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6_flowspec)),
+            neighbor
+                .max_prefixes_rtc
+                .or_else(|| group.and_then(|g| g.max_prefixes_rtc)),
+        ]);
         // Spelling and cross-field rules are enforced in `Config::validate`;
         // an unparseable value cannot reach a loaded configuration.
         transport.max_prefix_action = neighbor
@@ -1120,6 +1222,10 @@ impl Config {
         // retention knobs — both construction paths must see them.
         transport.reject_retention_enabled = self.policy.reject_retention.enabled;
         transport.reject_retention_capacity = self.policy.reject_retention.capacity;
+        transport.local_revalidation = self
+            .rpki
+            .as_ref()
+            .is_some_and(|rpki| rpki.local_revalidation);
 
         let policy =
             self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, store)?;
@@ -1189,6 +1295,14 @@ impl Config {
             max_prefixes_ipv6: None,
             max_prefixes_received_ipv4: None,
             max_prefixes_received_ipv6: None,
+            max_prefixes_l3vpn_ipv4_unicast: None,
+            max_prefixes_l3vpn_ipv6_unicast: None,
+            max_prefixes_ipv4_labeled_unicast: None,
+            max_prefixes_ipv6_labeled_unicast: None,
+            max_prefixes_l2vpn_evpn: None,
+            max_prefixes_ipv4_flowspec: None,
+            max_prefixes_ipv6_flowspec: None,
+            max_prefixes_rtc: None,
             max_prefix_action: None,
             max_prefix_warning_percent: None,
             max_prefixes_out_ipv4: None,

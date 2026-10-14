@@ -270,6 +270,33 @@ def check_systemd_exit_70(
             )
 
 
+def check_systemd_core_isolation(
+    errors: list[str], text: str, *, packaged: bool = False
+) -> None:
+    """ADR-0140: the shipped unit passes one runtime-state directory to the
+    daemon and to the stop-hook release helper."""
+    binary = "/usr/bin/rustbgpd" if packaged else "/usr/local/bin/rustbgpd"
+    expected = {
+        ("Service", "ExecStart"): (
+            f"{binary} --runtime-state-dir /var/lib/rustbgpd /etc/rustbgpd/config.toml"
+        ),
+        ("Service", "ExecStopPost"): (
+            f"{binary} --release-core-isolation --runtime-state-dir /var/lib/rustbgpd"
+        ),
+    }
+    assignments = systemd_assignments(text)
+    for (section, key), value in expected.items():
+        actual = [
+            found
+            for found_section, found_key, found in assignments
+            if found_section == section and found_key == key
+        ]
+        if actual != [value]:
+            errors.append(
+                f"systemd unit: [{section}] {key} must occur once with value {value!r}, got {actual!r}"
+            )
+
+
 def check_systemd_unit(errors: list[str], text: str) -> None:
     assignments = systemd_assignments(text)
     for (section, key), expected in SYSTEMD_DIRECTIVES.items():
@@ -494,7 +521,9 @@ def check(root: Path) -> list[str]:
         return (root / path).read_text(encoding="utf-8")
 
     try:
-        check_systemd_unit(errors, read(SYSTEMD_UNIT))
+        unit = read(SYSTEMD_UNIT)
+        check_systemd_unit(errors, unit)
+        check_systemd_core_isolation(errors, unit)
         check_systemd_template(errors, read(SYSTEMD_TEMPLATE))
         check_systemd_container(errors, read(SYSTEMD_CONTAINER_UNIT))
         check_container_deployment_docs(
@@ -524,7 +553,8 @@ def check(root: Path) -> list[str]:
             build_packages,
             (
                 exact("for unit in rustbgpd.service 'rustbgpd@.service'; do"),
-                r"^\s+sed 's\|\^ExecStart=/usr/local/bin/rustbgpd \|ExecStart=/usr/bin/rustbgpd \|' \\$",
+                r"^\s+sed -e 's\|\^ExecStart=/usr/local/bin/rustbgpd \|ExecStart=/usr/bin/rustbgpd \|' \\$",
+                r"^\s+-e 's\|\^ExecStopPost=/usr/local/bin/rustbgpd \|ExecStopPost=/usr/bin/rustbgpd \|' \\$",
                 r"^grep -qxF 'ExecStart=/usr/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config\.toml' \\$",
             ),
         )

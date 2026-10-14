@@ -30,7 +30,7 @@
 #   FRR 10.7.0:  per-neighbor `no neighbor X enforce-first-as`
 #                (global `no bgp enforce-first-as` alone is
 #                insufficient — the M19 finding)
-#   BIRD 2.19.2: `enforce first as off` (also the default)
+#   BIRD 2.19.3: `enforce first as off` (also the default)
 #   GoBGP 4.10.0: no first-AS enforcement exists; nothing to disable
 #
 # Cross-subnet static routes make the preserved BGP NEXT_HOPs
@@ -39,7 +39,7 @@
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
-#   docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
+#   docker build -t bird:v2.19.3-m83 -f tests/interop/Dockerfile.bird2 tests/interop
 #   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.10.0 --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe -t gobgp:v4.10.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   docker pull quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b
 #   containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
@@ -72,7 +72,7 @@ topology:
 
     bird:
       kind: linux
-      image: bird:v2.19.2-m83
+      image: bird:v2.19.3-m83
       cmd: sleep infinity
       binds:
         - ./configs/bird-m83.conf:/etc/bird/bird.conf:ro

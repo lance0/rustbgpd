@@ -1654,6 +1654,7 @@ impl Config {
         // orchestrator; invalid ES config must not silently degrade to
         // "orchestrator not spawned".
         let _ = self.resolve_ethernet_segments()?;
+        validate_evpn_core_isolation(self)?;
         // Validate EVPN IP-VRF config at load time so an operator who
         // declares a malformed [[evpn_ip_vrfs]] block, a duplicate
         // L3VNI, or an L3VNI that collides with an L2VNI sees the
@@ -1667,8 +1668,9 @@ impl Config {
         validate_bfd(self)?;
         // Every named chain (global, group, neighbor) already went through
         // `resolve_chain_with_store` above, which charges the same node budget, so only
-        // the inherited effective chains remain to be bounded here.
-        self.validate_effective_policy_chain_nodes()?;
+        // the inherited effective chains remain to be bounded here. The same pass
+        // checks each effective export chain against its binding's families.
+        self.validate_effective_policy_chains(true)?;
 
         Ok(())
     }
@@ -1973,6 +1975,88 @@ fn validate_reserved_policy_names(config: &Config) -> Result<(), ConfigError> {
                      (ADR-0112) and cannot be defined by an operator policy; rename it"
                 ),
             });
+        }
+    }
+    Ok(())
+}
+
+/// ADR-0140 decision 1: `[evpn_core_isolation]` needs a bound segment on
+/// Linux, bounded timers with the backstop not below the settle hold,
+/// unique bindings while enabled, and no uplink that names a bound
+/// interface (rustbgpd's own admin-down of it would latch isolation).
+fn validate_evpn_core_isolation(config: &Config) -> Result<(), ConfigError> {
+    // IFNAMSIZ-1, as for `[[ethernet_segments]].interface`.
+    const IFNAMSIZ_MAX: usize = 15;
+    let Some(table) = config.evpn_core_isolation.as_ref() else {
+        return Ok(());
+    };
+    let invalid = |reason: String| ConfigError::InvalidEvpnCoreIsolation { reason };
+    if !cfg!(target_os = "linux") {
+        return Err(invalid(
+            "the core-isolation hold drives Linux link admin state; it needs the EVPN \
+             dataplane on Linux"
+                .to_string(),
+        ));
+    }
+    let bound: Vec<(&str, &str)> = config
+        .ethernet_segments
+        .iter()
+        .filter_map(|segment| Some((segment.interface.as_deref()?, segment.esi.as_str())))
+        .collect();
+    if bound.is_empty() {
+        return Err(invalid(
+            "requires at least one [[ethernet_segments]] entry with an `interface` \
+             binding; unbound segments have no link to hold"
+                .to_string(),
+        ));
+    }
+    if table.hold_after_sync_seconds > 3600 {
+        return Err(invalid(format!(
+            "hold_after_sync_seconds {} outside the supported range 0..=3600",
+            table.hold_after_sync_seconds
+        )));
+    }
+    if !(1..=3600).contains(&table.backstop_seconds) {
+        return Err(invalid(format!(
+            "backstop_seconds {} outside the supported range 1..=3600",
+            table.backstop_seconds
+        )));
+    }
+    if table.backstop_seconds < table.hold_after_sync_seconds {
+        return Err(invalid(format!(
+            "backstop_seconds {} is below hold_after_sync_seconds {}; the backstop \
+             would always release before the settle hold",
+            table.backstop_seconds, table.hold_after_sync_seconds
+        )));
+    }
+    if table.enabled {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for (interface, esi) in &bound {
+            if let Some(first) = seen.insert(interface, esi) {
+                return Err(invalid(format!(
+                    "interface {interface:?} is bound by both esi {first:?} and esi \
+                     {esi:?}; while the hold is enabled each interface may be bound by \
+                     only one segment"
+                )));
+            }
+        }
+    }
+    let mut uplinks = HashSet::new();
+    for uplink in &table.uplinks {
+        if uplink.is_empty() || uplink.len() > IFNAMSIZ_MAX {
+            return Err(invalid(format!(
+                "uplink {uplink:?} is not a Linux interface name (1..={IFNAMSIZ_MAX} \
+                 characters)"
+            )));
+        }
+        if !uplinks.insert(uplink.as_str()) {
+            return Err(invalid(format!("duplicate uplink {uplink:?}")));
+        }
+        if let Some((_, esi)) = bound.iter().find(|(interface, _)| *interface == uplink) {
+            return Err(invalid(format!(
+                "uplink {uplink:?} is the bound interface of esi {esi:?}; the hold would \
+                 take its own uplink down and never release"
+            )));
         }
     }
     Ok(())
@@ -2997,7 +3081,7 @@ fn validate_max_prefix_modes(
         return Err(ConfigError::InvalidNeighborConfig {
             address: subject.to_string(),
             field: "max_prefix_action".to_string(),
-            reason: "\"block\" applies to the per-family unicast bounds only; unset the aggregate \
+            reason: "\"block\" applies to the per-family bounds only; unset the aggregate \
                      max_prefixes"
                 .to_string(),
         });

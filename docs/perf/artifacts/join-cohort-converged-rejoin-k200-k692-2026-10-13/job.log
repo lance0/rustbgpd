@@ -1,0 +1,26 @@
+2026-10-13T00:49:45Z prebuilt binaries from <queue-dir>/binaries/rejoin (no in-window build)
+2026-10-13T00:50:16Z base-k200-rep1 start load=1.40 1.63 1.52
+2026-10-13T00:51:32Z base-k200-rep1 harness_rc=1 daemon_rc=0
+2026-10-13T00:52:02Z head-k200-rep1 start load=1.64 1.67 1.55
+2026-10-13T00:53:50Z head-k200-rep1 harness_rc=0 daemon_rc=0
+2026-10-13T00:54:20Z head-k692-rep1 start load=1.24 1.52 1.51
+2026-10-13T00:56:28Z head-k692-rep1 harness_rc=0 daemon_rc=0
+2026-10-13T00:56:58Z base-k692-rep1 start load=1.40 1.49 1.50
+2026-10-13T01:03:04Z base-k692-rep1 harness_rc=0 daemon_rc=0
+2026-10-13T01:04:04Z base-k692-rep2 start load=1.44 1.91 1.75
+2026-10-13T01:10:11Z base-k692-rep2 harness_rc=0 daemon_rc=0
+2026-10-13T01:11:11Z head-k692-rep2 start load=1.65 2.10 1.97
+2026-10-13T01:13:18Z head-k692-rep2 harness_rc=0 daemon_rc=0
+2026-10-13T01:13:48Z head-k200-rep2 start load=1.27 1.76 1.85
+2026-10-13T01:15:37Z head-k200-rep2 harness_rc=0 daemon_rc=0
+2026-10-13T01:16:37Z base-k200-rep2 start load=1.45 1.68 1.81
+2026-10-13T01:17:52Z base-k200-rep2 harness_rc=1 daemon_rc=0
+2026-10-13T01:18:22Z base-k200-rep3 start load=1.58 1.64 1.78
+2026-10-13T01:21:22Z base-k200-rep3 harness_rc=0 daemon_rc=0
+2026-10-13T01:22:22Z head-k200-rep3 start load=1.48 1.90 1.88
+2026-10-13T01:24:11Z head-k200-rep3 harness_rc=0 daemon_rc=0
+2026-10-13T01:25:11Z head-k692-rep3 start load=1.45 1.79 1.84
+2026-10-13T01:27:18Z head-k692-rep3 harness_rc=0 daemon_rc=0
+2026-10-13T01:27:48Z base-k692-rep3 start load=1.35 1.68 1.79
+2026-10-13T01:33:54Z base-k692-rep3 harness_rc=0 daemon_rc=0
+2026-10-13T01:33:54Z analyzer rc=4

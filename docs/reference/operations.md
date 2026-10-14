@@ -1304,9 +1304,10 @@ synchronous actor work: a clone already running cannot be interrupted.
 ### Peer max-prefix exceeded
 
 When a peer exceeds `max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
-or the pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6`
-bounds, the daemon sends a NOTIFICATION and tears down the
-session. Without negotiated Notification GR this is Cease/1 (Maximum Number of
+the pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6`
+bounds, or a non-unicast `max_prefixes_<family>` bound (VPN, labeled unicast,
+EVPN, FlowSpec, RT-Constrain), the daemon sends a NOTIFICATION and tears down
+the session. Without negotiated Notification GR this is Cease/1 (Maximum Number of
 Prefixes Reached). With the RFC 8538 N-bit, the daemon sends outer Cease/9
 (Hard Reset) whose data encapsulates the same Cease/1 reason and RFC 4486 data,
 preventing the over-limit routes from being retained as stale. By default the
@@ -1422,16 +1423,21 @@ rather than derived from placeholder zero counts.
 Prometheus exposes the same live actor authority as
 `bgp_max_prefix_usage`, `bgp_max_prefix_limit`, and
 `bgp_max_prefix_headroom`, keyed by `peer` and bounded `scope`
-(`aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or
-`ipv6_unicast_received`). Usage is the session
+(`aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
+`ipv6_unicast_received`, or a non-unicast family label: `l3vpn_ipv4_unicast`,
+`l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`,
+`l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`). Usage is the session
 actor's enforcement count, not an alias for `bgp_rib_prefixes`: in particular,
 unicast Add-Path IDs collapse to one unique prefix while the aggregate also
 includes max-prefix-counted non-unicast identities. Limit and headroom series
 exist only for finite configured bounds. The two `*_received` scopes report
 the pre-policy count bounded by `max_prefixes_received_*` (announced prefixes,
 accepted or rejected) and exist — usage included — only while that bound is
-configured, because rejected identities are not tracked otherwise. All
-capacity families are
+configured, because rejected identities are not tracked otherwise. A
+non-unicast family scope exists only while its `max_prefixes_<family>` bound
+is configured; its usage counts unique accepted routes with Add-Path paths
+collapsed, while the aggregate keeps counting VPN and labeled-unicast Add-Path
+paths separately. All capacity families are
 removed when the session goes down and republished from fresh actor state on
 reconnect; GR-retained RIB rows therefore never appear as live session usage.
 
@@ -1668,7 +1674,7 @@ exactly under the floods these drops account for.
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
 | `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, or `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait) |
-| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`; series are absent while the session is down, and the `*_received` scopes are absent while their `max_prefixes_received_*` bound is unset |
+| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, `ipv6_unicast_received`, or a non-unicast family (`l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`); series are absent while the session is down, and the `*_received` and non-unicast family scopes are absent while their bound is unset |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
 | `bgp_max_prefix_blocking{peer,scope}` | 1 while a `max_prefix_action = "block"` episode is open for a finite scope — net-new prefixes are being withheld until usage falls back under the bound; present for every finite scope, reaped with the other capacity series |
@@ -1853,12 +1859,13 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_as_path_loop_detected_total{peer}` | Announced NLRI rejected because our own ASN appears in the received `AS_PATH` (RFC 4271 §9.1.2), counted across every address family, including EVPN and FlowSpec. No `reason` label — the mechanism is the metric name; withdrawals in the same UPDATE are still processed |
 | `bgp_rr_loop_detected_total{peer}` | UPDATEs rejected by route-reflection loop detection (RFC 4456 §8). No `reason` label; the debug log line emitted with each increment carries `reason=originator_id` (received `ORIGINATOR_ID` equals our router-id) or `reason=cluster_list` (our cluster-id already in `CLUSTER_LIST`) |
 | `bgp_bgpls_nlri_discarded_total{peer}` | Known BGP-LS NLRIs dropped for out-of-order descriptor TLVs (RFC 9552 fault management). The affected NLRI is isolated and the session is preserved; each increment carries a `family=bgp_ls` debug log line. Fatal BGP-LS framing/length errors are not counted here — they still reset the session |
+| `bgp_evpn_recovery_provenance_exhausted_total{cause}` | EVPN recovery-provenance resets accepted by the exact captured connection. `cause` is `peer_limit`, `daemon_limit`, or `allocation_failure`; there are no peer or generation labels. Full command queues retain a bounded retry. Stale, closed, duplicate, or merely queued requests do not increment this counter. One structured WARN includes the reset peer/session, attempted peer/daemon byte charges and both caps when the reset is accepted; it identifies a distinct limiting peer when shared metadata resizing would exceed another peer's cap. This is a resource-pressure session reset, not transparent recovery. |
 | `bgp_evpn_nlri_discarded_total{peer}` | Unrecognized or unsupported EVPN typed NLRIs discarded under RFC 7606 §5.4 while supported routes in the same MP attribute and the session are preserved. This existing counter remains the peer aggregate across announcements and withdrawals. Malformed EVPN framing and malformed payloads for supported types are not counted here and retain their existing decode-error handling. |
 | `bgp_evpn_nlri_discarded_by_type_total{peer,route_type}` | The same discards separated by decimal wire route type (bounded to one octet). One WARN per type per TCP connection identifies the peer, `family=evpn`, `route_type`, and initial `discarded` count; DEBUG records retain every per-type count per UPDATE. Repeated discards continue incrementing both counters. Ordinary reconnects preserve counters and re-arm warnings; configured-peer deletion reaps all type series. Use this counter to identify unsupported routes sent by a peer, such as multicast types 7–8; these routes do not enter the RIB or get reflected. |
 | `bgp_path_attribute_discarded_total{peer,type_code}` | Surviving decoded attributes removed by effective `discard_path_attributes`, plus well-formed ORIGINATOR_ID (`9`) and CLUSTER_LIST (`10`) received from an external neighbor, which RFC 7606 §7.9/§7.10 discard without any configuration (an attribute matching both counts once); `type_code` is the decimal wire type. Increments once per removed attribute occurrence in an UPDATE, not once per NLRI, and each peer/type/update produces one bounded DEBUG record. RFC 7606-removed malformed attributes do not increment it; their reported causes appear in `bgp_update_malformed_causes_total`. Ordinary session resets preserve the counter; configured-peer deletion reaps all of its type-code series. |
 | `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). Each increment is accompanied by a warn log line per malformed attribute and, at DEBUG, the §6 full-message hex capture |
 | `bgp_update_malformed_causes_total{peer,type_code,reason,disposition}` | Causes reported while processing malformed UPDATEs, with the final applied disposition on every cause. `type_code` is decimal 0–255 or `none` when no attribute type is attributable. Multiple independent causes can occur in one UPDATE or attribute; this is neither an UPDATE nor an NLRI count. Each prohibited AS-set attribute occurrence contributes one `as_set_prohibited` cause. A missing mandatory attribute caused by the decoder removing that same malformed attribute adds no second cause. Counters survive session resets; configured-peer deletion reaps them. |
-| `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a bounded OpenConfig AFI/SAFI label; `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, or `message_too_long`. `missing_ipv6_next_hop` also counts a link-local next hop withheld because the destination is not on the interface where it was learned (warning detail: `link-local next hop cannot be advertised outside its interface scope`), with or without capability 77. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
+| `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a bounded OpenConfig AFI/SAFI label; `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, `message_too_long`, or `multiple_labels_not_negotiated`. `multiple_labels_not_negotiated` counts a labeled-unicast or VPN route whose NLRI binds more than one MPLS label: rustbgpd does not advertise the RFC 8277 Multiple Labels Capability, so such a route is withheld from every peer and a copy already sent is withdrawn. Its zero series exists only for those four families. `missing_ipv6_next_hop` also counts a link-local next hop withheld because the destination is not on the interface where it was learned (warning detail: `link-local next hop cannot be advertised outside its interface scope`), with or without capability 77. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
 | `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by max-prefix teardown: bare Cease/1 without Notification GR, or RFC 8538 Hard Reset encapsulating Cease/1 when the N-bit was negotiated (see "Peer max-prefix exceeded" above) |
 | `bgp_max_prefix_blocked_total{peer,scope}` | Blocking episodes opened for a scope under `max_prefix_action = "block"`, counted once when the first net-new prefix is withheld by a full bound — not once per withheld prefix. Each increment marks a `bgp_max_prefix_blocking{peer,scope}` transition to 1; the scope must recover to 0 before another withheld prefix increments the counter again. Read it as how often a peer has driven a bound to full, never as how much it sent: a `rate()` over it measures episode frequency, the gauge answers whether prefixes are being withheld right now, and the peer's replay after recovery, or `rbgp rib received <addr>`, shows what is installed. Carries no prefix label: the withheld set is exactly the unbounded quantity the limit exists to contain |
 | `bgp_max_prefix_warning_total{peer,scope}` | `max_prefix_warning_percent` (or the bound itself under `max_prefix_action = "warning"`) crossings, one per crossing per scope; each is paired with one warn log line and one `max_prefix_warning` session event |
@@ -2591,7 +2598,7 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, whether or not a contribution is still retained (compare `bgp_rpki_cache_end_of_data_ready`) |
 | `bgp_rpki_cache_end_of_data_age_seconds{cache}` | Seconds since the cache's last accepted End of Data, computed at scrape time from a monotonic clock (the age `rbgp rpki caches` shows). Absent until the first End of Data and after a flush or expiry; advances through an ordinary disconnect. `bgp_rpki_cache_effective_expire_seconds` minus this value is the time left before the retained contribution expires |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
-| `bgp_validation_import_refreshes_total{dependency, outcome}` | Inbound Route Refresh work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, `skipped_state_unknown`, or `failed`. A state-query timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
+| `bgp_validation_import_refreshes_total{dependency, outcome}` | Import re-evaluation work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed` (an inbound Route Refresh was sent), `skipped_not_established`, `skipped_state_unknown`, or `failed`. With `[rpki] local_revalidation`, `revalidated_locally` counts peers re-evaluated from retained input and `fallback_refresh` counts peers whose retained input was incomplete and that were refreshed instead. A state-query or re-evaluation-request timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
 
 A sudden drop in VRP count likely means a cache connection was lost or the
 cache itself has stale data. A non-zero `failed` outcome on
@@ -2882,11 +2889,19 @@ inbound scopes add no checks. Link-local identities
 retain their `%interface` scope in both check names and details.
 
 `peer.<scoped-address>.inbound_prefix_bound` is yellow for an established
-eBGP peer with no effective inbound prefix bound after peer-group inheritance.
-It names the peer and the five keys that can set a bound: `max_prefixes`,
-`max_prefixes_ipv4`, `max_prefixes_ipv6`, `max_prefixes_received_ipv4`, and
-`max_prefixes_received_ipv6`. Static, API-added, and accepted dynamic peers
-are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
+eBGP peer when a negotiated family has no effective inbound prefix bound after
+peer-group inheritance. The aggregate `max_prefixes` covers every family.
+Otherwise each family in `negotiated_session.families` needs its own bound:
+`max_prefixes_ipv4` or `max_prefixes_received_ipv4` for IPv4 unicast,
+`max_prefixes_ipv6` or `max_prefixes_received_ipv6` for IPv6 unicast, and
+`max_prefixes_<family>` for the other families that have a per-family key.
+BGP-LS has no per-family key, so only the aggregate covers it. The detail names
+the peer and each unbounded family with the keys that would bound it. A bound
+on one family does not satisfy the check for another. When the daemon reports
+no negotiated families, any unicast bound satisfies the check, and the detail
+lists `max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
+`max_prefixes_received_ipv4`, and `max_prefixes_received_ipv6`. Static,
+API-added, and accepted dynamic peers are checked. iBGP, route-reflector clients, down sessions, and stale snapshots
 are excluded; the check also requires the daemon's global ASN and peer
 configuration to be available. This advisory warning retains exit status 0.
 
@@ -2929,6 +2944,8 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 | `rpki.cache.<addr>.session` | With configured caches and a reachable daemon, the daemon's `ListCaches` row for each `[rpki] cache_servers` entry | yellow when the RTR session is down (the detail says whether a contribution is still retained and its age), when the cache has no inventory row, or when `ListCaches` fails, for example because the token cannot read RPKI cache state |
 | `rpki.cache.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[rpki] cache_servers` entry | yellow on failure because this is CLI-network-vantage evidence, not daemon-side connectivity; use `rpki.cache.<addr>.session` and `rpki.vrp_table` for the daemon's state |
 | `evpn.es.<interface>.auto_esi` | With a reachable daemon, the `evpn_es_auto_esi_state` series at 1 for each `esi = "auto-lacp"` segment in the effective config | yellow when the segment is not ready (the detail names the reason, such as `no_partner` or `down`), when no readiness is reported for it yet, or when the metrics snapshot is unavailable; a not-ready segment originates nothing and is absent from `rbgp evpn es list` |
+| `evpn.es.<interface>.core_isolation` | With `[evpn_core_isolation] enabled = true`, the `evpn_es_core_isolation_state` series at 1 for each bound segment in the effective config | yellow for `isolated`, `backstop_released`, `suppressed_no_peer` or `overridden`, when no state is reported yet, or when the metrics snapshot is unavailable; red for `action_failed`, `ownership_ambiguous` or `uplink_overlap`. The two failure states `action_failed` and `ownership_ambiguous` are reported for any interface even with the table disabled or the binding removed, because a failed release can leave a link down |
+| `evpn.core_isolation.uplinks` | With `uplinks` configured, `evpn_core_isolated{signal="uplinks"}` at 1 while `signal="sessions"` reads 0 | yellow: every configured uplink lacks carrier while EVPN sessions are up, which points to a wrong `uplinks` list |
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
 | `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, crash reports, and the event-history DB write there |

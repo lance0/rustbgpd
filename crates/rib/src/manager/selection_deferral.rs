@@ -1577,6 +1577,9 @@ impl RibManager {
                 checkpoint();
                 self.rebuild_rtc_membership_and_restage_vpn(peer);
             }
+            // RFC 4684 §6 holds whose RT-Constrain EoR arrived during the
+            // deferral end here, behind the routes the rebuild emitted.
+            self.release_ready_rtc_eor_holds();
         }
         // Overflow state and logical byte budget stay sticky until every
         // typed store and RTC side effect for the family has completed.

@@ -30,7 +30,7 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build -t bird:v2.19.2-m85 -f tests/interop/Dockerfile.bird-v2192 tests/interop
+#   - docker build -t bird:v2.19.3-m85 -f tests/interop/Dockerfile.bird2 tests/interop
 #   - containerlab deploy -t tests/interop/m95-rfc8212-presence-frr-bird.clab.yml
 #   - grpcurl + jq on the host
 
@@ -43,8 +43,8 @@ export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 BIRD="clab-${TOPO}-bird"
-readonly BIRD_IMAGE="bird:v2.19.2-m85"
-readonly BIRD_VERSION="BIRD version 2.19.2"
+readonly BIRD_IMAGE="bird:v2.19.3-m85"
+readonly BIRD_VERSION="BIRD version 2.19.3"
 
 FRR_PEER="10.95.1.2"
 BIRD_PEER="10.95.2.2"

@@ -1,0 +1,490 @@
+//! Dormant G1 recovery boundaries; EVPN group staging is a later slice.
+//!
+//! G2 must supply the authoritative admissible member-key iterator before
+//! moving a clean projection, including its OLD pre-policy RTC input. Neither
+//! negotiated EVPN nor the current Loc-RIB/post-policy RTs prove ownership or
+//! reconstruct that prior. This module deliberately has no projection builder.
+
+use rustbgpd_wire::EvpnRouteKey;
+
+use super::update_groups::recovery_provenance::{Exhaustion, PeerSession, ProvenanceHandle};
+use super::{IpAddr, RibManager};
+use crate::adj_rib_out::AdjRibOut;
+use crate::route::EvpnRibRoute;
+use crate::update::EvpnRecoveryReset;
+
+/// Registration failed before a charged primary record existed. This bounded
+/// inline session control state retains reset handoff, not recovery keys. Its
+/// fixed size is excluded from the ledger's provenance-allocation charge.
+#[derive(Clone, Copy)]
+pub(super) struct PendingReset {
+    error: Exhaustion,
+    admitted: bool,
+}
+
+impl RibManager {
+    pub(in crate::manager) fn evpn_grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
+        let gid = self.grouped_member_of(peer)?;
+        self.group_ribs.get(&gid)?.owns_evpn.then_some(gid)
+    }
+
+    fn evpn_recovery_owner(&self, peer: IpAddr) -> Option<PeerSession> {
+        Some(PeerSession {
+            peer,
+            session_id: *self.outbound_session_ids.get(&peer)?,
+        })
+    }
+
+    pub(in crate::manager) fn evpn_recovery_handle(
+        &self,
+        peer: IpAddr,
+    ) -> Option<ProvenanceHandle> {
+        self.evpn_recovery
+            .primary_handle(self.evpn_recovery_owner(peer)?)
+    }
+
+    fn evpn_registration_reset(&self, peer: IpAddr) -> Option<PendingReset> {
+        let owner = self.evpn_recovery_owner(peer)?;
+        let sender = self.outbound_peers.get(&peer)?;
+        self.live_sessions
+            .get(&peer)?
+            .last()
+            .filter(|record| {
+                record.session_id == owner.session_id && record.outbound_tx.same_channel(sender)
+            })?
+            .evpn_recovery_reset
+    }
+
+    pub(in crate::manager) fn register_evpn_recovery(&mut self, peer: IpAddr, fresh: bool) -> bool {
+        if self.evpn_grouped_member_of(peer).is_none() {
+            return true;
+        }
+        if self.evpn_registration_reset(peer).is_some() {
+            self.retry_evpn_recovery_reset(peer);
+            return false;
+        }
+        let Some(owner) = self.evpn_recovery_owner(peer) else {
+            return false;
+        };
+        if self.evpn_recovery.primary_handle(owner).is_some() {
+            return true;
+        }
+        match self.evpn_recovery.register(owner) {
+            Ok(handle) => {
+                if !fresh {
+                    // An existing session needs G2's filtered prior capture;
+                    // a new record's sealed empty proof is for fresh sessions.
+                    let _ = self.evpn_recovery.finish_recovery(handle);
+                }
+                true
+            }
+            Err(error) => {
+                if let Some(record) = self.newest_live_session_mut(peer, owner.session_id) {
+                    record.evpn_recovery_reset = Some(PendingReset {
+                        error,
+                        admitted: false,
+                    });
+                }
+                self.retry_evpn_recovery_reset(peer);
+                self.mark_outbound_dirty(peer);
+                false
+            }
+        }
+    }
+
+    pub(in crate::manager) fn prepare_evpn_registration_replay(&mut self, peer: IpAddr) {
+        if self.evpn_grouped_member_of(peer).is_none() {
+            return;
+        }
+        let Some(handle) = self.evpn_recovery_handle(peer) else {
+            return;
+        };
+        if self.evpn_recovery.is_dormant(handle) {
+            self.capture_shared_evpn_admitted(peer);
+        }
+    }
+
+    /// Future private-to-shared commit supplies a real ownership claim first;
+    /// this reads the actual private admitted map, never a desired group view.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "live EVPN ownership transfer is deferred until complete G2 admission and view integration"
+        )
+    )]
+    pub(in crate::manager) fn capture_private_evpn_admitted(&mut self, peer: IpAddr) -> bool {
+        self.capture_evpn_admitted(peer, true)
+    }
+
+    pub(in crate::manager) fn capture_shared_evpn_admitted(&mut self, peer: IpAddr) -> bool {
+        self.capture_evpn_admitted(peer, false)
+    }
+
+    fn capture_evpn_admitted(&mut self, peer: IpAddr, private: bool) -> bool {
+        let Some(gid) = self.evpn_grouped_member_of(peer) else {
+            return false;
+        };
+        if !self.register_evpn_recovery(peer, false) {
+            return false;
+        }
+        let handle = self
+            .evpn_recovery_handle(peer)
+            .expect("registered EVPN owner");
+        match self.evpn_recovery.begin_capture(handle) {
+            Ok(false) => {
+                return self
+                    .evpn_recovery
+                    .proof(handle)
+                    .is_ok_and(|proof| proof.is_some());
+            }
+            Err(_) => {
+                self.retry_evpn_recovery_reset(peer);
+                return false;
+            }
+            Ok(true) => {}
+        }
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = std::cell::RefCell::new(|| {
+            super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", false);
+        });
+        let captured = if private {
+            capture_admitted_keys(
+                &mut self.evpn_recovery,
+                handle,
+                self.adj_ribs_out
+                    .get(&peer)
+                    .into_iter()
+                    .flat_map(crate::adj_rib_out::AdjRibOut::iter_evpn)
+                    .map(EvpnRibRoute::key),
+                &mut || checkpoint.borrow_mut()(),
+            )
+        } else {
+            let filter = self.member_rt_filter(peer);
+            let group = &self.group_ribs[&gid];
+            // A synthetic flag cannot make an incomplete ownership transfer
+            // authoritative: private bodies or missing received metadata mean
+            // the old shared projection is unknown, not an empty admission.
+            group.evpn_projection_complete_with_checkpoint(&mut || checkpoint.borrow_mut()())
+                && self
+                    .adj_ribs_out
+                    .get(&peer)
+                    .is_none_or(|rib| rib.evpn_len() == 0)
+                && capture_admitted_keys(
+                    &mut self.evpn_recovery,
+                    handle,
+                    group
+                        .evpn_member_projection_with_checkpoint(
+                            peer,
+                            self.cluster_id,
+                            filter.as_ref(),
+                            self.peer_unexportable.get(&peer),
+                            || checkpoint.borrow_mut()(),
+                        )
+                        .map(EvpnRibRoute::key),
+                    &mut || checkpoint.borrow_mut()(),
+                )
+        };
+        if !captured {
+            self.mark_outbound_dirty(peer);
+            self.retry_evpn_recovery_reset(peer);
+            return false;
+        }
+        self.evpn_recovery.seal_capture(handle).unwrap_or(false)
+    }
+
+    /// G2's pre-mutation capture seam. The iterator is already filtered for
+    /// source/RR/OLD-RTC eligibility and actual exact-export admission; its
+    /// producer must not walk current desired state after a missed send.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "G2 supplies the authoritative EVPN member projection before activation"
+        )
+    )]
+    pub(in crate::manager) fn capture_evpn_recovery_before_projection(
+        &mut self,
+        peer: IpAddr,
+        keys: impl Iterator<Item = EvpnRouteKey>,
+    ) -> bool {
+        if self.evpn_grouped_member_of(peer).is_none() {
+            return false;
+        }
+        if !self.register_evpn_recovery(peer, false) {
+            return false;
+        }
+        let handle = self
+            .evpn_recovery_handle(peer)
+            .expect("registered EVPN owner");
+        match self.evpn_recovery.begin_capture(handle) {
+            Ok(false) => {
+                return self
+                    .evpn_recovery
+                    .proof(handle)
+                    .is_ok_and(|proof| proof.is_some());
+            }
+            Err(_) => {
+                self.retry_evpn_recovery_reset(peer);
+                return false;
+            }
+            Ok(true) => {}
+        }
+        for key in keys {
+            self.replacement_checkpoint(false);
+            if self.evpn_recovery.capture_key(handle, key).is_err() {
+                self.mark_outbound_dirty(peer);
+                self.retry_evpn_recovery_reset(peer);
+                return false;
+            }
+        }
+        self.evpn_recovery.seal_capture(handle).unwrap_or(false)
+    }
+
+    pub(in crate::manager) fn evpn_recovery_reset_pending(&self, peer: IpAddr) -> bool {
+        self.evpn_registration_reset(peer).is_some()
+            || self
+                .evpn_recovery_handle(peer)
+                .is_some_and(|handle| self.evpn_recovery.exhaustion(handle).is_some())
+    }
+
+    /// The callback only admits to the lifecycle owner's existing queue.
+    /// Success suppresses duplicate requests; transport execution validates
+    /// both session ID and channel token and owns the counter/warning receipt.
+    pub(in crate::manager) fn retry_evpn_recovery_reset(&mut self, peer: IpAddr) {
+        let handle = self.evpn_recovery_handle(peer);
+        let error = if let Some(handle) = handle {
+            if self.evpn_recovery.reset_admitted(handle) {
+                return;
+            }
+            self.evpn_recovery.exhaustion(handle)
+        } else {
+            self.evpn_registration_reset(peer)
+                .filter(|pending| !pending.admitted)
+                .map(|pending| pending.error)
+        };
+        let (Some(error), Some(handler), Some(owner), Some(outbound)) = (
+            error,
+            self.evpn_recovery_reset.as_ref(),
+            self.evpn_recovery_owner(peer),
+            self.outbound_peers.get(&peer),
+        ) else {
+            return;
+        };
+        let (peer_limit_bytes, daemon_limit_bytes) = self.evpn_recovery.limits();
+        let admitted = handler(EvpnRecoveryReset {
+            peer,
+            session_id: owner.session_id,
+            outbound: outbound.clone(),
+            cause: error.cause,
+            limiting_peer: error.limiting_peer,
+            attempted_peer_bytes: error.attempted_peer_bytes,
+            attempted_daemon_bytes: error.attempted_daemon_bytes,
+            peer_limit_bytes,
+            daemon_limit_bytes,
+        });
+        if admitted {
+            if let Some(handle) = handle {
+                self.evpn_recovery.mark_reset_admitted(handle);
+            } else if let Some(record) = self.newest_live_session_mut(peer, owner.session_id)
+                && let Some(pending) = record.evpn_recovery_reset.as_mut()
+            {
+                pending.admitted = true;
+            }
+        }
+    }
+
+    pub(in crate::manager) fn evpn_advertised_resync_in_progress(&self, peer: IpAddr) -> bool {
+        // A retained primary/reset handoff remains authoritative through an
+        // exact connection replay or a move to the private projection. A
+        // negotiated EVPN family in an ordinary unicast group does not.
+        self.evpn_recovery_reset_pending(peer)
+            || self
+                .evpn_recovery_handle(peer)
+                .is_some_and(|handle| !self.evpn_recovery.is_dormant(handle))
+            || self.evpn_grouped_member_of(peer).is_some_and(|gid| {
+                self.dirty_peers.contains(&peer)
+                    || self.group_ribs[&gid].dirty_members.contains(&peer)
+            })
+    }
+
+    /// Called with an outbound queue permit, before any admission-side
+    /// mutation. Sorting uses the existing owned batch, without key scratch.
+    pub(in crate::manager) fn reserve_evpn_recovery_admission(
+        &mut self,
+        peer: IpAddr,
+        announce: &mut [EvpnRibRoute],
+        withdraw: &mut Vec<EvpnRouteKey>,
+    ) -> bool {
+        if self.evpn_recovery_reset_pending(peer) {
+            self.retry_evpn_recovery_reset(peer);
+            return false;
+        }
+        let Some(handle) = self.evpn_recovery_handle(peer) else {
+            return self.evpn_grouped_member_of(peer).is_none();
+        };
+        if self.evpn_recovery.is_dormant(handle) {
+            // Ordinary clean deltas need no recovery key allocation. G2's
+            // capture seam must run before a missed projection can advance.
+            return !self.dirty_peers.contains(&peer);
+        }
+        let Ok(Some(proof)) = self.evpn_recovery.proof(handle) else {
+            return false;
+        };
+        withdraw.retain(|key| proof.binary_search(key).is_ok());
+        withdraw.sort_unstable();
+        withdraw.dedup();
+        announce.sort_unstable_by_key(EvpnRibRoute::key);
+        match self.evpn_recovery.reserve_admission(
+            handle,
+            announce.iter().map(EvpnRibRoute::key),
+            withdraw,
+        ) {
+            Ok(true) => true,
+            Ok(false) => false,
+            Err(_) => {
+                self.mark_outbound_dirty(peer);
+                self.retry_evpn_recovery_reset(peer);
+                false
+            }
+        }
+    }
+
+    pub(in crate::manager) fn admit_evpn_recovery_batch(
+        &mut self,
+        peer: IpAddr,
+        announce: &[EvpnRibRoute],
+        withdraw: &[EvpnRouteKey],
+    ) {
+        let Some(handle) = self.evpn_recovery_handle(peer) else {
+            return;
+        };
+        if self.evpn_recovery.is_dormant(handle) {
+            return;
+        }
+        // Candidate capacity was reserved before any commit-side mutation;
+        // final gates only remove announces or add admitted withdrawals.
+        let admitted = self.evpn_recovery.apply_admitted(
+            handle,
+            announce.iter().map(EvpnRibRoute::key),
+            withdraw,
+        );
+        assert!(
+            admitted == Ok(true),
+            "EVPN pre-reserved admission must complete"
+        );
+    }
+
+    pub(in crate::manager) fn retain_evpn_recovery_withdrawals(
+        &self,
+        peer: IpAddr,
+        withdrawals: &mut Vec<EvpnRouteKey>,
+    ) {
+        let Some(handle) = self.evpn_recovery_handle(peer) else {
+            return;
+        };
+        if self.evpn_recovery.is_dormant(handle) {
+            return;
+        }
+        let proof = self.evpn_recovery.proof(handle).ok().flatten();
+        withdrawals.retain(|key| proof.is_some_and(|keys| keys.binary_search(key).is_ok()));
+        withdrawals.sort_unstable();
+        withdrawals.dedup();
+    }
+
+    pub(in crate::manager) fn finish_evpn_recovery(&mut self, peer: IpAddr) -> bool {
+        if self.evpn_recovery_reset_pending(peer) {
+            self.mark_outbound_dirty(peer);
+            self.retry_evpn_recovery_reset(peer);
+            return false;
+        }
+        let Some(handle) = self.evpn_recovery_handle(peer) else {
+            return true;
+        };
+        if self.evpn_recovery.is_dormant(handle) {
+            return true;
+        }
+        // The legacy resync has no shared EVPN projection or completeness
+        // barrier. G2 must settle explicitly after its complete admitted heal.
+        if self.evpn_grouped_member_of(peer).is_some() {
+            self.mark_outbound_dirty(peer);
+            return false;
+        }
+        let actual = self.adj_ribs_out.get(&peer);
+        let matches = self.evpn_recovery.proof(handle).is_ok_and(|proof| {
+            proof.is_some_and(|keys| {
+                actual.map_or(0, AdjRibOut::evpn_len) == keys.len()
+                    && actual.is_none_or(|rib| {
+                        rib.iter_evpn()
+                            .all(|route| keys.binary_search(&route.key()).is_ok())
+                    })
+            })
+        });
+        if !matches {
+            self.mark_outbound_dirty(peer);
+            return false;
+        }
+        if self.evpn_recovery.finish_recovery(handle) != Ok(true) {
+            self.mark_outbound_dirty(peer);
+            return false;
+        }
+        true
+    }
+
+    /// G2 calls this only after its entire recovery batch was admitted, with
+    /// the current authoritative admissible member keys in identity order.
+    /// Key equality supplements that delivery barrier; it cannot replace it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "G2 owns the complete EVPN recovery delivery barrier"
+        )
+    )]
+    pub(in crate::manager) fn settle_evpn_recovery(
+        &mut self,
+        peer: IpAddr,
+        current: impl Iterator<Item = EvpnRouteKey>,
+    ) -> bool {
+        let Some(handle) = self.evpn_recovery_handle(peer) else {
+            return false;
+        };
+        let matches = self
+            .evpn_recovery
+            .proof(handle)
+            .is_ok_and(|proof| proof.is_some_and(|keys| keys.iter().copied().eq(current)));
+        matches && self.evpn_recovery.finish_recovery(handle) == Ok(true)
+    }
+
+    pub(in crate::manager) fn retire_evpn_recovery(&mut self, peer: IpAddr) {
+        if let Some(handle) = self.evpn_recovery_handle(peer) {
+            self.evpn_recovery.retire_member(handle);
+        }
+        if let Some(owner) = self.evpn_recovery_owner(peer)
+            && let Some(outbound) = self.outbound_peers.get(&peer)
+            && let Some(record) = self.live_sessions.get_mut(&peer).and_then(|sessions| {
+                sessions.iter_mut().find(|record| {
+                    record.session_id == owner.session_id
+                        && record.outbound_tx.same_channel(outbound)
+                })
+            })
+        {
+            record.evpn_recovery_reset = None;
+        }
+    }
+}
+
+fn capture_admitted_keys(
+    ledger: &mut super::update_groups::recovery_provenance::EvpnRecoveryProvenance,
+    handle: ProvenanceHandle,
+    keys: impl Iterator<Item = EvpnRouteKey>,
+    checkpoint: &mut impl FnMut(),
+) -> bool {
+    for key in keys {
+        checkpoint();
+        if ledger.capture_key(handle, key).is_err() {
+            return false;
+        }
+    }
+    true
+}

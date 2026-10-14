@@ -1,0 +1,50 @@
+diff --git a/bench/scale/reloadstall/run-converged-rejoin.sh b/bench/scale/reloadstall/run-converged-rejoin.sh
+index 012592119..e5de34c7b 100755
+--- a/bench/scale/reloadstall/run-converged-rejoin.sh
++++ b/bench/scale/reloadstall/run-converged-rejoin.sh
+@@ -138,6 +138,7 @@ if [[ -n $DRY_RUN ]]; then
+     echo "base=$BASE_REF $BASE_SHA"
+     echo "head=$HEAD_REF $HEAD_SHA"
+     echo "out=$OUT smoke=${SMOKE:+1} quiet=$QUIET daemon_cpus=$DAEMON_CPUS engine_cpus=$ENGINE_CPUS"
++    echo "prebuilt=${PREBUILT_DIR:-none}"
+     echo "# campaign.json:"
+     cat "$dry/campaign.json"
+     echo "acquire_rustbgpd_host_lock"
+@@ -210,6 +211,23 @@ trap cleanup EXIT
+ trap 'exit 130' INT
+ trap 'exit 143' TERM
+ 
++if [[ -n ${PREBUILT_DIR:-} ]]; then
++    # Queue-local patch (quiet-queue-2026-10-13): the daemons and reloadstall were built in prep
++    # with this driver's own cargo commands; verify their hashes and refs, then copy them in.
++    log "prebuilt binaries from $PREBUILT_DIR (no in-window build)"
++    (cd "$PREBUILT_DIR" && sha256sum -c --quiet SHA256SUMS) >>"$OUT/build.log" 2>&1 || { log "STOP: prebuilt hash mismatch"; exit 2; }
++    [[ $(cat "$PREBUILT_DIR/refs.txt") == "base $BASE_SHA"$'\n'"head $HEAD_SHA" ]] || { log "STOP: prebuilt refs differ"; exit 2; }
++    cp "$PREBUILT_DIR/reloadstall" "$OUT/bin/reloadstall"
++    HARNESS=$OUT/bin/reloadstall
++    declare -A BIN=() DAEMON_SHA=()
++    for arm in base head; do
++        mkdir "$OUT/bin/$arm"
++        cp "$PREBUILT_DIR/$arm/rustbgpd" "$OUT/bin/$arm/rustbgpd"
++        BIN[$arm]=$OUT/bin/$arm/rustbgpd
++        DAEMON_SHA[$arm]=$(provenance_sha256_file "${BIN[$arm]}")
++    done
++    rmdir "$OUT/trees"
++else
+ PIN_BUILD=()
+ [[ -z $BUILD_CPUS ]] || PIN_BUILD=(taskset -c "$BUILD_CPUS")
+ build_failed() { log "STOP: $1 build failed (see $OUT/build.log)"; exit 2; }
+@@ -234,11 +252,13 @@ done
+ rm -rf "$OUT/target"
+ for arm in base head; do git -C "$REPO" worktree remove --force "$OUT/trees/$arm"; done
+ rmdir "$OUT/trees"
++fi
+ {
+     echo "base=$BASE_REF $BASE_SHA tree=$(git -C "$REPO" rev-parse "$BASE_SHA^{tree}") daemon_sha256=${DAEMON_SHA[base]}"
+     echo "head=$HEAD_REF $HEAD_SHA tree=$(git -C "$REPO" rev-parse "$HEAD_SHA^{tree}") daemon_sha256=${DAEMON_SHA[head]}"
+     echo "diffstat=$(git -C "$REPO" diff --shortstat "$BASE_SHA" "$HEAD_SHA")"
+     echo "driver=$DRIVER_STATE"
++    echo "prebuilt=${PREBUILT_DIR:-none}"
+     echo "reloadstall_sha256=$(provenance_sha256_file "$HARNESS")"
+     echo "gen_scenario_sha256=$(provenance_sha256_file "$REPO/bench/scale/reloadstall/gen-scenario.py")"
+     echo "analyzer_sha256=$(provenance_sha256_file "$PY")"

@@ -7,7 +7,7 @@ replace its evidence. It reuses M90's site inputs, GoBGP member configs, and
 | Component | Exact boundary |
 |---|---|
 | ARouteServer | Python package 1.23.2; Docker schema-2 manifest `sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66`; image config `sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93`; upstream `v1.23.2` commit `85f24252564822556bd93cb9eba1f73d1e8268ea` |
-| BIRD | 2.19.2 source archive SHA-256 `aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660`, staged by the shared producer before image build; ARouteServer target 2.16; exact runtime version plus `bird -p` before daemon start |
+| BIRD | 2.19.3 source archive SHA-256 `853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd`, staged by the shared producer before image build; ARouteServer target 2.16; exact runtime version plus `bird -p` before daemon start |
 | GoBGP | 4.10.0 release archive SHA-256 `05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe`; `gobgp` binary SHA-256 `55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86`; `gobgpd` binary SHA-256 `bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d` |
 | rustbgpd | Source contains the post-M103 boundary `350eb813b7a2a71ccfae2084d033253e96419cea`; the driver requires the exact checked-out SHA and records the same-run local `rustbgpd:dev` image ID |
 
@@ -52,7 +52,7 @@ The proof is green only when both halves pass in the same checkout:
    12-file tree, and runs strict config plus four policy checks.
 2. The M104 live differential finishes exactly 74 passed / 0 failed. It checks
    every runtime/image/config identity before daemon start, renders BIRD for
-   target 2.16, requires BIRD 2.19.2 `bird -p`, renders the current rustbgpd
+   target 2.16, requires BIRD 2.19.3 `bird -p`, renders the current rustbgpd
    tree, drives all 11 routes, checks both verdicts, exact rustbgpd
    policy/term attribution and BIRD cause communities for every rejection,
    and requires all six sessions to survive.
@@ -68,17 +68,17 @@ Stage the exact BIRD archive and build the three images with the hosted pins:
 ```bash
 work=$(mktemp -d)
 .github/scripts/install-bird3.sh \
-  --version 2.19.2 \
-  --sha256 aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660 \
-  --prepare-archive "$work/bird-2.19.2.tar.gz"
+  --version 2.19.3 \
+  --sha256 853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd \
+  --prepare-archive "$work/bird-2.19.3.tar.gz"
 .github/scripts/install-bird3.sh \
-  --version 2.19.2 \
-  --sha256 aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660 \
-  --stage-archive "$work/bird-2.19.2.tar.gz" tests/interop/bird3-archive
+  --version 2.19.3 \
+  --sha256 853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd \
+  --stage-archive "$work/bird-2.19.3.tar.gz" tests/interop/bird3-archive
 
 docker build --target dev -t rustbgpd:dev .
-docker build -t bird:v2.19.2-m104 \
-  -f tests/interop/Dockerfile.bird-v2192 tests/interop
+docker build -t bird:v2.19.3-m104 \
+  -f tests/interop/Dockerfile.bird2 tests/interop
 docker build --build-arg TARGETARCH=amd64 \
   --build-arg GOBGP_VERSION=4.10.0 \
   --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe \

@@ -4594,30 +4594,27 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     .unwrap();
     assert_eq!(reply_rx.await.unwrap(), Ok(()));
     assert_eq!(query_update_group(&tx, peer).await, "policy_peer_context");
-    // Two entries: the carried tombstone (p1) plus the dirty leaver's
-    // baseline key (p2) — a dirty mover's baseline rides the residue as
-    // (over-)withdraw candidates instead of seeding the Adj-RIB-Out
-    // (its snapshot is intended state, not wire state — LAN-346).
+    // Only p1 was admitted. The failed p2 announcement is desired state,
+    // so it must not become a withdrawal duty across the move.
     assert_metric(
         residue(),
-        2.0,
-        "the extra withdraws carried across the move must stay in the residue gauge",
+        1.0,
+        "the admitted withdrawal carried across the move must stay in the residue gauge",
     );
 
     // Free the channel and let the resync timer drain the residue.
     let jammed = out_rx.recv().await.unwrap();
     assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
+    assert_eq!(jammed.announce[0].prefix, Prefix::V4(p1));
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
     quiesce().await;
     let resync = out_rx
         .try_recv()
         .expect("the per-peer resync must emit the residue withdraw");
-    assert!(
-        resync
-            .withdraw
-            .iter()
-            .any(|(prefix, _)| *prefix == Prefix::V4(p1)),
-        "the per-peer resync must (over-)withdraw the carried tombstoned prefix"
+    assert_eq!(
+        resync.withdraw,
+        vec![(Prefix::V4(p1), 0)],
+        "the per-peer resync must withdraw only the admitted tombstoned prefix"
     );
     quiesce().await;
     assert_metric(
@@ -6258,6 +6255,15 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
         manager.dirty_peers.len(),
         PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
     );
+    assert_eq!(
+        manager
+            .pending_group_admitted
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        manager.dirty_peers,
+        "every withheld peer must retain its admitted-key proof"
+    );
     let first_tick_envelopes = receivers
         .iter_mut()
         .filter_map(|receiver| receiver.try_recv().ok())
@@ -6268,6 +6274,10 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
     let backlog = manager.resync_dirty_peers_bounded();
     assert!(!backlog, "no withheld peers remain");
     assert!(manager.dirty_peers.is_empty());
+    assert!(
+        manager.pending_group_admitted.is_empty(),
+        "completed recovery must release every admitted-key proof"
+    );
     let second_tick_envelopes = receivers
         .iter_mut()
         .filter_map(|receiver| receiver.try_recv().ok())
@@ -6299,6 +6309,10 @@ async fn dirty_resync_tick_uses_full_poll_budget_before_parking() {
     let backlog = manager.resync_dirty_peers_bounded();
     assert!(!backlog, "budgeted tick drains the whole backlog");
     assert!(manager.dirty_peers.is_empty());
+    assert!(
+        manager.pending_group_admitted.is_empty(),
+        "completed recovery must release every admitted-key proof"
+    );
     let envelopes = receivers
         .iter_mut()
         .filter_map(|receiver| receiver.try_recv().ok())
@@ -8631,7 +8645,11 @@ async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
         let (mut manager, peers, mut receivers) = direct_clean_transition_manager(66, 2, None);
         let (tx, rx) = mpsc::channel(128);
         manager.rx = rx;
-        manager.conditional_expiry_cutoff = cutoff;
+        if let Some(cutoff) = cutoff {
+            manager
+                .expiry_cutoffs
+                .observe(ExpiryTimer::Conditional, true, cutoff);
+        }
         let flags: Vec<_> = peers
             .iter()
             .map(|peer| queue_refresh(&tx, *peer, 0, Afi::Ipv4))
@@ -8643,7 +8661,7 @@ async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
             assert_eq!(receiver.try_recv().is_ok(), i < admitted);
         }
         if cutoff.is_some() {
-            assert_eq!(manager.conditional_expiry_cutoff, Some(0));
+            assert!(manager.expiry_cutoffs.any_exhausted());
         }
     }
 }

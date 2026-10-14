@@ -1,0 +1,13 @@
+cell	readiness_probe_deadline_exceeded
+base-k200-rep1	1
+base-k200-rep2	1
+base-k200-rep3	0
+base-k692-rep1	0
+base-k692-rep2	0
+base-k692-rep3	0
+head-k200-rep1	0
+head-k200-rep2	0
+head-k200-rep3	0
+head-k692-rep1	0
+head-k692-rep2	0
+head-k692-rep3	0

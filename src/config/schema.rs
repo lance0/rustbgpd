@@ -139,6 +139,12 @@ pub struct Config {
     /// the observable-without-enforcement scope decision.
     #[serde(default)]
     pub ethernet_segments: Vec<EthernetSegmentConfig>,
+    /// ADR-0140 core-isolation hold for bound Ethernet Segments. Absent
+    /// by default; `enabled = true` lets rustbgpd take the CE-facing
+    /// members of each bound segment administratively down while the PE
+    /// is core-isolated and at startup until EVPN syncs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evpn_core_isolation: Option<EvpnCoreIsolationConfig>,
     /// Local IP-VRFs / L3VNIs this VTEP serves (Gate 9 symmetric
     /// Interface-less IRB, RFC 9136 §4.4.2). Empty by default —
     /// L2-only VTEPs and route reflectors leave it empty. See
@@ -594,6 +600,15 @@ pub struct RpkiConfig {
     /// RTR cache servers to connect to.
     #[serde(default)]
     pub cache_servers: Vec<CacheServer>,
+    /// RFC 9324 local re-evaluation. When `true`, a session whose import
+    /// policy matches RPKI or ASPA state keeps its pre-policy IPv4/IPv6
+    /// unicast input (accepted routes plus rejects that validation decided),
+    /// and a VRP or ASPA change is re-evaluated locally instead of requesting
+    /// inbound Route Refresh. A session whose retained rejects exceed the
+    /// per-session bound falls back to Route Refresh. Default `false`;
+    /// restart-required like the rest of `[rpki]`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_revalidation: bool,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1475,6 +1490,110 @@ define_neighbor_and_peer_group_configs! {
                 /// `max_prefixes_received_ipv6`.
             }
         }
+        max_prefixes_l3vpn_ipv4_unicast: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted VPN-IPv4 (`l3vpn_ipv4_unicast`) routes, unique by RD + prefix
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_l3vpn_ipv4_unicast`.
+            }
+        }
+        max_prefixes_l3vpn_ipv6_unicast: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted VPN-IPv6 (`l3vpn_ipv6_unicast`) routes, unique by RD + prefix
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_l3vpn_ipv6_unicast`.
+            }
+        }
+        max_prefixes_ipv4_labeled_unicast: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted IPv4 labeled-unicast prefixes
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_ipv4_labeled_unicast`.
+            }
+        }
+        max_prefixes_ipv6_labeled_unicast: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted IPv6 labeled-unicast prefixes
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_ipv6_labeled_unicast`.
+            }
+        }
+        max_prefixes_l2vpn_evpn: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted EVPN routes (unique RFC 7432 route keys)
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_l2vpn_evpn`.
+            }
+        }
+        max_prefixes_ipv4_flowspec: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted IPv4 `FlowSpec` rules
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_ipv4_flowspec`.
+            }
+        }
+        max_prefixes_ipv6_flowspec: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted IPv6 `FlowSpec` rules
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_ipv6_flowspec`.
+            }
+        }
+        max_prefixes_rtc: Option<u32> {
+            neighbor {
+                /// Maximum unique accepted RT-Constrain membership routes
+                /// from this peer, Add-Path paths collapsed, before
+                /// `max_prefix_action` applies (Cease/1 carrying the AFI/SAFI
+                /// under `shutdown`). Enforced independently of every other
+                /// bound. Unset = unlimited.
+            }
+            peer_group {
+                /// Per-family limit inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefixes_rtc`.
+            }
+        }
         max_prefix_action: Option<String> {
             neighbor {
                 /// What a crossed max-prefix bound does: `"shutdown"` (default;
@@ -1482,7 +1601,7 @@ define_neighbor_and_peer_group_configs! {
                 /// restart), `"block"` (withhold net-new prefixes beyond the
                 /// bound while the session stays Established), or `"warning"`
                 /// (warn once per crossing and keep accepting). `block` applies
-                /// to the per-family unicast bounds and requires the aggregate
+                /// to the per-family bounds and requires the aggregate
                 /// `max_prefixes` to be unset; `block` and `warning` exclude
                 /// `max_prefix_restart_seconds`.
             }
@@ -1973,6 +2092,10 @@ define_neighbor_and_peer_group_configs! {
 // Manual Debug: never render `md5_password` (mirrors `TcpAoConfig`; the
 // `tcp_ao` field redacts through `TcpAoConfig`'s own Debug).
 impl fmt::Debug for Neighbor {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field call per configuration key; the manual impl exists only to redact md5_password"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Neighbor")
             .field("address", &self.address)
@@ -1999,6 +2122,32 @@ impl fmt::Debug for Neighbor {
                 "max_prefixes_received_ipv6",
                 &self.max_prefixes_received_ipv6,
             )
+            .field(
+                "max_prefixes_l3vpn_ipv4_unicast",
+                &self.max_prefixes_l3vpn_ipv4_unicast,
+            )
+            .field(
+                "max_prefixes_l3vpn_ipv6_unicast",
+                &self.max_prefixes_l3vpn_ipv6_unicast,
+            )
+            .field(
+                "max_prefixes_ipv4_labeled_unicast",
+                &self.max_prefixes_ipv4_labeled_unicast,
+            )
+            .field(
+                "max_prefixes_ipv6_labeled_unicast",
+                &self.max_prefixes_ipv6_labeled_unicast,
+            )
+            .field("max_prefixes_l2vpn_evpn", &self.max_prefixes_l2vpn_evpn)
+            .field(
+                "max_prefixes_ipv4_flowspec",
+                &self.max_prefixes_ipv4_flowspec,
+            )
+            .field(
+                "max_prefixes_ipv6_flowspec",
+                &self.max_prefixes_ipv6_flowspec,
+            )
+            .field("max_prefixes_rtc", &self.max_prefixes_rtc)
             .field("max_prefix_action", &self.max_prefix_action)
             .field(
                 "max_prefix_warning_percent",
@@ -2183,6 +2332,10 @@ impl Serialize for TcpAoKeyringConfig {
 
 // Manual Debug: never render `md5_password` (mirrors `TcpAoConfig`).
 impl fmt::Debug for PeerGroupConfig {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field call per configuration key; the manual impl exists only to redact md5_password"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerGroupConfig")
             .field("admin_down", &self.admin_down)
@@ -2204,6 +2357,32 @@ impl fmt::Debug for PeerGroupConfig {
                 "max_prefixes_received_ipv6",
                 &self.max_prefixes_received_ipv6,
             )
+            .field(
+                "max_prefixes_l3vpn_ipv4_unicast",
+                &self.max_prefixes_l3vpn_ipv4_unicast,
+            )
+            .field(
+                "max_prefixes_l3vpn_ipv6_unicast",
+                &self.max_prefixes_l3vpn_ipv6_unicast,
+            )
+            .field(
+                "max_prefixes_ipv4_labeled_unicast",
+                &self.max_prefixes_ipv4_labeled_unicast,
+            )
+            .field(
+                "max_prefixes_ipv6_labeled_unicast",
+                &self.max_prefixes_ipv6_labeled_unicast,
+            )
+            .field("max_prefixes_l2vpn_evpn", &self.max_prefixes_l2vpn_evpn)
+            .field(
+                "max_prefixes_ipv4_flowspec",
+                &self.max_prefixes_ipv4_flowspec,
+            )
+            .field(
+                "max_prefixes_ipv6_flowspec",
+                &self.max_prefixes_ipv6_flowspec,
+            )
+            .field("max_prefixes_rtc", &self.max_prefixes_rtc)
             .field("max_prefix_action", &self.max_prefix_action)
             .field(
                 "max_prefix_warning_percent",
@@ -3637,6 +3816,52 @@ fn add_legacy_recovery_delay_secs_property(schema: &mut Schema) {
     properties.insert("recovery_delay_secs".to_string(), legacy);
 }
 
+/// `[evpn_core_isolation]` (ADR-0140): hold the CE-facing links of
+/// bound Ethernet Segments administratively down while this PE is
+/// core-isolated, and at startup until EVPN has synced.
+///
+/// Opt-in. Enabling it gives rustbgpd ownership of the admin state of
+/// every member of each bound bond (or the bound link itself). Accepted
+/// only with at least one `[[ethernet_segments]]` entry that has an
+/// `interface`, on Linux.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvpnCoreIsolationConfig {
+    /// Take control of bound-segment link admin state. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Underlay uplink names. When set and every one lacks carrier, the
+    /// PE is core-isolated even with EVPN sessions up. Optional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uplinks: Vec<String>,
+    /// Seconds EVPN must stay synced before a hold releases. Default 10,
+    /// range `0..=3600`.
+    #[serde(default = "default_core_isolation_hold_after_sync")]
+    #[schemars(range(max = 3600))]
+    pub hold_after_sync_seconds: u64,
+    /// Seconds after daemon start (startup hold) or after the core
+    /// returns (isolation hold) at which a hold releases even without
+    /// EVPN sync, with a warning. Default 180, range `1..=3600`, and at
+    /// least `hold_after_sync_seconds`.
+    #[serde(default = "default_core_isolation_backstop")]
+    #[schemars(range(min = 1, max = 3600))]
+    pub backstop_seconds: u64,
+}
+
+/// ADR-0140 decision 3 default for `hold_after_sync_seconds`.
+pub const DEFAULT_CORE_ISOLATION_HOLD_AFTER_SYNC_SECS: u64 = 10;
+/// ADR-0140 decision 3 default for `backstop_seconds` (FRR's
+/// `startup-delay` default).
+pub const DEFAULT_CORE_ISOLATION_BACKSTOP_SECS: u64 = 180;
+
+fn default_core_isolation_hold_after_sync() -> u64 {
+    DEFAULT_CORE_ISOLATION_HOLD_AFTER_SYNC_SECS
+}
+
+fn default_core_isolation_backstop() -> u64 {
+    DEFAULT_CORE_ISOLATION_BACKSTOP_SECS
+}
+
 /// RFC 9785 §3: the DF Election preference default MUST be 32767.
 pub const DEFAULT_DF_PREFERENCE: u32 = 32_767;
 
@@ -3753,6 +3978,8 @@ pub enum ConfigError {
     InvalidEvpnInstance { reason: String },
     #[error("invalid Ethernet Segment config: {reason}")]
     InvalidEthernetSegment { reason: String },
+    #[error("invalid [evpn_core_isolation] config: {reason}")]
+    InvalidEvpnCoreIsolation { reason: String },
     #[error("invalid EVPN IP-VRF config: {reason}")]
     InvalidEvpnIpVrf { reason: String },
     #[error("invalid managed netdev config: {reason}")]

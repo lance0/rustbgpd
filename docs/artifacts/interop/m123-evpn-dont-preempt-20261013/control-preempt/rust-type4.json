@@ -1,0 +1,48 @@
+[
+  {
+    "as_path": [],
+    "communities": [],
+    "esi": "00:01:23:00:00:00:00:00:00:01",
+    "ethernet_tag": "",
+    "extended_communities": [
+      434036887988994148,
+      432909764016472064
+    ],
+    "gateway": "",
+    "ip": "192.0.2.2",
+    "label": 0,
+    "label2": 0,
+    "mac": "",
+    "next_hop": "192.0.2.2",
+    "peer": "10.0.123.2",
+    "prefix": "",
+    "rd": "192.0.2.2:0",
+    "route_type": 4,
+    "route_type_name": "es",
+    "tunnel_type": 0
+  },
+  {
+    "as_path": [],
+    "communities": [],
+    "esi": "00:01:23:00:00:00:00:00:00:01",
+    "ethernet_tag": "",
+    "extended_communities": [
+      842122827661412,
+      219550481834311688,
+      432909764016472064,
+      434036613111087304
+    ],
+    "gateway": "",
+    "ip": "10.0.123.1",
+    "label": 0,
+    "label2": 0,
+    "mac": "",
+    "next_hop": "10.0.123.1",
+    "peer": "0.0.0.0",
+    "prefix": "",
+    "rd": "10.0.123.1:100",
+    "route_type": 4,
+    "route_type_name": "es",
+    "tunnel_type": 8
+  }
+]

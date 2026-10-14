@@ -269,6 +269,9 @@ impl RibService {
         })
         .await?
         .map_err(|error| match error {
+            RoutePageError::ResyncInProgress => Status::failed_precondition(
+                "advertised routes are unavailable until outbound resynchronization completes",
+            ),
             RoutePageError::Invalidated => Status::aborted(
                 "route table changed during pagination; restart with an empty page_token",
             ),
@@ -321,6 +324,9 @@ impl RibService {
         })
         .await?
         .map_err(|error| match error {
+            RoutePageError::ResyncInProgress => Status::failed_precondition(
+                "EVPN advertised routes are unavailable until outbound resynchronization completes",
+            ),
             RoutePageError::Invalidated => Status::aborted(
                 "EVPN route table changed during pagination; restart with an empty page_token",
             ),
@@ -5723,6 +5729,34 @@ mod tests {
             cursor.scope,
             RouteQueryScope::Advertised { peer: destination }
         );
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn evpn_advertised_page_refuses_unsettled_group_projection() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = RibService::new(tx);
+        let task = tokio::spawn(async move {
+            let Some(RibUpdate::QueryEvpnRoutesPage { scope, reply, .. }) = rx.recv().await else {
+                panic!("expected EVPN advertised page");
+            };
+            assert_eq!(
+                scope,
+                RouteQueryScope::Advertised {
+                    peer: "192.0.2.2".parse().unwrap(),
+                }
+            );
+            reply.send(Err(RoutePageError::ResyncInProgress)).unwrap();
+        });
+        let error = svc
+            .list_advertised_evpn_routes(Request::new(proto::ListPeerEvpnRoutesRequest {
+                neighbor_address: "192.0.2.2".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("resynchronization"));
         task.await.unwrap();
     }
 

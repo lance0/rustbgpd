@@ -17,6 +17,10 @@
 //! it never had a row here. One driver runs every
 //! row. [`wait_site_table_covers_every_call_site`] fails when a call site is
 //! added without a row, so an admission decision cannot go unnoticed.
+//! [`bare_rib_waits_are_listed_with_a_reason`] fails when a function sends
+//! to the RIB or awaits its reply without a wait helper and without a
+//! recorded reason, so a wait that was never wrapped cannot escape the table
+//! either.
 
 use super::*;
 
@@ -26,7 +30,9 @@ use crate::config::{PreparedDatasetGeneration, plan_reload_peer_actions};
 use crate::peer_manager::generation::ReloadGenerationOutcome;
 use rustbgpd_api::peer_types::{PeerInfo, PeerManagerOperatorQuery, ResolvedPeerPolicy};
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
-use rustbgpd_rib::{ExportPolicyCohortOutcome, PeerExportPolicyRestoreReceipt};
+use rustbgpd_rib::{
+    ConditionalAdvertisementCapture, ExportPolicyCohortOutcome, PeerExportPolicyRestoreReceipt,
+};
 use rustbgpd_transport::ImportPolicyTermHits;
 
 /// Fresh caller budget used by this matrix (`PEER_MANAGER_READ_TIMEOUT` in
@@ -58,6 +64,10 @@ enum RibHold {
     Receiver(fn(&RibUpdate) -> bool),
     /// Answer the first matching command, then drop the receiver.
     ExitAfter(fn(&RibUpdate) -> bool),
+    /// Answer the first matching command, refill the freed slot, then stop
+    /// receiving until release, so the next send parks on a full channel
+    /// even though earlier round trips had to complete.
+    FullAfter(fn(&RibUpdate) -> bool),
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +119,8 @@ enum Drive {
     /// with reads admitted after earlier restoration steps succeeded.
     CompensatingReplay,
     ValidationRefresh,
+    /// RFC 9324 local re-evaluation fan-out (`[rpki] local_revalidation`).
+    LocalRevalidation,
     DatasetRefresh,
     DatasetGeneration {
         compensate: bool,
@@ -127,6 +139,19 @@ enum Drive {
     ConfiguredOwnerPublication,
     /// A reload commits a BFD membership change and awaits the BFD actor.
     BfdReload,
+    /// A reload or catalog change installs conditional advertisements.
+    ConditionalInstall,
+    /// Dynamic source retirement awaits the primary-lane RIB barrier.
+    DampeningRetirement,
+    /// Config-transaction planning queries the RIB's update groups.
+    UpdateGroupSnapshot,
+    /// An unstoppable primary is replaced and its RIB generation fenced.
+    ReplacePrimary,
+    /// A capacity-blocked dampening source with a pending inbound collision
+    /// candidate is disabled; the candidate's `PeerDown` is sent first.
+    DampeningDisable,
+    /// Peer removal queues the RIB's `PeerDeleted` reap marker.
+    PeerRemoval,
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +204,13 @@ fn stall_then_hold_state(command: &PeerCommand, index: usize) -> SessionAction {
     match (command, index) {
         (PeerCommand::QueryState { .. }, 0) => SessionAction::Stall,
         (PeerCommand::QueryState { .. }, 1) => SessionAction::Hold,
+        _ => SessionAction::Answer,
+    }
+}
+
+fn hold_first_revalidate(command: &PeerCommand, index: usize) -> SessionAction {
+    match command {
+        PeerCommand::RevalidateImport { .. } if index == 0 => SessionAction::Hold,
         _ => SessionAction::Answer,
     }
 }
@@ -241,6 +273,18 @@ fn is_retained_stale(update: &RibUpdate) -> bool {
 
 fn is_owner_publication(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::PublishDampeningOwners { .. })
+}
+
+fn is_conditional_install(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::InstallConditionalAdvertisements { .. })
+}
+
+fn is_rib_barrier(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::QueryLocRibCount { .. })
+}
+
+fn is_update_group_snapshot(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::QueryUpdateGroupSnapshot { .. })
 }
 
 fn is_reevaluate(update: &RibUpdate) -> bool {
@@ -525,6 +569,17 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::ExportRestored,
     },
     WaitSite {
+        site: "policy.rs::revalidate_import_validation_dependents",
+        awaits: "PeerCommand::RevalidateImport answer of each validation-dependent peer",
+        drive: Drive::LocalRevalidation,
+        rib: RibHold::None,
+        session: hold_first_revalidate,
+        additional_entry: None,
+        window: Duration::from_millis(250),
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
         site: "policy.rs::soft_reset_import_validation_dependents",
         awaits: "PeerCommand::QueryState of each validation-dependent peer",
         drive: Drive::ValidationRefresh,
@@ -749,6 +804,118 @@ const WAIT_SITES: &[WaitSite] = &[
         contract: Contract::Served,
         completion: Completion::Finished,
     },
+    WaitSite {
+        site: "conditional.rs::conditional_rib_request",
+        awaits: "RibUpdate::InstallConditionalAdvertisements acknowledgement",
+        drive: Drive::ConditionalInstall,
+        rib: RibHold::Reply(is_conditional_install),
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    // Capacity disable and owned enable share this helper and its fence.
+    WaitSite {
+        site: "dampening_control.rs::rib_control",
+        awaits: "RibUpdate::QueryLocRibCount barrier after dynamic source retirement",
+        drive: Drive::DampeningRetirement,
+        rib: RibHold::Reply(is_rib_barrier),
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "the source is mid-transition: a retiring dynamic peer is out of the peer \
+                     table until the barrier decides whether it returns, and a capacity disable \
+                     or owned enable is unacknowledged against the RIB block; bounded by \
+                     RIB_REPLY_TIMEOUT (5 s)",
+        },
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "update_group_plan.rs::query_update_group_snapshot",
+        awaits: "RibUpdate::QueryUpdateGroupSnapshot reply (config transaction planning)",
+        drive: Drive::UpdateGroupSnapshot,
+        rib: RibHold::Reply(is_update_group_snapshot),
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    // RIB mailbox admission waits for primary-lane capacity for as long as
+    // the RIB runs: dropping an update would desynchronize the RIB, so no
+    // constant bounds these waits. Each caller chooses its read admission;
+    // a reply, where the update carries one, is awaited separately.
+    WaitSite {
+        site: "mod.rs::send_rib_update",
+        awaits: "RibUpdate::PeerDown fence for a replaced unstoppable primary (full RIB channel)",
+        drive: Drive::ReplacePrimary,
+        rib: RibHold::Capacity,
+        session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "the replacement actor is installed but the old session is not yet \
+                     unregistered, so the peer's session identity is mid-swap",
+        },
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "mod.rs::send_rib_update",
+        awaits: "RibUpdate::PeerDown fence for a capacity-blocked collision candidate",
+        drive: Drive::DampeningDisable,
+        rib: RibHold::Capacity,
+        session: answer_all,
+        additional_entry: Some("disable_dampening_capacity pending-inbound fence"),
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "the dampening source is mid-transition: the peer is disabled but the \
+                     capacity disable is not yet acknowledged against the RIB block",
+        },
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "mod.rs::send_rib_update",
+        awaits: "RibUpdate::PeerDeleted reap marker (full RIB channel)",
+        drive: Drive::PeerRemoval,
+        rib: RibHold::Capacity,
+        session: answer_all,
+        additional_entry: Some("reap_deleted_peer_metric_series_for_key"),
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "the caller's peer removal is only partly applied",
+        },
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "mod.rs::send_rib_update",
+        awaits: "RibUpdate::ReplacePeerExportPolicies send (cohort transition, full RIB channel)",
+        drive: FORWARD_COHORT,
+        rib: RibHold::FullAfter(is_prestage),
+        session: answer_all,
+        additional_entry: Some("try_apply_export_only_policy_cohort transition send"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    WaitSite {
+        site: "mod.rs::send_rib_update",
+        awaits: "RibUpdate::DiscardPreparedExportPolicyDestination send (full RIB channel)",
+        drive: Drive::ForwardCohort {
+            import_delta: false,
+            cohort_reply: CohortReply::Authoritative,
+        },
+        rib: RibHold::FullAfter(is_cohort_replace),
+        session: answer_all,
+        additional_entry: Some("discard_prepared_export_destination before the per-peer fallback"),
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "the cohort transition did not commit: the caller is unwinding it or \
+                     falling back to per-peer applies",
+        },
+        completion: Completion::ExportApplied,
+    },
 ];
 
 /// Shared hold point: a stub signals `held` when it parks the transaction and
@@ -789,7 +956,13 @@ impl Gate {
     }
 }
 
-fn answer_rib(update: RibUpdate, cohort_reply: CohortReply) {
+/// `capture` acknowledges a conditional-advertisement install; rows that
+/// never install one pass `None`.
+fn answer_rib(
+    update: RibUpdate,
+    cohort_reply: CohortReply,
+    capture: Option<&ConditionalAdvertisementCapture>,
+) {
     match update {
         RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
             let _ = reply.send(Ok(()));
@@ -821,14 +994,41 @@ fn answer_rib(update: RibUpdate, cohort_reply: CohortReply) {
                 })
                 .collect()));
         }
-        RibUpdate::QueryPeerRetainedStale { reply, .. } => {
+        RibUpdate::QueryPeerRetainedStale { reply, .. } | RibUpdate::QueryLocRibCount { reply } => {
             let _ = reply.send(0);
         }
         RibUpdate::PublishDampeningOwners { reply, .. } => {
             let _ = reply.send(Ok(()));
         }
+        RibUpdate::InstallConditionalAdvertisements { reply, .. } => {
+            let _ = reply.send(capture.expect("the row supplies a capture").clone());
+        }
+        RibUpdate::QueryUpdateGroupSnapshot { reply } => {
+            let _ = reply.send(rustbgpd_rib::UpdateGroupSnapshot::default());
+        }
         _ => {}
     }
+}
+
+/// A real RIB's capture of an empty install, for the stub to acknowledge with.
+async fn conditional_capture() -> ConditionalAdvertisementCapture {
+    let (rib_tx, rib_rx) = mpsc::channel(1);
+    let rib = tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, mpsc::channel(1).1, None, None, BgpMetrics::new())
+            .run(),
+    );
+    let (reply, capture) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::InstallConditionalAdvertisements {
+            set: rustbgpd_rib::ConditionalAdvertisementSet::default(),
+            swapping_datasets: Vec::new(),
+            reply,
+        })
+        .await
+        .unwrap();
+    let capture = capture.await.unwrap();
+    rib.abort();
+    capture
 }
 
 fn spawn_rib(
@@ -836,6 +1036,8 @@ fn spawn_rib(
     gate: Gate,
     hold: RibHold,
     cohort_reply: CohortReply,
+    capture: Option<ConditionalAdvertisementCapture>,
+    filler: Option<mpsc::WeakSender<RibUpdate>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if matches!(hold, RibHold::Capacity) {
@@ -852,33 +1054,51 @@ fn spawn_rib(
                 RibHold::Reply(matcher)
                 | RibHold::LaterReply(matcher, _)
                 | RibHold::Receiver(matcher)
-                | RibHold::ExitAfter(matcher) => Some(matcher),
+                | RibHold::ExitAfter(matcher)
+                | RibHold::FullAfter(matcher) => Some(matcher),
             };
             if !(armed && matcher.is_some_and(|matcher| matcher(&update))) {
-                answer_rib(update, cohort_reply);
+                answer_rib(update, cohort_reply, capture.as_ref());
                 continue;
             }
             if skip > 0 {
                 skip -= 1;
-                answer_rib(update, cohort_reply);
+                answer_rib(update, cohort_reply, capture.as_ref());
                 continue;
             }
             armed = false;
             match hold {
                 RibHold::Reply(..) | RibHold::LaterReply(..) => {
                     let gate = gate.clone();
+                    let capture = capture.clone();
                     tokio::spawn(async move {
                         gate.hold().await;
-                        answer_rib(update, cohort_reply);
+                        answer_rib(update, cohort_reply, capture.as_ref());
                     });
                 }
                 RibHold::Receiver(_) => {
-                    answer_rib(update, cohort_reply);
+                    answer_rib(update, cohort_reply, capture.as_ref());
                     gate.hold().await;
                 }
                 RibHold::ExitAfter(_) => {
-                    answer_rib(update, cohort_reply);
+                    answer_rib(update, cohort_reply, capture.as_ref());
                     break;
+                }
+                RibHold::FullAfter(_) => {
+                    // Fill the slot before answering, so the owner's next
+                    // send cannot slip into it.
+                    let (reply, _) = oneshot::channel();
+                    filler
+                        .as_ref()
+                        .and_then(mpsc::WeakSender::upgrade)
+                        .expect("the row supplies a filler sender")
+                        .try_send(RibUpdate::QueryPeerRetainedStale {
+                            peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                            reply,
+                        })
+                        .expect("the matched command freed the only slot");
+                    answer_rib(update, cohort_reply, capture.as_ref());
+                    gate.hold().await;
                 }
                 RibHold::None | RibHold::Capacity => unreachable!("matched without a matcher"),
             }
@@ -894,6 +1114,7 @@ fn command_kind(command: &PeerCommand) -> &'static str {
         PeerCommand::SendRouteRefresh { .. } => "SendRouteRefresh",
         PeerCommand::QueryImportPolicyTermHits { .. } => "QueryImportPolicyTermHits",
         PeerCommand::ReplayOutbound { .. } => "ReplayOutbound",
+        PeerCommand::RevalidateImport { .. } => "RevalidateImport",
         _ => "other",
     }
 }
@@ -924,6 +1145,15 @@ fn answer_session(command: PeerCommand, addr: IpAddr, established: bool, fail: b
         | PeerCommand::UpdateGracefulShutdown { reply, .. }
         | PeerCommand::SendRouteRefresh { reply, .. } => {
             let _ = reply.send(if fail { failed() } else { Ok(()) });
+        }
+        PeerCommand::RevalidateImport { reply, .. } => {
+            let _ = reply.send(if established {
+                rustbgpd_transport::ImportRevalidation::Local {
+                    refresh_families: Vec::new(),
+                }
+            } else {
+                rustbgpd_transport::ImportRevalidation::NotEstablished
+            });
         }
         PeerCommand::QueryImportPolicyTermHits { reply } => {
             let _ = reply.send(Some(ImportPolicyTermHits {
@@ -1148,6 +1378,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         | Drive::HonorBlackhole
         | Drive::CompensatingReplay
         | Drive::ValidationRefresh
+        | Drive::LocalRevalidation
         | Drive::DatasetRefresh
         | Drive::DatasetGeneration { .. }
         | Drive::RetainedStaleCapacity
@@ -1159,7 +1390,13 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         | Drive::OutboundReplay
         | Drive::MaxPrefixRestart
         | Drive::ConfiguredOwnerPublication
-        | Drive::BfdReload => (Vec::new(), false),
+        | Drive::BfdReload
+        | Drive::ConditionalInstall
+        | Drive::DampeningRetirement
+        | Drive::UpdateGroupSnapshot
+        | Drive::ReplacePrimary
+        | Drive::DampeningDisable
+        | Drive::PeerRemoval => (Vec::new(), false),
     };
     match drive {
         Drive::ForwardCohort { .. }
@@ -1240,6 +1477,13 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::ValidationRefresh => {
             manager
                 .soft_reset_import_validation_dependents(ImportValidationDependency::Rpki)
+                .await
+        }
+        Drive::LocalRevalidation => {
+            manager
+                .revalidate_import_validation_dependents(rustbgpd_transport::ValidationDelta::Rpki(
+                    None,
+                ))
                 .await
         }
         Drive::DatasetRefresh => {
@@ -1330,6 +1574,64 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             coupling.pending = Some(std::collections::HashMap::from([(peers[0], replacement)]));
             coupling.reloading = true;
             manager.commit_bfd_reload(None).await
+        }
+        Drive::ConditionalInstall => {
+            let set = rustbgpd_rib::ConditionalAdvertisementSet {
+                definitions: Vec::new(),
+                attachments: BTreeMap::from([(peers[0], vec![Arc::from("backup")])]),
+            };
+            let prior = manager
+                .install_conditional_advertisements(set.clone(), &[])
+                .await?;
+            assert!(prior.is_some());
+            assert_eq!(manager.conditional_advertisements, set);
+            Ok(())
+        }
+        Drive::DampeningRetirement => manager
+            .dampening_retirement_barrier(peers[0], &[1])
+            .await
+            .map_err(|error| error.to_string()),
+        Drive::UpdateGroupSnapshot => manager.query_update_group_snapshot().await.map(drop),
+        Drive::ReplacePrimary => {
+            manager.replace_unstoppable_primary(&key(peers[0])).await;
+            Ok(())
+        }
+        Drive::DampeningDisable => {
+            use rustbgpd_rib::update::{PeerSourceContext, ReceivedRouteSource};
+            let admission = manager.peers[&key(peers[0])]
+                .transport_config
+                .dampening_admission
+                .clone()
+                .unwrap();
+            let (asn, reason) = admission.capacity_failure().unwrap();
+            let notice = rustbgpd_rib::dampening::DampeningCapacityNotice {
+                source: ReceivedRouteSource {
+                    peer: peers[0],
+                    session_id: 1,
+                    peer_asn: Some(asn),
+                    context: Some(Arc::new(PeerSourceContext {
+                        dampening_admission: Some(admission.clone()),
+                        peer_interface: None,
+                        accepted_dynamic_range: None,
+                        route_server_client: false,
+                    })),
+                },
+                reason,
+            };
+            match manager.disable_dampening_capacity(notice).await {
+                rustbgpd_api::peer_types::OwnedDampeningControlOutcome::Applied => {
+                    assert!(admission.capacity_disable_complete());
+                    Ok(())
+                }
+                outcome => Err(format!("{outcome:?}")),
+            }
+        }
+        Drive::PeerRemoval => {
+            let removed = PeerKey::new(IpAddr::V4(Ipv4Addr::new(10, 39, 0, 9)), None);
+            manager
+                .reap_deleted_peer_metric_series_for_key(&removed)
+                .await;
+            Ok(())
         }
     }
 }
@@ -1423,13 +1725,28 @@ async fn run(row: &WaitSite) {
         Drive::ForwardCohort { cohort_reply, .. } => cohort_reply,
         _ => CohortReply::Committed,
     };
-    let rib_capacity = if matches!(row.rib, RibHold::Receiver(_) | RibHold::Capacity) {
+    let rib_capacity = if matches!(
+        row.rib,
+        RibHold::Receiver(_) | RibHold::FullAfter(_) | RibHold::Capacity
+    ) {
         1
     } else {
         16
     };
     let (rib_tx, rib_rx) = mpsc::channel(rib_capacity);
-    let rib = spawn_rib(rib_rx, gate.clone(), row.rib, cohort_reply);
+    let capture = if matches!(row.drive, Drive::ConditionalInstall) {
+        Some(conditional_capture().await)
+    } else {
+        None
+    };
+    let rib = spawn_rib(
+        rib_rx,
+        gate.clone(),
+        row.rib,
+        cohort_reply,
+        capture,
+        Some(rib_tx.downgrade()),
+    );
     if matches!(row.rib, RibHold::Capacity) {
         let (reply, _response) = oneshot::channel();
         rib_tx
@@ -1507,7 +1824,7 @@ async fn run(row: &WaitSite) {
                     crate::config::RFC8212_MISSING_IMPORT_POLICY,
                 ));
         }
-        Drive::ValidationRefresh => {
+        Drive::ValidationRefresh | Drive::LocalRevalidation => {
             for peer in [first, second] {
                 manager.peers.get_mut(&key(peer)).unwrap().import_policy =
                     Some(validation_policy_chain(ImportValidationDependency::Rpki));
@@ -1557,9 +1874,26 @@ async fn run(row: &WaitSite) {
         | Drive::HotExportKnobs
         | Drive::GracefulShutdown
         | Drive::OutboundReplay
-        | Drive::ConfiguredOwnerPublication => {}
+        | Drive::ConfiguredOwnerPublication
+        | Drive::ConditionalInstall
+        | Drive::DampeningRetirement
+        | Drive::UpdateGroupSnapshot
+        | Drive::ReplacePrimary
+        | Drive::PeerRemoval => {}
         Drive::BfdReload => {
             manager = attach_held_bfd_actor(manager, first, gate.clone());
+        }
+        Drive::DampeningDisable => {
+            let admission = Box::pin(super::dampening_control::capacity_blocked_admission()).await;
+            let (candidate, _) = spawn_session(first, false, gate.clone(), answer_all, false);
+            let blocked = manager.peers.get_mut(&key(first)).unwrap();
+            blocked.transport_config.dampening_admission = Some(admission);
+            blocked.pending_inbound = Some(PendingInbound {
+                recovery_reset: None,
+                handle: candidate,
+                session_id: 99,
+            });
+            manager.register_session(99, &key(first));
         }
     }
 
@@ -1764,17 +2098,38 @@ async fn check_completion(row: &WaitSite, manager: &mut PeerManager, result: Res
 #[tokio::test(start_paused = true)]
 async fn every_wait_site_honours_its_operator_read_contract() {
     for row in WAIT_SITES {
-        tokio::time::timeout(Duration::from_mins(15), run(row))
+        tokio::time::timeout(Duration::from_mins(15), Box::pin(run(row)))
             .await
             .unwrap_or_else(|_| panic!("{}: the row did not complete", row.site));
     }
 }
 
-/// Call sites of the wait helpers per enclosing function, excluding the
-/// helper definitions themselves.
-fn wait_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
-    const HELPERS: [&str; 2] = ["await_with_readiness", "await_with_readiness_budget"];
-    let mut sites = BTreeMap::new();
+/// Every production source file of the module, keyed by file name, so a new
+/// file cannot escape the source guards. `read_dir` is not recursive:
+/// `tests/` holds only test drivers, which make no actor waits of their own.
+fn peer_manager_sources() -> BTreeMap<String, String> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/peer_manager");
+    let mut sources = BTreeMap::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "rs") {
+            let file = path.file_name().unwrap().to_str().unwrap().to_owned();
+            sources.insert(file, std::fs::read_to_string(&path).unwrap());
+        }
+    }
+    assert!(
+        ["mod.rs", "policy.rs", "configured_owners.rs"]
+            .iter()
+            .all(|file| sources.contains_key(*file)),
+        "the scan must cover the module's source files: {:?}",
+        sources.keys()
+    );
+    sources
+}
+
+/// Each non-comment line paired with the name of its enclosing function.
+fn lines_by_fn(source: &str) -> Vec<(&str, &str)> {
+    let mut lines = Vec::new();
     let mut current = "<none>";
     for line in source.lines() {
         let trimmed = line.trim_start();
@@ -1792,12 +2147,109 @@ fn wait_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
                 .next()
                 .expect("split yields at least one piece");
         }
-        let calls = trimmed.matches(".await_with_readiness").count();
+        lines.push((current, trimmed));
+    }
+    lines
+}
+
+/// Call sites of the wait helpers per enclosing function, excluding the
+/// helper definitions themselves.
+fn wait_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
+    const HELPERS: [&str; 2] = ["await_with_readiness", "await_with_readiness_budget"];
+    let mut sites = BTreeMap::new();
+    for (current, line) in lines_by_fn(source) {
+        let calls = line.matches(".await_with_readiness").count();
         if calls > 0 && !HELPERS.contains(&current) {
             *sites.entry(format!("{file}::{current}")).or_default() += calls;
         }
     }
     sites
+}
+
+/// Functions with more RIB waits than wait-helper calls, the number of
+/// unwrapped waits, and the reason each is safe. The run loop does not poll
+/// the readiness lane while a RIB send or reply is awaited bare, so `/readyz`
+/// goes unanswered for the whole wait.
+const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
+    (
+        "configured_owners.rs::send_configured_owners",
+        1,
+        "returns the round trip to its callers: configured_owner_publication wraps it, and the \
+         startup publication runs once, against a freshly started RIB, before the run loop \
+         serves any readiness query",
+    ),
+    (
+        "snapshot.rs::query_bmp_peer_stats",
+        1,
+        "admission and reply share one PEER_QUERY_TIMEOUT (100 ms) deadline, joined with the \
+         other BMP tick probes, inside the 200 ms readiness deadline",
+    ),
+    (
+        "snapshot.rs::query_bmp_loc_rib_stats",
+        1,
+        "admission and reply share one PEER_QUERY_TIMEOUT (100 ms) deadline, joined with the \
+         other BMP tick probes, inside the 200 ms readiness deadline",
+    ),
+];
+
+/// Per function that mentions `rib_tx`, how many RIB waits it holds beyond
+/// its wait-helper calls: the textual shape of a RIB send or round trip
+/// awaited bare. A function's waits are the larger of its `oneshot::channel`
+/// replies and its direct `rib_tx` sends or reservations (a `rib_tx` line
+/// with `.send(`, `.try_send(` or `.reserve` on it or on the next line).
+/// This is a count, not a pairing. A function may hold more wrapped waits
+/// than RIB waits (capacity reservations, session probes, or two waits for
+/// one round trip), and each such spare wait can mask one bare wait added to
+/// the same function.
+fn bare_rib_wait_fns(file: &str, source: &str) -> BTreeMap<String, usize> {
+    const SENDS: [&str; 3] = [".send(", ".try_send(", ".reserve"];
+    let lines = lines_by_fn(source);
+    let mut seen: BTreeMap<&str, (bool, usize, usize, usize)> = BTreeMap::new();
+    for (index, &(current, line)) in lines.iter().enumerate() {
+        let (rib, replies, sends, waits) = seen.entry(current).or_default();
+        let next = lines.get(index + 1).map_or("", |&(_, next)| next);
+        if line.contains("rib_tx") {
+            *rib = true;
+            if SENDS
+                .iter()
+                .any(|send| line.contains(send) || next.starts_with(send))
+            {
+                *sends += 1;
+            }
+        }
+        *replies += line.matches("oneshot::channel").count();
+        *waits += line.matches("await_with_readiness").count();
+    }
+    seen.into_iter()
+        .filter_map(|(current, (rib, replies, sends, waits))| {
+            let bare = replies.max(sends).saturating_sub(waits);
+            (rib && bare > 0).then(|| (format!("{file}::{current}"), bare))
+        })
+        .collect()
+}
+
+/// A RIB send or reply awaited outside `await_with_readiness*` must be
+/// listed in `BARE_RIB_WAIT_FNS`, with its count and the reason it cannot
+/// hold `/readyz` past its deadline. A second bare wait in a listed or
+/// wrapped function raises its count unless a spare wrapped wait masks it
+/// (see [`bare_rib_wait_fns`]). Stale entries fail too, so the list cannot
+/// outlive its code.
+#[test]
+fn bare_rib_waits_are_listed_with_a_reason() {
+    let found: BTreeMap<String, usize> = peer_manager_sources()
+        .iter()
+        .flat_map(|(file, source)| bare_rib_wait_fns(file, source))
+        .collect();
+    let listed: BTreeMap<String, usize> = BARE_RIB_WAIT_FNS
+        .iter()
+        .map(|(site, count, _)| ((*site).to_string(), *count))
+        .collect();
+    assert_eq!(
+        found, listed,
+        "a peer-manager function awaits a RIB send or reply without serving readiness (left: found in \
+         the source, right: BARE_RIB_WAIT_FNS); run the wait under await_with_readiness with a \
+         WAIT_SITES row, or list it with the reason it is bounded below the readiness deadline"
+    );
 }
 
 /// A new actor wait-helper call site must get a row in `WAIT_SITES`
@@ -1806,29 +2258,10 @@ fn wait_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
 /// (`additional_entry`) are not counted, so each site is keyed once.
 #[test]
 fn wait_site_table_covers_every_call_site() {
-    // Scan every production source file of the module, so a new file cannot
-    // escape the guard. `read_dir` is not recursive: `tests/` holds only test
-    // drivers, which make no actor waits of their own.
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/peer_manager");
-    let mut sources = BTreeMap::new();
-    let mut scanned = BTreeSet::new();
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|extension| extension == "rs") {
-            let file = path.file_name().unwrap().to_str().unwrap().to_owned();
-            sources.extend(wait_call_sites(
-                &file,
-                &std::fs::read_to_string(&path).unwrap(),
-            ));
-            scanned.insert(file);
-        }
-    }
-    assert!(
-        ["mod.rs", "policy.rs", "configured_owners.rs"]
-            .iter()
-            .all(|file| scanned.contains(*file)),
-        "the scan must cover the module's source files: {scanned:?}"
-    );
+    let sources: BTreeMap<String, usize> = peer_manager_sources()
+        .iter()
+        .flat_map(|(file, source)| wait_call_sites(file, source))
+        .collect();
     let mut table = BTreeMap::new();
     for row in WAIT_SITES
         .iter()
@@ -1861,7 +2294,14 @@ async fn serial_policy_walk_serves_reads(drive_kind: Drive, preflight: bool) {
     let count = if preflight { 32 } else { 8 };
     let gate = Gate::new();
     let (rib_tx, rib_rx) = mpsc::channel(16);
-    let rib = spawn_rib(rib_rx, gate.clone(), RibHold::None, CohortReply::Committed);
+    let rib = spawn_rib(
+        rib_rx,
+        gate.clone(),
+        RibHold::None,
+        CohortReply::Committed,
+        None,
+        None,
+    );
     let (command_tx, command_rx) = mpsc::channel(4);
     let (operator_tx, operator_rx) = mpsc::channel(4);
     let mut manager = PeerManager::new(
@@ -2445,6 +2885,8 @@ async fn detached_snapshot_lets_the_reload_finish_while_a_session_reply_is_held(
         gate.clone(),
         RibHold::Reply(is_cohort_replace),
         CohortReply::Committed,
+        None,
+        None,
     );
     let (manager, operator_tx, mut first, _second) = detach_fixture(rib_tx, 4, 16);
     let transaction = tokio::spawn(async move {

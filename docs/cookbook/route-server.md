@@ -15,7 +15,7 @@ rejected the single best path.
 
 **Proven by:**
 [M83](../receipts.md#interop-labs--pr-gated-interopyml) (RFC 7947
-route-server profile against BIRD 2.19.2 + GoBGP 4.10.0 + FRR 10.7.0 +
+route-server profile against BIRD 2.19.3 + GoBGP 4.10.0 + FRR 10.7.0 +
 StayRTR, [ADR-0101](../adr/0101-route-server-profile.md)): byte-level
 transparency on the wire (tshark on the RS↔BIRD link — no route-server
 ASN in any AS_PATH segment, NEXT_HOP = originator, MED and communities
@@ -191,7 +191,8 @@ max_prefixes = 50000
 ```
 
 Set an inbound prefix limit on each member or its peer group; `rbgp doctor`
-warns when an established eBGP member has no effective bound.
+warns when an established eBGP member negotiates a family with no effective
+bound.
 
 <a id="member-set-control-communities-rfc-7947-232--rfc-8195"></a>
 ## Member-set control communities

@@ -1,0 +1,56 @@
+# M123: all-active ES on an LACP LAG, preference DF with Dont-Preempt.
+# Keep these comments free of apostrophes and quotes: sr_cli batch input
+# treats an unbalanced quote as an open string.
+set / interface ethernet-1/1 admin-state enable
+set / interface ethernet-1/1 subinterface 0 admin-state enable
+set / interface ethernet-1/1 subinterface 0 ipv4 admin-state enable
+set / interface ethernet-1/1 subinterface 0 ipv4 address 10.0.123.2/24
+set / interface ethernet-1/2 admin-state enable
+set / interface ethernet-1/2 ethernet aggregate-id lag1
+# The rustbgpd bond uses the same LACP system and key, so the CE puts both
+# links in one aggregator. Linux derives key 15 from a 10G full-duplex veth.
+set / interface lag1 admin-state enable
+set / interface lag1 subinterface 0 type bridged
+set / interface lag1 subinterface 0 admin-state enable
+set / interface lag1 lag lag-type lacp
+set / interface lag1 lag member-speed 10G
+set / interface lag1 lag lacp interval FAST
+set / interface lag1 lag lacp lacp-mode ACTIVE
+set / interface lag1 lag lacp admin-key 15
+set / interface lag1 lag lacp system-id-mac 00:00:00:00:01:23
+set / interface lag1 lag lacp system-priority 65535
+set / interface system0 admin-state enable
+set / interface system0 subinterface 0 admin-state enable
+set / interface system0 subinterface 0 ipv4 admin-state enable
+set / interface system0 subinterface 0 ipv4 address 192.0.2.2/32
+set / network-instance default interface ethernet-1/1.0
+set / network-instance default interface system0.0
+set / network-instance default protocols bgp autonomous-system 65000
+set / network-instance default protocols bgp router-id 10.0.123.2
+set / network-instance default protocols bgp afi-safi evpn admin-state enable
+set / network-instance default protocols bgp group pe peer-as 65000
+set / network-instance default protocols bgp group pe transport local-address 10.0.123.2
+set / network-instance default protocols bgp group pe afi-safi evpn admin-state enable
+set / network-instance default protocols bgp group pe afi-safi ipv4-unicast admin-state disable
+set / network-instance default protocols bgp neighbor 10.0.123.1 peer-group pe
+set / network-instance default protocols bgp neighbor 10.0.123.1 admin-state enable
+set / tunnel-interface vxlan1 vxlan-interface 100 type bridged ingress vni 100
+set / network-instance bd100 type mac-vrf
+set / network-instance bd100 admin-state enable
+set / network-instance bd100 interface lag1.0
+set / network-instance bd100 vxlan-interface vxlan1.100
+set / network-instance bd100 protocols bgp-evpn bgp-instance 1 admin-state enable
+set / network-instance bd100 protocols bgp-evpn bgp-instance 1 vxlan-interface vxlan1.100
+set / network-instance bd100 protocols bgp-evpn bgp-instance 1 evi 100
+set / network-instance bd100 protocols bgp-vpn bgp-instance 1 route-distinguisher rd 192.0.2.2:100
+set / network-instance bd100 protocols bgp-vpn bgp-instance 1 route-target export-rt target:65000:100
+set / network-instance bd100 protocols bgp-vpn bgp-instance 1 route-target import-rt target:65000:100
+# The ES leafref needs the system bgp-vpn instance.
+set / system network-instance protocols bgp-vpn bgp-instance 1
+set / system network-instance protocols evpn ethernet-segments bgp-instance 1 ethernet-segment es1 admin-state enable
+set / system network-instance protocols evpn ethernet-segments bgp-instance 1 ethernet-segment es1 esi 00:01:23:00:00:00:00:00:00:01
+set / system network-instance protocols evpn ethernet-segments bgp-instance 1 ethernet-segment es1 interface lag1
+set / system network-instance protocols evpn ethernet-segments bgp-instance 1 ethernet-segment es1 multi-homing-mode all-active
+set / system network-instance protocols evpn ethernet-segments bgp-instance 1 ethernet-segment es1 df-election algorithm type preference
+set / system network-instance protocols evpn ethernet-segments bgp-instance 1 ethernet-segment es1 df-election algorithm preference-alg preference-value 100
+set / system network-instance protocols evpn ethernet-segments bgp-instance 1 ethernet-segment es1 df-election algorithm preference-alg capabilities non-revertive true

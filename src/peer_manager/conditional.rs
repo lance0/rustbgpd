@@ -12,7 +12,7 @@ use rustbgpd_rib::{ConditionalAdvertisementCapture, ConditionalAdvertisementSet,
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use super::{PeerManager, RIB_REPLY_TIMEOUT};
+use super::{OperatorReadAdmission, PeerManager, RIB_REPLY_TIMEOUT};
 use crate::config::Config;
 
 /// First retry delay after a failed reconcile; doubles per failure.
@@ -31,20 +31,33 @@ impl PeerManager {
     /// and the acknowledgement share one absolute deadline, so a full actor
     /// mailbox cannot stretch the request past `RIB_REPLY_TIMEOUT`. Any
     /// failure after the send leaves the RIB outcome unknown.
+    ///
+    /// The request queues behind the RIB's primary-lane work, which can take
+    /// seconds after a large export commit, so the wait serves readiness.
+    /// It serves operator reads too: they report peer-table and session
+    /// state, which the install does not change. The run-loop reconcile has
+    /// nothing in flight, and reload and catalog changes already admit reads
+    /// at the policy steps around this one.
     async fn conditional_rib_request<T>(
-        &self,
+        &mut self,
         request: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
     ) -> Result<T, String> {
         let (reply, response) = oneshot::channel();
         let deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
-        tokio::time::timeout_at(deadline, self.rib_tx.send(request(reply)))
+        let rib_tx = self.rib_tx.clone();
+        let request = request(reply);
+        let round_trip = async move {
+            tokio::time::timeout_at(deadline, rib_tx.send(request))
+                .await
+                .map_err(|_| "RIB conditional-advertisement request timed out before dispatch")?
+                .map_err(|_| "RIB unavailable for conditional-advertisement request")?;
+            tokio::time::timeout_at(deadline, response)
+                .await
+                .map_err(|_| "RIB conditional-advertisement acknowledgement timed out".to_string())?
+                .map_err(|_| "RIB dropped conditional-advertisement acknowledgement".to_string())
+        };
+        self.await_with_readiness(round_trip, OperatorReadAdmission::Served)
             .await
-            .map_err(|_| "RIB conditional-advertisement request timed out before dispatch")?
-            .map_err(|_| "RIB unavailable for conditional-advertisement request")?;
-        tokio::time::timeout_at(deadline, response)
-            .await
-            .map_err(|_| "RIB conditional-advertisement acknowledgement timed out".to_string())?
-            .map_err(|_| "RIB dropped conditional-advertisement acknowledgement".to_string())
     }
 
     /// Install `set` unless the RIB already holds it. `Ok(None)` means
@@ -151,7 +164,7 @@ impl PeerManager {
     /// `Ok(Some(prior))` restores the tracker state from before the
     /// re-observation, for a generation that rolls the dataset swap back.
     pub(super) async fn reobserve_conditional_advertisement_datasets(
-        &self,
+        &mut self,
         datasets: &[String],
         changed: Vec<Arc<str>>,
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {

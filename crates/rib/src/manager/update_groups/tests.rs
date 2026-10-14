@@ -651,6 +651,7 @@ fn announce_delta(p: Prefix, src: IpAddr, old: Option<IpAddr>) -> GroupDelta {
         path_id: 0,
         new: Some((new, None)),
         old_source: old,
+        prior: None,
         policy_label: None,
         source_attrs,
         lane: None,
@@ -663,6 +664,7 @@ fn withdraw_delta(p: Prefix, old: Option<IpAddr>) -> GroupDelta {
         path_id: 0,
         new: None,
         old_source: old,
+        prior: None,
         policy_label: None,
         source_attrs: None,
         lane: None,
@@ -1619,6 +1621,18 @@ fn pcb_emit_consumers_ignore_lane_fields() {
     seed(&mut m, cand(p, OTHER2, 250));
     let mut out = stage_pcb(&mut m, &[p]);
     assert!(!out.lane_deltas.is_empty());
+    let prior = out.deltas[0].prior.as_ref().unwrap();
+    assert_eq!(prior.adv_entry(MEMBER).unwrap().route.local_pref(), 300);
+    assert_eq!(prior.adv_entry(OTHER1).unwrap().route.local_pref(), 200);
+    assert_eq!(
+        m.group_ribs[&PCB_GID]
+            .adv_entry(OTHER1, &p, 0)
+            .unwrap()
+            .route
+            .local_pref(),
+        250,
+        "the prior snapshot must survive the desired-view commit"
+    );
 
     let member_emit = |deltas: &[GroupDelta]| {
         let mut announce = Vec::new();
@@ -1730,6 +1744,7 @@ fn adv_entry_derivation_matrix() {
         path_id: 0,
         new: Some((route_with_comm(p, OTHER1, 7), Some(NextHopAction::Self_))),
         old_source: None,
+        prior: None,
         policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: Some(AttrSet::new(vec![PathAttribute::Communities(vec![7])])),
         lane: None,
@@ -1887,6 +1902,7 @@ fn pcb_family_counts_lane_term_is_per_family() {
         path_id: 0,
         new: Some((w6.clone(), None)),
         old_source: None,
+        prior: None,
         policy_label: None,
         source_attrs: None,
         lane: None,
@@ -2070,6 +2086,7 @@ fn pcb_join_counters_replay_lane_permit() {
         path_id: 0,
         new: Some((route(p1, MEMBER), None)),
         old_source: None,
+        prior: None,
         policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: None,
         lane: None,
@@ -2088,6 +2105,7 @@ fn pcb_join_counters_replay_lane_permit() {
         path_id: 0,
         new: Some((route(p2, OTHER1), None)),
         old_source: None,
+        prior: None,
         policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
         source_attrs: None,
         lane: None,
@@ -2336,9 +2354,14 @@ fn pcb_steady_state_emission_matrix_matches_adv() {
                     emitted.insert(member, announce.len() + withdraw.len());
                     let wire = wires.get_mut(&member).unwrap();
                     for key in &withdraw {
-                        wire.remove(key);
+                        assert!(wire.remove(key).is_some(), "{case}: unknown withdrawal");
                     }
                     for route in announce {
+                        assert!(
+                            wire.get(&(route.prefix, route.path_id))
+                                .is_none_or(|old| !routes_equal(old, &route)),
+                            "{case}: unchanged slot was re-announced"
+                        );
                         wire.insert((route.prefix, route.path_id), route);
                     }
                     let adv: HashMap<(Prefix, u32), &Route> = group
@@ -2385,6 +2408,95 @@ fn pcb_steady_state_emission_matrix_matches_adv() {
     }
 }
 
+#[test]
+fn pcb_promotion_compares_the_former_winners_advertised_slot() {
+    for change in ["equal", "attributes", "next-hop"] {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        seed(&mut m, cand(p, OTHER1, 300));
+        let old_runner_up = cand(p, OTHER2, 200);
+        seed(&mut m, old_runner_up.clone());
+        stage_pcb(&mut m, &[p]);
+
+        unseed(&mut m, OTHER1, p);
+        let mut promoted = cand(p, OTHER2, 200);
+        promoted.attributes = AttrSet::new(promoted.attributes.to_vec());
+        match change {
+            "attributes" => {
+                let mut attrs = promoted.attributes.to_vec();
+                attrs.push(PathAttribute::Med(99));
+                promoted.attributes = AttrSet::new(attrs);
+            }
+            "next-hop" => promoted.next_hop = FOURTH,
+            _ => assert!(!Arc::ptr_eq(
+                &old_runner_up.attributes,
+                &promoted.attributes
+            )),
+        }
+        seed(&mut m, promoted);
+        let mut out = stage_pcb(&mut m, &[p]);
+        out.build_shared_emit(&mut |_| {});
+        assert!(!out.shared_applies_to(OTHER1));
+        assert!(!out.shared_applies_with_source_exclusion(OTHER1));
+        let (announce, withdraw) = member_emission(&out, OTHER1);
+        assert_eq!(announce.len(), usize::from(change != "equal"), "{change}");
+        assert!(withdraw.is_empty(), "{change}");
+        let (announce, withdraw) = member_emission(&out, OTHER2);
+        assert!(announce.is_empty());
+        assert_eq!(withdraw, vec![(p, 0)]);
+        assert!(out.shared_applies_to(FOURTH));
+        assert_eq!(member_emission(&out, FOURTH).0.len(), 1);
+    }
+}
+
+#[test]
+fn pcb_overtaking_compares_the_new_winners_advertised_slot() {
+    let mut m = staging_manager();
+    let p = prefix(1);
+    m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+    seed(&mut m, cand(p, OTHER1, 300));
+    seed(&mut m, cand(p, OTHER2, 200));
+    stage_pcb(&mut m, &[p]);
+    assert_eq!(lane_count_rows(&m), vec![(OTHER1, [1, 0])]);
+
+    seed(&mut m, cand(p, OTHER2, 400));
+    let mut out = stage_pcb(&mut m, &[p]);
+    out.build_shared_emit(&mut |_| {});
+    let (announce, withdraw) = member_emission(&out, OTHER2);
+    assert!(announce.is_empty() && withdraw.is_empty());
+    assert_eq!(member_emission(&out, OTHER1).0.len(), 1);
+    assert_eq!(lane_count_rows(&m), vec![(OTHER2, [1, 0])]);
+    assert_eq!(lane_source(&m, p), Some(OTHER1));
+}
+
+#[test]
+fn pcb_promotion_compares_source_control_before_policy_scrubbing() {
+    let deny = TARGET_ASN;
+    let allow = 42;
+    for (old_tag, new_tag, announces, withdrawals) in [
+        (deny, allow, 1, 0),
+        (allow, deny, 0, 1),
+        (deny, deny, 0, 0),
+        (allow, allow, 0, 0),
+    ] {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        m.group_ribs.insert(
+            PCB_GID,
+            per_client_best_group(Some(strip_communities_chain(vec![deny, allow]))),
+        );
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, old_tag));
+        stage_pcb(&mut m, &[p]);
+        unseed(&mut m, OTHER1, p);
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, new_tag));
+        let out = stage_pcb(&mut m, &[p]);
+        let (announce, withdraw) = emit_walk(&out, OTHER1, Some((RS_ASN, TARGET_ASN)));
+        assert_eq!((announce.len(), withdraw.len()), (announces, withdrawals));
+    }
+}
+
 /// A lane-only transition (winner untouched) is member-scoped:
 /// `source(w)` — and nobody else — receives the delta, the target
 /// leaves the shared payload (exception routing), and the wire
@@ -2408,6 +2520,16 @@ fn pcb_lane_only_transition_targets_winner_source_only() {
     );
     assert_eq!(out.lane_deltas.len(), 1);
     assert_eq!(out.lane_deltas[0].emit_target, Some(OTHER1));
+    assert_eq!(
+        out.lane_deltas[0]
+            .prior
+            .as_ref()
+            .unwrap()
+            .route
+            .local_pref(),
+        200,
+        "lane-only emission must retain its old advertised slot"
+    );
     assert!(
         !out.shared_applies_to(OTHER1),
         "the lane target must not ride the shared payload"
@@ -2734,8 +2856,7 @@ fn pcb_empty_lane_emits_like_plain_group() {
 
 /// Dirty-member resync: full-table announce minus own-sourced;
 /// tombstones withdraw unless the member still retains the key
-/// (staged by another source). Over-withdrawing keys now staged by
-/// the member itself is the deliberate safe direction.
+/// (staged by another source), and only for actually admitted keys.
 #[test]
 fn dirty_resync_replays_table_and_tombstones() {
     let mut group = empty_group();
@@ -2745,7 +2866,13 @@ fn dirty_resync_replays_table_and_tombstones() {
     group.apply_delta(&announce_delta(k4, MEMBER, None));
     group.tombstones.insert((k1, 0)); // retained via OTHER1 — no withdraw
     group.tombstones.insert((k3, 0)); // gone — withdraw
-    group.tombstones.insert((k4, 0)); // member-sourced now — safe over-withdraw
+    group.tombstones.insert((k4, 0)); // formerly foreign, member-sourced now
+    group.tombstones.insert((prefix(5), 0)); // never admitted — no withdraw
+    let admitted = HashSet::from([
+        ExactExportKey::Unicast(k1, 0),
+        ExactExportKey::Unicast(k3, 0),
+        ExactExportKey::Unicast(k4, 0),
+    ]);
 
     let mut announce = Vec::new();
     let mut withdraw = Vec::new();
@@ -2758,6 +2885,7 @@ fn dirty_resync_replays_table_and_tombstones() {
         false,
         None,
         None,
+        Some(&admitted),
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
@@ -2800,6 +2928,7 @@ fn regroup_baseline_diff_and_force() {
         false,
         Some(&baseline),
         None,
+        None,
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
@@ -2820,6 +2949,7 @@ fn regroup_baseline_diff_and_force() {
         false,
         true,
         Some(&baseline),
+        None,
         None,
         &mut announce,
         &mut withdraw,
@@ -2977,7 +3107,11 @@ fn extra_withdraws_respect_retained_keys() {
     let mut group = empty_group();
     let (k1, k7) = (prefix(1), prefix(7));
     group.apply_delta(&announce_delta(k1, OTHER1, None));
-    let extras: HashSet<(Prefix, u32)> = HashSet::from([(k1, 0), (k7, 0)]);
+    let extras: HashSet<(Prefix, u32)> = HashSet::from([(k1, 0), (k7, 0), (prefix(8), 0)]);
+    let admitted = HashSet::from([
+        ExactExportKey::Unicast(k1, 0),
+        ExactExportKey::Unicast(k7, 0),
+    ]);
 
     let mut announce = Vec::new();
     let mut withdraw = Vec::new();
@@ -2990,6 +3124,7 @@ fn extra_withdraws_respect_retained_keys() {
         false,
         None,
         Some(&extras),
+        Some(&admitted),
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
@@ -3030,6 +3165,7 @@ fn resync(
         is_force,
         None,
         extras,
+        None,
         &mut announce,
         &mut withdraw,
         &mut nh_flags,
@@ -3316,6 +3452,7 @@ fn lane_retire_records_member_scoped_withdraw() {
     out.lane_deltas.push(LaneDelta {
         prefix: p1,
         new: None,
+        prior: None,
         old_source: Some(OTHER2),
         emit_target: Some(MEMBER),
         prior_source_attrs: None,
@@ -3324,6 +3461,7 @@ fn lane_retire_records_member_scoped_withdraw() {
     out.lane_deltas.push(LaneDelta {
         prefix: p2,
         new: Some(lane_entry(route(p2, OTHER2), OTHER1, "lane", None)),
+        prior: None,
         old_source: None,
         emit_target: Some(OTHER1),
         prior_source_attrs: None,
@@ -3332,6 +3470,7 @@ fn lane_retire_records_member_scoped_withdraw() {
     out.lane_deltas.push(LaneDelta {
         prefix: p3,
         new: None,
+        prior: None,
         old_source: Some(OTHER2),
         emit_target: None,
         prior_source_attrs: None,
@@ -3784,6 +3923,7 @@ fn pcb_member_view_snapshot_records_substitution_for_regroup_diff() {
             false,
             Some(&baseline),
             None,
+            None,
             &mut announce,
             &mut withdraw,
             &mut nh_flags,
@@ -3926,8 +4066,8 @@ fn vpn_source_flip_matrix_exhaustive() {
 
 /// VPN dirty-member resync: full-VPN-table announce minus
 /// own-sourced; VPN tombstones withdraw unless the member still
-/// retains the key via another source; own-sourced tombstones are a
-/// safe over-withdraw. Force bypasses only the equality suppression.
+/// retains the key via another source, and only for admitted keys.
+/// Force bypasses only the equality suppression.
 #[test]
 fn vpn_dirty_resync_replays_table_and_tombstones() {
     let mut group = empty_group();
@@ -3935,7 +4075,13 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
     group.apply_vpn_delta(&vpn_announce_delta(2, MEMBER, None));
     group.vpn_tombstones.insert(vpn_key(1)); // retained via OTHER1 — no withdraw
     group.vpn_tombstones.insert(vpn_key(3)); // gone — withdraw
-    group.vpn_tombstones.insert(vpn_key(2)); // member-sourced — safe over-withdraw
+    group.vpn_tombstones.insert(vpn_key(2)); // formerly foreign, member-sourced now
+    group.vpn_tombstones.insert(vpn_key(4)); // never admitted — no withdraw
+    let admitted = HashSet::from([
+        ExactExportKey::Vpn(vpn_route(1, OTHER1).key()),
+        ExactExportKey::Vpn(vpn_route(2, OTHER1).key()),
+        ExactExportKey::Vpn(vpn_route(3, OTHER1).key()),
+    ]);
 
     let mut announce = Vec::new();
     let mut withdraw = Vec::new();
@@ -3947,6 +4093,7 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
         false,
         None,
         None,
+        Some(&admitted),
         &mut announce,
         &mut withdraw,
     );
@@ -3974,6 +4121,7 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
         false,
         Some(&baseline),
         None,
+        None,
         &mut announce,
         &mut withdraw,
     );
@@ -3991,6 +4139,7 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
         false,
         true,
         Some(&baseline),
+        None,
         None,
         &mut announce,
         &mut withdraw,
@@ -4292,8 +4441,8 @@ fn vpn_matrix_rt_filter_dimension() {
 }
 
 /// The Φ dimension of the dirty resync (design §2.4): announce only
-/// Φ-passing entries; the failing-retention backstop (over-)withdraws
-/// table keys outside Φ (healing a membership delta missed while
+/// Φ-passing entries; the failing-retention backstop withdraws
+/// admitted keys outside Φ (healing a membership delta missed while
 /// dirty); the snapshot is Φ-filtered.
 #[test]
 fn vpn_dirty_resync_rt_filter_dimension() {
@@ -4333,6 +4482,7 @@ fn vpn_dirty_resync_rt_filter_dimension() {
     // Φ-passing table and withdraws the residue (Φ-aware retention:
     // a staged-but-Φ-failing key is NOT retained).
     let extras: HashSet<VpnRouteKey> = HashSet::from([out_phi.nlri.key()]);
+    let admitted = HashSet::from([ExactExportKey::Vpn(out_phi.key())]);
     let mut announce = Vec::new();
     let mut withdraw = Vec::new();
     RibManager::assemble_group_vpn_resync(
@@ -4343,6 +4493,7 @@ fn vpn_dirty_resync_rt_filter_dimension() {
         false,
         None,
         Some(&extras),
+        Some(&admitted),
         &mut announce,
         &mut withdraw,
     );
@@ -4416,6 +4567,7 @@ fn source_control_passthrough_keeps_dense_residue_empty() {
         path_id: 0,
         new: Some((source.clone(), None)),
         old_source: None,
+        prior: None,
         policy_label: None,
         source_attrs: capture_source_attrs(&source),
         lane: None,
@@ -4458,6 +4610,7 @@ fn source_control_modifying_mode_preserves_historical_residue_and_transition() {
         path_id: 0,
         new: Some((staged, None)),
         old_source: None,
+        prior: None,
         policy_label,
         source_attrs: capture_source_attrs(&source),
         lane: None,
@@ -5088,17 +5241,12 @@ fn pcb_otc_transition_emission_matches_ungrouped_per_client_best() {
     );
 }
 
-/// The one deliberate deviation from the ungrouped path, pinned: a
-/// NEWLY blocked identity that was never delivered. The ungrouped
-/// path's Adj-RIB-Out gate keeps it silent; a group member's prior
-/// wire view is group-derived, so the backstop emits one defensive
-/// withdraw (an RFC 4271 no-op — over-withdraw is the safe
-/// direction) alongside the diagnostic. Steady-state replays are
-/// silent on both sides afterwards.
+/// A newly blocked identity that was never delivered reports its diagnostic
+/// without a withdrawal, matching the private Adj-RIB-Out gate.
 #[test]
-fn pcb_otc_fresh_blocked_prefix_emits_one_defensive_withdraw() {
+fn pcb_otc_fresh_blocked_prefix_matches_private_silence() {
     let p = prefix(1);
-    let run = |grouped: bool| -> (DrainedWire, DrainedWire) {
+    let run = |grouped: bool| -> (DrainedWire, DrainedWire, DrainedWire) {
         let mut m = staging_manager();
         let mut rx = if grouped {
             register_pcb_member(&mut m, MEMBER, per_client_best_customer_group())
@@ -5109,38 +5257,48 @@ fn pcb_otc_fresh_blocked_prefix_emits_one_defensive_withdraw() {
         receive_routes(&mut m, OTHER1, vec![with_otc_attr(cand(p, OTHER1, 300))]);
         let pass = drain_wire(&mut rx);
         m.send_route_refresh_response(MEMBER, Afi::Ipv4, Safi::Unicast);
-        (pass, drain_wire(&mut rx))
-    };
-    let (grouped_pass, grouped_refresh) = run(true);
-    let (ungrouped_pass, ungrouped_refresh) = run(false);
-    assert_eq!(
-        grouped_pass,
-        DrainedWire {
+        let refresh = drain_wire(&mut rx);
+        m.handle_update(crate::update::RibUpdate::RoutesReceived {
+            peer: OTHER1,
+            session_id: 0,
             announced: vec![],
             withdrawn: vec![(p, 0)],
-            otc_blocked: vec![(p, OTHER1)],
-        },
-        "grouped: one defensive withdraw beside the diagnostic"
-    );
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while m.process_next_route_chunk() {}
+        (pass, refresh, drain_wire(&mut rx))
+    };
+    let (grouped_pass, grouped_refresh, grouped_withdraw) = run(true);
+    let (ungrouped_pass, ungrouped_refresh, ungrouped_withdraw) = run(false);
+    assert_eq!(grouped_pass, ungrouped_pass);
     assert_eq!(
-        ungrouped_pass,
+        grouped_pass,
         DrainedWire {
             announced: vec![],
             withdrawn: vec![],
             otc_blocked: vec![(p, OTHER1)],
         },
-        "ungrouped: the Adj-RIB-Out gate keeps the fresh case silent"
+        "the fresh blocked identity keeps its diagnostic without withdrawing"
     );
     assert_eq!(grouped_refresh, DrainedWire::default());
     assert_eq!(ungrouped_refresh, DrainedWire::default());
+    assert_eq!(grouped_withdraw, ungrouped_withdraw);
+    assert_eq!(
+        grouped_withdraw,
+        DrainedWire::default(),
+        "withdrawing a never-admitted blocked route must stay silent"
+    );
 }
 
 /// Lane variant through the real path: a blocked runner-up
 /// substituting toward `source(w)` is stripped/suppressed exactly
 /// like the ungrouped outcome (which stages the same route as the
-/// member's first non-own permitted candidate) — modulo the pinned
-/// defensive withdraw on the fresh edge — and its diagnostic is
-/// the LANE route.
+/// member's first non-own permitted candidate), and its diagnostic is the
+/// LANE route. A fresh blocked slot has no admitted key to withdraw.
 #[test]
 fn pcb_otc_blocked_lane_substitution_matches_ungrouped_toward_winner_source() {
     let p = prefix(1);
@@ -5164,6 +5322,7 @@ fn pcb_otc_blocked_lane_substitution_matches_ungrouped_toward_winner_source() {
     };
     let (grouped_pass, grouped_refresh) = run(true);
     let (ungrouped_pass, ungrouped_refresh) = run(false);
+    assert_eq!(grouped_pass, ungrouped_pass);
     assert!(grouped_pass.announced.is_empty() && ungrouped_pass.announced.is_empty());
     assert_eq!(
         grouped_pass.otc_blocked,
@@ -5171,11 +5330,7 @@ fn pcb_otc_blocked_lane_substitution_matches_ungrouped_toward_winner_source() {
         "the diagnostic is the LANE route toward source(w)"
     );
     assert_eq!(ungrouped_pass.otc_blocked, vec![(p, OTHER2)]);
-    assert_eq!(
-        grouped_pass.withdrawn,
-        vec![(p, 0)],
-        "fresh blocked edge: the pinned defensive withdraw"
-    );
+    assert_eq!(grouped_pass.withdrawn, Vec::<(Prefix, u32)>::new());
     assert_eq!(ungrouped_pass.withdrawn.len(), 0);
     assert_eq!(grouped_refresh, DrainedWire::default());
     assert_eq!(ungrouped_refresh, DrainedWire::default());
@@ -5549,10 +5704,10 @@ fn single_best_group_otc_at_backstop_trips_debug_assert() {
 
 /// The per-client-best counterpart of the assert test: the same
 /// backstop entry does NOT panic — the blocked announce strips,
-/// the pending-gated conversion emits its withdraw, and the
-/// diagnostic delivers (clearing the pending edge).
+/// the pending diagnostic delivers and retires, and no never-admitted
+/// key is withdrawn.
 #[test]
-fn per_client_best_group_otc_at_backstop_strips_with_pending_gated_withdraw() {
+fn per_client_best_pending_diagnostic_does_not_invent_withdrawal() {
     let mut m = staging_manager();
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
     m.outbound_peers.insert(MEMBER, outbound_tx);
@@ -5580,10 +5735,9 @@ fn per_client_best_group_otc_at_backstop_strips_with_pending_gated_withdraw() {
         update.announce.is_empty(),
         "the blocked announce is stripped"
     );
-    assert_eq!(
-        update.withdraw,
-        vec![(prefix(1), 0)],
-        "a pending (newly blocked) identity converts to a withdraw"
+    assert!(
+        update.withdraw.is_empty(),
+        "a diagnostic alone is not evidence of an admitted route"
     );
     assert_eq!(update.otc_blocked.len(), 1);
     assert!(
@@ -5645,6 +5799,7 @@ fn announce_route_delta(new: Route) -> GroupDelta {
         path_id: 0,
         new: Some((new, None)),
         old_source: None,
+        prior: None,
         policy_label: None,
         source_attrs,
         lane: None,

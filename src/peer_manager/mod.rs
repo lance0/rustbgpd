@@ -52,6 +52,7 @@ mod peer_table;
 mod policy;
 mod queries;
 mod reconcile;
+mod recovery;
 mod rotation;
 pub(crate) use rotation::TCP_AO_AWAITING_PEER_PREFIX;
 mod snapshot;
@@ -440,6 +441,7 @@ impl PeerShutdownOutcome {
 struct PendingInbound {
     handle: PeerHandle,
     session_id: u64,
+    recovery_reset: Option<recovery::SessionRecoveryReset>,
 }
 
 #[cfg(test)]
@@ -470,6 +472,8 @@ pub struct PeerManager {
     /// Session lifecycle notifications are keyed by session id, and scoped
     /// link-local peers can share the same address on different interfaces.
     session_index: HashMap<u64, PeerKey>,
+    evpn_recovery_retry_at: Option<tokio::time::Instant>,
+    evpn_recovery_retry_cursor: u64,
     rx: mpsc::Receiver<PeerManagerCommand>,
     /// Dedicated read-only lane drained only at safe actor seams. Mutation
     /// commands remain on `rx` and therefore stay ordered behind a policy
@@ -728,6 +732,7 @@ impl PeerManager {
                 dynamic_neighbors: Vec::new(),
                 evpn_instances: Vec::new(),
                 ethernet_segments: Vec::new(),
+                evpn_core_isolation: None,
                 evpn_ip_vrfs: Vec::new(),
                 managed_netdevs: crate::config::ManagedNetdevsConfig::default(),
                 fib_tables: Vec::new(),
@@ -1110,6 +1115,24 @@ impl PeerManager {
         }
     }
 
+    /// Readiness-aware mailbox admission: queue one RIB update on the primary
+    /// lane, serving readiness while that lane is full. This covers only the
+    /// admission wait; a caller whose update carries a reply awaits it
+    /// separately. The update keeps the RIB's peer or export state in step
+    /// with this actor, so it is never dropped for time: the send waits for
+    /// capacity for as long as the RIB runs, and fails only once the RIB has
+    /// exited.
+    async fn send_rib_update(
+        &mut self,
+        update: RibUpdate,
+        admission: OperatorReadAdmission,
+    ) -> Result<(), ()> {
+        let rib_tx = self.rib_tx.clone();
+        self.await_with_readiness(async move { rib_tx.send(update).await }, admission)
+            .await
+            .map_err(drop)
+    }
+
     async fn receive_readiness_query(
         readiness_rx: &mut Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
     ) -> Option<PeerManagerReadinessQuery> {
@@ -1174,6 +1197,8 @@ impl PeerManager {
             next_max_prefix_latch_generation: 1,
             retiring_sessions: HashMap::new(),
             session_index: HashMap::new(),
+            evpn_recovery_retry_at: None,
+            evpn_recovery_retry_cursor: 0,
             rx,
             readiness_rx: None,
             operator_rx: None,
@@ -1297,7 +1322,20 @@ impl PeerManager {
     }
 
     pub(super) fn unregister_session(&mut self, session_id: u64) {
-        self.session_index.remove(&session_id);
+        if let Some(key) = self.session_index.remove(&session_id)
+            && let Some((_, slot)) = self.peers.recovery_session_mut(&key, session_id)
+        {
+            *slot = None;
+        }
+    }
+
+    /// `[rpki] local_revalidation`: RFC 9324 local re-evaluation instead of
+    /// inbound Route Refresh on a validation-cache change.
+    fn local_revalidation(&self) -> bool {
+        self.current_config
+            .rpki
+            .as_ref()
+            .is_some_and(|rpki| rpki.local_revalidation)
     }
 
     fn build_transport_config(&self, config: &PeerManagerNeighborConfig) -> TransportConfig {
@@ -1353,6 +1391,7 @@ impl PeerManager {
         transport.max_prefixes_ipv6 = config.max_prefixes_ipv6;
         transport.max_prefixes_received_ipv4 = config.max_prefixes_received_ipv4;
         transport.max_prefixes_received_ipv6 = config.max_prefixes_received_ipv6;
+        transport.max_prefixes_family = config.max_prefixes_family;
         transport.max_prefix_action = config.max_prefix_action;
         transport.max_prefix_warning_percent = config.max_prefix_warning_percent;
         transport.peer_group.clone_from(&config.peer_group);
@@ -1411,6 +1450,8 @@ impl PeerManager {
         // hazard as the explain knobs above.
         transport.reject_retention_enabled = self.current_config.policy.reject_retention.enabled;
         transport.reject_retention_capacity = self.current_config.policy.reject_retention.capacity;
+        // RFC 9324: `[rpki]` is restart-required, so construction-time reads hold.
+        transport.local_revalidation = self.local_revalidation();
         // RFC 8671: tap outbound UPDATEs for BMP only when some collector
         // actually monitors the post-policy Adj-RIB-Out stream ([bmp]
         // changes require a restart, so read-at-construction is
@@ -1896,6 +1937,9 @@ impl PeerManager {
                 let result = self.reset_peer(peer, reason).await;
                 let _ = reply.send(result);
             }
+            PeerManagerCommand::ResetEvpnRecoverySession { request } => {
+                self.reset_evpn_recovery_session(request);
+            }
             PeerManagerCommand::SoftResetIn {
                 peer,
                 families,
@@ -1911,10 +1955,15 @@ impl PeerManager {
             PeerManagerCommand::ReplayOutbound { peer, reply } => {
                 self.replay_outbound(peer, reply).await;
             }
-            PeerManagerCommand::SoftResetImportValidationDependents { dependency, reply } => {
-                let result = self
-                    .soft_reset_import_validation_dependents(dependency)
-                    .await;
+            PeerManagerCommand::SoftResetImportValidationDependents { delta, reply } => {
+                let result = if self.local_revalidation() {
+                    self.revalidate_import_validation_dependents(delta).await
+                } else {
+                    self.soft_reset_import_validation_dependents(policy::validation_dependency(
+                        &delta,
+                    ))
+                    .await
+                };
                 let _ = reply.send(result);
             }
             PeerManagerCommand::SetGracefulShutdown {
@@ -2466,6 +2515,7 @@ impl PeerManager {
                 self.reconcile_conditional_advertisements().await;
             }
             let bfd_retry_at = self.bfd_retry_deadline();
+            let evpn_recovery_retry_at = self.evpn_recovery_retry_at;
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             tokio::select! {
@@ -2689,6 +2739,13 @@ impl PeerManager {
                         std::future::pending::<()>().await;
                     }
                 } => self.retry_bfd_commands(bfd_state_change_rx.as_ref()),
+                () = async {
+                    if let Some(deadline) = evpn_recovery_retry_at {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => self.retry_evpn_recovery_resets(),
                 change = async {
                     match bfd_state_change_rx.as_mut() {
                         Some(rx) => rx.recv().await,

@@ -318,7 +318,8 @@ pub enum SessionNotification {
         /// IP address of the remote peer.
         peer_addr: IpAddr,
         /// Bound scope: `aggregate`, `ipv4_unicast`, `ipv6_unicast`,
-        /// `ipv4_unicast_received`, or `ipv6_unicast_received`.
+        /// `ipv4_unicast_received`, `ipv6_unicast_received`, or a
+        /// non-unicast family label (`PrefixLimitFamily::label`).
         scope: &'static str,
         /// Usage that crossed the threshold.
         usage: usize,
@@ -457,6 +458,9 @@ pub struct PeerRuntimeConfigUpdate {
     pub max_prefixes_received_ipv4: Option<u32>,
     /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
     pub max_prefixes_received_ipv6: Option<u32>,
+    /// Non-unicast per-family accepted bounds. Lowering one below the
+    /// family's current count enforces immediately on apply.
+    pub max_prefixes_family: crate::config::FamilyPrefixLimits,
     /// Response to a crossed bound; switching to `Shutdown` re-evaluates
     /// every bound immediately.
     pub max_prefix_action: crate::config::MaxPrefixAction,
@@ -506,6 +510,12 @@ pub enum PeerCommand {
         /// Shutdown communication reason (pre-encoded), or None.
         reason: Option<Bytes>,
     },
+    /// Reset only the captured EVPN outbound connection. A reconnect changes
+    /// the token even when the session actor retains its generation ID.
+    ResetEvpnRecoverySession {
+        /// Connection token and bounded resource-exhaustion evidence.
+        request: rustbgpd_rib::EvpnRecoveryReset,
+    },
     /// Query the current session state.
     QueryState {
         /// Oneshot channel to receive the session state snapshot.
@@ -531,6 +541,15 @@ pub enum PeerCommand {
         safi: Safi,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
+    /// RFC 9324: a validation snapshot changed. The session answers at once
+    /// whether it can re-evaluate locally, then replays the affected
+    /// retained routes through its inbound path.
+    RevalidateImport {
+        /// What changed.
+        delta: ValidationDelta,
+        /// The session's answer, sent before the re-evaluation runs.
+        reply: oneshot::Sender<ImportRevalidation>,
     },
     /// Replace the import policy chain for future inbound UPDATE processing.
     UpdateImportPolicy {
@@ -709,6 +728,35 @@ impl PeerCommand {
             _ => std::future::pending().await,
         }
     }
+}
+
+/// What changed in the validation snapshot, for RFC 9324 local
+/// re-evaluation ([`PeerCommand::RevalidateImport`]).
+#[derive(Debug, Clone)]
+pub enum ValidationDelta {
+    /// VRPs changed. `Some` lists every added or removed VRP; `None` (full
+    /// snapshot, cache reset, or first table) re-evaluates every retained route.
+    Rpki(Option<Arc<[rustbgpd_rpki::VrpEntry]>>),
+    /// ASPA records changed. `Some` holds the changed customer ASNs; `None`
+    /// re-evaluates every retained route.
+    Aspa(Option<Arc<rustc_hash::FxHashSet<u32>>>),
+}
+
+/// A session's answer to [`PeerCommand::RevalidateImport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportRevalidation {
+    /// Not Established: nothing to re-evaluate.
+    NotEstablished,
+    /// Retained unicast input is complete and is being re-evaluated locally.
+    /// `refresh_families` lists negotiated families outside the store whose
+    /// import can still depend on the change (`FlowSpec` destination RPKI).
+    Local {
+        /// Families that still need inbound Route Refresh.
+        refresh_families: Vec<(Afi, Safi)>,
+    },
+    /// No complete retained input (disabled, reject bound exceeded, or
+    /// retention started mid-session): fall back to Route Refresh.
+    Incomplete,
 }
 
 /// Per-term hit-counter snapshot for one session's installed import
@@ -921,7 +969,8 @@ pub enum StateQueryOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaxPrefixScopeState {
     /// `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
-    /// or `ipv6_unicast_received`.
+    /// `ipv6_unicast_received`, or a non-unicast family label such as
+    /// `l3vpn_ipv4_unicast` (see `PrefixLimitFamily::label`).
     pub scope: &'static str,
     /// The session actor's enforcement count for the scope.
     pub usage: usize,
@@ -2533,6 +2582,7 @@ impl PeerHandle {
         max_prefixes_ipv6: Option<u32>,
         max_prefixes_received_ipv4: Option<u32>,
         max_prefixes_received_ipv6: Option<u32>,
+        max_prefixes_family: crate::config::FamilyPrefixLimits,
         max_prefix_action: crate::config::MaxPrefixAction,
         max_prefix_warning_percent: Option<u8>,
         gr_stale_routes_time: u64,
@@ -2552,6 +2602,7 @@ impl PeerHandle {
                         max_prefixes_ipv6,
                         max_prefixes_received_ipv4,
                         max_prefixes_received_ipv6,
+                        max_prefixes_family,
                         max_prefix_action,
                         max_prefix_warning_percent,
                         gr_stale_routes_time,

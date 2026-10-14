@@ -3,20 +3,20 @@
 # proves: RFC 7947 transparency, OTC, per-member views, ROV rejection and per-client-best path hiding for BIRD, GoBGP and FRR members under a reduced lab policy; does not qualify the production cookbook policy
 # claims: selected advertised
 # evidence: docs/interop.md#test-matrix
-# pinned: BIRD 2.19.2, GoBGP 4.10.0, digest-pinned FRR 10.7.0 and StayRTR; local run 2026-09-22, recorded in the M83 test-matrix row
+# pinned: BIRD 2.19.3, GoBGP 4.10.0, digest-pinned FRR 10.7.0 and StayRTR; local run 2026-10-13, recorded in the M83 test-matrix row
 #
 # M83 interop test — route-server profile, multi-stack receipt
 # (RFC 7947 / RFC 7948 / RFC 9234 / ADR-0101 proof-ladder closer).
 #
 # rustbgpd is the route server (AS 65500) for three member stacks —
-# BIRD 2.19.2, GoBGP 4.10.0 (Add-Path receive), FRR 10.7.0 — with a
+# BIRD 2.19.3, GoBGP 4.10.0 (Add-Path receive), FRR 10.7.0 — with a
 # StayRTR RTR fixture feeding ROV and a tshark capture on the RS↔BIRD
 # link for the byte-level assertions.
 #
 # First-AS relaxation per stack (client-side, RFC 7947 §2.2.2.1):
 #   FRR 10.7.0  — per-neighbor `no neighbor X enforce-first-as`
 #                 (global form alone is insufficient, the M19 finding)
-#   BIRD 2.19.2 — `enforce first as off` (explicit; also the default)
+#   BIRD 2.19.3 — `enforce first as off` (explicit; also the default)
 #   GoBGP 4.10.0 — no first-AS enforcement exists; nothing to disable
 #
 # Assertions:
@@ -104,7 +104,7 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
+#   - docker build -t bird:v2.19.3-m83 -f tests/interop/Dockerfile.bird2 tests/interop
 #   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.10.0 --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe -t gobgp:v4.10.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   - docker pull quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b
 #   - containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
@@ -925,8 +925,8 @@ preflight_incumbent_versions() {
     frr_container_image_id=$(docker inspect -f '{{.Image}}' "$FRR") || return 1
     frr_version=$(docker exec "$FRR" /usr/lib/frr/bgpd --version 2>&1 \
         | sed -n '1p') || return 1
-    [ "$bird_version" = "BIRD version 2.19.2" ] || {
-        echo "ERROR: M83 requires BIRD version 2.19.2, got: $bird_version" >&2
+    [ "$bird_version" = "BIRD version 2.19.3" ] || {
+        echo "ERROR: M83 requires BIRD version 2.19.3, got: $bird_version" >&2
         return 1
     }
     [ "$gobgp_version" = "gobgp version 4.10.0" ] || {
@@ -949,7 +949,7 @@ preflight_incumbent_versions() {
         echo "ERROR: M83 requires $FRR_VERSION, got: $frr_version" >&2
         return 1
     }
-    log "Runtime preflight: BIRD 2.19.2, GoBGP 4.10.0, and FRR 10.7.0 exact identities confirmed"
+    log "Runtime preflight: BIRD 2.19.3, GoBGP 4.10.0, and FRR 10.7.0 exact identities confirmed"
 }
 
 stop_capture() {
@@ -1822,7 +1822,7 @@ assert_reload_stability() {
 # ---------------------------------------------------------------------------
 
 main() {
-    log "M83 interop test: route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.10.0 + FRR 10.7.0 + RTR)"
+    log "M83 interop test: route-server profile, multi-stack (BIRD 2.19.3 + GoBGP 4.10.0 + FRR 10.7.0 + RTR)"
     log "Topology: $TOPO"
 
     resolve_grpc_addr

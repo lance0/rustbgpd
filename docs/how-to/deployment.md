@@ -64,7 +64,7 @@ with an explicit stable tag (`vMAJOR.MINOR.PATCH`):
 
 ```sh
 less packaging/install.sh
-sh packaging/install.sh --tag v0.76.0
+sh packaging/install.sh --tag v0.77.0
 ```
 
 Without a source checkout, fetch the published asset:
@@ -80,10 +80,10 @@ systemd units. `--download-only` writes the verified selected artifact and its
 manifest without installing either.
 
 ```sh
-sh packaging/install.sh --tag v0.76.0 --prefix /opt/rustbgpd-0.76.0
-/opt/rustbgpd-0.76.0/rbgp doctor
+sh packaging/install.sh --tag v0.77.0 --prefix /opt/rustbgpd-0.77.0
+/opt/rustbgpd-0.77.0/rbgp doctor
 
-sh packaging/install.sh --tag v0.76.0 --download-only ./rustbgpd-v0.76.0
+sh packaging/install.sh --tag v0.77.0 --download-only ./rustbgpd-v0.77.0
 ```
 
 ### Pre-built binary tarball
@@ -166,7 +166,7 @@ subcommand name but not its flags. All three shells offer `--json-lines`,
 `--pager`, and `--json-version` only on command paths where those flags apply.
 
 To pin to a specific tag for reproducibility, swap `latest` for the
-version, e.g. `releases/download/v0.76.0/${TARBALL}`. SHA-256
+version, e.g. `releases/download/v0.77.0/${TARBALL}`. SHA-256
 checksums are published alongside each tarball as
 `checksums-${SUFFIX}.txt`.
 
@@ -527,6 +527,14 @@ Notes on the sandbox:
   `CAP_NET_ADMIN`, so the unprivileged unit cannot program the kernel.
 - `ProtectSystem=strict` + explicit `ReadWritePaths` confines the
   daemon to `/var/lib/rustbgpd` (state) and `/etc/rustbgpd` (config).
+- `ExecStart` passes `--runtime-state-dir /var/lib/rustbgpd`; the daemon
+  refuses to start when that differs from the config's `runtime_state_dir`,
+  so change both together. `ExecStopPost=` runs
+  `rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd`
+  after every stop, crash or failed start: it raises CE-facing links that an
+  EVPN [core-isolation hold](../reference/configuration.md#evpn_core_isolation)
+  left down, needs `CAP_NET_ADMIN` only when there is something to release,
+  and exits 0 when there is nothing to release.
 - `ExecReload=kill -HUP` is the supported reload path. See the
   [reload matrix](../reference/reload-matrix.md) for which fields hot-apply vs.
   need a restart.
@@ -716,8 +724,8 @@ docker compose down
 For your own deployment:
 
 - **Image name and command**: published GHCR version tags have **no leading
-  `v`**: use `ghcr.io/lance0/rustbgpd:0.76.0`, not
-  `ghcr.io/lance0/rustbgpd:v0.76.0`. The older `:0.68.0` image is
+  `v`**: use `ghcr.io/lance0/rustbgpd:0.77.0`, not
+  `ghcr.io/lance0/rustbgpd:v0.77.0`. The older `:0.68.0` image is
   amd64-only; it is not backfilled when a later release publishes multiple
   platforms. The production image runs as uid/gid 999 — pinned in the
   `Dockerfile` runtime stage (`useradd --uid 999 --gid 999` and
@@ -807,7 +815,7 @@ Use exactly one of these deployment paths:
      --ulimit nofile=65536:524288 \
      --mount=type=bind,source=/etc/rustbgpd,target=/etc/rustbgpd,readonly \
      --mount=type=bind,source=/var/lib/rustbgpd,target=/var/lib/rustbgpd \
-     ghcr.io/lance0/rustbgpd:0.76.0
+     ghcr.io/lance0/rustbgpd:0.77.0
    ```
 
 Do not omit the host state bind when overriding the image user. The directory
@@ -857,7 +865,7 @@ sudo install -o root -g root -m 0600 config.toml /etc/rustbgpd/config.toml
 sudo install -m 0644 examples/systemd/rustbgpd-container.service \
   /etc/systemd/system/rustbgpd-container.service
 sudo tee /etc/rustbgpd/rustbgpd-container.env >/dev/null <<'EOF'
-RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.76.0
+RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.77.0
 EOF
 sudo chmod 0644 /etc/rustbgpd/rustbgpd-container.env
 sudo systemctl daemon-reload
@@ -887,7 +895,7 @@ docker run --rm \
   --user=root \
   --cap-drop=ALL \
   --mount=type=bind,source=/etc/rustbgpd,target=/etc/rustbgpd,readonly \
-  ghcr.io/lance0/rustbgpd:0.76.0 \
+  ghcr.io/lance0/rustbgpd:0.77.0 \
   rustbgpd --check --strict /etc/rustbgpd/config.toml
 ```
 

@@ -608,7 +608,7 @@ impl RibManager {
         let mut tags = None;
         let mut peers = vec![leader];
         for _ in 0..queued {
-            if self.conditional_expiry_cutoff == Some(0) {
+            if self.expiry_cutoff_reached() {
                 break;
             }
             if self.primary_lookahead.is_none() {
@@ -649,7 +649,7 @@ impl RibManager {
                 .primary_lookahead
                 .take()
                 .expect("refresh admitted above");
-            self.count_conditional_expiry_admission();
+            self.expiry_cutoffs.charge();
             self.advance_route_pages_for_update(&update);
             let RibUpdate::RouteRefreshRequest {
                 peer,
@@ -1973,7 +1973,7 @@ impl RibManager {
         };
         let (blocked, ready): (HashSet<_>, HashSet<_>) = families
             .into_iter()
-            .partition(|family| self.selection_convergence_held(*family));
+            .partition(|family| self.eor_held(peer, *family));
         if !blocked.is_empty() {
             self.pending_eor.entry(peer).or_default().extend(blocked);
         }

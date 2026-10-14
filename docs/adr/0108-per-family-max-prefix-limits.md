@@ -154,3 +154,41 @@ and rejects a configured aggregate `max_prefixes`, whose non-unicast families
 have no admission seam; both exclude `max_prefix_restart_seconds`.
 
 **Still deferred.** Outbound limits beyond ADR-0113 and non-unicast families.
+
+## Amendment: non-unicast per-family limits
+
+**Date:** 2026-10-12
+
+This amends the deferred "non-unicast families" item above; the earlier
+decision text is unchanged.
+
+**Decision.** Add one accepted-route bound per non-unicast family a route
+reflector carries: `max_prefixes_l3vpn_ipv4_unicast`,
+`max_prefixes_l3vpn_ipv6_unicast`, `max_prefixes_ipv4_labeled_unicast`,
+`max_prefixes_ipv6_labeled_unicast`, `max_prefixes_l2vpn_evpn`,
+`max_prefixes_ipv4_flowspec`, `max_prefixes_ipv6_flowspec`, and
+`max_prefixes_rtc` (neighbor-level, peer-group inheritable exactly like
+`max_prefixes_ipv4`). The key suffix is the canonical family label, which is
+also the metric `scope`. BGP-LS and BGP-LS VPN get no per-family bound in this
+amendment: the session counts both in one table, so a bound would need new
+per-family counters, and the aggregate `max_prefixes` still covers them.
+RT-Constrain is included because its single family is already counted
+exactly.
+
+**Counting** follows the unicast accepted rule: unique routes accepted after
+import policy, Add-Path paths of one route collapsed (VPN identity is RD +
+prefix, labeled identity is the prefix), withdrawals and RFC 7313 `EoRR` or
+timeout sweeps release the slot, and a session reset clears it. EVPN, FlowSpec,
+and RT-Constrain keys carry no path identifier. Under Add-Path the session
+keeps a per-identity path count only for the negotiated Add-Path receive
+families. The aggregate keeps its historical per-path count for VPN and
+labeled unicast. There is no pre-policy received variant for these families.
+
+**Enforcement** is independent of every other bound, in `PrefixLimitFamily`
+order after the unicast bounds. `shutdown` sends Cease/1 with the RFC 4486
+AFI, SAFI, and bound (RFC 8538 encapsulation under Notification GR) and uses
+the same latch and optional timed restart; `block` withholds net-new routes of
+the full family at the same admission seam, before accounting and delivery,
+and requests one route refresh for that family when the episode ends;
+`warning` reports per crossing. Runtime lowering enforces immediately, and
+removing a bound drops its metric scope.

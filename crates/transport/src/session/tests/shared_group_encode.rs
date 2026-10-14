@@ -2024,15 +2024,20 @@ async fn ungrouped_frames(
     out
 }
 
-fn prefix_attr_map(frames: &[Vec<u8>]) -> std::collections::BTreeMap<String, Vec<String>> {
+fn raw_unicast_attributes(frame: &[u8]) -> Vec<u8> {
+    let attributes_offset = 21 + usize::from(u16::from_be_bytes([frame[19], frame[20]]));
+    let attributes_len = usize::from(u16::from_be_bytes([
+        frame[attributes_offset],
+        frame[attributes_offset + 1],
+    ]));
+    frame[attributes_offset + 2..attributes_offset + 2 + attributes_len].to_vec()
+}
+
+fn prefix_attr_map(frames: &[Vec<u8>]) -> std::collections::BTreeMap<String, Vec<u8>> {
     let mut map = std::collections::BTreeMap::new();
     for frame in frames {
         let parsed = parse_frame(frame, false);
-        let attrs: Vec<String> = parsed
-            .attributes
-            .iter()
-            .map(|attr| format!("{attr:?}"))
-            .collect();
+        let attrs = raw_unicast_attributes(frame);
         for nlri in &parsed.announced {
             assert!(
                 map.insert(nlri.prefix.to_string(), attrs.clone()).is_none(),
@@ -2041,6 +2046,123 @@ fn prefix_attr_map(frames: &[Vec<u8>]) -> std::collections::BTreeMap<String, Vec
         }
     }
     map
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "pins elected encoder, follower and private wire events plus EoR coverage in one sequence"
+)]
+#[tokio::test]
+async fn shared_group_per_key_wire_events_and_eor_match_private_path() {
+    let (initial, _) = mixed_failover_pass();
+    let mut replacement = initial[0].clone();
+    replacement.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![64_603])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 44, 0, 7)),
+        PathAttribute::Communities(vec![0xFDE8_002A]),
+        PathAttribute::OriginatorId(Ipv4Addr::new(192, 0, 2, 9)),
+        PathAttribute::ClusterList(vec![Ipv4Addr::new(192, 0, 2, 10)]),
+    ]);
+    replacement.next_hop = IpAddr::V4(Ipv4Addr::new(10, 44, 0, 7));
+    let excluded = Ipv4Addr::new(10, 44, 0, 1);
+    let removed = (initial[2].prefix, initial[2].path_id);
+    let passes = [
+        (initial.clone(), vec![], true, 3),
+        (vec![replacement], vec![removed], false, 2),
+        (vec![initial[2].clone()], vec![], true, 2),
+    ];
+    let shared_cells: Vec<_> = passes
+        .iter()
+        .map(|_| Arc::new(rustbgpd_rib::SharedGroupEncode::default()))
+        .collect();
+    let (mut encoder, mut encoder_wire) = shared_group_member(65001).await;
+    let (mut follower, mut follower_wire) = shared_group_member(65001).await;
+    let (mut private, mut private_wire) = shared_group_member(65001).await;
+    let mut streams = [Vec::new(), Vec::new(), Vec::new()];
+    for ((announce, withdraw, eor, frame_count), shared) in passes.iter().zip(&shared_cells) {
+        for (index, (member, wire)) in [
+            (&mut encoder, &mut encoder_wire),
+            (&mut follower, &mut follower_wire),
+            (&mut private, &mut private_wire),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut update = shared_group_envelope(member, shared, excluded, announce);
+            update.withdraw.clone_from(withdraw);
+            if *eor {
+                update.end_of_rib = vec![(Afi::Ipv4, Safi::Unicast)];
+            }
+            if index == 2 {
+                update.shared_group_encode = None;
+            }
+            member.test_drain_outbound(update).await;
+            streams[index].extend(read_raw_frames(wire, *frame_count).await);
+        }
+    }
+    // Packing and cross-key order may differ; each key's final attribute
+    // bytes and ordered events, and the state covered by EoR, may not.
+    let trace = |frames: &[Vec<u8>]| {
+        let mut events = std::collections::BTreeMap::<_, Vec<(Vec<u8>, Option<Vec<u8>>)>>::new();
+        let mut state = std::collections::BTreeMap::new();
+        let mut eor_states = Vec::new();
+        for frame in frames {
+            let parsed = parse_frame(frame, false);
+            let nlri_bytes = |mut bytes: &[u8]| {
+                let mut rows = Vec::new();
+                while !bytes.is_empty() {
+                    let length = 1 + usize::from(bytes[0]).div_ceil(8);
+                    rows.push(bytes[..length].to_vec());
+                    bytes = &bytes[length..];
+                }
+                rows
+            };
+            let withdrawn_len = usize::from(u16::from_be_bytes([frame[19], frame[20]]));
+            let withdrawn = nlri_bytes(&frame[21..21 + withdrawn_len]);
+            assert_eq!(withdrawn.len(), parsed.withdrawn.len());
+            for (nlri, bytes) in parsed.withdrawn.iter().zip(withdrawn) {
+                let key = (nlri.prefix, nlri.path_id);
+                assert!(
+                    state.remove(&key).is_some(),
+                    "unknown or duplicate withdrawal"
+                );
+                events.entry(key).or_default().push((bytes, None));
+            }
+            let attributes = raw_unicast_attributes(frame);
+            let announced = nlri_bytes(&frame[23 + withdrawn_len + attributes.len()..]);
+            assert_eq!(announced.len(), parsed.announced.len());
+            for (nlri, bytes) in parsed.announced.iter().zip(announced) {
+                let key = (nlri.prefix, nlri.path_id);
+                state.insert(key, attributes.clone());
+                events
+                    .entry(key)
+                    .or_default()
+                    .push((bytes, Some(attributes.clone())));
+            }
+            if frame[19..] == [0, 0, 0, 0] {
+                let progress: std::collections::BTreeMap<_, _> = events
+                    .iter()
+                    .map(|(key, events)| (*key, events.len()))
+                    .collect();
+                eor_states.push((state.clone(), progress));
+            }
+        }
+        (events, state, eor_states)
+    };
+    let expected = trace(&streams[2]);
+    assert_eq!(expected.2.len(), 2, "both EoR barriers must be exercised");
+    assert_eq!(trace(&streams[0]), expected, "elected encoder");
+    assert_eq!(trace(&streams[1]), expected, "shared follower");
+    for (member, wire) in [
+        (&mut encoder, &mut encoder_wire),
+        (&mut follower, &mut follower_wire),
+        (&mut private, &mut private_wire),
+    ] {
+        assert_stream_ends(member, wire, false).await;
+    }
 }
 
 /// A mixed failover pass (withdrawals plus displacing announcements) stays

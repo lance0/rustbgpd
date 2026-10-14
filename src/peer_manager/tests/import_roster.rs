@@ -109,6 +109,7 @@ async fn roster_follows_replacement_deletion_and_rebinding() {
     // Inbound collision: the candidate becomes the primary.
     let second_chain = named_deny_policy_chain(&[Some("second-in")]);
     mgr.peers.get_mut(&key(peer)).unwrap().pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
         handle: published_handle(Some(&second_chain), 5),
         session_id: 77,
     });

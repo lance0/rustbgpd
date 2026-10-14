@@ -5,6 +5,7 @@
 # the resolved digest as a build argument. The image-primer checker catches
 # stale defaults and malformed entries.
 7e8b28a17dd619eb73eba959ef6a944dd9c11cf5c1700a2ecbb8eb13bd4a8a57  bird-3.3.3.tar.gz
+853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd  bird-2.19.3.tar.gz
 aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660  bird-2.19.2.tar.gz
 e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522  gobgp_3.37.0_linux_amd64.tar.gz
 0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29  gobgp_3.37.0_linux_arm64.tar.gz

@@ -567,3 +567,279 @@ fn prepare_outbound_attributes_labeled_adds_rr_attrs_for_ibgp_reflection() {
         PathAttribute::NextHop(_) | PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
     )));
 }
+
+/// An RFC 3107-style two-entry stack: a non-bottom label, then the
+/// bottom-of-stack label.
+fn two_label_stack() -> Vec<MplsLabelEntry> {
+    vec![
+        MplsLabelEntry::try_new(3001, 0, false).unwrap(),
+        MplsLabelEntry::try_new(4093, 0, true).unwrap(),
+    ]
+}
+
+/// The (labeled, VPN) route pair for one AFI, with a one-label stack and a
+/// next hop of that AFI.
+fn mpls_routes_for(afi: Afi) -> (rustbgpd_rib::LabeledRibRoute, rustbgpd_rib::VpnRibRoute) {
+    let mut labeled = make_labeled_rib_route(4093);
+    let mut vpn = make_vpn_rib_route(4093);
+    if afi == Afi::Ipv6 {
+        let next_hop: IpAddr = "2001:db8::7".parse().unwrap();
+        labeled.nlri.prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48));
+        labeled.next_hop = next_hop;
+        vpn.nlri.prefix = VpnPrefix::v6("2001:db8:1::".parse().unwrap(), 48).unwrap();
+        vpn.next_hop = next_hop;
+    }
+    (labeled, vpn)
+}
+
+/// RFC 8277 §2.1 / §3.2.1: a route that binds more than one label goes only
+/// to a peer that negotiated the Multiple Labels Capability, which rustbgpd
+/// never advertises. For every labeled-unicast and VPN family, the exact
+/// probe refuses the two-label route under its own reason, and the live
+/// writer sends the one-label route of the same batch but not the two-label
+/// one.
+#[tokio::test]
+async fn multi_label_routes_are_withheld_for_every_label_stack_family() {
+    use rustbgpd_rib::{ExactExportCandidate, ExactExportErrorCode, ExactExportSnapshot};
+
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        for safi in [Safi::LabeledUnicast, Safi::MplsVpn] {
+            let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+            let (client, mut server) = connected_stream_pair().await;
+            session.test_install_stream(client);
+            let mut negotiated = negotiated_session(65002, false);
+            negotiated.negotiated_families = vec![(afi, safi)];
+            install_test_negotiated_session(&mut session, negotiated);
+            let profile = session.publish_export_profile();
+
+            let (single_labeled, single_vpn) = mpls_routes_for(afi);
+            let mut multi_labeled = single_labeled.clone();
+            multi_labeled.nlri.labels = two_label_stack();
+            multi_labeled.path_id = 7;
+            let mut multi_vpn = single_vpn.clone();
+            multi_vpn.nlri.labels = two_label_stack();
+            multi_vpn.path_id = 7;
+
+            let (single, multi) = if safi == Safi::LabeledUnicast {
+                (
+                    ExactExportCandidate::Labeled(&single_labeled),
+                    ExactExportCandidate::Labeled(&multi_labeled),
+                )
+            } else {
+                (
+                    ExactExportCandidate::Vpn(&single_vpn),
+                    ExactExportCandidate::Vpn(&multi_vpn),
+                )
+            };
+            assert!(
+                ExactExportSnapshot::probe_announcement(profile.as_ref(), single).is_ok(),
+                "{afi:?}/{safi:?}: one label is exportable"
+            );
+            let error =
+                ExactExportSnapshot::probe_announcement(profile.as_ref(), multi).unwrap_err();
+            assert_eq!(
+                error.code(),
+                ExactExportErrorCode::MultipleLabelsNotNegotiated,
+                "{afi:?}/{safi:?}"
+            );
+            assert_eq!(error.code().as_str(), "multiple_labels_not_negotiated");
+
+            // Live writer: the multi-label entry (a distinct path ID, so it
+            // is a separate route) never reaches the wire.
+            let mut update = empty_outbound_update();
+            update.exact_export_snapshot = Some(profile);
+            if safi == Safi::LabeledUnicast {
+                update.labeled_announce = vec![multi_labeled, single_labeled.clone()];
+            } else {
+                update.vpn_announce = vec![multi_vpn, single_vpn.clone()];
+            }
+            session.send_route_update(update);
+            let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+                panic!("{afi:?}/{safi:?}: expected MP_REACH UPDATE");
+            };
+            let parsed = msg.parse(true, false, &[]).unwrap();
+            let mp = parsed
+                .attributes
+                .iter()
+                .find_map(|attr| match attr {
+                    PathAttribute::MpReachNlri(mp) => Some(mp),
+                    _ => None,
+                })
+                .expect("MP_REACH");
+            assert_eq!((mp.afi, mp.safi), (afi, safi));
+            if safi == Safi::LabeledUnicast {
+                assert_eq!(mp.vpn_announced.len(), 0);
+                assert_eq!(
+                    mp.labeled_announced
+                        .iter()
+                        .map(|entry| &entry.nlri)
+                        .collect::<Vec<_>>(),
+                    vec![&single_labeled.nlri],
+                    "{afi:?}: only the one-label route is sent"
+                );
+            } else {
+                assert_eq!(mp.labeled_announced.len(), 0);
+                assert_eq!(
+                    mp.vpn_announced
+                        .iter()
+                        .map(|entry| &entry.nlri)
+                        .collect::<Vec<_>>(),
+                    vec![&single_vpn.nlri],
+                    "{afi:?}: only the one-label route is sent"
+                );
+            }
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(50),
+                    read_single_raw_bgp_message(&mut server)
+                )
+                .await
+                .is_err(),
+                "{afi:?}/{safi:?}: the multi-label announcement must not reach the wire"
+            );
+        }
+    }
+}
+
+/// RFC 8277 §3.2.1: when a route already advertised with one label is
+/// replaced by the same prefix with two labels, the advertised copy MUST be
+/// withdrawn. Through the real RIB and the session's exact-export encoder, a
+/// labeled-IPv4 and a `VPNv4` route are first sent with one label; their
+/// two-label replacements produce withdrawals, no announcements, and one
+/// `bgp_exact_export_rejections_total{reason="multiple_labels_not_negotiated"}`
+/// increment per family.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered RIB-to-outbound scenario across both label-stack SAFIs"
+)]
+async fn one_to_two_label_replacement_withdraws_the_advertised_copy() {
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    let rib_metrics = BgpMetrics::new();
+    let (mut session, rib_rx) =
+        make_test_session_with_metrics_and_identity(BgpMetrics::new(), SessionIdentity::primary(7));
+    let families = vec![
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+    ];
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families.clone_from(&families);
+    install_test_negotiated_session(&mut session, negotiated);
+    session.publish_export_profile();
+    let (_query_tx, query_rx) = mpsc::channel(8);
+    let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, rib_metrics.clone());
+    let manager_task = tokio::spawn(manager.run());
+
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    session
+        .rib_tx
+        .send(RibUpdate::SetPeerExportEncoder {
+            peer: session.peer_ip,
+            session_id: 7,
+            encoder: session.export_encoder.clone(),
+        })
+        .await
+        .unwrap();
+    session
+        .rib_tx
+        .send(RibUpdate::PeerUp {
+            peer: session.peer_ip,
+            session_id: 7,
+            peer_asn: 65002,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: families,
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+
+    let (mut labeled, mut vpn) = mpls_routes_for(Afi::Ipv4);
+    labeled.peer = source;
+    vpn.peer = source;
+    let one_label = labeled.nlri.labels.clone();
+    let (one_label_labeled, one_label_vpn) = (labeled.nlri.clone(), vpn.nlri.clone());
+    let rejections = |family: &str| {
+        counter_samples(&rib_metrics, "bgp_exact_export_rejections_total")
+            .into_iter()
+            .filter(|(labels, _)| {
+                labels["family"] == family && labels["reason"] == "multiple_labels_not_negotiated"
+            })
+            .map(|(_, value)| value)
+            .sum::<f64>()
+    };
+
+    let mut labeled_seen = (Vec::new(), Vec::new());
+    let mut vpn_seen = (Vec::new(), Vec::new());
+    for (round, labels) in [one_label, two_label_stack()].into_iter().enumerate() {
+        labeled.nlri.labels.clone_from(&labels);
+        vpn.nlri.labels = labels;
+        session
+            .rib_tx
+            .send(RibUpdate::LabeledRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: vec![labeled.clone()],
+                withdrawn: vec![],
+            })
+            .await
+            .unwrap();
+        session
+            .rib_tx
+            .send(RibUpdate::VpnRoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: vec![vpn.clone()],
+                withdrawn: vec![],
+            })
+            .await
+            .unwrap();
+        // Collect RIB exports (End-of-RIB included) until both families
+        // have moved once for this round.
+        let want = round + 1;
+        while labeled_seen.0.len() + labeled_seen.1.len() < want
+            || vpn_seen.0.len() + vpn_seen.1.len() < want
+        {
+            let update = tokio::time::timeout(Duration::from_secs(3), outbound_rx.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("round {round}: labeled {labeled_seen:?}, VPN {vpn_seen:?}")
+                })
+                .expect("outbound channel open");
+            labeled_seen
+                .0
+                .extend(update.labeled_announce.iter().map(|r| r.nlri.clone()));
+            labeled_seen
+                .1
+                .extend(update.labeled_withdraw.iter().copied());
+            vpn_seen
+                .0
+                .extend(update.vpn_announce.iter().map(|r| r.nlri.clone()));
+            vpn_seen.1.extend(update.vpn_withdraw.iter().cloned());
+        }
+    }
+
+    assert_eq!(labeled_seen.0, vec![one_label_labeled]);
+    assert_eq!(labeled_seen.1, vec![labeled.key()]);
+    assert_eq!(vpn_seen.0, vec![one_label_vpn]);
+    assert_eq!(vpn_seen.1, vec![vpn.key()]);
+    for family in ["ipv4_labeled_unicast", "l3vpn_ipv4_unicast"] {
+        assert!(
+            (rejections(family) - 1.0).abs() < f64::EPSILON,
+            "{family}: rejections {}",
+            rejections(family)
+        );
+    }
+
+    drop(session);
+    manager_task.abort();
+}

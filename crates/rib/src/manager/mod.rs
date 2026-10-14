@@ -15,6 +15,7 @@ pub use bench_support::{
 mod conditional_advertisement;
 mod dampening_history;
 mod distribution;
+mod evpn_recovery;
 mod export_chains;
 mod flowspec_validation;
 mod graceful_restart;
@@ -829,6 +830,22 @@ pub struct RibManager {
     /// keep the immediate `EoR`: a client that never sends ROUTE-REFRESH
     /// would otherwise never see `EoR` at all.
     gr_deferred_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Peers whose RT-Constrain-filtered families (VPN, EVPN) keep their
+    /// initial-table `EoR` in `pending_eor` until the peer's RT-Constrain
+    /// `EoR` arrives or the [`RTC_EOR_HOLD_CAP`] deadline passes (RFC 4684
+    /// §6). Armed at `PeerUp` when the session starts with an empty
+    /// membership; a membership re-derived from GR-retained RTC routes is
+    /// already known and is not held. A peer acting as GR helper sweeps the
+    /// routes it kept from us on our `EoR`, so an `EoR` sent before its
+    /// interest arrives withdraws VPN routes we are about to re-send. A peer
+    /// with the Restart State bit set is never held: it withholds its own
+    /// RTC `EoR` until it has ours (RFC 4724 §4.1).
+    rtc_eor_hold: graceful_restart::DeadlineMap<IpAddr>,
+    /// Held peers whose RT-Constrain `EoR` (or closing `EoRR`) arrived while
+    /// RT-Constrain selection was deferred. Membership is not rebuilt until
+    /// that deferral is staged or released, so the hold ends there, after
+    /// the rebuild has emitted the matching VPN/EVPN routes.
+    rtc_eor_hold_ready: HashSet<IpAddr>,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
     /// Route identities touched while their family's Loc-RIB was frozen.
@@ -983,11 +1000,13 @@ pub struct RibManager {
     /// distribution window, held until the run loop's next ordinary receive
     /// so a non-extending update keeps its FIFO position.
     primary_lookahead: Option<RibUpdate>,
-    /// ADR-0137: while a conditional-advertisement settle deadline is due,
-    /// the primary updates still admitted before it fires — the backlog
-    /// when expiry was first seen. Every admission counts, including one a
-    /// distribution window coalesces, and a window does not extend past it.
-    conditional_expiry_cutoff: Option<usize>,
+    /// ADR-0137 admission cutoffs, one per run-loop timer: while a timer is
+    /// due, the primary updates still admitted before it fires, which is
+    /// the backlog when it was first seen due. Every admission counts,
+    /// including one a distribution window coalesces, and a window does not
+    /// extend past an exhausted cutoff. Sustained ingress therefore cannot
+    /// postpone any of these deadlines indefinitely.
+    expiry_cutoffs: ExpiryCutoffs,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
@@ -1020,11 +1039,18 @@ pub struct RibManager {
     /// group-owned VPN — held until its one-shot resync diff succeeds.
     /// Transient — regroups are config-time events.
     pending_regroup_baseline: HashMap<IpAddr, update_groups::RegroupBaseline>,
-    /// Extra (over-)withdraw keys a member must emit on its next
-    /// resync: tombstones carried across a regroup by a member that was
-    /// dirty when it moved (its missed withdrawals are unknown —
-    /// over-withdraw is the safe direction). Cleared on resync success.
+    /// Candidate withdrawal keys carried across a dirty regroup; admission
+    /// intersects these with the member's actual admitted-key proof. Cleared
+    /// on resync success.
     pending_extra_withdraws: HashMap<IpAddr, update_groups::ExtraWithdraws>,
+    /// Actual admitted unicast/VPN keys while a member's shared desired view
+    /// can advance without delivery. Bounded by its admitted inventory, and
+    /// released after recovery; routes remain shared in the group table.
+    pending_group_admitted: HashMap<IpAddr, HashSet<crate::update::ExactExportKey>>,
+    /// Charged EVPN history only for explicitly group-owned EVPN. Negotiated
+    /// families and unicast group membership do not establish that ownership.
+    evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance,
+    evpn_recovery_reset: Option<crate::update::EvpnRecoveryResetFn>,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
@@ -1075,6 +1101,75 @@ pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Durat
 /// arriving after it do not emit a record; the interval alone cannot
 /// establish whether a query was delayed by the commit.
 const POST_COMMIT_QUERY_TRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run-loop timers whose expiry waits only for the work queued when they
+/// first fell due (ADR-0137 admission cutoff).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpiryTimer {
+    RtcEor,
+    Conditional,
+    GrStale,
+    LlgrStale,
+    RefreshWindow,
+    SelectionDeferral,
+}
+
+impl ExpiryTimer {
+    const COUNT: usize = 6;
+}
+
+/// One admission cutoff per [`ExpiryTimer`]: `None` while the timer is not
+/// due, else the primary updates still admitted before it fires. An
+/// admission is charged to every captured cutoff, so several timers due at
+/// once each fire within the backlog present when they fell due.
+#[derive(Debug, Default)]
+struct ExpiryCutoffs([Option<usize>; ExpiryTimer::COUNT]);
+
+impl ExpiryCutoffs {
+    /// Capture `backlog` the first time `timer` is seen due; forget it once
+    /// the timer is no longer due.
+    fn observe(&mut self, timer: ExpiryTimer, due: bool, backlog: usize) {
+        let cutoff = &mut self.0[timer as usize];
+        if !due {
+            *cutoff = None;
+        } else if cutoff.is_none() {
+            *cutoff = Some(backlog);
+        }
+    }
+
+    fn remaining(&self, timer: ExpiryTimer) -> usize {
+        self.0[timer as usize].unwrap_or(0)
+    }
+
+    fn clear(&mut self, timer: ExpiryTimer) {
+        self.0[timer as usize] = None;
+    }
+
+    /// Charge one primary admission to every due timer.
+    fn charge(&mut self) {
+        for cutoff in self.0.iter_mut().flatten() {
+            *cutoff = cutoff.saturating_sub(1);
+        }
+    }
+
+    fn any_exhausted(&self) -> bool {
+        self.0.contains(&Some(0))
+    }
+
+    /// Whether due `timer` must wait for another due timer whose cutoff is
+    /// already exhausted. Its branch is skipped until that timer has fired:
+    /// admitting more here would run post-deadline work ahead of the
+    /// exhausted timer and stretch its bound.
+    fn yields(&self, timer: ExpiryTimer) -> bool {
+        self.remaining(timer) > 0 && self.any_exhausted()
+    }
+}
+
+/// Upper bound on holding a peer's VPN/EVPN End-of-RIB while waiting for its
+/// RT-Constrain End-of-RIB. RFC 4684 §6: a speaker that delays VPN
+/// advertisement until that marker "MUST limit that delay to an upper bound.
+/// By default, a 60 second value should be used."
+const RTC_EOR_HOLD_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Actor work units accounted between a transition's terminal commit poll and
 /// the first general or summary query dispatched afterwards.
@@ -1426,6 +1521,8 @@ pub(super) struct LiveSessionRecord {
     /// This session has sent its L2VPN/EVPN End-of-RIB since the peer's
     /// Adj-RIB-In was last discarded.
     evpn_end_of_rib: bool,
+    /// Failed reset admission remains in this bounded existing session record.
+    evpn_recovery_reset: Option<evpn_recovery::PendingReset>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1991,6 +2088,8 @@ impl RibManager {
             peer_rt_membership: HashMap::new(),
             peer_orf_pending: HashMap::new(),
             gr_deferred_eor: HashMap::new(),
+            rtc_eor_hold: graceful_restart::DeadlineMap::default(),
+            rtc_eor_hold_ready: HashSet::new(),
             selection_deferral: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
             selection_deferred_refresh: HashMap::new(),
@@ -2004,6 +2103,9 @@ impl RibManager {
             group_ribs: HashMap::new(),
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
+            pending_group_admitted: HashMap::new(),
+            evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
+            evpn_recovery_reset: None,
             #[cfg(test)]
             test_force_ungrouped: false,
             #[cfg(test)]
@@ -2061,7 +2163,7 @@ impl RibManager {
             pending_distribute_affected: HashSet::new(),
             distribution_window: distribution::DistributionWindow::default(),
             distribution_window_limits: distribution::DistributionWindowLimits::default(),
-            conditional_expiry_cutoff: None,
+            expiry_cutoffs: ExpiryCutoffs::default(),
             primary_lookahead: None,
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
@@ -2108,6 +2210,18 @@ impl RibManager {
         readiness_rx: mpsc::Receiver<RibReadinessQuery>,
     ) -> Self {
         self.readiness_rx = Some(readiness_rx);
+        self
+    }
+
+    /// Install nonblocking reset admission to the existing session lifecycle
+    /// owner. Exhausted EVPN recovery remains unsettled until that generation
+    /// leaves; successful callback admission is not a completed reset receipt.
+    #[must_use]
+    pub fn with_evpn_recovery_reset_handler(
+        mut self,
+        handler: crate::update::EvpnRecoveryResetFn,
+    ) -> Self {
+        self.evpn_recovery_reset = Some(handler);
         self
     }
 
@@ -2360,6 +2474,46 @@ impl RibManager {
     }
 
     #[must_use]
+    /// L2VPN/EVPN session counts and End-of-RIB sync, from the newest live
+    /// session record per peer.
+    fn evpn_sessions_sync(&self) -> crate::update::EvpnSessionsSync {
+        let evpn = (Afi::L2Vpn, Safi::Evpn);
+        // The newest live record is the one registration uses; an older
+        // collision-window record cannot vouch for it.
+        let peers: Vec<bool> = self
+            .live_sessions
+            .values()
+            .filter_map(|sessions| sessions.last())
+            .filter(|s| s.sendable_families.contains(&evpn))
+            .map(|s| s.evpn_end_of_rib)
+            .collect();
+        // Peers retaining L2VPN/EVPN routes as GR or LLGR stale: the
+        // overlay still forwards on them (ADR-0140 decision 2).
+        let stale = self
+            .gr_peers
+            .keys()
+            .chain(self.llgr_peers.keys())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter(|peer| {
+                self.gr_peers.get(*peer).is_some_and(|f| f.contains(&evpn))
+                    || self
+                        .llgr_peers
+                        .get(*peer)
+                        .is_some_and(|f| f.contains(&evpn))
+            })
+            .count();
+        // GR selection deferral keeps EVPN Loc-RIB unchanged, so remote
+        // Type 4 routes are not readable until it releases.
+        crate::update::EvpnSessionsSync {
+            established: peers.len(),
+            stale,
+            synced: !self.selection_deferred(evpn)
+                && !peers.is_empty()
+                && peers.iter().all(|&synced| synced),
+        }
+    }
+
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.selection_deferral
             .as_ref()
@@ -2371,6 +2525,75 @@ impl RibManager {
         self.selection_deferral
             .as_ref()
             .is_some_and(|state| state.is_gated(family))
+    }
+
+    /// Whether `family`'s pending `EoR` toward `peer` must stay queued: the
+    /// RFC 4724 convergence gate, or the RFC 4684 §6 hold on the families RT
+    /// membership filters while `peer`'s RT-Constrain `EoR` is outstanding.
+    pub(super) fn eor_held(&self, peer: IpAddr, family: (Afi, Safi)) -> bool {
+        self.selection_convergence_held(family)
+            || (self.rtc_eor_hold.contains_key(&peer) && Self::rtc_gated_family(family))
+    }
+
+    /// The families the RFC 4684 outbound membership gate filters.
+    pub(super) fn rtc_gated_family(family: (Afi, Safi)) -> bool {
+        family.1 == Safi::MplsVpn || family == (Afi::L2Vpn, Safi::Evpn)
+    }
+
+    /// End a peer's RFC 4684 §6 `EoR` hold and emit the held markers. A
+    /// dirty peer keeps them pending: its resync flushes them after the
+    /// routes it replays, preserving table-before-`EoR` order.
+    fn release_rtc_eor_hold(&mut self, peer: IpAddr) {
+        self.rtc_eor_hold_ready.remove(&peer);
+        if self.rtc_eor_hold.remove(&peer).is_some() && !self.dirty_peers.contains(&peer) {
+            self.flush_pending_eor(peer);
+        }
+    }
+
+    /// `peer`'s RT membership is complete on the wire (its RT-Constrain
+    /// `EoR`, or an `EoRR` closing an active window). Release the hold now,
+    /// unless RT-Constrain selection is still deferred: membership is then
+    /// rebuilt only when the deferral is staged or released, and the hold
+    /// ends there instead, after the VPN/EVPN routes it admits.
+    fn rtc_membership_complete(&mut self, peer: IpAddr) {
+        if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
+            if self.rtc_eor_hold.contains_key(&peer) {
+                self.rtc_eor_hold_ready.insert(peer);
+            }
+        } else {
+            self.release_rtc_eor_hold(peer);
+        }
+    }
+
+    /// RT-Constrain selection was just staged or released and every
+    /// membership rebuilt: end the holds whose `EoR` already arrived.
+    fn release_ready_rtc_eor_holds(&mut self) {
+        let ready: Vec<IpAddr> = self.rtc_eor_hold_ready.drain().collect();
+        for peer in ready {
+            self.release_rtc_eor_hold(peer);
+        }
+    }
+
+    fn next_rtc_eor_hold_deadline(&mut self) -> Option<tokio::time::Instant> {
+        self.rtc_eor_hold.min()
+    }
+
+    fn expire_rtc_eor_holds(&mut self) {
+        let now = tokio::time::Instant::now();
+        let expired: Vec<IpAddr> = self
+            .rtc_eor_hold
+            .iter()
+            .filter(|&(_, &deadline)| deadline <= now)
+            .map(|(&peer, _)| peer)
+            .collect();
+        for peer in expired {
+            info!(
+                %peer,
+                cap_secs = RTC_EOR_HOLD_CAP.as_secs(),
+                "no RT-Constrain End-of-RIB from peer within the cap — sending held VPN/EVPN End-of-RIB"
+            );
+            self.release_rtc_eor_hold(peer);
+        }
     }
 
     /// Emit an RFC 9069 Loc-RIB Route Monitoring event. `pdu = None`
@@ -2962,16 +3185,33 @@ impl RibManager {
             .take()
             .or_else(|| self.rx.try_recv().ok());
         if update.is_some() {
-            self.count_conditional_expiry_admission();
+            self.expiry_cutoffs.charge();
         }
         update
     }
 
-    /// Charge one primary admission against a due settle deadline's cutoff.
-    fn count_conditional_expiry_admission(&mut self) {
-        if let Some(cutoff) = self.conditional_expiry_cutoff.as_mut() {
-            *cutoff = cutoff.saturating_sub(1);
+    /// A due timer's admission cutoff is exhausted: coalescing paths must
+    /// not admit further primary updates ahead of its expiry.
+    fn expiry_cutoff_reached(&self) -> bool {
+        self.expiry_cutoffs.any_exhausted()
+    }
+
+    /// Drain-first expiry for a due `timer`: run one admitted route chunk,
+    /// or admit one queued update charged to the cutoffs, and return `true`
+    /// so the caller re-enters the loop. Return `false`, clearing the
+    /// cutoff, once only post-deadline work remains and the timer may fire.
+    /// An admitted route batch always finishes first (its chunks and final
+    /// distribution); batches come only from admitted updates, so this
+    /// stays bounded.
+    async fn drain_before_expiry(&mut self, timer: ExpiryTimer) -> bool {
+        let remaining = self.expiry_cutoffs.remaining(timer);
+        if (!self.pending_route_batches.is_empty() || remaining > 0)
+            && self.drain_ready_updates().await
+        {
+            return true;
         }
+        self.expiry_cutoffs.clear(timer);
+        false
     }
 
     /// Cancel-safe receive of the next primary update, the held lookahead
@@ -3638,6 +3878,10 @@ impl RibManager {
                 ));
             }
             #[cfg(test)]
+            RibUpdate::TestQueryPeerOutboundDirty { peer, reply } => {
+                let _ = reply.send(self.dirty_peers.contains(&peer));
+            }
+            #[cfg(test)]
             RibUpdate::TestQueryPolicyTransitionStats { reply } => {
                 let stats = self.policy_transition_stats;
                 let _ = reply.send((
@@ -3757,6 +4001,16 @@ impl RibManager {
                             "all current-session End-of-RIB markers received",
                         );
                     }
+                    if (afi, safi) == crate::route::RtcRibRouteKey::afi_safi() {
+                        // Membership is complete: every RTC UPDATE before
+                        // this marker has been applied and its VPN/EVPN
+                        // corrective emit queued (or left to the dirty
+                        // resync, which flushes after the replay). Runs
+                        // after the selection transition above, which is
+                        // what rebuilds membership while RTC selection was
+                        // deferred.
+                        self.rtc_membership_complete(peer);
+                    }
                 }
             }
             RibUpdate::RouteRefreshRequest {
@@ -3800,6 +4054,16 @@ impl RibManager {
                 safi,
             } => {
                 if !self.stale_session_message(peer, session_id, "EndRouteRefresh", Refresh) {
+                    // A collision-failback survivor already sent its EoR;
+                    // its refreshed membership ends with the EoRR that
+                    // closes an active RTC refresh window. A stray or
+                    // duplicate EoRR (ignored below) proves nothing.
+                    let rtc_refresh_completed = (afi, safi)
+                        == crate::route::RtcRibRouteKey::afi_safi()
+                        && self
+                            .refresh_in_progress
+                            .get(&peer)
+                            .is_some_and(|families| families.contains(&(afi, safi)));
                     self.handle_end_route_refresh(peer, afi, safi);
                     if let Some(transition) =
                         self.selection_deferral_end_route_refresh(peer, session_id, (afi, safi))
@@ -3808,6 +4072,10 @@ impl RibManager {
                             [transition],
                             "collision-failback survivor refresh completed",
                         );
+                    }
+                    // After the transition, as on the EoR path.
+                    if rtc_refresh_completed {
+                        self.rtc_membership_complete(peer);
                     }
                 }
             }
@@ -3910,23 +4178,15 @@ impl RibManager {
                 queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
             }
             RibUpdate::QueryEvpnSessionsSynced { reply } => {
-                let evpn = (Afi::L2Vpn, Safi::Evpn);
-                // The newest live record is the one registration uses; an
-                // older collision-window record cannot vouch for it.
-                let peers: Vec<bool> = self
-                    .live_sessions
-                    .values()
-                    .filter_map(|sessions| sessions.last())
-                    .filter(|s| s.sendable_families.contains(&evpn))
-                    .map(|s| s.evpn_end_of_rib)
-                    .collect();
-                // GR selection deferral keeps EVPN Loc-RIB unchanged, so
-                // remote Type 4 routes are not readable until it releases.
-                let _ = reply.send(
-                    !self.selection_deferred(evpn)
-                        && !peers.is_empty()
-                        && peers.iter().all(|&synced| synced),
-                );
+                let _ = reply.send(self.evpn_sessions_sync());
+            }
+            RibUpdate::QueryEvpnEsSnapshot { reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(crate::update::EvpnEsSnapshot {
+                        sessions: self.evpn_sessions_sync(),
+                        es_routes: self.loc_rib.iter_evpn_es().cloned().collect(),
+                    });
+                }
             }
             RibUpdate::QueryEvpnRoutesPage {
                 scope,
@@ -4598,6 +4858,8 @@ impl RibManager {
             self.peer_rt_membership.remove(&peer);
             return;
         };
+        let captured_prior =
+            self.vpn_grouped_member_of(peer).is_some() && self.capture_group_admitted_keys(peer);
         self.peer_rt_membership.insert(peer, new.clone());
         if !self.outbound_peers.contains_key(&peer) {
             return;
@@ -4648,6 +4910,12 @@ impl RibManager {
         } else {
             self.mark_outbound_dirty(peer);
             self.distribute_changes(&HashSet::new(), &HashSet::new());
+        }
+        if captured_prior
+            && !self.dirty_peers.contains(&peer)
+            && !self.pending_regroup_baseline.contains_key(&peer)
+        {
+            self.release_group_admitted_keys(peer);
         }
     }
 
@@ -4872,6 +5140,11 @@ impl RibManager {
         let refresh_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(refresh_sleep);
 
+        // RFC 4684 §6 VPN/EVPN End-of-RIB hold cap — reset each iteration to
+        // the nearest held peer's deadline.
+        let rtc_eor_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
+        tokio::pin!(rtc_eor_sleep);
+
         // RFC 4724 restarting-speaker selection-deferral timer. The roster
         // and deadline are frozen before this actor starts.
         let selection_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
@@ -5035,6 +5308,13 @@ impl RibManager {
                 false
             };
 
+            let has_rtc_eor_timer = if let Some(deadline) = self.next_rtc_eor_hold_deadline() {
+                rtc_eor_sleep.as_mut().reset(deadline);
+                true
+            } else {
+                false
+            };
+
             let has_selection_timer =
                 if let Some(deadline) = self.next_selection_deferral_deadline() {
                     selection_sleep.as_mut().reset(deadline);
@@ -5063,6 +5343,7 @@ impl RibManager {
                 || has_gr_timers
                 || has_llgr_timers
                 || has_refresh_timers
+                || has_rtc_eor_timer
                 || has_selection_timer
                 || has_conditional_timer;
 
@@ -5072,8 +5353,52 @@ impl RibManager {
 
             let now = tokio::time::Instant::now();
             let conditional_due = has_conditional_timer && conditional_sleep.deadline() <= now;
-            if !conditional_due {
-                self.conditional_expiry_cutoff = None;
+            let rtc_eor_due = has_rtc_eor_timer && rtc_eor_sleep.deadline() <= now;
+            let gr_due = has_gr_timers && gr_sleep.deadline() <= now;
+            let llgr_due = has_llgr_timers && llgr_sleep.deadline() <= now;
+            let refresh_due = has_refresh_timers && refresh_sleep.deadline() <= now;
+            let selection_due = has_selection_timer && selection_sleep.deadline() <= now;
+            // ADR-0137: capture every due timer's admission cutoff the
+            // moment it is first seen due, before any branch below drains.
+            // Each due branch admits only that backlog (drain-first within
+            // it) and then fires, and every admission is charged to all
+            // captured cutoffs, so an update that arrives after a deadline
+            // is never counted as pre-deadline work and sustained ingress
+            // cannot postpone any of these timers. The branch order below
+            // decides which of several due timers drains first, but once
+            // any due timer's cutoff is exhausted, every timer that still
+            // has room yields (its branch is skipped) until the exhausted
+            // one has fired, so no branch admits post-deadline work ahead
+            // of another timer's expiry.
+            let backlog = self.primary_backlog();
+            for (timer, due) in [
+                (ExpiryTimer::RtcEor, rtc_eor_due),
+                (ExpiryTimer::Conditional, conditional_due),
+                (ExpiryTimer::GrStale, gr_due),
+                (ExpiryTimer::LlgrStale, llgr_due),
+                (ExpiryTimer::RefreshWindow, refresh_due),
+                (ExpiryTimer::SelectionDeferral, selection_due),
+            ] {
+                self.expiry_cutoffs.observe(timer, due, backlog);
+            }
+            let cutoffs = &self.expiry_cutoffs;
+            let rtc_eor_due = rtc_eor_due && !cutoffs.yields(ExpiryTimer::RtcEor);
+            let conditional_due = conditional_due && !cutoffs.yields(ExpiryTimer::Conditional);
+            let gr_due = gr_due && !cutoffs.yields(ExpiryTimer::GrStale);
+            let llgr_due = llgr_due && !cutoffs.yields(ExpiryTimer::LlgrStale);
+            let refresh_due = refresh_due && !cutoffs.yields(ExpiryTimer::RefreshWindow);
+            let selection_due = selection_due && !cutoffs.yields(ExpiryTimer::SelectionDeferral);
+            if rtc_eor_due {
+                // A queued RT-Constrain EoR releases the hold with its
+                // membership applied; let it win over the cap. RFC 4684 §6
+                // requires the delay to be bounded; an admitted route batch
+                // finishes first, so no route from an update queued before
+                // the cap lands behind the released EoR.
+                if self.drain_before_expiry(ExpiryTimer::RtcEor).await {
+                    continue;
+                }
+                self.expire_rtc_eor_holds();
+                continue;
             }
             if has_attr_gc_timer && attr_gc_sleep.deadline() <= now {
                 self.gc_attr_intern_on_timer();
@@ -5106,27 +5431,15 @@ impl RibManager {
                 // ADR-0137: expiry applies only the observation of a finished
                 // batch. An open route batch, and the primary updates already
                 // queued when expiry was first seen, run first so their
-                // observation flush precedes it. Later traffic cannot defer
-                // the timer: the cutoff is captured once per expiry and
-                // charged for every admission, and this check precedes the
-                // other timers, whose drains are unbounded under traffic.
-                let cutoff = match self.conditional_expiry_cutoff {
-                    Some(cutoff) => cutoff,
-                    None => *self
-                        .conditional_expiry_cutoff
-                        .insert(self.primary_backlog()),
-                };
-                if (!self.pending_route_batches.is_empty() || cutoff > 0)
-                    && self.drain_ready_updates().await
-                {
+                // observation flush precedes it.
+                if self.drain_before_expiry(ExpiryTimer::Conditional).await {
                     continue;
                 }
-                self.conditional_expiry_cutoff = None;
                 let _ = self.fire_conditional_advertisement_timers();
                 continue;
             }
-            if has_gr_timers && gr_sleep.deadline() <= now {
-                if self.drain_ready_updates().await {
+            if gr_due {
+                if self.drain_before_expiry(ExpiryTimer::GrStale).await {
                     continue;
                 }
                 let expired: Vec<IpAddr> = self
@@ -5140,24 +5453,28 @@ impl RibManager {
                 }
                 continue;
             }
-            if has_llgr_timers && llgr_sleep.deadline() <= now {
-                if self.drain_ready_updates().await {
+            if llgr_due {
+                if self.drain_before_expiry(ExpiryTimer::LlgrStale).await {
                     continue;
                 }
                 self.sweep_expired_llgr_stale();
                 continue;
             }
-            if has_refresh_timers && refresh_sleep.deadline() <= now {
-                if self.drain_ready_updates().await {
+            if refresh_due {
+                if self.drain_before_expiry(ExpiryTimer::RefreshWindow).await {
                     continue;
                 }
                 self.expire_refresh_windows();
                 continue;
             }
-            if has_selection_timer && selection_sleep.deadline() <= now {
-                // A queued current-session EoR wins the all-EoR release race
-                // over a simultaneously ready timer.
-                if self.drain_ready_updates().await {
+            if selection_due {
+                // A current-session EoR queued before the timer was first
+                // seen due wins the all-EoR release race; one that arrives
+                // after it does not count toward the expired deferral.
+                if self
+                    .drain_before_expiry(ExpiryTimer::SelectionDeferral)
+                    .await
+                {
                     continue;
                 }
                 self.expire_selection_deferral();
@@ -5269,42 +5586,13 @@ impl RibManager {
                             resync_armed = false;
                         }
                     }
-                    () = gr_sleep.as_mut(), if has_gr_timers => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        // Find all peers whose GR deadline has expired
-                        let now = tokio::time::Instant::now();
-                        let expired: Vec<IpAddr> = self
-                            .gr_stale_deadlines
-                            .iter()
-                            .filter(|&(_, &deadline)| deadline <= now)
-                            .map(|(&peer, _)| peer)
-                            .collect();
-                        for peer in expired {
-                            self.sweep_gr_stale(peer);
-                        }
-                    }
-                    () = llgr_sleep.as_mut(), if has_llgr_timers => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        self.sweep_expired_llgr_stale();
-                    }
-                    () = refresh_sleep.as_mut(), if has_refresh_timers => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        self.expire_refresh_windows();
-                    }
-                    () = selection_sleep.as_mut(), if has_selection_timer => {
-                        if self.drain_ready_updates().await {
-                            continue;
-                        }
-                        self.expire_selection_deferral();
-                    }
-                    // Expiry is applied by the due check at the top of the
-                    // loop, after any ready update that precedes it.
+                    // Each timer only wakes the loop: expiry is applied by
+                    // the due checks above, under its admission cutoff.
+                    () = gr_sleep.as_mut(), if has_gr_timers => {}
+                    () = llgr_sleep.as_mut(), if has_llgr_timers => {}
+                    () = refresh_sleep.as_mut(), if has_refresh_timers => {}
+                    () = rtc_eor_sleep.as_mut(), if has_rtc_eor_timer => {}
+                    () = selection_sleep.as_mut(), if has_selection_timer => {}
                     () = conditional_sleep.as_mut(), if has_conditional_timer => {}
                 }
             } else {

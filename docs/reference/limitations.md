@@ -102,8 +102,11 @@ Shipped and interop-tested:
 - Active-active multi-homing building blocks: DF election, Type 1/4, BUM
   suppression, aliasing ECMP via FDB nexthop groups, and all-active Type 5
   receive. Preference-based DF election can opt into RFC 9785 Don't-Preempt
-  (`df_dont_preempt`), and `esi = "auto-lacp"` derives a Type 1 ESI from a
-  Linux bond's LACP partner. A daemon started with no `[[ethernet_segments]]`
+  (`df_dont_preempt`); the [M123 receipt](../artifacts/interop/m123-evpn-dont-preempt-20261013/README.md)
+  qualifies Highest-Preference Don't-Preempt restart, recovery and
+  reference-withdrawal behavior against SR Linux 25.10.1 on one two-PE
+  all-active segment, without forwarding. `esi = "auto-lacp"` derives a
+  Type 1 ESI from a Linux bond's LACP partner. A daemon started with no `[[ethernet_segments]]`
   takes its first segment, explicit-ESI or `auto-lacp`, live through SIGHUP or
   `ApplyEvpnRuntime`. Type 2 (STP) ESI derivation is not implemented. See
   [Ethernet Segments](configuration.md#auto-derived-esi-lacp-type-1).

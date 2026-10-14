@@ -1017,20 +1017,85 @@ fn inbound_prefix_bound_check(
         || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
-        || !neighbor.inbound_prefix_limits.is_empty()
         || neighbor.effective_max_prefixes.is_some()
-        || neighbor.effective_max_prefixes_ipv4.is_some()
-        || neighbor.effective_max_prefixes_ipv6.is_some()
+        || has_inbound_scope(neighbor, "aggregate")
     {
         return None;
     }
+    let negotiated = neighbor
+        .negotiated_session
+        .as_ref()
+        .map_or(&[][..], |session| session.families.as_slice());
+    let detail = if negotiated.is_empty() {
+        // No negotiated-family evidence (an older daemon): any unicast bound
+        // satisfies the check, as before per-family coverage existed.
+        if ["ipv4_unicast", "ipv6_unicast"]
+            .into_iter()
+            .any(|family| family_bounded(neighbor, family))
+        {
+            return None;
+        }
+        format!(
+            "peer {identity} is Established eBGP with no effective inbound prefix bound; configure max_prefixes, max_prefixes_ipv4, max_prefixes_ipv6, max_prefixes_received_ipv4, or max_prefixes_received_ipv6 on the neighbor or its peer group"
+        )
+    } else {
+        let unbounded: Vec<String> = negotiated
+            .iter()
+            .filter(|family| !family_bounded(neighbor, family))
+            .map(|family| format!("{family} ({})", family_bound_keys(family)))
+            .collect();
+        if unbounded.is_empty() {
+            return None;
+        }
+        format!(
+            "peer {identity} is Established eBGP with no effective inbound prefix bound for negotiated families {}; configure the listed key or the aggregate max_prefixes on the neighbor or its peer group",
+            unbounded.join(", ")
+        )
+    };
     Some(Check {
         name: format!("peer.{identity}.inbound_prefix_bound"),
         status: CheckStatus::Warn,
-        detail: format!(
-            "peer {identity} is Established eBGP with no effective inbound prefix bound; configure max_prefixes, max_prefixes_ipv4, max_prefixes_ipv6, max_prefixes_received_ipv4, or max_prefixes_received_ipv6 on the neighbor or its peer group"
-        ),
+        detail,
     })
+}
+
+fn has_inbound_scope(neighbor: &crate::proto::NeighborState, scope: &str) -> bool {
+    neighbor
+        .inbound_prefix_limits
+        .iter()
+        .any(|row| row.scope == scope)
+}
+
+/// Whether a finite per-family bound covers one negotiated family. Scope
+/// names are the canonical family labels (plus `_received` for unicast).
+fn family_bounded(neighbor: &crate::proto::NeighborState, family: &str) -> bool {
+    has_inbound_scope(neighbor, family)
+        || has_inbound_scope(neighbor, &format!("{family}_received"))
+        || match family {
+            "ipv4_unicast" => neighbor.effective_max_prefixes_ipv4.is_some(),
+            "ipv6_unicast" => neighbor.effective_max_prefixes_ipv6.is_some(),
+            _ => false,
+        }
+}
+
+/// The per-family keys that can bound `family`, besides the aggregate.
+fn family_bound_keys(family: &str) -> String {
+    match family {
+        "ipv4_unicast" => "max_prefixes_ipv4 or max_prefixes_received_ipv4".to_string(),
+        "ipv6_unicast" => "max_prefixes_ipv6 or max_prefixes_received_ipv6".to_string(),
+        "l3vpn_ipv4_unicast"
+        | "l3vpn_ipv6_unicast"
+        | "ipv4_labeled_unicast"
+        | "ipv6_labeled_unicast"
+        | "l2vpn_evpn"
+        | "ipv4_flowspec"
+        | "ipv6_flowspec"
+        | "rtc" => {
+            format!("max_prefixes_{family}")
+        }
+        // BGP-LS and unrecognised families have no per-family key.
+        _ => "aggregate max_prefixes only".to_string(),
+    }
 }
 
 /// Most recent session-event timestamp per peer, for time-in-state.
@@ -1603,6 +1668,208 @@ fn evpn_auto_esi_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Ch
             }
         })
         .collect()
+}
+
+/// Every `state` reading 1 per `interface` in one state-set family.
+fn state_set(metrics: &str, family: &str) -> HashMap<String, BTreeSet<String>> {
+    let mut states: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for line in metrics.lines() {
+        let Some((labels, value)) = line
+            .strip_prefix(family)
+            .and_then(|rest| rest.strip_prefix('{'))
+            .and_then(|rest| rest.split_once("} "))
+        else {
+            continue;
+        };
+        let Some(labels) = parse_metric_labels(labels) else {
+            continue;
+        };
+        let (Some(interface), Some(state)) = (labels.get("interface"), labels.get("state")) else {
+            continue;
+        };
+        let entry = states.entry(interface.clone()).or_default();
+        if value.trim() == "1" {
+            entry.insert(state.clone());
+        }
+    }
+    states
+}
+
+/// ADR-0140: one `evpn.es.<interface>.core_isolation` check per bound
+/// segment while `[evpn_core_isolation] enabled = true`, from the daemon's
+/// `evpn_es_core_isolation_state` gauge, plus `evpn.core_isolation.uplinks`
+/// when every configured uplink lacks carrier while EVPN sessions are up.
+fn evpn_core_isolation_checks(document: &toml::Value, metrics: Option<&str>) -> Vec<Check> {
+    let enabled = document
+        .get("evpn_core_isolation")
+        .and_then(|t| t.get("enabled"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    let states = state_set(metrics.unwrap_or_default(), "evpn_es_core_isolation_state");
+    let bound = if enabled {
+        config_rows(document, &["ethernet_segments"])
+    } else {
+        &[]
+    };
+    let mut checks: Vec<Check> = bound
+        .iter()
+        .filter_map(|row| row.get("interface").and_then(toml::Value::as_str))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|interface| {
+            let active = states
+                .get(interface)
+                .map(|set| set.iter().map(String::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let (status, detail) = match (metrics, active.as_slice()) {
+                (None, _) => (
+                    CheckStatus::Warn,
+                    "core-isolation state unknown: the metrics snapshot is unavailable".to_string(),
+                ),
+                (Some(_), []) => (
+                    CheckStatus::Warn,
+                    "no core-isolation state reported for this binding yet; rerun doctor"
+                        .to_string(),
+                ),
+                (Some(_), [_, _, ..]) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "core-isolation state ambiguous: more than one state reads 1 ({}); \
+                         rerun doctor",
+                        active.join(", ")
+                    ),
+                ),
+                (Some(_), [state]) => core_isolation_status(state, interface),
+            };
+            Check {
+                name: format!("evpn.es.{interface}.core_isolation"),
+                status,
+                detail,
+            }
+        })
+        .collect();
+    // A failure outlives the table: a release that failed after a disable or
+    // an unbind still leaves a link down, so it is reported for any
+    // interface, configured or not.
+    let covered: BTreeSet<String> = checks.iter().map(|c| c.name.clone()).collect();
+    let failing: BTreeMap<&String, &BTreeSet<String>> = states.iter().collect();
+    for (interface, set) in failing {
+        let name = format!("evpn.es.{interface}.core_isolation");
+        if covered.contains(&name) {
+            continue;
+        }
+        if let [state] = set
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            let (status, detail) = core_isolation_status(state, interface);
+            if status == CheckStatus::Fail {
+                checks.push(Check {
+                    name,
+                    status,
+                    detail,
+                });
+            }
+        }
+    }
+    if !enabled {
+        return checks;
+    }
+    let signal = |name: &str| {
+        metrics.and_then(|text| {
+            text.lines()
+                .find_map(|line| {
+                    line.strip_prefix(&format!("evpn_core_isolated{{signal=\"{name}\"}} "))
+                })
+                .map(|value| value.trim() == "1")
+        })
+    };
+    let uplinks_configured = document
+        .get("evpn_core_isolation")
+        .and_then(|t| t.get("uplinks"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|u| !u.is_empty());
+    if uplinks_configured && signal("uplinks") == Some(true) && signal("sessions") == Some(false) {
+        checks.push(Check {
+            name: "evpn.core_isolation.uplinks".to_string(),
+            status: CheckStatus::Warn,
+            detail: "every configured uplink lacks carrier while EVPN sessions are up, so the \
+                     uplink signal isolates a PE that still reaches the overlay; check the \
+                     [evpn_core_isolation] uplinks list"
+                .to_string(),
+        });
+    }
+    checks
+}
+
+/// Doctor mapping for one `evpn_es_core_isolation_state` (ADR-0140
+/// decision 7).
+fn core_isolation_status(state: &str, interface: &str) -> (CheckStatus, String) {
+    match state {
+        "released" => (
+            CheckStatus::Ok,
+            "released: the CE-facing links are up".to_string(),
+        ),
+        "startup_hold" | "recovering" => (
+            CheckStatus::Ok,
+            format!("{state}: CE-facing links held down until EVPN syncs and settles"),
+        ),
+        "disabled" => (CheckStatus::Ok, "disabled".to_string()),
+        "isolated" => (
+            CheckStatus::Warn,
+            "isolated: the PE lost its EVPN sessions or every uplink, and the CE-facing \
+             members are held down; check the underlay and rbgp neighbor"
+                .to_string(),
+        ),
+        "backstop_released" => (
+            CheckStatus::Warn,
+            "backstop_released: the backstop released the hold before EVPN synced, so the CE \
+             may send traffic this PE has no routes for; check that EVPN sessions reach \
+             End-of-RIB"
+                .to_string(),
+        ),
+        "suppressed_no_peer" => (
+            CheckStatus::Warn,
+            "suppressed_no_peer: the PE is isolated but the segment had no remote ES peer, so \
+             its links stay up and the CE has no other path"
+                .to_string(),
+        ),
+        "overridden" => (
+            CheckStatus::Warn,
+            format!(
+                "overridden: another writer raised a held member of {interface}; rustbgpd owns \
+                 this admin state while the feature is enabled (check systemd-networkd \
+                 ActivationPolicy, NetworkManager and manual ip link use)"
+            ),
+        ),
+        "ownership_ambiguous" => (
+            CheckStatus::Fail,
+            "ownership_ambiguous: a receipt entry no longer matches its link, which is left \
+             down (see the daemon log for the member); raise or delete the link by hand, and \
+             the stop hook (rustbgpd --release-core-isolation) or the next start drops the \
+             entry"
+                .to_string(),
+        ),
+        "action_failed" => (
+            CheckStatus::Fail,
+            "action_failed: an admin-state write or receipt publication failed; see the daemon \
+             log"
+            .to_string(),
+        ),
+        "uplink_overlap" => (
+            CheckStatus::Fail,
+            format!(
+                "uplink_overlap: a configured uplink is {interface}, is enslaved under it or is \
+                 stacked on it, so it is excluded from the uplink signal; fix the uplinks list"
+            ),
+        ),
+        other => (
+            CheckStatus::Warn,
+            format!("unknown core-isolation state {other}"),
+        ),
+    }
 }
 
 /// Remediation for one `auto-lacp` not-ready reason, as in the reasons
@@ -3109,6 +3376,11 @@ async fn run_with_deadlines(
                             for check in evpn_auto_esi_checks(&document, metrics_text.as_deref()) {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
+                            for check in
+                                evpn_core_isolation_checks(&document, metrics_text.as_deref())
+                            {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
                             if let Some(check) = authz_enforcement_check(&document) {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
@@ -4592,6 +4864,17 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             }];
             assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
         }
+        // A non-unicast family bound (for example `max_prefixes_rtc`) leaves
+        // the unicast feed and the aggregate unbounded: the warning stays.
+        let mut family_only = peer.clone();
+        family_only.inbound_prefix_limits = vec![crate::proto::InboundPrefixLimitState {
+            scope: "rtc".to_string(),
+            limit: 10,
+            ..Default::default()
+        }];
+        let check = inbound_prefix_bound_check("10.0.0.2", &family_only, Some(65001))
+            .expect("a family-only bound must not satisfy the unicast check");
+        assert_eq!(check.status, CheckStatus::Warn);
         for case in 0..4 {
             let mut bounded = peer.clone();
             match case {
@@ -4602,6 +4885,149 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 _ => unreachable!(),
             }
             assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
+        }
+    }
+
+    fn bound_peer(families: &[&str], scopes: &[&str]) -> crate::proto::NeighborState {
+        crate::proto::NeighborState {
+            config: Some(crate::proto::NeighborConfig {
+                remote_asn: 65002,
+                ..Default::default()
+            }),
+            state: crate::proto::SessionState::Established as i32,
+            negotiated_session: Some(crate::proto::NegotiatedSessionState {
+                families: families.iter().map(ToString::to_string).collect(),
+                ..Default::default()
+            }),
+            inbound_prefix_limits: scopes
+                .iter()
+                .map(|scope| crate::proto::InboundPrefixLimitState {
+                    scope: (*scope).to_string(),
+                    limit: 100,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The warning detail for an eBGP peer, or `None` when it passes.
+    fn bound_warning(neighbor: &crate::proto::NeighborState) -> Option<String> {
+        inbound_prefix_bound_check("10.0.0.2", neighbor, Some(65001)).map(|check| {
+            assert_eq!(check.name, "peer.10.0.0.2.inbound_prefix_bound");
+            assert_eq!(check.status, CheckStatus::Warn);
+            check.detail
+        })
+    }
+
+    const VPN_PEER: [&str; 2] = ["ipv4_unicast", "l3vpn_ipv4_unicast"];
+    const DUAL_STACK_PEER: [&str; 2] = ["ipv4_unicast", "ipv6_unicast"];
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_vpn_only_bound_for_dual_family_peer() {
+        let detail = bound_warning(&bound_peer(&VPN_PEER, &["l3vpn_ipv4_unicast"]))
+            .expect("the negotiated IPv4 unicast feed is unbounded");
+        assert!(
+            detail.contains(
+                "negotiated families ipv4_unicast (max_prefixes_ipv4 or max_prefixes_received_ipv4);"
+            ),
+            "{detail}"
+        );
+        assert!(detail.contains("aggregate max_prefixes"), "{detail}");
+    }
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_unicast_only_bound_for_vpn_peer() {
+        let detail = bound_warning(&bound_peer(&VPN_PEER, &["ipv4_unicast"]))
+            .expect("the negotiated VPN family is unbounded");
+        assert!(
+            detail.contains(
+                "negotiated families l3vpn_ipv4_unicast (max_prefixes_l3vpn_ipv4_unicast);"
+            ),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_ipv4_only_row_for_dual_stack_peer() {
+        let detail = bound_warning(&bound_peer(&DUAL_STACK_PEER, &["ipv4_unicast"]))
+            .expect("the negotiated IPv6 unicast feed is unbounded");
+        assert!(
+            detail.contains(
+                "negotiated families ipv6_unicast (max_prefixes_ipv6 or max_prefixes_received_ipv6);"
+            ),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_ipv4_only_effective_field_for_dual_stack_peer() {
+        let mut peer = bound_peer(&DUAL_STACK_PEER, &[]);
+        peer.effective_max_prefixes_ipv4 = Some(100);
+        let detail = bound_warning(&peer).expect("the negotiated IPv6 unicast feed is unbounded");
+        assert!(
+            detail.contains(
+                "negotiated families ipv6_unicast (max_prefixes_ipv6 or max_prefixes_received_ipv6);"
+            ),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inbound_prefix_bound_warns_on_linkstate_without_aggregate() {
+        // BGP-LS has no per-family key; only the aggregate covers it.
+        let detail = bound_warning(&bound_peer(
+            &["ipv4_unicast", "linkstate"],
+            &["ipv4_unicast"],
+        ))
+        .expect("the negotiated BGP-LS family is unbounded");
+        assert!(
+            detail.contains("negotiated families linkstate (aggregate max_prefixes only);"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inbound_prefix_bound_passes_with_aggregate_or_every_family_bound() {
+        // The aggregate covers every negotiated family.
+        assert_eq!(bound_warning(&bound_peer(&VPN_PEER, &["aggregate"])), None);
+        assert_eq!(
+            bound_warning(&bound_peer(&["linkstate"], &["aggregate"])),
+            None
+        );
+        let mut aggregate = bound_peer(&DUAL_STACK_PEER, &[]);
+        aggregate.effective_max_prefixes = Some(100);
+        assert_eq!(bound_warning(&aggregate), None);
+        // A per-family bound on every negotiated family passes, through
+        // accepted rows, received-only rows, or the legacy effective fields.
+        assert_eq!(
+            bound_warning(&bound_peer(
+                &VPN_PEER,
+                &["ipv4_unicast", "l3vpn_ipv4_unicast"]
+            )),
+            None
+        );
+        assert_eq!(
+            bound_warning(&bound_peer(
+                &DUAL_STACK_PEER,
+                &["ipv4_unicast_received", "ipv6_unicast_received"]
+            )),
+            None
+        );
+        let mut legacy_both = bound_peer(&DUAL_STACK_PEER, &[]);
+        legacy_both.effective_max_prefixes_ipv4 = Some(100);
+        legacy_both.effective_max_prefixes_ipv6 = Some(100);
+        assert_eq!(bound_warning(&legacy_both), None);
+        // With every family unbounded, the detail still names each key.
+        let detail = bound_warning(&bound_peer(&DUAL_STACK_PEER, &[])).unwrap();
+        for key in [
+            "max_prefixes",
+            "max_prefixes_ipv4",
+            "max_prefixes_ipv6",
+            "max_prefixes_received_ipv4",
+            "max_prefixes_received_ipv6",
+        ] {
+            assert!(detail.contains(key), "{detail}");
         }
     }
 
@@ -5383,6 +5809,86 @@ paths = ["x"]
     /// pre-existing `rpki.vrp_table` check passes this fixture. The session
     /// check is what warns; mapping a retained disconnect to `Ok` makes the
     /// retained-cache assertion red.
+    /// ADR-0140 decision 7 mapping: warn for isolated, backstop_released,
+    /// suppressed_no_peer and overridden; fail for action_failed,
+    /// ownership_ambiguous and uplink_overlap; nothing while disabled.
+    #[test]
+    fn evpn_core_isolation_check_maps_states_and_flags_dead_uplinks() {
+        let document = |enabled: bool| -> toml::Value {
+            toml::from_str(&format!(
+                r#"
+                [evpn_core_isolation]
+                enabled = {enabled}
+                uplinks = ["eth1"]
+                [[ethernet_segments]]
+                esi = "auto-lacp"
+                interface = "bond0"
+                [[ethernet_segments]]
+                esi = "00:11:22:33:44:55:66:77:88:99"
+                "#
+            ))
+            .unwrap()
+        };
+        let row = |state: &str| {
+            format!("evpn_es_core_isolation_state{{interface=\"bond0\",state=\"{state}\"}} 1\n")
+        };
+        for (state, status) in [
+            ("released", CheckStatus::Ok),
+            ("startup_hold", CheckStatus::Ok),
+            ("recovering", CheckStatus::Ok),
+            ("isolated", CheckStatus::Warn),
+            ("backstop_released", CheckStatus::Warn),
+            ("suppressed_no_peer", CheckStatus::Warn),
+            ("overridden", CheckStatus::Warn),
+            ("action_failed", CheckStatus::Fail),
+            ("ownership_ambiguous", CheckStatus::Fail),
+            ("uplink_overlap", CheckStatus::Fail),
+        ] {
+            let checks = evpn_core_isolation_checks(&document(true), Some(&row(state)));
+            assert_eq!(checks.len(), 1, "only bound segments get a check");
+            assert_eq!(checks[0].name, "evpn.es.bond0.core_isolation");
+            assert_eq!(checks[0].status, status, "{state}: {}", checks[0].detail);
+            assert!(checks[0].detail.starts_with(state), "{}", checks[0].detail);
+        }
+        assert!(evpn_core_isolation_checks(&document(false), Some(&row("isolated"))).is_empty());
+        assert!(evpn_core_isolation_checks(&document(false), Some(&row("disabled"))).is_empty());
+        // Disabling must not hide a failed release, nor must unbinding.
+        for state in ["action_failed", "ownership_ambiguous"] {
+            let checks = evpn_core_isolation_checks(&document(false), Some(&row(state)));
+            assert_eq!(checks.len(), 1, "{state}");
+            assert_eq!(checks[0].name, "evpn.es.bond0.core_isolation");
+            assert_eq!(checks[0].status, CheckStatus::Fail);
+        }
+        let gone = "evpn_es_core_isolation_state{interface=\"old0\",state=\"action_failed\"} 1\n";
+        let checks = evpn_core_isolation_checks(
+            &document(true),
+            Some(&format!("{}{gone}", row("released"))),
+        );
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[1].name, "evpn.es.old0.core_isolation");
+        assert_eq!(checks[1].status, CheckStatus::Fail);
+        let unknown = evpn_core_isolation_checks(&document(true), Some(""));
+        assert_eq!(unknown[0].status, CheckStatus::Warn);
+
+        let dead_uplinks = format!(
+            "{}evpn_core_isolated{{signal=\"sessions\"}} 0\nevpn_core_isolated{{signal=\"uplinks\"}} 1\n",
+            row("isolated")
+        );
+        let checks = evpn_core_isolation_checks(&document(true), Some(&dead_uplinks));
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[1].name, "evpn.core_isolation.uplinks");
+        assert_eq!(checks[1].status, CheckStatus::Warn);
+        let both_down = format!(
+            "{}evpn_core_isolated{{signal=\"sessions\"}} 1\nevpn_core_isolated{{signal=\"uplinks\"}} 1\n",
+            row("isolated")
+        );
+        assert_eq!(
+            evpn_core_isolation_checks(&document(true), Some(&both_down)).len(),
+            1,
+            "a real isolation is not an uplink-list problem"
+        );
+    }
+
     #[test]
     fn evpn_auto_esi_check_reports_the_not_ready_reason_and_follows_the_gauge() {
         let document: toml::Value = toml::from_str(

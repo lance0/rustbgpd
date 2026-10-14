@@ -1,0 +1,26 @@
+{
+  "rust_decoded_srl": [
+    300,
+    true
+  ],
+  "rust_drained": true,
+  "rust_own_type4": null,
+  "srl_admin": [
+    300,
+    true
+  ],
+  "srl_decoded_rust": null,
+  "srl_df": {
+    "192.0.2.2": true
+  },
+  "srl_oper": [
+    300,
+    true
+  ],
+  "srl_own_type4": [
+    300,
+    true
+  ],
+  "srl_role_changed_after": "2026-10-13T13:36:59.551Z",
+  "srl_role_settled_for": 15
+}

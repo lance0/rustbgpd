@@ -145,16 +145,37 @@ def expected_management_route_prefix(routes_per_peer: object) -> Optional[str]:
     return f"{first}.{second}.{third}.0/24"
 
 
+def route_prefix_identity(meta: dict) -> tuple[dict, list[str]]:
+    """The route-server soak's management identity: stub 1's first route."""
+    expected_prefix = meta.get("management_route_prefix")
+    derived_prefix = expected_management_route_prefix(meta.get("routes_per_peer"))
+    errors = []
+    if derived_prefix is None:
+        errors.append(
+            "run metadata routes_per_peer cannot map to a management route prefix"
+        )
+    elif expected_prefix != derived_prefix:
+        errors.append(
+            "run metadata management route prefix mismatches stub 1 first route"
+        )
+    return {"route_prefix": expected_prefix}, errors
+
+
 def analyze_management_load(
     raw: bytes, meta: dict, first_shutdown: object, cycles: dict,
+    operations_set: tuple[str, ...] = MANAGEMENT_OPERATIONS,
+    identity_check=route_prefix_identity,
 ) -> dict:
-    """Validate bounded JSONL evidence without trusting its terminal summary."""
+    """Validate bounded JSONL evidence without trusting its terminal summary.
+
+    `operations_set` and `identity_check` let another soak (the EVPN RR soak)
+    reuse these gates with its own operation set and identity fields."""
     schema_errors: list[str] = []
     failures: list[dict] = []
     starts: list[dict] = []
     summaries: list[dict] = []
     operations: dict[str, list[dict]] = {
-        operation: [] for operation in MANAGEMENT_OPERATIONS
+        operation: [] for operation in operations_set
     }
 
     if not raw.endswith(b"\n"):
@@ -276,16 +297,17 @@ def analyze_management_load(
         schema_errors.append("terminal summary is not last")
 
     expected_intervals = {
-        "metrics": meta.get("management_metrics_interval_sec"),
-        "neighbor": meta.get("management_cli_interval_sec"),
-        "policy_stats": meta.get("management_cli_interval_sec"),
-        "rib_prefix": meta.get("management_cli_interval_sec"),
-        "doctor": meta.get("management_doctor_interval_sec"),
+        operation: meta.get(
+            "management_metrics_interval_sec" if operation == "metrics"
+            else "management_doctor_interval_sec" if operation == "doctor"
+            else "management_cli_interval_sec"
+        )
+        for operation in operations_set
     }
     expected_timeout = meta.get("management_timeout_sec")
     expected_peers = meta.get("peers")
-    expected_prefix = meta.get("management_route_prefix")
-    derived_prefix = expected_management_route_prefix(meta.get("routes_per_peer"))
+    identity, identity_errors = identity_check(meta)
+    schema_errors.extend(identity_errors)
     for operation, interval in expected_intervals.items():
         parsed = finite_number(interval)
         if parsed is None or parsed <= 0:
@@ -300,43 +322,35 @@ def analyze_management_load(
         or expected_peers <= 0
     ):
         schema_errors.append("run metadata has invalid peer cardinality")
-    if derived_prefix is None:
-        schema_errors.append(
-            "run metadata routes_per_peer cannot map to a management route prefix"
-        )
-    elif expected_prefix != derived_prefix:
-        schema_errors.append(
-            "run metadata management route prefix mismatches stub 1 first route"
-        )
     started_at = None
     # Older drivers start every worker at load start and record no phases.
-    phase_offsets = {operation: 0.0 for operation in MANAGEMENT_OPERATIONS}
+    phase_offsets = {operation: 0.0 for operation in operations_set}
     summary_end = None
     summary_end_unix = None
     stop_requested = None
-    summary_scheduled = {operation: 0 for operation in MANAGEMENT_OPERATIONS}
-    summary_completed = {operation: 0 for operation in MANAGEMENT_OPERATIONS}
-    summary_missed = {operation: 0 for operation in MANAGEMENT_OPERATIONS}
+    summary_scheduled = {operation: 0 for operation in operations_set}
+    summary_completed = {operation: 0 for operation in operations_set}
+    summary_missed = {operation: 0 for operation in operations_set}
 
     if len(starts) == 1:
         start = starts[0]
         started_at = finite_number(start.get("started_monotonic"))
         if (
             started_at is None
-            or start.get("operations") != list(MANAGEMENT_OPERATIONS)
+            or start.get("operations") != list(operations_set)
             or start.get("interval_seconds") != expected_intervals
             or start.get("timeout_seconds") != expected_timeout
             or start.get("peer_count") != expected_peers
-            or start.get("route_prefix") != expected_prefix
+            or any(start.get(key) != value for key, value in identity.items())
         ):
             schema_errors.append("start record does not match run metadata")
         recorded_phases = start.get("phase_offset_seconds", phase_offsets)
         if not isinstance(recorded_phases, dict) or set(recorded_phases) != set(
-            MANAGEMENT_OPERATIONS
+            operations_set
         ):
             schema_errors.append("start record has invalid phase offsets")
         else:
-            for operation in MANAGEMENT_OPERATIONS:
+            for operation in operations_set:
                 offset = finite_number(recorded_phases[operation])
                 interval = finite_number(expected_intervals[operation])
                 if offset is None or offset < 0 or (
@@ -369,7 +383,7 @@ def analyze_management_load(
             or summary.get("interval_seconds") != expected_intervals
             or summary.get("timeout_seconds") != expected_timeout
             or summary.get("peer_count") != expected_peers
-            or summary.get("route_prefix") != expected_prefix
+            or any(summary.get(key) != value for key, value in identity.items())
             or started_at is None or abs(summary_start - started_at) > 0.001
         ):
             schema_errors.append("terminal summary is invalid or mismatches metadata")
@@ -379,10 +393,10 @@ def analyze_management_load(
             ("missed", summary_missed),
         ):
             value = summary.get(field)
-            if not isinstance(value, dict) or set(value) != set(MANAGEMENT_OPERATIONS):
+            if not isinstance(value, dict) or set(value) != set(operations_set):
                 schema_errors.append(f"terminal summary has invalid {field} counts")
                 continue
-            for operation in MANAGEMENT_OPERATIONS:
+            for operation in operations_set:
                 count = value[operation]
                 if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                     schema_errors.append(
@@ -407,7 +421,7 @@ def analyze_management_load(
         for n, issued in cycles["reload_issued"].items()
         if n in cycles["reload_complete"]
     }
-    for operation in MANAGEMENT_OPERATIONS:
+    for operation in operations_set:
         observed = len(operations[operation])
         if summary_completed[operation] != observed:
             count_mismatches.append(
@@ -543,7 +557,7 @@ def analyze_management_load(
         },
         "management_operations": {
             "value": {operation: len(records) for operation, records in operations.items()},
-            "pass": all(operations[operation] for operation in MANAGEMENT_OPERATIONS),
+            "pass": all(operations[operation] for operation in operations_set),
         },
         "management_completion": {
             "value": coverage,

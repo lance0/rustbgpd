@@ -1,0 +1,18 @@
+{
+  "rust_role": null,
+  "srl_admin": [
+    100,
+    false
+  ],
+  "srl_df": {
+    "192.0.2.2": true
+  },
+  "srl_oper": [
+    100,
+    false
+  ],
+  "srl_own_type4": [
+    100,
+    false
+  ]
+}

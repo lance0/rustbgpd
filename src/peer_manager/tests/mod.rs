@@ -82,6 +82,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefixes_family: rustbgpd_transport::FamilyPrefixLimits::default(),
         max_prefix_action: rustbgpd_transport::MaxPrefixAction::Shutdown,
         max_prefix_warning_percent: None,
         max_prefix_restart_seconds: None,
@@ -281,6 +282,7 @@ fn make_dynamic_manager_config() -> Config {
         file_path: None,
         evpn_instances: Vec::new(),
         ethernet_segments: Vec::new(),
+        evpn_core_isolation: None,
         evpn_ip_vrfs: Vec::new(),
         managed_netdevs: crate::config::ManagedNetdevsConfig::default(),
         fib_tables: Vec::new(),
@@ -1203,7 +1205,11 @@ fn attach_test_pending_inbound(
     mgr.peers
         .get_mut(&key(peer_addr))
         .expect("managed peer")
-        .pending_inbound = Some(PendingInbound { handle, session_id });
+        .pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
+        handle,
+        session_id,
+    });
     mgr.register_session(session_id, &key(peer_addr));
 }
 
@@ -1238,6 +1244,14 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefixes_l3vpn_ipv4_unicast: None,
+        max_prefixes_l3vpn_ipv6_unicast: None,
+        max_prefixes_ipv4_labeled_unicast: None,
+        max_prefixes_ipv6_labeled_unicast: None,
+        max_prefixes_l2vpn_evpn: None,
+        max_prefixes_ipv4_flowspec: None,
+        max_prefixes_ipv6_flowspec: None,
+        max_prefixes_rtc: None,
         max_prefix_action: None,
         max_prefix_warning_percent: None,
         max_prefixes_out_ipv4: None,
@@ -1753,6 +1767,7 @@ mod policy_apply;
 mod policy_failures;
 mod policy_stats;
 mod queries;
+mod recovery;
 mod reload_generation;
 mod rfc8212;
 mod snapshots;

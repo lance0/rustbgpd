@@ -1176,6 +1176,40 @@ and fresh-per-run rules as the route-server flagship soak apply.
 
 ---
 
+# EVPN route-reflector soak (Type 2/5 churn, client flaps, reloads)
+
+`run-soak-evpn-rr.sh` runs a bare-host daemon as an EVPN-only route reflector
+for `SOAK_CLIENTS` real iBGP clients driven by `bench/evpn-load`'s
+`evpn-rr-soak` (no containers). Each epoch replaces part of every client's
+Type 2 and Type 5 windows, flaps one client every `FLAP_EVERY` epochs, and
+reloads (a description-only config swap plus SIGHUP) every `RELOAD_EVERY`
+epochs. After each epoch the driver requires every client's reflected view to
+be exactly the other clients' current windows. The management-plane load
+reads client 0's paged EVPN views alongside the scenario 10 reads. The
+existing EVPN soaks (M33, M67, Gate 8b) measure VTEP state, not reflection.
+
+```bash
+# 24 h default (150 clients x 200 Type 2 + 50 Type 5, 60 s epochs):
+bash tests/soak/run-soak-evpn-rr.sh
+
+# ~6-minute smoke:
+SOAK_CLIENTS=12 SOAK_TYPE2=40 SOAK_TYPE5=10 SOAK_SHIFT2=8 SOAK_SHIFT5=2 \
+SOAK_SECONDS=300 EPOCH_SEC=20 CHURN_SEC=8 FLAP_EVERY=2 RELOAD_EVERY=3 \
+WARMUP_SEC=30 SAMPLE_INTERVAL=10 MANAGEMENT_CLI_INTERVAL_SEC=2 \
+MANAGEMENT_DOCTOR_INTERVAL_SEC=60 METRICS_SNAPSHOT_EVERY=3 \
+bash tests/soak/run-soak-evpn-rr.sh
+```
+
+It needs ports 1790 and 9179 free and the same file-descriptor headroom as the
+flagship soaks. Output lands in `tests/soak/runs/soak-evpn-rr-<UTC>/` with
+`driver.log` in place of `reloadstall.log`. The analyzer is
+`analyze-soak-evpn-rr.py`; it reuses the route-server flagship analyzer's
+generic gates. The precommitted gates are scenario 12 in
+`docs/soaks/soak-acceptance-gates.md`. Stop a run with
+`bash tests/soak/flagship-lifecycle.sh stop <run-dir>`.
+
+---
+
 # File-descriptor headroom (both bare-host flagship soaks)
 
 Both flagship runners launch the daemon from the invoking shell. The daemon

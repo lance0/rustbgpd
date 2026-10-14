@@ -78,8 +78,9 @@ fn unknown_options_use_the_documented_invocation_exit() {
         "{stderr}"
     );
     let usage = concat!(
-        "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] ",
+        "usage: rustbgpd [--runtime-state-dir DIR] [--check [--strict]] [--diff PATH] [--json] ",
         "[--init-config PROFILE] [--dump-config-schema] [CONFIG_PATH]\n",
+        "       rustbgpd --release-core-isolation --runtime-state-dir DIR\n",
         "       rustbgpd (--help | -h)\n",
         "       rustbgpd (--version | -V)\n",
         "       rustbgpd --man\n",
@@ -193,5 +194,128 @@ fn check_still_exits_1_when_the_config_cannot_be_loaded() {
     assert!(
         stderr.contains("error: failed to read") && stderr.contains("missing.toml"),
         "{stderr}"
+    );
+}
+
+/// ADR-0140: the release helper takes only `--runtime-state-dir`, never
+/// reads a config, fails loudly on a missing directory and succeeds on a
+/// readable one without a receipt.
+#[cfg(target_os = "linux")]
+#[test]
+fn release_core_isolation_is_a_config_free_one_shot() {
+    assert_invalid(
+        &["--release-core-isolation"],
+        "--release-core-isolation requires --runtime-state-dir DIR",
+    );
+    assert_invalid(
+        &[
+            "--release-core-isolation",
+            "--runtime-state-dir",
+            "/tmp",
+            "/etc/rustbgpd/config.toml",
+        ],
+        "--release-core-isolation takes only --runtime-state-dir DIR",
+    );
+    assert_invalid(
+        &["--runtime-state-dir"],
+        "--runtime-state-dir requires a directory argument",
+    );
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = temp.path().join("missing");
+    let output = run(
+        &[
+            "--release-core-isolation",
+            "--runtime-state-dir",
+            missing.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot open runtime-state directory"),
+        "{output:?}"
+    );
+
+    let dir = temp.path().join("state");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let output = run(
+        &[
+            "--release-core-isolation",
+            "--runtime-state-dir",
+            dir.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(dir.join("evpn-core-isolation-owned.json.lock").exists());
+}
+
+/// The daemon's `--runtime-state-dir` must name the config's directory.
+#[test]
+fn runtime_state_dir_flag_must_match_the_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = temp.path().join("state");
+    let config = starter_config()
+        .lines()
+        .map(|line| {
+            if line.starts_with("runtime_state_dir") {
+                format!("runtime_state_dir = \"{}\"", state.display())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(&config_path, config).expect("write config");
+    let config_path = config_path.to_str().unwrap();
+
+    let same = format!("{}/", state.display());
+    let output = run(
+        &["--runtime-state-dir", &same, "--check", config_path],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+    let output = run(
+        &["--runtime-state-dir", "/elsewhere", "--check", config_path],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("differs from the config"),
+        "{output:?}"
+    );
+    assert_invalid(
+        &[
+            "--runtime-state-dir",
+            "/x",
+            "--diff",
+            config_path,
+            config_path,
+        ],
+        "--runtime-state-dir applies only to a daemon start or --check",
+    );
+
+    // A symlink to the right directory is refused at start, because the
+    // release helper would refuse it at stop.
+    std::fs::create_dir(&state).unwrap();
+    let link = temp.path().join("state-link");
+    std::os::unix::fs::symlink(&state, &link).unwrap();
+    let output = run(
+        &[
+            "--runtime-state-dir",
+            link.to_str().unwrap(),
+            "--check",
+            config_path,
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("is a symlink"),
+        "{output:?}"
     );
 }

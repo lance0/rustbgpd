@@ -2516,6 +2516,7 @@ fn insert_active_peer_with_candidate(mgr: &mut PeerManager, peer_key: &PeerKey, 
         false,
     );
     mgr.peers.get_mut(peer_key).unwrap().pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
         handle: fake_peer_handle(
             addr,
             SessionState::OpenConfirm,

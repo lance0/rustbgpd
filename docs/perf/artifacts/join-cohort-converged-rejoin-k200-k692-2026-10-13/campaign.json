@@ -1,0 +1,21 @@
+{
+  "peers": 700,
+  "prefixes": 400400,
+  "ks": [
+    200,
+    692
+  ],
+  "repeats": 3,
+  "rounds": 3,
+  "quiet": true,
+  "smoke": false,
+  "bars": {
+    "high_k": "improve",
+    "rejoin_rel": 0.1,
+    "rejoin_abs_s": 0.03,
+    "gap_median_rel": 0.1,
+    "gap_median_abs_ms": 50.0,
+    "gap_max_rel": 0.1,
+    "gap_max_abs_ms": 100.0
+  }
+}

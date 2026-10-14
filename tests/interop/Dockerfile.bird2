@@ -1,0 +1,67 @@
+FROM debian:bookworm-slim
+
+ARG BIRD_VERSION=2.19.3
+ARG BIRD_SHA256=853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd
+# Defaults are the current BIRD 2 interop pin. The M100 control passes its
+# frozen BIRD 2.19.2 version and checksum as build arguments.
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends \
+        bison \
+        build-essential \
+        ca-certificates \
+        curl \
+        flex \
+        iproute2 \
+        libncurses-dev \
+        libreadline-dev \
+        m4 \
+        perl \
+        pkg-config \
+        tshark \
+    && rm -rf /var/lib/apt/lists/*
+
+# Hosted CI stages a checksum- and version-verified archive (restored from its
+# cache entry or fetched upstream) before this build. The absent-archive branch is only for cold local builds and is
+# bounded to three 60-second attempts per checksum-verified source.
+COPY bird3-archive/ /tmp/bird-archive/
+
+RUN set -eux; \
+    archive="bird-${BIRD_VERSION}.tar.gz"; \
+    target="/tmp/bird-archive/${archive}"; \
+    if [ ! -f "${target}" ]; then \
+        for source in "https://bird.nic.cz/download/${archive}" \
+            "https://ftp.openbsd.org/pub/OpenBSD/distfiles/${archive}"; do \
+            attempt=1; \
+            while :; do \
+                rm -f "${target}.download"; \
+                if curl --fail --location --silent --show-error \
+                    --connect-timeout 10 --max-time 60 \
+                    "${source}" --output "${target}.download" \
+                    && echo "${BIRD_SHA256}  ${target}.download" | sha256sum --check --strict; then \
+                    mv "${target}.download" "${target}"; \
+                    break 2; \
+                fi; \
+                rm -f "${target}.download"; \
+                if [ "${attempt}" -ge 3 ]; then \
+                    echo "BIRD ${BIRD_VERSION} source exhausted: ${source}" >&2; \
+                    break; \
+                fi; \
+                sleep $((attempt * 5)); \
+                attempt=$((attempt + 1)); \
+            done; \
+        done; \
+        test -f "${target}"; \
+    fi; \
+    echo "${BIRD_SHA256}  ${target}" | sha256sum --check --strict; \
+    mkdir /tmp/bird; \
+    tar -xzf "${target}" -C /tmp/bird --strip-components=1; \
+    cd /tmp/bird; \
+    ./configure --prefix=/usr --sysconfdir=/etc/bird --localstatedir=/run/bird; \
+    make -j"$(nproc)"; \
+    make install; \
+    test "$(bird --version 2>&1)" = "BIRD version ${BIRD_VERSION}"; \
+    rm -rf /tmp/bird /tmp/bird-archive; \
+    mkdir -p /etc/bird /run/bird
+
+CMD ["sleep", "infinity"]

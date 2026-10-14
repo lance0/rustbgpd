@@ -2162,10 +2162,12 @@ mod collision_hold;
 mod denied_replacements;
 mod exact_export;
 mod export_policy;
+mod family_max_prefix;
 mod forwarding_state;
 mod import_policy;
 mod inbound_update;
 mod labeled;
+mod local_revalidation;
 mod loop_detection;
 mod max_prefix;
 mod metrics;
@@ -2190,4 +2192,5 @@ mod tcp_ao;
 mod tcp_mss;
 mod vpn;
 
+mod recovery;
 mod replay;

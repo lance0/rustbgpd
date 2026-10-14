@@ -962,7 +962,15 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `max_prefixes_ipv6`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108) |
 | `max_prefixes_received_ipv4` | u32 | no      | --      | Maximum unique IPv4-unicast prefixes the peer may announce, counted **before** import policy: every prefix the peer currently announces counts once whether policy accepts or rejects it, Add-Path identities share one slot, and an explicit withdrawal or an enhanced-route-refresh sweep releases it. Same latched Cease/1 teardown, RFC 4486 data, Notification GR encapsulation, and `max_prefix_restart_seconds` contract as `max_prefixes_ipv4`, enforced independently of it. Rejected identities are tracked only while this bound is set; enabling it on an Established session requests a route refresh so the peer's existing rejections are recounted. Inherits from the peer group when omitted; a neighbor value overrides the group value (ADR-0108 amendment) |
 | `max_prefixes_received_ipv6` | u32 | no      | --      | IPv6-unicast sibling of `max_prefixes_received_ipv4`; inherits from the peer group when omitted and may be overridden per neighbor |
-| `max_prefix_action`    | string   | no       | `"shutdown"` | What a crossed max-prefix bound does. `"shutdown"`: Cease/1 teardown and latch (plus the optional `max_prefix_restart_seconds` timed restart). `"block"`: net-new prefixes beyond a full bound are withheld (never installed; the episode is counted once in `bgp_max_prefix_blocked_total`) while the session stays Established; a prefix already accepted still takes attribute changes and new Add-Path identities. Usage falling below the bound, removing the bound, or leaving `block` ends the episode and requests one route refresh so the peer replays what was withheld. Without negotiated route refresh, peer reannouncement or a session reset is required. `"warning"`: warn once per crossing at the bound and keep accepting. `block` applies to the per-family unicast bounds and requires the aggregate `max_prefixes` to be unset; `block` and `warning` exclude `max_prefix_restart_seconds`. Inherits from the peer group (ADR-0108 amendment) |
+| `max_prefixes_l3vpn_ipv4_unicast` | u32 | no | -- | Maximum unique accepted VPN-IPv4 routes (RD + prefix) from the peer, counted after import policy like `max_prefixes_ipv4`: Add-Path paths of one route share a slot, withdrawals and enhanced-route-refresh sweeps release it, and a session reset clears it. Applies `max_prefix_action`: `shutdown` sends Cease/1 with RFC 4486 AFI/SAFI/bound data (RFC 8538 Cease/9 encapsulation under Notification GR) and latches the peer; `block` withholds net-new routes of this family only; `warning` reports. Enforced independently of `max_prefixes` and every other family bound, so a leak in one family never consumes another family's budget. Inherits from the peer group when omitted; a neighbor value overrides it |
+| `max_prefixes_l3vpn_ipv6_unicast` | u32 | no | -- | VPN-IPv6 (AFI 2/SAFI 128) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_ipv4_labeled_unicast` | u32 | no | -- | IPv4 labeled unicast (AFI 1/SAFI 4) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_ipv6_labeled_unicast` | u32 | no | -- | IPv6 labeled unicast (AFI 2/SAFI 4) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_l2vpn_evpn` | u32 | no | -- | EVPN (AFI 25/SAFI 70) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_ipv4_flowspec` | u32 | no | -- | IPv4 `FlowSpec` (AFI 1/SAFI 133) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_ipv6_flowspec` | u32 | no | -- | IPv6 `FlowSpec` (AFI 2/SAFI 133) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefixes_rtc` | u32 | no | -- | RT-Constrain (AFI 1/SAFI 132) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
+| `max_prefix_action`    | string   | no       | `"shutdown"` | What a crossed max-prefix bound does. `"shutdown"`: Cease/1 teardown and latch (plus the optional `max_prefix_restart_seconds` timed restart). `"block"`: net-new prefixes beyond a full bound are withheld (never installed; the episode is counted once in `bgp_max_prefix_blocked_total`) while the session stays Established; a prefix already accepted still takes attribute changes and new Add-Path identities. Usage falling below the bound, removing the bound, or leaving `block` ends the episode and requests one route refresh so the peer replays what was withheld. Without negotiated route refresh, peer reannouncement or a session reset is required. `"warning"`: warn once per crossing at the bound and keep accepting. `block` applies to the per-family bounds (unicast and the non-unicast `max_prefixes_<family>` keys) and requires the aggregate `max_prefixes` to be unset; `block` and `warning` exclude `max_prefix_restart_seconds`. Inherits from the peer group (ADR-0108 amendment) |
 | `max_prefix_warning_percent` | u8 | no      | --      | Warning threshold as a percentage (1..=100) of every finite max-prefix bound, independent of `max_prefix_action`. Crossing it (usage ≥ percent of the bound) emits one warn log line, one `max_prefix_warning` session event, and one `bgp_max_prefix_warning_total` increment; the latch re-arms when usage falls back under the threshold. Never a teardown. Inherits from the peer group |
 | `max_prefixes_out_ipv4` | non-zero u32 | no | -- | Maximum distinct IPv4-unicast prefixes advertised **to** this peer (ADR-0113). Excess net-new prefixes are withheld while the session stays Established; nothing already advertised is withdrawn and no NOTIFICATION is sent. Counts prefixes, not paths: every Add-Path identity for one NLRI shares a slot |
 | `max_prefixes_out_ipv6` | non-zero u32 | no | -- | IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113) |
@@ -1632,8 +1640,8 @@ Peer-group fields mirror every neighbor setting except `address`,
 `interface`, `remote_asn`, `description`, `peer_group`, and `tcp_ao`.
 That covers `admin_down` / `admin_down_reason` (static members only), timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
-`max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
-`max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
+`max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`, the non-unicast
+`max_prefixes_<family>` keys, `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
 `max_prefix_restart_seconds`,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
 receive-side Prefix ORF, `disable_ipv4_unicast`, `link_local_next_hop`,
@@ -2720,14 +2728,58 @@ Every route receives a validation state based on RPKI data:
 
 Use `match_rpki_validation` in import or export policy statements to filter
 routes by RPKI state. Import validation evaluates against the current VRP
-snapshot at ingress time. Each changed VRP/ASPA snapshot asks every affected
-Established peer whose resolved import policy matches validation state to
-replay all negotiated families. This is a full family replay, not a replay
+snapshot at ingress time. By default, each changed VRP/ASPA snapshot asks every
+affected Established peer whose resolved import policy matches validation state
+to replay all negotiated families. This is a full family replay, not a replay
 limited to prefixes covered by the cache delta. When negotiated, Enhanced Route
 Refresh can bracket it with BoRR/EoRR but does not delta-reduce it.
 Reconsidering previously denied routes requires negotiated Route Refresh and
 the peer's replay; peers that cannot be refreshed evaluate against the new
 snapshot when routes are naturally re-advertised or a new session replays them.
+[Local re-evaluation](#local-re-evaluation-rfc-9324) replaces that replay with
+a local one.
+
+### Local re-evaluation (RFC 9324)
+
+```toml
+[rpki]
+local_revalidation = true
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|:--------:|:-------:|-------------|
+| `local_revalidation` | bool | no | `false` | Re-evaluate VRP and ASPA changes from locally retained input instead of asking peers for inbound Route Refresh |
+
+With `local_revalidation = true`, every session whose import policy matches
+RPKI or ASPA state keeps the pre-policy IPv4/IPv6 unicast input it received:
+each accepted route, and each rejected route that a different validation
+outcome would have admitted. A reject that holds for every validation outcome
+(a bogon, an IRR mismatch) is not kept. A changed VRP snapshot re-runs import
+policy for the retained routes covered by the changed VRPs; a changed ASPA
+snapshot does the same for routes whose `AS_PATH` contains a changed customer
+ASN. Newly admitted routes enter the RIB and newly rejected ones are withdrawn
+through the ordinary inbound path, and no ROUTE-REFRESH is sent. The first
+table after startup, an RTR cache reset, and a full snapshot re-evaluate every
+retained route. Re-evaluation runs in bounded chunks on the session task.
+
+Each session keeps at most 65,536 retained rejects. A session that exceeds the
+bound discards its retained input, logs a warning, and falls back to inbound
+Route Refresh for later changes until the session resets;
+`bgp_validation_import_refreshes_total{outcome="fallback_refresh"}` counts each
+fallback. If the overflow interrupts queued work, the session requests the
+unicast replay immediately. FlowSpec import still sees the destination
+prefix's RPKI state and is not retained, so negotiated FlowSpec families keep
+Route Refresh. An import policy that starts depending on validation state
+during an established session falls back the same way until an enhanced Route
+Refresh (RFC 7313) has replayed every negotiated unicast family, or until the
+session resets. A peer whose import-policy Route Refresh failed and awaits retry also
+falls back, because its retained input predates the policy change.
+
+The retained input costs memory in proportion to the routes received from
+validation-dependent peers. RFC 9324 Section 4 requires this control to be
+global, so it is not available per neighbor. Like the rest of `[rpki]`,
+changing it requires a restart. IRR and other policy dataset swaps still use
+Route Refresh.
 
 Drop RPKI-invalid routes (recommended):
 
@@ -3405,16 +3457,32 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
-unicast route is an RFC 8950 next hop. An IPv4 address does not apply to a
-route with IPv6 NLRI (IPv6 unicast, IPv6 labeled unicast, or VPNv6), whose
-`MP_REACH_NLRI` next hop must be IPv6 (RFC 2545 §3, RFC 8277, RFC 4659
-§3.2.1); the route keeps its next hop, as with FRR's `set ip next-hop`.
+unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
+IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6 (RFC 2545
+§3); the route keeps its next hop, as with FRR's `set ip next-hop`.
 rustbgpd does not originate 6PE or 6VPE routes and never converts an IPv4
 `set_next_hop` into an IPv4-mapped IPv6 address. To set one deliberately, give
 the IPv6 form, such as `"::ffff:192.0.2.9"`. A received IPv4-mapped next hop
 is reflected unchanged. On import, `"self"` for an IPv6 route resolves to the
 session's local IPv6 address, else `local_ipv6_nexthop`; with neither (IPv4
 transport and no `local_ipv6_nexthop`) the route keeps its received next hop.
+
+`set_next_hop` never applies to a labeled-unicast or VPN route
+(`ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l3vpn_ipv4_unicast`,
+`l3vpn_ipv6_unicast`). Such a route keeps its received labels, which are valid
+only at the received next hop (RFC 8277 §3.2.2), and rustbgpd allocates no
+labels ([ADR-0077](../adr/0077-mpls-vpn-bgpls-address-family-boundary.md)
+Decision 6). Config validation therefore rejects an export policy whose
+`set_next_hop`, `"self"` or an address, can reach one of those families on the
+neighbor, peer group or dynamic range it is bound to. The check runs at
+startup and before a SIGHUP or API change commits, and the error names the
+family, the policy and the binding. A TOML statement has no family match, so
+bind a policy that sets the next hop only to unicast peers. In `.rpol`, a term
+whose guard excludes those families, such as `route.family == ipv4-unicast`,
+stays legal on a peer that also carries them; a guard the check cannot prove
+exclusive, such as a prefix match alone, is rejected. On import the action
+leaves a labeled or VPN route's next hop unchanged, as before.
+
 Export never encodes an IPv4 next hop for a route with IPv6 NLRI, including a
 VPNv6 route received with a 12-octet RD + IPv4 next hop: such a route is
 withheld from that peer and counted in
@@ -4683,6 +4751,154 @@ unsupported dependency cycles fail closed before commit.
 
 ---
 
+## `[evpn_core_isolation]`
+
+Optional, opt-in (ADR-0140, alpha with EVPN multihoming). Holds the CE-facing
+links of bound Ethernet Segments administratively down while this PE is
+core-isolated, and at startup until EVPN has synced, so the CE moves its
+traffic to the other ES member instead of hashing flows into a PE that cannot
+deliver them. Only segments with an `interface` binding are affected.
+
+```toml
+[evpn_core_isolation]
+enabled = true                 # default false
+uplinks = ["eth1", "eth2"]     # optional underlay uplinks
+hold_after_sync_seconds = 10   # default 10, 0..=3600
+backstop_seconds = 180         # default 180, 1..=3600
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Let rustbgpd own the admin state of every bound segment's CE-facing members |
+| `uplinks` | string[] | `[]` | Underlay links. When set and every one lacks carrier (`IFF_LOWER_UP`; a missing link counts as down), the PE is core-isolated even with EVPN sessions up |
+| `hold_after_sync_seconds` | u64 | `10` | How long EVPN must stay synced before a hold releases (`0..=3600`) |
+| `backstop_seconds` | u64 | `180` | When a hold releases even without EVPN sync, with a warning (`1..=3600`, at least `hold_after_sync_seconds`) |
+
+The table is accepted only on Linux and only with at least one
+`[[ethernet_segments]]` entry that has an `interface`. While `enabled = true`,
+each `interface` may be bound by only one segment; validation names both
+segments. An `uplinks` entry that names a bound interface is rejected, because
+the hold would take its own uplink down and never release. The table reloads
+live with the EVPN runtime config on SIGHUP or `ApplyEvpnRuntime`; disabling it
+or removing a binding releases the affected links at once.
+
+**Signal.** The PE is core-isolated when it has no Established L2VPN/EVPN
+session and no EVPN peer whose routes it retains as GR or LLGR stale, or when
+every configured uplink lacks carrier. Isolation is entered immediately. An
+uplink that is a bound link, is enslaved under a bound bond, or is an owned
+member is excluded from the signal, logged as an error and reported as
+`uplink_overlap`; if every uplink is excluded the uplink signal is false. The
+same applies to an uplink stacked on such a link, such as a VLAN on the bound
+bond: the daemon follows each uplink's kernel lower device (`IFLA_LINK`) for up
+to eight hops, because the stacked link loses carrier when the hold takes the
+members down. A lower device that is missing, or that lives in another network
+namespace, ends the check, and the uplink keeps its own carrier in the signal.
+
+**Action.** For a bound bond, every member is set administratively down
+(`RTM_SETLINK` clearing `IFF_UP`); the bond stays up and the members stay
+enslaved. A bound link that is not a bond is itself set down. Protodown is not
+used: bonds, veths and physical NIC drivers do not accept it. While a hold is in
+place, member discovery is level-triggered: a member enslaved admin-up during
+the hold is recorded and taken down, a member already down when the hold
+begins is left alone and is not raised later, and a held member that another
+writer raises is reported as `overridden` and not taken down again until the
+hold ends. A held member that leaves the bond and is enslaved again comes back
+admin-up from the kernel, so it is taken down again rather than treated as
+overridden. Taking the members down drops the bond's carrier, so the ADR-0085
+link drain withdraws the segment's routes; on release, origination returns
+after `recovery_delay_seconds`.
+
+**Peer rule.** Isolation holds a segment only if a remote PE's Type 4 route for
+its ESI, with the matching ES-Import route target, was present while the core
+was up and EVPN was synced; a session that has not yet sent End-of-RIB never
+updates that record. Otherwise the CE has no other member and the hold is
+suppressed (`suppressed_no_peer`). Until EVPN has synced after startup and
+every bound segment has a peer record (an `auto-lacp` bond that the startup
+hold leaves unresolved has none), a core loss keeps the startup hold rather
+than becoming a suppressed isolation. A RIB that does not answer a poll gives
+no reading: nothing is decided on the previous one, and an isolation hold is
+released after `backstop_seconds` without an answer. A reload that gives a bound interface
+another ESI or originator drops that peer record and the hold: the members are
+released, and the segment is held again only after a Type 4 is seen for the
+new identity.
+
+**Holds.** A hold arms at daemon start (every bound segment, without the peer
+rule) or at the isolation edge. It releases once EVPN has been continuously
+synced (an Established session, End-of-RIB from every one, and no GR selection
+deferral) for `hold_after_sync_seconds`, or, without sync, when
+`backstop_seconds` have passed since daemon start or since the core came back.
+A backstop release logs a warning with reason `backstop_unsynced` and reports
+`backstop_released` until sync is observed. The settle hold gives the dataplane
+time to program remote MACs; it does not confirm that it did.
+
+**Device requirements.** The CE removes the member immediately when its end of
+the link loses carrier on admin-down, as with a veth or a NIC that drops PHY
+link on close. Otherwise removal waits for the CE's LACP timeout, about 3 s at
+the fast rate and 90 s at the slow rate. Use a NIC that drops link on close
+(for example the `link-down-on-close` private flag on i40e and ice) or have the
+CE request fast LACPDUs (Linux `lacp_rate fast`, the LACP short timeout
+elsewhere).
+
+**Ownership contract.** Enabling the table gives rustbgpd exclusive ownership
+of the admin state of each bound bond's members (or the bound link). Do not
+manage that state with `ip link`, systemd-networkd, NetworkManager or ifupdown.
+systemd-networkd's `ActivationPolicy=always-up` re-raises a downed link and
+`BindCarrier=` also drives admin state: give the members
+`ActivationPolicy=manual`. Leave the members unmanaged by NetworkManager. To
+work on a member, disable the table or remove the binding first.
+
+**Ownership receipt and release.** Before each admin-down, rustbgpd durably
+publishes `<runtime_state_dir>/evpn-core-isolation-owned.json`, recording the
+boot ID, network namespace, binding, ifindex, name, permanent and assigned
+MACs, and master bond of the member; the lock file
+`evpn-core-isolation-owned.json.lock` beside it is never removed. A link is
+raised only when every recorded field still matches exactly one link and the
+link is still down. A different boot ID discards the entry. Any other mismatch
+(renamed, recreated, a member removed from the bond, more than one candidate)
+leaves the link down, keeps the entry, and reports `ownership_ambiguous`. Raise
+(or delete) the link by hand: the release helper and the next start drop an
+ambiguous entry once no link with its ifindex or name is left down, and keep it
+otherwise. Dropping an entry never raises a link. Held links are released:
+
+- on clean shutdown, after the EVPN sessions close;
+- after any exit by `rustbgpd --release-core-isolation --runtime-state-dir DIR`,
+  which the shipped systemd unit runs as `ExecStopPost=`. It does not read the
+  config, refuses while a daemon holds the lock, exits 0 only when no owned link
+  is left down, and exits 1 for a missing directory, an unreadable receipt or an
+  ambiguous entry. Supervisors without a stop hook (plain containers, runit,
+  OpenRC without `stop_post`) must run it after the daemon exits;
+- at the next start, which adopts matching entries into the startup hold and
+  raises entries whose binding is gone or whose table is disabled.
+
+The daemon accepts the same `--runtime-state-dir` flag and refuses to start
+when it differs from `runtime_state_dir`, so the stop hook always reads the
+directory the daemon wrote.
+
+**Planned restarts.** A restart moves the CE's traffic to the other ES member
+for the startup hold. Between the old daemon's shutdown and the new daemon's
+startup hold, and during the supervisor's restart delay, the CE may hash into
+this PE.
+
+**Observability.** `evpn_es_core_isolation_state{interface, state}` is a state
+set per bound interface: `released`, `startup_hold`, `isolated`, `recovering`,
+`backstop_released`, `suppressed_no_peer`, `overridden`, `ownership_ambiguous`,
+`uplink_overlap`, `action_failed` or `disabled`.
+`evpn_core_isolated{signal}` is 1 while the `sessions` or `uplinks` signal
+holds. Each transition is logged once with its state as the reason code.
+`action_failed` and `ownership_ambiguous` outrank `disabled`, and an interface
+whose binding was removed keeps its series while one of its releases is
+failing, so a disable or unbind that could not raise a link stays visible.
+`rbgp doctor` reports `evpn.es.<interface>.core_isolation` for each bound
+segment while the table is enabled, reports those two failure states for any
+interface whatever the table's state, and reports
+`evpn.core_isolation.uplinks` when every uplink lacks carrier while EVPN
+sessions are up.
+
+Stock-Linux FRR peers do not provide the reverse protection: FRR's protodown
+write fails on bond members, so an isolated FRR PE keeps attracting CE traffic.
+
+---
+
 ## `[[evpn_ip_vrfs]]`
 
 Optional, repeatable. Declares the local IP-VRF / L3VNI tenants this VTEP
@@ -5426,7 +5642,7 @@ quoting it:
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `gr_stale_routes_time must be > 0` / `gr_stale_routes_time <value> exceeds 3600 (1 hour max)` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `prefix length ... exceeds` |
 | Policy entry must have at least one match condition (see [Match conditions](#match-conditions)) | `must have at least one match condition` |
-| Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates trigger inbound Route Refresh for established peers whose import policy depends on validation state | *(informational — no error)* |
+| Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates re-evaluate established peers whose import policy depends on validation state, by inbound Route Refresh unless `[rpki] local_revalidation` re-evaluates them locally | *(informational — no error)* |
 | `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |

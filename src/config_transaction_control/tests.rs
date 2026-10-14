@@ -11819,6 +11819,12 @@ const TRANSACTION_FAULT_CHILD: &str = "RUSTBGPD_TEST_TRANSACTION_FAULT_CHILD";
 async fn run_confirmed_live_policy_fault_child(root: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
+    // Pre-effect deadlines are tokio instants; the settlement budget is wall
+    // clock. With tokio time paused, a stalled pre-effect wait reaches its
+    // deadline as soon as every task is idle, so its clean settlement no
+    // longer races the budget fence on a loaded host. Waits after an effect
+    // are bounded only by the budget and still end at the real fence.
+    tokio::time::pause();
     let (baseline, fault): (
         Vec<TransactionTestActor>,
         Option<(usize, TransactionTestFault)>,
@@ -11891,22 +11897,30 @@ async fn run_confirmed_live_policy_fault_child(root: &Path) {
     ));
     tokio::pin!(applying);
     // An owned apply settles or fences within its budget; past budget plus
-    // grace the watchdog has already exited the process.
+    // grace the watchdog has already exited the process. The watchdog runs on
+    // the wall clock while tokio time is paused, so watch it from a thread.
     let (budget, grace) =
         rustbgpd_api::runtime_config_settlement::settlement_test_control::duration_override()
             .expect("the parent provides a settlement control directory");
-    let result = tokio::time::timeout(budget + grace, async {
-        tokio::select! {
-            result = &mut applying => Some(result),
-            () = async {
-                while watchdog.owner_fence_reason().is_none() {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            } => None,
+    let (fenced_tx, fenced_rx) = tokio::sync::oneshot::channel();
+    let fence_watch = watchdog.clone();
+    std::thread::spawn(move || {
+        let hang = std::time::Instant::now() + budget + grace;
+        while fence_watch.owner_fence_reason().is_none() {
+            if fenced_tx.is_closed() || std::time::Instant::now() >= hang {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
-    })
-    .await
-    .expect("owned apply must settle or actually fence within its test budget");
+        let _ = fenced_tx.send(());
+    });
+    let result = tokio::select! {
+        result = &mut applying => Some(result),
+        fenced = fenced_rx => {
+            fenced.expect("owned apply must settle or actually fence within its test budget");
+            None
+        }
+    };
     let outstanding = schedule.outstanding.load(Ordering::SeqCst)
         | (u8::from(schedule.publication_outstanding.load(Ordering::SeqCst)) << 3);
     let fence = watchdog.owner_fence_reason();
@@ -12004,9 +12018,10 @@ async fn confirmed_live_policy_faults_are_enumerated() {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let settings = root.path().join("settings.v1");
-        // Only a reply that never arrives needs the budget: its pre-effect
-        // wait ends at the pre-effect deadline, leaving budget/10 to settle
-        // cleanly, and its post-effect wait ends at the fence. Every other
+        // Only a reply that never arrives needs the budget: its post-effect
+        // wait ends at the wall-clock fence. Its pre-effect wait ends at the
+        // pre-effect deadline in the child's paused tokio time, so the whole
+        // budget remains to settle cleanly. Every other
         // outcome follows from fault ordering alone, so it gets the schema's
         // maximum budget and a slow fsync on a loaded host cannot fence a
         // clean apply. Use the maximum grace for the child to validate and

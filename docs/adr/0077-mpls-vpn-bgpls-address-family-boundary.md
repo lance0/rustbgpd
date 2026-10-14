@@ -245,9 +245,10 @@ appropriately.
 
 Therefore:
 
-- `next_hop_self` and any future label rewrite knob are rejected or ignored for
-  labeled-unicast and VPN families until a dataplane-backed ADR defines label
-  ownership.
+- `next_hop_self`, an export policy `set_next_hop`, and any future label
+  rewrite knob are rejected for labeled-unicast and VPN families until a
+  dataplane-backed ADR defines label ownership (see the 2026-10-12
+  amendment).
 - A route-reflector-only implementation must preserve next-hop and label stack
   unless policy withdraws the route.
 - If a future implementation allows next-hop rewrite, it must be paired with
@@ -486,3 +487,21 @@ The /96 behavior agrees with
 which compares RTs without deriving an AS from their administrators.
 The historical eBGP distribution deferral above remains separate from this
 shared matcher correction; this does not qualify a complete eBGP fabric.
+
+## Amendment (2026-10-12): export `set_next_hop` is rejected for labeled and VPN families
+
+Decision 6 originally said a next-hop rewrite is "rejected or ignored" for
+these families. Export policy `set_next_hop` did neither: labeled-unicast and
+VPN export rewrote the next hop while keeping the received labels, which the
+new next hop never allocated (RFC 8277 §3.2.2), so the reflected traffic had
+no valid label binding.
+
+The rewrite is now rejected. Config validation refuses an effective export
+chain whose `set_next_hop` (`self` or an address) can reach
+`ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l3vpn_ipv4_unicast` or
+`l3vpn_ipv6_unicast` on the peer or dynamic range it is bound to, at startup
+and before any SIGHUP or API change commits. A `.rpol` term whose
+`route.family` guard provably excludes those families stays legal; any other
+term counts as reachable. Policy evaluation also applies no next-hop action
+to a labeled-unicast or VPN route, so a binding that bypassed validation
+cannot rewrite either.

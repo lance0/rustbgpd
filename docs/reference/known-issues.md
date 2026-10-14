@@ -490,13 +490,17 @@ resolved.
   non-client attribute-swap, the §6 60-second EoR delay, eBGP RTC
   subtleties, and Add-Path remain deferred — see the ADR-0077
   amendment). IPv4/IPv6 labeled-unicast (AFI 1/2, SAFI 4) per RFC 8277 is
-  implemented RR-only — the label stack and next-hop are preserved
-  verbatim, no label allocation, rewrite, or MPLS FIB install; Add-Path
+  implemented RR-only — the label and next-hop are preserved
+  verbatim, no label allocation, rewrite, or MPLS FIB install; a
+  multi-label stack is stored but withheld from every peer, since
+  rustbgpd does not advertise the Multiple Labels Capability
+  ([RFC notes](rfc-notes.md#rfc-8277--label-stacks-on-labeled-unicast-and-vpn-routes)); Add-Path
   per RFC 7911 is supported — completing the ADR-0077 quartet
   (BGP-LS, VPNv4/v6, RT-Constrain, labeled-unicast); M79 is the GoBGP
-  real-peer receipt (reflection incl. multi-label stacks and a v6
-  next-hop over a v4 session, relabel implicit replace, label-stack
-  withdraw with zero session flap, GR window + EoR sweep). GR/LLGR stale
+  real-peer receipt (single-label reflection incl. a v6 next-hop over a
+  v4 session, multi-label stack stored and withheld, relabel implicit
+  replace, label-stack withdraw with zero session flap, GR window + EoR
+  sweep). GR/LLGR stale
   preservation now covers all of these RR
   families (RFC 4724 helper retention + RFC 9494 two-phase LLGR, M77
   receipt), and the pre-existing unicast/FlowSpec/EVPN paths implement

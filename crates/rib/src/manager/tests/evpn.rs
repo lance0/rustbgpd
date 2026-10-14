@@ -686,6 +686,106 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     handle.await.unwrap();
 }
 
+/// A send that fails because the target's session closed during the pass is
+/// not backpressure: it must not log "outbound channel full" or leave the
+/// peer dirty. A full channel on a live session still warns and goes dirty.
+#[test]
+fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
+    use std::sync::{Arc as StdArc, Mutex};
+    const DEFERRED: &str = "outbound channel full — EVPN update deferred";
+
+    let (_tx, rx) = mpsc::channel(4);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some("192.0.2.254".parse().unwrap()),
+        BgpMetrics::new(),
+    );
+    let closed: IpAddr = "192.0.2.30".parse().unwrap();
+    let full: IpAddr = "192.0.2.31".parse().unwrap();
+    let mut receivers = Vec::new();
+    for (peer, router_id) in [(closed, "192.0.2.30"), (full, "192.0.2.31")] {
+        let (outbound_tx, mut out) = mpsc::channel(1);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: router_id.parse().unwrap(),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while out.try_recv().is_ok() {}
+        receivers.push(out);
+    }
+    let closed_rx = receivers.remove(0);
+    let _full_rx = receivers.remove(0);
+
+    // The announce fills both one-slot channels. Forget it in each
+    // Adj-RIB-Out so every later pass stages it again.
+    let route = make_evpn_imet("192.0.2.10".parse().unwrap(), 100);
+    let key = route.key();
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    for peer in [closed, full] {
+        assert!(
+            manager
+                .adj_ribs_out
+                .get_mut(&peer)
+                .unwrap()
+                .remove_evpn(&key)
+        );
+    }
+    let keys = HashSet::from([key]);
+
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    let subscriber = CaptureSubscriber {
+        level: tracing::Level::WARN,
+        events: StdArc::clone(&captured),
+    };
+    let messages = || {
+        captured
+            .lock()
+            .unwrap()
+            .drain(..)
+            .map(|fields| fields.0.get("message").cloned().unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        // Sibling tests reach this callsite through `manager.run()` with no
+        // subscriber; warm it here and refresh its cached interest first.
+        manager.distribute_evpn_keys_to_peer(full, &keys, &mut || {});
+        tracing::callsite::rebuild_interest_cache();
+        messages();
+
+        // The session closes after the pass's gone-check but before its
+        // send, as when it tears down concurrently.
+        let mut closed_rx = Some(closed_rx);
+        manager.distribute_evpn_keys_to_peer(closed, &keys, &mut || drop(closed_rx.take()));
+        assert!(closed_rx.is_none(), "the pass reached its checkpoint");
+        assert_eq!(
+            messages(),
+            Vec::<String>::new(),
+            "closed channel is not backpressure"
+        );
+        assert!(!manager.dirty_peers.contains(&closed));
+
+        manager.distribute_evpn_keys_to_peer(full, &keys, &mut || {});
+        assert_eq!(messages(), vec![DEFERRED.to_string()]);
+        assert!(manager.dirty_peers.contains(&full));
+    });
+}
+
 /// Regression: when an EVPN update fails to send (outbound channel full),
 /// the peer is marked dirty; a later `distribute_changes` must resync EVPN
 /// routes, not only unicast / `FlowSpec`. Before this fix, dirty resync
@@ -822,6 +922,205 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
         saw_imet2,
         "dirty resync must eventually deliver the second EVPN announce (imet2) to the target peer"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A Type 2 or Type 5 route from 10.0.0.1, distinguished by `n`.
+fn churn_route(n: u8, type5: bool) -> EvpnRibRoute {
+    let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let rd = RouteDistinguisher([0, 1, 10, 0, 0, 1, 0, 1]);
+    route.route = if type5 {
+        EvpnRoute::IpPrefix(rustbgpd_wire::EvpnIpPrefixRoute {
+            rd,
+            esi: EthernetSegmentIdentifier([0; 10]),
+            ethernet_tag: EthernetTagId(0),
+            prefix: rustbgpd_wire::EvpnIpPrefixValue::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(100, 64, 0, n),
+                32,
+            )),
+            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            label: MplsLabel::new(50_000),
+        })
+    } else {
+        EvpnRoute::MacIp(EvpnMacIp {
+            rd,
+            esi: EthernetSegmentIdentifier([0; 10]),
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress([2, 0, 0, 0, 0, n]),
+            ip: Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, n))),
+            label1: MplsLabel::new(10_100),
+            label2: None,
+        })
+    };
+    route
+}
+
+/// Apply outbound updates to a client view until it equals `expected`
+/// (keys and route content) or `wait` passes; returns the final view.
+async fn drain_view(
+    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    view: &mut BTreeMap<rustbgpd_wire::EvpnRouteKey, EvpnRoute>,
+    expected: &BTreeMap<rustbgpd_wire::EvpnRouteKey, EvpnRoute>,
+    wait: Duration,
+    stop_when_exact: bool,
+) {
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        if stop_when_exact && view == expected {
+            return;
+        }
+        match tokio::time::timeout_at(deadline, out_rx.recv()).await {
+            Ok(Some(update)) => {
+                for key in &update.evpn_withdraw {
+                    view.remove(key);
+                }
+                for route in &update.evpn_announce {
+                    view.insert(route.route.key(), route.route.clone());
+                }
+            }
+            Ok(None) => panic!("outbound channel closed unexpectedly"),
+            Err(_) => return,
+        }
+    }
+}
+
+/// A deferred EVPN update (outbound channel full) must recover through the
+/// dirty resync without losing an announcement or a withdrawal: after
+/// Type 2/5 churn that includes withdrawals of already-sent routes and an
+/// announce-then-withdraw inside the deferral window, the client's view is
+/// exactly the current table, and stays so across further resync ticks.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "setup, saturated churn and the exact-view drain in one scenario"
+)]
+async fn deferred_evpn_churn_recovers_exact_announces_and_withdrawals() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let mut outputs = Vec::new();
+    for (peer, router_id, capacity) in [(target, 2, 1), (source, 1, 64)] {
+        let (out_tx, mut out_rx) = mpsc::channel(capacity);
+        tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, router_id),
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: evpn_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        outputs.push(out_rx);
+    }
+    let mut out_rx = outputs.remove(0);
+    let _source_out = outputs.remove(0);
+
+    let send = |announce: Vec<EvpnRibRoute>, withdraw: Vec<EvpnRibRoute>| {
+        let tx = tx.clone();
+        async move {
+            tx.send(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: source,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: announce,
+                evpn_withdrawn: withdraw.iter().map(|r| r.route.key()).collect(),
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+            // Let the manager distribute each change on its own.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let table = |routes: &[(u8, bool)]| {
+        routes
+            .iter()
+            .map(|&(n, t5)| {
+                let route = churn_route(n, t5).route;
+                (route.key(), route)
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    // Initial table, delivered normally.
+    let mut view = BTreeMap::new();
+    send(
+        vec![
+            churn_route(1, false),
+            churn_route(2, false),
+            churn_route(1, true),
+        ],
+        vec![],
+    )
+    .await;
+    let initial = table(&[(1, false), (2, false), (1, true)]);
+    drain_view(
+        &mut out_rx,
+        &mut view,
+        &initial,
+        Duration::from_secs(10),
+        true,
+    )
+    .await;
+    assert_eq!(view, initial, "initial table must arrive exactly");
+
+    // Churn without draining: the first change fills the one-slot channel
+    // and every later one is deferred.
+    send(vec![churn_route(3, false)], vec![churn_route(1, false)]).await;
+    send(vec![churn_route(2, true)], vec![churn_route(1, true)]).await;
+    send(vec![churn_route(4, false)], vec![]).await;
+    send(vec![], vec![churn_route(4, false)]).await;
+    send(vec![churn_route(5, false)], vec![churn_route(2, false)]).await;
+    assert_eq!(
+        out_rx.len(),
+        1,
+        "the channel must be saturated, so later changes were deferred"
+    );
+
+    let current = table(&[(3, false), (5, false), (2, true)]);
+    drain_view(
+        &mut out_rx,
+        &mut view,
+        &current,
+        Duration::from_secs(10),
+        true,
+    )
+    .await;
+    assert_eq!(
+        view, current,
+        "deferred churn must recover to the exact table"
+    );
+    // Further resync ticks must not resurrect a withdrawn route.
+    drain_view(
+        &mut out_rx,
+        &mut view,
+        &current,
+        Duration::from_millis(2500),
+        false,
+    )
+    .await;
+    assert_eq!(view, current, "the view must stay exact after recovery");
 
     drop(tx);
     handle.await.unwrap();
@@ -1682,6 +1981,106 @@ async fn zero_esi_vpws_ead_per_evi_reflects_byte_identically() {
         .expect("outbound channel open");
     assert!(msg.evpn_announce.is_empty());
     assert_eq!(msg.evpn_withdraw, vec![key]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 9135 §9.1.1 / RFC 7432 §7.2: a Type 2 with MAC Address Length 0 is
+/// treat-as-withdraw, and its key is not the 48-bit route's. Applying the
+/// revised parser's treat-as-withdraw keys for an UPDATE carrying it next
+/// to a valid sibling withdraws only the sibling from a reflection client;
+/// the peer's 48-bit route for the same MAC is still reflected state.
+#[tokio::test]
+async fn zero_length_mac_type2_withdraws_only_its_siblings_from_clients() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let client = Ipv4Addr::new(10, 0, 0, 2);
+    let _source_rx = evpn_rr_client_up(&tx, source).await;
+    let mut client_rx = evpn_rr_client_up(&tx, client).await;
+    let mac = make_evpn_macip(source, [0, 0x11, 0x22, 0x33, 0x44, 0x55], None, false);
+    let sibling = make_evpn_macip(source, [0, 0x11, 0x22, 0x33, 0x44, 0x66], None, false);
+    for route in [&mac, &sibling] {
+        evpn_routes_received(&tx, source, route.clone()).await;
+        let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+            .await
+            .expect("client should receive the reflection within 2s")
+            .expect("outbound channel open");
+        assert_eq!(msg.evpn_announce.len(), 1);
+    }
+
+    let mut nlri = Vec::new();
+    rustbgpd_wire::encode_evpn_nlri(&[mac.route.clone(), sibling.route.clone()], &mut nlri)
+        .unwrap();
+    assert_eq!(nlri[24], 48);
+    nlri[24] = 0; // first route: MAC Address Length 0
+    let mut value = vec![0, 25, 70, 4, 10, 0, 0, 1, 0];
+    value.extend(nlri);
+    let mut attributes = vec![0x40, 1, 1, 0, 0x40, 2, 0, 0x90, 14];
+    attributes.extend(u16::try_from(value.len()).unwrap().to_be_bytes());
+    attributes.extend(value);
+    let parsed = rustbgpd_wire::UpdateMessage {
+        withdrawn_routes: bytes::Bytes::new(),
+        path_attributes: bytes::Bytes::from(attributes),
+        nlri: bytes::Bytes::new(),
+    }
+    .parse_revised(true, true, false, &[])
+    .expect("zero-length MAC must not be session-reset");
+    assert_eq!(parsed.malformed.len(), 1);
+    let withdrawn: Vec<_> = parsed
+        .update
+        .attributes
+        .iter()
+        .filter_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp.evpn_announced.iter().map(EvpnRoute::key)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: withdrawn,
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+        .await
+        .expect("client should receive the withdrawal within 2s")
+        .expect("outbound channel open");
+    assert!(msg.evpn_announce.is_empty());
+    assert_eq!(msg.evpn_withdraw, vec![sibling.key()]);
+
+    // The 48-bit route was never withdrawn: withdrawing it now reaches the
+    // client.
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![mac.key()],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+        .await
+        .expect("client should receive the 48-bit withdrawal within 2s")
+        .expect("outbound channel open");
+    assert_eq!(msg.evpn_withdraw, vec![mac.key()]);
 
     drop(tx);
     handle.await.unwrap();
@@ -3209,7 +3608,7 @@ async fn evpn_sessions_synced(tx: &mpsc::Sender<RibUpdate>) -> bool {
     tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
         .await
         .unwrap();
-    rx.await.unwrap()
+    rx.await.unwrap().synced
 }
 
 /// `PeerUp` without waiting for the initial End-of-RIB, which selection
@@ -3337,6 +3736,89 @@ async fn evpn_sessions_synced_ignores_non_evpn_sessions_and_stale_end_of_rib() {
     handle.await.unwrap();
 }
 
+/// ADR-0140 decision 2: the reply counts established EVPN sessions and
+/// peers whose EVPN routes are retained as GR-stale, so a planned
+/// reflector restart is not read as core isolation.
+#[tokio::test]
+async fn evpn_sessions_sync_counts_established_and_gr_stale_peers() {
+    async fn sync(tx: &mpsc::Sender<RibUpdate>) -> crate::update::EvpnSessionsSync {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+    let a = Ipv4Addr::new(10, 0, 0, 1);
+    let unicast = Ipv4Addr::new(10, 0, 0, 2);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    session_up(&tx, unicast, 1, vec![(Afi::Ipv4, Safi::Unicast)]).await;
+    session_up(&tx, a, 1, evpn_sendable()).await;
+    let up = sync(&tx).await;
+    assert_eq!((up.established, up.stale), (1, 0));
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: IpAddr::V4(a),
+        session_id: 1,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: evpn_sendable(),
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let restarting = sync(&tx).await;
+    assert_eq!(
+        (restarting.established, restarting.stale, restarting.synced),
+        (0, 1, false),
+        "a GR-restarting EVPN peer is stale, not established"
+    );
+
+    tx.send(RibUpdate::PeerDown {
+        session_id: 1,
+        peer: IpAddr::V4(unicast),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerDown {
+        session_id: 1,
+        peer: IpAddr::V4(a),
+    })
+    .await
+    .unwrap();
+    let gone = sync(&tx).await;
+    assert_eq!((gone.established, gone.stale), (0, 0));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// ADR-0140: the snapshot answers session counts and Type 4 rows in one
+/// actor turn.
+#[tokio::test]
+async fn evpn_es_snapshot_reports_sessions_with_no_routes() {
+    let a = Ipv4Addr::new(10, 0, 0, 1);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    session_up(&tx, a, 1, evpn_sendable()).await;
+    evpn_eor(&tx, a, 1).await;
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::QueryEvpnEsSnapshot { reply })
+        .await
+        .unwrap();
+    let snapshot = rx.await.unwrap();
+    assert_eq!(snapshot.sessions.established, 1);
+    assert!(snapshot.sessions.synced);
+    assert!(snapshot.es_routes.is_empty());
+    drop(tx);
+    handle.await.unwrap();
+}
+
 // --- FIB install-candidate view (multipath/ECMP) ---
 
 /// RFC 9785 §4.3 boot gate: synced only once every established EVPN
@@ -3348,7 +3830,7 @@ async fn evpn_sessions_synced_tracks_evpn_end_of_rib_per_session() {
         tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
             .await
             .unwrap();
-        rx.await.unwrap()
+        rx.await.unwrap().synced
     }
     async fn eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, afi: Afi, safi: Safi) {
         tx.send(RibUpdate::EndOfRib {
@@ -3400,7 +3882,7 @@ async fn evpn_sessions_synced_resets_on_collision_replacement_and_failover() {
         tx.send(RibUpdate::QueryEvpnSessionsSynced { reply })
             .await
             .unwrap();
-        rx.await.unwrap()
+        rx.await.unwrap().synced
     }
     async fn up(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, session_id: u64) {
         let (out_tx, mut out_rx) = mpsc::channel(64);

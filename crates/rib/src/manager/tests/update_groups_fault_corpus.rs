@@ -4,7 +4,7 @@
 //! identities, not operation ordering. The ignored extension sweeps those same
 //! schedules under hard parameter/operation caps on a weekly hosted runner.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
@@ -20,9 +20,9 @@ use rustbgpd_wire::{
 };
 
 use super::update_groups_oracle::{
-    NormAnnounce, NormMsg, NormVpnAnnounce, Oracle, OraclePeerFeatures, Streams, deny_prefix_chain,
-    deny_prefixes_chain, fold, fold_vpn, ibgp_route, peer_context_permit_chain, pfx, rtc_default,
-    vpn_nlri, vpn_route, vpn_rtc_sendable,
+    NormAnnounce, NormMsg, Oracle, OraclePeerFeatures, RecoveryPath, Streams, assert_route_parity,
+    deny_prefix_chain, deny_prefixes_chain, fold, fold_vpn, ibgp_route, peer_context_permit_chain,
+    pfx, rtc_default, vpn_nlri, vpn_route, vpn_rtc_sendable,
 };
 use crate::route::RtcRibRouteKey;
 
@@ -210,12 +210,6 @@ fn parse_extended_config(get: impl Fn(&str) -> Option<String>) -> Result<Extende
     })
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ComparisonMode {
-    ExactStream,
-    SemanticFold,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FamilySet {
     Unicast,
@@ -325,7 +319,6 @@ enum Op {
 struct Schedule {
     name: &'static str,
     seed: u64,
-    comparison: ComparisonMode,
     require_vpn_churn: bool,
     ops: Vec<Op>,
 }
@@ -378,8 +371,8 @@ impl ReplaySchedule {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "scenario={} seed={:#x} mode={:?} ops=[{}]",
-            self.schedule.name, self.schedule.seed, self.schedule.comparison, ops
+            "scenario={} seed={:#x} ops=[{}]",
+            self.schedule.name, self.schedule.seed, ops
         )
     }
 
@@ -829,110 +822,6 @@ fn policy(spec: &PolicySpec) -> Option<rustbgpd_policy::PolicyChain> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum SemanticEffect {
-    SessionStart {
-        peer: IpAddr,
-        generation: u64,
-    },
-    Announce {
-        peer: IpAddr,
-        route: NormAnnounce,
-    },
-    Withdraw {
-        peer: IpAddr,
-        key: (Prefix, u32),
-    },
-    UnknownWithdrawBeforeTerminalRoute {
-        peer: IpAddr,
-        key: (Prefix, u32),
-    },
-    VpnAnnounce {
-        peer: IpAddr,
-        route: NormVpnAnnounce,
-    },
-    VpnWithdraw {
-        peer: IpAddr,
-        key: (String, u32),
-    },
-    UnknownVpnWithdrawBeforeTerminalRoute {
-        peer: IpAddr,
-        key: (String, u32),
-    },
-}
-
-fn semantic_effects(streams: &Streams) -> Vec<SemanticEffect> {
-    let terminal = fold(streams);
-    let terminal_vpn = fold_vpn(streams);
-    let mut effects = Vec::new();
-    for (peer, messages) in streams {
-        let mut state: HashMap<(Prefix, u32), NormAnnounce> = HashMap::new();
-        let mut vpn_state: HashMap<String, NormVpnAnnounce> = HashMap::new();
-        for message in messages {
-            if let Some(generation) = message.session_start {
-                state.clear();
-                vpn_state.clear();
-                effects.push(SemanticEffect::SessionStart {
-                    peer: *peer,
-                    generation,
-                });
-            }
-            for key in &message.withdraw {
-                if state.remove(key).is_some() {
-                    effects.push(SemanticEffect::Withdraw {
-                        peer: *peer,
-                        key: *key,
-                    });
-                } else if terminal
-                    .get(peer)
-                    .is_some_and(|routes| routes.contains_key(key))
-                {
-                    effects.push(SemanticEffect::UnknownWithdrawBeforeTerminalRoute {
-                        peer: *peer,
-                        key: *key,
-                    });
-                }
-            }
-            for route in &message.announce {
-                let key = (route.0, route.1);
-                if state.get(&key) != Some(route) {
-                    state.insert(key, route.clone());
-                    effects.push(SemanticEffect::Announce {
-                        peer: *peer,
-                        route: route.clone(),
-                    });
-                }
-            }
-            for key in &message.vpn_withdraw {
-                if vpn_state.remove(&key.0).is_some() {
-                    effects.push(SemanticEffect::VpnWithdraw {
-                        peer: *peer,
-                        key: key.clone(),
-                    });
-                } else if terminal_vpn
-                    .get(peer)
-                    .is_some_and(|routes| routes.contains_key(&key.0))
-                {
-                    effects.push(SemanticEffect::UnknownVpnWithdrawBeforeTerminalRoute {
-                        peer: *peer,
-                        key: key.clone(),
-                    });
-                }
-            }
-            for route in &message.vpn_announce {
-                if vpn_state.get(&route.0) != Some(route) {
-                    vpn_state.insert(route.0.clone(), route.clone());
-                    effects.push(SemanticEffect::VpnAnnounce {
-                        peer: *peer,
-                        route: route.clone(),
-                    });
-                }
-            }
-        }
-    }
-    effects
-}
-
 async fn apply_vpn_announce(oracle: &mut Oracle, peer: Ipv4Addr, generation: u64, id: u8) {
     oracle
         .vpn_routes_generation(
@@ -1235,6 +1124,7 @@ async fn run_path(
         schedule.replay()
     );
     let mut oracle = Oracle::spawn(force_ungrouped, Some(Ipv4Addr::new(192, 0, 2, 1)));
+    let mut recovering = HashSet::new();
     for (index, op) in schedule.ops() {
         eprintln!(
             "update-group replay: scenario={} seed={:#x} op={index} {op:?}",
@@ -1244,7 +1134,32 @@ async fn run_path(
             force_ungrouped || force_failure_op != Some(index),
             "forced fault-corpus failure at original op {index}"
         );
+        if let Op::PeerUp { peer, .. } | Op::PeerUpAddPath { peer, .. } | Op::PeerUpOrf { peer, .. } =
+            op
+            && recovering.remove(peer)
+        {
+            // The replacement session discards its predecessor's wire state.
+            oracle.close_recovery(*peer);
+        }
         apply(&mut oracle, op, force_ungrouped).await;
+        if let Op::DrainOne(peer) = op {
+            // The drained pre-failure admission is still normal. Only a peer
+            // with an actual deferred update enters the named recovery path.
+            if oracle.peer_outbound_dirty(*peer).await {
+                if recovering.insert(*peer) {
+                    oracle.begin_recovery(*peer, RecoveryPath::QueueDeferral);
+                }
+            } else if recovering.remove(peer) {
+                oracle.close_recovery(*peer);
+            }
+        } else if matches!(op, Op::DrainAvailable) {
+            for peer in recovering.iter().copied().collect::<Vec<_>>() {
+                if !oracle.peer_outbound_dirty(peer).await {
+                    oracle.close_recovery(peer);
+                    recovering.remove(&peer);
+                }
+            }
+        }
     }
     if !force_ungrouped {
         let left = oracle.group_label(LEFT).await;
@@ -1254,6 +1169,15 @@ async fn run_path(
             "scenario did not exercise a shared update group ({left:?}/{right:?}): {}",
             schedule.replay()
         );
+    }
+
+    oracle.drain_available();
+    for peer in recovering {
+        assert!(
+            !oracle.peer_outbound_dirty(peer).await,
+            "scheduled recovery did not finish for {peer}"
+        );
+        oracle.close_recovery(peer);
     }
 
     // Every schedule ends with a current-generation sentinel from SOURCE.
@@ -1321,20 +1245,7 @@ fn validate_terminal_stream(streams: &Streams) -> Result<(), String> {
 async fn run_schedule(schedule: ReplaySchedule, max_ops: usize, force_failure_op: Option<usize>) {
     let grouped = run_path(&schedule, false, max_ops, force_failure_op).await;
     let ungrouped = run_path(&schedule, true, max_ops, force_failure_op).await;
-    match schedule.schedule.comparison {
-        ComparisonMode::ExactStream => assert_eq!(
-            grouped,
-            ungrouped,
-            "exact stream mismatch: {}",
-            schedule.replay()
-        ),
-        ComparisonMode::SemanticFold => assert_eq!(
-            semantic_effects(&grouped),
-            semantic_effects(&ungrouped),
-            "normalized semantic-effect mismatch: {}",
-            schedule.replay()
-        ),
-    }
+    assert_route_parity(&grouped, &ungrouped);
     assert_eq!(
         fold(&grouped),
         fold(&ungrouped),
@@ -1376,7 +1287,6 @@ fn saturation_schedule(seed: u64) -> Schedule {
     Schedule {
         name: "saturation-drain-virtual-retry",
         seed,
-        comparison: ComparisonMode::SemanticFold,
         require_vpn_churn: false,
         ops: vec![
             Op::PeerUp {
@@ -1432,7 +1342,6 @@ fn dirty_policy_schedule(seed: u64) -> Schedule {
     Schedule {
         name: "dirty-policy-regroup-transitions",
         seed,
-        comparison: ComparisonMode::SemanticFold,
         require_vpn_churn: false,
         ops: vec![
             Op::PeerUp {
@@ -1521,7 +1430,6 @@ fn stale_generation_rtc_schedule(seed: u64) -> Schedule {
     Schedule {
         name: "stale-generation-rtc-membership-churn",
         seed,
-        comparison: ComparisonMode::ExactStream,
         require_vpn_churn: true,
         ops: vec![
             Op::PeerUp {
@@ -1601,7 +1509,6 @@ fn add_path_membership_schedule(seed: u64) -> Schedule {
     Schedule {
         name: "add-path-membership-and-limit-churn",
         seed,
-        comparison: ComparisonMode::SemanticFold,
         require_vpn_churn: false,
         ops: vec![
             Op::PeerUp {
@@ -1708,7 +1615,6 @@ fn orf_membership_schedule(seed: u64) -> Schedule {
     Schedule {
         name: "orf-membership-generation-and-filter-churn",
         seed,
-        comparison: ComparisonMode::SemanticFold,
         require_vpn_churn: false,
         ops: vec![
             Op::PeerUp {
@@ -1806,7 +1712,6 @@ fn replacement_during_resync_schedule(seed: u64) -> Schedule {
     Schedule {
         name: "session-replacement-during-dirty-resync",
         seed,
-        comparison: ComparisonMode::SemanticFold,
         require_vpn_churn: false,
         ops: vec![
             Op::PeerUp {
@@ -1880,7 +1785,6 @@ fn combined_saturation_regroup_replacement_schedule(seed: u64) -> Schedule {
     Schedule {
         name: "combined-saturation-regroup-session-replacement",
         seed,
-        comparison: ComparisonMode::SemanticFold,
         require_vpn_churn: false,
         ops: vec![
             Op::PeerUp {
@@ -2112,6 +2016,7 @@ fn norm_message(announce: Vec<NormAnnounce>, withdraw: Vec<(Prefix, u32)>) -> No
         refresh_markers: vec![],
         vpn_announce: vec![],
         vpn_withdraw: vec![],
+        ..NormMsg::default()
     }
 }
 
@@ -2124,6 +2029,7 @@ fn session_start_message(generation: u64) -> NormMsg {
         refresh_markers: vec![],
         vpn_announce: vec![],
         vpn_withdraw: vec![],
+        ..NormMsg::default()
     }
 }
 
@@ -2132,53 +2038,48 @@ fn one_peer_stream(messages: Vec<NormMsg>) -> Streams {
 }
 
 #[test]
-fn semantic_effects_reject_transient_announces_and_attribute_changes() {
+fn corpus_parity_rejects_extra_and_transient_announcements() {
     let first = pfx(41, 0);
     let extra = pfx(43, 0);
     let baseline = one_peer_stream(vec![norm_message(vec![norm_announce(first, 100)], vec![])]);
-
-    let extra_transient = one_peer_stream(vec![
-        norm_message(vec![norm_announce(first, 100)], vec![]),
-        norm_message(vec![norm_announce(extra, 100)], vec![]),
-        norm_message(vec![], vec![(Prefix::V4(extra), 0)]),
-    ]);
-    assert_ne!(
-        semantic_effects(&baseline),
-        semantic_effects(&extra_transient)
-    );
-
-    let wrong_attributes = one_peer_stream(vec![
-        norm_message(vec![norm_announce(first, 100)], vec![]),
-        norm_message(vec![norm_announce(first, 200)], vec![]),
-        norm_message(vec![norm_announce(first, 100)], vec![]),
-    ]);
-    assert_ne!(
-        semantic_effects(&baseline),
-        semantic_effects(&wrong_attributes)
-    );
+    for invalid in [
+        one_peer_stream(vec![
+            norm_message(vec![norm_announce(first, 100)], vec![]),
+            norm_message(vec![norm_announce(first, 100)], vec![]),
+        ]),
+        one_peer_stream(vec![
+            norm_message(vec![norm_announce(first, 100)], vec![]),
+            norm_message(vec![norm_announce(extra, 100)], vec![]),
+            norm_message(vec![], vec![(Prefix::V4(extra), 0)]),
+        ]),
+        one_peer_stream(vec![
+            norm_message(vec![norm_announce(first, 100)], vec![]),
+            norm_message(vec![norm_announce(first, 200)], vec![]),
+            norm_message(vec![norm_announce(first, 100)], vec![]),
+        ]),
+    ] {
+        assert!(std::panic::catch_unwind(|| assert_route_parity(&baseline, &invalid)).is_err());
+    }
 }
 
 #[test]
-fn semantic_effects_allow_only_terminally_absent_unknown_withdraws() {
+fn corpus_parity_rejects_unknown_and_duplicate_withdrawals() {
     let prefix = pfx(45, 0);
     let empty = one_peer_stream(vec![]);
-    let safe_over_withdraw =
-        one_peer_stream(vec![norm_message(vec![], vec![(Prefix::V4(prefix), 0)])]);
-    assert_eq!(
-        semantic_effects(&empty),
-        semantic_effects(&safe_over_withdraw)
-    );
-
-    let terminal_route =
-        one_peer_stream(vec![norm_message(vec![norm_announce(prefix, 100)], vec![])]);
-    let withdraw_before_terminal_route = one_peer_stream(vec![
-        norm_message(vec![], vec![(Prefix::V4(prefix), 0)]),
-        norm_message(vec![norm_announce(prefix, 100)], vec![]),
-    ]);
-    assert_ne!(
-        semantic_effects(&terminal_route),
-        semantic_effects(&withdraw_before_terminal_route)
-    );
+    for invalid in [
+        one_peer_stream(vec![norm_message(vec![], vec![(Prefix::V4(prefix), 0)])]),
+        one_peer_stream(vec![
+            norm_message(vec![], vec![(Prefix::V4(prefix), 0)]),
+            norm_message(vec![norm_announce(prefix, 100)], vec![]),
+        ]),
+        one_peer_stream(vec![
+            norm_message(vec![norm_announce(prefix, 100)], vec![]),
+            norm_message(vec![], vec![(Prefix::V4(prefix), 0)]),
+            norm_message(vec![], vec![(Prefix::V4(prefix), 0)]),
+        ]),
+    ] {
+        assert!(std::panic::catch_unwind(|| assert_route_parity(&empty, &invalid)).is_err());
+    }
 }
 
 #[test]

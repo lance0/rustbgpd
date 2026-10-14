@@ -61,9 +61,11 @@ match_rpki_validation = "invalid"
 action = "deny"
 ```
 
-Later VRP updates trigger an inbound Route Refresh for established
-members whose import policy depends on validation state, so verdicts
-track the cache rather than freezing at ingress time. Details:
+Later VRP updates re-evaluate established members whose import policy
+depends on validation state, so verdicts track the cache rather than
+freezing at ingress time. By default that asks each such member for an
+inbound Route Refresh; `local_revalidation = true` in `[rpki]`
+re-evaluates retained routes locally instead, as RFC 9324 asks. Details:
 [`[rpki]` reference](../reference/configuration.md#rpki),
 [ADR-0034](../adr/0034-rpki-origin-validation.md). Reject-at-import
 against a live RTR cache is exercised in the M83 interop lab

@@ -55,9 +55,27 @@ MUTATIONS = (
     ),
     (
         "scripts/build-packages.sh",
-        "sed 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \\",
-        "sed 's|/usr/local/bin|/usr/bin|g' \\",
+        "sed -e 's|^ExecStart=/usr/local/bin/rustbgpd |ExecStart=/usr/bin/rustbgpd |' \\",
+        "sed -e 's|/usr/local/bin|/usr/bin|g' \\",
         "native systemd staging",
+    ),
+    (
+        "scripts/build-packages.sh",
+        "-e 's|^ExecStopPost=/usr/local/bin/rustbgpd |ExecStopPost=/usr/bin/rustbgpd |' \\",
+        "-e 's|^ExecStopPost=x|y|' \\",
+        "native systemd staging",
+    ),
+    (
+        contract.SYSTEMD_UNIT,
+        "ExecStopPost=/usr/local/bin/rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd",
+        "ExecStopPost=-/usr/local/bin/rustbgpd --release-core-isolation --runtime-state-dir /var/lib/rustbgpd",
+        "systemd unit",
+    ),
+    (
+        contract.SYSTEMD_UNIT,
+        "ExecStart=/usr/local/bin/rustbgpd --runtime-state-dir /var/lib/rustbgpd /etc/rustbgpd/config.toml",
+        "ExecStart=/usr/local/bin/rustbgpd /etc/rustbgpd/config.toml",
+        "systemd unit",
     ),
     (
         contract.SYSTEMD_TEMPLATE,

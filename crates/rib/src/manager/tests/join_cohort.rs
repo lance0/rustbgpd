@@ -465,7 +465,8 @@ async fn dead_cohort_member_does_not_stall_or_corrupt_the_others() {
 /// next turn, and every joiner still gets the oracle's stream.
 ///
 /// Admitting `MAX_JOIN_COHORT` members besides the leader makes the 65-joiner
-/// case red (65 registrations in one turn).
+/// case red (65 registrations in one turn); admitting one fewer makes the
+/// 64-joiner case red (63 registrations in the first turn).
 #[tokio::test]
 async fn cohort_bound_counts_the_leader() {
     for queued in [64, 65] {

@@ -123,7 +123,7 @@ states that the whole decision is Superseded.
 | [0096](0096-policy-language.md) | A typed, compiled policy language (`.rpol`) | Accepted | 2026-07-02 | Active |
 | [0097](0097-bmp-monitoring.md) | BMP monitoring — the trio, BMPv4 framing, and path marking | Accepted | 2026-07-03 | Active |
 | [0098](0098-update-groups.md) | RIB-level update groups — shared outbound staging | Accepted | 2026-07-03 | Active |
-| [0099](0099-update-groups-v2.md) | Update groups v2 — per-family keying and RT-aware VPN emit | Accepted | 2026-07-03 | Active |
+| [0099](0099-update-groups-v2.md) | Update groups v2 — per-family keying and RT-aware VPN emit | Accepted; EVPN design accepted, implementation pending | 2026-07-03 | Active |
 | [0100](0100-parallel-rib-manager.md) | Parallelizing the RibManager (research blueprint) | Proposed | 2026-07-03 | Parked |
 | [0101](0101-route-server-profile.md) | IXP route-server profile — per-client best-path (RFC 7947 §2.3.2) | Accepted | 2026-07-03 | Active |
 | [0102](0102-evpn-origination-acknowledgement.md) | EVPN origination acknowledgement-awareness (Type 1/2/4) | Accepted | 2026-07-09 | Active |
@@ -164,7 +164,7 @@ states that the whole decision is Superseded.
 | [0137](0137-conditional-advertisement.md) | Conditional advertisement | Accepted | 2026-10-07 | Active |
 | [0138](0138-route-flap-dampening.md) | Route flap dampening | Proposed (preparation pulled forward 2026-10-09 and shipped; runtime enablement NO-GO, demand-gated) | 2026-10-08 | Active |
 | [0139](0139-flowspec-controller-contract.md) | Scoped FlowSpec controller compatibility contract | Accepted | 2026-10-10 | Active |
-| [0140](0140-evpn-core-isolation-es-hold.md) | EVPN core isolation and startup hold for bound Ethernet Segments | Accepted (design; implementation pending) | 2026-10-12 | Active |
+| [0140](0140-evpn-core-isolation-es-hold.md) | EVPN core isolation and startup hold for bound Ethernet Segments | Accepted (implemented; M121 interop cell) | 2026-10-12 | Active |
 
 ## Supporting records
 

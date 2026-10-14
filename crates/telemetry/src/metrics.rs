@@ -296,6 +296,28 @@ pub const fn evpn_es_auto_esi_states() -> &'static [&'static str] {
     ]
 }
 
+/// Closed `state` vocabulary of `evpn_es_core_isolation_state` (ADR-0140
+/// decision 7).
+#[must_use]
+pub const fn evpn_es_core_isolation_states() -> &'static [&'static str] {
+    &[
+        "released",
+        "startup_hold",
+        "isolated",
+        "recovering",
+        "backstop_released",
+        "suppressed_no_peer",
+        "overridden",
+        "ownership_ambiguous",
+        "uplink_overlap",
+        "action_failed",
+        "disabled",
+    ]
+}
+
+/// Closed `signal` vocabulary of `evpn_core_isolated`.
+const EVPN_CORE_ISOLATION_SIGNALS: [&str; 2] = ["sessions", "uplinks"];
+
 /// Bounded label contract for aggregate ORR topology-input diagnostics.
 const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
     "included_default",
@@ -683,6 +705,7 @@ struct BgpMetricsInner {
     path_attribute_discarded: IntCounterVec,
     evpn_nlri_discarded: IntCounterVec,
     evpn_nlri_discarded_by_type: IntCounterVec,
+    evpn_recovery_provenance_exhausted: IntCounterVec,
     update_malformed: IntCounterVec,
     update_malformed_causes: IntCounterVec,
     otc_routes_blocked: IntCounterVec,
@@ -742,6 +765,8 @@ struct BgpMetricsInner {
     evpn_df_role: IntGaugeVec,
     evpn_es_ac_gate: IntGaugeVec,
     evpn_es_auto_esi_state: IntGaugeVec,
+    evpn_es_core_isolation_state: IntGaugeVec,
+    evpn_core_isolated: IntGaugeVec,
     evpn_df_role_changes: IntCounterVec,
     evpn_es_drained: IntGaugeVec,
     evpn_ip_vrf_observed_routes: IntGaugeVec,
@@ -2011,6 +2036,18 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_recovery_provenance_exhausted = IntCounterVec::new(
+            Opts::new(
+                "bgp_evpn_recovery_provenance_exhausted_total",
+                "EVPN recovery-provenance reset requests accepted by the captured connection",
+            ),
+            &["cause"],
+        )
+        .expect("valid metric definition");
+        for cause in ["peer_limit", "daemon_limit", "allocation_failure"] {
+            evpn_recovery_provenance_exhausted.with_label_values(&[cause]);
+        }
+
         let update_malformed = IntCounterVec::new(
             Opts::new(
                 "bgp_update_malformed_total",
@@ -2403,6 +2440,43 @@ impl BgpMetrics {
                  segment leaves the config.",
             ),
             &["interface", "state"],
+        )
+        .expect("valid metric definition");
+
+        let evpn_es_core_isolation_state = IntGaugeVec::new(
+            Opts::new(
+                "evpn_es_core_isolation_state",
+                "ADR-0140 core-isolation hold of each bound Ethernet Segment as a state \
+                 set per (interface, state): the current state's series is 1 and the \
+                 others are 0. released: no hold. startup_hold: the boot hold keeps the \
+                 CE-facing members administratively down. isolated: the PE is \
+                 core-isolated and holds them down. recovering: the core is back and \
+                 the hold waits for EVPN sync and the settle time. backstop_released: \
+                 the backstop released the hold before EVPN synced. suppressed_no_peer: \
+                 isolation did not hold the segment because it had no remote ES peer. \
+                 overridden: another writer raised a held member. ownership_ambiguous: \
+                 a receipt entry no longer matches its link, which is left down. \
+                 uplink_overlap: an uplink is, is enslaved under, or is stacked on this \
+                 binding and is excluded from the signal. action_failed: an admin-state write or \
+                 receipt publication failed. disabled: [evpn_core_isolation] is off. \
+                 interface is the bound link name. Series are removed when the binding \
+                 leaves the config, except that an interface whose release is still \
+                 failing keeps its action_failed or ownership_ambiguous series until \
+                 nothing it owns is left down.",
+            ),
+            &["interface", "state"],
+        )
+        .expect("valid metric definition");
+
+        let evpn_core_isolated = IntGaugeVec::new(
+            Opts::new(
+                "evpn_core_isolated",
+                "ADR-0140 core-isolation signal, 1 when it holds: signal=sessions has \
+                 no Established and no GR/LLGR-stale L2VPN/EVPN session; signal=uplinks \
+                 has every configured uplink (after excluding links under a bound \
+                 interface) without carrier. The PE is core-isolated when either is 1.",
+            ),
+            &["signal"],
         )
         .expect("valid metric definition");
 
@@ -3204,6 +3278,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_nlri_discarded_by_type.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_recovery_provenance_exhausted.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_malformed.clone()))
             .expect("metric not already registered");
         registry
@@ -3327,6 +3404,12 @@ impl BgpMetrics {
             .expect("metric not already registered");
         registry
             .register(Box::new(evpn_es_auto_esi_state.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_es_core_isolation_state.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_core_isolated.clone()))
             .expect("metric not already registered");
         registry
             .register(Box::new(evpn_df_role_changes.clone()))
@@ -3622,6 +3705,7 @@ impl BgpMetrics {
             path_attribute_discarded,
             evpn_nlri_discarded,
             evpn_nlri_discarded_by_type,
+            evpn_recovery_provenance_exhausted,
             update_malformed,
             update_malformed_causes,
             otc_routes_blocked,
@@ -3663,6 +3747,8 @@ impl BgpMetrics {
             evpn_df_role,
             evpn_es_ac_gate,
             evpn_es_auto_esi_state,
+            evpn_es_core_isolation_state,
+            evpn_core_isolated,
             evpn_df_role_changes,
             evpn_es_drained,
             evpn_ip_vrf_observed_routes,
@@ -4762,8 +4848,9 @@ impl BgpMetrics {
 
     /// Publish one authoritative max-prefix accounting scope.
     ///
-    /// `scope` is deliberately bounded to the aggregate and the two unicast
-    /// families whose independent limits are enforced by the session actor.
+    /// `scope` is deliberately bounded to the aggregate and the families
+    /// whose independent limits are enforced by the session actor: unicast
+    /// (accepted and received) and the non-unicast per-family bounds.
     /// An unlimited scope keeps its usage series but removes limit, headroom,
     /// and blocking instead of manufacturing a misleading zero.
     pub fn set_max_prefix_capacity(
@@ -4780,6 +4867,14 @@ impl BgpMetrics {
                 | "ipv6_unicast"
                 | "ipv4_unicast_received"
                 | "ipv6_unicast_received"
+                | "l3vpn_ipv4_unicast"
+                | "l3vpn_ipv6_unicast"
+                | "ipv4_labeled_unicast"
+                | "ipv6_labeled_unicast"
+                | "l2vpn_evpn"
+                | "ipv4_flowspec"
+                | "ipv6_flowspec"
+                | "rtc"
         ));
         let labels = [peer, scope];
         let usage = i64::try_from(usage).unwrap_or(i64::MAX);
@@ -5090,9 +5185,22 @@ impl BgpMetrics {
         peer: &str,
         families: impl IntoIterator<Item = &'a str>,
     ) {
+        use crate::reason_labels::ExactExportReason;
         for family in families {
             let family = Self::exact_export_family_label(family);
-            for reason in crate::reason_labels::ExactExportReason::ALL {
+            let label_stack_family = matches!(
+                family,
+                "l3vpn_ipv4_unicast"
+                    | "l3vpn_ipv6_unicast"
+                    | "ipv4_labeled_unicast"
+                    | "ipv6_labeled_unicast"
+            );
+            for reason in ExactExportReason::ALL {
+                // Only label-stack families can hit the label-count reason;
+                // skip a zero series that can never move.
+                if reason == ExactExportReason::MultipleLabelsNotNegotiated && !label_stack_family {
+                    continue;
+                }
                 self.0
                     .exact_export_rejections
                     .with_label_values(&[peer, family, reason.as_str()])
@@ -5385,6 +5493,17 @@ impl BgpMetrics {
             .inc_by(count);
     }
 
+    /// Count a reset accepted by its captured EVPN connection, never a
+    /// queued, stale or refused request. The cause vocabulary is closed.
+    pub fn record_evpn_recovery_provenance_exhausted(&self, cause: &str) {
+        if matches!(cause, "peer_limit" | "daemon_limit" | "allocation_failure") {
+            self.0
+                .evpn_recovery_provenance_exhausted
+                .with_label_values(&[cause])
+                .inc();
+        }
+    }
+
     /// Record a malformed UPDATE by the RFC 7606 disposition applied.
     ///
     /// One call per malformed UPDATE, at the point the final
@@ -5665,12 +5784,13 @@ impl BgpMetrics {
         self.0.aspa_records.set(count);
     }
 
-    /// Record validation-cache-triggered inbound Route Refresh work.
+    /// Record validation-cache-triggered import re-evaluation work.
     ///
     /// Labels are bounded:
     /// - `dependency`: `"rpki"` or `"aspa"`.
-    /// - `outcome`: `"eligible"`, `"refreshed"`,
-    ///   `"skipped_not_established"`, or `"failed"`.
+    /// - `outcome`: `"eligible"`, `"refreshed"`, `"skipped_not_established"`,
+    ///   `"skipped_state_unknown"`, `"failed"`, and with RFC 9324 local
+    ///   re-evaluation `"revalidated_locally"` or `"fallback_refresh"`.
     pub fn record_validation_import_refresh(&self, dependency: &str, outcome: &str, count: u64) {
         self.0
             .validation_import_refreshes
@@ -6109,6 +6229,59 @@ impl BgpMetrics {
                 .0
                 .evpn_es_auto_esi_state
                 .remove_label_values(&[interface, state]);
+        }
+    }
+
+    /// Publish one bound interface's core-isolation hold state as a state
+    /// set, with the same no-two-at-1 discipline as
+    /// [`Self::set_evpn_es_auto_esi_state`]. `state` is one of
+    /// [`evpn_es_core_isolation_states`].
+    pub fn set_evpn_es_core_isolation_state(&self, interface: &str, state: &str) {
+        let states = evpn_es_core_isolation_states();
+        debug_assert!(
+            states.contains(&state),
+            "unknown core-isolation state {state:?}"
+        );
+        for candidate in states.iter().filter(|candidate| **candidate != state) {
+            self.0
+                .evpn_es_core_isolation_state
+                .with_label_values(&[interface, candidate])
+                .set(0);
+        }
+        if states.contains(&state) {
+            self.0
+                .evpn_es_core_isolation_state
+                .with_label_values(&[interface, state])
+                .set(1);
+        }
+    }
+
+    /// Drop every core-isolation state series of a binding that left the
+    /// config.
+    pub fn remove_evpn_es_core_isolation_state(&self, interface: &str) {
+        for state in evpn_es_core_isolation_states() {
+            let _ = self
+                .0
+                .evpn_es_core_isolation_state
+                .remove_label_values(&[interface, state]);
+        }
+    }
+
+    /// Drop both core-isolation signal series, so a disabled or removed
+    /// `[evpn_core_isolation]` leaves no stale value behind.
+    pub fn clear_evpn_core_isolated(&self) {
+        for signal in EVPN_CORE_ISOLATION_SIGNALS {
+            let _ = self.0.evpn_core_isolated.remove_label_values(&[signal]);
+        }
+    }
+
+    /// Publish the two ADR-0140 core-isolation signals.
+    pub fn set_evpn_core_isolated(&self, sessions: bool, uplinks: bool) {
+        for (signal, value) in EVPN_CORE_ISOLATION_SIGNALS.iter().zip([sessions, uplinks]) {
+            self.0
+                .evpn_core_isolated
+                .with_label_values(&[signal])
+                .set(i64::from(value));
         }
     }
 
@@ -9129,6 +9302,32 @@ mod tests {
                 .with_label_values(&["10.0.0.1"])
                 .get();
         assert_eq!(val, 5);
+    }
+
+    #[test]
+    fn evpn_recovery_reset_counter_has_only_three_fixed_causes() {
+        let metrics = BgpMetrics::new();
+        metrics.record_evpn_recovery_provenance_exhausted("peer_limit");
+        metrics.record_evpn_recovery_provenance_exhausted("unknown");
+        let families = metrics.0.registry.gather();
+        let family = families
+            .iter()
+            .find(|family| family.name() == "bgp_evpn_recovery_provenance_exhausted_total")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 3);
+        for metric in family.get_metric() {
+            assert_eq!(metric.get_label().len(), 1);
+            assert_eq!(metric.get_label()[0].name(), "cause");
+            let cause = metric.get_label()[0].value();
+            assert!(matches!(
+                cause,
+                "peer_limit" | "daemon_limit" | "allocation_failure"
+            ));
+            assert_eq!(
+                metric.get_counter().get_value(),
+                if cause == "peer_limit" { 1.0 } else { 0.0 }
+            );
+        }
     }
 
     #[test]

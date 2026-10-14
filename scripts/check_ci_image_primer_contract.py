@@ -334,9 +334,26 @@ def check(root: Path) -> list[str]:
         version_default = re.search(r"(?m)^ARG BIRD_VERSION=([^\s]+)$", source)
         if version_default and version_default.group(1) != bird3_version:
             errors.append(f"{relative}: BIRD version default differs from {MANIFEST}")
-        digest_default = re.search(r"(?m)^ARG BIRD_SHA256=([^\s]+)$", source)
-        if digest_default and manifest.get(digest_default.group(1)) != f"bird-{bird3_version}.tar.gz":
-            errors.append(f"{relative}: BIRD checksum default differs from {MANIFEST}")
+    # A default digest must be the manifest pin of the archive its own version
+    # default selects, not merely some manifest digest: the manifest also keeps
+    # pins for older controls, and a cold local build would check one archive
+    # against another's checksum. Any default value is captured, so a malformed,
+    # empty or differently spelled default fails instead of escaping the match.
+    for relative, source in dockerfiles.items():
+        for tool, arch, digest in re.findall(
+            r"(?m)^(?:ARG|ENV) ([A-Z0-9]+)_(?:([A-Z0-9]+)_)?SHA256=(.*)$", source
+        ):
+            version = re.search(rf"(?m)^(?:ARG|ENV) {tool}_VERSION=([\w.]+)$", source)
+            name = tool.lower()
+            if name == "bird":
+                archive = f"bird-{version.group(1)}.tar.gz" if version else "?"
+            else:
+                arch = arch.lower() or "amd64"
+                archive = f"{name}_{version.group(1)}_linux_{arch}.tar.gz" if version else "?"
+            if manifest.get(digest) != archive:
+                errors.append(
+                    f"{relative}: default digest is not the {MANIFEST} pin for {archive}"
+                )
     for relative, text in {**texts, **scripts, **dockerfiles}.items():
         for match in DIGEST.finditer(text):
             if match.group(0) not in manifest:

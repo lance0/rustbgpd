@@ -1,0 +1,37 @@
+{
+  "ce_bundled_ports": 2,
+  "rust_admin": [
+    200,
+    true
+  ],
+  "rust_advertised": [
+    200,
+    true
+  ],
+  "rust_decoded_srl": [
+    300,
+    true
+  ],
+  "rust_drained": true,
+  "rust_own_type4": null,
+  "rust_recovery_pending": false,
+  "rust_role": "",
+  "srl_admin": [
+    300,
+    true
+  ],
+  "srl_decoded_rust": null,
+  "srl_df": {
+    "192.0.2.2": true
+  },
+  "srl_oper": [
+    300,
+    true
+  ],
+  "srl_oper_state": "up",
+  "srl_own_type4": [
+    300,
+    true
+  ],
+  "srl_role_change": "2026-10-13T13:37:02.649Z"
+}

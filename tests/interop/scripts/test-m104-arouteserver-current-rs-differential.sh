@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M104 — current-daemon sibling of the immutable M90 ARouteServer filtering
 # differential. The exact M90 site/config fixtures remain read-only; only the
-# daemon boundary moves to BIRD 2.19.2, GoBGP 4.10.0, and the checked-out
+# daemon boundary moves to BIRD 2.19.3, GoBGP 4.10.0, and the checked-out
 # rustbgpd SHA. The unchanged 11-row corpus must finish at 74 passed / 0 failed.
 
 set -euo pipefail
@@ -29,8 +29,8 @@ readonly ARS_IMAGE="pierky/arouteserver@$ARS_MANIFEST_DIGEST"
 readonly ARS_CONFIG_DIGEST="sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93"
 readonly ARS_VERSION="1.23.2"
 readonly ARS_TAG_COMMIT="85f24252564822556bd93cb9eba1f73d1e8268ea"
-readonly BIRD_IMAGE="bird:v2.19.2-m104"
-readonly BIRD_VERSION="BIRD version 2.19.2"
+readonly BIRD_IMAGE="bird:v2.19.3-m104"
+readonly BIRD_VERSION="BIRD version 2.19.3"
 readonly BIRD_TARGET_VERSION="2.16"
 readonly GOBGP_IMAGE="gobgp:v4.10.0-m104"
 readonly GOBGP_VERSION="gobgp version 4.10.0"
@@ -336,10 +336,10 @@ render_bird_config() {
     fi
     docker cp "$ARS_WORK/out/bird.conf" "$BIRD":/etc/bird/bird.conf
     docker exec "$BIRD" bird -p -c /etc/bird/bird.conf >/dev/null 2>&1 || {
-        echo "ERROR: exact BIRD 2.19.2 rejected the ARouteServer 2.16 target" >&2
+        echo "ERROR: exact BIRD 2.19.3 rejected the ARouteServer 2.16 target" >&2
         return 1
     }
-    log "Exact BIRD 2.19.2 accepted the generated config with bird -p"
+    log "Exact BIRD 2.19.3 accepted the generated config with bird -p"
 }
 
 render_rustbgpd_config() {
@@ -407,7 +407,7 @@ render_rustbgpd_config() {
 }
 
 start_daemons() {
-    log "Starting BIRD 2.19.2 after successful bird -p..."
+    log "Starting BIRD 2.19.3 after successful bird -p..."
     docker exec "$BIRD" sh -c \
         'mkdir -p /run/bird && (bird -d -c /etc/bird/bird.conf >>/tmp/bird.log 2>&1 &)'
 

@@ -1,0 +1,32 @@
+{
+  "rust_admin": [
+    200,
+    false
+  ],
+  "rust_advertised": [
+    200,
+    false
+  ],
+  "rust_decoded_srl": [
+    100,
+    false
+  ],
+  "rust_own_type4": [
+    200,
+    false
+  ],
+  "rust_recovery_pending": false,
+  "rust_role": "df",
+  "srl_decoded_rust": [
+    200,
+    false
+  ],
+  "srl_df": {
+    "10.0.123.1": true,
+    "192.0.2.2": false
+  },
+  "srl_oper": [
+    100,
+    false
+  ]
+}

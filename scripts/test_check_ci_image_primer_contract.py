@@ -107,7 +107,7 @@ BIRD3_ARCHIVE = next(archive for archive in ARCHIVE_PINS if archive.startswith("
 BIRD3_VERSION = BIRD3_ARCHIVE.removeprefix("bird-").removesuffix(".tar.gz")
 BIRD3_DIGEST = ARCHIVE_PINS[BIRD3_ARCHIVE]
 BIRD3_NEXT_VERSION = ".".join((*BIRD3_VERSION.split(".")[:2], str(int(BIRD3_VERSION.split(".")[2]) + 1)))
-BIRD2192 = "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660"
+BIRD2_DIGEST = "853ea9e9adc36ea5277c3883c5ceddf06460fc496743dbdbff191975e1f55ebd"
 DRIFTED = "f" * 64
 M1_CALL = (
     "        uses: ./.github/actions/run-interop-test\n"
@@ -117,11 +117,11 @@ M1_CALL = (
     "          script: tests/interop/scripts/test-m1-frr.sh\n"
 )
 M83_BIRD_STAGE = (
-    "      - name: Stage verified BIRD 2.19.2 archive\n"
+    "      - name: Stage verified BIRD 2.19.3 archive\n"
     "        uses: ./.github/actions/stage-bird3-artifact\n"
     "        id: bird_archive\n"
     "        with:\n"
-    '          version: "2.19.2"\n\n'
+    '          version: "2.19.3"\n\n'
 )
 M74_STAGE = (
     "      - name: Stage verified GoBGP archive\n"
@@ -178,13 +178,66 @@ class PrimerContractTests(unittest.TestCase):
     def test_archive_digest_copies_match_the_manifest(self):
         with self.subTest("Dockerfile copy drifts"):
             self.assert_red(
-                f"tests/interop/Dockerfile.bird-v2192:4: digest is not in {MANIFEST}",
+                f"tests/interop/Dockerfile.bird2:4: digest is not in {MANIFEST}",
                 (
-                    "tests/interop/Dockerfile.bird-v2192",
-                    f"ARG BIRD_SHA256={BIRD2192}",
+                    "tests/interop/Dockerfile.bird2",
+                    f"ARG BIRD_SHA256={BIRD2_DIGEST}",
                     f"ARG BIRD_SHA256={DRIFTED}",
                 ),
             )
+        for name, dockerfile, old, new, archive in (
+            (
+                "BIRD 2 default digest is another manifest pin",
+                "tests/interop/Dockerfile.bird2",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST}",
+                f"ARG BIRD_SHA256={ARCHIVE_PINS['bird-2.19.2.tar.gz']}",
+                "bird-2.19.3.tar.gz",
+            ),
+            (
+                "GoBGP 4.x default digest is another manifest pin",
+                "tests/interop/Dockerfile.gobgp-v47",
+                f"ARG GOBGP_SHA256={ARCHIVE_PINS['gobgp_4.7.0_linux_amd64.tar.gz']}",
+                f"ARG GOBGP_SHA256={ARCHIVE_PINS['gobgp_4.8.0_linux_amd64.tar.gz']}",
+                "gobgp_4.7.0_linux_amd64.tar.gz",
+            ),
+            (
+                "GoBGP per-architecture default digest is the other architecture's pin",
+                "tests/interop/Dockerfile.gobgp",
+                f"ARG GOBGP_ARM64_SHA256={ARCHIVE_PINS['gobgp_3.37.0_linux_arm64.tar.gz']}",
+                f"ARG GOBGP_ARM64_SHA256={ARCHIVE_PINS['gobgp_3.37.0_linux_amd64.tar.gz']}",
+                "gobgp_3.37.0_linux_arm64.tar.gz",
+            ),
+            # Malformed defaults must fail closed rather than skip the pairing.
+            (
+                "BIRD 2 default digest is not a hash",
+                "tests/interop/Dockerfile.bird2",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST}",
+                "ARG BIRD_SHA256=invalid",
+                "bird-2.19.3.tar.gz",
+            ),
+            (
+                "BIRD 2 default digest is empty",
+                "tests/interop/Dockerfile.bird2",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST}",
+                "ARG BIRD_SHA256=",
+                "bird-2.19.3.tar.gz",
+            ),
+            # The manifest's lowercase spelling is the canonical pin that the
+            # archive-pin helper and stage actions resolve; another spelling of
+            # the same hash is a second, unchecked copy of the pin.
+            (
+                "BIRD 2 default digest is the right hash in uppercase",
+                "tests/interop/Dockerfile.bird2",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST}",
+                f"ARG BIRD_SHA256={BIRD2_DIGEST.upper()}",
+                "bird-2.19.3.tar.gz",
+            ),
+        ):
+            with self.subTest(name):
+                self.assert_red(
+                    f"{dockerfile}: default digest is not the {MANIFEST} pin for {archive}",
+                    (dockerfile, old, new),
+                )
         with self.subTest("manifest bumped: one local Docker default still needs a bump"):
             errors = self.mutated_errors((MANIFEST, BIRD3_DIGEST, DRIFTED))
             stale = {error.split(":", 1)[0] for error in errors if "is not in" in error}
@@ -501,13 +554,18 @@ class PrimerContractTests(unittest.TestCase):
     def test_lab_jobs_stage_the_archive_they_build(self):
         with self.subTest("stage step removed"):
             self.assert_red(
-                "interop.yml:m83: builds tests/interop/Dockerfile.bird-v2192 without first staging bird3 2.19.2",
+                "interop.yml:m83: builds tests/interop/Dockerfile.bird2 without first staging bird3 2.19.3",
                 (INTEROP, M83_BIRD_STAGE, ""),
             )
         with self.subTest("different version staged"):
             self.assert_red(
-                "interop.yml:m83: builds tests/interop/Dockerfile.bird-v2192 without first staging bird3 2.19.2",
-                (INTEROP, M83_BIRD_STAGE, M83_BIRD_STAGE.replace('"2.19.2"', '"3.3.2"')),
+                "interop.yml:m83: builds tests/interop/Dockerfile.bird2 without first staging bird3 2.19.3",
+                (INTEROP, M83_BIRD_STAGE, M83_BIRD_STAGE.replace('"2.19.3"', '"3.3.2"')),
+            )
+        with self.subTest("frozen control falls back to the current Dockerfile default"):
+            self.assert_red(
+                "interop.yml:m100: builds tests/interop/Dockerfile.bird2 without first staging bird3 2.19.3",
+                (INTEROP, "            BIRD_VERSION=2.19.2\n", ""),
             )
         with self.subTest("stage runs after the build"):
             self.assert_red(

@@ -761,6 +761,83 @@ max_prefixes_received_ipv4 = 12
     assert_eq!(peers[0].0.max_prefixes_ipv6, None);
 }
 
+/// Mutant: dropping a key from the resolution array, misordering it against
+/// `PrefixLimitFamily`, or skipping the group fallback moves a bound to the
+/// wrong family or loses it.
+#[test]
+fn family_max_prefixes_inherit_from_group_and_override_per_neighbor() {
+    use rustbgpd_transport::PrefixLimitFamily;
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.rr-clients]
+max_prefixes_l3vpn_ipv4_unicast = 500
+max_prefixes_l2vpn_evpn = 300
+max_prefixes_rtc = 40
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+peer_group = "rr-clients"
+max_prefixes_l3vpn_ipv4_unicast = 50
+max_prefixes_l3vpn_ipv6_unicast = 60
+max_prefixes_ipv4_labeled_unicast = 70
+max_prefixes_ipv6_labeled_unicast = 80
+max_prefixes_ipv4_flowspec = 90
+max_prefixes_ipv6_flowspec = 100
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    let limits = peers[0].0.max_prefixes_family;
+    let expected = [
+        (PrefixLimitFamily::L3vpnIpv4, Some(50)),
+        (PrefixLimitFamily::L3vpnIpv6, Some(60)),
+        (PrefixLimitFamily::Ipv4LabeledUnicast, Some(70)),
+        (PrefixLimitFamily::Ipv6LabeledUnicast, Some(80)),
+        (PrefixLimitFamily::L2vpnEvpn, Some(300)),
+        (PrefixLimitFamily::Ipv4Flowspec, Some(90)),
+        (PrefixLimitFamily::Ipv6Flowspec, Some(100)),
+        (PrefixLimitFamily::Rtc, Some(40)),
+    ];
+    for (family, bound) in expected {
+        assert_eq!(limits.get(family), bound, "{family:?}");
+    }
+    assert_eq!(
+        peers[0].0.max_prefixes, None,
+        "the aggregate stays independent"
+    );
+    assert_eq!(peers[0].0.max_prefixes_ipv4, None);
+}
+
+#[test]
+fn family_max_prefix_edit_is_hot_applicable() {
+    let old = test_neighbor("10.0.0.2", 65002);
+    let mut hot = old.clone();
+    hot.max_prefixes_l3vpn_ipv4_unicast = Some(1);
+    hot.max_prefixes_l3vpn_ipv6_unicast = Some(2);
+    hot.max_prefixes_ipv4_labeled_unicast = Some(3);
+    hot.max_prefixes_ipv6_labeled_unicast = Some(4);
+    hot.max_prefixes_l2vpn_evpn = Some(5);
+    hot.max_prefixes_ipv4_flowspec = Some(6);
+    hot.max_prefixes_ipv6_flowspec = Some(7);
+    hot.max_prefixes_rtc = Some(8);
+    assert!(super::neighbor_change_hot_applicable(&old, &hot));
+    let changes = super::describe_neighbor_changes(&old, &hot);
+    assert_eq!(changes.len(), 8);
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.impact == Some(super::ConfigFieldImpact::HotApplied))
+    );
+}
+
 #[test]
 fn received_max_prefixes_reject_non_u32_values() {
     for value in ["-1", "\"12\"", "4294967296", "1.5"] {
@@ -877,12 +954,12 @@ fn max_prefix_modes_reject_unknown_actions_and_conflicting_fields() {
         (
             "max_prefixes = 500\nmax_prefix_action = \"block\"",
             "",
-            "per-family unicast bounds only",
+            "per-family bounds only",
         ),
         (
             "max_prefix_action = \"block\"",
             "max_prefixes = 500",
-            "per-family unicast bounds only",
+            "per-family bounds only",
         ),
         (
             "max_prefix_action = \"warning\"\nmax_prefix_restart_seconds = 60",
