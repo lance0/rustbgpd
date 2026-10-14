@@ -34,7 +34,7 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe ]]; then
 fi
 
 [[ $# -ge 4 && $1 == --head && $3 == --output-dir ]] ||
-    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--phase pilot|qualified] [--profile PROFILE] [--cell all|dataset-reevaluate|peer-down|widen]'
+    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--phase pilot|qualified] [--profile PROFILE] [--cell all|dataset-reevaluate|peer-down|widen|unsynchronized-dirty]'
 head=$2
 output=$4
 shift 4
@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ $phase == pilot || $phase == qualified ]] || fail 'invalid campaign phase'
 [[ $profile == all || $profile == ipv4-100k || $profile == full-uc || $profile == full-vpn || $profile == mixed-widen ]] || fail 'invalid campaign profile'
-[[ $selected_cell == all || $selected_cell == dataset-reevaluate || $selected_cell == peer-down || $selected_cell == widen ]] || fail 'invalid campaign cell'
+[[ $selected_cell == all || $selected_cell == dataset-reevaluate || $selected_cell == peer-down || $selected_cell == widen || $selected_cell == unsynchronized-dirty ]] || fail 'invalid campaign cell'
 [[ $head =~ ^[0-9a-f]{40}$ ]] || fail 'head must be an exact source SHA'
 [[ ${GITHUB_ACTIONS:-} == true && ${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}} == github-hosted && ${RUNNER_OS:-} == Linux ]] ||
     fail 'this receipt requires a fresh GitHub-hosted Linux VM; do not measure on the dev or soak host'

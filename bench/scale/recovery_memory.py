@@ -16,7 +16,7 @@ import time
 
 BASELINE = "c862af9338aa828b7462f3cf85781f63b0e79fe8"
 INTERMEDIATE = "bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00"
-CELLS = ("dataset-reevaluate", "peer-down", "widen")
+CELLS = ("dataset-reevaluate", "peer-down", "widen", "unsynchronized-dirty")
 FAMILIES = ("ipv4_unicast", "ipv6_unicast", "vpnv4", "vpnv6")
 PROFILES = {
     "ipv4-100k": ((100000, 0, 0, 0), (0, 0, 0, 0)),
@@ -56,6 +56,8 @@ def campaign_cases(
         cells = ["widen"] if profile == "mixed-widen" else ["dataset-reevaluate", "peer-down"]
         if profile == "full-vpn" and phase == "qualified":
             cells.append("widen")
+        if profile in ("full-uc", "full-vpn"):
+            cells.append("unsynchronized-dirty")
         require(
             selected_cell == "all" or selected_cell in cells, "unsupported profile/cell selection"
         )
@@ -508,7 +510,7 @@ def run_scope(
 def validate_log(
     path: Path, role: str, cell: str, clients: int = 256, profile: str = "ipv4-100k"
 ) -> dict[str, object]:
-    samples, completed, identities = [], [], []
+    samples, completed, identities, unsynchronized = [], [], [], []
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("recovery_sample "):
             samples.append(json.loads(line.removeprefix("recovery_sample ")))
@@ -516,6 +518,9 @@ def validate_log(
             completed.append(json.loads(line.removeprefix("recovery_complete ")))
         elif line.startswith("recovery_identity "):
             identities.append(json.loads(line.removeprefix("recovery_identity ")))
+        elif line.startswith("recovery_unsynchronized "):
+            require(len(samples) == 1 and not completed, "unsynchronized pass outside retained preparation")
+            unsynchronized.append(json.loads(line.removeprefix("recovery_unsynchronized ")))
     require(
         [row.get("phase") for row in samples] == list(PHASES),
         "missing, duplicate or unordered phase barriers",
@@ -542,6 +547,32 @@ def validate_log(
     require(profile in PROFILES and cell in CELLS and clients > 0, "unknown receipt shape")
     seed, additions = PROFILES[profile]
     additions = additions if cell == "widen" else (0, 0, 0, 0)
+    pulse_family = next(f for f, n in enumerate(seed) if n)
+    if cell == "unsynchronized-dirty":
+        additions = tuple(clients if f == pulse_family else 0 for f in range(4))
+        require(len(unsynchronized) == clients, "missing unsynchronized dirty pass barriers")
+        for index, progress in enumerate(unsynchronized):
+            paused = index + 1
+            for name in ("pass", "clients", "dirty_peers", "group_dirty_members"):
+                uint(progress.get(name), name)
+            require(
+                progress.get("pass") == index
+                and progress.get("clients") == clients
+                and progress.get("profile") == profile
+                and progress.get("dirty_peers") == progress.get("group_dirty_members") == paused,
+                "missing actual progressive dirty overlap",
+            )
+            for field, expected in (
+                ("paused_families", tuple(paused * seed[f] + (paused * (paused - 1) // 2 if f == pulse_family else 0) for f in range(4))),
+                ("active_families", tuple((clients - paused) * (seed[f] + (paused if f == pulse_family else 0)) for f in range(4))),
+            ):
+                values = progress.get(field)
+                require(isinstance(values, dict) and set(values) == set(FAMILIES), "missing unsynchronized family inventory")
+                for name, value in values.items():
+                    uint(value, name)
+                require(values == dict(zip(FAMILIES, expected)), "wrong unsynchronized actual receiver inventory")
+    else:
+        require(not unsynchronized, "unexpected unsynchronized pass barriers")
     require(cell != "widen" or sum(additions) > 0, "profile cannot widen")
     limits = tuple(a + b for a, b in zip(seed, additions))
     gauges_absent = role == "baseline"
@@ -585,6 +616,8 @@ def validate_log(
                 if phase == "settled" and cell == "peer-down"
                 else clients * (limits[f] if phase == "settled" else seed[f])
             )
+            if cell == "unsynchronized-dirty" and phase in ("retained", "operation_end") and f == pulse_family:
+                target += clients * (clients - 1) // 2
             require(present == target, "nonconverged exact family receiver inventory")
             require(
                 withdrawals
@@ -592,7 +625,7 @@ def validate_log(
                 "withdrawal inventory mismatch or unchanged-policy flap",
             )
             require(
-                announces >= (clients * limits[f] if phase == "settled" else clients * seed[f]),
+                announces >= max(target, clients * seed[f]),
                 "population did not deliver all family routes",
             )
             if limits[f] == 0:
@@ -650,7 +683,10 @@ def validate_log(
             require(sum(causes.values()) == 0, "candidate budget/proof fallback disqualifies shape")
             if phase in ("retained", "operation_end"):
                 require(
-                    metrics[GAUGES[0]] == clients * sum(limits),
+                    metrics[GAUGES[0]] == (
+                        clients * sum(seed) + clients * (clients - 1) // 2
+                        if cell == "unsynchronized-dirty" else clients * sum(limits)
+                    ),
                     "candidate lacks complete admitted recovery proofs",
                 )
         elif (
@@ -715,6 +751,7 @@ def validate_log(
         if "bgp_evpn_recovery_provenance_exhausted_total" in samples[0]["metrics"]
         else "absent",
         "workload_identity": identity,
+        "unsynchronized_passes": len(unsynchronized),
         "samples": samples,
     }
 
