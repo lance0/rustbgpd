@@ -2505,7 +2505,7 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (smet)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
+'--rd=[Exact Route Distinguisher\: text or 0x plus 16 raw hex digits]:RD:_default' \
 '--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
 '--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
 '--ethernet-tag=[Ethernet Tag ID (default 0)]:ETHERNET_TAG:_default' \
@@ -2529,7 +2529,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (mac-ip)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
+'--rd=[Exact Route Distinguisher\: text or 0x plus 16 raw hex digits]:RD:_default' \
 '--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
 '--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
 '--ethernet-tag=[Ethernet Tag ID (default 0)]:ETHERNET_TAG:_default' \
@@ -2552,7 +2552,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (imet)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
+'--rd=[Exact Route Distinguisher\: text or 0x plus 16 raw hex digits]:RD:_default' \
 '--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
 '--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
 '--ethernet-tag=[Ethernet Tag ID (default 0)]:ETHERNET_TAG:_default' \
@@ -2576,7 +2576,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (es)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
+'--rd=[Exact Route Distinguisher\: text or 0x plus 16 raw hex digits]:RD:_default' \
 '--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
 '--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
 '--esi=[Ethernet Segment Identifier\: 10 colon-separated hex octets]:ESI:_default' \
@@ -2598,7 +2598,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (ip-prefix)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
+'--rd=[Exact Route Distinguisher\: text or 0x plus 16 raw hex digits]:RD:_default' \
 '--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
 '--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
 '--ethernet-tag=[Ethernet Tag ID (default 0)]:ETHERNET_TAG:_default' \
@@ -2620,7 +2620,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (ead-per-es)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
+'--rd=[Exact Route Distinguisher\: text or 0x plus 16 raw hex digits]:RD:_default' \
 '--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
 '--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
 '--esi=[Ethernet Segment Identifier\: 10 colon-separated hex octets]:ESI:_default' \
@@ -2641,7 +2641,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (ead-per-evi)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Exact Route Distinguisher, "asn\:value" or "ip\:value"]:RD:_default' \
+'--rd=[Exact Route Distinguisher\: text or 0x plus 16 raw hex digits]:RD:_default' \
 '--received-from=[Look up this accepted source; absence does not explain import rejection]:RECEIVED_FROM:_default' \
 '--advertised-to=[Evaluate current export gates and committed local state for this peer]:ADVERTISED_TO:_default' \
 '--esi=[Ethernet Segment Identifier\: 10 colon-separated hex octets]:ESI:_default' \

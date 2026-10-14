@@ -44,6 +44,7 @@ mod policy_service;
 #[cfg(test)]
 mod replacement_summary_tests;
 pub mod rib_service;
+mod route_distinguisher;
 pub mod rpki_service;
 pub mod runtime_config_settlement;
 pub mod server;
