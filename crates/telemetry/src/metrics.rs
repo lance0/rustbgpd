@@ -1648,6 +1648,11 @@ impl BgpMetrics {
             &["outcome"],
         )
         .expect("valid metric definition");
+        // Both outcomes exist at 0 from startup, so the first increment of
+        // either one is a visible `increase()` rather than a new series.
+        for outcome in ["cleared", "still_dirty"] {
+            rib_dirty_resync.with_label_values(&[outcome]);
+        }
 
         let rib_ingest_channel_depth = IntGauge::new(
             "bgp_rib_ingest_channel_depth",
@@ -9792,6 +9797,17 @@ mod tests {
             1
         );
         assert_eq!(m.0.rib_ingest_channel_depth.get(), 17);
+    }
+
+    /// `BgpOutboundResyncStalled` uses `increase()` on both outcomes; a series
+    /// created by its first increment would hide the first drain.
+    #[test]
+    fn dirty_resync_outcomes_are_exported_at_zero_before_any_tick() {
+        let text = gather_text(&BgpMetrics::new());
+        for outcome in ["cleared", "still_dirty"] {
+            let series = format!("bgp_rib_dirty_resync_total{{outcome=\"{outcome}\"}} 0");
+            assert!(text.lines().any(|line| line == series), "missing {series}");
+        }
     }
 
     fn repo_doc(path: &str) -> String {

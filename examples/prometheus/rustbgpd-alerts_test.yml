@@ -1759,6 +1759,10 @@ tests:
   # is just as dirty but drains at 10m and 20m, pinning the `unless` clause.
   # edge3 is idle, rejecting a raw-counter query. edge4 drains once at 5m and
   # then stays dirty: it fires by 25m only with the 5m windows.
+  # edge5 is a fresh start: the cleared series is absent for two scrapes, is
+  # then exported at 0, and its first drain at 12m suppresses the alert. The
+  # daemon pre-initializes the series because a series born at 1 has no
+  # increase, which would let edge5 fire at 20m across that drain.
   - interval: 1m
     input_series:
       - series: 'bgp_rib_dirty_resync_total{outcome="still_dirty", instance="edge1:9179"}'
@@ -1777,6 +1781,10 @@ tests:
         values: "0+60x39"
       - series: 'bgp_rib_dirty_resync_total{outcome="cleared", instance="edge4:9179"}'
         values: "0x4 1x35"
+      - series: 'bgp_rib_dirty_resync_total{outcome="still_dirty", instance="edge5:9179"}'
+        values: "0+60x20 1200x18"
+      - series: 'bgp_rib_dirty_resync_total{outcome="cleared", instance="edge5:9179"}'
+        values: "_ _ 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2"
     alert_rule_test:
       - eval_time: 10m
         alertname: BgpOutboundResyncStalled

@@ -12,7 +12,9 @@
   **Operator-visible:** `BgpOutboundRouteDrops` is now warning severity and
   describes the automatic dirty-peer resync instead of asking for a manual
   outbound refresh. The new critical `BgpOutboundResyncStalled` alert fires
-  when the resync timer has not drained for 15 minutes. The new warning
+  when the resync timer has not drained for 15 minutes; both
+  `bgp_rib_dirty_resync_total` outcomes are now exported at 0 from startup so
+  the first drain is visible to `increase()`. The new warning
   `BgpOutboundCommitRefused` alert fires on `missing_encoder` refusals. The
   Grafana "RIB ingest pressure" panel plots refusals by reason. See the
   [alert notes](../docs/how-to/grafana.md).
