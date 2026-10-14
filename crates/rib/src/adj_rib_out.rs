@@ -32,9 +32,18 @@ pub struct AdjRibOut {
     /// also backs the group RIB-Out table (`GroupRibOut`), whose route map
     /// was the largest heap component in docs/perf/rebaseline-2026-07.md.
     routes: RouteSlab<Route>,
-    /// Explicit unicast actions admitted alongside route bodies. None uses
-    /// the immutable session profile's default and needs no sparse entry.
+    /// Explicit `Specific` unicast actions admitted alongside route bodies.
+    /// None uses the immutable session profile's default and needs no entry;
+    /// `Self_` lives in `self_next_hop`. A hashed entry is 44 B plus one
+    /// control byte, about 51-103 B per action with hashbrown's power-of-two
+    /// growth (94 B per route measured at 1M entries).
     next_hop_overrides: HashMap<(Prefix, u32), NextHopAction>,
+    /// `Self_` action per slab slot, indexed by route handle. Allocated only
+    /// once a `Self_` action is admitted, so it costs 1 B per slot (plus `Vec`
+    /// growth slack) instead of a hashed entry per route.
+    self_next_hop: Vec<bool>,
+    /// Set entries in `self_next_hop`, keeping the empty check O(1).
+    self_next_hop_count: usize,
     /// Primary index: prefix → `(path_id, slab handle)` pairs, backed by a
     /// family-split prefix trie. `SmallVec<[(u32, u32); 1]>` inlines the
     /// single-best case (`path_id=0`) without heap allocation; Add-Path
@@ -142,6 +151,8 @@ impl AdjRibOut {
             peer,
             routes: RouteSlab::with_capacity(capacity),
             next_hop_overrides: HashMap::default(),
+            self_next_hop: Vec::new(),
+            self_next_hop_count: 0,
             prefix_path_ids: FamilyPrefixMap::default(),
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
@@ -168,26 +179,7 @@ impl AdjRibOut {
     /// Insert or replace an advertised route with checkpoints around index
     /// walks and possible allocation edges.
     pub(crate) fn insert_with(&mut self, route: Route, checkpoint: &mut impl FnMut()) {
-        let path_id = route.path_id;
-        self.next_hop_overrides.remove(&(route.prefix, path_id));
-        checkpoint();
-        let ids = self.prefix_path_ids.entry_or_default(route.prefix);
-        checkpoint();
-        let handle = ids.iter().find_map(|(id, handle)| {
-            checkpoint();
-            (*id == path_id).then_some(*handle)
-        });
-        if let Some(handle) = handle {
-            checkpoint();
-            self.routes.set(handle, route);
-            checkpoint();
-        } else {
-            checkpoint();
-            let handle = self.routes.insert(route);
-            checkpoint();
-            ids.push((path_id, handle));
-            checkpoint();
-        }
+        self.insert_with_next_hop(route, None, checkpoint);
     }
 
     pub(crate) fn insert_with_next_hop(
@@ -197,16 +189,55 @@ impl AdjRibOut {
         checkpoint: &mut impl FnMut(),
     ) {
         let key = (route.prefix, route.path_id);
-        self.insert_with(route, checkpoint);
-        if let Some(action) = action {
+        self.next_hop_overrides.remove(&key);
+        checkpoint();
+        let ids = self.prefix_path_ids.entry_or_default(route.prefix);
+        checkpoint();
+        let handle = ids.iter().find_map(|(id, handle)| {
+            checkpoint();
+            (*id == key.1).then_some(*handle)
+        });
+        let handle = if let Some(handle) = handle {
+            checkpoint();
+            self.routes.set(handle, route);
+            checkpoint();
+            handle
+        } else {
+            checkpoint();
+            let handle = self.routes.insert(route);
+            checkpoint();
+            ids.push((key.1, handle));
+            checkpoint();
+            handle
+        };
+        let is_self = matches!(action, Some(NextHopAction::Self_));
+        self.set_self_next_hop(handle, is_self);
+        if let Some(action) = action.filter(|_| !is_self) {
             checkpoint();
             self.next_hop_overrides.insert(key, action);
             checkpoint();
         }
     }
 
+    fn set_self_next_hop(&mut self, handle: u32, is_self: bool) {
+        let slot = handle as usize;
+        if is_self && self.self_next_hop.len() <= slot {
+            self.self_next_hop.resize(self.routes.slot_count(), false);
+        }
+        if let Some(flag) = self.self_next_hop.get_mut(slot)
+            && *flag != is_self
+        {
+            *flag = is_self;
+            if is_self {
+                self.self_next_hop_count += 1;
+            } else {
+                self.self_next_hop_count -= 1;
+            }
+        }
+    }
+
     pub(crate) fn has_next_hop_overrides(&self) -> bool {
-        !self.next_hop_overrides.is_empty()
+        self.self_next_hop_count != 0 || !self.next_hop_overrides.is_empty()
     }
 
     pub(crate) fn next_hop_override(
@@ -214,6 +245,14 @@ impl AdjRibOut {
         prefix: &Prefix,
         path_id: u32,
     ) -> Option<&NextHopAction> {
+        static SELF_ACTION: NextHopAction = NextHopAction::Self_;
+        if self.self_next_hop_count != 0
+            && self
+                .handle(prefix, path_id)
+                .is_some_and(|handle| self.self_next_hop.get(handle as usize) == Some(&true))
+        {
+            return Some(&SELF_ACTION);
+        }
         self.next_hop_overrides.get(&(*prefix, path_id))
     }
 
@@ -254,6 +293,7 @@ impl AdjRibOut {
         }
         checkpoint();
         self.next_hop_overrides.remove(&(*prefix, path_id));
+        self.set_self_next_hop(handle, false);
         let retired = self.routes.remove(handle);
         let removed = retired.is_some();
         drop(retired);
@@ -264,12 +304,16 @@ impl AdjRibOut {
     /// Look up a route by prefix and path ID.
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {
+        self.routes.get(self.handle(prefix, path_id)?)
+    }
+
+    fn handle(&self, prefix: &Prefix, path_id: u32) -> Option<u32> {
         let (_, handle) = self
             .prefix_path_ids
             .get(prefix)?
             .iter()
             .find(|(id, _)| *id == path_id)?;
-        self.routes.get(*handle)
+        Some(*handle)
     }
 
     /// Iterate over all advertised routes.
@@ -347,6 +391,8 @@ impl AdjRibOut {
     pub fn clear_unicast(&mut self) {
         self.routes.clear();
         self.next_hop_overrides.clear();
+        self.self_next_hop.clear();
+        self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
     }
 
@@ -362,6 +408,8 @@ impl AdjRibOut {
     pub fn release_unicast(&mut self) {
         self.routes = RouteSlab::default();
         self.next_hop_overrides = HashMap::default();
+        self.self_next_hop = Vec::new();
+        self.self_next_hop_count = 0;
         self.prefix_path_ids = FamilyPrefixMap::default();
     }
 
@@ -370,6 +418,8 @@ impl AdjRibOut {
     pub(crate) fn release_unicast_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.routes.release_with(checkpoint);
         release_hash_map(&mut self.next_hop_overrides, checkpoint);
+        self.self_next_hop = Vec::new();
+        self.self_next_hop_count = 0;
         self.prefix_path_ids.release_with(checkpoint);
     }
 
@@ -427,6 +477,8 @@ impl AdjRibOut {
     pub fn clear(&mut self) {
         self.routes.clear();
         self.next_hop_overrides.clear();
+        self.self_next_hop.clear();
+        self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
         self.flowspec_routes.clear();
         self.evpn_routes.clear();
@@ -442,6 +494,8 @@ impl AdjRibOut {
     pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.routes.retire_with(checkpoint);
         retire_hash_map(&mut self.next_hop_overrides, checkpoint);
+        self.self_next_hop.clear();
+        self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
         retire_hash_map(&mut self.evpn_routes, checkpoint);
@@ -855,6 +909,65 @@ mod tests {
             }
             assert!(!rib.has_next_hop_overrides());
         }
+    }
+
+    #[test]
+    fn unicast_action_residue_is_dropped_by_full_clears_and_slot_reuse() {
+        let mut rib = AdjRibOut::new("192.0.2.1".parse().unwrap());
+        let specific = NextHopAction::Specific("192.0.2.9".parse().unwrap());
+        let prefix = prefix_a();
+        let resets: [fn(&mut AdjRibOut); 2] = [AdjRibOut::clear, |rib| rib.retire_with(&mut || {})];
+        for reset in resets {
+            rib.insert_with_next_hop(
+                make_route(prefix, 1),
+                Some(NextHopAction::Self_),
+                &mut || {},
+            );
+            rib.insert_with_next_hop(make_route(prefix, 2), Some(specific.clone()), &mut || {});
+            assert_eq!(
+                rib.next_hop_override(&prefix, 1),
+                Some(&NextHopAction::Self_)
+            );
+            assert_eq!(rib.next_hop_override(&prefix, 2), Some(&specific));
+            reset(&mut rib);
+            assert!(!rib.has_next_hop_overrides());
+            // Reinserted keys reuse the same slots without the retired actions.
+            rib.insert(make_route(prefix, 1));
+            rib.insert(make_route(prefix, 2));
+            assert_eq!(rib.next_hop_override(&prefix, 1), None);
+            assert_eq!(rib.next_hop_override(&prefix, 2), None);
+            assert!(!rib.has_next_hop_overrides());
+            rib.clear();
+        }
+
+        // A withdrawn slot handed to another key starts without an action.
+        rib.insert_with_next_hop(
+            make_route(prefix, 0),
+            Some(NextHopAction::Self_),
+            &mut || {},
+        );
+        rib.withdraw(&prefix, 0);
+        assert!(!rib.has_next_hop_overrides());
+        rib.insert(make_route(prefix_b(), 0));
+        assert_eq!(rib.next_hop_override(&prefix_b(), 0), None);
+        assert!(!rib.has_next_hop_overrides());
+
+        // Dense next-hop-self stores one flag per slot and no hashed entry.
+        let mut rib = AdjRibOut::new("192.0.2.1".parse().unwrap());
+        for path_id in 0..1024 {
+            rib.insert_with_next_hop(
+                make_route(prefix, path_id),
+                Some(NextHopAction::Self_),
+                &mut || {},
+            );
+        }
+        assert_eq!(rib.next_hop_overrides.capacity(), 0);
+        assert_eq!(rib.self_next_hop_count, 1024);
+        assert!(rib.self_next_hop.capacity() <= 2 * rib.unicast_slot_count());
+        assert_eq!(
+            rib.next_hop_override(&prefix, 1023),
+            Some(&NextHopAction::Self_)
+        );
     }
 
     fn prefix_a() -> Prefix {

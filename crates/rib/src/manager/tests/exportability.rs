@@ -39,6 +39,14 @@ impl MockExactExportEncoder {
         })
     }
 
+    /// Accepting profile under which every next-hop action encodes the same
+    /// bytes, so action-only changes are provably wire-equivalent.
+    pub(super) fn equivalent_next_hop_actions(generation: u64) -> Arc<Self> {
+        let encoder = Self::accepting(generation);
+        encoder.config.write().unwrap().equivalent_next_hop_actions = true;
+        encoder
+    }
+
     pub(super) fn set_profile(
         &self,
         generation: u64,

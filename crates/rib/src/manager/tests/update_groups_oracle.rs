@@ -4534,6 +4534,182 @@ async fn oracle_action_only_same_update_pcb_winner_promotion() {
     }
 }
 
+/// Register a receiver profile under which every next-hop action encodes the
+/// same bytes, overriding the conservative `old == new` trait default.
+async fn equivalent_action_profile(o: &mut Oracle, peer: Ipv4Addr) {
+    o.tx.send(RibUpdate::SetPeerExportEncoder {
+        peer: IpAddr::V4(peer),
+        session_id: SESSION,
+        encoder: super::exportability::MockExactExportEncoder::equivalent_next_hop_actions(1),
+    })
+    .await
+    .unwrap();
+}
+
+/// Under an equivalent profile, PCB groups suppress an action-only change
+/// from borrowed prior slots: `delta.prior` toward members that receive the
+/// winner, and the lane prior toward the winner's own source.
+#[tokio::test]
+async fn oracle_action_only_equivalent_profile_pcb_prior_suppression() {
+    const SELF_TAG: u32 = 0xFDE8_0064;
+    for initially_self in [false, true] {
+        let mut runs = Vec::new();
+        for force_ungrouped in [false, true] {
+            let mut policy = permit_all_with(RouteModifications {
+                communities_remove: vec![SELF_TAG],
+                ..RouteModifications::default()
+            });
+            let mut tagged = policy.policies[0].policy.entries[0].clone();
+            tagged.match_community = vec![CommunityMatch::Standard { value: SELF_TAG }];
+            tagged.modifications.set_next_hop = Some(NextHopAction::Self_);
+            policy.policies[0].policy.entries.insert(0, tagged);
+            let candidate = |prefix, use_self: bool| {
+                rs_route(
+                    prefix,
+                    B,
+                    vec![65002; 2],
+                    if use_self { vec![SELF_TAG] } else { vec![] },
+                )
+            };
+            let mut o = Oracle::spawn(force_ungrouped, None);
+            for peer in [A, B, C] {
+                equivalent_action_profile(&mut o, peer).await;
+                pcb_peer_up(&mut o, peer, Some(policy.clone()), 64).await;
+            }
+            assert_eq!(
+                o.group_label(A).await.starts_with("group:"),
+                !force_ungrouped
+            );
+
+            // B is the only candidate: A and C hold it as the group winner.
+            o.routes(B, vec![candidate(pfx(1, 0), initially_self)], vec![])
+                .await;
+            for peer in [A, C] {
+                let initial = o.drain_peer_available(peer).await;
+                let initial: Vec<_> = initial.iter().flat_map(|msg| &msg.announce).collect();
+                assert_eq!(initial.len(), 1);
+                assert_eq!(initial[0].5, initially_self.then_some(NextHopAction::Self_));
+            }
+            o.routes(B, vec![candidate(pfx(1, 0), !initially_self)], vec![])
+                .await;
+            for peer in [A, C] {
+                assert!(
+                    o.drain_peer_available(peer)
+                        .await
+                        .iter()
+                        .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                    "an equivalent winner action change must not reach {peer}"
+                );
+            }
+
+            // A wins the second prefix, so A holds B's route as its lane
+            // substitution while C receives A's route.
+            o.routes(B, vec![candidate(pfx(2, 0), initially_self)], vec![])
+                .await;
+            o.routes(A, vec![ranked(pfx(2, 0), A, 1)], vec![]).await;
+            let lane = o.drain_peer_available(A).await;
+            let lane: Vec<_> = lane.iter().flat_map(|msg| &msg.announce).collect();
+            assert!(lane.iter().all(|entry| entry.3 == IpAddr::V4(B)));
+            assert_eq!(
+                lane.last().map(|entry| entry.5.clone()),
+                Some(initially_self.then_some(NextHopAction::Self_))
+            );
+            o.routes(B, vec![candidate(pfx(2, 0), !initially_self)], vec![])
+                .await;
+            assert!(
+                o.drain_peer_available(A)
+                    .await
+                    .iter()
+                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                "an equivalent lane action change must not reach the winner's source"
+            );
+            runs.push(o.finish().await);
+        }
+        assert_route_parity(&runs[0], &runs[1]);
+    }
+}
+
+/// A clean member keeps its regroup baseline when the regroup resync is
+/// refused, and that baseline stays the admitted action record while it is
+/// dirty. Under an equivalent profile the action-only change is suppressed
+/// from that baseline on both the refused and the recovered resync, so only
+/// the genuine withdrawal reaches the wire.
+#[tokio::test]
+async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
+    tokio::time::pause();
+    for initially_self in [false, true] {
+        let mut runs = Vec::new();
+        for force_ungrouped in [false, true] {
+            let policy = |use_self: bool, regrouped: bool| {
+                let mut policy = permit_all_with(RouteModifications {
+                    set_next_hop: use_self.then_some(NextHopAction::Self_),
+                    ..RouteModifications::default()
+                });
+                if regrouped {
+                    policy.policies[0].policy.entries.insert(
+                        0,
+                        deny_prefix_chain(pfx(2, 0)).policies[0].policy.entries[0].clone(),
+                    );
+                }
+                policy
+            };
+            let mut o = Oracle::spawn(force_ungrouped, Some(A));
+            for peer in [A, B, C] {
+                equivalent_action_profile(&mut o, peer).await;
+            }
+            o.peer_up(A, false, true, None, 64).await;
+            o.peer_up(B, false, true, Some(policy(initially_self, false)), 64)
+                .await;
+            o.peer_up(C, false, true, Some(policy(initially_self, false)), 2)
+                .await;
+            o.drain_one(C).await; // Initial End-of-RIB.
+            // Both admitted announcements stay queued, filling C's channel.
+            o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+                .await;
+            o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+                .await;
+            // The new policy flips every action and withdraws pfx2. The
+            // withdrawal cannot be admitted, so C goes dirty with its baseline.
+            o.replace_policy(C, Some(policy(!initially_self, true)))
+                .await;
+            assert_eq!(
+                o.group_label(C).await.starts_with("group:"),
+                !force_ungrouped
+            );
+            // Both queued announcements were admitted before the refusal, so
+            // they drain as normal admissions; only the retry that follows
+            // runs inside the recovery interval.
+            o.drain_one(C).await;
+            o.drain_before_recovery(C, RecoveryPath::InterruptedRegroup)
+                .await;
+            tokio::time::advance(Duration::from_secs(2)).await;
+            o.quiesce().await;
+            o.end_recovery(C).await;
+            runs.push(o.finish().await);
+        }
+        assert_route_parity(&runs[0], &runs[1]);
+        for stream in &runs {
+            let messages = &stream[&IpAddr::V4(C)];
+            let announced: Vec<_> = messages
+                .iter()
+                .flat_map(|msg| &msg.announce)
+                .map(|entry| (entry.0, entry.5.clone()))
+                .collect();
+            let initial = initially_self.then_some(NextHopAction::Self_);
+            assert_eq!(
+                announced,
+                vec![
+                    (Prefix::V4(pfx(1, 0)), initial.clone()),
+                    (Prefix::V4(pfx(2, 0)), initial),
+                ],
+                "the admitted key keeps its equivalent action without a replay"
+            );
+            let withdrawn: Vec<_> = messages.iter().flat_map(|msg| &msg.withdraw).collect();
+            assert_eq!(withdrawn, vec![&(Prefix::V4(pfx(2, 0)), 0)]);
+        }
+    }
+}
+
 /// A new winner's source already holds the standing route it now receives as
 /// a substitution. Clean promotion must not reannounce that unchanged value.
 #[tokio::test]

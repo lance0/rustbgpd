@@ -152,6 +152,14 @@ impl<P> UnicastDistributionResult<P> {
 /// lengths and compatibility checks for adversarially heterogeneous peers.
 const MAX_SHARED_UNICAST_PROBE_COHORTS: usize = 8;
 
+#[cfg(test)]
+thread_local! {
+    /// Outbound commits on this thread that passed the O(1) action-suppression
+    /// gate and may scan their unicast batch.
+    pub(in crate::manager) static ACTION_SUPPRESSION_SCANS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Successful exact-export probes for one update-group's shared unicast
 /// payload. Entries live for one [`RibManager::distribute_changes`] pass only.
 ///
@@ -2665,10 +2673,22 @@ impl RibManager {
         {
             return false;
         }
-        let private = self.adj_ribs_out.get(&peer);
-        let baseline = self.pending_regroup_baseline.get(&peer);
+        // Suppression needs an admitted old slot. A grouped member keeps no
+        // private unicast slots and borrows prior group slots only when the
+        // stage carries actions, so clean grouped fanout without next-hop
+        // actions returns here in O(1) instead of scanning its batch.
+        let private = self.adj_ribs_out.get(&peer).filter(|rib| !rib.is_empty());
+        let baseline = self
+            .pending_regroup_baseline
+            .get(&peer)
+            .filter(|base| !base.unicast.is_empty());
         let clean_stage =
             stage.filter(|stage| !self.dirty_peers.contains(&peer) && stage.has_next_hop_actions);
+        if private.is_none() && baseline.is_none() && clean_stage.is_none() {
+            return false;
+        }
+        #[cfg(test)]
+        ACTION_SUPPRESSION_SCANS.with(|scans| scans.set(scans.get() + 1));
         if !batch.unicast.next_hop_override.iter().any(Option::is_some)
             && !private.is_some_and(AdjRibOut::has_next_hop_overrides)
             && baseline.is_none_or(|base| base.next_hop_overrides.is_empty())
@@ -2961,6 +2981,11 @@ impl RibManager {
             && batch.rtc_withdraw.is_empty()
             && !self.pending_otc_blocked.contains_key(&peer)
         {
+            // A fully suppressed envelope is a successful no-op commit. Like
+            // the successful enqueue tail below, it needs no forced readiness
+            // service: the suppression scan and these retires already run a
+            // budgeted checkpoint per route, which serves readiness whenever
+            // the budget elapses. Forcing only serves earlier.
             batch.retire_with(&mut || checkpoint());
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             return true;
