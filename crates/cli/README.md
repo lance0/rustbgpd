@@ -509,6 +509,7 @@ The family RIB commands also expose bounded peer views and filtered pages:
 
 ```bash
 rbgp rib vpn received 192.0.2.1 --rd 65000:100 --prefix 10.0.0.0/24 --limit 100
+rbgp rib vpn --prefix 10.0.0.0/16 --longer -a vpnv4 --limit 100
 rbgp rib labeled advertised 192.0.2.2 -a labeled-v4 --limit 100
 rbgp rib rtc received 192.0.2.1 --route-target RT:65000:100 --limit 100
 rbgp evpn best --mac 00:11:22:33:44:55 --esi 00:01:02:03:04:05:06:07:08:09 --vni 100
@@ -519,6 +520,10 @@ Restart with an empty token after a table-change error. JSON pages include
 view, neighbor, routes, total count, next token and version; existing unpaged
 commands keep their arrays. Received rows are retained accepted post-policy
 input; advertised rows are local export state and keep their source peer.
+VPN and labeled `--prefix` filters use a canonical CIDR, match exactly by
+default, and include more specific routes with `--longer`. On best views,
+`--neighbor` filters the winning route's source; received and advertised views
+take their source or destination neighbor as a positional argument.
 These additions stay outside the current v1 inventory. See the
 [API reference](../../docs/reference/api.md#bounded-vpn-labeled-rtc-and-evpn-best-pages)
 for filter semantics and errors.
@@ -527,7 +532,7 @@ for filter semantics and errors.
 
 ```bash
 rbgp evpn
-rbgp evpn received <addr> --route-type 2 --rd 65000:100
+rbgp evpn received <addr> --route-type 2 --rd 65000:100 --mac 00:11:22:33:44:55 --vni 100
 rbgp evpn advertised <addr> --limit 100 --page-token '<token>'
 
 rbgp evpn explain mac-ip --rd 65000:100 --mac aa:bb:cc:dd:ee:ff --advertised-to 192.0.2.2
@@ -556,6 +561,9 @@ maximum 1000) with a total and an opaque continuation token. Pass that token
 with the same peer and filters for the next page; restart without it after a
 table change aborts the query. JSON returns `view`, `neighbor`, `routes`,
 `total_count`, `next_page_token`, and `page_version`.
+Best and peer pages accept the same `--mac`, `--esi`, and `--vni` filters.
+Their `--rd` accepts structured text or `0x` plus 16 raw hex digits, allowing
+an exact RD type to be selected when its display text is ambiguous.
 
 Received rows are accepted post-policy Adj-RIB-In; absence does not prove the
 peer never sent a route. Advertised rows are committed Adj-RIB-Out for the

@@ -297,7 +297,13 @@ impl RibService {
         } else {
             RouteQueryScope::Received { peer: Some(peer) }
         };
-        let (filter, identity) = peer_evpn_filter(req.route_type_filter, &req.rd_filter)?;
+        let (filter, identity) = peer_evpn_filter(
+            req.route_type_filter,
+            &req.rd_filter,
+            &req.mac_filter,
+            &req.esi_filter,
+            req.vni_filter,
+        )?;
         let (after, expected_version) = if req.page_token.is_empty() {
             (None, None)
         } else {
@@ -1081,48 +1087,68 @@ fn family_page_error(error: RoutePageError) -> Status {
     }
 }
 
-fn family_page_scope(view: i32, peer: &str) -> Result<(RouteQueryScope, Option<IpAddr>), Status> {
-    let peer = parse_optional_peer_filter(peer)?;
-    let scope = match proto::FamilyRouteView::try_from(view) {
-        Ok(proto::FamilyRouteView::Best) => RouteQueryScope::Best,
-        Ok(proto::FamilyRouteView::Received) => RouteQueryScope::Received {
-            peer: Some(
-                peer.ok_or_else(|| Status::invalid_argument("received view requires peer_filter"))?,
-            ),
+fn family_page_scope(
+    view: i32,
+    neighbor: &str,
+    source: &str,
+) -> Result<(RouteQueryScope, Option<IpAddr>), Status> {
+    let view = proto::FamilyRouteView::try_from(view)
+        .map_err(|_| Status::invalid_argument("unknown family route view"))?;
+    if view == proto::FamilyRouteView::Unspecified {
+        return Err(Status::invalid_argument(
+            "view must be BEST, RECEIVED or ADVERTISED",
+        ));
+    }
+    let peer = if view == proto::FamilyRouteView::Best {
+        if !neighbor.is_empty() {
+            return Err(Status::invalid_argument(
+                "neighbor_address is not valid for best view",
+            ));
+        }
+        parse_optional_peer_filter(source)?
+    } else {
+        if !source.is_empty() {
+            return Err(Status::invalid_argument(
+                "source_peer_filter is only valid for best view",
+            ));
+        }
+        Some(
+            parse_optional_peer_filter(neighbor)?
+                .ok_or_else(|| Status::invalid_argument("peer views require neighbor_address"))?,
+        )
+    };
+    let scope = match view {
+        proto::FamilyRouteView::Best => RouteQueryScope::Best,
+        proto::FamilyRouteView::Received => RouteQueryScope::Received { peer },
+        proto::FamilyRouteView::Advertised => RouteQueryScope::Advertised {
+            peer: peer.expect("peer view requires a validated neighbor"),
         },
-        Ok(proto::FamilyRouteView::Advertised) => RouteQueryScope::Advertised {
-            peer: peer
-                .ok_or_else(|| Status::invalid_argument("advertised view requires peer_filter"))?,
-        },
-        Err(_) => return Err(Status::invalid_argument("unknown family route view")),
+        proto::FamilyRouteView::Unspecified => unreachable!("unspecified view rejected above"),
     };
     Ok((scope, peer))
 }
 
-fn parse_family_prefix(value: &str) -> Result<Option<Prefix>, Status> {
+fn parse_family_prefix(value: &str, length: u32) -> Result<Option<Prefix>, Status> {
     if value.is_empty() {
+        if length != 0 {
+            return Err(Status::invalid_argument(
+                "prefix_filter_length requires a non-empty prefix_filter",
+            ));
+        }
         return Ok(None);
     }
-    let (address, length) = value
-        .split_once('/')
-        .ok_or_else(|| Status::invalid_argument("prefix_filter must be CIDR"))?;
-    let prefix = parse_prefix_request(
-        address,
-        length
-            .parse()
-            .map_err(|_| Status::invalid_argument("invalid prefix length"))?,
-    )?;
-    if prefix
-        .to_string()
-        .split_once('/')
-        .map(|(addr, _)| addr.parse::<IpAddr>())
-        != Some(address.parse::<IpAddr>())
-    {
-        return Err(Status::invalid_argument(
-            "prefix_filter must have zero host bits",
-        ));
+    parse_prefix_request(value, length).map(Some)
+}
+
+fn family_ip_prefix(prefix: rustbgpd_wire::VpnPrefix) -> Prefix {
+    match prefix {
+        rustbgpd_wire::VpnPrefix::V4 { addr, len } => {
+            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(addr, len))
+        }
+        rustbgpd_wire::VpnPrefix::V6 { addr, len } => {
+            Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr, len))
+        }
     }
-    Ok(Some(prefix))
 }
 
 fn vpn_prefix(prefix: Prefix) -> rustbgpd_wire::VpnPrefix {
@@ -1136,6 +1162,63 @@ fn vpn_prefix(prefix: Prefix) -> rustbgpd_wire::VpnPrefix {
             len: prefix.len,
         },
     }
+}
+
+fn parse_family_cursor_prefix(value: &str) -> Result<Prefix, Status> {
+    let (address, length) = value
+        .split_once('/')
+        .ok_or_else(|| Status::invalid_argument("page cursor prefix must be CIDR"))?;
+    let length = length
+        .parse()
+        .map_err(|_| Status::invalid_argument("invalid cursor prefix length"))?;
+    let prefix = parse_prefix_request(address, length)?;
+    if prefix
+        .to_string()
+        .split_once('/')
+        .map(|(addr, _)| addr.parse::<IpAddr>())
+        != Some(address.parse::<IpAddr>())
+    {
+        return Err(Status::invalid_argument(
+            "page cursor prefix must have zero host bits",
+        ));
+    }
+    Ok(prefix)
+}
+
+fn family_page_afi(
+    value: i32,
+    ipv4: proto::AddressFamily,
+    ipv6: proto::AddressFamily,
+) -> Result<Option<Afi>, Status> {
+    if value == proto::AddressFamily::Unspecified as i32 {
+        Ok(None)
+    } else if value == ipv4 as i32 {
+        Ok(Some(Afi::Ipv4))
+    } else if value == ipv6 as i32 {
+        Ok(Some(Afi::Ipv6))
+    } else {
+        Err(Status::invalid_argument(
+            "unsupported address family for this route query",
+        ))
+    }
+}
+
+fn family_prefix_matches(
+    afi: Option<Afi>,
+    filter: Option<Prefix>,
+    longer: bool,
+    candidate: Prefix,
+) -> bool {
+    afi.is_none_or(|afi| match candidate {
+        Prefix::V4(_) => afi == Afi::Ipv4,
+        Prefix::V6(_) => afi == Afi::Ipv6,
+    }) && filter.is_none_or(|prefix| {
+        if longer {
+            prefix_contains(&prefix, &candidate)
+        } else {
+            prefix == candidate
+        }
+    })
 }
 
 fn parse_family_rd(value: &str) -> Result<Option<rustbgpd_wire::RouteDistinguisher>, Status> {
@@ -1278,7 +1361,7 @@ fn parse_vpn_page_key(value: &str) -> Result<rustbgpd_rib::VpnRouteQueryKey, Sta
             route_distinguisher: rustbgpd_wire::RouteDistinguisher(
                 parse_page_octets(rd).map_err(|_| invalid())?.to_be_bytes(),
             ),
-            prefix: vpn_prefix(parse_family_prefix(prefix)?.ok_or_else(invalid)?),
+            prefix: vpn_prefix(parse_family_cursor_prefix(prefix)?),
         },
         peer.parse().map_err(|_| invalid())?,
         path.parse().map_err(|_| invalid())?,
@@ -1292,7 +1375,7 @@ fn parse_labeled_page_key(value: &str) -> Result<rustbgpd_rib::LabeledRouteQuery
         return Err(invalid());
     };
     Ok((
-        parse_family_prefix(prefix)?.ok_or_else(invalid)?,
+        parse_family_cursor_prefix(prefix)?,
         peer.parse().map_err(|_| invalid())?,
         path.parse().map_err(|_| invalid())?,
     ))
@@ -1316,45 +1399,67 @@ fn parse_rtc_page_key(value: &str) -> Result<rustbgpd_rib::RtcRouteQueryKey, Sta
 }
 
 fn evpn_loc_filter(
-    req: &proto::ListEvpnRoutesPageRequest,
+    req: &proto::ListBestEvpnRoutesRequest,
 ) -> Result<(Option<RibRowFilter<EvpnRibRoute>>, String), Status> {
-    let (base, base_identity) = peer_evpn_filter(req.route_type_filter, "")?;
-    let rd = parse_family_rd(&req.rd_filter)?;
-    let peer = parse_optional_peer_filter(&req.peer_filter)?;
-    let mac = if req.mac_filter.is_empty() {
+    let (base, base_identity) = peer_evpn_filter(
+        req.route_type_filter,
+        &req.rd_filter,
+        &req.mac_filter,
+        &req.esi_filter,
+        req.vni_filter,
+    )?;
+    let peer = parse_optional_peer_filter(&req.source_peer_filter)?;
+    let identity = family_query_identity("evpn-loc", &format!("{base_identity}:{peer:?}"));
+    let filter = row_filter(
+        base.is_some() || peer.is_some(),
+        move |route: &EvpnRibRoute| {
+            base.as_ref().is_none_or(|filter| filter(route))
+                && peer.is_none_or(|peer| route.peer == peer)
+        },
+    );
+    Ok((filter, identity))
+}
+
+fn peer_evpn_filter(
+    route_type: u32,
+    rd: &str,
+    mac: &str,
+    esi: &str,
+    vni: Option<u32>,
+) -> Result<(Option<RibRowFilter<EvpnRibRoute>>, String), Status> {
+    if route_type > 6 {
+        return Err(Status::invalid_argument(
+            "route_type_filter must be 0 or 1..=6",
+        ));
+    }
+    let rd = parse_family_rd(rd)?;
+    let mac = if mac.is_empty() {
         None
     } else {
-        Some(crate::injection_service::parse_mac(&req.mac_filter)?)
+        Some(crate::injection_service::parse_mac(mac)?)
     };
     let esi =
-        if req.esi_filter.is_empty() {
+        if esi.is_empty() {
             None
         } else {
-            Some(rustbgpd_evpn::parse_esi(&req.esi_filter).map_err(|error| {
+            Some(rustbgpd_evpn::parse_esi(esi).map_err(|error| {
                 Status::invalid_argument(format!("invalid esi_filter: {error}"))
             })?)
         };
-    let vni = req.vni_filter;
     if vni.is_some_and(|vni| vni > 0x00ff_ffff) {
         return Err(Status::invalid_argument(
             "vni_filter must be at most 16777215",
         ));
     }
     let identity = family_query_identity(
-        "evpn-loc",
-        &format!("{base_identity}:{rd:?}:{peer:?}:{mac:?}:{esi:?}:{vni:?}"),
+        "evpn-rows",
+        &format!("{route_type}:{rd:?}:{mac:?}:{esi:?}:{vni:?}"),
     );
     let filter = row_filter(
-        base.is_some()
-            || rd.is_some()
-            || peer.is_some()
-            || mac.is_some()
-            || esi.is_some()
-            || vni.is_some(),
+        route_type != 0 || rd.is_some() || mac.is_some() || esi.is_some() || vni.is_some(),
         move |route: &EvpnRibRoute| {
-            if base.as_ref().is_some_and(|filter| !filter(route))
+            if (route_type != 0 && u32::from(route.route_type()) != route_type)
                 || rd.is_some_and(|rd| !evpn_route_matches_rd(&route.route, rd))
-                || peer.is_some_and(|peer| peer != route.peer)
             {
                 return false;
             }
@@ -1406,41 +1511,6 @@ fn evpn_loc_filter(
         },
     );
     Ok((filter, identity))
-}
-
-fn peer_evpn_filter(
-    route_type: u32,
-    rd: &str,
-) -> Result<(Option<RibRowFilter<EvpnRibRoute>>, String), Status> {
-    if route_type > 6 {
-        return Err(Status::invalid_argument(
-            "route_type_filter must be 0 or 1..=6",
-        ));
-    }
-    let rd = if rd.is_empty() {
-        None
-    } else {
-        Some(
-            rd.parse::<rustbgpd_wire::RouteDistinguisher>()
-                .map_err(|error| Status::invalid_argument(format!("invalid rd_filter: {error}")))?,
-        )
-    };
-    let identity = format!(
-        "{route_type}:{}",
-        rd.map(|rd| rd.to_string()).unwrap_or_default()
-    );
-    Ok((
-        row_filter(
-            route_type != 0 || rd.is_some(),
-            move |route: &EvpnRibRoute| {
-                if route_type != 0 && u32::from(route.route_type()) != route_type {
-                    return false;
-                }
-                rd.is_none_or(|rd| evpn_route_matches_rd(&route.route, rd))
-            },
-        ),
-        identity,
-    ))
 }
 
 fn evpn_route_matches_rd(route: &EvpnRoute, rd: rustbgpd_wire::RouteDistinguisher) -> bool {
@@ -2934,23 +3004,24 @@ impl proto::rib_service_server::RibService for RibService {
         Ok(Response::new(proto::ListRtcRoutesResponse { routes }))
     }
 
-    async fn list_vpn_routes_page(
+    async fn list_vpn_rib_routes(
         &self,
-        request: Request<proto::ListVpnRoutesPageRequest>,
-    ) -> Result<Response<proto::ListVpnRoutesPageResponse>, Status> {
+        request: Request<proto::ListVpnRibRoutesRequest>,
+    ) -> Result<Response<proto::ListVpnRibRoutesResponse>, Status> {
         let req = request.into_inner();
-        let (scope, peer) = family_page_scope(req.view, &req.peer_filter)?;
-        if !req.afi_safi.is_empty()
-            && !["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"].contains(&req.afi_safi.as_str())
-        {
-            return Err(Status::invalid_argument("unsupported vpn family"));
-        }
-        let prefix = parse_family_prefix(&req.prefix_filter)?;
-        let prefix = prefix.map(vpn_prefix);
+        let (scope, peer) =
+            family_page_scope(req.view, &req.neighbor_address, &req.source_peer_filter)?;
+        let afi = family_page_afi(
+            req.afi_safi,
+            proto::AddressFamily::L3vpnIpv4Unicast,
+            proto::AddressFamily::L3vpnIpv6Unicast,
+        )?;
+        let prefix = parse_family_prefix(&req.prefix_filter, req.prefix_filter_length)?;
+        let longer = req.longer_prefixes && prefix.is_some();
         let rd = parse_family_rd(&req.rd_filter)?;
         let identity = family_query_identity(
             "vpn",
-            &format!("{}:{peer:?}:{prefix:?}:{rd:?}", req.afi_safi),
+            &format!("{afi:?}:{peer:?}:{prefix:?}:{longer}:{rd:?}"),
         );
         let (page_size, after, expected_version) = family_page_params(
             req.page_size,
@@ -2960,8 +3031,7 @@ impl proto::rib_service_server::RibService for RibService {
             parse_vpn_page_key,
         )?;
         let filter = Some(Box::new(move |route: &VpnRibRoute| {
-            (req.afi_safi.is_empty() || vpn_family_label(route) == req.afi_safi)
-                && prefix.is_none_or(|prefix| route.nlri.prefix == prefix)
+            family_prefix_matches(afi, prefix, longer, family_ip_prefix(route.nlri.prefix))
                 && rd.is_none_or(|rd| route.nlri.route_distinguisher == rd)
                 && (scope != RouteQueryScope::Best || peer.is_none_or(|peer| route.peer == peer))
         }) as RibRowFilter<VpnRibRoute>);
@@ -3002,7 +3072,7 @@ impl proto::rib_service_server::RibService for RibService {
         } else {
             String::new()
         };
-        Ok(Response::new(proto::ListVpnRoutesPageResponse {
+        Ok(Response::new(proto::ListVpnRibRoutesResponse {
             routes: page.routes.iter().map(vpn_route_to_proto).collect(),
             next_page_token,
             total_count: page.total,
@@ -3013,20 +3083,22 @@ impl proto::rib_service_server::RibService for RibService {
         }))
     }
 
-    async fn list_labeled_routes_page(
+    async fn list_labeled_rib_routes(
         &self,
-        request: Request<proto::ListLabeledRoutesPageRequest>,
-    ) -> Result<Response<proto::ListLabeledRoutesPageResponse>, Status> {
+        request: Request<proto::ListLabeledRibRoutesRequest>,
+    ) -> Result<Response<proto::ListLabeledRibRoutesResponse>, Status> {
         let req = request.into_inner();
-        let (scope, peer) = family_page_scope(req.view, &req.peer_filter)?;
-        if !req.afi_safi.is_empty()
-            && !["ipv4_labeled_unicast", "ipv6_labeled_unicast"].contains(&req.afi_safi.as_str())
-        {
-            return Err(Status::invalid_argument("unsupported labeled family"));
-        }
-        let prefix = parse_family_prefix(&req.prefix_filter)?;
+        let (scope, peer) =
+            family_page_scope(req.view, &req.neighbor_address, &req.source_peer_filter)?;
+        let afi = family_page_afi(
+            req.afi_safi,
+            proto::AddressFamily::Ipv4LabeledUnicast,
+            proto::AddressFamily::Ipv6LabeledUnicast,
+        )?;
+        let prefix = parse_family_prefix(&req.prefix_filter, req.prefix_filter_length)?;
+        let longer = req.longer_prefixes && prefix.is_some();
         let identity =
-            family_query_identity("labeled", &format!("{}:{peer:?}:{prefix:?}", req.afi_safi));
+            family_query_identity("labeled", &format!("{afi:?}:{peer:?}:{prefix:?}:{longer}"));
         let (page_size, after, expected_version) = family_page_params(
             req.page_size,
             &req.page_token,
@@ -3035,8 +3107,7 @@ impl proto::rib_service_server::RibService for RibService {
             parse_labeled_page_key,
         )?;
         let filter = Some(Box::new(move |route: &LabeledRibRoute| {
-            (req.afi_safi.is_empty() || labeled_family_label(route) == req.afi_safi)
-                && prefix.is_none_or(|prefix| route.nlri.prefix == prefix)
+            family_prefix_matches(afi, prefix, longer, route.nlri.prefix)
                 && (scope != RouteQueryScope::Best || peer.is_none_or(|peer| route.peer == peer))
         }) as RibRowFilter<LabeledRibRoute>);
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLabeledRoutesPage {
@@ -3070,7 +3141,7 @@ impl proto::rib_service_server::RibService for RibService {
         } else {
             String::new()
         };
-        Ok(Response::new(proto::ListLabeledRoutesPageResponse {
+        Ok(Response::new(proto::ListLabeledRibRoutesResponse {
             routes: page.routes.iter().map(labeled_route_to_proto).collect(),
             next_page_token,
             total_count: page.total,
@@ -3081,12 +3152,20 @@ impl proto::rib_service_server::RibService for RibService {
         }))
     }
 
-    async fn list_rtc_routes_page(
+    async fn list_rtc_rib_routes(
         &self,
-        request: Request<proto::ListRtcRoutesPageRequest>,
-    ) -> Result<Response<proto::ListRtcRoutesPageResponse>, Status> {
+        request: Request<proto::ListRtcRibRoutesRequest>,
+    ) -> Result<Response<proto::ListRtcRibRoutesResponse>, Status> {
         let req = request.into_inner();
-        let (scope, peer) = family_page_scope(req.view, &req.peer_filter)?;
+        let (scope, peer) =
+            family_page_scope(req.view, &req.neighbor_address, &req.source_peer_filter)?;
+        if req.afi_safi != proto::AddressFamily::Unspecified as i32
+            && req.afi_safi != proto::AddressFamily::Ipv4RtConstrain as i32
+        {
+            return Err(Status::invalid_argument(
+                "unsupported address family for RTC query",
+            ));
+        }
         let rt = parse_family_route_target(&req.route_target_filter)?;
         let origin = req.origin_as_filter;
         let identity = family_query_identity("rtc", &format!("{peer:?}:{rt:?}:{origin:?}"));
@@ -3142,7 +3221,7 @@ impl proto::rib_service_server::RibService for RibService {
         } else {
             String::new()
         };
-        Ok(Response::new(proto::ListRtcRoutesPageResponse {
+        Ok(Response::new(proto::ListRtcRibRoutesResponse {
             routes: page.routes.iter().map(rtc_route_to_proto).collect(),
             next_page_token,
             total_count: page.total,
@@ -3153,10 +3232,10 @@ impl proto::rib_service_server::RibService for RibService {
         }))
     }
 
-    async fn list_evpn_routes_page(
+    async fn list_best_evpn_routes(
         &self,
-        request: Request<proto::ListEvpnRoutesPageRequest>,
-    ) -> Result<Response<proto::ListEvpnRoutesPageResponse>, Status> {
+        request: Request<proto::ListBestEvpnRoutesRequest>,
+    ) -> Result<Response<proto::ListBestEvpnRoutesResponse>, Status> {
         let req = request.into_inner();
         if req.page_size > 1000 {
             return Err(Status::invalid_argument("page_size must be at most 1000"));
@@ -3198,7 +3277,7 @@ impl proto::rib_service_server::RibService for RibService {
         } else {
             String::new()
         };
-        Ok(Response::new(proto::ListEvpnRoutesPageResponse {
+        Ok(Response::new(proto::ListBestEvpnRoutesResponse {
             routes: page.routes.iter().map(evpn_route_to_proto).collect(),
             next_page_token,
             total_count: page.total,
@@ -4179,10 +4258,10 @@ mod tests {
         ListVpnRoutes,
         ListLabeledRoutes,
         ListRtcRoutes,
-        ListVpnRoutesPage,
-        ListLabeledRoutesPage,
-        ListRtcRoutesPage,
-        ListEvpnRoutesPage,
+        ListVpnRibRoutes,
+        ListLabeledRibRoutes,
+        ListRtcRibRoutes,
+        ListBestEvpnRoutes,
         ListTopologyNodes,
         ListTopologyLinks,
         ListOrrStatus,
@@ -4207,10 +4286,10 @@ mod tests {
         UnaryRibRead::ListVpnRoutes,
         UnaryRibRead::ListLabeledRoutes,
         UnaryRibRead::ListRtcRoutes,
-        UnaryRibRead::ListVpnRoutesPage,
-        UnaryRibRead::ListLabeledRoutesPage,
-        UnaryRibRead::ListRtcRoutesPage,
-        UnaryRibRead::ListEvpnRoutesPage,
+        UnaryRibRead::ListVpnRibRoutes,
+        UnaryRibRead::ListLabeledRibRoutes,
+        UnaryRibRead::ListRtcRibRoutes,
+        UnaryRibRead::ListBestEvpnRoutes,
         UnaryRibRead::ListTopologyNodes,
         UnaryRibRead::ListTopologyLinks,
         UnaryRibRead::ListOrrStatus,
@@ -4316,22 +4395,29 @@ mod tests {
                 .list_rtc_routes(Request::new(proto::ListRtcRoutesRequest::default()))
                 .await
                 .map(|_| ()),
-            UnaryRibRead::ListVpnRoutesPage => svc
-                .list_vpn_routes_page(Request::new(proto::ListVpnRoutesPageRequest::default()))
+            UnaryRibRead::ListVpnRibRoutes => svc
+                .list_vpn_rib_routes(Request::new(proto::ListVpnRibRoutesRequest {
+                    view: proto::FamilyRouteView::Best as i32,
+                    ..Default::default()
+                }))
                 .await
                 .map(|_| ()),
-            UnaryRibRead::ListLabeledRoutesPage => svc
-                .list_labeled_routes_page(Request::new(
-                    proto::ListLabeledRoutesPageRequest::default(),
-                ))
+            UnaryRibRead::ListLabeledRibRoutes => svc
+                .list_labeled_rib_routes(Request::new(proto::ListLabeledRibRoutesRequest {
+                    view: proto::FamilyRouteView::Best as i32,
+                    ..Default::default()
+                }))
                 .await
                 .map(|_| ()),
-            UnaryRibRead::ListRtcRoutesPage => svc
-                .list_rtc_routes_page(Request::new(proto::ListRtcRoutesPageRequest::default()))
+            UnaryRibRead::ListRtcRibRoutes => svc
+                .list_rtc_rib_routes(Request::new(proto::ListRtcRibRoutesRequest {
+                    view: proto::FamilyRouteView::Best as i32,
+                    ..Default::default()
+                }))
                 .await
                 .map(|_| ()),
-            UnaryRibRead::ListEvpnRoutesPage => svc
-                .list_evpn_routes_page(Request::new(proto::ListEvpnRoutesPageRequest::default()))
+            UnaryRibRead::ListBestEvpnRoutes => svc
+                .list_best_evpn_routes(Request::new(proto::ListBestEvpnRoutesRequest::default()))
                 .await
                 .map(|_| ()),
             UnaryRibRead::ListTopologyNodes => svc
@@ -4419,49 +4505,49 @@ mod tests {
                 .await
                 .map(|_| ()),
             PeerScopedRead::VpnPageReceived => svc
-                .list_vpn_routes_page(Request::new(proto::ListVpnRoutesPageRequest {
+                .list_vpn_rib_routes(Request::new(proto::ListVpnRibRoutesRequest {
                     view: proto::FamilyRouteView::Received as i32,
-                    peer_filter: peer,
+                    neighbor_address: peer,
                     ..Default::default()
                 }))
                 .await
                 .map(|_| ()),
             PeerScopedRead::VpnPageAdvertised => svc
-                .list_vpn_routes_page(Request::new(proto::ListVpnRoutesPageRequest {
+                .list_vpn_rib_routes(Request::new(proto::ListVpnRibRoutesRequest {
                     view: proto::FamilyRouteView::Advertised as i32,
-                    peer_filter: peer,
+                    neighbor_address: peer,
                     ..Default::default()
                 }))
                 .await
                 .map(|_| ()),
             PeerScopedRead::LabeledPageReceived => svc
-                .list_labeled_routes_page(Request::new(proto::ListLabeledRoutesPageRequest {
+                .list_labeled_rib_routes(Request::new(proto::ListLabeledRibRoutesRequest {
                     view: proto::FamilyRouteView::Received as i32,
-                    peer_filter: peer,
+                    neighbor_address: peer,
                     ..Default::default()
                 }))
                 .await
                 .map(|_| ()),
             PeerScopedRead::LabeledPageAdvertised => svc
-                .list_labeled_routes_page(Request::new(proto::ListLabeledRoutesPageRequest {
+                .list_labeled_rib_routes(Request::new(proto::ListLabeledRibRoutesRequest {
                     view: proto::FamilyRouteView::Advertised as i32,
-                    peer_filter: peer,
+                    neighbor_address: peer,
                     ..Default::default()
                 }))
                 .await
                 .map(|_| ()),
             PeerScopedRead::RtcPageReceived => svc
-                .list_rtc_routes_page(Request::new(proto::ListRtcRoutesPageRequest {
+                .list_rtc_rib_routes(Request::new(proto::ListRtcRibRoutesRequest {
                     view: proto::FamilyRouteView::Received as i32,
-                    peer_filter: peer,
+                    neighbor_address: peer,
                     ..Default::default()
                 }))
                 .await
                 .map(|_| ()),
             PeerScopedRead::RtcPageAdvertised => svc
-                .list_rtc_routes_page(Request::new(proto::ListRtcRoutesPageRequest {
+                .list_rtc_rib_routes(Request::new(proto::ListRtcRibRoutesRequest {
                     view: proto::FamilyRouteView::Advertised as i32,
-                    peer_filter: peer,
+                    neighbor_address: peer,
                     ..Default::default()
                 }))
                 .await
@@ -5323,9 +5409,9 @@ mod tests {
             },
         ));
         assert_eq!(parse_evpn_selector(&selector).unwrap(), route.key());
-        let (filter, _) = peer_evpn_filter(6, "65000:100").unwrap();
+        let (filter, _) = peer_evpn_filter(6, "65000:100", "", "", None).unwrap();
         assert!(filter.unwrap()(&route));
-        let (filter, _) = peer_evpn_filter(6, "65000:101").unwrap();
+        let (filter, _) = peer_evpn_filter(6, "65000:101", "", "", None).unwrap();
         assert!(!filter.unwrap()(&route));
         let scope = RouteQueryScope::Received { peer: Some(peer) };
         let version = RoutePageVersion {
@@ -5419,6 +5505,7 @@ mod tests {
                 rd_filter: "65000:100".into(),
                 page_size: 1,
                 page_token: String::new(),
+                ..Default::default()
             });
             let response = if advertised {
                 service.list_advertised_evpn_routes(request).await
@@ -6297,17 +6384,22 @@ mod tests {
     #[test]
     fn evpn_peer_filters_match_typed_rd_and_route_type() {
         let (mut route, ..) = non_unicast_routes("192.0.2.1".parse().unwrap());
-        let (filter, identity) = peer_evpn_filter(3, "065000:0100").unwrap();
-        assert_eq!(identity, "3:65000:100");
+        let (filter, identity) = peer_evpn_filter(3, "065000:0100", "", "", None).unwrap();
+        assert_eq!(
+            identity,
+            peer_evpn_filter(3, "65000:100", "", "", None).unwrap().1
+        );
         let filter = filter.unwrap();
         assert!(filter(&route));
-        assert!(!peer_evpn_filter(2, "").unwrap().0.unwrap()(&route));
+        assert!(!peer_evpn_filter(2, "", "", "", None).unwrap().0.unwrap()(
+            &route
+        ));
         let EvpnRoute::Imet(imet) = &mut route.route else {
             panic!("IMET fixture");
         };
         imet.rd = "65000:101".parse().unwrap();
         assert!(!filter(&route));
-        assert!(peer_evpn_filter(0, "").unwrap().0.is_none());
+        assert!(peer_evpn_filter(0, "", "", "", None).unwrap().0.is_none());
     }
 
     #[tokio::test]
@@ -6322,7 +6414,7 @@ mod tests {
         };
         let token = encode_evpn_page_token(
             RouteQueryScope::Received { peer: Some(peer) },
-            "3:65000:100",
+            &peer_evpn_filter(3, "65000:100", "", "", None).unwrap().1,
             &route,
             version,
         )
@@ -6333,6 +6425,7 @@ mod tests {
             rd_filter: "65000:100".into(),
             page_size: 1,
             page_token: token.clone(),
+            ..Default::default()
         };
         let task = tokio::spawn(async move {
             let Some(RibUpdate::QueryEvpnRoutesPage {

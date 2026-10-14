@@ -195,14 +195,14 @@ pub(crate) struct MockState {
     pub(crate) list_conditional_response:
         Mutex<Option<server_proto::ListConditionalAdvertisementsResponse>>,
     pub(crate) family_page_error: Mutex<Option<(Code, String)>>,
-    pub(crate) last_list_vpn_page: Mutex<Option<server_proto::ListVpnRoutesPageRequest>>,
-    pub(crate) list_vpn_page_response: Mutex<server_proto::ListVpnRoutesPageResponse>,
-    pub(crate) last_list_labeled_page: Mutex<Option<server_proto::ListLabeledRoutesPageRequest>>,
-    pub(crate) list_labeled_page_response: Mutex<server_proto::ListLabeledRoutesPageResponse>,
-    pub(crate) last_list_rtc_page: Mutex<Option<server_proto::ListRtcRoutesPageRequest>>,
-    pub(crate) list_rtc_page_response: Mutex<server_proto::ListRtcRoutesPageResponse>,
-    pub(crate) last_list_evpn_page: Mutex<Option<server_proto::ListEvpnRoutesPageRequest>>,
-    pub(crate) list_evpn_page_response: Mutex<server_proto::ListEvpnRoutesPageResponse>,
+    pub(crate) last_list_vpn_page: Mutex<Option<server_proto::ListVpnRibRoutesRequest>>,
+    pub(crate) list_vpn_page_response: Mutex<server_proto::ListVpnRibRoutesResponse>,
+    pub(crate) last_list_labeled_page: Mutex<Option<server_proto::ListLabeledRibRoutesRequest>>,
+    pub(crate) list_labeled_page_response: Mutex<server_proto::ListLabeledRibRoutesResponse>,
+    pub(crate) last_list_rtc_page: Mutex<Option<server_proto::ListRtcRibRoutesRequest>>,
+    pub(crate) list_rtc_page_response: Mutex<server_proto::ListRtcRibRoutesResponse>,
+    pub(crate) last_list_evpn_page: Mutex<Option<server_proto::ListBestEvpnRoutesRequest>>,
+    pub(crate) list_evpn_page_response: Mutex<server_proto::ListBestEvpnRoutesResponse>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) list_vpn_response: Mutex<Option<server_proto::ListVpnRoutesResponse>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
@@ -2347,10 +2347,10 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         }))
     }
 
-    async fn list_vpn_routes_page(
+    async fn list_vpn_rib_routes(
         &self,
-        request: Request<server_proto::ListVpnRoutesPageRequest>,
-    ) -> Result<Response<server_proto::ListVpnRoutesPageResponse>, Status> {
+        request: Request<server_proto::ListVpnRibRoutesRequest>,
+    ) -> Result<Response<server_proto::ListVpnRibRoutesResponse>, Status> {
         *self.state.last_list_vpn_page.lock().await = Some(request.into_inner());
         if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
             return Err(Status::new(code, message));
@@ -2360,10 +2360,10 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         ))
     }
 
-    async fn list_labeled_routes_page(
+    async fn list_labeled_rib_routes(
         &self,
-        request: Request<server_proto::ListLabeledRoutesPageRequest>,
-    ) -> Result<Response<server_proto::ListLabeledRoutesPageResponse>, Status> {
+        request: Request<server_proto::ListLabeledRibRoutesRequest>,
+    ) -> Result<Response<server_proto::ListLabeledRibRoutesResponse>, Status> {
         *self.state.last_list_labeled_page.lock().await = Some(request.into_inner());
         if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
             return Err(Status::new(code, message));
@@ -2373,10 +2373,10 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         ))
     }
 
-    async fn list_rtc_routes_page(
+    async fn list_rtc_rib_routes(
         &self,
-        request: Request<server_proto::ListRtcRoutesPageRequest>,
-    ) -> Result<Response<server_proto::ListRtcRoutesPageResponse>, Status> {
+        request: Request<server_proto::ListRtcRibRoutesRequest>,
+    ) -> Result<Response<server_proto::ListRtcRibRoutesResponse>, Status> {
         *self.state.last_list_rtc_page.lock().await = Some(request.into_inner());
         if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
             return Err(Status::new(code, message));
@@ -2386,10 +2386,10 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         ))
     }
 
-    async fn list_evpn_routes_page(
+    async fn list_best_evpn_routes(
         &self,
-        request: Request<server_proto::ListEvpnRoutesPageRequest>,
-    ) -> Result<Response<server_proto::ListEvpnRoutesPageResponse>, Status> {
+        request: Request<server_proto::ListBestEvpnRoutesRequest>,
+    ) -> Result<Response<server_proto::ListBestEvpnRoutesResponse>, Status> {
         *self.state.last_list_evpn_page.lock().await = Some(request.into_inner());
         if let Some((code, message)) = self.state.family_page_error.lock().await.clone() {
             return Err(Status::new(code, message));

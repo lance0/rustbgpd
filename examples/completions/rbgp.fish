@@ -640,8 +640,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "fib" -d 'Show general unicast FIB route install status'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "bgpls" -d 'Show BGP-LS routes learned from peers (RFC 9552)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "bgp-ls" -d 'Show BGP-LS routes learned from peers (RFC 9552)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "vpn" -d 'Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "labeled" -d 'Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "vpn" -d 'Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "labeled" -d 'Show labeled-unicast best routes or a received/advertised view (RFC 8277)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "rtc" -d 'Show RT-Constrain routes (RFC 4684, single IPv4 family)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "add" -d 'Inject a route'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "delete" -d 'Withdraw a route'
@@ -846,10 +846,10 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s a -l family -d 'VPN family filter: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l neighbor -l peer -d 'Neighbor IP address filter' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l neighbor -l peer -d 'Source neighbor filter for best routes; peer views take a positional neighbor' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l limit -d 'Maximum rows in the page (default 100 for peer views and filtered queries)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l page-token -d 'Opaque continuation token; restart after a route table change' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l prefix -d 'Exact canonical IP prefix' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l prefix -d 'Canonical IP prefix; exact unless --longer is set' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l rd -d 'Exact Route Distinguisher (text or 0x plus 16 raw hex digits)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -858,6 +858,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s l -l longer -d 'Include more specific prefixes matching --prefix'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -865,10 +866,10 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -f -a "advertised" -d 'Committed local export toward one destination; rows retain source peers'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s a -l family -d 'Labeled family filter: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l neighbor -l peer -d 'Neighbor IP address filter' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l neighbor -l peer -d 'Source neighbor filter for best routes; peer views take a positional neighbor' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l limit -d 'Maximum rows in the page (default 100 for peer views and filtered queries)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l page-token -d 'Opaque continuation token; restart after a route table change' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l prefix -d 'Exact canonical IP prefix' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l prefix -d 'Canonical IP prefix; exact unless --longer is set' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -876,6 +877,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s l -l longer -d 'Include more specific prefixes matching --prefix'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -935,8 +937,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "blackholes" -d 'Show RFC 7999 BLACKHOLE discard install status'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "fib" -d 'Show general unicast FIB route install status'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "bgpls" -d 'Show BGP-LS routes learned from peers (RFC 9552)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "vpn" -d 'Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "labeled" -d 'Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "vpn" -d 'Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "labeled" -d 'Show labeled-unicast best routes or a received/advertised view (RFC 8277)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "rtc" -d 'Show RT-Constrain routes (RFC 4684, single IPv4 family)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "add" -d 'Inject a route'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "delete" -d 'Withdraw a route'
@@ -1166,7 +1168,10 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from best" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from best" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l route-type -d 'Only this route type (1..=6)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l rd -d 'Route Distinguisher, e.g. "65000:100"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l rd -d 'Exact Route Distinguisher (text or 0x plus 16 raw hex digits)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l mac -d 'Exact Type 2 MAC address' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l esi -d 'Exact 10-byte Ethernet Segment Identifier' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l vni -d 'VXLAN VNI in either label; MPLS routes do not match' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l limit -d 'Maximum rows in this page (1..=1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l page-token -d 'Opaque continuation token from the preceding page; restart after a table change' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1180,7 +1185,10 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l route-type -d 'Only this route type (1..=6)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l rd -d 'Route Distinguisher, e.g. "65000:100"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l rd -d 'Exact Route Distinguisher (text or 0x plus 16 raw hex digits)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l mac -d 'Exact Type 2 MAC address' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l esi -d 'Exact 10-byte Ethernet Segment Identifier' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l vni -d 'VXLAN VNI in either label; MPLS routes do not match' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l limit -d 'Maximum rows in this page (1..=1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l page-token -d 'Opaque continuation token from the preceding page; restart after a table change' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2157,8 +2165,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "blackholes" -d 'Show RFC 7999 BLACKHOLE discard install status'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "fib" -d 'Show general unicast FIB route install status'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "bgpls" -d 'Show BGP-LS routes learned from peers (RFC 9552)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "vpn" -d 'Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "labeled" -d 'Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "vpn" -d 'Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "labeled" -d 'Show labeled-unicast best routes or a received/advertised view (RFC 8277)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "rtc" -d 'Show RT-Constrain routes (RFC 4684, single IPv4 family)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "add" -d 'Inject a route'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "delete" -d 'Withdraw a route'

@@ -551,6 +551,14 @@ fn parse_vpn_family(family: Option<&str>) -> Result<String, CliError> {
     }
 }
 
+pub(crate) fn parse_vpn_rib_family(family: Option<&str>) -> Result<i32, CliError> {
+    Ok(match parse_vpn_family(family)?.as_str() {
+        "l3vpn_ipv4_unicast" => AddressFamily::L3vpnIpv4Unicast as i32,
+        "l3vpn_ipv6_unicast" => AddressFamily::L3vpnIpv6Unicast as i32,
+        _ => AddressFamily::Unspecified as i32,
+    })
+}
+
 fn make_vpn_request(
     family: Option<&str>,
     peer: Option<String>,
@@ -579,6 +587,14 @@ fn parse_labeled_family(family: Option<&str>) -> Result<String, CliError> {
              (alias: labeled-v4) or ipv6_labeled_unicast (alias: labeled-v6)"
         ))),
     }
+}
+
+pub(crate) fn parse_labeled_rib_family(family: Option<&str>) -> Result<i32, CliError> {
+    Ok(match parse_labeled_family(family)?.as_str() {
+        "ipv4_labeled_unicast" => AddressFamily::Ipv4LabeledUnicast as i32,
+        "ipv6_labeled_unicast" => AddressFamily::Ipv6LabeledUnicast as i32,
+        _ => AddressFamily::Unspecified as i32,
+    })
 }
 
 fn make_labeled_request(
@@ -2165,7 +2181,11 @@ fn family_page_json<T: serde::Serialize>(
     version: Option<&crate::proto::RoutePageVersion>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "view": match view { 1 => "received", 2 => "advertised", _ => "best" },
+        "view": match crate::proto::FamilyRouteView::try_from(view) {
+            Ok(crate::proto::FamilyRouteView::Received) => "received",
+            Ok(crate::proto::FamilyRouteView::Advertised) => "advertised",
+            _ => "best",
+        },
         "neighbor": peer,
         "routes": rows,
         "total_count": total,
@@ -2182,45 +2202,40 @@ fn print_family_page_footer(total: u64, next: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "family-specific filters and page controls passed from CLI arguments"
-)]
+fn family_page_peer(
+    view: i32,
+    neighbor_address: &mut String,
+    source_peer_filter: &mut String,
+) -> Result<Option<String>, CliError> {
+    let peer = if view == crate::proto::FamilyRouteView::Best as i32 {
+        &*source_peer_filter
+    } else {
+        &*neighbor_address
+    };
+    let peer = (!peer.is_empty()).then(|| peer.clone());
+    if let Some(peer) = &peer {
+        crate::commands::evpn::validate_peer_view(peer, None)?;
+    }
+    *neighbor_address = bare_ip_rpc_address(neighbor_address).to_string();
+    *source_peer_filter = bare_ip_rpc_address(source_peer_filter).to_string();
+    Ok(peer)
+}
+
 pub async fn vpn_page(
     connection: Connection,
-    family: Option<&str>,
-    peer: Option<String>,
-    view: i32,
-    prefix: Option<String>,
-    rd: Option<String>,
-    page_size: u32,
-    page_token: Option<String>,
+    mut request: crate::proto::ListVpnRibRoutesRequest,
     json: bool,
 ) -> Result<(), CliError> {
-    if let Some(peer) = &peer {
-        bare_ip_rpc_address(peer)
-            .parse::<std::net::IpAddr>()
-            .map_err(|_| CliError::Argument("neighbor must be an IP address".into()))?;
-    }
+    let view = request.view;
+    let peer = family_page_peer(
+        view,
+        &mut request.neighbor_address,
+        &mut request.source_peer_filter,
+    )?;
     let mut client = connection.rib_listing_client();
-    let mut response = read_rpc(
-        "ListVpnRoutesPage",
-        client.list_vpn_routes_page(crate::proto::ListVpnRoutesPageRequest {
-            view,
-            peer_filter: peer
-                .as_deref()
-                .map(bare_ip_rpc_address)
-                .unwrap_or_default()
-                .to_string(),
-            page_size,
-            page_token: page_token.unwrap_or_default(),
-            afi_safi: parse_vpn_family(family)?,
-            prefix_filter: prefix.unwrap_or_default(),
-            rd_filter: rd.unwrap_or_default(),
-        }),
-    )
-    .await?
-    .into_inner();
+    let mut response = read_rpc("ListVpnRibRoutes", client.list_vpn_rib_routes(request))
+        .await?
+        .into_inner();
     for route in &mut response.routes {
         restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
     }
@@ -2240,40 +2255,21 @@ pub async fn vpn_page(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "family-specific filters and page controls passed from CLI arguments"
-)]
 pub async fn labeled_page(
     connection: Connection,
-    family: Option<&str>,
-    peer: Option<String>,
-    view: i32,
-    prefix: Option<String>,
-    page_size: u32,
-    page_token: Option<String>,
+    mut request: crate::proto::ListLabeledRibRoutesRequest,
     json: bool,
 ) -> Result<(), CliError> {
-    if let Some(peer) = &peer {
-        bare_ip_rpc_address(peer)
-            .parse::<std::net::IpAddr>()
-            .map_err(|_| CliError::Argument("neighbor must be an IP address".into()))?;
-    }
+    let view = request.view;
+    let peer = family_page_peer(
+        view,
+        &mut request.neighbor_address,
+        &mut request.source_peer_filter,
+    )?;
     let mut client = connection.rib_listing_client();
     let mut response = read_rpc(
-        "ListLabeledRoutesPage",
-        client.list_labeled_routes_page(crate::proto::ListLabeledRoutesPageRequest {
-            view,
-            peer_filter: peer
-                .as_deref()
-                .map(bare_ip_rpc_address)
-                .unwrap_or_default()
-                .to_string(),
-            page_size,
-            page_token: page_token.unwrap_or_default(),
-            afi_safi: parse_labeled_family(family)?,
-            prefix_filter: prefix.unwrap_or_default(),
-        }),
+        "ListLabeledRibRoutes",
+        client.list_labeled_rib_routes(request),
     )
     .await?
     .into_inner();
@@ -2296,43 +2292,21 @@ pub async fn labeled_page(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "family-specific filters and page controls passed from CLI arguments"
-)]
 pub async fn rtc_page(
     connection: Connection,
-    peer: Option<String>,
-    view: i32,
-    origin_as: Option<u32>,
-    route_target: Option<String>,
-    page_size: u32,
-    page_token: Option<String>,
+    mut request: crate::proto::ListRtcRibRoutesRequest,
     json: bool,
 ) -> Result<(), CliError> {
-    if let Some(peer) = &peer {
-        bare_ip_rpc_address(peer)
-            .parse::<std::net::IpAddr>()
-            .map_err(|_| CliError::Argument("neighbor must be an IP address".into()))?;
-    }
+    let view = request.view;
+    let peer = family_page_peer(
+        view,
+        &mut request.neighbor_address,
+        &mut request.source_peer_filter,
+    )?;
     let mut client = connection.rib_listing_client();
-    let mut response = read_rpc(
-        "ListRtcRoutesPage",
-        client.list_rtc_routes_page(crate::proto::ListRtcRoutesPageRequest {
-            view,
-            peer_filter: peer
-                .as_deref()
-                .map(bare_ip_rpc_address)
-                .unwrap_or_default()
-                .to_string(),
-            page_size,
-            page_token: page_token.unwrap_or_default(),
-            origin_as_filter: origin_as,
-            route_target_filter: route_target.unwrap_or_default(),
-        }),
-    )
-    .await?
-    .into_inner();
+    let mut response = read_rpc("ListRtcRibRoutes", client.list_rtc_rib_routes(request))
+        .await?
+        .into_inner();
     for route in &mut response.routes {
         restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
     }
@@ -2772,6 +2746,105 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use prost::Message;
+
+    #[tokio::test]
+    async fn family_page_adapters_preserve_invalid_views_and_mixed_selectors() {
+        let server = spawn_mock_server(None).await;
+        *server.state.family_page_error.lock().await = Some((
+            tonic::Code::InvalidArgument,
+            "invalid view or selectors".into(),
+        ));
+        for view in [
+            crate::proto::FamilyRouteView::Unspecified as i32,
+            99,
+            crate::proto::FamilyRouteView::Best as i32,
+            crate::proto::FamilyRouteView::Received as i32,
+            crate::proto::FamilyRouteView::Advertised as i32,
+        ] {
+            let vpn = crate::proto::ListVpnRibRoutesRequest {
+                view,
+                neighbor_address: "192.0.2.1".into(),
+                source_peer_filter: "192.0.2.2".into(),
+                ..Default::default()
+            };
+            let result = vpn_page(
+                connect(&server.addr, None).await.unwrap(),
+                vpn.clone(),
+                true,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.starts_with("invalid argument:"))
+            );
+            assert_eq!(
+                server
+                    .state
+                    .last_list_vpn_page
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .encode_to_vec(),
+                vpn.encode_to_vec()
+            );
+            let labeled = crate::proto::ListLabeledRibRoutesRequest {
+                view,
+                neighbor_address: "192.0.2.1".into(),
+                source_peer_filter: "192.0.2.2".into(),
+                ..Default::default()
+            };
+            let result = labeled_page(
+                connect(&server.addr, None).await.unwrap(),
+                labeled.clone(),
+                true,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.starts_with("invalid argument:"))
+            );
+            assert_eq!(
+                server
+                    .state
+                    .last_list_labeled_page
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .encode_to_vec(),
+                labeled.encode_to_vec()
+            );
+            let rtc = crate::proto::ListRtcRibRoutesRequest {
+                view,
+                neighbor_address: "192.0.2.1".into(),
+                source_peer_filter: "192.0.2.2".into(),
+                afi_safi: AddressFamily::Ipv4RtConstrain as i32,
+                ..Default::default()
+            };
+            let result = rtc_page(
+                connect(&server.addr, None).await.unwrap(),
+                rtc.clone(),
+                true,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.starts_with("invalid argument:"))
+            );
+            assert_eq!(
+                server
+                    .state
+                    .last_list_rtc_page
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .encode_to_vec(),
+                rtc.encode_to_vec()
+            );
+        }
+        assert!(server.state.last_list_vpn.lock().await.is_none());
+        assert!(server.state.last_list_labeled.lock().await.is_none());
+        assert!(server.state.last_list_rtc.lock().await.is_none());
+    }
 
     fn json_lines_records(bytes: &[u8]) -> Vec<serde_json::Value> {
         std::str::from_utf8(bytes)
@@ -3659,6 +3732,11 @@ mod tests {
             "ipv4_labeled_unicast"
         );
         assert!(parse_labeled_family(Some("vpnv4")).is_err());
+        assert_eq!(
+            parse_labeled_rib_family(None).unwrap(),
+            AddressFamily::Unspecified as i32
+        );
+        assert!(parse_labeled_rib_family(Some("vpnv4")).is_err());
     }
 
     #[tokio::test]
@@ -3749,6 +3827,11 @@ mod tests {
             "l3vpn_ipv4_unicast"
         );
         assert!(parse_vpn_family(Some("evpn")).is_err());
+        assert_eq!(
+            parse_vpn_rib_family(None).unwrap(),
+            AddressFamily::Unspecified as i32
+        );
+        assert!(parse_vpn_rib_family(Some("evpn")).is_err());
     }
 
     #[tokio::test]

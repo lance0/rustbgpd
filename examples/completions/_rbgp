@@ -1376,11 +1376,11 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-a+[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
 '--family=[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
-'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
-'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--neighbor=[Source neighbor filter for best routes; peer views take a positional neighbor]:NEIGHBOR:_default' \
+'--peer=[Source neighbor filter for best routes; peer views take a positional neighbor]:NEIGHBOR:_default' \
 '--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
-'--prefix=[Exact canonical IP prefix]:family_view_prefix:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
 '--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1390,6 +1390,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -1419,11 +1421,13 @@ _arguments "${_arguments_options[@]}" : \
 '--family=[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
 '--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
-'--prefix=[Exact canonical IP prefix]:family_view_prefix:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
 '--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 ':peer -- Source neighbor whose accepted routes to inspect:_default' \
@@ -1443,11 +1447,13 @@ _arguments "${_arguments_options[@]}" : \
 '--family=[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
 '--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
-'--prefix=[Exact canonical IP prefix]:family_view_prefix:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
 '--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 ':peer -- Destination neighbor whose committed exports to inspect:_default' \
@@ -1489,11 +1495,11 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '-a+[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
 '--family=[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
-'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
-'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--neighbor=[Source neighbor filter for best routes; peer views take a positional neighbor]:NEIGHBOR:_default' \
+'--peer=[Source neighbor filter for best routes; peer views take a positional neighbor]:NEIGHBOR:_default' \
 '--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
-'--prefix=[Exact canonical IP prefix]:family_view_prefix:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1502,6 +1508,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -1531,10 +1539,12 @@ _arguments "${_arguments_options[@]}" : \
 '--family=[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
 '--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
-'--prefix=[Exact canonical IP prefix]:family_view_prefix:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 ':peer -- Source neighbor whose accepted routes to inspect:_default' \
@@ -1554,10 +1564,12 @@ _arguments "${_arguments_options[@]}" : \
 '--family=[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
 '--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
-'--prefix=[Exact canonical IP prefix]:family_view_prefix:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 ':peer -- Destination neighbor whose committed exports to inspect:_default' \
@@ -2419,7 +2431,10 @@ _arguments "${_arguments_options[@]}" : \
 (received)
 _arguments "${_arguments_options[@]}" : \
 '--route-type=[Only this route type (1..=6)]:ROUTE_TYPE:_default' \
-'--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
+'--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
+'--mac=[Exact Type 2 MAC address]:MAC:_default' \
+'--esi=[Exact 10-byte Ethernet Segment Identifier]:ESI:_default' \
+'--vni=[VXLAN VNI in either label; MPLS routes do not match]:VNI:_default' \
 '--limit=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2441,7 +2456,10 @@ _arguments "${_arguments_options[@]}" : \
 (advertised)
 _arguments "${_arguments_options[@]}" : \
 '--route-type=[Only this route type (1..=6)]:ROUTE_TYPE:_default' \
-'--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
+'--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
+'--mac=[Exact Type 2 MAC address]:MAC:_default' \
+'--esi=[Exact 10-byte Ethernet Segment Identifier]:ESI:_default' \
+'--vni=[VXLAN VNI in either label; MPLS routes do not match]:VNI:_default' \
 '--limit=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -7344,8 +7362,8 @@ _rbgp__subcmd__help__subcmd__rib_commands() {
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
 'fib:Show general unicast FIB route install status' \
 'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
-'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
-'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'vpn:Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)' \
+'labeled:Show labeled-unicast best routes or a received/advertised view (RFC 8277)' \
 'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
@@ -8072,8 +8090,8 @@ _rbgp__subcmd__rib_commands() {
 'fib:Show general unicast FIB route install status' \
 'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
 'bgp-ls:Show BGP-LS routes learned from peers (RFC 9552)' \
-'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
-'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'vpn:Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)' \
+'labeled:Show labeled-unicast best routes or a received/advertised view (RFC 8277)' \
 'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
@@ -8120,8 +8138,8 @@ _rbgp__subcmd__rib__subcmd__help_commands() {
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
 'fib:Show general unicast FIB route install status' \
 'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
-'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
-'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'vpn:Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)' \
+'labeled:Show labeled-unicast best routes or a received/advertised view (RFC 8277)' \
 'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \

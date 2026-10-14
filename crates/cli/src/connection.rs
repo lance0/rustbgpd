@@ -1378,10 +1378,10 @@ mod tests {
     #[test]
     fn listing_surface_inventory_uses_bounded_client() {
         const LISTING_RPCS: &[&str] = &[
-            ".list_vpn_routes_page(",
-            ".list_labeled_routes_page(",
-            ".list_rtc_routes_page(",
-            ".list_evpn_routes_page(",
+            ".list_vpn_rib_routes(",
+            ".list_labeled_rib_routes(",
+            ".list_rtc_rib_routes(",
+            ".list_best_evpn_routes(",
             ".list_evpn_routes(",
             ".list_received_evpn_routes(",
             ".list_advertised_evpn_routes(",

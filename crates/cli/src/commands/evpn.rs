@@ -39,20 +39,20 @@ fn route_type_label(t: u32) -> &'static str {
 
 pub async fn list_best_page(
     connection: Connection,
-    mut request: crate::proto::ListEvpnRoutesPageRequest,
+    mut request: crate::proto::ListBestEvpnRoutesRequest,
     json: bool,
 ) -> Result<(), CliError> {
-    let peer = (!request.peer_filter.is_empty()).then(|| request.peer_filter.clone());
+    let peer = (!request.source_peer_filter.is_empty()).then(|| request.source_peer_filter.clone());
     if let Some(peer) = &peer {
         validate_peer_view(peer, None)?;
     }
-    request.peer_filter = peer
+    request.source_peer_filter = peer
         .as_deref()
         .map(bare_ip_rpc_address)
         .unwrap_or_default()
         .to_string();
     let mut client = connection.rib_listing_client();
-    let mut response = read_rpc("ListEvpnRoutesPage", client.list_evpn_routes_page(request))
+    let mut response = read_rpc("ListBestEvpnRoutes", client.list_best_evpn_routes(request))
         .await?
         .into_inner();
     for route in &mut response.routes {
@@ -229,10 +229,10 @@ pub async fn list_peer(
     json: bool,
 ) -> Result<(), CliError> {
     let peer = request.neighbor_address.clone();
-    validate_peer_view(
-        &peer,
-        (!request.rd_filter.is_empty()).then_some(request.rd_filter.as_str()),
-    )?;
+    validate_peer_view(&peer, None)?;
+    if !request.rd_filter.is_empty() {
+        request.rd_filter = parse_page_rd(&request.rd_filter).map_err(CliError::Argument)?;
+    }
     request.neighbor_address = bare_ip_rpc_address(&peer).to_string();
     let mut client = connection.rib_listing_client();
     let mut response = if received {
@@ -2183,6 +2183,7 @@ mod tests {
                     rd_filter: "65000:100".into(),
                     page_size: 25,
                     page_token: "opaque".into(),
+                    ..Default::default()
                 },
                 true,
             )
@@ -2984,6 +2985,7 @@ mod tests {
                     rd_filter: "65000:100".into(),
                     page_size: 25,
                     page_token: "previous-page".into(),
+                    ..Default::default()
                 },
                 true,
             )

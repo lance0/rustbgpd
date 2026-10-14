@@ -74,7 +74,7 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         epoch: 1,
         generation: 2,
     });
-    *server.state.list_vpn_page_response.lock().await = proto::ListVpnRoutesPageResponse {
+    *server.state.list_vpn_page_response.lock().await = proto::ListVpnRibRoutesResponse {
         routes: vec![proto::VpnRouteEntry {
             peer_address: "192.0.2.1".into(),
             route_distinguisher_str: "65000:100".into(),
@@ -86,7 +86,7 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         next_page_token: "next".into(),
         page_version: version,
     };
-    *server.state.list_labeled_page_response.lock().await = proto::ListLabeledRoutesPageResponse {
+    *server.state.list_labeled_page_response.lock().await = proto::ListLabeledRibRoutesResponse {
         routes: vec![proto::LabeledRouteEntry {
             peer_address: "192.0.2.1".into(),
             prefix: "10.0.0.0/24".into(),
@@ -98,7 +98,7 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         next_page_token: "next".into(),
         page_version: version,
     };
-    *server.state.list_rtc_page_response.lock().await = proto::ListRtcRoutesPageResponse {
+    *server.state.list_rtc_page_response.lock().await = proto::ListRtcRibRoutesResponse {
         routes: vec![proto::RtcRouteEntry {
             peer_address: "192.0.2.1".into(),
             origin_as: 65000,
@@ -110,7 +110,7 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         next_page_token: "next".into(),
         page_version: version,
     };
-    *server.state.list_evpn_page_response.lock().await = proto::ListEvpnRoutesPageResponse {
+    *server.state.list_evpn_page_response.lock().await = proto::ListBestEvpnRoutesResponse {
         routes: vec![proto::EvpnRouteEntry {
             peer_address: "192.0.2.1".into(),
             route_type: 2,
@@ -155,9 +155,15 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         .clone()
         .unwrap();
     assert_eq!(request.view, proto::FamilyRouteView::Advertised as i32);
-    assert_eq!(request.peer_filter, "192.0.2.2");
-    assert_eq!(request.afi_safi, "l3vpn_ipv4_unicast");
-    assert_eq!(request.prefix_filter, "10.0.0.0/24");
+    assert_eq!(request.neighbor_address, "192.0.2.2");
+    assert!(request.source_peer_filter.is_empty());
+    assert_eq!(
+        request.afi_safi,
+        proto::AddressFamily::L3vpnIpv4Unicast as i32
+    );
+    assert_eq!(request.prefix_filter, "10.0.0.0");
+    assert_eq!(request.prefix_filter_length, 24);
+    assert!(!request.longer_prefixes);
     assert_eq!(request.rd_filter, "0x00020000fde80064");
     assert_eq!(request.page_size, 1);
     assert_eq!(request.page_token, "before");
@@ -191,7 +197,15 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         .await
         .clone()
         .unwrap();
-    assert_eq!(request.peer_filter, "fe80::1");
+    assert_eq!(request.neighbor_address, "fe80::1");
+    assert!(request.source_peer_filter.is_empty());
+    assert_eq!(
+        request.afi_safi,
+        proto::AddressFamily::Ipv4LabeledUnicast as i32
+    );
+    assert_eq!(request.prefix_filter, "10.0.0.0");
+    assert_eq!(request.prefix_filter_length, 24);
+    assert!(!request.longer_prefixes);
     assert_eq!(request.page_size, 100);
     assert_eq!(request.view, proto::FamilyRouteView::Received as i32);
     assert!(server.state.last_list_labeled.lock().await.is_none());
@@ -224,6 +238,9 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         .clone()
         .unwrap();
     assert_eq!(request.route_target_filter, "0x02020000fde80064");
+    assert_eq!(request.neighbor_address, "192.0.2.1");
+    assert!(request.source_peer_filter.is_empty());
+    assert_eq!(request.afi_safi, proto::AddressFamily::Unspecified as i32);
     assert_eq!(request.origin_as_filter, Some(65000));
     assert_eq!(request.page_size, 100);
 
@@ -260,6 +277,7 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         .await
         .clone()
         .unwrap();
+    assert_eq!(request.source_peer_filter, "192.0.2.1");
     assert_eq!(request.vni_filter, Some(100));
     assert_eq!(request.mac_filter, "00:11:22:33:44:55");
     assert_eq!(request.esi_filter, "00:01:02:03:04:05:06:07:08:09");
@@ -293,6 +311,265 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn family_best_pages_send_source_filters_and_typed_exact_or_longer_prefixes() {
+    let server = test_support::spawn_mock_server(None).await;
+    for (family, selector, afi_safi, prefix, address, length) in [
+        (
+            "vpn",
+            "vpnv4",
+            proto::AddressFamily::L3vpnIpv4Unicast,
+            "10.0.0.0/16",
+            "10.0.0.0",
+            16,
+        ),
+        (
+            "vpn",
+            "vpnv6",
+            proto::AddressFamily::L3vpnIpv6Unicast,
+            "2001:0db8::/32",
+            "2001:db8::",
+            32,
+        ),
+        (
+            "labeled",
+            "labeled-v4",
+            proto::AddressFamily::Ipv4LabeledUnicast,
+            "10.0.0.0/16",
+            "10.0.0.0",
+            16,
+        ),
+        (
+            "labeled",
+            "labeled-v6",
+            proto::AddressFamily::Ipv6LabeledUnicast,
+            "2001:0db8::/32",
+            "2001:db8::",
+            32,
+        ),
+    ] {
+        for longer in [false, true] {
+            let mut args = vec![
+                "--json",
+                "rib",
+                family,
+                "--neighbor",
+                "fe80::1%eth0",
+                "-a",
+                selector,
+                "--prefix",
+                prefix,
+            ];
+            if longer {
+                args.push("--longer");
+            }
+            let output = run(&server.addr, &args);
+            assert!(output.status.success(), "{output:?}");
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["view"], "best");
+            assert_eq!(value["neighbor"], "fe80::1%eth0");
+            let fields = if family == "vpn" {
+                let request = server
+                    .state
+                    .last_list_vpn_page
+                    .lock()
+                    .await
+                    .clone()
+                    .unwrap();
+                (
+                    request.view,
+                    request.neighbor_address,
+                    request.source_peer_filter,
+                    request.afi_safi,
+                    request.prefix_filter,
+                    request.prefix_filter_length,
+                    request.longer_prefixes,
+                )
+            } else {
+                let request = server
+                    .state
+                    .last_list_labeled_page
+                    .lock()
+                    .await
+                    .clone()
+                    .unwrap();
+                (
+                    request.view,
+                    request.neighbor_address,
+                    request.source_peer_filter,
+                    request.afi_safi,
+                    request.prefix_filter,
+                    request.prefix_filter_length,
+                    request.longer_prefixes,
+                )
+            };
+            assert_eq!(
+                fields,
+                (
+                    proto::FamilyRouteView::Best as i32,
+                    String::new(),
+                    "fe80::1".into(),
+                    afi_safi as i32,
+                    address.into(),
+                    length,
+                    longer
+                )
+            );
+        }
+    }
+    let output = run(
+        &server.addr,
+        &[
+            "--json",
+            "rib",
+            "rtc",
+            "--neighbor",
+            "192.0.2.1",
+            "--limit",
+            "1",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let request = server
+        .state
+        .last_list_rtc_page
+        .lock()
+        .await
+        .clone()
+        .unwrap();
+    assert_eq!(request.view, proto::FamilyRouteView::Best as i32);
+    assert!(request.neighbor_address.is_empty());
+    assert_eq!(request.source_peer_filter, "192.0.2.1");
+    assert_eq!(request.afi_safi, proto::AddressFamily::Unspecified as i32);
+    assert!(server.state.last_list_vpn.lock().await.is_none());
+    assert!(server.state.last_list_labeled.lock().await.is_none());
+    assert!(server.state.last_list_rtc.lock().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn family_plain_best_listings_keep_legacy_rpc_shapes() {
+    let server = test_support::spawn_mock_server(None).await;
+    for family in ["vpn", "labeled", "rtc"] {
+        let output = run(
+            &server.addr,
+            &["--json", "rib", family, "--neighbor", "192.0.2.1"],
+        );
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .unwrap()
+                .is_array()
+        );
+    }
+    assert_eq!(
+        server
+            .state
+            .last_list_vpn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .peer_filter,
+        "192.0.2.1"
+    );
+    assert_eq!(
+        server
+            .state
+            .last_list_labeled
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .peer_filter,
+        "192.0.2.1"
+    );
+    assert_eq!(
+        server
+            .state
+            .last_list_rtc
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .peer_filter,
+        "192.0.2.1"
+    );
+    assert!(server.state.last_list_vpn_page.lock().await.is_none());
+    assert!(server.state.last_list_labeled_page.lock().await.is_none());
+    assert!(server.state.last_list_rtc_page.lock().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_peer_pages_forward_raw_rd_and_mac_esi_vni_without_changing_json() {
+    let server = test_support::spawn_mock_server(None).await;
+    *server.state.list_peer_evpn_response.lock().await = proto::ListPeerEvpnRoutesResponse {
+        routes: vec![proto::EvpnRouteEntry {
+            peer_address: "192.0.2.1".into(),
+            route_type: 2,
+            ..Default::default()
+        }],
+        total_count: 2,
+        next_page_token: "next".into(),
+        page_version: Some(proto::RoutePageVersion {
+            epoch: 1,
+            generation: 2,
+        }),
+    };
+    for (view, peer) in [("received", "192.0.2.1"), ("advertised", "fe80::2%eth0")] {
+        let output = run(
+            &server.addr,
+            &[
+                "--json",
+                "evpn",
+                view,
+                peer,
+                "--rd",
+                "0x00020000FDE80064",
+                "--mac",
+                "00:11:22:33:44:55",
+                "--esi",
+                "00:01:02:03:04:05:06:07:08:09",
+                "--vni",
+                "100",
+                "--limit",
+                "1",
+                "--page-token",
+                "previous",
+            ],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_page(&value, view, peer);
+        assert_eq!(value["routes"][0]["peer"], "192.0.2.1");
+        let request = if view == "received" {
+            server
+                .state
+                .last_list_received_evpn
+                .lock()
+                .await
+                .clone()
+                .unwrap()
+        } else {
+            server
+                .state
+                .last_list_advertised_evpn
+                .lock()
+                .await
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(request.neighbor_address, peer.split('%').next().unwrap());
+        assert_eq!(request.rd_filter, "0x00020000fde80064");
+        assert_eq!(request.mac_filter, "00:11:22:33:44:55");
+        assert_eq!(request.esi_filter, "00:01:02:03:04:05:06:07:08:09");
+        assert_eq!(request.vni_filter, Some(100));
+        assert_eq!(request.page_size, 1);
+        assert_eq!(request.page_token, "previous");
+        assert!(server.state.last_list_evpn.lock().await.is_none());
+        assert!(server.state.last_list_evpn_page.lock().await.is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn family_page_rpc_errors_do_not_fall_back_to_best_or_print_rows() {
     let server = test_support::spawn_mock_server(None).await;
     for code in [
@@ -302,11 +579,14 @@ async fn family_page_rpc_errors_do_not_fall_back_to_best_or_print_rows() {
         tonic::Code::FailedPrecondition,
     ] {
         *server.state.family_page_error.lock().await = Some((code, "restart pagination".into()));
+        *server.state.list_peer_evpn_error.lock().await = Some((code, "restart pagination".into()));
         for args in [
             vec!["--json", "rib", "vpn", "received", "192.0.2.1"],
             vec!["--json", "rib", "labeled", "advertised", "192.0.2.1"],
             vec!["--json", "rib", "rtc", "received", "192.0.2.1"],
             vec!["--json", "evpn", "best"],
+            vec!["--json", "evpn", "received", "192.0.2.1"],
+            vec!["--json", "evpn", "advertised", "192.0.2.1"],
         ] {
             let output = run(&server.addr, &args);
             assert!(!output.status.success(), "{output:?}");

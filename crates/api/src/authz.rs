@@ -619,26 +619,26 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.RibService",
-        "ListVpnRoutesPage",
-        "/rustbgpd.v1.RibService/ListVpnRoutesPage",
+        "ListVpnRibRoutes",
+        "/rustbgpd.v1.RibService/ListVpnRibRoutes",
         AuthTier::SensitiveRead,
     ),
     method(
         "rustbgpd.v1.RibService",
-        "ListLabeledRoutesPage",
-        "/rustbgpd.v1.RibService/ListLabeledRoutesPage",
+        "ListLabeledRibRoutes",
+        "/rustbgpd.v1.RibService/ListLabeledRibRoutes",
         AuthTier::SensitiveRead,
     ),
     method(
         "rustbgpd.v1.RibService",
-        "ListRtcRoutesPage",
-        "/rustbgpd.v1.RibService/ListRtcRoutesPage",
+        "ListRtcRibRoutes",
+        "/rustbgpd.v1.RibService/ListRtcRibRoutes",
         AuthTier::SensitiveRead,
     ),
     method(
         "rustbgpd.v1.RibService",
-        "ListEvpnRoutesPage",
-        "/rustbgpd.v1.RibService/ListEvpnRoutesPage",
+        "ListBestEvpnRoutes",
+        "/rustbgpd.v1.RibService/ListBestEvpnRoutes",
         AuthTier::SensitiveRead,
     ),
     method(
@@ -1389,10 +1389,10 @@ mod tests {
     #[test]
     fn paged_family_route_reads_require_sensitive_read() {
         for method in [
-            "ListVpnRoutesPage",
-            "ListLabeledRoutesPage",
-            "ListRtcRoutesPage",
-            "ListEvpnRoutesPage",
+            "ListVpnRibRoutes",
+            "ListLabeledRibRoutes",
+            "ListRtcRibRoutes",
+            "ListBestEvpnRoutes",
         ] {
             let path = format!("/rustbgpd.v1.RibService/{method}");
             assert_eq!(

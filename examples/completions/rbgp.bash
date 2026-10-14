@@ -4226,7 +4226,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__advertised)
-            opts="-s -j -h --route-type --rd --limit --page-token --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            opts="-s -j -h --route-type --rd --mac --esi --vni --limit --page-token --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4237,6 +4237,18 @@ _rbgp() {
                     return 0
                     ;;
                 --rd)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --mac)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --esi)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vni)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -6174,7 +6186,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__received)
-            opts="-s -j -h --route-type --rd --limit --page-token --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            opts="-s -j -h --route-type --rd --mac --esi --vni --limit --page-token --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6185,6 +6197,18 @@ _rbgp() {
                     return 0
                     ;;
                 --rd)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --mac)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --esi)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vni)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -12896,7 +12920,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__labeled)
-            opts="-a -s -j -h --family --peer --neighbor --limit --page-token --prefix --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help received advertised help"
+            opts="-a -l -s -j -h --family --peer --neighbor --limit --page-token --prefix --longer --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help received advertised help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -12970,7 +12994,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__labeled__subcmd__advertised)
-            opts="-s -j -a -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --family --limit --page-token --prefix --help"
+            opts="-s -j -a -l -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --family --limit --page-token --prefix --longer --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -13092,7 +13116,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__labeled__subcmd__received)
-            opts="-s -j -a -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --family --limit --page-token --prefix --help"
+            opts="-s -j -a -l -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --family --limit --page-token --prefix --longer --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -13556,7 +13580,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__vpn)
-            opts="-a -s -j -h --family --peer --neighbor --limit --page-token --prefix --rd --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help received advertised help"
+            opts="-a -l -s -j -h --family --peer --neighbor --limit --page-token --prefix --longer --rd --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help received advertised help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -13634,7 +13658,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__vpn__subcmd__advertised)
-            opts="-s -j -a -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --family --limit --page-token --prefix --rd --help"
+            opts="-s -j -a -l -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --family --limit --page-token --prefix --longer --rd --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -13760,7 +13784,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__vpn__subcmd__received)
-            opts="-s -j -a -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --family --limit --page-token --prefix --rd --help"
+            opts="-s -j -a -l -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --family --limit --page-token --prefix --longer --rd --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
