@@ -438,6 +438,7 @@ impl UpdateGroupRegistry {
 #[derive(Debug, Default)]
 pub(in crate::manager) struct RegroupBaseline {
     pub(in crate::manager) unicast: FastMap<(Prefix, u32), Route>,
+    pub(in crate::manager) next_hop_overrides: FastMap<(Prefix, u32), NextHopAction>,
     pub(in crate::manager) vpn: FastMap<VpnRouteKey, VpnRibRoute>,
 }
 
@@ -488,12 +489,24 @@ fn merge_owned_maps<K: Eq + std::hash::Hash, V, S: std::hash::BuildHasher + Defa
 
 impl RegroupBaseline {
     fn merge_prior(&mut self, prior: Self, checkpoint: &mut impl FnMut()) {
+        // An absent override means the prior wire used the stored next hop.
+        // On overlap that None must replace a newer speculative override too.
+        for key in prior.unicast.keys() {
+            checkpoint();
+            self.next_hop_overrides.remove(key);
+        }
+        merge_owned_maps(
+            &mut self.next_hop_overrides,
+            prior.next_hop_overrides,
+            checkpoint,
+        );
         merge_owned_maps(&mut self.unicast, prior.unicast, checkpoint);
         merge_owned_maps(&mut self.vpn, prior.vpn, checkpoint);
     }
 
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
         crate::adj_rib_out::release_hash_map(&mut self.unicast, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.next_hop_overrides, checkpoint);
         crate::adj_rib_out::release_hash_map(&mut self.vpn, checkpoint);
     }
 }
@@ -528,9 +541,6 @@ pub(in crate::manager) struct GroupRibOut {
     evpn_inputs: FastMap<rustbgpd_wire::EvpnRouteKey, EvpnGroupInput>,
     pub(in crate::manager) evpn_policy_denied:
         FastMap<rustbgpd_wire::EvpnRouteKey, VpnDenialRecord>,
-    /// Next-hop-override flags for staged entries (`Some` values only)
-    /// so joins/replays don't re-run policy to recover them.
-    nh_overrides: FastMap<(Prefix, u32), NextHopAction>,
     /// Captured pre-policy SOURCE attributes per staged entry for a policy
     /// that can modify source-control communities (entries only for sources
     /// carrying communities; the `Arc` is shared with the Adj-RIB-In/Loc-RIB
@@ -688,7 +698,6 @@ impl GroupRibOut {
         self.table.retire_with(checkpoint);
         release_hash_map(&mut self.evpn_inputs, checkpoint);
         release_hash_map(&mut self.evpn_policy_denied, checkpoint);
-        release_hash_map(&mut self.nh_overrides, checkpoint);
         release_hash_map(&mut self.source_attrs, checkpoint);
         release_hash_map(&mut self.source_counts, checkpoint);
         for (_, mut paths) in self.policy_filtered.drain() {
@@ -749,7 +758,6 @@ impl GroupRibOut {
             recovery_snapshot: None,
             evpn_inputs: FastMap::default(),
             evpn_policy_denied: FastMap::default(),
-            nh_overrides: FastMap::default(),
             source_attrs: FastMap::default(),
             source_control_passthrough,
             source_counts: AddrMap::default(),
@@ -991,14 +999,6 @@ impl GroupRibOut {
                 "staged Permit attribution must match the immutable chain default"
             );
             self.inc_source(route.peer, &delta.prefix);
-            match nh {
-                Some(action) => {
-                    self.nh_overrides.insert(key, action.clone());
-                }
-                None => {
-                    self.nh_overrides.remove(&key);
-                }
-            }
             if !self.source_control_passthrough {
                 match &delta.source_attrs {
                     Some(attrs) => {
@@ -1009,10 +1009,10 @@ impl GroupRibOut {
                     }
                 }
             }
-            self.table.insert(route.clone());
+            self.table
+                .insert_with_next_hop(route.clone(), nh.clone(), &mut || {});
         } else {
             self.table.withdraw(&delta.prefix, delta.path_id);
-            self.nh_overrides.remove(&key);
             if !self.source_control_passthrough {
                 self.source_attrs.remove(&key);
             }
@@ -1094,7 +1094,7 @@ impl GroupRibOut {
 
     /// The next-hop-override flag staged for a table entry.
     pub(in crate::manager) fn nh_override(&self, key: (Prefix, u32)) -> Option<NextHopAction> {
-        self.nh_overrides.get(&key).cloned()
+        self.table.next_hop_override(&key.0, key.1).cloned()
     }
 
     /// RFC 7947 control-decision input for a staged table entry: either the
@@ -1211,7 +1211,7 @@ impl GroupRibOut {
             let key = (*prefix, path_id);
             return Some(AdvEntry {
                 route: staged,
-                nh: self.nh_overrides.get(&key),
+                nh: self.table.next_hop_override(prefix, path_id),
                 source_attrs: if self.source_control_passthrough {
                     None
                 } else {
@@ -1442,6 +1442,7 @@ impl GroupRibOut {
         rejected: &HashSet<ExactExportKey>,
     ) -> FastMap<(Prefix, u32), Route> {
         self.member_view_snapshot_with_checkpoint(member, rs_control, rejected, &mut |_| {})
+            .unicast
     }
 
     fn member_view_snapshot_with_checkpoint(
@@ -1450,11 +1451,12 @@ impl GroupRibOut {
         rs_control: Option<(u32, u32)>,
         rejected: &HashSet<ExactExportKey>,
         checkpoint: &mut impl FnMut(bool),
-    ) -> FastMap<(Prefix, u32), Route> {
+    ) -> RegroupBaseline {
         use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
         checkpoint(true);
         let mut snapshot =
             FastMap::with_capacity_and_hasher(self.table.len(), FastState::default());
+        let mut next_hop_overrides = FastMap::default();
         for entry in self.table.iter().filter_map(|staged| {
             checkpoint(false);
             let key = (staged.prefix, staged.path_id);
@@ -1475,12 +1477,19 @@ impl GroupRibOut {
             }
             let mut route = entry.route.clone();
             rs_control_route_rewrite(&mut route, large_communities, rs_control);
-            Some((key, route))
+            Some((key, route, entry.nh.cloned()))
         }) {
+            if let Some(action) = entry.2 {
+                next_hop_overrides.insert(entry.0, action);
+            }
             snapshot.insert(entry.0, entry.1);
         }
         checkpoint(true);
-        snapshot
+        RegroupBaseline {
+            unicast: snapshot,
+            next_hop_overrides,
+            vpn: FastMap::default(),
+        }
     }
 
     /// VPN sibling of [`Self::member_view_snapshot_with_checkpoint`], filtered by the

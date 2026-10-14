@@ -2133,6 +2133,58 @@ impl ExactExportSnapshot for SessionExportProfile {
         SessionExportProfile::generation(self)
     }
 
+    fn unicast_next_hop_actions_equal(
+        &self,
+        route: &Route,
+        old: Option<&rustbgpd_policy::NextHopAction>,
+        new: Option<&rustbgpd_policy::NextHopAction>,
+    ) -> bool {
+        let same = match (
+            self.prepare_unicast_candidate(route, old),
+            self.prepare_unicast_candidate(route, new),
+        ) {
+            (
+                Ok(PreparedUnicastCandidate::Ipv4Body { attrs: old, .. }),
+                Ok(PreparedUnicastCandidate::Ipv4Body { attrs: new, .. }),
+            ) => old == new,
+            (
+                Ok(PreparedUnicastCandidate::Mp {
+                    afi: old_afi,
+                    next_hop: old_nh,
+                    link_local_next_hop: old_ll,
+                    attrs: old_attrs,
+                    ipv4_mode: old_mode,
+                    ..
+                }),
+                Ok(PreparedUnicastCandidate::Mp {
+                    afi: new_afi,
+                    next_hop: new_nh,
+                    link_local_next_hop: new_ll,
+                    attrs: new_attrs,
+                    ipv4_mode: new_mode,
+                    ..
+                }),
+            ) => {
+                old_afi == new_afi
+                    && old_nh == new_nh
+                    && old_ll == new_ll
+                    && old_attrs == new_attrs
+                    && old_mode == new_mode
+            }
+            _ => false,
+        };
+        // Equal prepared fields are not permission to conceal an encoding or
+        // negotiated-ceiling refusal. Failed comparison takes the final gate.
+        same && exact_export_result(SessionExportProfile::probe_announcement(
+            self,
+            ExportCandidate::Unicast {
+                route,
+                next_hop_override: new,
+            },
+        ))
+        .is_ok()
+    }
+
     fn probe_announcement(
         &self,
         candidate: ExactExportCandidate<'_>,

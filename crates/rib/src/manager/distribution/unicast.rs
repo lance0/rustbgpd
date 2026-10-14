@@ -9,7 +9,7 @@ use super::{
     RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, debug,
     evaluate_chain_with_attribution, family_label, gauge_val, policy_label_with_term,
     prefix_family, record_export_policy_eval, route_type, route_type_label, route_type_message,
-    routes_equal, rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family,
+    rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
     validate_route_aspa, validate_route_rpki,
 };
 
@@ -428,6 +428,7 @@ impl RibManager {
         orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult, IpAddr)>,
         per_client_best: bool,
         source: Option<crate::update::RouteSourceIdentity>,
+        snapshot: Option<&dyn crate::update::ExactExportSnapshot>,
     ) -> ExplainAdvertisedRoute {
         use crate::best_path::{
             BestPathReason, best_path_cmp_orr, best_path_cmp_orr_with_reason,
@@ -1220,7 +1221,8 @@ impl RibManager {
 
         explain.modifications = result.modifications.clone();
         let mut post_policy_memo = super::ExportMemo::default();
-        let (mut post_policy_candidate, _) = post_policy_memo.apply(best, &result.modifications);
+        let (mut post_policy_candidate, post_policy_action) =
+            post_policy_memo.apply(best, &result.modifications);
         if super::no_advertise_export_suppressed(post_policy_candidate.communities()) {
             explain.decision = ExplainDecision::Deny;
             let message = "export policy produced a route carrying NO_ADVERTISE; RFC 1997 \
@@ -1429,8 +1431,15 @@ impl RibManager {
         // pointer at the per-candidate view.
         if source.is_some() {
             let existing = rib_out.and_then(|out| out.get(&prefix, explain.path_id));
-            let in_sync =
-                existing.is_some_and(|existing| routes_equal(existing, &post_policy_candidate));
+            let in_sync = existing.is_some_and(|existing| {
+                crate::manager::helpers::unicast_routes_equal_for_profile(
+                    existing,
+                    rib_out.and_then(|out| out.next_hop_override(&prefix, explain.path_id)),
+                    &post_policy_candidate,
+                    post_policy_action.as_ref(),
+                    snapshot,
+                )
+            });
             explain.already_advertised = in_sync;
             if in_sync {
                 gate(
@@ -1477,10 +1486,18 @@ impl RibManager {
             // Same modification application + equality the live tail
             // uses (`ExportMemo::apply` + `routes_equal`).
             let mut memo = super::ExportMemo::default();
-            let (mut modified, _nh_action) = memo.apply(best, &result.modifications);
+            let (mut modified, nh_action) = memo.apply(best, &result.modifications);
             modified.path_id = 0;
             let existing = rib_out.and_then(|out| out.get(&prefix, 0));
-            let in_sync = existing.is_some_and(|existing| routes_equal(existing, &modified));
+            let in_sync = existing.is_some_and(|existing| {
+                crate::manager::helpers::unicast_routes_equal_for_profile(
+                    existing,
+                    rib_out.and_then(|out| out.next_hop_override(&prefix, 0)),
+                    &modified,
+                    nh_action.as_ref(),
+                    snapshot,
+                )
+            });
             explain.already_advertised = in_sync;
             if in_sync {
                 gate(
@@ -1994,7 +2011,14 @@ impl RibManager {
             let changed = force
                 || rib_out
                     .get(prefix, modified.path_id)
-                    .is_none_or(|existing| !routes_equal(existing, &modified));
+                    .is_none_or(|existing| {
+                        !unicast_routes_equal(
+                            existing,
+                            rib_out.next_hop_override(prefix, modified.path_id),
+                            &modified,
+                            nh_action.as_ref(),
+                        )
+                    });
             if changed {
                 checkpoint();
                 out.next_hop_override.push(nh_action);
@@ -2223,9 +2247,14 @@ impl RibManager {
                 checkpoint();
                 otc_blocked.push(modified.clone());
             }
-            let changed = rib_out
-                .get(prefix, 0)
-                .is_none_or(|existing| !routes_equal(existing, &modified));
+            let changed = rib_out.get(prefix, 0).is_none_or(|existing| {
+                !unicast_routes_equal(
+                    existing,
+                    rib_out.next_hop_override(prefix, modified.path_id),
+                    &modified,
+                    nh_action.as_ref(),
+                )
+            });
             if changed {
                 checkpoint();
                 out.next_hop_override.push(nh_action);
@@ -2698,9 +2727,15 @@ impl RibManager {
         // every route that already lives in AdjRibOut, defeating the
         // whole point of `RefreshPeerOutbound`.
         let changed = force
-            || rib_out
-                .get(prefix, 0)
-                .is_none_or(|existing| !routes_equal(existing, &modified));
+            || rib_out.get(prefix, 0).is_none_or(|existing| {
+                !crate::manager::helpers::unicast_routes_equal_for_profile(
+                    existing,
+                    rib_out.next_hop_override(prefix, modified.path_id),
+                    &modified,
+                    nh_action.as_ref(),
+                    target.explain_snapshot(),
+                )
+            });
         if let Some(trace) = target.trace() {
             trace.staged_next_hop = Some(match nh_action {
                 Some(rustbgpd_policy::NextHopAction::Specific(addr)) => addr,
@@ -2984,9 +3019,14 @@ impl RibManager {
 
         // `force` semantics as in `distribute_single_best_prefix`.
         let changed = force
-            || rib_out
-                .get(prefix, 0)
-                .is_none_or(|existing| !routes_equal(existing, &modified));
+            || rib_out.get(prefix, 0).is_none_or(|existing| {
+                !unicast_routes_equal(
+                    existing,
+                    rib_out.next_hop_override(prefix, modified.path_id),
+                    &modified,
+                    nh_action.as_ref(),
+                )
+            });
         if changed {
             checkpoint();
             result.next_hop_override.push(nh_action);

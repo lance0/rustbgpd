@@ -22,8 +22,8 @@ use tracing::{debug, info, warn};
 use super::helpers::{
     LOCAL_PEER, bgpls_route_family, bgpls_routes_equal, evpn_routes_equal, flowspec_route_family,
     gauge_val, labeled_route_family, labeled_routes_equal, prefix_family, routes_equal,
-    rtc_routes_equal, should_suppress_ibgp_inner, unicast_route_family, validate_route_aspa,
-    validate_route_rpki, vpn_route_family, vpn_routes_equal,
+    rtc_routes_equal, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
+    validate_route_aspa, validate_route_rpki, vpn_route_family, vpn_routes_equal,
 };
 use super::{
     AuthoritativeTransitionReceipt, PendingRouteChunk, PendingRoutesReceived,
@@ -215,6 +215,8 @@ pub(in crate::manager) struct OutboundCommitBatch {
     /// advertised view only if an exact probe fails: neither the group table,
     /// rejection overlay nor outbound admission changes before that point.
     pub(in crate::manager) defer_grouped_refresh_prior: bool,
+    /// Explicit family replay re-emits even a wire-equivalent action change.
+    pub(in crate::manager) force_unicast_replay: bool,
     pub(in crate::manager) announce_source_exclusion: Option<IpAddr>,
     pub(in crate::manager) shared_group_encode: Option<Arc<crate::update::SharedGroupEncode>>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
@@ -1383,6 +1385,7 @@ pub(in crate::manager) enum ExportTarget<'a> {
         peer_asn: Option<u32>,
         peer_group: Option<&'a str>,
         local_role: Option<BgpRole>,
+        snapshot: Option<&'a dyn crate::update::ExactExportSnapshot>,
         trace: &'a mut ExportGateTrace,
     },
 }
@@ -1591,6 +1594,13 @@ impl<'a> ExportTarget<'a> {
                     },
                 ),
             },
+        }
+    }
+
+    fn explain_snapshot(&self) -> Option<&dyn crate::update::ExactExportSnapshot> {
+        match self {
+            Self::Explain { snapshot, .. } => *snapshot,
+            Self::Peer { .. } | Self::Group { .. } => None,
         }
     }
 
@@ -2635,6 +2645,127 @@ impl RibManager {
         self.replacement_checkpoint(true);
     }
 
+    /// Suppress only action-only candidates proven wire-equivalent by the
+    /// same immutable transport profile used for the final admission probe.
+    /// Old group slots are borrowed from this pass, never stored per receiver.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the common action diff resolves admitted private, regroup and shared slots before filtering an aligned payload"
+    )]
+    fn suppress_equivalent_unicast_actions(
+        &self,
+        peer: IpAddr,
+        batch: &mut OutboundCommitBatch,
+        snapshot: &dyn crate::update::ExactExportSnapshot,
+        stage: Option<&super::update_groups::GroupStageOutput>,
+    ) -> bool {
+        if batch.force_unicast_replay
+            || self.force_outbound_peers.contains(&peer)
+            || batch.unicast.announce.is_empty()
+        {
+            return false;
+        }
+        let private = self.adj_ribs_out.get(&peer);
+        let baseline = self.pending_regroup_baseline.get(&peer);
+        let clean_stage =
+            stage.filter(|stage| !self.dirty_peers.contains(&peer) && stage.has_next_hop_actions);
+        if !batch.unicast.next_hop_override.iter().any(Option::is_some)
+            && !private.is_some_and(AdjRibOut::has_next_hop_overrides)
+            && baseline.is_none_or(|base| base.next_hop_overrides.is_empty())
+            && clean_stage.is_none()
+        {
+            return false;
+        }
+        let prior: crate::fast_hash::FastMap<_, _> = clean_stage
+            .into_iter()
+            .flat_map(|stage| stage.prior_slots(peer))
+            .inspect(|_| self.replacement_checkpoint(false))
+            .collect();
+        let rs_control = self
+            .peer_rs_control
+            .get(&peer)
+            .copied()
+            .zip(self.peer_asn.get(&peer).copied());
+        let keep: Vec<_> = batch
+            .unicast
+            .announce
+            .iter()
+            .zip(batch.unicast.next_hop_override.iter())
+            .map(|(route, new_action)| {
+                self.replacement_checkpoint(false);
+                let key = (route.prefix, route.path_id);
+                let old = baseline
+                    .and_then(|base| {
+                        base.unicast
+                            .get(&key)
+                            .map(|old| (old, base.next_hop_overrides.get(&key)))
+                    })
+                    .or_else(|| {
+                        private.and_then(|rib| {
+                            rib.get(&key.0, key.1)
+                                .map(|old| (old, rib.next_hop_override(&key.0, key.1)))
+                        })
+                    });
+                let mut rewritten = None;
+                let old = old.or_else(|| {
+                    let entry = prior.get(&key)?;
+                    if entry.nh == new_action.as_ref()
+                        || !self.clean_group_route_was_admitted(
+                            peer,
+                            entry.route,
+                            entry.source_attrs,
+                        )
+                    {
+                        return None;
+                    }
+                    // The central comparison sees the receiver's post-control
+                    // Route, just like private advertised state and baselines.
+                    let (_, large) = super::update_groups::source_control_input(entry.source_attrs);
+                    let mut route = entry.route.clone();
+                    rs_control::rs_control_route_rewrite(&mut route, large, rs_control);
+                    rewritten = Some((route, entry.nh));
+                    None
+                });
+                let old =
+                    old.or_else(|| rewritten.as_ref().map(|(route, action)| (route, *action)));
+                !old.is_some_and(|(old, old_action)| {
+                    old_action != new_action.as_ref()
+                        && routes_equal(old, route)
+                        && snapshot.unicast_next_hop_actions_equal(
+                            route,
+                            old_action,
+                            new_action.as_ref(),
+                        )
+                })
+            })
+            .collect();
+        if keep.iter().all(|keep| *keep) {
+            return false;
+        }
+        batch.unicast = AlignedUnicastPayload {
+            announce: batch
+                .unicast
+                .announce
+                .iter()
+                .zip(&keep)
+                .filter(|(_, keep)| **keep)
+                .map(|(route, _)| route.clone())
+                .collect::<Vec<_>>()
+                .into(),
+            next_hop_override: batch
+                .unicast
+                .next_hop_override
+                .iter()
+                .zip(&keep)
+                .filter(|(_, keep)| **keep)
+                .map(|(action, _)| action.clone())
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        batch.shared_group_encode = None;
+        true
+    }
+
     pub(super) fn try_send_and_commit_outbound_update_with_group_prior(
         &mut self,
         peer: IpAddr,
@@ -2647,6 +2778,7 @@ impl RibManager {
             batch,
             group_prior,
             shared_unicast_precommit,
+            None,
             None,
         )
     }
@@ -2662,6 +2794,7 @@ impl RibManager {
         mut group_prior: HashSet<crate::update::ExactExportKey>,
         mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
         otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
+        group_stage: Option<&super::update_groups::GroupStageOutput>,
     ) -> bool {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -2773,6 +2906,65 @@ impl RibManager {
                 .collect();
             self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
         }
+        // Validate the trust boundary before consuming any durable pending
+        // state (OTC diagnostics or the rejected-route overlay). A failed
+        // precommit leaves those structures intact for the retry.
+        let has_candidate_route_payload = !batch.unicast.announce.is_empty()
+            || !batch.withdraw.is_empty()
+            || !batch.flowspec_announce.is_empty()
+            || !batch.flowspec_withdraw.is_empty()
+            || !batch.evpn_announce.is_empty()
+            || !batch.evpn_withdraw.is_empty()
+            || !batch.bgpls_announce.is_empty()
+            || !batch.bgpls_withdraw.is_empty()
+            || !batch.vpn_announce.is_empty()
+            || !batch.vpn_withdraw.is_empty()
+            || !batch.labeled_announce.is_empty()
+            || !batch.labeled_withdraw.is_empty()
+            || !batch.rtc_announce.is_empty()
+            || !batch.rtc_withdraw.is_empty();
+        let exact_export_snapshot = if has_candidate_route_payload {
+            let Some(encoder) = self.peer_export_encoders.get(&peer) else {
+                warn!(%peer, "route-bearing outbound update has no exact export encoder — refusing Adj-RIB-Out commit");
+                batch.retire_with(&mut || checkpoint());
+                super::retire_hash_set(&mut group_prior, &mut || checkpoint());
+                self.replacement_checkpoint(true);
+                return false;
+            };
+            Some(encoder.snapshot())
+        } else {
+            None
+        };
+
+        if let Some(snapshot) = &exact_export_snapshot
+            && self.suppress_equivalent_unicast_actions(
+                peer,
+                &mut batch,
+                snapshot.as_ref(),
+                group_stage,
+            )
+            && batch.unicast.announce.is_empty()
+            && batch.withdraw.is_empty()
+            && batch.end_of_rib.is_empty()
+            && batch.refresh_markers.is_empty()
+            && batch.flowspec_announce.is_empty()
+            && batch.flowspec_withdraw.is_empty()
+            && batch.evpn_announce.is_empty()
+            && batch.evpn_withdraw.is_empty()
+            && batch.bgpls_announce.is_empty()
+            && batch.bgpls_withdraw.is_empty()
+            && batch.vpn_announce.is_empty()
+            && batch.vpn_withdraw.is_empty()
+            && batch.labeled_announce.is_empty()
+            && batch.labeled_withdraw.is_empty()
+            && batch.rtc_announce.is_empty()
+            && batch.rtc_withdraw.is_empty()
+            && !self.pending_otc_blocked.contains_key(&peer)
+        {
+            batch.retire_with(&mut || checkpoint());
+            super::retire_hash_set(&mut group_prior, &mut || checkpoint());
+            return true;
+        }
         let Ok(permit) = tx.try_reserve() else {
             batch.retire_with(&mut || checkpoint());
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
@@ -2824,35 +3016,6 @@ impl RibManager {
             }
             self.refresh_group_recovery_gauges();
         }
-        // Validate the trust boundary before consuming any durable pending
-        // state (OTC diagnostics or the rejected-route overlay). A failed
-        // precommit leaves those structures intact for the retry.
-        let has_candidate_route_payload = !batch.unicast.announce.is_empty()
-            || !batch.withdraw.is_empty()
-            || !batch.flowspec_announce.is_empty()
-            || !batch.flowspec_withdraw.is_empty()
-            || !batch.evpn_announce.is_empty()
-            || !batch.evpn_withdraw.is_empty()
-            || !batch.bgpls_announce.is_empty()
-            || !batch.bgpls_withdraw.is_empty()
-            || !batch.vpn_announce.is_empty()
-            || !batch.vpn_withdraw.is_empty()
-            || !batch.labeled_announce.is_empty()
-            || !batch.labeled_withdraw.is_empty()
-            || !batch.rtc_announce.is_empty()
-            || !batch.rtc_withdraw.is_empty();
-        let exact_export_snapshot = if has_candidate_route_payload {
-            let Some(encoder) = self.peer_export_encoders.get(&peer) else {
-                warn!(%peer, "route-bearing outbound update has no exact export encoder — refusing Adj-RIB-Out commit");
-                batch.retire_with(&mut || checkpoint());
-                super::retire_hash_set(&mut group_prior, &mut || checkpoint());
-                self.replacement_checkpoint(true);
-                return false;
-            };
-            Some(encoder.snapshot())
-        } else {
-            None
-        };
 
         let OutboundCommitBatch {
             unicast:
@@ -2862,6 +3025,7 @@ impl RibManager {
                 },
             unicast_otc_prechecked,
             defer_grouped_refresh_prior,
+            force_unicast_replay: _,
             announce_source_exclusion,
             mut shared_group_encode,
             mut withdraw,
@@ -3732,9 +3896,14 @@ impl RibManager {
                 super::replacement_readiness_checkpoint(&readiness, true);
             }
             if grouped_unicast_count.is_none() {
-                for route in announce.iter().inspect(|_| checkpoint()) {
+                for (route, action) in announce
+                    .iter()
+                    .zip(next_hop_override.iter())
+                    .inspect(|_| checkpoint())
+                {
                     super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
-                    rib_out.insert_with(route.clone(), &mut || checkpoint());
+                    rib_out
+                        .insert_with_next_hop(route.clone(), action.clone(), &mut || checkpoint());
                 }
                 for (prefix, path_id) in &withdraw {
                     super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
@@ -7150,6 +7319,9 @@ impl RibManager {
                             self.pending_regroup_baseline
                                 .get(&peer)
                                 .map(|base| &base.unicast),
+                            self.pending_regroup_baseline
+                                .get(&peer)
+                                .map(|base| &base.next_hop_overrides),
                             self.pending_extra_withdraws
                                 .get(&peer)
                                 .map(|extras| &extras.unicast),
@@ -7926,6 +8098,7 @@ impl RibManager {
                 if self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                     peer,
                     OutboundCommitBatch {
+                        force_unicast_replay: is_force,
                         unicast_otc_prechecked,
                         announce_source_exclusion,
                         shared_group_encode,
@@ -7952,6 +8125,7 @@ impl RibManager {
                         lazy_group_prior,
                     }),
                     member_of.is_none().then_some(effective_prefixes.as_ref()),
+                    member_of.and_then(|gid| group_stage.get(&gid)),
                 ) {
                     self.update_policy_filtered_routes_for_prefixes(
                         peer,

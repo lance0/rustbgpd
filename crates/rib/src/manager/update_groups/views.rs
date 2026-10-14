@@ -2,7 +2,7 @@ use super::{
     Afi, ExactExportKey, FastMap, GroupEvalAccumulator, GroupRibOut, HashSet, IpAddr,
     NextHopAction, PolicyAction, PolicyLabel, Prefix, RibManager, Route, RouteQueryKey,
     RtcMembership, Safi, VpnAddressFamily, VpnRibRoute, VpnRibRouteKey, VpnRouteKey,
-    bump_counter_row, route_query_key, routes_equal, rt_passes, vpn_routes_equal,
+    bump_counter_row, route_query_key, rt_passes, vpn_routes_equal,
 };
 
 impl RibManager {
@@ -42,6 +42,7 @@ impl RibManager {
         is_dirty: bool,
         is_force: bool,
         baseline: Option<&FastMap<(Prefix, u32), Route>>,
+        baseline_actions: Option<&FastMap<(Prefix, u32), NextHopAction>>,
         extras: Option<&HashSet<(Prefix, u32)>>,
         admitted: Option<super::admitted_recovery::AdmittedKeyView<'_>>,
         announce: &mut Vec<Route>,
@@ -82,7 +83,14 @@ impl RibManager {
             rs_control_route_rewrite(&mut route, source_large_communities, rs_control);
             if !is_force
                 && let Some(base) = baseline
-                && base.get(&key).is_some_and(|old| routes_equal(old, &route))
+                && base.get(&key).is_some_and(|old| {
+                    crate::manager::helpers::unicast_routes_equal(
+                        old,
+                        baseline_actions.and_then(|actions| actions.get(&key)),
+                        &route,
+                        entry.nh,
+                    )
+                })
             {
                 continue;
             }

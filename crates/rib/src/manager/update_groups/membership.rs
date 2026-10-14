@@ -80,8 +80,8 @@ impl RibManager {
             let mut baseline: Option<RegroupBaseline> = match prev_gid {
                 Some(gid) => {
                     let group = self.group_ribs.get(&gid);
-                    let base = group.map(|g| RegroupBaseline {
-                        unicast: g.member_view_snapshot_with_checkpoint(
+                    let base = group.map(|g| {
+                        let mut base = g.member_view_snapshot_with_checkpoint(
                             peer,
                             rs_control,
                             &rejected,
@@ -92,8 +92,8 @@ impl RibManager {
                                     self.replacement_checkpoint_at("fallback_baseline", false);
                                 }
                             },
-                        ),
-                        vpn: g.member_vpn_view_snapshot_with_checkpoint(
+                        );
+                        base.vpn = g.member_vpn_view_snapshot_with_checkpoint(
                             peer,
                             rt_filter.as_ref(),
                             &rejected,
@@ -104,7 +104,8 @@ impl RibManager {
                                     self.replacement_checkpoint_at("fallback_baseline", false);
                                 }
                             },
-                        ),
+                        );
+                        base
                     });
                     // A member that leaves while dirty may have missed
                     // withdrawals; carry the group tombstones along as
@@ -136,6 +137,15 @@ impl RibManager {
                                 self.replacement_checkpoint_at("fallback_baseline", false);
                                 unicast.insert((route.prefix, route.path_id), route.clone());
                             }
+                            let next_hop_overrides = rib_out
+                                .iter()
+                                .filter_map(|route| {
+                                    self.replacement_checkpoint_at("fallback_baseline", false);
+                                    rib_out.next_hop_override(&route.prefix, route.path_id).map(
+                                        |action| ((route.prefix, route.path_id), action.clone()),
+                                    )
+                                })
+                                .collect();
                             let mut vpn = FastMap::default();
                             if vpn_groupable {
                                 vpn = FastMap::with_capacity_and_hasher(
@@ -148,7 +158,11 @@ impl RibManager {
                                     vpn.insert(route.nlri.key(), route.clone());
                                 }
                             }
-                            RegroupBaseline { unicast, vpn }
+                            RegroupBaseline {
+                                unicast,
+                                next_hop_overrides,
+                                vpn,
+                            }
                         })
                         .unwrap_or_default(),
                 ),
@@ -160,6 +174,10 @@ impl RibManager {
                 base.unicast.retain(|(prefix, path_id), _| {
                     checkpoint();
                     admitted.contains(&ExactExportKey::Unicast(*prefix, *path_id))
+                });
+                base.next_hop_overrides.retain(|key, _| {
+                    checkpoint();
+                    base.unicast.contains_key(key)
                 });
                 base.vpn.retain(|nlri_key, _| {
                     checkpoint();
@@ -243,7 +261,11 @@ impl RibManager {
                         );
                     }
                     let extras = self.pending_extra_withdraws.entry(peer).or_default();
-                    for baseline in previous.into_iter().chain(std::iter::once(base)) {
+                    for mut baseline in previous.into_iter().chain(std::iter::once(base)) {
+                        crate::adj_rib_out::release_hash_map(
+                            &mut baseline.next_hop_overrides,
+                            &mut checkpoint,
+                        );
                         let mut unicast = baseline.unicast.into_keys();
                         extras
                             .unicast
@@ -330,11 +352,18 @@ impl RibManager {
                     let mut unicast = base.unicast.into_values();
                     for route in unicast.by_ref() {
                         checkpoint();
-                        rib_out.insert_with(route, &mut checkpoint);
+                        let action = base
+                            .next_hop_overrides
+                            .remove(&(route.prefix, route.path_id));
+                        rib_out.insert_with_next_hop(route, action, &mut checkpoint);
                     }
                     crate::manager::replacement_readiness_checkpoint(&readiness, true);
                     drop(unicast);
                     crate::manager::replacement_readiness_checkpoint(&readiness, true);
+                    crate::adj_rib_out::release_hash_map(
+                        &mut base.next_hop_overrides,
+                        &mut checkpoint,
+                    );
                     let mut vpn = base.vpn.into_values();
                     for route in vpn.by_ref() {
                         checkpoint();

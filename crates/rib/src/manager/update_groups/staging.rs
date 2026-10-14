@@ -5,7 +5,7 @@ use super::{
     GroupDelta, GroupRibOut, GroupStageOutput, HashMap, HashSet, IpAddr, LaneDelta, PolicyAction,
     PolicyChain, PolicyFilteredRouteKey, PolicyLabel, Prefix, RibManager, RunnerUp,
     VpnDenialRecord, VpnGroupDelta, VpnGroupStageOutput, VpnRibRoute, VpnRibRouteKey, VpnRouteKey,
-    capture_source_attrs, routes_equal, source_control_input,
+    capture_source_attrs, source_control_input,
 };
 
 impl RibManager {
@@ -248,7 +248,12 @@ impl RibManager {
                     let prior = group.runner_up.get(prefix);
                     let (content_unchanged, control_unchanged) = match (prior, &stage.runner_up) {
                         (Some(old), Some(new)) => (
-                            routes_equal(&old.route, &new.route),
+                            crate::manager::helpers::unicast_routes_equal(
+                                &old.route,
+                                old.nh.as_ref(),
+                                &new.route,
+                                new.nh.as_ref(),
+                            ),
                             source_control_input(old.source_attrs.as_ref())
                                 == source_control_input(new.source_attrs.as_ref()),
                         ),
@@ -353,6 +358,19 @@ impl RibManager {
                     .drain(..)
                     .zip(result.next_hop_override.drain(..))
                 {
+                    if group
+                        .table
+                        .get(&route.prefix, route.path_id)
+                        .is_some_and(|old| crate::manager::helpers::routes_equal(old, &route))
+                    {
+                        let action = group.nh_override((route.prefix, route.path_id));
+                        if action != nh {
+                            self.replacement_checkpoint(true);
+                            out.prior_equal_actions
+                                .insert((route.prefix, route.path_id), action);
+                            self.replacement_checkpoint(true);
+                        }
+                    }
                     let prior_source_attrs =
                         super::payload::capture_prior_source_attrs(group, *prefix, route.path_id);
                     let prior =

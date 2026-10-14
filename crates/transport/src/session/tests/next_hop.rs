@@ -3508,3 +3508,524 @@ async fn vpnv6_set_next_hop_keeps_link_local_on_the_wire() {
 async fn vpnv6_add_path_set_next_hop_keeps_link_local_on_the_wire() {
     check_mpls_set_next_hop_keeps_link_local(Safi::MplsVpn, true).await;
 }
+
+/// Compare immutable preparation with the actual UPDATE bytes for a retained
+/// Route whose export action flips. Includes body IPv4, ENHE and IPv6, ordinary
+/// eBGP, iBGP and route-server clients, and already-self negative controls.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered final-wire and EoR control per peer profile, family and action direction"
+)]
+async fn action_only_profile_equivalence_matches_final_wire_bytes() {
+    use rustbgpd_policy::NextHopAction;
+    use rustbgpd_rib::ExactExportSnapshot;
+    for (remote_asn, rs_client) in [(65001, false), (65002, true), (65002, false)] {
+        for (afi, enhe) in [(Afi::Ipv4, false), (Afi::Ipv4, true), (Afi::Ipv6, false)] {
+            for already_self in [false, true] {
+                let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+                session.config.route_server_client = rs_client;
+                session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+                let (client, mut server) = connected_stream_pair().await;
+                session.test_install_stream(client);
+                let mut negotiated = negotiated_session(remote_asn, enhe);
+                negotiated.negotiated_families = vec![(afi, Safi::Unicast)];
+                session.negotiated = Some(Arc::new(negotiated));
+                let profile = session.publish_export_profile();
+                let mut route = if afi == Afi::Ipv4 {
+                    make_route(100)
+                } else {
+                    make_v6_unicast_route("2001:db8::9".parse().unwrap())
+                };
+                if already_self {
+                    let address = if afi == Afi::Ipv4 {
+                        IpAddr::V4(profile.local_ipv4())
+                    } else {
+                        "2001:db8::1".parse().unwrap()
+                    };
+                    route.next_hop = address;
+                    AttrSet::edit(&mut route.attributes, |attrs| {
+                        attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+                        if let IpAddr::V4(address) = address {
+                            attrs.push(PathAttribute::NextHop(address));
+                        }
+                    });
+                }
+                let equal = profile.unicast_next_hop_actions_equal(
+                    &route,
+                    None,
+                    Some(&NextHopAction::Self_),
+                );
+                assert_eq!(
+                    equal,
+                    profile.unicast_next_hop_actions_equal(
+                        &route,
+                        Some(&NextHopAction::Self_),
+                        None
+                    )
+                );
+                // Both directions traverse the real transport writer. The final
+                // EoR must follow all three route events, never split their order.
+                let mut wire = Vec::new();
+                for (index, action) in [None, Some(NextHopAction::Self_), None]
+                    .into_iter()
+                    .enumerate()
+                {
+                    session.send_route_update(OutboundRouteUpdate {
+                        exact_export_snapshot: Some(profile.clone()),
+                        announce: vec![route.clone()].into(),
+                        next_hop_override: vec![action].into(),
+                        end_of_rib: if index == 2 {
+                            vec![(afi, Safi::Unicast)]
+                        } else {
+                            vec![]
+                        },
+                        ..OutboundRouteUpdate::default()
+                    });
+                    let raw = read_single_raw_bgp_message(&mut server).await;
+                    let Message::Update(update) = rustbgpd_wire::decode_message(
+                        &mut Bytes::from(raw.clone()),
+                        rustbgpd_wire::MAX_MESSAGE_LEN,
+                    )
+                    .unwrap() else {
+                        panic!("expected UPDATE");
+                    };
+                    let parsed = update.parse(true, false, &[]).unwrap();
+                    assert_eq!(parsed.withdrawn, [] as [rustbgpd_wire::Ipv4NlriEntry; 0]);
+                    assert!(
+                        !parsed
+                            .attributes
+                            .iter()
+                            .any(|attr| matches!(attr, PathAttribute::MpUnreachNlri(_)))
+                    );
+                    wire.push(raw);
+                }
+                assert_eq!(
+                    wire[0] == wire[1],
+                    equal,
+                    "AS {remote_asn}, RS {rs_client}, {afi:?}, ENHE {enhe}, already self {already_self}"
+                );
+                assert_eq!(
+                    wire[0], wire[2],
+                    "returning to None restores exact original bytes"
+                );
+                if !enhe && afi == Afi::Ipv4 && (remote_asn == 65001 || rs_client) {
+                    assert_eq!(
+                        equal, already_self,
+                        "passthrough peers need the action-only replacement unless already self"
+                    );
+                }
+                if !enhe && remote_asn != 65001 && !rs_client {
+                    assert!(equal, "ordinary eBGP already rewrites to self");
+                }
+                let eor = read_single_raw_bgp_message(&mut server).await;
+                let body = &eor[19..];
+                assert_eq!(
+                    body,
+                    if afi == Afi::Ipv4 {
+                        &[0, 0, 0, 0][..]
+                    } else {
+                        &[0, 0, 0, 6, 0x80, 15, 3, 0, 2, 1][..]
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn action_only_failed_preparation_cannot_prove_equivalence() {
+    use rustbgpd_policy::NextHopAction;
+    use rustbgpd_rib::ExactExportSnapshot;
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    session.negotiated = Some(Arc::new(negotiated_session(65001, false)));
+    let profile = session.publish_export_profile();
+    let route = make_v6_unicast_route("2001:db8::9".parse().unwrap());
+    // A specific link-local hop lacks this global peer's interface scope.
+    let refused = NextHopAction::Specific("fe80::9".parse().unwrap());
+    assert!(profile.prepare_unicast_candidate(&route, None).is_ok());
+    assert!(matches!(
+        profile.prepare_unicast_candidate(&route, Some(&refused)),
+        Err(export::ExportProbeError::LinkLocalNextHopScope)
+    ));
+    assert!(!profile.unicast_next_hop_actions_equal(&route, None, Some(&refused)));
+    assert!(!profile.unicast_next_hop_actions_equal(&route, Some(&refused), None));
+    assert!(!profile.unicast_next_hop_actions_equal(&route, Some(&refused), Some(&refused)));
+}
+
+#[tokio::test]
+async fn action_only_equal_prepared_form_must_still_pass_exact_encoding() {
+    use rustbgpd_policy::NextHopAction;
+    use rustbgpd_rib::ExactExportSnapshot;
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let profile = session.publish_export_profile();
+    let mut route = make_route(100);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(
+            (0..1200).map(|n| 0xFDE8_0000 + n).collect(),
+        ));
+    });
+    assert!(profile.prepare_unicast_candidate(&route, None).is_ok());
+    assert!(
+        profile
+            .prepare_unicast_candidate(&route, Some(&NextHopAction::Self_))
+            .is_ok()
+    );
+    assert!(
+        <export::SessionExportProfile as ExactExportSnapshot>::probe_announcement(
+            profile.as_ref(),
+            rustbgpd_rib::ExactExportCandidate::Unicast {
+                route: &route,
+                next_hop_override: None
+            }
+        )
+        .is_err()
+    );
+    assert!(!profile.unicast_next_hop_actions_equal(&route, None, Some(&NextHopAction::Self_)));
+    assert!(!profile.unicast_next_hop_actions_equal(&route, Some(&NextHopAction::Self_), None));
+}
+
+/// Use real immutable profiles with identical policy inputs. Slow-peer isolation
+/// selects the existing private path without changing policy or wire attributes.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered real-RIB source or policy transition, authoritative fallback, and forced replay control"
+)]
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the fixture independently varies peer encoding, initial action, isolation, and regroup history"
+)]
+async fn action_only_replacement_frames(
+    rs_client: bool,
+    initially_self: bool,
+    private: bool,
+    clean: bool,
+    action_community: Option<u32>,
+) -> Vec<Vec<u8>> {
+    use rustbgpd_policy::{CommunityMatch, NextHopAction};
+    use rustbgpd_rib::{ExportPolicyCohortOutcome, PeerExportPolicyReplacement};
+    let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.route_server_client = rs_client;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    session.publish_export_profile();
+    let (mut second, _unused_rx) = make_test_session_with_rib(65001, 65002);
+    second.peer_ip = "10.0.0.3".parse().unwrap();
+    second.config.route_server_client = rs_client;
+    second.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    second.publish_export_profile();
+    let (_query_tx, query_rx) = mpsc::channel(8);
+    let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
+    let task = tokio::spawn(manager.run());
+    let peers = [session.peer_ip, second.peer_ip];
+    let policy = |use_self: bool| {
+        let mut statement = next_hop_statement(NextHopAction::Self_, None, None);
+        if let Some(tag) = action_community {
+            statement.match_community = vec![CommunityMatch::Standard { value: tag }];
+            statement.modifications.communities_remove = vec![tag];
+            let mut fallback = statement.clone();
+            fallback.match_community.clear();
+            fallback.modifications.set_next_hop = None;
+            return PolicyChain::new(vec![Policy {
+                entries: vec![statement, fallback],
+                default_action: PolicyAction::Deny,
+            }]);
+        }
+        statement.modifications.set_next_hop = use_self.then_some(NextHopAction::Self_);
+        PolicyChain::new(vec![Policy {
+            entries: vec![statement],
+            default_action: PolicyAction::Deny,
+        }])
+    };
+    let mut receivers = Vec::new();
+    for (peer, encoder) in [
+        (session.peer_ip, session.export_encoder.clone()),
+        (second.peer_ip, second.export_encoder.clone()),
+    ] {
+        session
+            .rib_tx
+            .send(RibUpdate::SetPeerExportEncoder {
+                peer,
+                session_id: 0,
+                encoder,
+            })
+            .await
+            .unwrap();
+        let (outbound_tx, receiver) = mpsc::channel(16);
+        session
+            .rib_tx
+            .send(RibUpdate::PeerUp {
+                peer,
+                session_id: 0,
+                peer_asn: 65002,
+                peer_router_id: match peer {
+                    IpAddr::V4(ip) => ip,
+                    IpAddr::V6(_) => unreachable!(),
+                },
+                outbound_tx,
+                export_policy: Some(policy(initially_self)),
+                sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: vec![],
+                add_path_send_max: 0,
+                negotiated_orf_recv: vec![],
+                negotiated_llgr_families: vec![],
+            })
+            .await
+            .unwrap();
+        if private {
+            session
+                .rib_tx
+                .send(RibUpdate::PeerSlowState {
+                    peer,
+                    session_id: 0,
+                    slow: true,
+                })
+                .await
+                .unwrap();
+        }
+        receivers.push(receiver);
+    }
+    for peer in peers {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        session
+            .rib_tx
+            .send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+            .await
+            .unwrap();
+        assert_eq!(response.await.unwrap().starts_with("group:"), !private);
+    }
+    for receiver in &mut receivers {
+        while let Ok(update) = receiver.try_recv() {
+            assert!(
+                update.announce.is_empty(),
+                "registration only has its initial EoR"
+            );
+        }
+    }
+    let mut route = make_route(100);
+    route.peer = "192.0.2.9".parse().unwrap();
+    route.next_hop = route.peer;
+    route.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65003])],
+        }),
+        PathAttribute::NextHop("192.0.2.9".parse().unwrap()),
+    ]);
+    if let Some(tag) = action_community
+        && initially_self
+    {
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![tag]));
+        });
+    }
+    session
+        .rib_tx
+        .send(RibUpdate::RoutesReceived {
+            peer: route.peer,
+            session_id: 0,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(3), receivers[0].recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.announce.len(), 1);
+    session.send_route_update(initial);
+    let mut frames = vec![read_single_raw_bgp_message(&mut server).await];
+    let replacements = || {
+        peers
+            .into_iter()
+            .map(|peer| PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(policy(!initially_self)),
+            })
+            .collect()
+    };
+    if let Some(tag) = action_community {
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+            if !initially_self {
+                attrs.push(PathAttribute::Communities(vec![tag]));
+            }
+        });
+        session
+            .rib_tx
+            .send(RibUpdate::RoutesReceived {
+                peer: route.peer,
+                session_id: 0,
+                announced: vec![route],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+        // The primary-channel snapshot waits for the source mutation's
+        // selection and fanout, including a byte-equivalent silent result.
+        let (reply, response) = tokio::sync::oneshot::channel();
+        session
+            .rib_tx
+            .send(RibUpdate::QueryBestRoutes {
+                deadline: tokio::time::Instant::now() + Duration::from_secs(3),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.await.unwrap().len(), 1);
+    } else {
+        if clean {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            session
+                .rib_tx
+                .send(RibUpdate::ReplacePeerExportPolicies {
+                    replacements: replacements(),
+                    reply,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                response.await.unwrap().unwrap(),
+                ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+                "action-only inventory must hand off before any cohort member commits"
+            );
+            assert!(
+                receivers[0].try_recv().is_err(),
+                "a refused cohort cannot emit a partial transition"
+            );
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        session
+            .rib_tx
+            .send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements: replacements(),
+                reply,
+            })
+            .await
+            .unwrap();
+        response.await.unwrap().unwrap();
+    }
+    let mut replacements_seen = 0;
+    while let Ok(update) = receivers[0].try_recv() {
+        assert_eq!(update.withdraw, [] as [(rustbgpd_wire::Prefix, u32); 0]);
+        replacements_seen += update.announce.len();
+        assert_eq!(
+            update.announce.len(),
+            1,
+            "no empty or duplicate replacement envelope"
+        );
+        session.send_route_update(update);
+        frames.push(read_single_raw_bgp_message(&mut server).await);
+    }
+    assert_eq!(
+        replacements_seen,
+        usize::from(rs_client),
+        "only the passthrough profile has changed next-hop bytes"
+    );
+    let (reply, response) = tokio::sync::oneshot::channel();
+    session
+        .rib_tx
+        .send(RibUpdate::RefreshPeerOutbound {
+            peer: peers[0],
+            reply,
+        })
+        .await
+        .unwrap();
+    response.await.unwrap().unwrap();
+    let forced = receivers[0]
+        .try_recv()
+        .expect("explicit forced restage always reannounces");
+    assert_eq!(forced.announce.len(), 1);
+    assert_eq!(forced.withdraw, [] as [(rustbgpd_wire::Prefix, u32); 0]);
+    session.send_route_update(forced);
+    frames.push(read_single_raw_bgp_message(&mut server).await);
+    assert!(receivers[0].try_recv().is_err());
+    for raw in &frames {
+        let Message::Update(update) = rustbgpd_wire::decode_message(
+            &mut Bytes::from(raw.clone()),
+            rustbgpd_wire::MAX_MESSAGE_LEN,
+        )
+        .unwrap() else {
+            panic!("expected UPDATE");
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        assert_eq!(parsed.withdrawn, [] as [rustbgpd_wire::Ipv4NlriEntry; 0]);
+        assert_eq!(parsed.announced.len(), 1);
+    }
+    if rs_client {
+        assert_ne!(frames[0], frames[1]);
+        assert_eq!(frames[1], frames[2]);
+    } else {
+        assert_eq!(frames[0], frames[1]);
+    }
+    drop(session);
+    task.abort();
+    let _ = task.await;
+    frames
+}
+
+#[tokio::test]
+async fn action_only_policy_replacement_receiver_bytes_match_private() {
+    for rs_client in [false, true] {
+        for initially_self in [false, true] {
+            for clean in [false, true] {
+                let grouped =
+                    action_only_replacement_frames(rs_client, initially_self, false, clean, None)
+                        .await;
+                let private =
+                    action_only_replacement_frames(rs_client, initially_self, true, clean, None)
+                        .await;
+                assert_eq!(
+                    grouped, private,
+                    "RS {rs_client}, initially Self {initially_self}, clean transition {clean}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn action_only_source_update_receiver_bytes_match_private() {
+    for rs_client in [false, true] {
+        for initially_self in [false, true] {
+            let grouped = action_only_replacement_frames(
+                rs_client,
+                initially_self,
+                false,
+                false,
+                Some(0xFDE8_0064),
+            )
+            .await;
+            let private = action_only_replacement_frames(
+                rs_client,
+                initially_self,
+                true,
+                false,
+                Some(0xFDE8_0064),
+            )
+            .await;
+            assert_eq!(
+                grouped, private,
+                "RS {rs_client}, initially Self {initially_self}"
+            );
+        }
+    }
+}

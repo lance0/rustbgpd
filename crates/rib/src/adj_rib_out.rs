@@ -4,6 +4,7 @@
 
 use std::net::IpAddr;
 
+use rustbgpd_policy::NextHopAction;
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
@@ -31,6 +32,9 @@ pub struct AdjRibOut {
     /// also backs the group RIB-Out table (`GroupRibOut`), whose route map
     /// was the largest heap component in docs/perf/rebaseline-2026-07.md.
     routes: RouteSlab<Route>,
+    /// Explicit unicast actions admitted alongside route bodies. None uses
+    /// the immutable session profile's default and needs no sparse entry.
+    next_hop_overrides: HashMap<(Prefix, u32), NextHopAction>,
     /// Primary index: prefix → `(path_id, slab handle)` pairs, backed by a
     /// family-split prefix trie. `SmallVec<[(u32, u32); 1]>` inlines the
     /// single-best case (`path_id=0`) without heap allocation; Add-Path
@@ -137,6 +141,7 @@ impl AdjRibOut {
         Self {
             peer,
             routes: RouteSlab::with_capacity(capacity),
+            next_hop_overrides: HashMap::default(),
             prefix_path_ids: FamilyPrefixMap::default(),
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
@@ -164,6 +169,7 @@ impl AdjRibOut {
     /// walks and possible allocation edges.
     pub(crate) fn insert_with(&mut self, route: Route, checkpoint: &mut impl FnMut()) {
         let path_id = route.path_id;
+        self.next_hop_overrides.remove(&(route.prefix, path_id));
         checkpoint();
         let ids = self.prefix_path_ids.entry_or_default(route.prefix);
         checkpoint();
@@ -182,6 +188,33 @@ impl AdjRibOut {
             ids.push((path_id, handle));
             checkpoint();
         }
+    }
+
+    pub(crate) fn insert_with_next_hop(
+        &mut self,
+        route: Route,
+        action: Option<NextHopAction>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let key = (route.prefix, route.path_id);
+        self.insert_with(route, checkpoint);
+        if let Some(action) = action {
+            checkpoint();
+            self.next_hop_overrides.insert(key, action);
+            checkpoint();
+        }
+    }
+
+    pub(crate) fn has_next_hop_overrides(&self) -> bool {
+        !self.next_hop_overrides.is_empty()
+    }
+
+    pub(crate) fn next_hop_override(
+        &self,
+        prefix: &Prefix,
+        path_id: u32,
+    ) -> Option<&NextHopAction> {
+        self.next_hop_overrides.get(&(*prefix, path_id))
     }
 
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
@@ -220,6 +253,7 @@ impl AdjRibOut {
             checkpoint();
         }
         checkpoint();
+        self.next_hop_overrides.remove(&(*prefix, path_id));
         let retired = self.routes.remove(handle);
         let removed = retired.is_some();
         drop(retired);
@@ -312,6 +346,7 @@ impl AdjRibOut {
     /// Use [`Self::release_unicast`] when ownership moves to an update group.
     pub fn clear_unicast(&mut self) {
         self.routes.clear();
+        self.next_hop_overrides.clear();
         self.prefix_path_ids.clear();
     }
 
@@ -326,6 +361,7 @@ impl AdjRibOut {
     /// memory.
     pub fn release_unicast(&mut self) {
         self.routes = RouteSlab::default();
+        self.next_hop_overrides = HashMap::default();
         self.prefix_path_ids = FamilyPrefixMap::default();
     }
 
@@ -333,6 +369,7 @@ impl AdjRibOut {
     /// index entry, and final backing allocation.
     pub(crate) fn release_unicast_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.routes.release_with(checkpoint);
+        release_hash_map(&mut self.next_hop_overrides, checkpoint);
         self.prefix_path_ids.release_with(checkpoint);
     }
 
@@ -389,6 +426,7 @@ impl AdjRibOut {
     /// VPN, labeled-unicast, and RTC — and the secondary prefix index.
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.next_hop_overrides.clear();
         self.prefix_path_ids.clear();
         self.flowspec_routes.clear();
         self.evpn_routes.clear();
@@ -403,6 +441,7 @@ impl AdjRibOut {
     /// Retire every advertised family while retaining its backing allocations.
     pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.routes.retire_with(checkpoint);
+        retire_hash_map(&mut self.next_hop_overrides, checkpoint);
         self.prefix_path_ids.retire_with(checkpoint);
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
         retire_hash_map(&mut self.evpn_routes, checkpoint);
@@ -782,6 +821,41 @@ mod tests {
     use crate::attr_set::AttrSet;
     use crate::route::BgpLsFamily;
     use crate::test_support::make_route_with_path_id as make_route;
+
+    #[test]
+    fn unicast_action_residue_follows_exact_admitted_key_lifecycle() {
+        let mut rib = AdjRibOut::new("192.0.2.1".parse().unwrap());
+        let prefix = prefix_a();
+        for path_id in [1, 2] {
+            rib.insert_with_next_hop(
+                make_route(prefix, path_id),
+                Some(NextHopAction::Self_),
+                &mut || {},
+            );
+        }
+        assert!(rib.has_next_hop_overrides());
+        rib.insert(make_route(prefix, 1));
+        assert_eq!(rib.next_hop_override(&prefix, 1), None);
+        assert_eq!(
+            rib.next_hop_override(&prefix, 2),
+            Some(&NextHopAction::Self_)
+        );
+        rib.withdraw(&prefix, 2);
+        assert!(!rib.has_next_hop_overrides());
+        for release in [false, true] {
+            rib.insert_with_next_hop(
+                make_route(prefix, 0),
+                Some(NextHopAction::Self_),
+                &mut || {},
+            );
+            if release {
+                rib.release_unicast_with(&mut || {});
+            } else {
+                rib.clear_unicast();
+            }
+            assert!(!rib.has_next_hop_overrides());
+        }
+    }
 
     fn prefix_a() -> Prefix {
         Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24))

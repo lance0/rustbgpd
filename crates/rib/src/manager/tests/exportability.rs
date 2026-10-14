@@ -16,6 +16,7 @@ struct MockExportConfig {
     generation: u64,
     rejected: HashSet<ExactExportKey>,
     required_scope: Option<crate::route::NextHopScope>,
+    equivalent_next_hop_actions: bool,
 }
 
 pub(super) struct MockExactExportEncoder {
@@ -31,6 +32,7 @@ impl MockExactExportEncoder {
                 generation,
                 rejected: HashSet::new(),
                 required_scope: None,
+                equivalent_next_hop_actions: false,
             }),
             probed: Arc::new(Mutex::new(Vec::new())),
             probe_batches: Arc::new(AtomicUsize::new(0)),
@@ -46,6 +48,7 @@ impl MockExactExportEncoder {
             generation,
             rejected: rejected.into_iter().collect(),
             required_scope: None,
+            equivalent_next_hop_actions: false,
         };
     }
 
@@ -71,6 +74,20 @@ impl ExactExportSnapshot for MockExactExportSnapshot {
 
     fn generation(&self) -> u64 {
         self.config.generation
+    }
+
+    fn unicast_next_hop_actions_equal(
+        &self,
+        route: &Route,
+        old: Option<&rustbgpd_policy::NextHopAction>,
+        new: Option<&rustbgpd_policy::NextHopAction>,
+    ) -> bool {
+        old == new
+            || (self.config.equivalent_next_hop_actions
+                && !self
+                    .config
+                    .rejected
+                    .contains(&ExactExportKey::Unicast(route.prefix, route.path_id)))
     }
 
     fn probe_announcement(
@@ -2124,4 +2141,131 @@ async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+#[test]
+fn action_only_admitted_residue_survives_refusal_and_rejection() {
+    use rustbgpd_policy::NextHopAction;
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target: IpAddr = "192.0.2.2".parse().unwrap();
+    let (outbound, mut receiver) = mpsc::channel(1);
+    let encoder = MockExactExportEncoder::accepting(1);
+    manager.outbound_peers.insert(target, outbound);
+    manager.peer_export_encoders.insert(target, encoder.clone());
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 1),
+    );
+    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+    let batch =
+        |action| OutboundCommitBatch::with_unicast(vec![route.clone()].into(), vec![action].into());
+    assert!(manager.try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_))));
+    // The old announcement occupies the sole queue slot. Refusing the new
+    // action, including an exact-refusal profile, cannot publish desired state.
+    encoder.set_profile(2, [key]);
+    assert!(!manager.try_send_and_commit_outbound_update(target, batch(None)));
+    assert_eq!(
+        manager.adj_ribs_out[&target].next_hop_override(&route.prefix, route.path_id),
+        Some(&NextHopAction::Self_)
+    );
+    assert_eq!(
+        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        &[Some(NextHopAction::Self_)]
+    );
+    assert!(manager.try_send_and_commit_outbound_update(target, batch(None)));
+    let rejected = receiver.try_recv().unwrap();
+    assert!(rejected.announce.is_empty());
+    assert_eq!(rejected.withdraw, vec![(route.prefix, route.path_id)]);
+    assert_eq!(
+        manager.adj_ribs_out[&target].next_hop_override(&route.prefix, route.path_id),
+        None
+    );
+    assert!(
+        manager.adj_ribs_out[&target]
+            .get(&route.prefix, route.path_id)
+            .is_none()
+    );
+    encoder.set_profile(3, []);
+    assert!(manager.try_send_and_commit_outbound_update(target, batch(None)));
+    assert_eq!(
+        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        &[None]
+    );
+    assert!(manager.try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_))));
+    assert_eq!(
+        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        &[Some(NextHopAction::Self_)]
+    );
+}
+
+/// Admission-only fixture: transport separately proves the immutable profile's
+/// equality answer against final bytes. A proven no-op does not need a queue
+/// slot and must retain the admitted action rather than publishing desired state.
+#[test]
+fn action_only_equivalent_form_needs_no_queue_admission() {
+    use rustbgpd_policy::NextHopAction;
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target: IpAddr = "192.0.2.2".parse().unwrap();
+    let (outbound, mut receiver) = mpsc::channel(1);
+    let encoder = MockExactExportEncoder::accepting(1);
+    encoder.config.write().unwrap().equivalent_next_hop_actions = true;
+    manager.outbound_peers.insert(target, outbound);
+    manager.peer_export_encoders.insert(target, encoder.clone());
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 1),
+    );
+    let batch =
+        |action| OutboundCommitBatch::with_unicast(vec![route.clone()].into(), vec![action].into());
+    assert!(manager.try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_))));
+    assert!(
+        manager.try_send_and_commit_outbound_update(target, batch(None)),
+        "byte-equivalent action needs no queue slot"
+    );
+    assert_eq!(
+        manager.adj_ribs_out[&target].next_hop_override(&route.prefix, route.path_id),
+        Some(&NextHopAction::Self_)
+    );
+    assert_eq!(
+        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        &[Some(NextHopAction::Self_)]
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "no empty envelope may be enqueued"
+    );
+    let mut replay = batch(None);
+    replay.force_unicast_replay = true;
+    assert!(
+        manager.try_send_and_commit_outbound_update(target, replay),
+        "explicit family replay must re-emit the current action even when its bytes are equal"
+    );
+    assert_eq!(
+        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        &[None]
+    );
+    assert_eq!(
+        manager.adj_ribs_out[&target].next_hop_override(&route.prefix, route.path_id),
+        None
+    );
+    // The existing GShut/ORF force indicator also bypasses ordinary action
+    // equivalence until the force pass has successfully emitted its routes.
+    manager.force_outbound_peers.insert(target);
+    assert!(manager.try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_))));
+    assert_eq!(
+        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        &[Some(NextHopAction::Self_)]
+    );
+    manager.force_outbound_peers.remove(&target);
+    encoder.set_profile(2, [ExactExportKey::Unicast(route.prefix, route.path_id)]);
+    encoder.config.write().unwrap().equivalent_next_hop_actions = true;
+    assert!(
+        manager.try_send_and_commit_outbound_update(target, batch(None)),
+        "failed comparison must still run final refusal probe"
+    );
+    let rejected = receiver.try_recv().unwrap();
+    assert!(rejected.announce.is_empty());
+    assert_eq!(rejected.withdraw, vec![(route.prefix, route.path_id)]);
 }
