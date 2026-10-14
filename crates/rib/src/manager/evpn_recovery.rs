@@ -58,7 +58,7 @@ impl RibManager {
 
     pub(in crate::manager) fn evpn_grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
         let gid = self.grouped_member_of(peer)?;
-        self.group_ribs.get(&gid)?.owns_evpn.then_some(gid)
+        self.group_ribs.get(&gid)?.owns_evpn_routes().then_some(gid)
     }
 
     fn evpn_recovery_owner(&self, peer: IpAddr) -> Option<PeerSession> {

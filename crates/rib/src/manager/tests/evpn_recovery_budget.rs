@@ -27,8 +27,7 @@ fn fixture(capacity: usize) -> (RibManager, IpAddr, mpsc::Receiver<OutboundRoute
     let (sender, mut output) = mpsc::channel(capacity);
     register(&mut manager, peer, sender);
     while output.try_recv().is_ok() {}
-    // A capacity-one registration can defer EoR after the initial RTC
-    // batch. Settle that ordinary recovery before enabling the G1 owner.
+    // Settle any ordinary registration deferral before enabling ownership.
     for _ in 0..3 {
         if !manager.dirty_peers.contains(&peer) {
             break;
@@ -58,11 +57,7 @@ fn register_session(
         peer_router_id: "192.0.2.30".parse().unwrap(),
         outbound_tx: sender,
         export_policy: None,
-        sendable_families: vec![
-            (Afi::Ipv4, Safi::Unicast),
-            (Afi::L2Vpn, Safi::Evpn),
-            (Afi::Ipv4, Safi::RtConstrain),
-        ],
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)],
         is_ebgp: false,
         route_reflector_client: false,
         orr_vantage: None,
@@ -102,7 +97,7 @@ fn negotiated_evpn_and_unicast_grouping_do_not_own_evpn() {
 }
 
 #[test]
-fn owned_capture_is_retained_across_rtc_changes_and_generic_cleanup() {
+fn owned_capture_is_retained_across_stale_membership_changes_and_generic_cleanup() {
     let (mut manager, peer, _output) = fixture(8);
     own(&mut manager, peer, false);
     let old = route(1).key();
@@ -121,7 +116,7 @@ fn owned_capture_is_retained_across_rtc_changes_and_generic_cleanup() {
         manager.evpn_recovery.proof_keys(handle).unwrap(),
         Some([old].to_vec())
     );
-    // A new desired iterator must not overwrite an already-owned old-Φ proof.
+    // A new desired iterator must not overwrite an already-owned prior proof.
     assert!(manager.capture_evpn_recovery_before_projection(peer, [route(2).key()].into_iter()));
     assert_eq!(
         manager.evpn_recovery.proof_keys(handle).unwrap(),
