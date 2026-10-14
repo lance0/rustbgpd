@@ -994,11 +994,9 @@ fn update_group_recovery_check(metrics: Option<&str>) -> Option<Check> {
             let cause = parse_metric_labels(labels)?.remove("cause")?;
             Some((cause, value.trim().parse::<u64>().ok()?))
         });
-        match parsed {
-            Some((cause, value)) => {
-                counts.insert(cause, value);
-            }
-            None => malformed = true,
+        // A duplicate cause row would let a later value hide an earlier one.
+        if parsed.is_none_or(|(cause, value)| counts.insert(cause, value).is_some()) {
+            malformed = true;
         }
     }
     if counts.is_empty() && !malformed {
@@ -6290,6 +6288,18 @@ paths = ["x"]
                 .unwrap()
                 .status,
             CheckStatus::Warn
+        );
+
+        // A duplicate cause row must not let a trailing zero hide a positive
+        // limit count.
+        let duplicate =
+            format!("bgp_update_group_recovery_fallback_total{{cause=\"peer_limit\"}} 1\n{ZERO}");
+        let duplicate = update_group_recovery_check(Some(&duplicate)).unwrap();
+        assert_eq!(duplicate.status, CheckStatus::Warn);
+        assert!(
+            duplicate.detail.contains("malformed"),
+            "{}",
+            duplicate.detail
         );
     }
 
