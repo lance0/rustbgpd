@@ -24,6 +24,7 @@ _gate:
     just links
     just check-devtools
     just check-fast
+    just proto-lint
     just check-contracts
     just check-clippy
     cargo test --locked --workspace
@@ -80,6 +81,10 @@ check-fast:
     python3 -m unittest -v scripts/test_check_bench_inventory.py
     python3 scripts/check_bench_inventory.py
     python3 -m unittest -v scripts/test_capture_released_state.py
+
+# Lint the protobuf schemas and reject wire- or JSON-breaking changes against BASE (installs the pinned buf on first use).
+proto-lint base="origin/main":
+    bash scripts/check-proto.sh {{base}}
 
 # Check the slower repository contracts: public tracker ids, documentation paths, and metric consumers (minutes, no compilation).
 check-contracts:

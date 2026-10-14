@@ -271,6 +271,35 @@ jobs:
           done
       - run: python3 -m unittest -v scripts/test_check_v1_stable_surface.py
       - run: python3 scripts/check-v1-stable-surface.py
+      # The stable-surface digest above detects any change to inventoried
+      # services; buf separates additive from breaking changes across the
+      # whole schema. A pull request compares against its test merge commit's
+      # first parent, the base it merges into. A push to main compares against
+      # the push's `before` commit, so a multi-commit push is checked as a
+      # whole and skew between two pull requests that each passed alone is
+      # caught. An all-zero `before` (a ref's first push) falls back to the
+      # previous commit. A manual dispatch has no defined base and only lints.
+      - name: Lint protobuf schemas and reject breaking changes
+        shell: bash
+        run: |
+          bash -n .github/scripts/install-buf.sh
+          bash -n scripts/check-proto.sh
+          shellcheck .github/scripts/install-buf.sh scripts/check-proto.sh
+          case "${GITHUB_EVENT_NAME:-}" in
+            pull_request) base=HEAD^1 ;;
+            push)
+              base=$(jq -r .before "$GITHUB_EVENT_PATH")
+              if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" =~ ^0+$ ]]; then
+                base=HEAD^1
+              elif ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                # The full-history checkout normally holds it already.
+                git fetch --no-tags origin "$base"
+              fi
+              ;;
+            workflow_dispatch) base=--lint-only ;;
+            *) base=origin/main ;;
+          esac
+          scripts/check-proto.sh "$base"
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # `tokio-codec` is intentionally off by default, so the workspace lint
