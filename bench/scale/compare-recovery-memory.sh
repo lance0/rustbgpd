@@ -34,19 +34,21 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe ]]; then
 fi
 
 [[ $# -ge 4 && $1 == --head && $3 == --output-dir ]] ||
-    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--phase pilot|qualified] [--profile PROFILE]'
+    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--phase pilot|qualified] [--profile PROFILE] [--cell all|dataset-reevaluate|peer-down|widen]'
 head=$2
 output=$4
 shift 4
 phase=pilot
 profile=all
+selected_cell=all
 while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || fail 'missing selector value'
-    case $1 in --phase) phase=$2 ;; --profile) profile=$2 ;; *) fail 'unknown selector' ;; esac
+    case $1 in --phase) phase=$2 ;; --profile) profile=$2 ;; --cell) selected_cell=$2 ;; *) fail 'unknown selector' ;; esac
     shift 2
 done
 [[ $phase == pilot || $phase == qualified ]] || fail 'invalid campaign phase'
 [[ $profile == all || $profile == ipv4-100k || $profile == full-uc || $profile == full-vpn || $profile == mixed-widen ]] || fail 'invalid campaign profile'
+[[ $selected_cell == all || $selected_cell == dataset-reevaluate || $selected_cell == peer-down || $selected_cell == widen ]] || fail 'invalid campaign cell'
 [[ $head =~ ^[0-9a-f]{40}$ ]] || fail 'head must be an exact source SHA'
 [[ ${GITHUB_ACTIONS:-} == true && ${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}} == github-hosted && ${RUNNER_OS:-} == Linux ]] ||
     fail 'this receipt requires a fresh GitHub-hosted Linux VM; do not measure on the dev or soak host'
@@ -111,7 +113,7 @@ for path in "${inputs[@]}"; do
     printf '%s  %s\n' "$(provenance_sha256_file "$repository/$path")" "$path" >> "$output/instrumentation.sha256"
 done
 instrumentation=$(provenance_sha256_file "$output/instrumentation.sha256")
-python3 - "$output/manifest.json" "$baseline" "$intermediate" "$head" "$instrumentation" "$phase" "$profile" "$checker" <<'PYCODE'
+python3 - "$output/manifest.json" "$baseline" "$intermediate" "$head" "$instrumentation" "$phase" "$profile" "$checker" "$selected_cell" <<'PYCODE'
 import importlib.util
 import json
 from pathlib import Path
@@ -120,13 +122,13 @@ spec = importlib.util.spec_from_file_location("receipt", sys.argv[8])
 receipt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(receipt)
 profiles = None if sys.argv[7] == "all" else [sys.argv[7]]
-cases = receipt.campaign_cases(sys.argv[6], profiles)
+cases = receipt.campaign_cases(sys.argv[6], profiles, sys.argv[9])
 profiles = list(dict.fromkeys(case["profile"] for case in cases))
 Path(sys.argv[1]).write_text(json.dumps({
     "schema": "rustbgpd.recovery-memory.campaign.v2",
     "baseline": sys.argv[2], "intermediate": sys.argv[3], "candidate": sys.argv[4],
     "instrumentation_manifest_sha256": sys.argv[5], "phase": sys.argv[6],
-    "profiles": profiles, "cases": cases, "build_jobs": 4,
+    "profiles": profiles, "selected_cell": sys.argv[9], "cases": cases, "build_jobs": 4,
     "comparators": ["baseline", "intermediate"],
     "order_per_cell": ["control", "candidate", "candidate", "control"],
     "scope": "manager-direct RIB and production exact-export preflight; no final wire/TCP",

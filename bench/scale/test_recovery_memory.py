@@ -318,6 +318,59 @@ class RecoveryReceiptTests(unittest.TestCase):
             [{"profile": "mixed-widen", "clients": 100, "cell": "widen"}],
         )
 
+    def test_cell_selector_keeps_the_closed_qualified_roster(self) -> None:
+        full = receipt.campaign_cases("qualified")
+        self.assertEqual(len(full), 8)
+        split = [
+            selected
+            for case in full
+            for selected in receipt.campaign_cases("qualified", [case["profile"]], case["cell"])
+        ]
+        self.assertEqual(
+            sorted(split, key=lambda row: (row["profile"], row["cell"])),
+            sorted(full, key=lambda row: (row["profile"], row["cell"])),
+        )
+        self.assertEqual(
+            receipt.campaign_cases("qualified", ["full-vpn"], "peer-down"),
+            [{"profile": "full-vpn", "cell": "peer-down", "clients": 100}],
+        )
+
+    def test_unsupported_or_empty_cell_selection_is_refused(self) -> None:
+        for phase, profiles, cell in (
+            ("qualified", ["full-uc"], "widen"),
+            ("qualified", ["mixed-widen"], "peer-down"),
+            ("pilot", ["full-vpn"], "widen"),
+            ("qualified", [], "all"),
+            ("qualified", ["full-uc"], "unknown"),
+        ):
+            with self.subTest(phase=phase, profiles=profiles, cell=cell):
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.campaign_cases(phase, profiles, cell)
+
+    def test_one_cell_campaign_retains_eight_complete_abba_legs(self) -> None:
+        root = self.campaign(selected_cell="peer-down")
+        receipt.summarize(root)
+        result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(result["rows"]), 8)
+        self.assertTrue(all(row["cell"] == "peer-down" for row in result["rows"]))
+        self.assertEqual(len(result["summaries"]), 2)
+        self.assertEqual(sum(len(row["samples"]) for row in result["rows"]), 32)
+
+    def test_tampered_or_missing_manifest_cell_is_not_a_partial_green(self) -> None:
+        root = self.campaign(selected_cell="peer-down")
+        path = root / "manifest.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for selected in (None, "dataset-reevaluate", "widen", "all"):
+            changed = copy.deepcopy(original)
+            if selected is None:
+                del changed["selected_cell"]
+            else:
+                changed["selected_cell"] = selected
+            receipt.write_json(path, changed)
+            with self.subTest(selected=selected):
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.summarize(root)
+
     def observer_tree(self) -> Path:
         for name, anchor, indent in (
             ("crates/rib/src/update.rs", receipt.VARIANT, "    "),
@@ -448,7 +501,7 @@ class RecoveryReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(receipt.InvalidReceipt, "high-water"):
             receipt.check_peak_coverage({"memory.peak": 1000}, [], {"memory.peak": 456})
 
-    def campaign(self, profile: str = "ipv4-100k") -> Path:
+    def campaign(self, profile: str = "ipv4-100k", selected_cell: str = "all") -> Path:
         root = self.root / f"campaign-{profile}"
         root.mkdir()
         entries = []
@@ -468,7 +521,8 @@ class RecoveryReceiptTests(unittest.TestCase):
             "instrumentation_manifest_sha256": instrumentation,
             "phase": "qualified",
             "profiles": [profile],
-            "cases": receipt.campaign_cases("qualified", [profile]),
+            "selected_cell": selected_cell,
+            "cases": receipt.campaign_cases("qualified", [profile], selected_cell),
             "build_jobs": 4,
             "comparators": ["baseline", "intermediate"],
             "order_per_cell": ["control", "candidate", "candidate", "control"],

@@ -29,15 +29,24 @@ PROFILES = {
 }
 
 
-def campaign_cases(phase: str, profiles: list[str] | None = None) -> list[dict]:
+def campaign_cases(
+    phase: str, profiles: list[str] | None = None, selected_cell: str = "all"
+) -> list[dict]:
     require(phase in ("pilot", "qualified"), "unknown campaign phase")
-    selected = profiles or (
-        ["full-uc", "full-vpn"]
-        if phase == "pilot"
-        else ["ipv4-100k", "full-uc", "full-vpn", "mixed-widen"]
+    require(selected_cell in ("all", *CELLS), "unknown campaign cell")
+    selected = (
+        profiles
+        if profiles is not None
+        else (
+            ["full-uc", "full-vpn"]
+            if phase == "pilot"
+            else ["ipv4-100k", "full-uc", "full-vpn", "mixed-widen"]
+        )
     )
     require(
-        len(selected) == len(set(selected))
+        isinstance(selected, list)
+        and bool(selected)
+        and len(selected) == len(set(selected))
         and set(selected) <= {"ipv4-100k", "full-uc", "full-vpn", "mixed-widen"},
         "invalid campaign profiles",
     )
@@ -47,8 +56,14 @@ def campaign_cases(phase: str, profiles: list[str] | None = None) -> list[dict]:
         cells = ["widen"] if profile == "mixed-widen" else ["dataset-reevaluate", "peer-down"]
         if profile == "full-vpn" and phase == "qualified":
             cells.append("widen")
+        require(
+            selected_cell == "all" or selected_cell in cells, "unsupported profile/cell selection"
+        )
         for cell in cells:
+            if selected_cell != "all" and cell != selected_cell:
+                continue
             cases.append({"profile": profile, "clients": clients, "cell": cell})
+    require(bool(cases), "empty campaign selection")
     return cases
 
 
@@ -770,7 +785,7 @@ def summarize(root: Path) -> None:
         and manifest["candidate"] not in (BASELINE, INTERMEDIATE),
         "candidate is not a distinct source SHA",
     )
-    cases = campaign_cases(manifest["phase"], manifest["profiles"])
+    cases = campaign_cases(manifest["phase"], manifest["profiles"], manifest.get("selected_cell"))
     require(
         manifest.get("cases") == cases
         and manifest.get("build_jobs") == 4

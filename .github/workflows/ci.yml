@@ -727,12 +727,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [ipv4-100k, full-uc, full-vpn, mixed-widen]
+        include:
+          - profile: ipv4-100k
+            cell: dataset-reevaluate
+          - profile: ipv4-100k
+            cell: peer-down
+          - profile: full-uc
+            cell: dataset-reevaluate
+          - profile: full-uc
+            cell: peer-down
+          - profile: full-vpn
+            cell: dataset-reevaluate
+          - profile: full-vpn
+            cell: peer-down
+          - profile: full-vpn
+            cell: widen
+          - profile: mixed-widen
+            cell: widen
     env:
       CARGO_BUILD_JOBS: "4"
-      # Each qualified profile runs on its own fresh VM.
+      # Each complete qualified cell runs on its own fresh VM.
       RECOVERY_MEMORY_PHASE: qualified
       RECOVERY_MEMORY_PROFILE: ${{ matrix.profile }}
+      RECOVERY_MEMORY_CELL: ${{ matrix.cell }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -756,12 +773,13 @@ jobs:
             --output-dir "$RUNNER_TEMP/update-group-recovery-memory/campaign" \
             --phase "$RECOVERY_MEMORY_PHASE" \
             --profile "$RECOVERY_MEMORY_PROFILE" \
+            --cell "$RECOVERY_MEMORY_CELL" \
             > "$RUNNER_TEMP/update-group-recovery-memory/driver.log" 2>&1
       - name: Upload recovery evidence even after refusal or failure
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: update-group-recovery-memory-${{ matrix.profile }}-${{ github.sha }}
+          name: update-group-recovery-memory-${{ matrix.profile }}-${{ matrix.cell }}-${{ github.sha }}
           path: ${{ runner.temp }}/update-group-recovery-memory
           if-no-files-found: warn
           retention-days: 30
