@@ -2176,8 +2176,8 @@ and either Type 2 label, the Type 1 per-EVI label, the Type 5 label, or
 Type 3's PMSI label field. An MPLS label with the same numeric value does
 not match.
 
-Every request takes `page_size` (0 defaults to 100; maximum 1000) and an
-opaque `page_token`. Responses carry `routes`, `total_count`,
+Every request takes `page_size` (0 defaults to 100; values above 1000 clamp
+to 1000) and an opaque `page_token`. Responses carry `routes`, `total_count`,
 `next_page_token` and `page_version { epoch, generation }`. Only the page's
 rows are cloned, using O(page) temporary storage. These unordered family
 tables are scanned per page to compute filtered counts; pagination bounds
@@ -2186,11 +2186,20 @@ source and Add-Path identity. A table mutation returns `ABORTED`; restart
 with an empty token. Tokens are process-local and cannot survive a daemon
 restart. Changed scope/filter or malformed tokens return `INVALID_ARGUMENT`.
 
-These four RPCs are additive and outside v1. Existing whole-table methods
-retain their signatures and behavior. The existing EVPN peer request gains
-MAC/ESI/VNI fields at new tags; those filters remain explicitly unstable.
-Older servers return `UNIMPLEMENTED` for the four new methods, avoiding a
-silent fallback to the wrong view. No v1 promotion is implied.
+These four RPCs are inventoried within their scoped RR-only roles. EVPN
+calls must select each of Types 1–5 separately to stay inside its role;
+all-types and Type 6 calls remain alpha, as do the `prefix_sid` and `smet`
+entry fields. The best-request filters are included; the existing EVPN peer
+MAC/ESI/VNI filters remain explicitly unstable. Authorization is unchanged:
+all four methods require `sensitive_read`.
+
+The whole-table `ListVpnRoutes`, `ListLabeledRoutes`, `ListRtcRoutes` and
+`ListEvpnRoutes` methods are deprecated and outside v1. Their replacements
+are `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes` with
+`view = BEST`, and `ListBestEvpnRoutes`, respectively. Existing methods retain
+their signatures and behavior; this change removes none. Older servers return
+`UNIMPLEMENTED` for the bounded methods: do not silently fall back when a
+caller requires bounded pages or peer views.
 
 ```bash
 rbgp rib vpn received 192.0.2.1 --rd 65000:100 --prefix 10.0.0.0/24 --limit 100
@@ -2208,7 +2217,8 @@ whole-table RPC.
 
 ### List EVPN routes
 
-`ListEvpnRoutes` retains its existing unpaginated best-route view. The additive
+The deprecated `ListEvpnRoutes` retains its existing unpaginated best-route
+view outside v1; use `ListBestEvpnRoutes` for bounded best pages. The
 `ListReceivedEvpnRoutes` and `ListAdvertisedEvpnRoutes` methods require
 `neighbor_address` and accept `route_type_filter` (0 or 1–6), `rd_filter`,
 `page_size`, and `page_token`. They also accept the explicitly unstable
@@ -2237,7 +2247,7 @@ for candidate-selection and destination export diagnostics.
 
 These peer methods return one page with `routes`, `total_count`,
 `next_page_token`, and `page_version`. The default page size is 100; the maximum
-is 1000, and larger requests return `INVALID_ARGUMENT`. Rows are ordered by typed
+is 1000, and larger requests clamp to 1000. Rows are ordered by typed
 EVPN route identity and source peer. Use the returned token with the same
 neighbor, direction, and filters to continue. Changed scope or filters, malformed
 or modified tokens return `INVALID_ARGUMENT`; table mutations return `ABORTED`,

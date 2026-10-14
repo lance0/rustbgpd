@@ -2326,6 +2326,10 @@ pub async fn rtc_page(
     Ok(())
 }
 
+#[expect(
+    deprecated,
+    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
+)]
 pub async fn vpn(
     connection: Connection,
     family: Option<&str>,
@@ -2346,6 +2350,10 @@ pub async fn vpn(
     print_vpn_routes(&resp.routes, json)
 }
 
+#[expect(
+    deprecated,
+    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
+)]
 pub async fn labeled(
     connection: Connection,
     family: Option<&str>,
@@ -2366,6 +2374,10 @@ pub async fn labeled(
     print_labeled_routes(&resp.routes, json)
 }
 
+#[expect(
+    deprecated,
+    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
+)]
 pub async fn rtc(connection: Connection, peer: Option<String>, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
     let mut resp = read_rpc(

@@ -1561,6 +1561,24 @@ The config file itself is mutable across runs: neighbor add/delete
 operations via gRPC persist back to the config file (see
 [`CONFIGURATION.md`](../reference/configuration.md) → "Config Persistence").
 
+### Migrate whole-table family reads
+
+Before the v1 inventory freeze, the scoped RR-only read contract moves to
+bounded pages. Replace `ListVpnRoutes`, `ListLabeledRoutes` and `ListRtcRoutes`
+with `ListVpnRibRoutes`, `ListLabeledRibRoutes` and `ListRtcRibRoutes`, selecting
+`view = BEST` for the previous winner-only behavior. Replace `ListEvpnRoutes`
+with `ListBestEvpnRoutes`; select each of Types 1–5 separately for the scoped
+EVPN role. The four whole-table methods remain functional but are deprecated
+and outside v1. No RPC is removed and plain CLI JSON arrays are unchanged.
+
+Follow `next_page_token` until empty. A table mutation returns `ABORTED`;
+restart the walk with an empty token. Page size 0 defaults to 100; values above
+1000 clamp to 1000. Older daemons can return `UNIMPLEMENTED` for the bounded
+methods, so check server support before switching automation. See the
+[family page contract](../reference/api.md#bounded-vpn-labeled-rtc-and-evpn-best-pages)
+for view, filter and peer semantics. Clients using additive EVPN peer filters
+must also verify the documented response acknowledgement before using rows.
+
 ## Sample profiles
 
 The repo ships ten config profiles, plus a Docker Compose quick-start, under
