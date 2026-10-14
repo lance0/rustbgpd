@@ -4458,6 +4458,8 @@ message EvpnRuntimeState {
   string message = 8;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
 enum EvpnRuntimeLifecycle {
   EVPN_RUNTIME_LIFECYCLE_UNKNOWN = 0;
   EVPN_RUNTIME_LIFECYCLE_ACTIVE = 1;
@@ -4466,6 +4468,9 @@ enum EvpnRuntimeLifecycle {
   EVPN_RUNTIME_LIFECYCLE_DEGRADED = 4;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum EvpnRuntimeMutationState {
   EVPN_RUNTIME_MUTATION_UNKNOWN = 0;
   EVPN_RUNTIME_MUTATION_DISABLED = 1;
@@ -4489,6 +4494,8 @@ message ListManagedNetdevsResponse {
   repeated ManagedNetdevState netdevs = 1;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
 enum ManagedNetdevClass {
   MANAGED_NETDEV_CLASS_UNKNOWN = 0;
   MANAGED_NETDEV_CLASS_BRIDGE = 1;
@@ -4499,6 +4506,9 @@ enum ManagedNetdevClass {
   MANAGED_NETDEV_CLASS_SVD_VXLAN = 6;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum ManagedNetdevLifecycleState {
   MANAGED_NETDEV_STATE_UNKNOWN = 0;
   MANAGED_NETDEV_STATE_DESIRED_ABSENT = 1;
@@ -4764,6 +4774,9 @@ message ApplyEvpnRuntimeResponse {
   string message = 4;
 }
 
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum EvpnRuntimeApplyOutcome {
   EVPN_RUNTIME_APPLY_UNKNOWN = 0;
   EVPN_RUNTIME_APPLY_VALIDATED = 1;
@@ -4857,6 +4870,10 @@ message IpVrfState {
 
 // Coarse readiness verdict for an IP-VRF. The detailed predicate
 // failures are surfaced as `not_ready_reasons` on `IpVrfState`.
+//
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum IpVrfReadinessState {
   // No probe verdict is on file yet. The two real cases:
   // (a) cold start — the daemon-side snapshot reader has not yet
@@ -4878,6 +4895,10 @@ enum IpVrfReadinessState {
 // `instance_status` report when one exists. Bound instances with no
 // report yet surface as UNKNOWN; unbound instances are UNBOUND even
 // before the reconciler reports.
+//
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// buf:lint:ignore ENUM_VALUE_PREFIX
 enum EvpnInstanceReadinessState {
   // No dataplane verdict is on file for this bound instance yet. The
   // usual cases are cold start before the first reconcile report, or

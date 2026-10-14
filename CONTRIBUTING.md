@@ -291,6 +291,48 @@ not part of this boundary. actionlint runs with its ShellCheck and Pyflakes
 integrations disabled; the existing explicitly scoped ShellCheck commands
 remain responsible for shell scripts.
 
+### Protobuf schema lint
+
+`buf.yaml` configures buf 1.73.0 for `proto/rustbgpd.proto` and
+`proto/rustbgpd_dialout.proto`; the vendored OpenConfig tree under
+`proto/github.com/` is skipped. `buf lint` runs a narrow, explicit rule set:
+enum zero values end in `_UNSPECIFIED`, enum values carry the enum-name prefix,
+and enum, field, message, oneof, service, RPC, file, and package names follow
+the usual case and package-version rules. `buf breaking` uses the `WIRE_JSON`
+category, so a renumbered field, a changed wire type, or a renamed field or
+enum value fails against the base. Run both with:
+
+```bash
+just proto-lint                # compare against origin/main
+just proto-lint <base-ref>     # compare against another commit
+```
+
+The recipe runs `scripts/check-proto.sh`. It uses `buf` from `PATH` only at the
+exact pinned version; otherwise, on Linux x86_64, it installs the
+checksum-verified release into
+`${XDG_DATA_HOME:-$HOME/.local/share}/rustbgpd/buf-1.73.0`. On other platforms
+install buf 1.73.0 on `PATH`, for example with
+`go install github.com/bufbuild/buf/cmd/buf@v1.73.0`. CI runs the same script
+in the `core` job: pull requests compare against the base they merge into, and
+pushes to `main` compare against the previous commit.
+
+New schema elements follow the rules; do not add an ignore to avoid naming a
+new enum value `_UNSPECIFIED`. When an existing name has to stay because
+renaming it would break clients, ignore the specific rule on that enum or
+message with a leading comment, and put the reason on the line above it:
+
+```proto
+// Pre-existing alpha EVPN value names; renaming them would break JSON clients.
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+enum EvpnRuntimeLifecycle {
+```
+
+Do not add `lint.ignore_only` entries to `buf.yaml`: they work per file and
+would disable a rule for the whole schema. A deliberate pre-v1 breaking change
+adds a `breaking.ignore_only` entry naming the failing rule and file in the same
+pull request, records the break in the changelog and upgrade notes, and removes
+the entry in a follow-up once the change is on `main`.
+
 ### Pre-commit hooks
 
 We ship a `.pre-commit-config.yaml` that runs `cargo fmt --all` and
