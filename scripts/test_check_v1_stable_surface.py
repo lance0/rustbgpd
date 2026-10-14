@@ -187,6 +187,35 @@ class EvpnReflectorRoleTests(unittest.TestCase):
         inventory["grpc"]["explicitly_unstable_message_fields"].remove("EvpnRouteEntry.smet")
         self.rejected(lambda: self.check(inventory), "not explicitly unstable")
 
+    def test_narrowed_set_cannot_lose_its_request_profile(self):
+        cases = [
+            (lambda entry: entry.pop("stable_request_values"), "stable request profile"),
+            (
+                lambda entry: entry.update(
+                    stable_request_value=entry.pop("stable_request_values")
+                ),
+                "unknown keys ['stable_request_value']",
+            ),
+            (
+                lambda entry: entry.update(
+                    stable_request_values={
+                        "ListPeerEvpnRoutesRequest.route_type_filter": [0, 1, 2, 3, 4, 5, 6]
+                    }
+                ),
+                "stable request profile",
+            ),
+        ]
+        for mutate, expected in cases:
+            with self.subTest(expected=expected):
+                inventory = copy.deepcopy(self.inventory)
+                mutate(self.evpn_entry(inventory))
+                self.rejected(
+                    lambda inventory=inventory: checker.check_method_sets(
+                        inventory, self.services, self.definitions
+                    ),
+                    expected,
+                )
+
     def test_profiled_request_field_must_exist(self):
         definitions = self.edited(
             "ListPeerEvpnRoutesRequest", "route_type_filter = 2", "route_types = 2"

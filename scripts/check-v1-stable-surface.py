@@ -744,6 +744,22 @@ def check_request_values(
                 )
 
 
+METHOD_SET_KEYS = {
+    "service",
+    "methods",
+    "signature_sha256",
+    "message_graph_sha256",
+    "excluded_message_fields",
+    "stable_request_values",
+}
+# Request messages whose inventoried calls are narrowed to a value profile,
+# keyed by message name. Every inventoried method taking one must carry exactly
+# this profile (the route-reflector-evpn Types 1-5 boundary).
+EXPECTED_STABLE_REQUEST_VALUES = {
+    "ListPeerEvpnRoutesRequest": {"ListPeerEvpnRoutesRequest.route_type_filter": [1, 2, 3, 4, 5]},
+}
+
+
 def check_method_sets(inventory: dict, services: dict, definitions: dict[str, str]) -> set[str]:
     stable_paths: set[str] = set()
     unstable_fields = set(inventory["grpc"]["explicitly_unstable_message_fields"])
@@ -762,7 +778,21 @@ def check_method_sets(inventory: dict, services: dict, definitions: dict[str, st
             if missing:
                 fail(f"stable gRPC methods disappeared from {service}: {', '.join(missing)}")
             label = f"grpc.{class_name}.{service}"
-            check_request_values(entry.get("stable_request_values", {}), rows, definitions, label)
+            unknown = sorted(set(entry) - METHOD_SET_KEYS)
+            if unknown:
+                fail(f"{label} has unknown keys {unknown}")
+            profile = entry.get("stable_request_values", {})
+            check_request_values(profile, rows, definitions, label)
+            # A missing or widened profile would silently promote every call.
+            # The narrowed requests are pinned here, so dropping, misspelling
+            # or widening a profile in the inventory alone fails.
+            for _, request, *_ in rows:
+                expected = EXPECTED_STABLE_REQUEST_VALUES.get(request.rsplit(".", 1)[-1])
+                if expected is not None and profile != expected:
+                    fail(
+                        f"{label} stable request profile for {request} must be {expected}, "
+                        f"got {profile or 'none'}; review the narrowed call contract"
+                    )
             excluded = entry.get("excluded_message_fields", [])
             require_sorted_unique(excluded, f"{label}.excluded_message_fields")
             outside_unstable = sorted(set(excluded) - unstable_fields)
