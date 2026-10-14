@@ -63,7 +63,7 @@ cargo build --profile scale --locked -p rrharness
 
 ## Arg contract
 
-Three modes (from `src/main.rs`):
+Profiling and join modes (from `src/main.rs`):
 
 ```text
 rrharness flood <n_clients> <n_prefixes> <secs> <out_prefix>
@@ -164,3 +164,87 @@ rrharness late-join 2 100
 The manager busy fraction uses the host's checked `sysconf(_SC_CLK_TCK)` value
 and treats malformed or unreadable `/proc/self/task/<tid>/stat` data as an
 error. It never substitutes a guessed tick rate or a zero CPU sample.
+
+## Recovery memory receipt
+
+`recovery-memory` is a separate memory-only mode with four consumer runtime
+workers and the dedicated manager thread. It has no profiler, RSS, elapsed-time
+or throughput output:
+
+```text
+rrharness recovery-memory dataset-reevaluate 256 100000
+rrharness recovery-memory peer-down 256 100000
+```
+
+One source originates 100,000 routes to 256 homogeneous plain RR clients in
+one shared group. The registered non-client source has an empty separate
+profile. Eight-slot outbound queues and compact, fixed receiver bitmaps are
+included in the measured scope; each receiver bitmap occupies 12,504 bytes
+at this shape. The consumers apply frozen source exclusions and reject unknown
+or repeated withdrawals of exact prefix/path keys. Initial population may
+retry announcements after bounded-queue deferral; the receipt records their
+actual count.
+
+Both cells drain, pause and acknowledge every receiver, then fill its queue
+with empty envelopes. The first drives production
+`ReevaluatePeerExportPolicies` for the shared client group; it does not drive
+the full dataset publication coordinator. The second sends the registered
+source's actual generation-matched `PeerDown` and confirms an empty Loc-RIB.
+Both require the actor's observed dirty-peer and group-dirty counts to equal
+the full receiver cohort before recording retained and operation-end samples.
+Consumers resume afterward. Settlement requires zero outbound recovery
+residue, matching advertised counts and exact folded receiver inventories;
+source removal additionally requires exactly 100,000 withdrawals per client.
+Actor query and receiver drain barriers establish completion, with a finite
+deadline for failure rather than a fixed sleep as proof.
+
+The hosted-only driver
+[`../compare-recovery-memory.sh`](../compare-recovery-memory.sh) freezes the
+committed harness source and minimally broadens two existing observer cfg gates
+on both `c862af9338aa828b7462f3cf85781f63b0e79fe8` and the exact candidate SHA.
+It verifies the unchanged observer bodies, retains the instrumentation and
+patches, preserves each revision's lockfile/pins, and builds serially with the
+`scale` profile, locked dependencies, four build jobs and separate targets.
+Each cell runs in A/B/B/A order in fresh root-owned transient systemd scopes.
+
+The dispatch-only `recovery_memory_receipt` CI job runs on a fresh hosted
+`ubuntu-24.04` VM **only when explicitly dispatching
+`fix/update-group-recovery-bounds`**. Manual main or release CI does not run
+the campaign. The driver refuses dev/self-hosted environments and fails before
+building if cgroup v2 peak accounting or the zero-swap fence is unavailable.
+Measured mode also verifies its own unified cgroup membership and records
+PID/start-time identity before allocating the RIB or receiver inventory.
+The binary embeds its original revision and instrumentation digest; the
+checker matches those identities and the running `/proc/PID/exe` digest to
+the recorded build. Raw ownership samples cover the scoped Bash launcher,
+Python checker and Rust workload before, during and after the workload, with
+foreign members and populated descendant cgroups refused. Every leg requires
+a distinct scope and workload identity.
+Primary evidence is whole-scope `memory.peak` in bytes, with current/stat
+snapshots at population, retained, operation-end and settled barriers; actual
+swap must remain zero and any cgroup or host OOM invalidates the campaign.
+
+Artifacts retain source and binary hashes, toolchain/build inputs, commands,
+exits, logs, raw cgroup files, phase gauges and per-cause fallback counts.
+Candidate recovery gauges are required; their baseline absence is recorded
+explicitly. Any available EVPN provenance-exhaustion counter is recorded as
+inactive/zero: this plain RR receipt does not exercise EVPN or imply that the
+common fallback resets sessions. Recovery-byte gauges are reservation charges,
+not a component attribution of RSS. The same fixed launcher and consumer
+overhead are charged to both revisions. The comparison has no timing verdict
+or automatic capacity threshold and is not a full-daemon, TCP, socket-buffer,
+dataset-publication or final transport-writer receipt.
+Settlement restores the population-ready empty-proof reservation charge,
+including the fixed ledger header, and retains the peak charge. Cgroup phase
+peaks must be monotonic, and the end snapshot must cover the pre-workload and
+all phase high-water marks.
+
+The checker and adversarial fixtures are
+[`../recovery_memory.py`](../recovery_memory.py) and
+[`../test_recovery_memory.py`](../test_recovery_memory.py). A local, tiny
+correctness exercise skips all memory and `/proc` reads:
+
+```text
+rrharness recovery-memory dataset-reevaluate 4 200 --correctness-only
+rrharness recovery-memory peer-down 4 200 --correctness-only
+```

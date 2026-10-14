@@ -1,0 +1,735 @@
+{
+  "budgets_bytes": {
+    "daemon": 536870912,
+    "per_peer": 67108864
+  },
+  "campaign_manifest": {
+    "baseline": "c862af9338aa828b7462f3cf85781f63b0e79fe8",
+    "build_jobs": 4,
+    "candidate": "ee50db161b98def127629eca8a30d9fc23a0320a",
+    "cells": [
+      "dataset-reevaluate",
+      "peer-down"
+    ],
+    "clients": 256,
+    "instrumentation_manifest_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee",
+    "order_per_cell": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "prefixes": 100000,
+    "schema": "rustbgpd.recovery-memory.campaign.v1",
+    "scope": "manager-direct RIB and production exact-export preflight; no TCP/session output"
+  },
+  "environment": {
+    "architecture": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "host_memory_before_build": {
+      "available_bytes": 15534874624,
+      "host_swap_total_bytes": 3221221376,
+      "scope": "pre-build host inventory, not contemporaneous workload headroom",
+      "total_bytes": 16766414848
+    },
+    "kernel_release": "6.17.0-1022-azure",
+    "os": "Ubuntu 24.04.5 LTS",
+    "runner_class": "GitHub-hosted ubuntu-24.04",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "hosted_evidence": {
+    "artifact_expires_on": "2026-11-13",
+    "artifact_id": 11864360496,
+    "artifact_name": "update-group-recovery-memory-ee50db161b98def127629eca8a30d9fc23a0320a",
+    "driver_exit": 0,
+    "host_oom_after": 0,
+    "host_oom_before": 0,
+    "job_id": 115630552079,
+    "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38495536388/job/115630552079",
+    "offline_full_campaign_summary": "passed",
+    "original_zip_retention": "privately archived and checksum-verified separately from the expiring hosted artifact",
+    "original_zip_sha256": "7022ac4f764ea692caef7115d643b49a896463e7d1d6922c8bdfb441471a7efa",
+    "run_id": 38495536388
+  },
+  "instrumentation": {
+    "baseline_transform": "identical candidate main.rs and recovery_memory.rs overlay; only the two TestQueryOutboundHealth observer cfg gates opened; original manifests, dependency pins and lockfiles preserved",
+    "build_command": "CARGO_BUILD_JOBS=4 RRHARNESS_RECOVERY_SOURCE_SHA=<role-source-commit> RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256=<manifest-sha256> cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4",
+    "input_hashes": {
+      "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+      "bench/scale/compare-recovery-memory.sh": "668f5142805d6def163e61fcf269199f65a58775a1cab3088d863ece17a4f9bb",
+      "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+      "bench/scale/recovery_memory.py": "9555b7e8465cacbd988c3df5a06a2c0cce508af7ac1427904b2a57e73d0c160c",
+      "bench/scale/rrharness/Cargo.toml": "8f2212fe8aeb856f7d95c024349197f3ef6249e536759e96cfb640130fb7c32a",
+      "bench/scale/rrharness/src/main.rs": "06c04a3e1565211a06aac0ee6bc374dca7314da04270666b9d8681492181c851",
+      "bench/scale/rrharness/src/recovery_memory.rs": "f49ffb9844064c42ced2b1b968965c5d396c1aa177da9fea9a4c793b91ee4553"
+    },
+    "manifest_sha256": "7661deda64b0176826673f21fa10b2fd28cd893c2ad346257f2a7c6a820a16ee"
+  },
+  "legs": [
+    {
+      "after": {
+        "memory.current": 13094912,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 200949760,
+        "memory.stat.anon": 10272768,
+        "memory.stat.file": 1941504,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "before": {
+        "memory.current": 12451840,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 12455936,
+        "memory.stat.anon": 9621504,
+        "memory.stat.file": 1888256,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "cell": "dataset-reevaluate",
+      "harness_log_sha256": "1baae07c3f391d5c44af1a2bf32959e76ff7138b8e8d279cf4ded8876d990226",
+      "launcher_exit": 0,
+      "leg": 1,
+      "original_scope_identity_sha256": "591c4ea239805f5b6c546c4c3d8733e1e599ef23d287d141482f1a8e010bc4ee",
+      "ownership": {
+        "foreign_members_observed": 0,
+        "original_log_sha256": "7d9200ef05e3537f606a40a118dc85057640b7904b2addba176d1b58e130be29",
+        "phases": [
+          "before",
+          "active",
+          "after"
+        ],
+        "populated_descendants_observed": 0,
+        "sample_count": 3
+      },
+      "processes": {
+        "bash": {
+          "exe_sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+          "executable_basename": "bash",
+          "parent_pid": 18773,
+          "pid": 18774,
+          "raw_record_sha256": "7370ece0d8d618da69f8f926dc1eacf261ca4723aeea7bd57ede85497c061d72",
+          "start_ticks": 61818
+        },
+        "python": {
+          "exe_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+          "executable_basename": "python3.12",
+          "parent_pid": 18774,
+          "pid": 18780,
+          "raw_record_sha256": "030f40ba4e6323876e9ebe5afb2794c87037c4131a65765cddeed4dfb91aa359",
+          "start_ticks": 61820
+        },
+        "rust": {
+          "exe_sha256": "9e04bf7cacc634a13866c322395e5b6d99357d428439b951b96a9a1c6f413bd5",
+          "executable_basename": "rrharness",
+          "parent_pid": 18780,
+          "pid": 18781,
+          "raw_record_sha256": "196294b012d45cdb7fbafe543982e2a77bdf4fda158f9efbdf89dc775dda8f73",
+          "start_ticks": 61829
+        }
+      },
+      "role": "baseline",
+      "scope_alias": "scope-01",
+      "status": {
+        "cgroup_valid": true,
+        "exit": 0,
+        "ownership_valid": true,
+        "timeout": false
+      }
+    },
+    {
+      "after": {
+        "memory.current": 10665984,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 846053376,
+        "memory.stat.anon": 10014720,
+        "memory.stat.file": 94208,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "before": {
+        "memory.current": 10194944,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 10199040,
+        "memory.stat.anon": 9625600,
+        "memory.stat.file": 36864,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "cell": "dataset-reevaluate",
+      "harness_log_sha256": "f7c15a8e026aae51701ea3ed61de0d658d0edd2ab35ef86f51dbec1674bf7a76",
+      "launcher_exit": 0,
+      "leg": 2,
+      "original_scope_identity_sha256": "8f4e97c84505f2d3ec34ade294f4656649a2ee1413b280b31135dc4d98e3630d",
+      "ownership": {
+        "foreign_members_observed": 0,
+        "original_log_sha256": "8eb5abc35cf5a54b0ccb228f31ef3e4d13f26b8c7c852a08fc334457b09fe374",
+        "phases": [
+          "before",
+          "active",
+          "after"
+        ],
+        "populated_descendants_observed": 0,
+        "sample_count": 3
+      },
+      "processes": {
+        "bash": {
+          "exe_sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+          "executable_basename": "bash",
+          "parent_pid": 18795,
+          "pid": 18796,
+          "raw_record_sha256": "8d380d22fc219937dfdea2882fb0499baf20ae07ca3efa4eb907ae40e2a995fa",
+          "start_ticks": 63254
+        },
+        "python": {
+          "exe_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+          "executable_basename": "python3.12",
+          "parent_pid": 18796,
+          "pid": 18802,
+          "raw_record_sha256": "86812dac4d9e8a5a3c804c641d7afdc23d130839ae6f49401469437697f4f318",
+          "start_ticks": 63256
+        },
+        "rust": {
+          "exe_sha256": "8a0235b5abb9101f4da1c690296461d76045dcc5a3406bf697ae9b8c69342df6",
+          "executable_basename": "rrharness",
+          "parent_pid": 18802,
+          "pid": 18803,
+          "raw_record_sha256": "de40e8b2150654168dde685d3a19f8a032d59cedabdd9b6ced51c7eb39951195",
+          "start_ticks": 63262
+        }
+      },
+      "role": "candidate",
+      "scope_alias": "scope-02",
+      "status": {
+        "cgroup_valid": true,
+        "exit": 0,
+        "ownership_valid": true,
+        "timeout": false
+      }
+    },
+    {
+      "after": {
+        "memory.current": 10358784,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 842416128,
+        "memory.stat.anon": 9707520,
+        "memory.stat.file": 94208,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "before": {
+        "memory.current": 10190848,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 10194944,
+        "memory.stat.anon": 9621504,
+        "memory.stat.file": 36864,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "cell": "dataset-reevaluate",
+      "harness_log_sha256": "670920695c15107beca5315e71561c6adc27908c07a5e64759d7995927b0c0a3",
+      "launcher_exit": 0,
+      "leg": 3,
+      "original_scope_identity_sha256": "d5df2261ffc7c5ce741fc6e9e8af2257260b91421ffc119a406aed4f4c72b26b",
+      "ownership": {
+        "foreign_members_observed": 0,
+        "original_log_sha256": "d3fe823c151ed0d3655b20a0818ae8b5b8d0f505a018e0df7603503ec9327582",
+        "phases": [
+          "before",
+          "active",
+          "after"
+        ],
+        "populated_descendants_observed": 0,
+        "sample_count": 3
+      },
+      "processes": {
+        "bash": {
+          "exe_sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+          "executable_basename": "bash",
+          "parent_pid": 18823,
+          "pid": 18824,
+          "raw_record_sha256": "06c442397654a455691e523a4845c60106d71cd9cd2eb66048e238db36ee1077",
+          "start_ticks": 67938
+        },
+        "python": {
+          "exe_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+          "executable_basename": "python3.12",
+          "parent_pid": 18824,
+          "pid": 18830,
+          "raw_record_sha256": "48dbce715206923c905ed8dda683df585efaa406ef2311153bedd71fd5dd2410",
+          "start_ticks": 67940
+        },
+        "rust": {
+          "exe_sha256": "8a0235b5abb9101f4da1c690296461d76045dcc5a3406bf697ae9b8c69342df6",
+          "executable_basename": "rrharness",
+          "parent_pid": 18830,
+          "pid": 18831,
+          "raw_record_sha256": "6bf92e3eafc1b53e5515592a07ab31c7f164331d5b2e4463fe874dee9b7d3447",
+          "start_ticks": 67946
+        }
+      },
+      "role": "candidate",
+      "scope_alias": "scope-03",
+      "status": {
+        "cgroup_valid": true,
+        "exit": 0,
+        "ownership_valid": true,
+        "timeout": false
+      }
+    },
+    {
+      "after": {
+        "memory.current": 10973184,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 208117760,
+        "memory.stat.anon": 9707520,
+        "memory.stat.file": 90112,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "before": {
+        "memory.current": 10506240,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 10510336,
+        "memory.stat.anon": 9621504,
+        "memory.stat.file": 36864,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "cell": "dataset-reevaluate",
+      "harness_log_sha256": "687df34c52a40952231087f3b04b5db8f4dfdb218d2ac3d3697cf9f3162709f0",
+      "launcher_exit": 0,
+      "leg": 4,
+      "original_scope_identity_sha256": "c699621a6912aee3abcc4ad5eeeb5cc2ee4557519a24810e60a734cec823d3c5",
+      "ownership": {
+        "foreign_members_observed": 0,
+        "original_log_sha256": "203b315a7292240b4ecda774b7fb0f518581bd1cde4c8d2772fb691c0fd7f66b",
+        "phases": [
+          "before",
+          "active",
+          "after"
+        ],
+        "populated_descendants_observed": 0,
+        "sample_count": 3
+      },
+      "processes": {
+        "bash": {
+          "exe_sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+          "executable_basename": "bash",
+          "parent_pid": 18848,
+          "pid": 18849,
+          "raw_record_sha256": "2e34e657a7af81576c27d86dd9afb35cd295b925bb7c61f2f2b5deaa0766ad36",
+          "start_ticks": 72597
+        },
+        "python": {
+          "exe_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+          "executable_basename": "python3.12",
+          "parent_pid": 18849,
+          "pid": 18855,
+          "raw_record_sha256": "33d72f4bf14502642fe8a445ab18d686535e06609a5c465027917a91e011daea",
+          "start_ticks": 72599
+        },
+        "rust": {
+          "exe_sha256": "9e04bf7cacc634a13866c322395e5b6d99357d428439b951b96a9a1c6f413bd5",
+          "executable_basename": "rrharness",
+          "parent_pid": 18855,
+          "pid": 18856,
+          "raw_record_sha256": "1d5fa8a08a7464816160cae30d032ff6bbd70ea79664aa2785b783b7cc5ddd6d",
+          "start_ticks": 72604
+        }
+      },
+      "role": "baseline",
+      "scope_alias": "scope-04",
+      "status": {
+        "cgroup_valid": true,
+        "exit": 0,
+        "ownership_valid": true,
+        "timeout": false
+      }
+    },
+    {
+      "after": {
+        "memory.current": 11235328,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 223547392,
+        "memory.stat.anon": 10117120,
+        "memory.stat.file": 90112,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "before": {
+        "memory.current": 10469376,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 10473472,
+        "memory.stat.anon": 9621504,
+        "memory.stat.file": 36864,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "cell": "peer-down",
+      "harness_log_sha256": "f58e0ee771f4b1481ca9d4b495c0f171e99c44ff2d4986a37f292c88c1392d6b",
+      "launcher_exit": 0,
+      "leg": 1,
+      "original_scope_identity_sha256": "0495aebb7eb614712221250e3843d34e4d6dfce8d4857de5d4d81b48490463ba",
+      "ownership": {
+        "foreign_members_observed": 0,
+        "original_log_sha256": "8343aed6bf5bae1058702625344b11217af080a825367b35e210adf92adc8a08",
+        "phases": [
+          "before",
+          "active",
+          "after"
+        ],
+        "populated_descendants_observed": 0,
+        "sample_count": 3
+      },
+      "processes": {
+        "bash": {
+          "exe_sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+          "executable_basename": "bash",
+          "parent_pid": 18869,
+          "pid": 18870,
+          "raw_record_sha256": "f3826ced9cbc6396e969c1684d021ea9452795c3ee0960df7874418acbce0e90",
+          "start_ticks": 74035
+        },
+        "python": {
+          "exe_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+          "executable_basename": "python3.12",
+          "parent_pid": 18870,
+          "pid": 18876,
+          "raw_record_sha256": "c5c82635b1a37ed9ef4a6064264c8fe48b48c1fb623bc81f277f11ffdc4b6a11",
+          "start_ticks": 74036
+        },
+        "rust": {
+          "exe_sha256": "9e04bf7cacc634a13866c322395e5b6d99357d428439b951b96a9a1c6f413bd5",
+          "executable_basename": "rrharness",
+          "parent_pid": 18876,
+          "pid": 18877,
+          "raw_record_sha256": "98b1e9e2b554fd474bf1e820eb77ca6e75a2584f4151f3eb95dc31b4edcbba0f",
+          "start_ticks": 74042
+        }
+      },
+      "role": "baseline",
+      "scope_alias": "scope-05",
+      "status": {
+        "cgroup_valid": true,
+        "exit": 0,
+        "ownership_valid": true,
+        "timeout": false
+      }
+    },
+    {
+      "after": {
+        "memory.current": 11440128,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 888643584,
+        "memory.stat.anon": 9699328,
+        "memory.stat.file": 94208,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "before": {
+        "memory.current": 10207232,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 10211328,
+        "memory.stat.anon": 9613312,
+        "memory.stat.file": 36864,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "cell": "peer-down",
+      "harness_log_sha256": "4516de35eef688d3bf70982889032af980db112ad154bc32947b671229e359cb",
+      "launcher_exit": 0,
+      "leg": 2,
+      "original_scope_identity_sha256": "3898ad6ebc51ff0317842e9856bf477f379e0ed6c48df5c17c261060cea927d1",
+      "ownership": {
+        "foreign_members_observed": 0,
+        "original_log_sha256": "d4bc0092017f72abe05aecb1ea7ba78d1858e6464db1ebdbad111d16b9cc5359",
+        "phases": [
+          "before",
+          "active",
+          "after"
+        ],
+        "populated_descendants_observed": 0,
+        "sample_count": 3
+      },
+      "processes": {
+        "bash": {
+          "exe_sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+          "executable_basename": "bash",
+          "parent_pid": 18890,
+          "pid": 18891,
+          "raw_record_sha256": "d4390fff2d9c0f3a5e7fbff5eb9c07f9040839d7abc22765c1c04bd4aa0c978d",
+          "start_ticks": 75080
+        },
+        "python": {
+          "exe_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+          "executable_basename": "python3.12",
+          "parent_pid": 18891,
+          "pid": 18897,
+          "raw_record_sha256": "d6a456ef415cc9317b7c7bf7e2937fc1083d178f865dd4d5c508811893bb601e",
+          "start_ticks": 75083
+        },
+        "rust": {
+          "exe_sha256": "8a0235b5abb9101f4da1c690296461d76045dcc5a3406bf697ae9b8c69342df6",
+          "executable_basename": "rrharness",
+          "parent_pid": 18897,
+          "pid": 18898,
+          "raw_record_sha256": "aad1294cccf03a2d6479cf1c611d4a285a1229318eb5f2dbe544519e17f9169f",
+          "start_ticks": 75088
+        }
+      },
+      "role": "candidate",
+      "scope_alias": "scope-06",
+      "status": {
+        "cgroup_valid": true,
+        "exit": 0,
+        "ownership_valid": true,
+        "timeout": false
+      }
+    },
+    {
+      "after": {
+        "memory.current": 10702848,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 903512064,
+        "memory.stat.anon": 9703424,
+        "memory.stat.file": 94208,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "before": {
+        "memory.current": 10465280,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 10469376,
+        "memory.stat.anon": 9617408,
+        "memory.stat.file": 36864,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "cell": "peer-down",
+      "harness_log_sha256": "58c9eb8acb89f6e10bb9315f22ed81837c8cefad44183776cea08c1e06d76533",
+      "launcher_exit": 0,
+      "leg": 3,
+      "original_scope_identity_sha256": "6e63ccf479e335ef2529039e50406dbcd3b08fe757b12e971c5f7641ba5eb336",
+      "ownership": {
+        "foreign_members_observed": 0,
+        "original_log_sha256": "ec0846376f5ba2252e9a877a35a26c03afc7cdb81f2b407198c0df6b2ec90754",
+        "phases": [
+          "before",
+          "active",
+          "after"
+        ],
+        "populated_descendants_observed": 0,
+        "sample_count": 3
+      },
+      "processes": {
+        "bash": {
+          "exe_sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+          "executable_basename": "bash",
+          "parent_pid": 18913,
+          "pid": 18914,
+          "raw_record_sha256": "17d916212fc9cfd43d3409ac1f1fefe1861c139da9786f914859ce695a4e82ee",
+          "start_ticks": 77783
+        },
+        "python": {
+          "exe_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+          "executable_basename": "python3.12",
+          "parent_pid": 18914,
+          "pid": 18920,
+          "raw_record_sha256": "5d01b8e63174dfdbf2df99d41d6fba5a3b6f7eef153e281c589246bf8dcb9398",
+          "start_ticks": 77785
+        },
+        "rust": {
+          "exe_sha256": "8a0235b5abb9101f4da1c690296461d76045dcc5a3406bf697ae9b8c69342df6",
+          "executable_basename": "rrharness",
+          "parent_pid": 18920,
+          "pid": 18921,
+          "raw_record_sha256": "e9d5ab8166f8d3ad2cd6c8675dce8eb281e38e8fd7cbddbb360ee16b05842243",
+          "start_ticks": 77791
+        }
+      },
+      "role": "candidate",
+      "scope_alias": "scope-07",
+      "status": {
+        "cgroup_valid": true,
+        "exit": 0,
+        "ownership_valid": true,
+        "timeout": false
+      }
+    },
+    {
+      "after": {
+        "memory.current": 10702848,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 229695488,
+        "memory.stat.anon": 9699328,
+        "memory.stat.file": 90112,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "before": {
+        "memory.current": 10248192,
+        "memory.events.oom": 0,
+        "memory.events.oom_group_kill": 0,
+        "memory.events.oom_kill": 0,
+        "memory.peak": 10252288,
+        "memory.stat.anon": 9621504,
+        "memory.stat.file": 36864,
+        "memory.stat.file_mapped": 0,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.swap.peak": 0
+      },
+      "cell": "peer-down",
+      "harness_log_sha256": "26ab61cf866aaba0d7631c0fc9daf14b18a022ef742bd12a3b50a5291f44d5bb",
+      "launcher_exit": 0,
+      "leg": 4,
+      "original_scope_identity_sha256": "4172386a598daa92b1f5e9a35564a9d19be1154a2eae588f0b93760d4b619e07",
+      "ownership": {
+        "foreign_members_observed": 0,
+        "original_log_sha256": "727a26e9eb04e01b3fd7934230706188306aa836356f11e23a3272fa27dd5420",
+        "phases": [
+          "before",
+          "active",
+          "after"
+        ],
+        "populated_descendants_observed": 0,
+        "sample_count": 3
+      },
+      "processes": {
+        "bash": {
+          "exe_sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+          "executable_basename": "bash",
+          "parent_pid": 18936,
+          "pid": 18937,
+          "raw_record_sha256": "505f78dddc01829ad899622f5d8acf2098f22c98807a9e6ed0d2506f2ed5f2c3",
+          "start_ticks": 80464
+        },
+        "python": {
+          "exe_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+          "executable_basename": "python3.12",
+          "parent_pid": 18937,
+          "pid": 18944,
+          "raw_record_sha256": "a45d082e00a303260c8778d4176f0fe649ec506ed79fd2106afa535a4309e0a1",
+          "start_ticks": 80467
+        },
+        "rust": {
+          "exe_sha256": "9e04bf7cacc634a13866c322395e5b6d99357d428439b951b96a9a1c6f413bd5",
+          "executable_basename": "rrharness",
+          "parent_pid": 18944,
+          "pid": 18945,
+          "raw_record_sha256": "d08b48d0e434bf178fece39dd20d5689fa973fb2df743d398d06792693642afa",
+          "start_ticks": 80472
+        }
+      },
+      "role": "baseline",
+      "scope_alias": "scope-08",
+      "status": {
+        "cgroup_valid": true,
+        "exit": 0,
+        "ownership_valid": true,
+        "timeout": false
+      }
+    }
+  ],
+  "measured_utc_date": "2026-10-14",
+  "prior_attempt": {
+    "correction_scope": "CI configuration only",
+    "measurement_rows": 0,
+    "outcome": "failed before building or measuring: missing toolchain input",
+    "run_id": 38494992846,
+    "run_url": "https://github.com/lance0/rustbgpd/actions/runs/38494992846"
+  },
+  "public_extract": {
+    "limitations": "Compact numeric/identity extracts cannot replay the full original ownership checks. Full raw campaign and logs are retained separately; the original hosted artifact expires on the recorded date.",
+    "original_comparison_sha256": "6d19d07d8dfd3d30d9984dc1b2c46e0ea3f7b80da72f3cbdaf528ff576e5ae75",
+    "redactions": "Each original cgroup path in comparison.json is replaced by a distinct scope-NN alias; this file retains its SHA-256 over the original stripped UTF-8 path. Process executable paths are reduced to basenames. Numeric values and source, binary and instrumentation hashes are unchanged. Hostnames and machine-specific filesystem paths are omitted."
+  },
+  "source_and_build": {
+    "baseline": {
+      "binary_sha256": "9e04bf7cacc634a13866c322395e5b6d99357d428439b951b96a9a1c6f413bd5",
+      "build_exit": 0,
+      "build_inputs_sha256": {
+        "Cargo.lock": "52fb663be2f6640ba4ba5e7575fdae03e7fc6d9168e926563a267181c8b2d255",
+        "Cargo.toml": "72538a3a0a9cfb9c4478f2aec137a13fa7b1c8066a590788d6204f9e5e35ad32",
+        "bench/scale/rrharness/Cargo.toml": "8f2212fe8aeb856f7d95c024349197f3ef6249e536759e96cfb640130fb7c32a"
+      },
+      "build_log_sha256": "912142e9fa2dd9a79aac060cd9f99cb6b25bd806745c316b3f24ab7d409acfcb",
+      "instrumentation_patch_sha256": "32d776c38f0a2df3293d2e8f4812d9e2c94c2116b4dee94024308fad9194b183",
+      "observer_patch_sha256": "7753a31c78ef6c9afc1388a61a104c6566ee70b6129a2d68f92b9de7631a2fc0",
+      "source_commit": "c862af9338aa828b7462f3cf85781f63b0e79fe8"
+    },
+    "candidate": {
+      "binary_sha256": "8a0235b5abb9101f4da1c690296461d76045dcc5a3406bf697ae9b8c69342df6",
+      "build_exit": 0,
+      "build_inputs_sha256": {
+        "Cargo.lock": "52fb663be2f6640ba4ba5e7575fdae03e7fc6d9168e926563a267181c8b2d255",
+        "Cargo.toml": "72538a3a0a9cfb9c4478f2aec137a13fa7b1c8066a590788d6204f9e5e35ad32",
+        "bench/scale/rrharness/Cargo.toml": "8f2212fe8aeb856f7d95c024349197f3ef6249e536759e96cfb640130fb7c32a"
+      },
+      "build_log_sha256": "6db9ec373a143af0eaa44a909b11a0cfa317a2061167fd2458afe7350309aafa",
+      "instrumentation_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "observer_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_commit": "ee50db161b98def127629eca8a30d9fc23a0320a"
+    }
+  }
+}

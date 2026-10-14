@@ -717,3 +717,42 @@ jobs:
         env:
           IMAGE_TAG: rustbgpd-netns-tests:latest
           SKIP_BUILD: "1"
+
+  recovery_memory_receipt:
+    # Bounded, operator-dispatched qualification; never part of push/PR,
+    # main/release re-tests, or the reserved self-hosted soak runner.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fix/update-group-recovery-bounds' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1 # stable
+        with:
+          toolchain: stable
+      - uses: ./.github/actions/install-protobuf
+      - name: Check recovery receipt negative fixtures
+        run: |
+          bash -n bench/scale/compare-recovery-memory.sh
+          python3 -m unittest discover -s bench/scale -p test_recovery_memory.py -v
+      - name: Run frozen-source cgroup memory comparison
+        shell: bash
+        env:
+          RECOVERY_MEMORY_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/update-group-recovery-memory"
+          bash bench/scale/compare-recovery-memory.sh \
+            --head "$GITHUB_SHA" \
+            --output-dir "$RUNNER_TEMP/update-group-recovery-memory/campaign" \
+            > "$RUNNER_TEMP/update-group-recovery-memory/driver.log" 2>&1
+      - name: Upload recovery evidence even after refusal or failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-group-recovery-memory-${{ github.sha }}
+          path: ${{ runner.temp }}/update-group-recovery-memory
+          if-no-files-found: warn
+          retention-days: 30

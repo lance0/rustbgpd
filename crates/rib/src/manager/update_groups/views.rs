@@ -43,16 +43,19 @@ impl RibManager {
         is_force: bool,
         baseline: Option<&FastMap<(Prefix, u32), Route>>,
         extras: Option<&HashSet<(Prefix, u32)>>,
-        admitted: Option<&HashSet<ExactExportKey>>,
+        admitted: Option<&super::admitted_recovery::AdmittedKeys>,
         announce: &mut Vec<Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<NextHopAction>>,
+        checkpoint: &mut impl FnMut(bool),
     ) {
         use crate::manager::distribution::rs_control::{
             rs_control_route_rewrite, rs_control_suppressed,
         };
+        checkpoint(true);
         let mut suppressed_withdraws: HashSet<(Prefix, u32)> = HashSet::new();
         for staged in group.table.iter() {
+            checkpoint(false);
             let key = (staged.prefix, staged.path_id);
             // adv(m) resolves the slot ([`GroupRibOut::adv_entry`]):
             // the staged winner for a non-source member, the lane
@@ -104,28 +107,51 @@ impl RibManager {
         };
         let mut keys: HashSet<(Prefix, u32)> = suppressed_withdraws;
         if let Some(base) = baseline {
-            keys.extend(base.keys().filter(|key| !member_retains(key)));
+            checkpoint(true);
+            keys.extend(base.keys().filter(|key| {
+                checkpoint(false);
+                !member_retains(key)
+            }));
+            checkpoint(true);
         }
         if is_dirty {
-            keys.extend(group.tombstones.iter().filter(|key| !member_retains(key)));
+            checkpoint(true);
+            keys.extend(group.tombstones.iter().filter(|key| {
+                checkpoint(false);
+                !member_retains(key)
+            }));
+            checkpoint(true);
         }
         if let Some(extra) = extras {
-            keys.extend(extra.iter().filter(|key| !member_retains(key)));
+            checkpoint(true);
+            keys.extend(extra.iter().filter(|key| {
+                checkpoint(false);
+                !member_retains(key)
+            }));
+            checkpoint(true);
         }
         if let Some(admitted) = admitted {
-            keys.extend(admitted.iter().filter_map(|key| match key {
-                ExactExportKey::Unicast(prefix, path_id)
-                    if !member_retains(&(*prefix, *path_id)) =>
-                {
-                    Some((*prefix, *path_id))
+            checkpoint(true);
+            keys.extend(admitted.iter().filter_map(|key| {
+                checkpoint(false);
+                match key {
+                    ExactExportKey::Unicast(prefix, path_id)
+                        if !member_retains(&(prefix, path_id)) =>
+                    {
+                        Some((prefix, path_id))
+                    }
+                    _ => None,
                 }
-                _ => None,
             }));
+            checkpoint(true);
             keys.retain(|(prefix, path_id)| {
+                checkpoint(false);
                 admitted.contains(&ExactExportKey::Unicast(*prefix, *path_id))
             });
         }
-        withdraw.extend(keys);
+        checkpoint(true);
+        withdraw.extend(keys.into_iter().inspect(|_| checkpoint(false)));
+        checkpoint(true);
     }
 
     /// VPN portion of a grouped member's resync update — the VPN sibling
@@ -152,11 +178,14 @@ impl RibManager {
         is_force: bool,
         baseline: Option<&FastMap<VpnRouteKey, VpnRibRoute>>,
         extras: Option<&HashSet<VpnRouteKey>>,
-        admitted: Option<&HashSet<ExactExportKey>>,
+        admitted: Option<&super::admitted_recovery::AdmittedKeys>,
         vpn_announce: &mut Vec<VpnRibRoute>,
         vpn_withdraw: &mut Vec<VpnRibRouteKey>,
+        checkpoint: &mut impl FnMut(bool),
     ) {
+        checkpoint(true);
         for route in group.table.iter_vpn() {
+            checkpoint(false);
             if route.peer == member || !rt_passes(filter, route) {
                 continue;
             }
@@ -181,35 +210,57 @@ impl RibManager {
         };
         let mut keys: HashSet<VpnRouteKey> = HashSet::new();
         if let Some(base) = baseline {
-            keys.extend(base.keys().filter(|key| !member_retains(key)));
+            checkpoint(true);
+            keys.extend(base.keys().filter(|key| {
+                checkpoint(false);
+                !member_retains(key)
+            }));
+            checkpoint(true);
         }
         if is_dirty {
-            keys.extend(
-                group
-                    .vpn_tombstones
-                    .iter()
-                    .filter(|key| !member_retains(key)),
-            );
+            checkpoint(true);
+            keys.extend(group.vpn_tombstones.iter().filter(|key| {
+                checkpoint(false);
+                !member_retains(key)
+            }));
+            checkpoint(true);
         }
         if let Some(extra) = extras {
-            keys.extend(extra.iter().filter(|key| !member_retains(key)));
+            checkpoint(true);
+            keys.extend(extra.iter().filter(|key| {
+                checkpoint(false);
+                !member_retains(key)
+            }));
+            checkpoint(true);
         }
         if let Some(admitted) = admitted {
-            keys.extend(admitted.iter().filter_map(|key| match key {
-                ExactExportKey::Vpn(key) if !member_retains(&key.nlri_key) => Some(key.nlri_key),
-                _ => None,
+            checkpoint(true);
+            keys.extend(admitted.iter().filter_map(|key| {
+                checkpoint(false);
+                match key {
+                    ExactExportKey::Vpn(key) if !member_retains(&key.nlri_key) => {
+                        Some(key.nlri_key)
+                    }
+                    _ => None,
+                }
             }));
+            checkpoint(true);
             keys.retain(|nlri_key| {
+                checkpoint(false);
                 admitted.contains(&ExactExportKey::Vpn(VpnRibRouteKey {
                     nlri_key: *nlri_key,
                     path_id: 0,
                 }))
             });
         }
-        vpn_withdraw.extend(keys.into_iter().map(|key| VpnRibRouteKey {
-            nlri_key: key,
-            path_id: 0,
+        checkpoint(true);
+        vpn_withdraw.extend(keys.into_iter().inspect(|_| checkpoint(false)).map(|key| {
+            VpnRibRouteKey {
+                nlri_key: key,
+                path_id: 0,
+            }
         }));
+        checkpoint(true);
     }
 
     /// Bump a member's export-policy counters by the group verdict:

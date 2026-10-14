@@ -34,6 +34,8 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+mod recovery_memory;
+
 /// The harness runs the daemon's `RibManager` in-process, so its stage/drain
 /// timings and RSS must come from the allocator the daemon ships with.
 #[global_allocator]
@@ -590,6 +592,10 @@ fn write_folded(report: &pprof::Report, path: &str) -> io::Result<()> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).expect("mode").clone();
+    if mode == "recovery-memory" {
+        recovery_memory::main(&args[2..]);
+        return;
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(12)
         .enable_all()

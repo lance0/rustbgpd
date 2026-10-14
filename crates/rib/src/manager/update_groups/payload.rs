@@ -25,6 +25,9 @@ pub(in crate::manager) struct GroupDelta {
     /// Source peer of the group-table entry this delta replaces, read
     /// BEFORE commit. `None` = the key was not previously staged.
     pub(in crate::manager) old_source: Option<IpAddr>,
+    /// Plain groups retain only SOURCE control attributes for prior eligibility;
+    /// full route/lane snapshots are confined to per-client-best groups.
+    pub(in crate::manager) prior_source_attrs: Option<Arc<AttrSet>>,
     /// The old shared entry and exception lane, read before this pass commits.
     /// Receivers resolve their actual prior slot for admission and equality.
     pub(in crate::manager) prior: Option<Box<PriorGroupSlots>>,
@@ -66,6 +69,9 @@ impl PriorGroupSlots {
         path_id: u32,
         checkpoint: &mut impl FnMut(bool),
     ) -> Option<Box<Self>> {
+        if !group.per_client_best {
+            return None;
+        }
         let route = group.table.get(&prefix, path_id)?;
         checkpoint(true);
         let prior = Box::new(Self {
@@ -99,6 +105,22 @@ impl PriorGroupSlots {
             source_attrs: entry.source_attrs.as_ref(),
             policy_label: entry.policy_label.as_ref(),
         })
+    }
+}
+
+pub(super) fn capture_prior_source_attrs(
+    group: &GroupRibOut,
+    prefix: Prefix,
+    path_id: u32,
+) -> Option<Arc<AttrSet>> {
+    if group.per_client_best {
+        return None;
+    }
+    let route = group.table.get(&prefix, path_id)?;
+    if group.source_control_passthrough {
+        capture_source_attrs(route)
+    } else {
+        group.source_attrs.get(&(prefix, path_id)).cloned()
     }
 }
 

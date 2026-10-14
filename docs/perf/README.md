@@ -220,6 +220,7 @@ records.
 
 | Document | Date stated | Workload or shape | Establishes | Does not establish |
 |---|---|---|---|---|
+| [Update-group recovery memory](update-group-recovery-memory-2026-10-14.md) | 2026-10-14 | Hosted manager-direct RIB, 256 receivers × 100k IPv4 routes; dataset reevaluation and full-table peer-down, two repetitions per arm per cell | All eight legs recover completely; candidate charge stays within the 512 MiB daemon admitted-key budget; candidate mean scope peaks are 4.13× / 3.95× baseline | Timing, full-daemon or TCP memory, EVPN, component attribution, or deployment capacity |
 | [`actor-ceiling-1m-2026-07.md`][actor-ceiling-1m-2026-07.md] | 2026-07 | 500 clients, 1M routes, 300 policy changes, three SIGHUP reloads | Transition polls stayed at or below 200 ms, but the post-commit flush blocked readiness for 1.64–2.40 s on all three reloads | A high-percentile bound from a large reload sample |
 | [`adj-rib-out-family-gauge-2026-07.md`][adj-rib-out-family-gauge-2026-07.md] | July 2026 | Family-gauge refresh at 8, 64, 256, and 1,000 peers | 256-peer and 1,000-peer rows improved 11.69% and 14.98% | A sevenfold whole-daemon or every-shape gain |
 | [`attr-intern-hashing-2026-08.md`][attr-intern-hashing-2026-08.md] | August 2026 | Typical and rich attributes at 10k and 100k entries | NO-GO: the isolated hash control exceeded its stability limit | A production change or speedup |
@@ -394,6 +395,7 @@ from that file; a directory name does not fill a missing date.
 
 | Document | Date stated | Workload, shape, or role | Establishes | Does not establish |
 |---|---|---|---|---|
+| [Update-group recovery memory extracts](artifacts/update-group-recovery-memory-2026-10-14/README.md) | 2026-10-14 | Eight hosted legs, 32 phase samples, exact numeric before/end snapshots and source/binary/instrumentation hashes | Recomputable memory ratios and compact recovery/accounting evidence | Full original ownership replay or raw build/process logs |
 | [`artifacts/adj-rib-out-family-gauge-2026-07/README.md`](artifacts/adj-rib-out-family-gauge-2026-07/README.md) | Unstated | Exact unrounded estimates and controls for the linked family-gauge receipt | Unstated | Unstated |
 | [`artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md`](artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md) | Unstated | Preflight-invalid and threshold-crossing attempts | Why those attempts were excluded | A retained result |
 | [`artifacts/attribute-layout-2026-08/README.md`](artifacts/attribute-layout-2026-08/README.md) | Unstated | 100k, 500k, and 900k structural rows plus a 200k-route bgperf2 result | The container-layout migration was rejected before a prototype | A live-byte A/B or throughput result |
