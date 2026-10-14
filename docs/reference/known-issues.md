@@ -473,7 +473,7 @@ resolved.
   qualifies member IRB against pinned SR Linux 25.10.1-399 with
   operator-provisioned SVIs, VRF attachments and L3 VXLAN devices.
   These local receipts do not establish hosted vendor qualification or scale
-  results. EVPN remains alpha. See
+  results. EVPN VTEP behavior remains alpha. See
   [ADR-0092](../adr/0092-evpn-vlan-aware-bundle-service.md).
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),

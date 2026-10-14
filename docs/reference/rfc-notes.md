@@ -26,7 +26,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; role-derived forwarding-state bits |
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim (a received IPv6 link-local next hop only toward its own link); routes with more than one label are not reflected (no RFC 8277 Multiple Labels Capability); no VRF import, no MPLS FIB, no local BGP-LS production |
-| EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap), RFC 9251 (SMET relay) | Route types 1–6; Type 6 SMET relay only; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
+| EVPN (Types 1–5 reflection scoped RR-only v1; Type 6 and Linux/VXLAN VTEP alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap), RFC 9251 (SMET relay) | Route types 1–6; Type 6 SMET relay only; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), RFC 9324 (opt-in), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention; local VRP/ASPA re-evaluation without Route Refresh when `[rpki] local_revalidation` is set |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
 | FlowSpec / blackhole | RFC 8955/8956 and RFC 9117 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Opt-in FlowSpec feasibility; opt-in BLACKHOLE Linux FIB discard |
@@ -2460,8 +2460,10 @@ restart recovery uses received routes rather than persistent incumbent memory.
 
 ### Type 6 SMET reflection
 
-Type 6 Selective Multicast Ethernet Tag (SMET) routes use the normal alpha EVPN
-RR path: typed receive, policy and selection, reflection, and withdrawal.
+Type 6 Selective Multicast Ethernet Tag (SMET) routes use the normal EVPN RR
+path: typed receive, policy and selection, reflection, and withdrawal. Unlike
+Types 1–5, Type 6 relay is alpha and outside the scoped
+[`route-reflector-evpn` role](v1-stable-contract.md#evpn-route-reflector-boundary).
 Route identity includes RD, Ethernet Tag, source, group, and originator IP.
 Flags are mutable payload outside that identity. The structural codec retains
 the full flags byte, including reserved high bits. Source and group can be

@@ -4518,7 +4518,7 @@ bridge_vlan = 20
   are counted as `non_zero_ethernet_tag` in `evpn_ip_vrf_remote_prefix_drops`.
   The [M120 local receipt](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md)
   qualifies this interface-less member IRB shape against SR Linux 25.10.1;
-  EVPN and Linux dataplane behavior remain alpha.
+  EVPN VTEP/IRB and Linux dataplane behavior remain alpha.
 - **Migration.** Changing `service_interface` or `ethernet_tag` on a live row
   goes through the L2VNI redefine path: routes under the old tag are
   withdrawn and local routes are replayed under the new one. Every PE in the

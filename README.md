@@ -22,7 +22,8 @@ them, and stream routing events to your own tools.
 **Stability:** inventoried route-server, route-reflector, and scoped FlowSpec
 controller surfaces have a [narrow v1 compatibility contract](docs/reference/v1-stable-contract.md),
 with release baseline v0.77.0. The project remains alpha overall; unlisted surfaces,
-EVPN, and Linux dataplane features are outside that promise.
+EVPN outside scoped Types 1–5 reflection, and Linux dataplane features are
+outside that promise.
 [Stability and compatibility](docs/reference/stability.md) explains the boundaries.
 
 ## Choose your path
@@ -41,7 +42,9 @@ are covered by the narrow v1 contract.
 
 IPv4/IPv6 unicast under the narrow v1 contract. VPN, labeled-unicast,
 RT-Constrain, and BGP-LS reflection have separate, scoped support. EVPN
-Types 1–6 remain alpha; Type 6 SMET supports relay only.
+Types 1–5 reflection has a
+[scoped RR-only v1 role](docs/reference/v1-stable-contract.md#evpn-route-reflector-boundary);
+Type 6 SMET relay, VTEP, IRB, and multi-homing remain alpha.
 
 [Deploy](docs/cookbook/route-reflector.md) ·
 [Family boundaries](docs/explanation/feature-tour.md#route-reflector-families-beyond-unicast)

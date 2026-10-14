@@ -24,7 +24,7 @@ loopback TCP port.
 
 This is a bounded raw-peer wire proof. It does not establish vendor
 interoperability, scale, performance, SMET origination, IGMP/MLD proxy behavior,
-or multicast forwarding. EVPN remains alpha; see the
+or multicast forwarding. Type 6 SMET relay remains alpha; see the
 [Type 6 support boundary](../../../docs/reference/rfc-notes.md#type-6-smet-reflection).
 
 ## Requirements and live invocation
