@@ -133,6 +133,13 @@ as-is (`bgp_session_state_transitions_total`,
 EVPN metric families (`evpn_*`) are VTEP-mode surface and stay empty
 in the RR role — deliberately not on the overview dashboard.
 
+Size the RR's memory from receivers × reflected EVPN routes. Each client
+has its own EVPN Adj-RIB-Out, at roughly 250–500 B per route per receiver
+depending on table fill: 150 clients × 37,250 reflected routes held a flat
+live heap of about 2.1 GB in the
+[EVPN RR soak](../soaks/soak-evpn-rr-24h-2026-10-12.md). The unicast RR
+figures do not transfer.
+
 Route churn is the fabric health signal on an EVPN RR. EVPN route events
 have their own category, which a default event stream does not include: watch
 `rbgp events watch --category evpn` (or the EVPN history,

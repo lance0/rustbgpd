@@ -173,8 +173,13 @@ sweeps, marks and expires Types 1–5 through graceful restart and LLGR against
 GoBGP 4.10.0; the [EVPN fabric RR recipe](../cookbook/evpn-fabric-rr.md) lists
 the FRR, GoBGP and SR Linux 25.10.1 reflection legs; and the
 [fanout baseline](../perf/evpn-fanout-2026-09-05.md) covers 8–480 receivers of
-a synthetic Type 2 workload. None of these is a scale, convergence-time or
-forwarding guarantee.
+a synthetic Type 2 workload; and the
+[24 h soak](../soaks/soak-evpn-rr-24h-2026-10-12.md) on the v0.77.0 tag holds
+150 clients at an exact 37,250 reflected Type 2/5 routes each through 1440
+churn epochs, 288 client flaps and 48 reloads. None of these is a scale,
+convergence-time or forwarding guarantee. Memory scales with receivers ×
+reflected routes, because each receiver keeps its own EVPN Adj-RIB-Out; the
+soak receipt records the per-route envelope at its shape.
 
 This promotion changes no configuration shape, default, RPC behavior or CLI
 output. Clients that use unfiltered or Type 6 peer-view calls, base

@@ -1,0 +1,277 @@
+{
+  "verdict": "pass",
+  "samples": 2881,
+  "epochs": 1440,
+  "flaps_executed": 288,
+  "reloads_complete": 48,
+  "peak_rss_mb": 2654.4,
+  "rss_late_slope_per_hour": 0.04083343939588322,
+  "intern_late_slope_per_hour": 0.0,
+  "slope_window_evaluated": true,
+  "gates": {
+    "min_samples": {
+      "value": 2881,
+      "limit": 2592.0,
+      "pass": true
+    },
+    "msgs_sent_monotone": {
+      "value": {
+        "breaks": 0
+      },
+      "pass": true
+    },
+    "readyz": {
+      "value": {
+        "bad_samples": 0,
+        "status_failures": 0,
+        "latency_failures": 0,
+        "longest_consecutive": 0,
+        "first": [],
+        "limit_ms": 250.0,
+        "limit_consecutive": 3,
+        "sample_scrape_failures": 0,
+        "observation_gaps": [],
+        "observation_gap_count": 0
+      },
+      "pass": true
+    },
+    "rss_late_slope_per_hour": {
+      "value": 0.04083343939588322,
+      "limit": 10.0,
+      "pass": true,
+      "note": null
+    },
+    "intern_late_slope_per_hour": {
+      "value": 0.0,
+      "limit": 100.0,
+      "pass": true,
+      "note": null
+    },
+    "no_abort": {
+      "value": [],
+      "pass": true
+    },
+    "rss_peak_mb": {
+      "value": 2654.4,
+      "limit": 4096.0,
+      "pass": true
+    },
+    "reload_accounting": {
+      "value": {
+        "issued": 48,
+        "complete": 48,
+        "planned": 48
+      },
+      "pass": true
+    },
+    "session_floor": {
+      "value": {
+        "violations": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "flap_accounting": {
+      "value": {
+        "executed": 288,
+        "planned": 288,
+        "defects": []
+      },
+      "pass": true
+    },
+    "flap_budget": {
+      "value": 288,
+      "limit": 288,
+      "pass": true
+    },
+    "max_prefix_flat": {
+      "value": 0,
+      "limit": 0,
+      "pass": true
+    },
+    "evpn_convergence": {
+      "value": {
+        "epochs": 1440,
+        "planned": 1440,
+        "expected_per_client": 37250,
+        "converge_ms_p50": 209,
+        "converge_ms_max": 213,
+        "defects": []
+      },
+      "pass": true
+    },
+    "evpn_terminal_receipt": {
+      "value": {
+        "receipt": [
+          {
+            "clients": 150,
+            "expected": 37250,
+            "epochs": 1440,
+            "converged_epochs": 1440,
+            "flaps": 288,
+            "reloads": 48,
+            "receivers": 150,
+            "min_live": 37250,
+            "max_live": 37250,
+            "invalid": 0,
+            "parse_errors": 0,
+            "self_reflected": 0
+          }
+        ],
+        "defects": []
+      },
+      "pass": true
+    },
+    "evpn_sessions_not_lost": {
+      "value": [],
+      "pass": true
+    },
+    "sent_counters_monotone": {
+      "value": {
+        "snapshots": 289,
+        "series": 750,
+        "decreases": [],
+        "vanished": [],
+        "error": null
+      },
+      "pass": true
+    },
+    "daemon_log": {
+      "value": {
+        "records": 67773,
+        "errors": 0,
+        "defects": 0,
+        "warnings_by_message": {
+          "inbound connection from unknown peer, dropping": 290,
+          "outbound channel full \u2014 EVPN update deferred": 3
+        },
+        "first_administrative_shutdown_unix": 1791934160.253085,
+        "examples": []
+      },
+      "pass": true
+    },
+    "evpn_deferral_recovery": {
+      "value": {
+        "count": 0,
+        "first": null,
+        "last": null,
+        "peers": 0,
+        "checked_by_epochs": [],
+        "teardown_excluded": 3,
+        "unrecovered": [],
+        "error": null
+      },
+      "pass": true
+    },
+    "management_evidence": {
+      "value": {
+        "errors": [],
+        "count_mismatches": []
+      },
+      "pass": true
+    },
+    "management_lifetime": {
+      "value": {
+        "load_start": 1911384.624394,
+        "measured_start": 1911384.668784559,
+        "measured_end": 1997785.582162519,
+        "stop_requested": 1997785.624944,
+        "load_end": 1997785.656618,
+        "last_operation_completed": 1997785.656327,
+        "engine_finish_release": 1997785.753304614,
+        "load_end_unix": 1791934160.043712,
+        "engine_first_shutdown_unix": 1791934160.253085
+      },
+      "pass": true
+    },
+    "management_operations": {
+      "value": {
+        "metrics": 86402,
+        "neighbor": 17281,
+        "evpn_received": 17281,
+        "evpn_advertised": 17281,
+        "doctor": 145
+      },
+      "pass": true
+    },
+    "management_completion": {
+      "value": {
+        "metrics": {
+          "scheduled": 86402,
+          "completed": 86402,
+          "ratio": 1.0
+        },
+        "neighbor": {
+          "scheduled": 17281,
+          "completed": 17281,
+          "ratio": 1.0
+        },
+        "evpn_received": {
+          "scheduled": 17281,
+          "completed": 17281,
+          "ratio": 1.0
+        },
+        "evpn_advertised": {
+          "scheduled": 17281,
+          "completed": 17281,
+          "ratio": 1.0
+        },
+        "doctor": {
+          "scheduled": 145,
+          "completed": 145,
+          "ratio": 1.0
+        }
+      },
+      "limit": 0.9,
+      "pass": true
+    },
+    "management_cadence": {
+      "value": {
+        "defects": [],
+        "operations": {
+          "metrics": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "neighbor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "evpn_received": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "evpn_advertised": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "doctor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          }
+        }
+      },
+      "limit": 2,
+      "pass": true
+    },
+    "management_failures": {
+      "value": {
+        "count": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "management_doctor": {
+      "value": {
+        "attempts": 145,
+        "failures": []
+      },
+      "pass": true
+    }
+  }
+}
