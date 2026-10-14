@@ -13,10 +13,13 @@ topology:
         - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
-        - ip -6 addr add 2001:db8:125:10::1/64 dev eth1
+        - ip -6 addr add 2001:db8:125:10::1/64 dev eth1 nodad
         - ip link set eth1 up
-        - ip -6 addr add 2001:db8:125:20::1/64 dev eth2
+        - ip -6 addr add 2001:db8:125:20::1/64 dev eth2 nodad
         - ip link set eth2 up
+        # Pin each active-open source even when another subnet address exists.
+        - ip -6 route replace 2001:db8:125:10::2/128 dev eth1 src 2001:db8:125:10::1
+        - ip -6 route replace 2001:db8:125:20::2/128 dev eth2 src 2001:db8:125:20::1
       env:
         RUST_LOG: info
         RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token

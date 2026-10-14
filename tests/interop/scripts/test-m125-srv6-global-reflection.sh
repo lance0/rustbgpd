@@ -161,6 +161,14 @@ main() {
     docker exec "$SINK" gobgpd --version >"$ARTIFACT_DIR/gobgp-version.txt"
     grep -qx 'gobgpd version 3\.37\.0' "$ARTIFACT_DIR/gobgp-version.txt"
     docker exec "$RUSTBGPD" rustbgpd --version >"$ARTIFACT_DIR/rustbgpd-version.txt"
+    docker exec "$RUSTBGPD" ip -j -6 route get 2001:db8:125:10::2 >"$ARTIFACT_DIR/frr-source-route.json"
+    jq -e 'if length == 1 and .[0].prefsrc == "2001:db8:125:10::1" and .[0].dev == "eth1"
+        then true else error("M125 FRR source/interface mismatch; see frr-source-route.json") end' \
+        "$ARTIFACT_DIR/frr-source-route.json" >/dev/null
+    docker exec "$RUSTBGPD" ip -j -6 route get 2001:db8:125:20::2 >"$ARTIFACT_DIR/sink-source-route.json"
+    jq -e 'if length == 1 and .[0].prefsrc == "2001:db8:125:20::1" and .[0].dev == "eth2"
+        then true else error("M125 observer source/interface mismatch; see sink-source-route.json") end' \
+        "$ARTIFACT_DIR/sink-source-route.json" >/dev/null
     start_capture
     docker exec -d "$SINK" sh -c 'gobgpd -f /config/gobgp.toml >/tmp/m125-gobgp.log 2>&1'
     docker exec "$FRR" /usr/lib/frr/frrinit.sh start
