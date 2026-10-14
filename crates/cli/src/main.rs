@@ -2085,11 +2085,13 @@ enum FamilyRibViewAction {
     /// Retained accepted post-policy input from one source neighbor.
     Received {
         /// Source neighbor whose accepted routes to inspect.
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
         peer: String,
     },
     /// Committed local export toward one destination; rows retain source peers.
     Advertised {
         /// Destination neighbor whose committed exports to inspect.
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
         peer: String,
     },
 }
@@ -11166,6 +11168,34 @@ printf '%s\n' "${COMPREPLY[@]}"
             vec!["rbgp", "evpn", "best", "--vni", "16777216"],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn family_page_peer_arguments_validate_ip_and_scope() {
+        for family in ["vpn", "labeled", "rtc"] {
+            for view in ["received", "advertised"] {
+                for peer in ["192.0.2.1", "2001:db8::1", "fe80::1%eth0"] {
+                    assert!(
+                        Cli::try_parse_from(["rbgp", "rib", family, view, peer]).is_ok(),
+                        "{family} {view} {peer}",
+                    );
+                }
+                for peer in [
+                    "invalid",
+                    "192.0.2.1%eth0",
+                    "2001:db8::1%eth0",
+                    "fe80::1%",
+                    "fe80::1%eth0%other",
+                ] {
+                    let Err(error) = Cli::try_parse_from(["rbgp", "rib", family, view, peer])
+                    else {
+                        panic!("malformed peer must fail argument parsing");
+                    };
+                    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+                    assert!(error.to_string().contains("expected a peer IP address"));
+                }
+            }
         }
     }
 }

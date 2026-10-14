@@ -18,6 +18,25 @@ fn run(addr: &str, args: &[&str]) -> std::process::Output {
         .expect("run rbgp")
 }
 
+#[test]
+fn family_page_peer_errors_precede_endpoint_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let addr = format!(
+        "unix://{}",
+        directory.path().join("no-server.sock").display()
+    );
+    for family in ["vpn", "labeled", "rtc"] {
+        for view in ["received", "advertised"] {
+            let output = run(&addr, &["rib", family, view, "invalid", "--json"]);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(2), "{family} {view}: {stderr}");
+            assert!(stderr.contains("expected a peer IP address"), "{stderr}");
+            assert!(!stderr.contains("cannot reach rustbgpd"), "{stderr}");
+            assert!(output.stdout.is_empty());
+        }
+    }
+}
+
 fn assert_page(value: &serde_json::Value, view: &str, neighbor: &str) {
     assert_eq!(value["view"], view);
     assert_eq!(value["neighbor"], neighbor);
