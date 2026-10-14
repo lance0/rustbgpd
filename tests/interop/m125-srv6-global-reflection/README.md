@@ -33,6 +33,13 @@ survives in every view, then withdraws IPv4. Both sessions must remain
 Established. Neither inner prefix may appear in any kernel route table on
 the reflector.
 
+The topology pins a preferred source for each DUT peer destination, so an
+additional address on either subnet cannot change the active-open source
+expected by the passive peer. The two static DUT addresses skip duplicate
+address detection on these isolated fixture links. Before starting any
+daemon, the driver checks the resolved source and interface and retains
+`frr-source-route.json` and `sink-source-route.json` in the receipt.
+
 The independent packet oracle reassembles both TCP sessions and checks:
 
 - One initial OPEN in all four directions, both unicast families, and
