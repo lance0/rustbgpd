@@ -642,6 +642,10 @@ impl RibManager {
     /// gather candidates from all peer Adj-RIB-Ins, run best-path, and if
     /// the selection changed, stage announces/withdraws for each outbound
     /// peer that negotiated the L2VPN/EVPN family.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one best-path pass preserves displaced group values until every owned and private consumer has admitted or captured OLD"
+    )]
     pub(in crate::manager) fn recompute_and_distribute_evpn(
         &mut self,
         affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
@@ -761,9 +765,26 @@ impl RibManager {
             .inspect(|_| checkpoint())
             .copied()
             .collect();
+        let mut owned_groups: Vec<_> = peers
+            .iter()
+            .filter_map(|&peer| self.evpn_grouped_member_of(peer))
+            .collect();
+        owned_groups.sort_unstable();
+        owned_groups.dedup();
+        let owned_pass = !owned_groups.is_empty();
+        for gid in owned_groups {
+            self.distribute_owned_evpn_group(gid, &changed_keys, &mut checkpoint);
+        }
         for peer in peers {
             checkpoint();
-            self.distribute_evpn_keys_to_peer(peer, &changed_keys, &mut checkpoint);
+            if self.evpn_grouped_member_of(peer).is_none() {
+                self.distribute_evpn_keys_to_peer(peer, &changed_keys, &mut checkpoint);
+            }
+        }
+        if owned_pass && !self.dirty_peers.is_empty() {
+            // All group OLD consumers have finished before the existing
+            // mixed-family recovery pass can settle a missed admission.
+            self.distribute_changes(&HashSet::new(), &HashSet::new());
         }
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
     }
@@ -780,6 +801,15 @@ impl RibManager {
     ) {
         if self.outbound_channel_gone(peer) {
             self.drop_gone_dirty_peer(peer);
+            return;
+        }
+        if let Some(gid) = self.evpn_grouped_member_of(peer) {
+            // A targeted caller must not advance a shared table while its
+            // other members still need the displaced actual OLD values.
+            self.distribute_owned_evpn_group(gid, keys, checkpoint);
+            if !self.dirty_peers.is_empty() {
+                self.distribute_changes(&HashSet::new(), &HashSet::new());
+            }
             return;
         }
         let sendable = self.peer_sendable_families.get(&peer).cloned();
@@ -856,16 +886,109 @@ impl RibManager {
 }
 
 impl RibManager {
+    /// One shared stage retains displaced OLD until every member's existing
+    /// transaction has either admitted its sparse payload or captured retry.
+    fn distribute_owned_evpn_group(
+        &mut self,
+        gid: usize,
+        keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let mut stage = self.stage_group_evpn_keys(gid, keys);
+        let members: Vec<_> = self
+            .group_ribs
+            .get(&gid)
+            .into_iter()
+            .flat_map(|group| group.members.iter().copied())
+            .collect();
+        for peer in members {
+            checkpoint();
+            if self.outbound_channel_gone(peer) {
+                self.drop_gone_dirty_peer(peer);
+                continue;
+            }
+            if self.evpn_recovery_reset_pending(peer) {
+                self.retry_evpn_recovery_reset(peer);
+                continue;
+            }
+            if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
+                self.capture_shared_evpn_before_deltas(peer, &stage.deltas);
+                self.mark_outbound_dirty_inner(peer, false);
+                continue;
+            }
+            self.apply_group_policy_counters(peer, &stage.evals);
+            let filter = self.member_rt_filter(peer);
+            let mut announce = Vec::new();
+            let mut withdraw = Vec::new();
+            crate::manager::update_groups::emit_evpn_group_deltas_for_member_with_checkpoint(
+                &self.group_ribs[&gid],
+                &stage.deltas,
+                peer,
+                self.cluster_id,
+                filter.as_ref(),
+                self.peer_unexportable.get(&peer),
+                &mut announce,
+                &mut withdraw,
+                checkpoint,
+            );
+            let retained = self
+                .evpn_recovery_handle(peer)
+                .is_some_and(|handle| !self.evpn_recovery.is_dormant(handle));
+            let complete = if retained {
+                // Full borrowed OLD proves coverage for successful clean
+                // updates too, without replaying unchanged keys during debt.
+                let Some(feed) = self.prepare_complete_evpn_feed_before_deltas(
+                    peer,
+                    gid,
+                    Some(gid),
+                    true,
+                    &stage.deltas,
+                ) else {
+                    if let Some(handle) = self.evpn_recovery_handle(peer) {
+                        self.evpn_recovery.fail_admission(handle);
+                    }
+                    self.mark_outbound_dirty_inner(peer, false);
+                    self.retry_evpn_recovery_reset(peer);
+                    continue;
+                };
+                announce = feed.announce;
+                withdraw = feed.withdraw;
+                Some(feed.seal)
+            } else {
+                if announce.is_empty() && withdraw.is_empty() {
+                    continue;
+                }
+                None
+            };
+            if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: announce,
+                    evpn_withdraw: withdraw,
+                    evpn_complete_feed: complete,
+                    ..OutboundCommitBatch::default()
+                },
+                HashSet::new(),
+                None,
+                None,
+                None,
+                Some(&stage),
+            ) {
+                // Queue capacity can disappear after the opportunistic
+                // pre-stage probe. The operation still owns actual OLD here.
+                self.capture_shared_evpn_before_deltas(peer, &stage.deltas);
+                self.mark_outbound_dirty_inner(peer, false);
+            }
+        }
+        let readiness = self.replacement_readiness.clone();
+        stage.retire_with(&mut |force| {
+            super::super::replacement_readiness_checkpoint(&readiness, force);
+        });
+    }
+
     /// Storage preparation only. G2b must capture a late failed admission from
     /// these displaced entries; this pre-stage full-channel probe is merely
     /// opportunistic (another family can consume credit before EVPN fanout).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "EVPN classifier activation and admitted fanout remain a later slice"
-        )
-    )]
     #[expect(
         clippy::too_many_lines,
         reason = "shared staging retains displaced input and commits its matching route metadata together"
@@ -892,7 +1015,10 @@ impl RibManager {
         // non-RTC admission, ownership transfer, views and counts.
         let members: Vec<_> = group.members.iter().copied().collect();
         for member in members {
-            if self.dirty_peers.contains(&member) || self.outbound_channel_full(member) {
+            if self.dirty_peers.contains(&member)
+                || self.force_outbound_peers.contains(&member)
+                || self.outbound_channel_full(member)
+            {
                 self.capture_shared_evpn_admitted(member);
             }
         }
@@ -983,13 +1109,22 @@ impl RibManager {
                 });
             }
         }
+        let table_stamp = if out.deltas.is_empty() {
+            None
+        } else {
+            Some(self.next_evpn_table_stamp().unwrap_or(0))
+        };
         let group = self
             .group_ribs
             .get_mut(&gid)
             .expect("staged group remains installed");
+        out.deltas.sort_unstable_by_key(|delta| delta.key);
         for delta in &out.deltas {
             checkpoint();
             group.apply_evpn_delta(delta);
+        }
+        if let Some(stamp) = table_stamp {
+            group.evpn_table_stamp = stamp;
         }
         group.replace_evpn_denials_with_checkpoint(keys, denials, &mut checkpoint);
         out

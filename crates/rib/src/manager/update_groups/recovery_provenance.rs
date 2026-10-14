@@ -1241,6 +1241,16 @@ impl EvpnRecoveryProvenance {
             .map(|proof| proof.map(|proof| proof.iter_with_checkpoint(|_| {}).collect()))
     }
 
+    /// Inspect retained storage without granting an exhausted proof authority.
+    #[cfg(test)]
+    pub(in crate::manager) fn retained_keys_for_test(
+        &self,
+        handle: ProvenanceHandle,
+    ) -> Option<Vec<EvpnRouteKey>> {
+        self.index(handle)
+            .map(|index| self.view(index).iter_with_checkpoint(|_| {}).collect())
+    }
+
     /// Keep a charged immutable copy under the same peer/session ownership.
     #[cfg_attr(
         not(test),

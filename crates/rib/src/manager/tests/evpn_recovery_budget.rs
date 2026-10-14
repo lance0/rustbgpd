@@ -107,6 +107,10 @@ fn owned_capture_is_retained_across_stale_membership_changes_and_generic_cleanup
     let old = route(1).key();
     assert!(manager.capture_evpn_recovery_before_projection(peer, [old].into_iter()));
     let handle = manager.evpn_recovery_handle(peer).unwrap();
+    // Membership setters may now run the live complete-feed recovery. Keep its
+    // delivery refused while checking that generic cleanup cannot retire OLD.
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
     manager.mark_outbound_dirty(peer);
     manager.set_rt_membership(
         peer,
@@ -866,6 +870,7 @@ impl FinalTransactionFixture {
                 None,
                 Some(&scope),
                 None,
+                None,
             )
     }
 }
@@ -895,6 +900,8 @@ fn assert_final_transaction_refusal(fault: FinalAdmissionFault, deferred_capture
         manager.evpn_recovery.proof_keys(handle).unwrap(),
         Some(vec![route(1).key()])
     );
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
     let overlay = manager.peer_unexportable[&peer].clone();
     let rejections = exact_rejection_count(manager);
     let common = (
@@ -939,15 +946,17 @@ fn assert_final_transaction_refusal(fault: FinalAdmissionFault, deferred_capture
         fixture.output.try_recv().is_err(),
         "no ANN, WD or EoR may escape refusal"
     );
-    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 1);
-    let retained = manager.adj_ribs_out[&peer]
-        .get_evpn(&route(1).key())
-        .unwrap();
-    assert_eq!(retained.next_hop, route(1).next_hop);
-    assert!(
-        manager.adj_ribs_out[&peer]
-            .get_evpn(&route(2).key())
-            .is_none()
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(handle).unwrap_err().cause,
+        EvpnRecoveryExhaustionCause::AdmissionInvariant,
+        "retained storage must not grant an exhausted proof authority"
+    );
+    assert_eq!(
+        manager.evpn_recovery.retained_keys_for_test(handle),
+        Some(vec![route(1).key()]),
+        "the real owned OLD admission must survive final refusal"
     );
     assert_eq!(
         manager.peer_unexportable[&peer], overlay,
@@ -1051,16 +1060,8 @@ fn final_evpn_admission_publishes_one_mixed_family_transaction_after_validation(
             HashSet::from([ExactExportKey::Evpn(route(1).key())])
         );
         assert!((exact_rejection_count(manager) - rejections - 1.0).abs() < f64::EPSILON);
-        assert!(
-            manager.adj_ribs_out[&peer]
-                .get_evpn(&route(1).key())
-                .is_none()
-        );
-        assert!(
-            manager.adj_ribs_out[&peer]
-                .get_evpn(&route(2).key())
-                .is_some()
-        );
+        assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+        assert_eq!(manager.evpn_admitted_count(peer), 1);
         let handle = manager.evpn_recovery_handle(peer).unwrap();
         assert_eq!(
             manager.evpn_recovery.proof_keys(handle).unwrap(),

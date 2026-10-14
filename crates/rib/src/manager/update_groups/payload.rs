@@ -1641,15 +1641,16 @@ pub(in crate::manager) struct EvpnGroupStageOutput {
     pub(in crate::manager) evals: GroupEvalAccumulator,
 }
 
+impl EvpnGroupStageOutput {
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        crate::manager::retire_vec(&mut self.deltas, &mut || checkpoint(false));
+        self.evals.retire_with(checkpoint);
+    }
+}
+
 /// Preparation only: activation will feed these ordinary per-peer payloads
 /// through the existing final export probe and queue-admission transaction.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "EVPN production ownership and member delivery activate in a later slice"
-    )
-)]
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "member emission uses the same old/new eligibility inputs as borrowed admitted projection"
@@ -1664,7 +1665,36 @@ pub(in crate::manager) fn emit_evpn_group_deltas_for_member(
     announce: &mut Vec<crate::route::EvpnRibRoute>,
     withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
 ) {
+    emit_evpn_group_deltas_for_member_with_checkpoint(
+        group,
+        deltas,
+        member,
+        cluster_id,
+        membership,
+        rejected,
+        announce,
+        withdraw,
+        &mut || {},
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "member emission borrows the same actual old/new eligibility and payload queues with cooperative checkpoints"
+)]
+pub(in crate::manager) fn emit_evpn_group_deltas_for_member_with_checkpoint(
+    group: &super::GroupRibOut,
+    deltas: &[EvpnGroupDelta],
+    member: IpAddr,
+    cluster_id: Option<std::net::Ipv4Addr>,
+    membership: Option<&super::RtcMembership>,
+    rejected: Option<&HashSet<crate::update::ExactExportKey>>,
+    announce: &mut Vec<crate::route::EvpnRibRoute>,
+    withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
+    checkpoint: &mut impl FnMut(),
+) {
     for delta in deltas {
+        checkpoint();
         let prior = delta.old.as_ref().filter(|entry| {
             entry.input.eligible(
                 &entry.route,

@@ -947,6 +947,40 @@ impl RibManager {
             .cloned();
         // ADR-0137: a replayed family goes through the same gate.
         let conditional = self.conditional_gate(peer, false);
+        let owned_evpn = (family == (Afi::L2Vpn, Safi::Evpn))
+            .then(|| self.evpn_grouped_member_of(peer))
+            .flatten();
+        let owned_evpn_feed = if let Some(gid) = owned_evpn {
+            if !self.capture_shared_evpn_admitted(peer) {
+                return FamilyReplayOutcome::Failed;
+            }
+            let Some(feed) = self.prepare_complete_evpn_feed(peer, gid, None, false) else {
+                if let Some(handle) = self.evpn_recovery_handle(peer) {
+                    self.evpn_recovery.fail_admission(handle);
+                }
+                self.mark_outbound_dirty_inner(peer, false);
+                self.retry_evpn_recovery_reset(peer);
+                return FamilyReplayOutcome::Failed;
+            };
+            Some(feed)
+        } else {
+            None
+        };
+        let private_evpn_recovery = (family == (Afi::L2Vpn, Safi::Evpn)
+            && self.has_private_evpn_handoff(peer))
+        .then(|| self.evpn_recovery_handle(peer))
+        .flatten();
+        let private_evpn_feed =
+            private_evpn_recovery.and_then(|_| self.private_evpn_feed_seal(peer));
+        if private_evpn_recovery.is_some() && private_evpn_feed.is_none() {
+            if let Some(handle) = private_evpn_recovery {
+                self.evpn_recovery.fail_admission(handle);
+            }
+            self.mark_outbound_dirty_inner(peer, false);
+            self.retry_evpn_recovery_reset(peer);
+            return FamilyReplayOutcome::Failed;
+        }
+        let mut evpn_complete_feed = None;
         let mut unicast = super::distribution::UnicastDistributionResult::default();
         let mut fs_announce = Vec::new();
         let mut fs_withdraw = Vec::new();
@@ -1120,7 +1154,18 @@ impl RibManager {
                 })
                 .map(crate::route::EvpnRibRoute::key)
                 .collect();
-            if !evpn_keys.is_empty() {
+            if let Some(handle) = private_evpn_recovery
+                && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
+            {
+                evpn_keys.extend(proof.iter_with_checkpoint(|force| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+                }));
+            }
+            if let Some(feed) = owned_evpn_feed {
+                evpn_announce = feed.announce;
+                evpn_withdraw = feed.withdraw;
+                evpn_complete_feed = Some(feed.seal);
+            } else if !evpn_keys.is_empty() {
                 Self::stage_evpn_routes_with_checkpoint(
                     loc_rib,
                     &refresh_view,
@@ -1149,6 +1194,25 @@ impl RibManager {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     },
                 );
+                if let Some(handle) = private_evpn_recovery
+                    && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
+                {
+                    Self::append_private_evpn_proof_withdrawals(
+                        proof,
+                        &refresh_view,
+                        &mut evpn_announce,
+                        &mut evpn_withdraw,
+                        &mut |force| {
+                            super::replacement_readiness_checkpoint(
+                                &self.replacement_readiness,
+                                force,
+                            );
+                        },
+                    );
+                }
+            }
+            if evpn_complete_feed.is_none() {
+                evpn_complete_feed = private_evpn_feed;
             }
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
             super::retire_hash_set(&mut evpn_keys, &mut || {
@@ -1819,7 +1883,7 @@ impl RibManager {
                 .pending_eor
                 .get(&peer)
                 .is_some_and(|families| families.contains(&family));
-        let (end_of_rib, refresh_markers) = match replay_kind {
+        let (mut end_of_rib, mut refresh_markers) = match replay_kind {
             FamilyReplayKind::PeerRefresh { .. } => (
                 if initial_eor_owed || suppress_eor {
                     vec![]
@@ -1839,6 +1903,15 @@ impl RibManager {
                 (vec![], vec![])
             }
         };
+        if let Some(seal) = evpn_complete_feed.as_mut() {
+            // Full data admission establishes coverage before the ordered
+            // terminal markers can be retried on this exact sender.
+            seal.required_markers |= Self::evpn_admitted_marker_bits(&end_of_rib, &refresh_markers);
+            end_of_rib.retain(|family| *family != (Afi::L2Vpn, Safi::Evpn));
+            refresh_markers.retain(|&(afi, safi, subtype)| {
+                (afi, safi) != (Afi::L2Vpn, Safi::Evpn) || subtype != RouteRefreshSubtype::EoRR
+            });
+        }
         self.replacement_checkpoint(true);
         let announce = cohort.as_deref().map_or_else(
             || unicast.announce.into(),
@@ -1882,6 +1955,7 @@ impl RibManager {
                 flowspec_withdraw: fs_withdraw,
                 evpn_announce,
                 evpn_withdraw,
+                evpn_complete_feed,
                 bgpls_announce,
                 bgpls_withdraw,
                 vpn_announce,
@@ -1895,6 +1969,7 @@ impl RibManager {
             group_prior,
             shared_unicast_precommit,
             member_of.is_none().then_some(&all_prefixes),
+            None,
             None,
         ) {
             if let Some(blocking) = prior_blocking {
@@ -1973,18 +2048,24 @@ impl RibManager {
         let Some(families) = self.pending_eor.remove(&peer) else {
             return;
         };
-        let (blocked, ready): (HashSet<_>, HashSet<_>) = families
-            .into_iter()
-            .partition(|family| self.eor_held(peer, *family));
+        let (blocked, ready): (HashSet<_>, HashSet<_>) = families.into_iter().partition(|family| {
+            self.eor_held(peer, *family)
+                || (*family == (Afi::L2Vpn, Safi::Evpn)
+                    && (self.evpn_grouped_member_of(peer).is_some()
+                        || self.has_private_evpn_handoff(peer))
+                    && !self.evpn_feed_is_current(peer))
+        });
         if !blocked.is_empty() {
             self.pending_eor.entry(peer).or_default().extend(blocked);
         }
         if ready.is_empty() {
             return;
         }
-        let Some(tx) = self.outbound_peers.get(&peer) else {
+        let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return;
         };
+        let evpn_marker = ready.contains(&(Afi::L2Vpn, Safi::Evpn));
+        let marker_only = evpn_marker && self.evpn_feed_is_current(peer);
         let eor = OutboundRouteUpdate {
             end_of_rib: ready.iter().copied().collect(),
             ..OutboundRouteUpdate::default()
@@ -1992,7 +2073,12 @@ impl RibManager {
         if tx.try_send(eor).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
             self.pending_eor.entry(peer).or_default().extend(ready);
-            self.mark_outbound_dirty(peer);
+            if !marker_only {
+                self.mark_outbound_dirty(peer);
+            }
+        } else if evpn_marker {
+            let bits = Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
+            self.evpn_feed_markers_admitted(peer, &tx, bits);
         }
     }
 

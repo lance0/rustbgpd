@@ -66,6 +66,7 @@ pub(in crate::manager) use payload::{
     EvpnGroupStageOutput, GroupDelta, GroupEvalAccumulator, GroupStageOutput, LaneDelta,
     PerClientBestPrefixStage, PolicyTransitionGroupStart, RsTagTransition, RunnerUp,
     SharedUnicastPayload, VpnGroupDelta, VpnGroupStageOutput, capture_source_attrs,
+    emit_evpn_group_deltas_for_member_with_checkpoint,
     emit_group_deltas_for_member_with_checkpoint, emit_lane_deltas_for_member_with_checkpoint,
     emit_rs_tag_transitions_with_checkpoint, emit_vpn_group_deltas_for_member_with_checkpoint,
     rt_passes, source_control_input,
@@ -539,7 +540,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// keys use charged sparse additions. Storage lives only in the ledger.
     recovery_snapshot: Option<admitted_recovery::SnapshotHandle>,
     /// Received RTC/reflection input beside the single post-policy EVPN body.
-    evpn_inputs: FastMap<rustbgpd_wire::EvpnRouteKey, EvpnGroupInput>,
+    pub(in crate::manager) evpn_inputs: FastMap<rustbgpd_wire::EvpnRouteKey, EvpnGroupInput>,
     /// Weak older key universe; admission remains in each owned member record.
     pub(in crate::manager) evpn_recovery_universe: Option<recovery_provenance::UniverseHandle>,
     pub(in crate::manager) evpn_policy_denied:
@@ -659,6 +660,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// G1 prepares recovery without activating EVPN grouping. G2 must enable
     /// this only with its authoritative group table and received-RT metadata.
     pub(in crate::manager) owns_evpn: bool,
+    /// Manager-unique revision of the paired EVPN route and received-input table.
+    pub(in crate::manager) evpn_table_stamp: u64,
     pub(in crate::manager) llgr: Vec<(Afi, Safi)>,
     /// ADR-0126 staging mode: `true` stages the first export-permitted
     /// candidate (winner walk + runner-up lane) instead of
@@ -794,6 +797,7 @@ impl GroupRibOut {
             local_role,
             sendable,
             owns_evpn: false,
+            evpn_table_stamp: 0,
             llgr,
             per_client_best,
             inventory_log: None,
@@ -2211,9 +2215,64 @@ impl RibManager {
                 targets.extend(group.members.iter().inspect(|_| checkpoint()).copied());
             }
         }
+        let mut evpn_feeds = HashMap::new();
+        for &gid in &groups {
+            let Some(group) = self
+                .group_ribs
+                .get(&gid)
+                .filter(|group| group.owns_evpn_routes())
+            else {
+                continue;
+            };
+            let members: Vec<_> = group.members.iter().copied().collect();
+            let mut keys: HashSet<_> = self
+                .loc_rib
+                .iter_evpn()
+                .inspect(|_| checkpoint())
+                .map(crate::route::EvpnRibRoute::key)
+                .collect();
+            keys.extend(
+                group
+                    .table
+                    .iter_evpn()
+                    .inspect(|_| checkpoint())
+                    .map(crate::route::EvpnRibRoute::key),
+            );
+            if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
+                crate::manager::retire_hash_set(&mut keys, &mut || checkpoint());
+                continue;
+            }
+            for &peer in &members {
+                self.capture_shared_evpn_admitted(peer);
+            }
+            let mut staged = self.stage_group_evpn_keys(gid, &keys);
+            for peer in members {
+                let clean = !self.dirty_peers.contains(&peer)
+                    && !self.group_ribs[&gid].dirty_members.contains(&peer);
+                if let Some(feed) = self.prepare_complete_evpn_feed_before_deltas(
+                    peer,
+                    gid,
+                    Some(gid),
+                    clean,
+                    &staged.deltas,
+                ) {
+                    evpn_feeds.insert(peer, feed);
+                }
+            }
+            // The sparse operation-local payloads now own every changed
+            // value needed by the existing trailing mixed transaction.
+            staged.retire_with(&mut |force| {
+                super::replacement_readiness_checkpoint(&readiness, force);
+            });
+            crate::manager::retire_hash_set(&mut keys, &mut || checkpoint());
+        }
         for peer in targets {
             checkpoint();
-            self.mark_outbound_dirty(peer);
+            let mut feed = evpn_feeds.remove(&peer);
+            self.mark_outbound_dirty_with_evpn_feed(peer, &mut feed);
+            if let Some(feed) = feed {
+                evpn_feeds.insert(peer, feed);
+            }
         }
         if !groups.is_empty() {
             let mut prefixes: HashSet<Prefix> = self
@@ -2292,7 +2351,7 @@ impl RibManager {
             memo.retire_with(&mut || checkpoint());
             self.refresh_lane_gauge();
         }
-        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        self.distribute_changes_with_evpn_feeds(evpn_feeds, false);
         Ok(())
     }
 
@@ -2319,6 +2378,7 @@ impl RibManager {
             self.drop_gone_dirty_peer(peer);
             return false;
         }
+        self.invalidate_evpn_feed_completion(peer);
         if capture && self.grouped_member_of(peer).is_some() {
             self.capture_group_admitted_keys(peer);
         }
@@ -2663,12 +2723,15 @@ impl RibManager {
             "slow-peer isolation: recomputing update-group membership"
         );
         let before = self.grouped_member_of(peer);
-        self.recompute_update_group(peer);
+        let mut evpn_feed = self.recompute_update_group(peer);
         let key_stable = before.is_some() && before == self.grouped_member_of(peer);
         if !key_stable {
-            self.mark_outbound_dirty(peer);
+            self.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
         }
-        self.distribute_changes_after_advertised_page_advance(&HashSet::new(), &HashSet::new());
+        self.distribute_changes_with_evpn_feeds(
+            evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
+            true,
+        );
     }
 
     /// Build the classifier input for one peer.
@@ -3131,6 +3194,50 @@ impl GroupRibOut {
             route: self.table.get_evpn(key)?.clone(),
             input: self.evpn_inputs.get(key)?.clone(),
         })
+    }
+
+    /// The operation's sorted deltas retain only displaced values. They
+    /// must stay alive until every OLD member has consumed its projection.
+    pub(in crate::manager) fn evpn_value_before_deltas<'a>(
+        &'a self,
+        key: &rustbgpd_wire::EvpnRouteKey,
+        deltas: &'a [EvpnGroupDelta],
+    ) -> Option<(&'a EvpnRibRoute, &'a EvpnGroupInput)> {
+        if let Ok(index) = deltas.binary_search_by_key(key, |delta| delta.key) {
+            let old = deltas[index].old.as_ref()?;
+            return Some((&old.route, &old.input));
+        }
+        Some((self.table.get_evpn(key)?, self.evpn_inputs.get(key)?))
+    }
+
+    pub(in crate::manager) fn evpn_member_projection_before_deltas<'a>(
+        &'a self,
+        deltas: &'a [EvpnGroupDelta],
+        member: IpAddr,
+        cluster_id: Option<std::net::Ipv4Addr>,
+        membership: Option<&'a RtcMembership>,
+        rejected: Option<&'a HashSet<ExactExportKey>>,
+        mut checkpoint: impl FnMut() + 'a,
+    ) -> impl Iterator<Item = &'a EvpnRibRoute> + 'a {
+        self.table
+            .iter_evpn()
+            .map(move |route| self.evpn_value_before_deltas(&route.key(), deltas))
+            .chain(deltas.iter().map(|delta| {
+                // Removed OLD rows no longer occur in the current table.
+                delta
+                    .new
+                    .is_none()
+                    .then_some(delta.old.as_ref())
+                    .flatten()
+                    .map(|entry| (&entry.route, &entry.input))
+            }))
+            .filter_map(move |entry| {
+                checkpoint();
+                let (route, input) = entry?;
+                input
+                    .eligible(route, member, self, cluster_id, membership, rejected)
+                    .then_some(route)
+            })
     }
 
     /// Borrow the admitted clean-member projection; RTC reads received input.
