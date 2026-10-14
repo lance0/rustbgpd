@@ -1,10 +1,10 @@
 name: CI
 
-# Manual dispatch runs the head of the chosen branch or tag, for example a
-# release commit whose push run a later merge canceled. A dispatch on `main`
-# shares the push runs' concurrency group below.
+# Ordinary manual dispatch shares the chosen ref's push concurrency group.
+# Opted-in memory qualification has its own immutable run group so main's
+# verification and new pushes cannot cancel the long hosted campaign.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && format('recovery-memory-{0}', github.run_id) || github.ref }}
   cancel-in-progress: true
 
 # Placed above `on:` so the trigger-contract self-check below (which
@@ -23,6 +23,12 @@ on:
     paths-ignore:
       - "**/*.md"
   workflow_dispatch:
+    inputs:
+      recovery_memory_receipt:
+        description: Run the hosted recovery memory qualification
+        type: boolean
+        default: false
+        required: false
 
 jobs:
   core:
@@ -51,7 +57,13 @@ jobs:
             pull_request:
               paths-ignore:
                 - "**/*.md"
-            workflow_dispatch:'
+            workflow_dispatch:
+              inputs:
+                recovery_memory_receipt:
+                  description: Run the hosted recovery memory qualification
+                  type: boolean
+                  default: false
+                  required: false'
           if [[ "$actual" != "$expected" ]]; then
             diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
             echo "CI triggers must keep main-only pushes, all PRs, Markdown ignores, and manual dispatch" >&2
@@ -720,8 +732,8 @@ jobs:
 
   recovery_memory_receipt:
     # Bounded, operator-dispatched qualification; never part of push/PR,
-    # main/release re-tests, or the reserved self-hosted soak runner.
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fix/update-group-recovery-memory' }}
+    # ordinary main/release re-tests, or the reserved self-hosted soak runner.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -744,6 +756,10 @@ jobs:
             cell: widen
           - profile: mixed-widen
             cell: widen
+          - profile: full-uc
+            cell: unsynchronized-dirty
+          - profile: full-vpn
+            cell: unsynchronized-dirty
     env:
       CARGO_BUILD_JOBS: "4"
       # Each complete qualified cell runs on its own fresh VM.

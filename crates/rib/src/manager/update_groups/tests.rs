@@ -6253,3 +6253,190 @@ fn clean_transition_inventory_degrades_on_table_drift() {
         "an undrifted pair completes the chunk"
     );
 }
+
+fn snapshot_capture_channel(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    gid: Option<usize>,
+) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
+    let (outbound, receiver) = tokio::sync::mpsc::channel(1);
+    manager.outbound_peers.insert(peer, outbound);
+    if let Some(gid) = gid {
+        manager
+            .update_groups
+            .members
+            .insert(peer, GroupMembership::Grouped(gid));
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .members
+            .insert(peer);
+    }
+    receiver
+}
+
+#[test]
+fn snapshot_reuse_unsynchronized_old_views_share_across_uc_vpn_add_and_remove() {
+    const GID: usize = 2207;
+    let mut manager = staging_manager();
+    let healthy_charge = manager.pending_group_admitted.bytes();
+    let mut group = empty_group();
+    group.sendable.push((Afi::Ipv4, Safi::MplsVpn));
+    for n in 1..=16 {
+        group.apply_delta(&announce_delta(prefix(n), OTHER1, None));
+    }
+    group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, None));
+    manager.group_ribs.insert(GID, group);
+    let peers = [MEMBER, OTHER2, IpAddr::V4(Ipv4Addr::new(10, 9, 0, 4))];
+    let _receivers: Vec<_> = peers
+        .iter()
+        .map(|peer| snapshot_capture_channel(&mut manager, *peer, Some(GID)))
+        .collect();
+    assert!(manager.capture_group_admitted_keys(peers[0]));
+    let handle = manager.group_ribs[&GID].recovery_snapshot.unwrap();
+    let first = manager
+        .pending_group_admitted
+        .owned_proof(&peers[0])
+        .unwrap();
+    manager
+        .group_ribs
+        .get_mut(&GID)
+        .unwrap()
+        .apply_delta(&withdraw_delta(prefix(1), Some(OTHER1)));
+    manager
+        .group_ribs
+        .get_mut(&GID)
+        .unwrap()
+        .apply_delta(&announce_delta(prefix(100), OTHER1, None));
+    assert!(manager.capture_group_admitted_keys(peers[1]));
+    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, Some(handle));
+    let second = manager.pending_group_admitted.get(&peers[1]).unwrap();
+    assert!(!second.contains(&ExactExportKey::Unicast(prefix(1), 0)));
+    assert!(second.contains(&ExactExportKey::Unicast(prefix(100), 0)));
+    assert_eq!(second.len(), 17);
+    assert_eq!(
+        manager
+            .pending_group_admitted
+            .owned_proof(&peers[0])
+            .unwrap(),
+        first
+    );
+    let second = manager
+        .pending_group_admitted
+        .owned_proof(&peers[1])
+        .unwrap();
+    manager
+        .group_ribs
+        .get_mut(&GID)
+        .unwrap()
+        .apply_vpn_delta(&vpn_withdraw_delta(1, Some(OTHER1)));
+    manager
+        .group_ribs
+        .get_mut(&GID)
+        .unwrap()
+        .apply_vpn_delta(&vpn_announce_delta(2, OTHER1, None));
+    assert!(manager.capture_group_admitted_keys(peers[2]));
+    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, Some(handle));
+    let third = manager.pending_group_admitted.get(&peers[2]).unwrap();
+    assert!(!third.contains(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())));
+    assert!(third.contains(&ExactExportKey::Vpn(vpn_route(2, OTHER1).key())));
+    assert!(third.contains(&ExactExportKey::Unicast(prefix(100), 0)));
+    assert_eq!(third.len(), 17);
+    assert_eq!(
+        manager
+            .pending_group_admitted
+            .owned_proof(&peers[1])
+            .unwrap(),
+        second
+    );
+    for peer in peers {
+        manager.release_group_admitted_keys(peer);
+    }
+    assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
+    assert_eq!(
+        manager.group_ribs[&GID].recovery_snapshot,
+        Some(handle),
+        "hint owns no released storage"
+    );
+    manager
+        .group_ribs
+        .get_mut(&GID)
+        .unwrap()
+        .apply_delta(&announce_delta(prefix(101), OTHER1, None));
+    assert!(manager.capture_group_admitted_keys(peers[0]));
+    assert_ne!(manager.group_ribs[&GID].recovery_snapshot, Some(handle));
+    let recaptured = manager.pending_group_admitted.get(&peers[0]).unwrap();
+    assert_eq!(recaptured.len(), 18);
+    assert!(!recaptured.contains(&ExactExportKey::Unicast(prefix(1), 0)));
+    assert!(recaptured.contains(&ExactExportKey::Unicast(prefix(101), 0)));
+    manager.release_group_admitted_keys(peers[0]);
+    assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
+}
+
+#[test]
+fn snapshot_reuse_shared_universe_refusal_falls_back_to_small_actual_flat_view() {
+    const GID: usize = 2208;
+    const RAW: u32 = 2_000;
+    const ACTUAL: usize = 32;
+    let actual_limit = u32::try_from(ACTUAL).unwrap();
+    let mut manager = staging_manager();
+    manager.pending_group_admitted =
+        admitted_recovery::AdmittedRecovery::with_test_limits(8 * 1024, 512 * 1024 * 1024);
+    let mut group = empty_group();
+    for index in 0..RAW {
+        let p = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32));
+        let source = if index < actual_limit { OTHER1 } else { MEMBER };
+        group.apply_delta(&announce_delta(p, source, None));
+    }
+    manager.group_ribs.insert(GID, group);
+    let _receiver = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
+    assert!(
+        manager.capture_group_admitted_keys(MEMBER),
+        "the 8 KiB peer cap must refuse a 2,000-key universe but permit 32 actual OLD keys"
+    );
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
+    assert_eq!(manager.group_recovery_fallback(MEMBER), None);
+    let proof = manager.pending_group_admitted.get(&MEMBER).unwrap();
+    assert_eq!(proof.len(), ACTUAL);
+    for index in 0..RAW {
+        assert_eq!(
+            proof.contains(&ExactExportKey::Unicast(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32)),
+                0
+            )),
+            index < actual_limit
+        );
+    }
+}
+
+#[test]
+fn snapshot_reuse_private_full_table_flat_capture_reserves_exact_cardinality() {
+    const COUNT: u32 = 1_048_577;
+    let mut manager = staging_manager();
+    let healthy_charge = manager.pending_group_admitted.bytes();
+    let _receiver = snapshot_capture_channel(&mut manager, MEMBER, None);
+    let mut private = AdjRibOut::with_capacity(MEMBER, COUNT as usize);
+    let template = route(prefix(1), OTHER1);
+    for index in 0..COUNT {
+        let mut value = template.clone();
+        value.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32));
+        private.insert(value);
+    }
+    manager.adj_ribs_out.insert(MEMBER, private);
+    assert!(
+        manager.capture_group_admitted_keys(MEMBER),
+        "removing caller exact-size reservation must restore the 1,048,576-key refusal"
+    );
+    let proof = manager.pending_group_admitted.get(&MEMBER).unwrap();
+    assert_eq!(proof.len(), COUNT as usize);
+    for index in [0, 1_048_575, 1_048_576] {
+        assert!(proof.contains(&ExactExportKey::Unicast(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32)),
+            0
+        )));
+    }
+    assert_eq!(manager.group_recovery_fallback(MEMBER), None);
+    manager.release_group_admitted_keys(MEMBER);
+    assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
+}

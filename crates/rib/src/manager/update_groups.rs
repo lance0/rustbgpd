@@ -535,7 +535,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// used. This IS the equality-suppression baseline: `routes_equal`
     /// runs once per group against it.
     pub(in crate::manager) table: AdjRibOut,
-    /// Non-owning hint; immutable key storage lives only in the recovery ledger.
+    /// Non-owning older universe; removed keys stay unadmitted and new OLD
+    /// keys use charged sparse additions. Storage lives only in the ledger.
     recovery_snapshot: Option<admitted_recovery::SnapshotHandle>,
     /// Received RTC/reflection input beside the single post-policy EVPN body.
     evpn_inputs: FastMap<rustbgpd_wire::EvpnRouteKey, EvpnGroupInput>,
@@ -982,9 +983,6 @@ impl GroupRibOut {
     /// source-count and next-hop-override residue in sync.
     fn apply_delta(&mut self, delta: &GroupDelta) {
         let key = (delta.prefix, delta.path_id);
-        if self.table.get(&delta.prefix, delta.path_id).is_some() != delta.new.is_some() {
-            self.recovery_snapshot = None;
-        }
         if let Some(log) = &mut self.inventory_log {
             log.insert(key);
         }
@@ -1071,9 +1069,6 @@ impl GroupRibOut {
             nlri_key: delta.key,
             path_id: 0,
         };
-        if self.table.get_vpn(&rib_key).is_some() != delta.new.is_some() {
-            self.recovery_snapshot = None;
-        }
         let slot = Self::vpn_count_slot(&delta.key);
         if let Some(old) = self.table.get_vpn(&rib_key) {
             let old_peer = old.peer;
@@ -1935,7 +1930,11 @@ impl RibManager {
                                 }),
                         )
                 };
-                let count = actual().count();
+                let (count, additions) = self.pending_group_admitted.capture_shape_with_checkpoint(
+                    group.recovery_snapshot,
+                    actual(),
+                    &mut checkpoint,
+                );
                 let raw_count = group.table.len().saturating_add(if group.stages_vpn() {
                     group.table.vpn_len()
                 } else {
@@ -1965,9 +1964,11 @@ impl RibManager {
                 let captured = (|| {
                     // An oversized unfiltered hint or failed optional allocation
                     // must not reject a smaller authoritative flat proof.
-                    if handle.is_none() {
-                        ledger.reserve_capture_with_checkpoint(peer, count, &mut checkpoint)?;
-                    }
+                    ledger.reserve_capture_with_checkpoint(
+                        peer,
+                        if handle.is_some() { additions } else { count },
+                        &mut checkpoint,
+                    )?;
                     for key in actual() {
                         ledger.push_capture_with_checkpoint(peer, key, &mut checkpoint)?;
                     }

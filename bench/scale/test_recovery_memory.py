@@ -51,6 +51,9 @@ class RecoveryReceiptTests(unittest.TestCase):
             profile = "smoke-vpn"
         seed, additions = receipt.PROFILES[profile]
         additions = additions if cell == "widen" else (0, 0, 0, 0)
+        pulse_family = next(f for f, n in enumerate(seed) if n)
+        if cell == "unsynchronized-dirty":
+            additions = tuple(clients if f == pulse_family else 0 for f in range(4))
         rows = []
         for phase in receipt.PHASES:
             cg = {name: 0 for name in receipt.SCALARS}
@@ -74,6 +77,8 @@ class RecoveryReceiptTests(unittest.TestCase):
                 metrics[receipt.GAUGES[0]] = (
                     clients * sum(a + b for a, b in zip(seed, additions)) if held else 0
                 )
+                if held and cell == "unsynchronized-dirty":
+                    metrics[receipt.GAUGES[0]] = clients * sum(seed) + clients * (clients - 1) // 2
                 metrics[receipt.GAUGES[1]] = 4096 if held else 56
                 metrics[receipt.GAUGES[2]] = 4096
                 metrics["bgp_evpn_recovery_provenance_exhausted_total"] = 0
@@ -87,6 +92,9 @@ class RecoveryReceiptTests(unittest.TestCase):
                 }
                 for f, name in enumerate(receipt.FAMILIES)
             }
+            if held and cell == "unsynchronized-dirty":
+                families[receipt.FAMILIES[pulse_family]]["present"] += clients * (clients - 1) // 2
+                families[receipt.FAMILIES[pulse_family]]["announces"] += clients * (clients - 1) // 2
             rows.append(
                 {
                     "schema": "rustbgpd.recovery-memory.v2",
@@ -128,6 +136,25 @@ class RecoveryReceiptTests(unittest.TestCase):
             "actual_receivers": row["clients"],
         }
 
+    def sample_lines(self, rows: list[dict]) -> list[str]:
+        lines = []
+        first = rows[0]
+        for row in rows:
+            if row["phase"] == "retained" and row["cell"] == "unsynchronized-dirty":
+                clients, seed = first["clients"], first["seed"]
+                family = next(name for name in receipt.FAMILIES if seed[name])
+                for index in range(clients):
+                    paused = index + 1
+                    progress = {
+                        "pass": index, "clients": clients, "profile": first["profile"],
+                        "dirty_peers": paused, "group_dirty_members": paused,
+                        "paused_families": {name: paused * seed[name] + (paused * (paused - 1) // 2 if name == family else 0) for name in receipt.FAMILIES},
+                        "active_families": {name: (clients - paused) * (seed[name] + (paused if name == family else 0)) for name in receipt.FAMILIES},
+                    }
+                    lines.append("recovery_unsynchronized " + json.dumps(progress))
+            lines.append("recovery_sample " + json.dumps(row))
+        return lines
+
     def log(
         self,
         rows: list[dict],
@@ -150,7 +177,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             "instrumentation_sha256": "d" * 64,
         }
         lines = ["recovery_identity " + json.dumps(identity)]
-        lines += ["recovery_sample " + json.dumps(row) for row in rows]
+        lines += self.sample_lines(rows)
         if complete:
             lines.append("recovery_complete " + json.dumps(self.completion(rows[-1], cell)))
         path = self.root / "harness.log"
@@ -310,6 +337,47 @@ class RecoveryReceiptTests(unittest.TestCase):
             row["metrics"]["bgp_update_group_recovery_fallback_total"] = 4
         self.validate(rows, role="intermediate")
 
+    def test_unsynchronized_receipt_requires_exact_actual_old_proofs(self) -> None:
+        for profile in ("smoke-uc", "smoke-vpn"):
+            with self.subTest(profile=profile):
+                rows = self.samples(cell="unsynchronized-dirty", profile=profile, clients=4)
+                self.validate(rows, cell="unsynchronized-dirty")
+                changed = copy.deepcopy(rows)
+                changed[1]["metrics"][receipt.GAUGES[0]] += 1
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "complete admitted"):
+                    self.validate(changed, cell="unsynchronized-dirty")
+                changed = copy.deepcopy(rows)
+                changed[1]["fallback_causes"]["daemon_limit"] = 1
+                changed[1]["metrics"]["bgp_update_group_recovery_fallback_total"] = 1
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "disqualifies"):
+                    self.validate(changed, cell="unsynchronized-dirty")
+
+    def test_unsynchronized_pass_barriers_reject_missing_duplicate_and_synchronized_shortcuts(self) -> None:
+        rows = self.samples(cell="unsynchronized-dirty", clients=4)
+        original = self.log(rows, "unsynchronized-dirty").read_text().splitlines()
+        locations = [i for i, line in enumerate(original) if line.startswith("recovery_unsynchronized ")]
+        for mutation in ("missing", "duplicate", "all-dirty", "desired-instead-of-old", "before-population", "after-retained"):
+            lines = original.copy()
+            position = locations[1]
+            if mutation == "missing":
+                del lines[position]
+            elif mutation == "duplicate":
+                lines[position] = lines[locations[0]]
+            elif mutation in ("all-dirty", "desired-instead-of-old"):
+                progress = json.loads(lines[position].removeprefix("recovery_unsynchronized "))
+                if mutation == "all-dirty":
+                    progress["dirty_peers"] = progress["group_dirty_members"] = 4
+                else:
+                    progress["paused_families"]["ipv4_unicast"] += 2
+                lines[position] = "recovery_unsynchronized " + json.dumps(progress)
+            else:
+                line = lines.pop(position)
+                lines.insert(1 if mutation == "before-population" else len(lines) - 1, line)
+            path = self.root / "bad-unsynchronized.log"
+            path.write_text("\n".join(lines) + "\n")
+            with self.subTest(mutation=mutation), self.assertRaises(receipt.InvalidReceipt):
+                receipt.validate_log(path, "candidate", "unsynchronized-dirty", 4, "smoke-uc")
+
     def test_pilot_is_explicit_feasibility_not_100_member_qualification(self) -> None:
         self.assertTrue(all(case["clients"] == 4 for case in receipt.campaign_cases("pilot")))
         self.assertEqual(
@@ -322,7 +390,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_cell_selector_keeps_the_closed_qualified_roster(self) -> None:
         full = receipt.campaign_cases("qualified")
-        self.assertEqual(len(full), 8)
+        self.assertEqual(len(full), 10)
         split = [
             selected
             for case in full
@@ -638,7 +706,7 @@ class RecoveryReceiptTests(unittest.TestCase):
                     row["metrics"]["bgp_update_group_recovery_fallback_total"] = clients
                     row["metrics"][receipt.GAUGES[0]] = 0
             lines = ["recovery_identity " + json.dumps(identity)]
-            lines.extend("recovery_sample " + json.dumps(row) for row in rows)
+            lines.extend(self.sample_lines(rows))
             lines.append("recovery_complete " + json.dumps(self.completion(rows[-1], cell)))
             (directory / "harness.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
             for phase in ("before", "after"):

@@ -20,7 +20,12 @@ ROSTER = {
 }
 RECOVERY_MEMORY_SELECTOR = (
     "${{ github.event_name == 'workflow_dispatch' && "
-    "github.ref == 'refs/heads/fix/update-group-recovery-memory' }}"
+    "inputs.recovery_memory_receipt == true }}"
+)
+RECOVERY_MEMORY_CONCURRENCY = (
+    "${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && "
+    "inputs.recovery_memory_receipt == true && "
+    "format('recovery-memory-{0}', github.run_id) || github.ref }}"
 )
 RESULTS = ("CORE", "CORE_TESTS", "SCALE_RECEIPTS")
 RETIRED_PRIVILEGED_WORKFLOW = ".github/workflows/privileged-interop.yml"
@@ -210,11 +215,27 @@ def check(root: Path) -> list[str]:
     if set(jobs) != ROSTER:
         errors.append("exact CI job roster drifted")
 
-    # This receipt is optional at dispatch; it must never run on main/release
-    # re-tests or consume the reserved self-hosted soak runner.
+    concurrency = re.findall(
+        r"(?m)^concurrency:\n  group:[ \t]*(.*?)[ \t]*\n  cancel-in-progress:[ \t]*(.*?)[ \t]*$",
+        text,
+    )
+    if concurrency != [(RECOVERY_MEMORY_CONCURRENCY, "true")]:
+        errors.append("receipt dispatch concurrency must isolate its run while retaining ordinary ref cancellation")
+
+    # Ordinary manual re-tests must not implicitly start a hosted campaign.
+    dispatch = text.split("\njobs:", 1)[0]
+    input_block = re.search(
+        r"(?m)^  workflow_dispatch:\n    inputs:\n      recovery_memory_receipt:\n(?:        [^\n]*\n)+",
+        dispatch,
+    )
+    if input_block is None or any(
+        re.findall(rf"(?m)^        {name}:[ \t]*(.*?)[ \t]*$", input_block.group()) != [value]
+        for name, value in (("type", "boolean"), ("default", "false"), ("required", "false"))
+    ):
+        errors.append("recovery_memory_receipt input must be an optional default-false boolean")
     recovery = jobs.get("recovery_memory_receipt", "")
     if re.findall(r"(?m)^ {4}if:[ \t]*(.*?)[ \t]*$", recovery) != [RECOVERY_MEMORY_SELECTOR]:
-        errors.append("recovery_memory_receipt must keep its dispatch and exact receipt-branch selector")
+        errors.append("recovery_memory_receipt must keep its operator-dispatch selector")
     if re.findall(r"(?m)^ {4}runs-on:[ \t]*(.*?)[ \t]*$", recovery) != ["ubuntu-24.04"]:
         errors.append("recovery_memory_receipt must use the fresh ubuntu-24.04 hosted runner")
     if len(re.findall(

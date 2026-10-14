@@ -16,6 +16,7 @@ enum Cell {
     DatasetReevaluate,
     PeerDown,
     Widen,
+    UnsynchronizedDirty,
 }
 impl Cell {
     fn name(self) -> &'static str {
@@ -23,6 +24,7 @@ impl Cell {
             Self::DatasetReevaluate => "dataset-reevaluate",
             Self::PeerDown => "peer-down",
             Self::Widen => "widen",
+            Self::UnsynchronizedDirty => "unsynchronized-dirty",
         }
     }
 }
@@ -68,6 +70,20 @@ impl Spec {
     }
     fn counts(self, widened: bool) -> [usize; 4] {
         std::array::from_fn(|f| self.seed[f] + if widened { self.additions[f] } else { 0 })
+    }
+    fn cell_additions(self, cell: Cell, clients: usize) -> [usize; 4] {
+        match cell {
+            Cell::Widen => self.additions,
+            Cell::UnsynchronizedDirty => {
+                let family = self.seed.iter().position(|n| *n > 0).unwrap();
+                std::array::from_fn(|f| if f == family { clients } else { 0 })
+            }
+            Cell::DatasetReevaluate | Cell::PeerDown => [0; 4],
+        }
+    }
+    fn cell_limits(self, cell: Cell, clients: usize) -> [usize; 4] {
+        let additions = self.cell_additions(cell, clients);
+        std::array::from_fn(|f| self.seed[f] + additions[f])
     }
     fn families(self) -> Vec<(Afi, Safi)> {
         FAMILIES
@@ -642,6 +658,58 @@ impl RecoveryHarness {
         .expect("operation did not converge to exact advertised and folded receiver state")
     }
 
+    async fn retain_unsynchronized(&self, spec: Spec) -> (Vec<oneshot::Sender<()>>, Vec<Counts>) {
+        let mut release = Vec::new();
+        let mut retained_counts = self.counts().await;
+        let family = spec.seed.iter().position(|n| *n > 0).unwrap();
+        for (index, receiver) in self.receivers.iter().enumerate() {
+            release.push(receiver.pause().await);
+            let added = spec.seed[family] + index;
+            let update = if family >= 2 {
+                vpn_receipt(self.source, vec![fixture_vpn_route(family % 2, added)])
+            } else {
+                let mut update =
+                    empty_routes_received(self.source, vec![fixture_route(family, added)]);
+                if let RibUpdate::RoutesReceived { session_id, .. } = &mut update {
+                    *session_id = 1;
+                }
+                update
+            };
+            self.tx.send(update).await.unwrap();
+            retained_counts = self.unsynchronized_pass(spec, index + 1).await;
+        }
+        (release, retained_counts)
+    }
+
+    async fn unsynchronized_pass(&self, spec: Spec, paused: usize) -> Vec<Counts> {
+        let family = spec.seed.iter().position(|n| *n > 0).unwrap();
+        tokio::time::timeout(RECOVERY_CELL_TIMEOUT, async {
+            loop {
+                let health = self.health().await;
+                let counts = self.counts().await;
+                let ready = health.0 == paused && health.2 == paused
+                    && counts.iter().enumerate().all(|(index, count)| {
+                        count.present == std::array::from_fn(|f| {
+                            spec.seed[f] + if f == family { index.min(paused) } else { 0 }
+                        }) && count.withdraws == [0; 4]
+                    });
+                if ready {
+                    let fold = |rows: &[Counts]| {
+                        std::array::from_fn(|f| rows.iter().map(|row| row.present[f]).sum::<usize>())
+                    };
+                    println!(
+                        "recovery_unsynchronized {{\"pass\":{},\"clients\":{},\"profile\":\"{}\",\"dirty_peers\":{},\"group_dirty_members\":{},\"paused_families\":{},\"active_families\":{}}}",
+                        paused - 1, self.receivers.len(), spec.name, health.0, health.2,
+                        family_counts_json(fold(&counts[..paused])),
+                        family_counts_json(fold(&counts[paused..])),
+                    );
+                    return counts;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("unsynchronized dirty pass did not preserve actual paused OLD and admitted healthy views")
+    }
+
     async fn verify_group(&self) {
         let mut labels = Vec::new();
         for receiver in &self.receivers {
@@ -855,18 +923,14 @@ async fn sample(
             total.withdraws[f] += count.withdraws[f];
         }
     }
-    let limits = spec.counts(cell == Cell::Widen);
     let clients = harness.receivers.len();
+    let limits = spec.cell_limits(cell, clients);
     println!(
         "recovery_sample {{\"schema\":\"rustbgpd.recovery-memory.v2\",\"cell\":\"{}\",\"profile\":\"{}\",\"phase\":\"{phase}\",\"clients\":{clients},\"seed\":{},\"additions\":{},\"receiver_queue_capacity\":{RECOVERY_QUEUE_CAPACITY},\"receiver_bitmap_bytes\":{},\"families\":{},\"folded_routes\":{},\"announces\":{},\"withdrawals\":{},\"dirty_peers\":{},\"group_dirty_members\":{},\"metrics\":{},\"fallback_causes\":{},\"cgroup\":{}}}",
         cell.name(),
         spec.name,
         family_counts_json(spec.seed),
-        family_counts_json(if cell == Cell::Widen {
-            spec.additions
-        } else {
-            [0; 4]
-        }),
+        family_counts_json(spec.cell_additions(cell, clients)),
         clients * limits.iter().map(|n| n.div_ceil(64) * 8).sum::<usize>(),
         total.json(),
         total.present.iter().sum::<usize>(),
@@ -921,7 +985,8 @@ async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Pa
             "profile has no widening cell"
         );
     }
-    let harness = RecoveryHarness::setup(clients, spec, spec.counts(cell == Cell::Widen)).await;
+    let harness =
+        RecoveryHarness::setup(clients, spec, spec.cell_limits(cell, clients as usize)).await;
     harness.verify_group().await;
     populate(&harness, spec.seed).await;
     let initial = harness.settle(spec.seed).await;
@@ -929,10 +994,19 @@ async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Pa
         && (0..4).all(|f| count.announces[f] >= spec.seed[f] as u64)));
     sample(&harness, cell, spec, "population_ready", memory, &initial).await;
     let mut release = Vec::new();
-    for receiver in &harness.receivers {
-        release.push(receiver.pause().await);
+    let mut retained_counts = initial.clone();
+    if cell == Cell::UnsynchronizedDirty {
+        let retained = harness.retain_unsynchronized(spec).await;
+        release = retained.0;
+        retained_counts = retained.1;
+    } else {
+        for receiver in &harness.receivers {
+            release.push(receiver.pause().await);
+        }
     }
-    let expected = if cell == Cell::PeerDown {
+    let expected = if cell == Cell::UnsynchronizedDirty {
+        spec.cell_limits(cell, clients as usize)
+    } else if cell == Cell::PeerDown {
         harness
             .tx
             .send(RibUpdate::PeerDown {
@@ -1019,8 +1093,16 @@ async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Pa
         // gauge, observed behind the synchronous receipt, proves sparse admission.
         // The measured checker applies capability-specific assertions to each SHA.
     }
-    sample(&harness, cell, spec, "retained", memory, &initial).await;
-    sample(&harness, cell, spec, "operation_end", memory, &initial).await;
+    sample(&harness, cell, spec, "retained", memory, &retained_counts).await;
+    sample(
+        &harness,
+        cell,
+        spec,
+        "operation_end",
+        memory,
+        &retained_counts,
+    )
+    .await;
     for resume in release {
         resume.send(()).unwrap();
     }
@@ -1051,12 +1133,13 @@ async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Pa
 pub(super) fn main(args: &[String]) {
     assert!(
         args.len() == 3 || (args.len() == 4 && args[3] == "--correctness-only"),
-        "usage: rrharness recovery-memory <dataset-reevaluate|peer-down|widen> <clients> <profile> [--correctness-only]"
+        "usage: rrharness recovery-memory <dataset-reevaluate|peer-down|widen|unsynchronized-dirty> <clients> <profile> [--correctness-only]"
     );
     let cell = match args[0].as_str() {
         "dataset-reevaluate" => Cell::DatasetReevaluate,
         "peer-down" => Cell::PeerDown,
         "widen" => Cell::Widen,
+        "unsynchronized-dirty" => Cell::UnsynchronizedDirty,
         _ => panic!("unknown recovery cell"),
     };
     let clients = args[1].parse().expect("clients must be a u32");
@@ -1255,6 +1338,54 @@ mod tests {
             ..Default::default()
         });
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unsynchronized_dirty_retains_actual_old_keys_with_one_bounded_universe() {
+        const CLIENTS: u32 = 3;
+        for profile in ["smoke-uc", "smoke-vpn"] {
+            let spec = Spec::named(profile);
+            let limits = spec.cell_limits(Cell::UnsynchronizedDirty, CLIENTS as usize);
+            let harness = RecoveryHarness::setup(CLIENTS, spec, limits).await;
+            harness.verify_group().await;
+            populate(&harness, spec.seed).await;
+            harness.settle(spec.seed).await;
+            let (release, retained) = harness.retain_unsynchronized(spec).await;
+            assert_eq!(harness.health().await.0, CLIENTS as usize);
+            let expected_keys = u64::from(CLIENTS) * spec.seed.iter().sum::<usize>() as u64
+                + u64::from(CLIENTS * (CLIENTS - 1) / 2);
+            assert_eq!(
+                retained
+                    .iter()
+                    .map(|row| row.present.iter().sum::<usize>() as u64)
+                    .sum::<u64>(),
+                expected_keys
+            );
+            let gauge = |name: &str| {
+                harness
+                    .metrics
+                    .registry()
+                    .gather()
+                    .into_iter()
+                    .find(|m| m.name() == name)
+                    .unwrap()
+                    .get_metric()[0]
+                    .get_gauge()
+                    .get_value() as u64
+            };
+            assert_eq!(gauge("bgp_update_group_recovery_entries"), expected_keys);
+            // Logical component credits, not an RSS or timing measurement.
+            assert!(
+                gauge("bgp_update_group_recovery_bytes") < 16 * 1024,
+                "three small unsynchronized proofs must not clone three key universes"
+            );
+            for resume in release {
+                resume.send(()).unwrap();
+            }
+            let final_counts = harness.settle(limits).await;
+            assert!(final_counts.iter().all(|row| row.withdraws == [0; 4]));
+            assert_eq!(gauge("bgp_update_group_recovery_entries"), 0);
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn widening_retains_new_admitted_keys_while_dirty() {
         let spec = Spec::named("smoke-mixed");

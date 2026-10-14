@@ -637,6 +637,31 @@ impl AdmittedRecovery {
         Ok(Some(handle))
     }
 
+    /// Count authoritative OLD keys and the sparse capacity needed beside a
+    /// live older universe, without collecting an uncharged key inventory.
+    pub(in crate::manager) fn capture_shape_with_checkpoint<A: Iterator<Item = Key>>(
+        &self,
+        hint: Option<SnapshotHandle>,
+        keys: A,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> (usize, usize) {
+        let universe = hint
+            .and_then(|handle| self.snapshot_index(handle))
+            .map(|index| self.snapshots[index].keys.as_slice());
+        keys.fold((0, 0), |(count, additions), key| {
+            checkpoint(false);
+            let missing = universe.is_some_and(|keys| {
+                keys.binary_search_by(|prior| {
+                    checkpoint(false);
+                    prior.cmp(&key)
+                })
+                .is_err()
+            });
+            (count + 1, additions + usize::from(missing))
+        })
+    }
+
+    /// Reserve flat keys or the exact sparse additions of a shared capture.
     pub(in crate::manager) fn reserve_capture_with_checkpoint(
         &mut self,
         peer: IpAddr,
@@ -644,9 +669,6 @@ impl AdmittedRecovery {
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Failure> {
         let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
-        if self.records[index].snapshot.is_some() {
-            return Ok(());
-        }
         if let Err(error) = self.grow_keys(index, count, checkpoint) {
             return Err(self.fail(index, error, checkpoint));
         }
@@ -937,15 +959,16 @@ impl AdmittedRecovery {
             let position = self
                 .snapshot_index(handle)
                 .and_then(|snapshot| self.snapshots[snapshot].keys.binary_search(&key).ok());
-            let Some(position) = position else {
-                return Err(self.fail(index, self.missing_proof(peer), checkpoint));
-            };
-            let bit = 1_u64 << (position % 64);
-            if self.records[index].words[position / 64] & bit == 0 {
-                self.records[index].words[position / 64] |= bit;
-                self.records[index].masked += 1;
+            if let Some(position) = position {
+                let bit = 1_u64 << (position % 64);
+                if self.records[index].words[position / 64] & bit == 0 {
+                    self.records[index].words[position / 64] |= bit;
+                    self.records[index].masked += 1;
+                }
+                return Ok(());
             }
-            return Ok(());
+            // Only the authoritative OLD producer reaches this seam. A key
+            // outside an older universe uses the charged sparse storage.
         }
         let keys = &self.records[index].keys.0;
         if keys.len() == keys.capacity() {
@@ -2181,6 +2204,110 @@ mod tests {
             assert!(ledger.get(&peer(1)).unwrap().is_empty());
             assert_eq!(ledger.bytes(), before);
             assert!(ledger.fail_next_allocation);
+        }
+    }
+
+    #[test]
+    fn older_universe_capture_reserves_only_actual_sparse_keys_before_population() {
+        let mut ledger = AdmittedRecovery::new();
+        let raw = [key(1), key(2), bulk_vpn_key(1)];
+        let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let actual = [bulk_vpn_key(2), key(99), key(2)]; // Deliberately unordered.
+        let mut visits = 0;
+        let (count, additions) =
+            ledger.capture_shape_with_checkpoint(Some(handle), actual.into_iter(), &mut |_| {
+                visits += 1;
+            });
+        assert_eq!((count, additions), (3, 2));
+        assert!(visits >= actual.len());
+        ledger.begin_capture(peer(2)).unwrap();
+        assert_eq!(
+            ledger
+                .share_capture_with_checkpoint(
+                    peer(2),
+                    Some(handle),
+                    count,
+                    actual.into_iter(),
+                    count,
+                    &mut |_| {}
+                )
+                .unwrap(),
+            Some(handle)
+        );
+        ledger
+            .reserve_capture_with_checkpoint(peer(2), additions, &mut |_| {})
+            .unwrap();
+        assert_eq!(ledger.records[1].keys.0.capacity(), additions);
+        let reserved = ledger.bytes();
+        ledger.fail_next_allocation_for_test();
+        for key in actual {
+            ledger.push_capture(peer(2), key).unwrap();
+        }
+        assert!(
+            ledger.get(&peer(2)).is_none(),
+            "partial capture is never published"
+        );
+        ledger.seal_capture(peer(2)).unwrap();
+        assert!(ledger.fail_next_allocation);
+        assert_eq!(ledger.bytes(), reserved);
+        assert_eq!(ledger.snapshots.len(), 1);
+        assert_eq!(ledger.snapshots[0].references, 2);
+        assert_eq!(
+            ledger.get(&peer(2)).unwrap().iter().collect::<Vec<_>>(),
+            [key(2), key(99), bulk_vpn_key(2)].map(ExactExportKey::from)
+        );
+        assert!(!ledger.get(&peer(2)).unwrap().contains(&key(1).into()));
+        assert_eq!(
+            ledger.get(&peer(1)).unwrap().iter().collect::<Vec<_>>(),
+            raw.map(ExactExportKey::from)
+        );
+    }
+
+    #[test]
+    fn older_universe_delta_refusal_releases_only_the_capturing_owner() {
+        for cause in [
+            FailureCause::AllocationFailure,
+            FailureCause::PeerLimit,
+            FailureCause::DaemonLimit,
+        ] {
+            let mut ledger = AdmittedRecovery::new();
+            let raw = [key(1), key(2), bulk_vpn_key(1)];
+            let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+            let actual = [key(2), key(3), bulk_vpn_key(2)];
+            ledger.begin_capture(peer(2)).unwrap();
+            ledger
+                .share_capture_with_checkpoint(
+                    peer(2),
+                    Some(handle),
+                    actual.len(),
+                    actual.into_iter(),
+                    actual.len(),
+                    &mut |_| {},
+                )
+                .unwrap()
+                .unwrap();
+            let (count, additions) =
+                ledger.capture_shape_with_checkpoint(Some(handle), actual.into_iter(), &mut |_| {});
+            assert_eq!((count, additions), (3, 2));
+            match cause {
+                FailureCause::AllocationFailure => ledger.fail_next_allocation_for_test(),
+                FailureCause::PeerLimit => ledger.peer_limit = ledger.peer_charge(1),
+                FailureCause::DaemonLimit => ledger.daemon_limit = ledger.bytes(),
+                FailureCause::MissingProof => unreachable!(),
+            }
+            let error = ledger
+                .reserve_capture_with_checkpoint(peer(2), additions, &mut |_| {})
+                .unwrap_err();
+            assert_eq!(error.cause, cause);
+            assert_eq!(ledger.seal_capture(peer(2)), Err(error));
+            assert!(ledger.get(&peer(2)).is_none());
+            assert_eq!(ledger.records[1].keys.0.capacity(), 0);
+            assert_eq!(ledger.records[1].words.capacity(), 0);
+            assert_eq!(ledger.snapshots[0].references, 1);
+            assert_eq!(
+                ledger.get(&peer(1)).unwrap().iter().collect::<Vec<_>>(),
+                raw.map(ExactExportKey::from)
+            );
         }
     }
 

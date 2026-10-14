@@ -59,9 +59,10 @@ class ScaleSplitContractTests(unittest.TestCase):
         cases = (
             ("  recovery_memory_receipt:\n", "  renamed_recovery_memory_receipt:\n"),
             (selector, ""),
-            (selector, selector.replace("'workflow_dispatch'", "'pull_request'")),
-            (selector, selector.replace("refs/heads/fix/update-group-recovery-memory", "refs/heads/main")),
             (selector, "    if: ${{ github.event_name == 'workflow_dispatch' }}\n"),
+            (selector, selector.replace("'workflow_dispatch'", "'pull_request'")),
+            (selector, "    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}\n"),
+            (selector, "    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fix/update-group-recovery-memory' }}\n"),
             (selector, f"    env:\n      RECEIPT_SELECTOR: {contract.RECOVERY_MEMORY_SELECTOR}\n"),
             ("    runs-on: ubuntu-24.04\n", ""),
             ("    runs-on: ubuntu-24.04\n", "    runs-on: self-hosted\n"),
@@ -71,6 +72,31 @@ class ScaleSplitContractTests(unittest.TestCase):
         for old, new in cases:
             with self.subTest(seam=old, replacement=new):
                 self.mutate(old, new)
+
+    def test_recovery_memory_receipt_dispatch_is_explicit_default_false(self) -> None:
+        for old, new in (
+            ("        default: false\n", ""),
+            ("        default: false\n", "        default: true\n"),
+            ("        type: boolean\n", "        type: string\n"),
+            ("        required: false\n", "        required: true\n"),
+            ("      recovery_memory_receipt:\n", "      wrong_input:\n"),
+        ):
+            with self.subTest(old=old, replacement=new):
+                self.mutate(old, new)
+
+    def test_receipt_concurrency_is_run_specific_only_when_opted_in(self) -> None:
+        self.assertEqual([], check(ROOT))
+        original = f"  group: {contract.RECOVERY_MEMORY_CONCURRENCY}\n"
+        for replacement in (
+            "  group: ${{ github.workflow }}-${{ github.ref }}\n",
+            "  group: ${{ github.workflow }}-${{ github.run_id }}\n",
+            original.replace(" && inputs.recovery_memory_receipt == true", ""),
+            original.replace("github.run_id", "github.sha"),
+            original.replace(" || github.ref", ""),
+        ):
+            with self.subTest(replacement=replacement):
+                self.mutate(original, replacement)
+        self.mutate("  cancel-in-progress: true\n", "  cancel-in-progress: false\n")
 
     def test_recovery_memory_receipt_requires_an_actual_toolchain_input(self) -> None:
         tail = "      - name: Check recovery receipt negative fixtures\n"
