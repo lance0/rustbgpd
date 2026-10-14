@@ -6410,6 +6410,218 @@ fn snapshot_reuse_shared_universe_refusal_falls_back_to_small_actual_flat_view()
     }
 }
 
+fn snapshot_capture_fallback_total(manager: &RibManager) -> f64 {
+    manager
+        .metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_update_group_recovery_fallback_total")
+        .unwrap()
+        .get_metric()
+        .iter()
+        .map(|metric| metric.get_counter().get_value())
+        .sum()
+}
+
+#[test]
+fn snapshot_reuse_sparse_share_refusal_falls_back_to_disjoint_actual_flat_view() {
+    const GID: usize = 2210;
+    let mut manager = staging_manager();
+    manager.pending_group_admitted =
+        admitted_recovery::AdmittedRecovery::with_test_limits(8 * 1024, 512 * 1024 * 1024);
+    let healthy_charge = manager.pending_group_admitted.bytes();
+    let mut group = empty_group();
+    group.sendable.push((Afi::Ipv4, Safi::MplsVpn));
+    for n in 1..=128 {
+        group.apply_delta(&announce_delta(prefix(n), OTHER1, None));
+    }
+    group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, None));
+    manager.group_ribs.insert(GID, group);
+    let _first = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
+    let _second = snapshot_capture_channel(&mut manager, OTHER2, Some(GID));
+    assert!(manager.capture_group_admitted_keys(MEMBER));
+    let handle = manager.group_ribs[&GID].recovery_snapshot.unwrap();
+    let first = manager.pending_group_admitted.owned_proof(&MEMBER).unwrap();
+    let group = manager.group_ribs.get_mut(&GID).unwrap();
+    for n in 1..=128 {
+        group.apply_delta(&withdraw_delta(prefix(n), Some(OTHER1)));
+        let p = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 101, n, 0), 24));
+        group.apply_delta(&announce_delta(p, OTHER1, None));
+    }
+    group.apply_vpn_delta(&vpn_withdraw_delta(1, Some(OTHER1)));
+    group.apply_vpn_delta(&vpn_announce_delta(2, OTHER1, None));
+    assert!(
+        manager.capture_group_admitted_keys(OTHER2),
+        "base plus mask fits 8 KiB, but sparse additions must refuse before attaching and allow flat OLD capture"
+    );
+    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, Some(handle));
+    assert_eq!(
+        manager.pending_group_admitted.owned_proof(&MEMBER).unwrap(),
+        first
+    );
+    let proof = manager.pending_group_admitted.get(&OTHER2).unwrap();
+    assert_eq!(proof.len(), 129);
+    for n in 1..=128 {
+        assert!(!proof.contains(&ExactExportKey::Unicast(prefix(n), 0)));
+        assert!(proof.contains(&ExactExportKey::Unicast(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 101, n, 0), 24)),
+            0,
+        )));
+    }
+    assert!(!proof.contains(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())));
+    assert!(proof.contains(&ExactExportKey::Vpn(vpn_route(2, OTHER1).key())));
+    assert_eq!(manager.group_recovery_fallback(OTHER2), None);
+    assert!(!manager.dirty_peers.contains(&OTHER2));
+    assert_eq!(snapshot_capture_fallback_total(&manager), 0.0);
+    manager.release_group_admitted_keys(OTHER2);
+    assert_eq!(
+        manager.pending_group_admitted.owned_proof(&MEMBER).unwrap(),
+        first
+    );
+    manager.release_group_admitted_keys(MEMBER);
+    assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
+}
+
+fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
+    use admitted_recovery::Key;
+
+    const GID: usize = 2212;
+    let mut manager = staging_manager();
+    manager.pending_group_admitted =
+        admitted_recovery::AdmittedRecovery::with_test_limits(8 * 1024, 512 * 1024 * 1024);
+    let healthy_charge = manager.pending_group_admitted.bytes();
+    let mut group = empty_group();
+    group.sendable.push((Afi::Ipv4, Safi::MplsVpn));
+    for n in 1..=128 {
+        group.apply_delta(&announce_delta(prefix(n), OTHER1, None));
+    }
+    group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, None));
+    manager.group_ribs.insert(GID, group);
+    let _first = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
+    let mut receiver = snapshot_capture_channel(&mut manager, OTHER2, Some(GID));
+    assert!(manager.capture_group_admitted_keys(MEMBER));
+    let first = manager.pending_group_admitted.owned_proof(&MEMBER).unwrap();
+    manager.pending_group_admitted.insert_empty(OTHER2).unwrap();
+    if attach_empty {
+        let old = (1..=128)
+            .map(|n| Key::Unicast(prefix(n), 0))
+            .chain(std::iter::once(
+                Key::try_from(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())).unwrap(),
+            ));
+        manager.prepare_empty_group_recovery_admission(OTHER2, old);
+        // A previously rejected envelope can leave reserved sparse capacity
+        // on a still-empty proof; none of these candidates proves admission.
+        manager
+            .pending_group_admitted
+            .reserve_admitted(OTHER2, (129..=132).map(|n| Key::Unicast(prefix(n), 0)))
+            .unwrap();
+        assert!(
+            manager
+                .pending_group_admitted
+                .get(&OTHER2)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let group = manager.group_ribs.get_mut(&GID).unwrap();
+    let mut candidates = Vec::new();
+    for n in 1..=128 {
+        group.apply_delta(&withdraw_delta(prefix(n), Some(OTHER1)));
+        let p = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 101, n, 0), 24));
+        group.apply_delta(&announce_delta(p, OTHER1, None));
+        candidates.push(route(p, OTHER1));
+    }
+    group.apply_vpn_delta(&vpn_withdraw_delta(1, Some(OTHER1)));
+    group.apply_vpn_delta(&vpn_announce_delta(2, OTHER1, None));
+    manager
+        .peer_export_encoders
+        .insert(OTHER2, super::super::permissive_test_exact_export_encoder());
+    let mut batch = OutboundCommitBatch::with_unicast(candidates.into(), vec![None; 128].into());
+    batch.vpn_announce.push(vpn_route(2, OTHER1));
+    batch.withdraw.push((prefix(1), 0));
+    batch.vpn_withdraw.push(vpn_route(1, OTHER1).key());
+    assert!(manager.try_send_and_commit_outbound_update(OTHER2, batch));
+    let update = receiver.try_recv().unwrap();
+    assert_eq!(update.announce.len(), 128);
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+    assert_eq!(update.vpn_withdraw, [] as [VpnRibRouteKey; 0]);
+    let proof = manager.pending_group_admitted.get(&OTHER2).expect(
+        "empty-proof optional sharing must leave viable flat admission instead of sticky failure",
+    );
+    assert_eq!(proof.len(), 129);
+    for value in update.announce.iter() {
+        assert!(proof.contains(&ExactExportKey::Unicast(value.prefix, value.path_id)));
+    }
+    assert!(proof.contains(&ExactExportKey::Vpn(update.vpn_announce[0].key())));
+    assert!(!proof.contains(&ExactExportKey::Unicast(prefix(1), 0)));
+    assert!(!proof.contains(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())));
+    assert_eq!(
+        manager.pending_group_admitted.owned_proof(&MEMBER).unwrap(),
+        first
+    );
+    assert_eq!(manager.group_recovery_fallback(OTHER2), None);
+    assert_eq!(snapshot_capture_fallback_total(&manager), 0.0);
+    manager.release_group_admitted_keys(OTHER2);
+    manager.release_group_admitted_keys(MEMBER);
+    assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
+}
+
+#[test]
+fn snapshot_reuse_fresh_empty_admission_falls_back_to_actual_flat_proof() {
+    snapshot_empty_admission_falls_back_to_flat(false);
+}
+
+#[test]
+fn snapshot_reuse_attached_empty_admission_reclaims_sparse_slack_before_flat_retry() {
+    snapshot_empty_admission_falls_back_to_flat(true);
+}
+
+#[test]
+fn snapshot_reuse_grouped_full_table_flat_capture_reserves_exact_cardinality() {
+    const GID: usize = 2211;
+    const COUNT: u32 = 1_048_577;
+    const RAW: u32 = 2 * COUNT;
+    let mut manager = staging_manager();
+    let healthy_charge = manager.pending_group_admitted.bytes();
+    let mut group = empty_group();
+    let mut delta = announce_delta(prefix(1), OTHER1, None);
+    for index in 0..RAW {
+        let p = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32));
+        delta.prefix = p;
+        let (route, _) = delta.new.as_mut().unwrap();
+        route.prefix = p;
+        route.peer = if index < COUNT { OTHER1 } else { MEMBER };
+        group.apply_delta(&delta);
+    }
+    manager.group_ribs.insert(GID, group);
+    let _receiver = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
+    assert!(
+        manager.capture_group_admitted_keys(MEMBER),
+        "a refused raw universe must still reserve all 1,048,577 actual OLD keys, not zero sparse additions"
+    );
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
+    let proof = manager.pending_group_admitted.get(&MEMBER).unwrap();
+    assert_eq!(proof.len(), COUNT as usize);
+    for index in [0, 1_048_575, 1_048_576] {
+        assert!(proof.contains(&ExactExportKey::Unicast(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32)),
+            0,
+        )));
+    }
+    for index in [COUNT, RAW - 1] {
+        assert!(!proof.contains(&ExactExportKey::Unicast(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32)),
+            0,
+        )));
+    }
+    assert_eq!(manager.group_recovery_fallback(MEMBER), None);
+    assert_eq!(snapshot_capture_fallback_total(&manager), 0.0);
+    manager.release_group_admitted_keys(MEMBER);
+    assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
+}
+
 #[test]
 fn snapshot_reuse_private_full_table_flat_capture_reserves_exact_cardinality() {
     const COUNT: u32 = 1_048_577;
