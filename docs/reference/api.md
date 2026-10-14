@@ -553,6 +553,19 @@ returns one only for an address without an interface or comparison peer.
 The row disappears when retention ends. `retention_only` is absent on
 ordinary rows and from older daemons, which return no row for such a peer.
 
+`outbound_resync_pending` is true while the peer missed outbound delivery and
+waits for the RIB's full export resync; `outbound_dirty_seconds` is the whole
+seconds that resync has been pending and is present only while it is.
+`update_group_recovery_fallback` names the update-group recovery fallback cause
+recorded for the current session (`peer_limit`, `daemon_limit`,
+`allocation_failure` or `missing_proof`) and is empty otherwise.
+`prefixes_sent_pending` is true while `prefixes_sent` is the update group's
+desired count for a grouped member awaiting resync rather than routes the peer
+is known to hold; `ListAdvertisedRoutes` for that peer reads its admitted
+baseline or returns `FAILED_PRECONDITION` during the same window. The two
+optional booleans are absent from an older daemon. See
+[Update-group recovery fallback](operations.md#update-group-recovery-fallback).
+
 `NeighborState.max_prefix_action` is the effective current disposition of a
 crossed inbound bound, not a straight echo of the `max_prefix_action`
 configuration key. `block` and `warning` mirror the configured value.
