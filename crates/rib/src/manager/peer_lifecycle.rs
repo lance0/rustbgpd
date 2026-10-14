@@ -770,6 +770,7 @@ impl RibManager {
         self.rtc_eor_hold.remove(&peer);
         self.rtc_eor_hold_ready.remove(&peer);
         self.dirty_peers.remove(&peer);
+        self.dirty_since.remove(&peer);
         self.pending_eor.remove(&peer);
         self.selection_deferred_refresh.remove(&peer);
         // Purge the peer's queued route batches. This upholds the

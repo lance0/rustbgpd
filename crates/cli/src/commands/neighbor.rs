@@ -1808,6 +1808,10 @@ mod tests {
             }],
             gr_retention_available: Some(true),
             retention_only: None,
+            outbound_resync_pending: Some(true),
+            outbound_dirty_seconds: Some(163),
+            update_group_recovery_fallback: "update_group_recovery_fallback-value".to_string(),
+            prefixes_sent_pending: Some(true),
         }
     }
 

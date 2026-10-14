@@ -673,6 +673,9 @@ pub struct RibManager {
     /// [`Self::dirty_resync_cursor`] instead of re-drawing an arbitrary
     /// subset each tick.
     dirty_peers: BTreeSet<IpAddr>,
+    /// When each peer's current dirty episode began. Written when a peer
+    /// enters `dirty_peers`; meaningful only while it is still there.
+    dirty_since: HashMap<IpAddr, tokio::time::Instant>,
     /// Ring position of the dirty-resync round-robin: the last peer
     /// attempted. Selection resumes strictly after it (wrapping), so peers
     /// whose sends keep failing cannot monopolize every tick while
@@ -2068,6 +2071,7 @@ impl RibManager {
             orr: crate::orr::OrrState::default(),
             cluster_id,
             dirty_peers: BTreeSet::new(),
+            dirty_since: HashMap::new(),
             dirty_resync_cursor: None,
             pending_inbound_refresh: BTreeMap::new(),
             pending_inbound_refresh_cursor: None,
@@ -3071,9 +3075,16 @@ impl RibManager {
             attempted.extend(ring.iter().copied());
             let selected: BTreeSet<IpAddr> = ring.into_iter().collect();
             let withheld: Vec<IpAddr> = self.dirty_peers.difference(&selected).copied().collect();
+            // A withheld peer re-marked during this pass continues its
+            // episode; keep its original start time.
+            let withheld_since: Vec<(IpAddr, tokio::time::Instant)> = withheld
+                .iter()
+                .filter_map(|peer| self.dirty_since.get(peer).map(|since| (*peer, *since)))
+                .collect();
             self.dirty_peers = selected;
             self.distribute_changes(&HashSet::new(), &HashSet::new());
             self.dirty_peers.extend(withheld);
+            self.dirty_since.extend(withheld_since);
             let unattempted_remain = self
                 .dirty_peers
                 .iter()
