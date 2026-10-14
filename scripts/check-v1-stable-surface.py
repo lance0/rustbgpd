@@ -692,8 +692,77 @@ def signature_digest(rows: list[tuple[str, str, str, bool, bool]]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def proto_field_re(field: str) -> str:
+    return rf"\b{re.escape(field)}\s*=\s*\d+"
+
+
+def carve_message_fields(
+    definitions: dict[str, str], paths: list[str], label: str
+) -> dict[str, str]:
+    """Remove exact field declarations before a method set's graph digest.
+
+    A carved field's own message types then leave the graph unless another
+    pinned field still references them.
+    """
+    carved = dict(definitions)
+    for path in paths:
+        message, separator, field = path.partition(".")
+        if not separator or message not in carved or not field or field == "*":
+            fail(f"{label} excluded protobuf field {path!r} must name one message field")
+        pattern = rf"(?<=[{{;}}])[^{{;}}]*{proto_field_re(field)}[^{{;}}]*;"
+        body, count = re.subn(pattern, "", carved[message])
+        if count != 1:
+            fail(f"{label} excluded protobuf field {path!r} disappeared")
+        carved[message] = body
+    return carved
+
+
+def check_request_values(
+    profile: dict, rows: list, definitions: dict[str, str], label: str
+) -> None:
+    """A value profile narrows calls: every method must take the profiled request."""
+    if not isinstance(profile, dict):
+        fail(f"{label}.stable_request_values must map request fields to values")
+    for path, values in profile.items():
+        message, separator, field = path.partition(".")
+        if not separator or message not in definitions or not re.search(
+            proto_field_re(field), definitions[message]
+        ):
+            fail(f"{label} stable request field {path!r} disappeared")
+        if (
+            not isinstance(values, list)
+            or not values
+            or not all(type(value) is int for value in values)
+            or values != sorted(set(values))
+        ):
+            fail(f"{label} stable request values for {path!r} must be sorted unique integers")
+        for method, request, *_ in rows:
+            if request.rsplit(".", 1)[-1] != message:
+                fail(
+                    f"{label} method {method} takes {request}, not the profiled request "
+                    f"{message}; its calls cannot be narrowed by {path!r}"
+                )
+
+
+METHOD_SET_KEYS = {
+    "service",
+    "methods",
+    "signature_sha256",
+    "message_graph_sha256",
+    "excluded_message_fields",
+    "stable_request_values",
+}
+# Request messages whose inventoried calls are narrowed to a value profile,
+# keyed by message name. Every inventoried method taking one must carry exactly
+# this profile (the route-reflector-evpn Types 1-5 boundary).
+EXPECTED_STABLE_REQUEST_VALUES = {
+    "ListPeerEvpnRoutesRequest": {"ListPeerEvpnRoutesRequest.route_type_filter": [1, 2, 3, 4, 5]},
+}
+
+
 def check_method_sets(inventory: dict, services: dict, definitions: dict[str, str]) -> set[str]:
     stable_paths: set[str] = set()
+    unstable_fields = set(inventory["grpc"]["explicitly_unstable_message_fields"])
     for class_name in ("stable_method_sets", "scoped_rr_only_method_sets"):
         for entry in inventory["grpc"][class_name]:
             service = entry["service"]
@@ -708,13 +777,37 @@ def check_method_sets(inventory: dict, services: dict, definitions: dict[str, st
             missing = sorted(wanted - found)
             if missing:
                 fail(f"stable gRPC methods disappeared from {service}: {', '.join(missing)}")
+            label = f"grpc.{class_name}.{service}"
+            unknown = sorted(set(entry) - METHOD_SET_KEYS)
+            if unknown:
+                fail(f"{label} has unknown keys {unknown}")
+            profile = entry.get("stable_request_values", {})
+            check_request_values(profile, rows, definitions, label)
+            # A missing or widened profile would silently promote every call.
+            # The narrowed requests are pinned here, so dropping, misspelling
+            # or widening a profile in the inventory alone fails.
+            for _, request, *_ in rows:
+                expected = EXPECTED_STABLE_REQUEST_VALUES.get(request.rsplit(".", 1)[-1])
+                if expected is not None and profile != expected:
+                    fail(
+                        f"{label} stable request profile for {request} must be {expected}, "
+                        f"got {profile or 'none'}; review the narrowed call contract"
+                    )
+            excluded = entry.get("excluded_message_fields", [])
+            require_sorted_unique(excluded, f"{label}.excluded_message_fields")
+            outside_unstable = sorted(set(excluded) - unstable_fields)
+            if outside_unstable:
+                fail(
+                    f"{label} excludes fields that are not explicitly unstable: {outside_unstable}"
+                )
+            graph_definitions = carve_message_fields(definitions, excluded, label)
             digest = signature_digest(rows)
             if digest != entry["signature_sha256"]:
                 fail(
                     f"stable gRPC signature changed for {service} ({digest}); review request/response "
                     "messages, streaming modes, and compatibility before updating the inventory"
                 )
-            graph_digest = message_graph_digest(rows, definitions)
+            graph_digest = message_graph_digest(rows, graph_definitions)
             if graph_digest != entry["message_graph_sha256"]:
                 fail(
                     f"stable protobuf message graph changed for {service} ({graph_digest}); "
@@ -779,6 +872,295 @@ def check_grpc(inventory: dict) -> None:
     missing_authz = sorted(stable_paths - authz_paths)
     if missing_authz:
         fail(f"stable gRPC methods disappeared from authorization inventory: {missing_authz}")
+
+
+METRIC_TYPES = {"Counter": "counter", "Gauge": "gauge", "Histogram": "histogram"}
+
+
+def metric_definition(source: str, name: str) -> tuple[str, list[str]] | None:
+    """Return (type, label names) for one `XxxVec::new(Opts::new("name", ...), &[...])`."""
+    matches = list(
+        re.finditer(
+            rf"\b(\w+)::new\(\s*(?:Histogram)?Opts::new\(\s*\"{re.escape(name)}\"",
+            source,
+        )
+    )
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    kind = next((value for key, value in METRIC_TYPES.items() if key in match.group(1)), None)
+    # The help string ends at `",`; the first `), &[...]` after it is the label list.
+    labels = re.compile(r"\"\s*,?\s*\)\s*,\s*&\[([^\]]*)\]").search(source, match.end())
+    if kind is None or labels is None or "::new(" in source[match.end() : labels.start()]:
+        return None
+    return kind, re.findall(r"\"([^\"]+)\"", labels.group(1))
+
+
+def production_rust_sources(root: Path) -> dict[str, str]:
+    """Comment-stripped non-test Rust sources that can emit metric labels.
+
+    Files under `tests` paths, and files whose `mod` declaration is test-gated
+    (with their submodules), are dropped; test-gated items are stripped.
+    """
+    files = {
+        path: strip_rust_comments(path.read_text())
+        for path in sorted([*root.glob("src/**/*.rs"), *root.glob("crates/*/src/**/*.rs")])
+        if "tests" not in path.relative_to(root).parts
+        and path.stem != "tests"
+        and not path.stem.endswith("_tests")
+    }
+    gated: set[Path] = set()
+    for path, text in files.items():
+        inner = re.match(r"\s*(?:#!\[[^\]]*\]\s*)*#!\[cfg\((.*?)\)\]", text, re.DOTALL)
+        if inner and cfg_is_test_only(inner.group(1)):
+            gated.add(path)
+        directory = path.parent if path.name in {"lib.rs", "main.rs", "mod.rs"} else (
+            path.parent / path.stem
+        )
+        position = 0
+        while found := cfg_attribute(text, position):
+            predicate, item_start, position = found
+            declaration = MOD_DECLARATION_RE.match(text, item_start)
+            if declaration and cfg_is_test_only(predicate):
+                name = declaration.group(1)
+                gated.update({directory / f"{name}.rs", directory / name})
+    return {
+        str(path.relative_to(root)): strip_cfg_test_items(text)
+        for path, text in files.items()
+        if not any(path == gate or gate in path.parents for gate in gated)
+    }
+
+
+MOD_DECLARATION_RE = re.compile(
+    r"\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;"
+)
+CFG_ATTRIBUTE_RE = re.compile(r"#\[cfg\(")
+
+
+def cfg_attribute(text: str, position: int) -> tuple[str, int, int] | None:
+    """Next `#[cfg(...)]` at or after `position`: (predicate, item start, attribute start + 1)."""
+    match = CFG_ATTRIBUTE_RE.search(text, position)
+    if match is None:
+        return None
+    depth, cursor = 1, match.end()
+    while cursor < len(text) and depth:
+        depth += {"(": 1, ")": -1}.get(text[cursor], 0)
+        cursor += 1
+    close = text.find("]", cursor - 1)
+    if close < 0:
+        return None
+    return text[match.end() : cursor - 1], close + 1, match.start() + 1
+
+
+def cfg_is_test_only(predicate: str) -> bool:
+    """Whether a cfg predicate names the `test` token, other than a bare `not(test)`.
+
+    ponytail: conservative, not a cfg evaluator. `any(test, x)` or
+    `not(all(test, x))` items are also treated as test-only, so evidence they
+    hold is ignored (fails closed); only a bare `not(test)` is kept.
+    """
+    compact = re.sub(r"\s+", "", re.sub(r'"[^"]*"', '""', predicate))
+    return re.search(r"\btest\b", compact) is not None and compact != "not(test)"
+
+
+ITEM_KEYWORD_RE = re.compile(
+    r"\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const|extern)\s+)*"
+    r"(fn|mod|impl|trait|struct|enum|union)\b"
+)
+
+
+def item_extent(text: str, start: int) -> int:
+    """End of the item, statement, field or block that begins at `start`."""
+    keyword = ITEM_KEYWORD_RE.match(text, start)
+    depth, cursor = 0, start
+    while cursor < len(text):
+        char = text[cursor]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif depth == 0:
+            if char == ";" or (char == "," and keyword is None):
+                return cursor + 1
+            if char == "}":
+                return cursor
+            if char == "{":
+                braces = 1
+                cursor += 1
+                while cursor < len(text) and braces:
+                    braces += {"{": 1, "}": -1}.get(text[cursor], 0)
+                    cursor += 1
+                return cursor
+        cursor += 1
+    return cursor
+
+
+def strip_cfg_test_items(text: str) -> str:
+    """Drop every attribute-gated item whose cfg predicate is test-only."""
+    position = 0
+    while found := cfg_attribute(text, position):
+        predicate, item_start, position = found
+        if cfg_is_test_only(predicate):
+            text = text[: position - 1] + text[item_extent(text, item_start) :]
+            position -= 1
+    return text
+
+
+def call_arguments(text: str, start: int) -> list[str] | None:
+    """Top-level arguments of the call whose `(` ends just before `start`."""
+    depth, cursor, index, arguments, in_string = 0, start, start, [], False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                arguments.append(text[cursor:index].strip())
+                return [argument for argument in arguments if argument]
+            depth -= 1
+        elif char == "," and depth == 0:
+            arguments.append(text[cursor:index].strip())
+            cursor = index + 1
+        index += 1
+    return None
+
+
+def label_function_values(sources: dict[str, str], function: str) -> set[str]:
+    """String literals a label function returns from its match arms."""
+    values: set[str] = set()
+    for text in sources.values():
+        for match in re.finditer(rf"\bfn\s+{re.escape(function)}\s*\([^)]*\)[^{{]*\{{", text):
+            depth, end = 1, match.end()
+            while end < len(text) and depth:
+                depth += {"{": 1, "}": -1}.get(text[end], 0)
+                end += 1
+            body = text[match.end() : end]
+            values.update(re.findall(r"=>\s*\"([^\"]+)\"", body))
+    return values
+
+
+def emitted_label_values(
+    metric_source: str, sources: dict[str, str], name: str, label: str, defined_labels: list[str]
+) -> set[str]:
+    """Label values a production call site passes literally, or through a label function.
+
+    Only the setter's argument in that label's position counts: a literal there,
+    or the match-arm literals of the function it calls directly or binds with
+    `let`. Unrelated nearby strings are not evidence.
+    """
+    binding = re.search(
+        rf"let\s+(\w+)\s*=\s*\w+::new\(\s*(?:Histogram)?Opts::new\(\s*\"{re.escape(name)}\"",
+        metric_source,
+    )
+    if binding is None:
+        return set()
+    position = defined_labels.index(label)
+    values: set[str] = set()
+    setters: list[tuple[str, int]] = []
+    pattern = rf"\.{re.escape(binding.group(1))}\s*\.with_label_values\(\s*&\[([^\]]*)\]"
+    for use in re.finditer(pattern, metric_source):
+        elements = [element.strip() for element in use.group(1).split(",") if element.strip()]
+        if len(elements) != len(defined_labels):
+            continue
+        element = elements[position]
+        if element.startswith('"'):
+            values.add(element.strip('"'))
+            continue
+        functions = list(
+            re.finditer(r"\bfn\s+(\w+)\s*\(([^)]*)\)", metric_source[: use.start()])
+        )
+        if not functions:
+            continue
+        setter = functions[-1]
+        parameters = [
+            part.split(":", 1)[0].strip()
+            for part in setter.group(2).split(",")
+            if part.strip() and "self" not in part
+        ]
+        if element in parameters:
+            setters.append((setter.group(1), parameters.index(element)))
+    for setter, index in setters:
+        for text in sources.values():
+            for call in re.finditer(rf"\.\s*{re.escape(setter)}\s*\(", text):
+                arguments = call_arguments(text, call.end())
+                if arguments is None or len(arguments) <= index:
+                    continue
+                argument = arguments[index]
+                literal = re.fullmatch(r"\"([^\"]+)\"", argument)
+                if literal:
+                    values.add(literal.group(1))
+                    continue
+                direct = re.fullmatch(r"(\w+)\(.*\)", argument, flags=re.DOTALL)
+                bound = re.search(
+                    rf"\blet\s+{re.escape(argument)}\s*=\s*(\w+)\(", text[: call.start()]
+                ) if re.fullmatch(r"\w+", argument) else None
+                function = (direct or bound).group(1) if (direct or bound) else None
+                if function:
+                    values.update(label_function_values(sources, function))
+    return values
+
+
+def check_metrics(
+    inventory: dict, source: str | None = None, emission_sources: dict[str, str] | None = None
+) -> None:
+    section = inventory.get("metrics")
+    if not isinstance(section, dict) or set(section) != {"source", "scoped_rr_only_series"}:
+        fail("metrics must be an object with exactly 'source' and 'scoped_rr_only_series'")
+    if source is None:
+        path = ROOT / safe_relative_path(section["source"], "metric source")
+        try:
+            source = strip_rust_comments(path.read_text())
+        except OSError as error:
+            fail(f"cannot read metric source {section['source']}: {error}")
+    # Test-only literals in the metric module itself are not emission evidence.
+    source = strip_cfg_test_items(source)
+    series = section["scoped_rr_only_series"]
+    if not isinstance(series, list) or not series:
+        fail("metrics.scoped_rr_only_series must pin at least one series")
+    names = [entry.get("name") for entry in series]
+    require_sorted_unique(names, "metrics.scoped_rr_only_series")
+    for entry in series:
+        name = entry["name"]
+        label = f"metrics.scoped_rr_only_series.{name}"
+        unknown = sorted(set(entry) - {"name", "type", "labels", "label_values", "meaning"})
+        if unknown:
+            fail(f"{label} has unknown keys {unknown}")
+        if not isinstance(entry.get("meaning"), str) or not entry["meaning"].strip():
+            fail(f"{label} must state its meaning in the pinned role")
+        labels = entry.get("labels")
+        if not isinstance(labels, list):
+            fail(f"{label}.labels must list the label names")
+        require_sorted_unique(labels, f"{label}.labels")
+        found = metric_definition(source, name)
+        if found is None:
+            fail(f"pinned metric {name} disappeared or is not one labeled definition")
+        kind, defined_labels = found
+        if kind != entry.get("type"):
+            fail(f"pinned metric {name} changed type: inventory {entry.get('type')!r}, source {kind!r}")
+        if sorted(defined_labels) != labels:
+            fail(f"pinned metric {name} changed labels: inventory {labels}, source {sorted(defined_labels)}")
+        for key, values in entry.get("label_values", {}).items():
+            if key not in labels:
+                fail(f"{label}.label_values names unknown label {key!r}")
+            if not isinstance(values, list) or not values:
+                fail(f"{label}.label_values.{key} must pin at least one value")
+            require_sorted_unique(values, f"{label}.label_values.{key}")
+            if emission_sources is None:
+                emission_sources = production_rust_sources(ROOT)
+            emitted = emitted_label_values(source, emission_sources, name, key, defined_labels)
+            missing = [value for value in values if value not in emitted]
+            if missing:
+                fail(
+                    f"pinned metric {name} label {key} values {missing} have no production "
+                    "call site or label function emitting them"
+                )
 
 
 def semantic_toml_sha256(path: Path) -> str:
@@ -1714,6 +2096,7 @@ def main() -> None:
     check_policy(inventory)
     check_config(inventory, load_json(SCHEMA_PATH))
     check_grpc(inventory)
+    check_metrics(inventory)
     check_cli_checker_selftests(inventory)
     check_cli(inventory)
     check_upgrade_exercises(inventory)

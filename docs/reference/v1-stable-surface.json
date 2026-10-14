@@ -41,6 +41,22 @@
       "constraints": ["receive-reflect-query"]
     },
     {
+      "id": "route-reflector-evpn",
+      "classification": "scoped_rr_only",
+      "families": ["l2vpn_evpn"],
+      "constraints": [
+        "receive-reflect-query; EVPN route types 1 through 5 only",
+        "configuration: the l2vpn_evpn family value in the already inventoried families/required_families keys, with the inventoried route-reflector, cluster-id and GR/LLGR keys; no EVPN-specific key",
+        "RibService.ListReceivedEvpnRoutes and ListAdvertisedEvpnRoutes: only with ListPeerEvpnRoutesRequest.route_type_filter 1..=5; 0 (all types) and 6 remain outside v1",
+        "EvpnRouteEntry.prefix_sid and EvpnRouteEntry.smet remain explicitly unstable",
+        "rbgp evpn received and rbgp evpn advertised: command paths and the evpn-peer-page-v1 JSON floor, only with --route-type 1..=5",
+        "RibService.ListEvpnRoutes, base rbgp evpn and ExplainEvpnRoute remain outside v1",
+        "metrics: the series in metrics.scoped_rr_only_series; table-wide EVPN counts include any Type 6 routes",
+        "committed advertised rows prove outbound admission, not remote receipt",
+        "no local EVI, Ethernet segment, VTEP, IRB or dataplane promise"
+      ]
+    },
+    {
       "id": "flowspec-controller",
       "classification": "stable",
       "families": ["ipv4_flowspec", "ipv6_flowspec"],
@@ -61,7 +77,7 @@
       "id": "evpn",
       "classification": "alpha",
       "families": ["l2vpn_evpn"],
-      "constraints": ["rr-vtep-irb-surfaces-remain-outside-v1"]
+      "constraints": ["type-6-smet-relay-vtep-irb-multihoming-and-dataplane-surfaces-remain-outside-v1"]
     },
     {
       "id": "linux-dataplane",
@@ -192,15 +208,16 @@
       {"service": "ControlService", "methods": ["Shutdown", "GetHealth", "GetMetrics", "TriggerMrtDump"], "signature_sha256": "2b1392bf21a2783f5829a0b7838af9285c10f2a59dc90f6d58083c35c5aaa684", "message_graph_sha256": "4495cd5ccf21ddb5d3f4cd79328bf118f9b458d28c2f78e24b62b0499b09bb50"}
     ],
     "scoped_rr_only_method_sets": [
-      {"service": "RibService", "methods": ["ListBgpLsRoutes", "ListVpnRoutes", "ListLabeledRoutes", "ListRtcRoutes", "ListTopologyNodes", "ListTopologyLinks", "ListOrrStatus"], "signature_sha256": "6e4fc15d26b9de73655759d98c31cf68e25b0e5fca712e676d59c01c710fe290", "message_graph_sha256": "dbc74dcd483fdc59a925995dbbc2923e3ee6a181601e6ffcc3c42e7b34fa7d1a"}
+      {"service": "RibService", "methods": ["ListBgpLsRoutes", "ListVpnRoutes", "ListLabeledRoutes", "ListRtcRoutes", "ListTopologyNodes", "ListTopologyLinks", "ListOrrStatus"], "signature_sha256": "6e4fc15d26b9de73655759d98c31cf68e25b0e5fca712e676d59c01c710fe290", "message_graph_sha256": "dbc74dcd483fdc59a925995dbbc2923e3ee6a181601e6ffcc3c42e7b34fa7d1a"},
+      {"service": "RibService", "methods": ["ListReceivedEvpnRoutes", "ListAdvertisedEvpnRoutes"], "stable_request_values": {"ListPeerEvpnRoutesRequest.route_type_filter": [1, 2, 3, 4, 5]}, "excluded_message_fields": ["EvpnRouteEntry.prefix_sid", "EvpnRouteEntry.smet"], "signature_sha256": "d8a4bfada141389f37bc53ef680624531b92f4413ccb145dd0242ad94dd35166", "message_graph_sha256": "43ced4e22efa19d19905e8dd620cb1d2ca5c4ad5d5328d2cdfbbc548a14d99b7"}
     ],
-    "explicitly_unstable_message_fields": ["BgpEvent.bfd", "BgpEvent.dataplane", "BgpEvent.dataplane_route", "BgpEvent.evpn", "ConfigTransactionApplyResponse.update_group_impact", "ConfigTransactionPlanResponse.update_group_impact", "DeleteNeighborRequest.interface", "FlowSpecValidationStatus.*", "GetNeighborStateRequest.interface", "NeighborConfig.interface", "NeighborConfig.paths_limit_receive_max", "NeighborState.paths_limits", "NeighborState.slow_peer", "PathsLimitState.*", "PeerGroupDefinition.paths_limit_receive_max", "ReceivedFlowSpecRouteEntry.path_id", "ReceivedFlowSpecRouteEntry.pending", "ReceivedFlowSpecRouteEntry.reason", "ReceivedFlowSpecRouteEntry.validation", "UpdateGroupFamilyImpact.*", "UpdateGroupImpactPlan.*", "UpdateGroupImpactRollup.*"],
-    "explicitly_outside_v1": ["ControlService.CheckLiveness", "gnmi.gNMI", "BfdService", "RpkiService", "EvpnService", "ConfigService.GetLastSighupReload", "ConfigService.ListConfigHistory", "ConfigService.PreviewConfigRollback", "ConfigService.RollbackConfigTransaction", "ConfigService.StreamPlanConfigTransaction", "ConfigService.StreamApplyConfigTransaction", "InjectionService.AddEvpnRoute", "InjectionService.DeleteEvpnRoute", "RibService.ListBlackholeDiscards", "RibService.ListEvpnRoutes", "RibService.ListReceivedEvpnRoutes", "RibService.ListAdvertisedEvpnRoutes", "RibService.ExplainEvpnRoute", "RibService.ListFibRoutes", "RibService.ListFibTables", "RibService.SetFibTable", "RibService.DeleteFibTable", "RibService.LookupBestPath", "NeighborService.ResetNeighbor", "NeighborService.ReplayOutbound", "EventService.ListEvpnEvents", "PolicyService.ListRejectedRoutes", "PolicyService.GetValidationPolicyPosture", "PolicyService.ListConditionalAdvertisements"]
+    "explicitly_unstable_message_fields": ["BgpEvent.bfd", "BgpEvent.dataplane", "BgpEvent.dataplane_route", "BgpEvent.evpn", "ConfigTransactionApplyResponse.update_group_impact", "ConfigTransactionPlanResponse.update_group_impact", "DeleteNeighborRequest.interface", "EvpnRouteEntry.prefix_sid", "EvpnRouteEntry.smet", "FlowSpecValidationStatus.*", "GetNeighborStateRequest.interface", "NeighborConfig.interface", "NeighborConfig.paths_limit_receive_max", "NeighborState.paths_limits", "NeighborState.slow_peer", "PathsLimitState.*", "PeerGroupDefinition.paths_limit_receive_max", "ReceivedFlowSpecRouteEntry.path_id", "ReceivedFlowSpecRouteEntry.pending", "ReceivedFlowSpecRouteEntry.reason", "ReceivedFlowSpecRouteEntry.validation", "UpdateGroupFamilyImpact.*", "UpdateGroupImpactPlan.*", "UpdateGroupImpactRollup.*"],
+    "explicitly_outside_v1": ["ControlService.CheckLiveness", "gnmi.gNMI", "BfdService", "RpkiService", "EvpnService", "ConfigService.GetLastSighupReload", "ConfigService.ListConfigHistory", "ConfigService.PreviewConfigRollback", "ConfigService.RollbackConfigTransaction", "ConfigService.StreamPlanConfigTransaction", "ConfigService.StreamApplyConfigTransaction", "InjectionService.AddEvpnRoute", "InjectionService.DeleteEvpnRoute", "RibService.ListBlackholeDiscards", "RibService.ListEvpnRoutes", "RibService.ExplainEvpnRoute", "RibService.ListFibRoutes", "RibService.ListFibTables", "RibService.SetFibTable", "RibService.DeleteFibTable", "RibService.LookupBestPath", "NeighborService.ResetNeighbor", "NeighborService.ReplayOutbound", "EventService.ListEvpnEvents", "PolicyService.ListRejectedRoutes", "PolicyService.GetValidationPolicyPosture", "PolicyService.ListConditionalAdvertisements"]
   },
   "cli": {
     "stability_scope": "command_path_and_name_only",
     "stable_command_paths": ["config abort", "config apply", "config confirm", "config diff", "config effective", "config plan", "config status", "diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt", "diff snapshots", "doctor", "dynamic-neighbor", "events", "global", "gshut", "health", "metrics", "mrt-dump", "neighbor", "neighbor-set", "peer-group", "policy check", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown"],
-    "scoped_rr_only_command_paths": ["orr", "rib bgpls", "rib labeled", "rib rtc", "rib vpn", "topology links", "topology nodes"],
+    "scoped_rr_only_command_paths": ["evpn advertised", "evpn received", "orr", "rib bgpls", "rib labeled", "rib rtc", "rib vpn", "topology links", "topology nodes"],
     "versioned_json_contracts": [
       {
         "id": "rbgp-json/1.1",
@@ -289,6 +306,21 @@
     ],
     "test_pinned_json_contracts": [
       {
+        "id": "evpn-peer-page-v1",
+        "source": "crates/cli/src/commands/evpn.rs",
+        "test": "evpn_peer_page_json_matches_inventory_floor",
+        "test_linkage": "assert_evpn_peer_page_floor",
+        "evolution": "additive_fields_only_except_explicitly_experimental_fields",
+        "executable_type_floor": true,
+        "explicitly_experimental_json_fields": ["prefix_sid", "smet"],
+        "required_json_types": {"neighbor": "string", "next_page_token": "string", "page_version": ["null", "object"], "routes": "array", "total_count": "number", "view": "string"},
+        "optional_json_types": {},
+        "nested_json_contracts": [
+          {"path": "page_version", "required_json_types": {"epoch": "number", "generation": "number"}, "optional_json_types": {}},
+          {"path": "routes[]", "required_json_types": {"as_path": "array", "communities": "array", "esi": "string", "ethernet_tag": "string", "extended_communities": "array", "gateway": "string", "ip": "string", "label": "number", "label2": "number", "mac": "string", "next_hop": "string", "peer": "string", "prefix": "string", "rd": "string", "route_type": "number", "route_type_name": "string", "tunnel_type": "number"}, "optional_json_types": {}}
+        ]
+      },
+      {
         "id": "neighbor-detail-v1",
         "source": "crates/cli/src/output.rs",
         "test": "test_json_neighbor_detail_serializes_dynamic_peer_fields",
@@ -335,6 +367,20 @@
           {"path": "checks[]", "required_json_types": {"detail": "string", "name": "string", "status": "string"}, "optional_json_types": {}}
         ]
       }
+    ]
+  },
+  "metrics": {
+    "source": "crates/telemetry/src/metrics.rs",
+    "scoped_rr_only_series": [
+      {"name": "bgp_as_path_loop_detected_total", "type": "counter", "labels": ["peer"], "meaning": "Announced NLRI of any family, EVPN included, rejected by AS_PATH loop detection; not EVPN-specific."},
+      {"name": "bgp_evpn_nlri_discarded_by_type_total", "type": "counter", "labels": ["peer", "route_type"], "meaning": "Unrecognized or unsupported EVPN NLRI discarded while the session survives, by decimal wire route type; includes types outside 1 through 5."},
+      {"name": "bgp_evpn_nlri_discarded_total", "type": "counter", "labels": ["peer"], "meaning": "Unrecognized or unsupported EVPN NLRI discarded while the session survives; malformed supported types are handled separately."},
+      {"name": "bgp_gr_stale_routes", "type": "gauge", "labels": ["peer"], "meaning": "Routes a peer currently holds GR- or LLGR-stale, summed across families with EVPN included; maintained per family, it falls as the peer re-advertises or withdraws them and as sweeps purge them. No per-route EVPN stale query exists."},
+      {"name": "bgp_rib_adj_out_prefixes", "type": "gauge", "labels": ["afi_safi", "peer"], "label_values": {"afi_safi": ["evpn"]}, "meaning": "Committed EVPN Adj-RIB-Out entries for a destination peer; the whole EVPN table, not remote receipt."},
+      {"name": "bgp_rib_loc_prefixes", "type": "gauge", "labels": ["afi_safi"], "label_values": {"afi_safi": ["evpn"]}, "meaning": "Selected EVPN Loc-RIB entries; the whole EVPN table."},
+      {"name": "bgp_rib_prefixes", "type": "gauge", "labels": ["afi_safi", "peer"], "label_values": {"afi_safi": ["evpn"]}, "meaning": "Retained EVPN Adj-RIB-In paths from a source peer; the whole EVPN table."},
+      {"name": "bgp_route_refresh_stale_entries", "type": "gauge", "labels": ["afi_safi", "peer"], "label_values": {"afi_safi": ["l2vpn_evpn"]}, "meaning": "EVPN routes awaiting replacement during an inbound Enhanced Route Refresh window; not a GR stale flag."},
+      {"name": "bgp_rr_loop_detected_total", "type": "counter", "labels": ["peer"], "meaning": "Updates rejected by route-reflector ORIGINATOR_ID or CLUSTER_LIST loop detection; not EVPN-specific."}
     ]
   },
   "compatibility": {

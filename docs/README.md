@@ -99,6 +99,7 @@ Understand the design and choose a deployment role.
 | [Implementation comparison](explanation/comparison.md) | Capability and scope comparisons with other BGP daemons. |
 | [GoBGP parity](explanation/gobgp-parity.md) | Detailed capability comparison against the pinned release. |
 | [IXP evaluation](explanation/ixp-evaluation.md) | Assess route-server fit using configuration and evidence. |
+| [EVPN reflector inventory proposal](explanation/evpn-rr-inventory-proposal.md) | Historical: how the scoped EVPN route-reflector v1 boundary was chosen. |
 
 ## Evidence
 

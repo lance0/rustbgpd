@@ -92,8 +92,9 @@ IPv4/IPv6 `Prefix` routes.
     and from the manual's BGP channel AFI/SAFI table, and the manual does not
     cite RFC 4684. This claim is limited to that release.
 
-[^evpn]: rustbgpd EVPN is **alpha**; its local VTEP and dataplane support are
-    Linux/VXLAN-only. Shipped and
+[^evpn]: rustbgpd EVPN is **alpha** apart from Types 1–5 route reflection, a
+    [scoped RR-only v1 role](../reference/v1-stable-contract.md#evpn-route-reflector-boundary);
+    its local VTEP and dataplane support are Linux/VXLAN-only. Shipped and
     FRR-interop-tested: the Route Reflector role (Types 1-5 reflection);
     a bidirectional single-homed VTEP (Type 2 local-MAC / MAC+IP
     origination from kernel FDB / neighbor events, Type 3 IMET per

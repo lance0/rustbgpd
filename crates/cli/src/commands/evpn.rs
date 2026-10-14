@@ -2327,6 +2327,111 @@ mod tests {
         );
     }
 
+    fn assert_evpn_peer_page_floor(value: &serde_json::Value, shape: &serde_json::Value) {
+        let json_type = |value: &serde_json::Value| match value {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        };
+        let object = value.as_object().expect("pinned EVPN JSON is an object");
+        for (required, floor) in [
+            (true, &shape["required_json_types"]),
+            (false, &shape["optional_json_types"]),
+        ] {
+            for (key, expected) in floor.as_object().unwrap() {
+                let Some(field) = object.get(key) else {
+                    assert!(
+                        !required,
+                        "required evpn-peer-page-v1 field {key:?} is absent"
+                    );
+                    continue;
+                };
+                let allowed: Vec<&str> = match expected {
+                    serde_json::Value::String(kind) => vec![kind.as_str()],
+                    serde_json::Value::Array(kinds) => {
+                        kinds.iter().map(|kind| kind.as_str().unwrap()).collect()
+                    }
+                    _ => panic!("invalid evpn-peer-page-v1 type floor for {key:?}"),
+                };
+                assert!(
+                    allowed.contains(&json_type(field)),
+                    "evpn-peer-page-v1 field {key:?} changed JSON type: expected {allowed:?}, got {}",
+                    json_type(field)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn evpn_peer_page_json_matches_inventory_floor() {
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/reference/v1-stable-surface.json"
+        ))
+        .unwrap();
+        let contract = inventory["cli"]["test_pinned_json_contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["id"] == "evpn-peer-page-v1")
+            .expect("evpn-peer-page-v1 is inventoried");
+        let experimental = contract["explicitly_experimental_json_fields"]
+            .as_array()
+            .unwrap();
+        // The scoped RR role covers type-filtered Type 1-5 pages only.
+        let routes: Vec<_> = (1..=5)
+            .map(|route_type| crate::proto::EvpnRouteEntry {
+                route_type,
+                rd: "65000:100".into(),
+                next_hop: "192.0.2.1".into(),
+                peer_address: "192.0.2.2".into(),
+                ..Default::default()
+            })
+            .collect();
+        for (received, page_version) in [
+            (
+                true,
+                Some(crate::proto::RoutePageVersion {
+                    epoch: 1,
+                    generation: 2,
+                }),
+            ),
+            (false, None),
+        ] {
+            let page = crate::proto::ListPeerEvpnRoutesResponse {
+                routes: routes.clone(),
+                next_page_token: String::new(),
+                total_count: 5,
+                page_version,
+            };
+            let value = super::peer_page_to_json(&page, "192.0.2.2", received);
+            assert_evpn_peer_page_floor(&value, contract);
+            for nested in contract["nested_json_contracts"].as_array().unwrap() {
+                match nested["path"].as_str().unwrap() {
+                    "page_version" => {
+                        if !value["page_version"].is_null() {
+                            assert_evpn_peer_page_floor(&value["page_version"], nested);
+                        }
+                    }
+                    "routes[]" => {
+                        let rows = value["routes"].as_array().unwrap();
+                        assert_eq!(rows.len(), 5);
+                        for row in rows {
+                            assert_evpn_peer_page_floor(row, nested);
+                            assert_ne!(row["route_type_name"], "unknown");
+                            for field in experimental {
+                                assert!(row.get(field.as_str().unwrap()).is_none());
+                            }
+                        }
+                    }
+                    path => panic!("unhandled evpn-peer-page-v1 nested path {path}"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn evpn_runtime_json_projection_covers_all_fields() {
         // Exhaustive fixtures fence new API fields; full expected documents

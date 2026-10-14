@@ -1,5 +1,10 @@
 # Propose a scoped EVPN route-reflector inventory
 
+> **Document class: HISTORICAL.** This 2026-10-12 proposal prepared the scoped
+> EVPN reflector inventory. The applied boundary is the
+> [EVPN route-reflector boundary](../reference/v1-stable-contract.md#evpn-route-reflector-boundary);
+> where the two differ, the contract governs.
+
 > **Proposal, not a compatibility contract.** EVPN, including RR-only use, is
 > [currently alpha](../reference/v1-stable-contract.md#role-matrix). The
 > [stable-surface inventory](../reference/v1-stable-surface.json) and its

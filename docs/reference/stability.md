@@ -25,9 +25,14 @@ member.
 
 In particular:
 
-- EVPN, including route-reflector use, Type 6 SMET relay, and
-  [interface-less IRB on bundle members](../how-to/evpn-vtep-setup.md#vlan-aware-bundle-members),
-  remains alpha.
+- EVPN route reflection of Types 1–5 is the scoped RR-only
+  `route-reflector-evpn` role: the `l2vpn_evpn` family, the type-filtered
+  received/advertised peer views and their CLI JSON page, and named metrics,
+  within the [EVPN reflector boundary](v1-stable-contract.md#evpn-route-reflector-boundary).
+  The unpaged `ListEvpnRoutes` query and base `rbgp evpn` command, EVPN explain
+  and events, Type 6 SMET relay, VTEP, IRB (including
+  [interface-less IRB on bundle members](../how-to/evpn-vtep-setup.md#vlan-aware-bundle-members)),
+  multi-homing, and every Linux dataplane behavior remain alpha.
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.

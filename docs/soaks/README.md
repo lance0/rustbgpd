@@ -17,6 +17,7 @@ the run they describe.
 
 | Document | Scope |
 |----------|--------------|
+| [EVPN route-reflector 24-hour soak, 2026-10-12 (PASS)](soak-evpn-rr-24h-2026-10-12.md) | Run on the v0.77.0 tag; 150 clients × 37,250 reflected Type 2/5 routes each; all 1440 epochs converge exactly through 288 client flaps and 48 reloads; every gate passes on the on-host verdict; flat 2.15 GB hold RSS |
 | [Gate 8b 24-hour BUM-state soak](soak-gate8b-24h-bum-state.md) | BUM-state validation across repeated DF role flips |
 | [Gate 8b MAC-churn 10-hour soak](soak-gate8b-mac-churn-10h-leak.md) | Attribute-intern behavior under MAC mobility and DF flips |
 | [Gate 8b MAC-churn 1-hour soak](soak-gate8b-mac-churn-1h.md) | Dry run for the longer MAC-churn gate |

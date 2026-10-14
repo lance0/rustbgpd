@@ -73,7 +73,10 @@ out of alpha.
 
 ## EVPN
 
-EVPN remains alpha. Its local VTEP and dataplane support are Linux/VXLAN-only.
+EVPN Types 1–5 route reflection is a
+[scoped RR-only v1 role](v1-stable-contract.md#evpn-route-reflector-boundary);
+the rest of EVPN remains alpha. Its local VTEP and dataplane support are
+Linux/VXLAN-only.
 The reflector implements scoped
 [SRv6 service framing](path-attribute-registry.md#srv6-service-framing-within-prefix-sid)
 and [eligibility](path-attribute-registry.md#srv6-service-eligibility) checks,

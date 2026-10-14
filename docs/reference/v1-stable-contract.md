@@ -12,7 +12,8 @@ The machine-readable source of truth is
 [`v1-stable-surface.json`](v1-stable-surface.json). CI checks its config fields
 against the generated JSON Schema, its RPC and top-level request/response
 signatures against the protobuf, its RPC membership against the authorization
-inventory, its CLI paths against the Clap tree, and its consecutive-release
+inventory, its CLI paths against the Clap tree, its pinned metric names,
+types and labels against the metric definitions, and its consecutive-release
 upgrade receipt. A surface absent from that file is outside the v1 promise.
 Its `rustbgpd-rs-rr-v1` contract ID is a stable identifier; the inventoried roles
 and exclusions define its scope.
@@ -36,8 +37,9 @@ for affected operators and needs migration guidance.
 | **Scoped RR-only** | `route-reflector-l3vpn` — VPNv4/VPNv6 | Route reflection and controller-feed use only. No PE VRF import, CE attachment, MPLS forwarding, or dataplane programming promise. |
 | **Scoped RR-only** | `route-reflector-labeled-unicast` — IPv4/IPv6 labeled-unicast | Receive, reflect, and query. Labels are not installed in a forwarding plane. |
 | **Scoped RR-only** | `route-reflector-rtc` — RT-Constrain | Receive, reflect, query, and VPN export membership within the RR boundary. |
+| **Scoped RR-only** | `route-reflector-evpn` — EVPN Types 1–5 | Receive, reflect, and query through the [type-filtered peer views](#evpn-route-reflector-boundary). No local EVI, Ethernet segment, VTEP, IRB, or dataplane promise. |
 | **Stable** | `flowspec-controller` — IPv4/IPv6 FlowSpec controller backend | Local origination, retained local-intent reconciliation, selected routes, and committed post-export-policy advertised views through the three inventoried RPCs. Receive-side validation and dataplane enforcement remain outside this role. |
-| **Alpha** | `evpn` — EVPN RR, VTEP, IRB, multi-homing | Functional and interop-tested slices exist, but EVPN remains outside this v1 compatibility promise, including RR-only EVPN. |
+| **Alpha** | `evpn` — EVPN Type 6 SMET relay, VTEP, IRB, multi-homing | Functional and interop-tested slices exist, but everything outside the `route-reflector-evpn` boundary remains outside this v1 compatibility promise, including all Linux dataplane behavior. |
 | **Alpha** | `linux-dataplane` — Linux FIB and managed netdev roles | Opt-in and tested, but not part of the control-plane RS/RR v1 contract. |
 | **Experimental** | `paths-limit` — Paths-Limit | Draft capability; semantics and wire assignments are not stable. |
 
@@ -126,6 +128,64 @@ The existing consecutive-release configuration fixture chain remains the
 upgrade check; it is not a FlowSpec RPC qualification receipt. Release
 preparation advances that chain normally.
 
+### EVPN route-reflector boundary
+
+The `route-reflector-evpn` role covers an iBGP route reflector that receives,
+reflects and queries EVPN Types 1–5. It uses the same scoped RR-only
+classification as the other reflected families: the surfaces below follow the
+compatibility rules, and no local EVPN service is implied. Relaying Type 1 and
+Type 4 routes does not stabilize local Ethernet segment or multi-homing
+behavior.
+
+| Surface | Included | Still outside v1 |
+|---|---|---|
+| Configuration | The `l2vpn_evpn` value in the already inventoried `families` and `required_families` keys of a neighbor or peer group, with the inventoried `route_reflector_client`, `cluster_id`, and GR/LLGR keys. No EVPN-specific key is added. | `Config.evpn_instances`, `Config.evpn_ip_vrfs`, `Config.ethernet_segments`, `Config.evpn_core_isolation`, `Config.managed_netdevs`, and every dataplane key. |
+| `RibService.ListReceivedEvpnRoutes`, `RibService.ListAdvertisedEvpnRoutes` | Calls with `route_type_filter` 1–5: accepted post-policy Adj-RIB-In from a source peer, or committed Adj-RIB-Out toward a destination peer, with `rd_filter`, `page_size` (default 100, maximum 1000) and process-local `page_token` continuation. An advertised row's `peer_address` remains its source peer. | `route_type_filter` 0 (all types) or 6. A committed row proves outbound admission, not remote receipt. |
+| `EvpnRouteEntry` | Fields 1–16, `route_type` through `tunnel_type`. Labels, gateway and tunnel type are route data for query and reflection, not a programming promise. | Field 17 `prefix_sid` (SRv6 inspection) and field 18 `smet` (Type 6), both explicitly unstable. |
+| CLI | Command paths `rbgp evpn received PEER` and `rbgp evpn advertised PEER` used with `--route-type` 1–5, and the `evpn-peer-page-v1` key/type floor of their `--json` page: `view`, `neighbor`, `routes`, `next_page_token`, `total_count`, `page_version` (`epoch`, `generation`), and each row's 17 route keys. | Other flags, human-readable output, unfiltered or Type 6 output, the conditional `prefix_sid` and `smet` row keys, base `rbgp evpn`, `rbgp evpn explain`, and injection, runtime, instance, segment and dataplane commands. |
+| Metrics | Names, types and label sets of the nine series in the inventory's `metrics.scoped_rr_only_series`, including `afi_safi="evpn"` on `bgp_rib_prefixes`, `bgp_rib_loc_prefixes` and `bgp_rib_adj_out_prefixes`, and `afi_safi="l2vpn_evpn"` on `bgp_route_refresh_stale_entries`. | The EVPN table gauges count the whole table, including any Type 6 routes. `bgp_gr_stale_routes` sums the routes a peer currently holds GR- or LLGR-stale across all families; it falls as routes are re-advertised, withdrawn or swept, and no per-route EVPN stale query exists. VTEP `evpn_*` series stay alpha. |
+
+The selected Loc-RIB view is deferred. `RibService.ListEvpnRoutes` and base
+`rbgp evpn` are not paginated: they scan the EVPN table and clone every
+matching row, and a route-type filter bounds neither. They stay outside v1
+until an explicit cost decision or a bounded replacement.
+`RibService.ExplainEvpnRoute` references a Type 6 selector and an optional
+SRv6 Argument companion, and EVPN events (`EventService.ListEvpnEvents` and
+the `BgpEvent.evpn` payload) remain alpha.
+
+The checker computes this method set's message-graph digest after removing
+the two excluded `EvpnRouteEntry` fields, so a change to fields 1–16, the
+request, the page or `RoutePageVersion` fails it, while a change confined to
+`prefix_sid` or `smet` does not. Such a change still trips the stable event
+graph's review tripwire, which reaches `EvpnRouteEntry` through the alpha
+`BgpEvent.evpn` payload; that does not promote the event. The set's
+`stable_request_values` records the 1–5 call profile and rejects any method
+that takes a different request message. A digest cannot verify a value
+restriction: the daemon still answers type 0 and 6 calls, as alpha behavior.
+`evpn_peer_page_json_matches_inventory_floor` executes the CLI floor. The
+metric floor is checked against the metric definitions, and each pinned label
+value must be passed by a production call site of that metric's setter, either
+as a literal or through a label function's match arm.
+
+Evidence is functional, on small topologies:
+[M122](../artifacts/interop/m122-evpn-rr-gr-20261012/README.md) retains,
+sweeps, marks and expires Types 1–5 through graceful restart and LLGR against
+GoBGP 4.10.0; the [EVPN fabric RR recipe](../cookbook/evpn-fabric-rr.md) lists
+the FRR, GoBGP and SR Linux 25.10.1 reflection legs; and the
+[fanout baseline](../perf/evpn-fanout-2026-09-05.md) covers 8–480 receivers of
+a synthetic Type 2 workload; and the
+[24 h soak](../soaks/soak-evpn-rr-24h-2026-10-12.md) on the v0.77.0 tag holds
+150 clients at an exact 37,250 reflected Type 2/5 routes each through 1440
+churn epochs, 288 client flaps and 48 reloads. None of these is a scale,
+convergence-time or forwarding guarantee. Memory scales with receivers ×
+reflected routes, because each receiver keeps its own EVPN Adj-RIB-Out; the
+soak receipt records the per-route envelope at its shape.
+
+This promotion changes no configuration shape, default, RPC behavior or CLI
+output. Clients that use unfiltered or Type 6 peer-view calls, base
+`rbgp evpn`, or EVPN events keep alpha behavior; to stay inside the role,
+query each of Types 1–5 separately.
+
 ## Stable surfaces
 
 The inventory pins individual config fields rather than whole structs. This is
@@ -175,7 +235,11 @@ experimental fields such as Paths-Limit are explicitly excluded in the
 inventory and may evolve under their experimental contract after review. The
 new update-group impact projection and alpha EVPN/BFD/dataplane event payloads
 are excluded the same way even though they are reachable through otherwise
-stable transaction or event envelopes.
+stable transaction or event envelopes. A method set may also name
+`excluded_message_fields`; those explicitly unstable fields are removed before
+its own digest is computed, as the
+[EVPN reflector boundary](#evpn-route-reflector-boundary) does for Type 6 and
+SRv6 inspection fields.
 
 The stable CLI set is also explicit. For an inventoried command, the v1 promise
 covers only its command path and command name. Flags, positional arguments,
@@ -204,13 +268,17 @@ it. Every pinned ribsnap golden is also linked to the exact BIRD, FRR, GoBGP,
 MRT, or BMP producer test that creates it; the executable floor checks every
 record in those real goldens and then passes each complete artifact through the
 fail-closed parser. The neighbor-detail JSON, neighbor update-group comparison
-JSON, and support-bundle manifest v2 pin required and optional key/type floors, including promised nested object shapes,
+JSON, support-bundle manifest v2, and the scoped EVPN peer-page JSON pin
+required and optional key/type floors, including promised nested object shapes,
 in their serializer contract tests while allowing additive fields.
 
 Prometheus metrics and structured event payloads used by the stable roles are
 covered by semantic rules rather than a promise that no new metric, event kind,
 or optional field will appear. Consumers must ignore unknown additive fields
-and series.
+and series. The `route-reflector-evpn` role additionally enumerates its
+series under `metrics.scoped_rr_only_series`, whose names, types and label sets
+the checker compares with the metric definitions, and whose pinned label values
+it requires at a production emission site.
 
 ## Compatibility rules
 
@@ -255,7 +323,8 @@ Two deprecation floors apply, each to a different set of surfaces:
   ([ADR-0125](../adr/0125-v1-stability-contract.md) DR7). DR7 supersedes the
   earlier two-minor / 90-day window for inventoried surfaces; there is no
   two-minor removal window for inventoried contracts.
-- **Uninventoried and alpha surfaces** (EVPN, the Linux dataplane, and RPCs,
+- **Uninventoried and alpha surfaces** (EVPN outside the
+  `route-reflector-evpn` boundary, the Linux dataplane, and RPCs,
   fields, configuration keys, and CLI commands absent from the inventory): a
   deprecated item remains functional for at least two minor releases and 90
   days, during both 0.x and 1.x. The inventory's
@@ -426,6 +495,7 @@ Run:
 ```bash
 python3 scripts/check-v1-stable-surface.py
 cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
+cargo test -p rustbgpctl evpn_peer_page_json_matches_inventory_floor
 cargo test -p rustbgpd --bin rustbgpd v1_stable_archived_fixtures_parse
 cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
 cargo test -p rustbgpd --bin rustbgpd config::tests::rfc8212::
