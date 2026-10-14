@@ -24,7 +24,7 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def scope(self) -> Path:
         path = self.root / "scope"
-        path.mkdir()
+        path.mkdir(exist_ok=True)
         for name, value in {
             "memory.current": "123",
             "memory.peak": "456",
@@ -115,6 +115,17 @@ class RecoveryReceiptTests(unittest.TestCase):
             )
         return rows
 
+    def completion(self, row: dict, cell: str) -> dict:
+        return {
+            "cell": cell,
+            "profile": row["profile"],
+            "expected_families_per_receiver": {
+                name: 0 if cell == "peer-down" else row["seed"][name] + row["additions"][name]
+                for name in receipt.FAMILIES
+            },
+            "actual_receivers": row["clients"],
+        }
+
     def log(
         self,
         rows: list[dict],
@@ -139,22 +150,7 @@ class RecoveryReceiptTests(unittest.TestCase):
         lines = ["recovery_identity " + json.dumps(identity)]
         lines += ["recovery_sample " + json.dumps(row) for row in rows]
         if complete:
-            row = rows[-1]
-            expected = {
-                name: 0 if cell == "peer-down" else row["seed"][name] + row["additions"][name]
-                for name in receipt.FAMILIES
-            }
-            lines.append(
-                "recovery_complete "
-                + json.dumps(
-                    {
-                        "cell": cell,
-                        "profile": row["profile"],
-                        "expected_families_per_receiver": expected,
-                        "actual_receivers": row["clients"],
-                    }
-                )
-            )
+            lines.append("recovery_complete " + json.dumps(self.completion(rows[-1], cell)))
         path = self.root / "harness.log"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
@@ -452,8 +448,8 @@ class RecoveryReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(receipt.InvalidReceipt, "high-water"):
             receipt.check_peak_coverage({"memory.peak": 1000}, [], {"memory.peak": 456})
 
-    def campaign(self) -> Path:
-        root = self.root / "campaign"
+    def campaign(self, profile: str = "ipv4-100k") -> Path:
+        root = self.root / f"campaign-{profile}"
         root.mkdir()
         entries = []
         for name in receipt.INSTRUMENT_INPUTS:
@@ -471,8 +467,8 @@ class RecoveryReceiptTests(unittest.TestCase):
             "candidate": "a" * 40,
             "instrumentation_manifest_sha256": instrumentation,
             "phase": "qualified",
-            "profiles": ["ipv4-100k"],
-            "cases": receipt.campaign_cases("qualified", ["ipv4-100k"]),
+            "profiles": [profile],
+            "cases": receipt.campaign_cases("qualified", [profile]),
             "build_jobs": 4,
             "comparators": ["baseline", "intermediate"],
             "order_per_cell": ["control", "candidate", "candidate", "control"],
@@ -580,26 +576,14 @@ class RecoveryReceiptTests(unittest.TestCase):
                 "\n".join(map(json.dumps, ownership)) + "\n", encoding="utf-8"
             )
             rows = self.samples(role, cell, profile, clients)
+            if role == "intermediate" and profile in ("full-uc", "full-vpn", "mixed-widen"):
+                for row in rows[1:]:
+                    row["fallback_causes"]["peer_limit"] = clients
+                    row["metrics"]["bgp_update_group_recovery_fallback_total"] = clients
+                    row["metrics"][receipt.GAUGES[0]] = 0
             lines = ["recovery_identity " + json.dumps(identity)]
             lines.extend("recovery_sample " + json.dumps(row) for row in rows)
-            lines.append(
-                "recovery_complete "
-                + json.dumps(
-                    {
-                        "cell": cell,
-                        "profile": profile,
-                        "actual_receivers": clients,
-                        "expected_families_per_receiver": dict(
-                            zip(
-                                receipt.FAMILIES,
-                                (0, 0, 0, 0)
-                                if cell == "peer-down"
-                                else receipt.PROFILES[profile][0],
-                            )
-                        ),
-                    }
-                )
-            )
+            lines.append("recovery_complete " + json.dumps(self.completion(rows[-1], cell)))
             (directory / "harness.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
             for phase in ("before", "after"):
                 shutil.copytree(raw_scope, directory / phase)
@@ -610,6 +594,17 @@ class RecoveryReceiptTests(unittest.TestCase):
         receipt.summarize(root)
         result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
         self.assertEqual(len(result["rows"]), 16)
+
+    def test_full_widening_campaigns_include_the_terminal_additions(self) -> None:
+        for profile in ("full-vpn", "mixed-widen"):
+            with self.subTest(profile=profile):
+                root = self.campaign(profile)
+                receipt.summarize(root)
+                result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
+                widened = [row for row in result["rows"] if row["cell"] == "widen"]
+                self.assertEqual(len(widened), 8)
+                self.assertTrue(all(row["strict_validation"]["passed"] for row in widened))
+                self.assertEqual(result["candidate_failures"], [])
 
     def test_historical_failure_is_retained_without_a_comparison_claim(self) -> None:
         root = self.campaign()
