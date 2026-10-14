@@ -551,6 +551,14 @@ fn parse_vpn_family(family: Option<&str>) -> Result<String, CliError> {
     }
 }
 
+pub(crate) fn parse_vpn_rib_family(family: Option<&str>) -> Result<i32, CliError> {
+    Ok(match parse_vpn_family(family)?.as_str() {
+        "l3vpn_ipv4_unicast" => AddressFamily::L3vpnIpv4Unicast as i32,
+        "l3vpn_ipv6_unicast" => AddressFamily::L3vpnIpv6Unicast as i32,
+        _ => AddressFamily::Unspecified as i32,
+    })
+}
+
 fn make_vpn_request(
     family: Option<&str>,
     peer: Option<String>,
@@ -579,6 +587,14 @@ fn parse_labeled_family(family: Option<&str>) -> Result<String, CliError> {
              (alias: labeled-v4) or ipv6_labeled_unicast (alias: labeled-v6)"
         ))),
     }
+}
+
+pub(crate) fn parse_labeled_rib_family(family: Option<&str>) -> Result<i32, CliError> {
+    Ok(match parse_labeled_family(family)?.as_str() {
+        "ipv4_labeled_unicast" => AddressFamily::Ipv4LabeledUnicast as i32,
+        "ipv6_labeled_unicast" => AddressFamily::Ipv6LabeledUnicast as i32,
+        _ => AddressFamily::Unspecified as i32,
+    })
 }
 
 fn make_labeled_request(
@@ -2156,6 +2172,160 @@ pub async fn bgpls(
     print_bgpls_routes(&resp.routes, json)
 }
 
+fn family_page_json<T: serde::Serialize>(
+    rows: T,
+    view: i32,
+    peer: Option<&str>,
+    total: u64,
+    next: &str,
+    version: Option<&crate::proto::RoutePageVersion>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "view": match crate::proto::FamilyRouteView::try_from(view) {
+            Ok(crate::proto::FamilyRouteView::Received) => "received",
+            Ok(crate::proto::FamilyRouteView::Advertised) => "advertised",
+            _ => "best",
+        },
+        "neighbor": peer,
+        "routes": rows,
+        "total_count": total,
+        "next_page_token": next,
+        "page_version": version.map(|v| serde_json::json!({ "epoch": v.epoch, "generation": v.generation })),
+    })
+}
+
+fn print_family_page_footer(total: u64, next: &str) -> Result<(), CliError> {
+    outln!("Total matching rows: {total}")?;
+    if !next.is_empty() {
+        outln!("Next page token: {next}")?;
+    }
+    Ok(())
+}
+
+fn family_page_peer(
+    view: i32,
+    neighbor_address: &mut String,
+    source_peer_filter: &mut String,
+) -> Result<Option<String>, CliError> {
+    let peer = if view == crate::proto::FamilyRouteView::Best as i32 {
+        &*source_peer_filter
+    } else {
+        &*neighbor_address
+    };
+    let peer = (!peer.is_empty()).then(|| peer.clone());
+    if let Some(peer) = &peer {
+        crate::commands::evpn::validate_peer_view(peer, None)?;
+    }
+    *neighbor_address = bare_ip_rpc_address(neighbor_address).to_string();
+    *source_peer_filter = bare_ip_rpc_address(source_peer_filter).to_string();
+    Ok(peer)
+}
+
+pub async fn vpn_page(
+    connection: Connection,
+    mut request: crate::proto::ListVpnRibRoutesRequest,
+    json: bool,
+) -> Result<(), CliError> {
+    let view = request.view;
+    let peer = family_page_peer(
+        view,
+        &mut request.neighbor_address,
+        &mut request.source_peer_filter,
+    )?;
+    let mut client = connection.rib_listing_client();
+    let mut response = read_rpc("ListVpnRibRoutes", client.list_vpn_rib_routes(request))
+        .await?
+        .into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
+    if json {
+        output::print_json_pretty(&family_page_json(
+            JsonVpnRoutes(&response.routes),
+            view,
+            peer.as_deref(),
+            response.total_count,
+            &response.next_page_token,
+            response.page_version.as_ref(),
+        ))?;
+    } else {
+        print_vpn_routes(&response.routes, false)?;
+        print_family_page_footer(response.total_count, &response.next_page_token)?;
+    }
+    Ok(())
+}
+
+pub async fn labeled_page(
+    connection: Connection,
+    mut request: crate::proto::ListLabeledRibRoutesRequest,
+    json: bool,
+) -> Result<(), CliError> {
+    let view = request.view;
+    let peer = family_page_peer(
+        view,
+        &mut request.neighbor_address,
+        &mut request.source_peer_filter,
+    )?;
+    let mut client = connection.rib_listing_client();
+    let mut response = read_rpc(
+        "ListLabeledRibRoutes",
+        client.list_labeled_rib_routes(request),
+    )
+    .await?
+    .into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
+    if json {
+        output::print_json_pretty(&family_page_json(
+            JsonLabeledRoutes(&response.routes),
+            view,
+            peer.as_deref(),
+            response.total_count,
+            &response.next_page_token,
+            response.page_version.as_ref(),
+        ))?;
+    } else {
+        print_labeled_routes(&response.routes, false)?;
+        print_family_page_footer(response.total_count, &response.next_page_token)?;
+    }
+    Ok(())
+}
+
+pub async fn rtc_page(
+    connection: Connection,
+    mut request: crate::proto::ListRtcRibRoutesRequest,
+    json: bool,
+) -> Result<(), CliError> {
+    let view = request.view;
+    let peer = family_page_peer(
+        view,
+        &mut request.neighbor_address,
+        &mut request.source_peer_filter,
+    )?;
+    let mut client = connection.rib_listing_client();
+    let mut response = read_rpc("ListRtcRibRoutes", client.list_rtc_rib_routes(request))
+        .await?
+        .into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
+    if json {
+        output::print_json_pretty(&family_page_json(
+            JsonRtcRoutes(&response.routes),
+            view,
+            peer.as_deref(),
+            response.total_count,
+            &response.next_page_token,
+            response.page_version.as_ref(),
+        ))?;
+    } else {
+        print_rtc_routes(&response.routes, false)?;
+        print_family_page_footer(response.total_count, &response.next_page_token)?;
+    }
+    Ok(())
+}
+
 pub async fn vpn(
     connection: Connection,
     family: Option<&str>,
@@ -2576,6 +2746,105 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use prost::Message;
+
+    #[tokio::test]
+    async fn family_page_adapters_preserve_invalid_views_and_mixed_selectors() {
+        let server = spawn_mock_server(None).await;
+        *server.state.family_page_error.lock().await = Some((
+            tonic::Code::InvalidArgument,
+            "invalid view or selectors".into(),
+        ));
+        for view in [
+            crate::proto::FamilyRouteView::Unspecified as i32,
+            99,
+            crate::proto::FamilyRouteView::Best as i32,
+            crate::proto::FamilyRouteView::Received as i32,
+            crate::proto::FamilyRouteView::Advertised as i32,
+        ] {
+            let vpn = crate::proto::ListVpnRibRoutesRequest {
+                view,
+                neighbor_address: "192.0.2.1".into(),
+                source_peer_filter: "192.0.2.2".into(),
+                ..Default::default()
+            };
+            let result = vpn_page(
+                connect(&server.addr, None).await.unwrap(),
+                vpn.clone(),
+                true,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.starts_with("invalid argument:"))
+            );
+            assert_eq!(
+                server
+                    .state
+                    .last_list_vpn_page
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .encode_to_vec(),
+                vpn.encode_to_vec()
+            );
+            let labeled = crate::proto::ListLabeledRibRoutesRequest {
+                view,
+                neighbor_address: "192.0.2.1".into(),
+                source_peer_filter: "192.0.2.2".into(),
+                ..Default::default()
+            };
+            let result = labeled_page(
+                connect(&server.addr, None).await.unwrap(),
+                labeled.clone(),
+                true,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.starts_with("invalid argument:"))
+            );
+            assert_eq!(
+                server
+                    .state
+                    .last_list_labeled_page
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .encode_to_vec(),
+                labeled.encode_to_vec()
+            );
+            let rtc = crate::proto::ListRtcRibRoutesRequest {
+                view,
+                neighbor_address: "192.0.2.1".into(),
+                source_peer_filter: "192.0.2.2".into(),
+                afi_safi: AddressFamily::Ipv4RtConstrain as i32,
+                ..Default::default()
+            };
+            let result = rtc_page(
+                connect(&server.addr, None).await.unwrap(),
+                rtc.clone(),
+                true,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CliError::Rpc(ref message)) if message.starts_with("invalid argument:"))
+            );
+            assert_eq!(
+                server
+                    .state
+                    .last_list_rtc_page
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .encode_to_vec(),
+                rtc.encode_to_vec()
+            );
+        }
+        assert!(server.state.last_list_vpn.lock().await.is_none());
+        assert!(server.state.last_list_labeled.lock().await.is_none());
+        assert!(server.state.last_list_rtc.lock().await.is_none());
+    }
 
     fn json_lines_records(bytes: &[u8]) -> Vec<serde_json::Value> {
         std::str::from_utf8(bytes)
@@ -3463,6 +3732,11 @@ mod tests {
             "ipv4_labeled_unicast"
         );
         assert!(parse_labeled_family(Some("vpnv4")).is_err());
+        assert_eq!(
+            parse_labeled_rib_family(None).unwrap(),
+            AddressFamily::Unspecified as i32
+        );
+        assert!(parse_labeled_rib_family(Some("vpnv4")).is_err());
     }
 
     #[tokio::test]
@@ -3553,6 +3827,11 @@ mod tests {
             "l3vpn_ipv4_unicast"
         );
         assert!(parse_vpn_family(Some("evpn")).is_err());
+        assert_eq!(
+            parse_vpn_rib_family(None).unwrap(),
+            AddressFamily::Unspecified as i32
+        );
+        assert!(parse_vpn_rib_family(Some("evpn")).is_err());
     }
 
     #[tokio::test]

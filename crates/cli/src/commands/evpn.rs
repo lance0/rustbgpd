@@ -37,6 +37,43 @@ fn route_type_label(t: u32) -> &'static str {
     }
 }
 
+pub async fn list_best_page(
+    connection: Connection,
+    mut request: crate::proto::ListBestEvpnRoutesRequest,
+    json: bool,
+) -> Result<(), CliError> {
+    let peer = (!request.source_peer_filter.is_empty()).then(|| request.source_peer_filter.clone());
+    if let Some(peer) = &peer {
+        validate_peer_view(peer, None)?;
+    }
+    request.source_peer_filter = peer
+        .as_deref()
+        .map(bare_ip_rpc_address)
+        .unwrap_or_default()
+        .to_string();
+    let mut client = connection.rib_listing_client();
+    let mut response = read_rpc("ListBestEvpnRoutes", client.list_best_evpn_routes(request))
+        .await?
+        .into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
+    if json {
+        output::print_json_pretty(&serde_json::json!({
+            "view": "best", "neighbor": peer, "routes": routes_to_json(&response.routes),
+            "total_count": response.total_count, "next_page_token": response.next_page_token,
+            "page_version": response.page_version.as_ref().map(|v| serde_json::json!({"epoch": v.epoch, "generation": v.generation})),
+        }))?;
+    } else {
+        print_routes(&response.routes, false)?;
+        outln!("Total matching rows: {}", response.total_count)?;
+        if !response.next_page_token.is_empty() {
+            outln!("Next page token: {}", response.next_page_token)?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn list(
     connection: Connection,
     route_type: Option<u32>,
@@ -191,14 +228,17 @@ pub async fn list_peer(
     mut request: crate::proto::ListPeerEvpnRoutesRequest,
     json: bool,
 ) -> Result<(), CliError> {
+    let filters_requested = !request.mac_filter.is_empty()
+        || !request.esi_filter.is_empty()
+        || request.vni_filter.is_some();
     let peer = request.neighbor_address.clone();
-    validate_peer_view(
-        &peer,
-        (!request.rd_filter.is_empty()).then_some(request.rd_filter.as_str()),
-    )?;
+    validate_peer_view(&peer, None)?;
+    if !request.rd_filter.is_empty() {
+        request.rd_filter = parse_page_rd(&request.rd_filter).map_err(CliError::Argument)?;
+    }
     request.neighbor_address = bare_ip_rpc_address(&peer).to_string();
     let mut client = connection.rib_listing_client();
-    let mut response = if received {
+    let response = if received {
         read_rpc(
             "ListReceivedEvpnRoutes",
             client.list_received_evpn_routes(request),
@@ -210,8 +250,19 @@ pub async fn list_peer(
             client.list_advertised_evpn_routes(request),
         )
         .await?
+    };
+    if filters_requested
+        && response
+            .metadata()
+            .get("x-rustbgpd-evpn-peer-filters")
+            .and_then(|value| value.to_str().ok())
+            != Some("mac,esi,vni")
+    {
+        return Err(CliError::Rpc(
+            "daemon does not acknowledge EVPN peer filters; upgrade it before using --mac, --esi or --vni".into(),
+        ));
     }
-    .into_inner();
+    let mut response = response.into_inner();
     for route in &mut response.routes {
         restore_matching_scoped_address(Some(&peer), &mut route.peer_address);
     }
@@ -255,6 +306,16 @@ pub(crate) fn parse_rd(value: &str) -> Result<String, String> {
         .parse::<rustbgpd_wire::RouteDistinguisher>()
         .map(|rd| rd.to_string())
         .map_err(|err| format!("invalid EVPN RD: {err}"))
+}
+
+pub(crate) fn parse_page_rd(value: &str) -> Result<String, String> {
+    if let Some(hex) = value.strip_prefix("0x") {
+        if hex.len() != 16 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("raw RD requires 0x followed by exactly 16 hexadecimal digits".into());
+        }
+        return Ok(value.to_ascii_lowercase());
+    }
+    parse_rd(value)
 }
 
 pub(crate) fn parse_smet_address(value: &str) -> Result<crate::proto::EvpnSmetAddress, String> {
@@ -333,7 +394,7 @@ pub(crate) fn parse_argument_esi(value: &str) -> Result<String, String> {
 
 pub(crate) fn parse_exact_prefix(value: &str) -> Result<String, String> {
     if !value.contains('/') {
-        return Err("exact EVPN prefix must include a CIDR length".into());
+        return Err("exact prefix must include a CIDR length".into());
     }
     let (ip, length) = output::parse_prefix_addr(value)?;
     let host_bits = match ip {
@@ -341,7 +402,7 @@ pub(crate) fn parse_exact_prefix(value: &str) -> Result<String, String> {
         std::net::IpAddr::V6(ip) => u128::from(ip).checked_shl(length).unwrap_or(0) != 0,
     };
     if host_bits {
-        return Err("exact EVPN prefix must have zero host bits".into());
+        return Err("exact prefix must have zero host bits".into());
     }
     Ok(format!("{ip}/{length}"))
 }
@@ -2136,6 +2197,7 @@ mod tests {
                     rd_filter: "65000:100".into(),
                     page_size: 25,
                     page_token: "opaque".into(),
+                    ..Default::default()
                 },
                 true,
             )
@@ -2937,6 +2999,7 @@ mod tests {
                     rd_filter: "65000:100".into(),
                     page_size: 25,
                     page_token: "previous-page".into(),
+                    ..Default::default()
                 },
                 true,
             )
@@ -3756,7 +3819,7 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
     }
     #[test]
     fn exact_selector_parser_boundaries() {
-        use super::{parse_esi, parse_exact_prefix, parse_mac, parse_rd};
+        use super::{parse_esi, parse_exact_prefix, parse_mac, parse_page_rd, parse_rd};
         use crate::commands::neighbor::parse_peer_address;
         for value in [
             "0.0.0.0/0",
@@ -3788,6 +3851,14 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert!(parse_esi("00:11:22:33:44:55:66:77:88:99").is_ok());
         assert!(parse_esi("00:11:22:33:44:55:66:77:88:9z").is_err());
         assert_eq!(parse_rd("65000:100").unwrap(), "65000:100");
+        assert_eq!(parse_page_rd("65000:100").unwrap(), "65000:100");
+        assert_eq!(
+            parse_page_rd("0x00020000FDE80064").unwrap(),
+            "0x00020000fde80064"
+        );
+        assert!(parse_rd("0x00020000fde80064").is_err());
+        assert!(parse_page_rd("0x0002").is_err());
+        assert!(parse_page_rd("0x00020000fde800zz").is_err());
         assert!(parse_rd("65536:65536").is_err());
         assert!(parse_peer_address("fe80::1%eth0").is_ok());
         for value in ["fe80::1%", "fe80::1%eth0%eth1", "192.0.2.1%eth0", "invalid"] {

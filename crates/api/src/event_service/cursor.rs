@@ -268,6 +268,11 @@ fn parse_event_types(raw: &[i32]) -> Result<Vec<proto::BgpEventType>, Status> {
 }
 
 fn parse_address_family(value: i32) -> Result<Option<proto::AddressFamily>, Status> {
+    // Appending typed RIB-query values must not enable replay families that
+    // this existing event surface has never admitted.
+    if !(0..=7).contains(&value) {
+        return Err(Status::invalid_argument("unknown address family"));
+    }
     let family = proto::AddressFamily::try_from(value)
         .map_err(|_| Status::invalid_argument("unknown address family"))?;
     Ok((family != proto::AddressFamily::Unspecified).then_some(family))

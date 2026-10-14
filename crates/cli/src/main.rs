@@ -1781,27 +1781,62 @@ enum RibAction {
         #[arg(long)]
         nlri_type: Option<u32>,
     },
-    /// Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)
+    /// Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)
     #[command(name = "vpn")]
     Vpn {
         /// VPN family filter: l3vpn_ipv4_unicast (alias vpnv4) or
         /// l3vpn_ipv6_unicast (alias vpnv6)
-        #[arg(short = 'a', long)]
+        #[arg(id = "family_view_family", short = 'a', long = "family", global = true)]
         family: Option<String>,
-        /// Neighbor IP address filter
+        /// Source neighbor filter for best routes; peer views take a positional neighbor.
         #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
+        #[command(subcommand)]
+        view: Option<FamilyRibViewAction>,
+        #[command(flatten)]
+        page: FamilyPageArgs,
+        /// Canonical IP prefix; exact unless --longer is set.
+        #[arg(id = "family_view_prefix", long = "prefix", global = true, value_parser = commands::evpn::parse_exact_prefix)]
+        prefix: Option<String>,
+        /// Include more specific prefixes matching --prefix.
+        #[arg(
+            id = "family_view_longer",
+            short = 'l',
+            long = "longer",
+            global = true,
+            requires = "family_view_prefix"
+        )]
+        longer: bool,
+        /// Exact Route Distinguisher (text or 0x plus 16 raw hex digits).
+        #[arg(long, global = true, value_parser = commands::evpn::parse_page_rd)]
+        rd: Option<String>,
     },
-    /// Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)
+    /// Show labeled-unicast best routes or a received/advertised view (RFC 8277)
     #[command(name = "labeled")]
     Labeled {
         /// Labeled family filter: ipv4_labeled_unicast (alias labeled-v4) or
         /// ipv6_labeled_unicast (alias labeled-v6)
-        #[arg(short = 'a', long)]
+        #[arg(id = "family_view_family", short = 'a', long = "family", global = true)]
         family: Option<String>,
-        /// Neighbor IP address filter
+        /// Source neighbor filter for best routes; peer views take a positional neighbor.
         #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
+        #[command(subcommand)]
+        view: Option<FamilyRibViewAction>,
+        #[command(flatten)]
+        page: FamilyPageArgs,
+        /// Canonical IP prefix; exact unless --longer is set.
+        #[arg(id = "family_view_prefix", long = "prefix", global = true, value_parser = commands::evpn::parse_exact_prefix)]
+        prefix: Option<String>,
+        /// Include more specific prefixes matching --prefix.
+        #[arg(
+            id = "family_view_longer",
+            short = 'l',
+            long = "longer",
+            global = true,
+            requires = "family_view_prefix"
+        )]
+        longer: bool,
     },
     /// Show RT-Constrain routes (RFC 4684, single IPv4 family)
     #[command(name = "rtc")]
@@ -1809,6 +1844,16 @@ enum RibAction {
         /// Neighbor IP address filter
         #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
+        #[command(subcommand)]
+        view: Option<FamilyRibViewAction>,
+        #[command(flatten)]
+        page: FamilyPageArgs,
+        /// Exact full Route Target membership (text or 0x plus 16 raw hex digits).
+        #[arg(long, global = true)]
+        route_target: Option<String>,
+        /// Membership origin AS.
+        #[arg(long, global = true)]
+        origin_as: Option<u32>,
     },
     /// Inject a route
     Add {
@@ -2043,6 +2088,83 @@ enum EventsAction {
     },
 }
 
+#[derive(Args, Default)]
+struct FamilyPageArgs {
+    /// Maximum rows in the page (default 100 for peer views and filtered queries).
+    #[arg(long = "limit", alias = "page-size", global = true, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    page_size: Option<u32>,
+    /// Opaque continuation token; restart after a route table change.
+    #[arg(id = "family_page_token", long = "page-token", global = true)]
+    page_token: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum FamilyRibViewAction {
+    /// Retained accepted post-policy input from one source neighbor.
+    Received {
+        /// Source neighbor whose accepted routes to inspect.
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
+        peer: String,
+    },
+    /// Committed local export toward one destination; rows retain source peers.
+    Advertised {
+        /// Destination neighbor whose committed exports to inspect.
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
+        peer: String,
+    },
+}
+
+fn family_cli_scope(
+    view: Option<FamilyRibViewAction>,
+    peer_filter: Option<String>,
+) -> Result<(i32, String, String), CliError> {
+    match view {
+        None => Ok((
+            proto::FamilyRouteView::Best as i32,
+            String::new(),
+            peer_filter.unwrap_or_default(),
+        )),
+        Some(view) => {
+            if peer_filter.is_some() {
+                return Err(CliError::Argument(
+                    "peer views use a positional neighbor, not --neighbor".into(),
+                ));
+            }
+            let (view, peer) = match view {
+                FamilyRibViewAction::Received { peer } => (proto::FamilyRouteView::Received, peer),
+                FamilyRibViewAction::Advertised { peer } => {
+                    (proto::FamilyRouteView::Advertised, peer)
+                }
+            };
+            Ok((view as i32, peer, String::new()))
+        }
+    }
+}
+
+#[derive(Args)]
+struct EvpnLocViewArgs {
+    /// Only this EVPN route type (1..=6).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=6))]
+    route_type: Option<u32>,
+    /// Source neighbor filter for the installed best route.
+    #[arg(long = "neighbor", visible_alias = "peer")]
+    peer: Option<String>,
+    /// Exact Route Distinguisher (text or 0x plus 16 raw hex digits).
+    #[arg(long, value_parser = commands::evpn::parse_page_rd)]
+    rd: Option<String>,
+    /// Exact Type 2 MAC address.
+    #[arg(long, value_parser = commands::evpn::parse_mac)]
+    mac: Option<String>,
+    /// Exact 10-byte Ethernet Segment Identifier.
+    #[arg(long, value_parser = commands::evpn::parse_esi)]
+    esi: Option<String>,
+    /// VXLAN VNI in either label; MPLS routes do not match.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=16777215))]
+    vni: Option<u32>,
+    #[command(flatten)]
+    page: FamilyPageArgs,
+}
+
 #[derive(Args)]
 struct EvpnPeerViewArgs {
     /// Source neighbor (received) or destination neighbor (advertised).
@@ -2050,9 +2172,18 @@ struct EvpnPeerViewArgs {
     /// Only this route type (1..=6).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=6))]
     route_type: Option<u32>,
-    /// Route Distinguisher, e.g. "65000:100".
+    /// Exact Route Distinguisher (text or 0x plus 16 raw hex digits).
     #[arg(long)]
     rd: Option<String>,
+    /// Exact Type 2 MAC address.
+    #[arg(long, value_parser = commands::evpn::parse_mac)]
+    mac: Option<String>,
+    /// Exact 10-byte Ethernet Segment Identifier.
+    #[arg(long, value_parser = commands::evpn::parse_esi)]
+    esi: Option<String>,
+    /// VXLAN VNI in either label; MPLS routes do not match.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=16777215))]
+    vni: Option<u32>,
     /// Maximum rows in this page (1..=1000).
     #[arg(
         long = "limit",
@@ -2074,12 +2205,17 @@ impl EvpnPeerViewArgs {
             rd_filter: self.rd.unwrap_or_default(),
             page_size: self.page_size,
             page_token: self.page_token.unwrap_or_default(),
+            mac_filter: self.mac.unwrap_or_default(),
+            esi_filter: self.esi.unwrap_or_default(),
+            vni_filter: self.vni,
         }
     }
 }
 
 #[derive(Subcommand)]
 enum EvpnAction {
+    /// Bounded, filtered page of installed EVPN best routes.
+    Best(EvpnLocViewArgs),
     /// Accepted post-policy EVPN routes from a peer; absence does not prove it sent none.
     Received(EvpnPeerViewArgs),
     /// Committed EVPN routes advertised to a peer (rows retain their source peer).
@@ -3450,6 +3586,23 @@ fn validate_neighbor_compare_action(command: &Command) -> Result<(), CliError> {
 fn validate_local_command(command: &Command) -> Result<(), CliError> {
     match command {
         Command::Evpn {
+            action: Some(EvpnAction::Best(args)),
+            route_type,
+            peer,
+            rd,
+        } => {
+            if route_type.is_some() || peer.is_some() || rd.is_some() {
+                return Err(CliError::Argument(
+                    "put best-view filters after evpn best".into(),
+                ));
+            }
+            if let Some(peer) = &args.peer {
+                commands::evpn::validate_peer_view(peer, None)?;
+            }
+            Ok(())
+        }
+
+        Command::Evpn {
             action: Some(EvpnAction::Received(args) | EvpnAction::Advertised(args)),
             route_type,
             peer,
@@ -3460,7 +3613,11 @@ fn validate_local_command(command: &Command) -> Result<(), CliError> {
                     "EVPN peer views take a positional peer; put --route-type and --rd after received or advertised".into(),
                 ));
             }
-            commands::evpn::validate_peer_view(&args.peer, args.rd.as_deref())
+            commands::evpn::validate_peer_view(&args.peer, None)?;
+            if let Some(rd) = &args.rd {
+                commands::evpn::parse_page_rd(rd).map_err(CliError::Argument)?;
+            }
+            Ok(())
         }
         Command::Top { interval } if !(1..=60).contains(interval) => Err(CliError::Argument(
             "interval must be between 1 and 60 seconds".into(),
@@ -4527,6 +4684,11 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 Some(RibAction::Vpn {
                     family: vpn_family,
                     peer,
+                    view,
+                    page,
+                    prefix: vpn_prefix,
+                    longer: vpn_longer,
+                    rd,
                 }) => {
                     reject_rib_status_filters(
                         binary_name,
@@ -4546,11 +4708,53 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         },
                     )?;
                     let family = vpn_family.or(family);
-                    return commands::rib::vpn(connection, family.as_deref(), peer, json).await;
+                    let (view, neighbor_address, source_peer_filter) =
+                        family_cli_scope(view, peer)?;
+                    if view != proto::FamilyRouteView::Best as i32
+                        || page.page_size.is_some()
+                        || page.page_token.is_some()
+                        || vpn_prefix.is_some()
+                        || rd.is_some()
+                    {
+                        let (prefix_filter, prefix_filter_length) = vpn_prefix
+                            .as_deref()
+                            .map(output::parse_prefix)
+                            .transpose()
+                            .map_err(CliError::Argument)?
+                            .unwrap_or_default();
+                        return commands::rib::vpn_page(
+                            connection,
+                            proto::ListVpnRibRoutesRequest {
+                                view,
+                                neighbor_address,
+                                source_peer_filter,
+                                afi_safi: commands::rib::parse_vpn_rib_family(family.as_deref())?,
+                                prefix_filter,
+                                prefix_filter_length,
+                                longer_prefixes: vpn_longer,
+                                rd_filter: rd.unwrap_or_default(),
+                                page_size: page.page_size.unwrap_or(100),
+                                page_token: page.page_token.unwrap_or_default(),
+                            },
+                            json,
+                        )
+                        .await;
+                    }
+                    return commands::rib::vpn(
+                        connection,
+                        family.as_deref(),
+                        (!source_peer_filter.is_empty()).then_some(source_peer_filter),
+                        json,
+                    )
+                    .await;
                 }
                 Some(RibAction::Labeled {
                     family: labeled_family,
                     peer,
+                    view,
+                    page,
+                    prefix: labeled_prefix,
+                    longer: labeled_longer,
                 }) => {
                     reject_rib_status_filters(
                         binary_name,
@@ -4570,9 +4774,53 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         },
                     )?;
                     let family = labeled_family.or(family);
-                    return commands::rib::labeled(connection, family.as_deref(), peer, json).await;
+                    let (view, neighbor_address, source_peer_filter) =
+                        family_cli_scope(view, peer)?;
+                    if view != proto::FamilyRouteView::Best as i32
+                        || page.page_size.is_some()
+                        || page.page_token.is_some()
+                        || labeled_prefix.is_some()
+                    {
+                        let (prefix_filter, prefix_filter_length) = labeled_prefix
+                            .as_deref()
+                            .map(output::parse_prefix)
+                            .transpose()
+                            .map_err(CliError::Argument)?
+                            .unwrap_or_default();
+                        return commands::rib::labeled_page(
+                            connection,
+                            proto::ListLabeledRibRoutesRequest {
+                                view,
+                                neighbor_address,
+                                source_peer_filter,
+                                afi_safi: commands::rib::parse_labeled_rib_family(
+                                    family.as_deref(),
+                                )?,
+                                prefix_filter,
+                                prefix_filter_length,
+                                longer_prefixes: labeled_longer,
+                                page_size: page.page_size.unwrap_or(100),
+                                page_token: page.page_token.unwrap_or_default(),
+                            },
+                            json,
+                        )
+                        .await;
+                    }
+                    return commands::rib::labeled(
+                        connection,
+                        family.as_deref(),
+                        (!source_peer_filter.is_empty()).then_some(source_peer_filter),
+                        json,
+                    )
+                    .await;
                 }
-                Some(RibAction::Rtc { peer }) => {
+                Some(RibAction::Rtc {
+                    peer,
+                    view,
+                    page,
+                    route_target,
+                    origin_as,
+                }) => {
                     reject_rib_status_filters(
                         binary_name,
                         "rtc",
@@ -4590,7 +4838,36 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             as_path_contains,
                         },
                     )?;
-                    return commands::rib::rtc(connection, peer, json).await;
+                    let (view, neighbor_address, source_peer_filter) =
+                        family_cli_scope(view, peer)?;
+                    if view != proto::FamilyRouteView::Best as i32
+                        || page.page_size.is_some()
+                        || page.page_token.is_some()
+                        || route_target.is_some()
+                        || origin_as.is_some()
+                    {
+                        return commands::rib::rtc_page(
+                            connection,
+                            proto::ListRtcRibRoutesRequest {
+                                view,
+                                neighbor_address,
+                                source_peer_filter,
+                                afi_safi: proto::AddressFamily::Unspecified as i32,
+                                origin_as_filter: origin_as,
+                                route_target_filter: route_target.unwrap_or_default(),
+                                page_size: page.page_size.unwrap_or(100),
+                                page_token: page.page_token.unwrap_or_default(),
+                            },
+                            json,
+                        )
+                        .await;
+                    }
+                    return commands::rib::rtc(
+                        connection,
+                        (!source_peer_filter.is_empty()).then_some(source_peer_filter),
+                        json,
+                    )
+                    .await;
                 }
                 _ => {}
             }
@@ -5002,6 +5279,28 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             rd,
         } => match action {
             None => commands::evpn::list(connection, route_type, peer, rd, json).await,
+            Some(EvpnAction::Best(args)) => {
+                if route_type.is_some() || peer.is_some() || rd.is_some() {
+                    return Err(CliError::Argument(
+                        "put best-view filters after evpn best".into(),
+                    ));
+                }
+                commands::evpn::list_best_page(
+                    connection,
+                    proto::ListBestEvpnRoutesRequest {
+                        route_type_filter: args.route_type.unwrap_or(0),
+                        source_peer_filter: args.peer.unwrap_or_default(),
+                        rd_filter: args.rd.unwrap_or_default(),
+                        mac_filter: args.mac.unwrap_or_default(),
+                        esi_filter: args.esi.unwrap_or_default(),
+                        vni_filter: args.vni,
+                        page_size: args.page.page_size.unwrap_or(100),
+                        page_token: args.page.page_token.unwrap_or_default(),
+                    },
+                    json,
+                )
+                .await
+            }
             Some(EvpnAction::Received(args)) => {
                 commands::evpn::list_peer(connection, true, args.into_request(), json).await
             }
@@ -8798,7 +9097,13 @@ printf '%s\n' "${COMPREPLY[@]}"
                 "--route-type",
                 "3",
                 "--rd",
-                "65000:100",
+                "0x00020000FDE80064",
+                "--mac",
+                "00:11:22:33:44:55",
+                "--esi",
+                "00:01:02:03:04:05:06:07:08:09",
+                "--vni",
+                "100",
                 "--limit",
                 "25",
                 "--page-token",
@@ -8816,7 +9121,10 @@ printf '%s\n' "${COMPREPLY[@]}"
             let request = args.into_request();
             assert_eq!(request.neighbor_address, "fe80::2%eth0");
             assert_eq!(request.route_type_filter, 3);
-            assert_eq!(request.rd_filter, "65000:100");
+            assert_eq!(request.rd_filter, "0x00020000FDE80064");
+            assert_eq!(request.mac_filter, "00:11:22:33:44:55");
+            assert_eq!(request.esi_filter, "00:01:02:03:04:05:06:07:08:09");
+            assert_eq!(request.vni_filter, Some(100));
             assert_eq!(request.page_size, 25);
             assert_eq!(request.page_token, "opaque");
         }
@@ -8846,6 +9154,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         for args in [
             vec!["received", "not-an-ip"],
             vec!["advertised", "192.0.2.1", "--rd", "invalid"],
+            vec!["received", "192.0.2.1", "--rd", "0x0002"],
             vec!["received", "fe80::1%"],
             vec!["received", "2001:db8::1%eth0"],
             vec!["--peer", "192.0.2.2", "received", "192.0.2.1"],
@@ -8865,6 +9174,9 @@ printf '%s\n' "${COMPREPLY[@]}"
             ("--route-type", "7"),
             ("--limit", "0"),
             ("--limit", "1001"),
+            ("--mac", "00:11"),
+            ("--esi", "00:01"),
+            ("--vni", "16777216"),
         ] {
             assert!(
                 Cli::try_parse_from(["rbgp", "evpn", "received", "192.0.2.1", flag, value])
@@ -10877,5 +11189,114 @@ printf '%s\n' "${COMPREPLY[@]}"
             Cli::try_parse_from(["rbgp", "rib"]).unwrap().pager,
             PagerMode::Auto
         );
+    }
+    #[test]
+    fn family_page_cli_accepts_filters_after_view_and_rejects_invalid_values() {
+        for args in [
+            vec![
+                "rbgp",
+                "rib",
+                "vpn",
+                "received",
+                "192.0.2.1",
+                "--rd",
+                "65000:1",
+                "--prefix",
+                "10.0.0.0/24",
+                "--limit",
+                "1",
+            ],
+            vec![
+                "rbgp",
+                "rib",
+                "labeled",
+                "advertised",
+                "192.0.2.1",
+                "-a",
+                "labeled-v4",
+                "--page-size",
+                "1000",
+            ],
+            vec![
+                "rbgp",
+                "rib",
+                "rtc",
+                "received",
+                "192.0.2.1",
+                "--origin-as",
+                "0",
+                "--route-target",
+                "RT:65000:1",
+            ],
+            vec![
+                "rbgp",
+                "evpn",
+                "best",
+                "--mac",
+                "00:11:22:33:44:55",
+                "--esi",
+                "00:01:02:03:04:05:06:07:08:09",
+                "--vni",
+                "16777215",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec![
+                "rbgp",
+                "rib",
+                "vpn",
+                "received",
+                "192.0.2.1",
+                "--limit",
+                "0",
+            ],
+            vec![
+                "rbgp",
+                "rib",
+                "labeled",
+                "advertised",
+                "192.0.2.1",
+                "--limit",
+                "1001",
+            ],
+            vec!["rbgp", "rib", "vpn", "--rd", "bad"],
+            vec!["rbgp", "rib", "vpn", "--prefix", "10.0.0.1/24"],
+            vec!["rbgp", "rib", "labeled", "--prefix", "2001:db8::1/64"],
+            vec!["rbgp", "evpn", "best", "--mac", "bad"],
+            vec!["rbgp", "evpn", "best", "--esi", "bad"],
+            vec!["rbgp", "evpn", "best", "--vni", "16777216"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn family_page_peer_arguments_validate_ip_and_scope() {
+        for family in ["vpn", "labeled", "rtc"] {
+            for view in ["received", "advertised"] {
+                for peer in ["192.0.2.1", "2001:db8::1", "fe80::1%eth0"] {
+                    assert!(
+                        Cli::try_parse_from(["rbgp", "rib", family, view, peer]).is_ok(),
+                        "{family} {view} {peer}",
+                    );
+                }
+                for peer in [
+                    "invalid",
+                    "192.0.2.1%eth0",
+                    "2001:db8::1%eth0",
+                    "fe80::1%",
+                    "fe80::1%eth0%other",
+                ] {
+                    let Err(error) = Cli::try_parse_from(["rbgp", "rib", family, view, peer])
+                    else {
+                        panic!("malformed peer must fail argument parsing");
+                    };
+                    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+                    assert!(error.to_string().contains("expected a peer IP address"));
+                }
+            }
+        }
     }
 }

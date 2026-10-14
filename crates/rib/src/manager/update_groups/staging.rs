@@ -544,6 +544,10 @@ impl RibManager {
         gid: usize,
         keys: &HashSet<VpnRouteKey>,
     ) -> VpnGroupStageOutput {
+        // Shared VPN tables move even when every member's outbound send defers.
+        if !keys.is_empty() {
+            self.advance_advertised_pages();
+        }
         self.replacement_checkpoint(true);
         let mut out = VpnGroupStageOutput {
             deltas: Vec::with_capacity(keys.len()),

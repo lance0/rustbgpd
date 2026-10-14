@@ -20,6 +20,11 @@ enum AddressFamily {
   ADDRESS_FAMILY_L2VPN_EVPN = 5;
   ADDRESS_FAMILY_BGP_LS = 6;
   ADDRESS_FAMILY_BGP_LS_VPN = 7;
+  ADDRESS_FAMILY_L3VPN_IPV4_UNICAST = 8;
+  ADDRESS_FAMILY_L3VPN_IPV6_UNICAST = 9;
+  ADDRESS_FAMILY_IPV4_LABELED_UNICAST = 10;
+  ADDRESS_FAMILY_IPV6_LABELED_UNICAST = 11;
+  ADDRESS_FAMILY_IPV4_RT_CONSTRAIN = 12;
 }
 
 enum SessionState {
@@ -2183,6 +2188,16 @@ service RibService {
   rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
   rpc ListLabeledRoutes(ListLabeledRoutesRequest) returns (ListLabeledRoutesResponse);
   rpc ListRtcRoutes(ListRtcRoutesRequest) returns (ListRtcRoutesResponse);
+  // Bounded, mutation-fenced VPN route query; outside the current v1 inventory.
+  // Group-owned advertised state returns FAILED_PRECONDITION during resync.
+  rpc ListVpnRibRoutes(ListVpnRibRoutesRequest) returns (ListVpnRibRoutesResponse);
+  // Bounded, mutation-fenced Labeled route query; outside the current v1 inventory.
+  rpc ListLabeledRibRoutes(ListLabeledRibRoutesRequest) returns (ListLabeledRibRoutesResponse);
+  // Bounded, mutation-fenced Rtc route query; outside the current v1 inventory.
+  rpc ListRtcRibRoutes(ListRtcRibRoutesRequest) returns (ListRtcRibRoutesResponse);
+  // Bounded, mutation-fenced Evpn route query; outside the current v1 inventory.
+  rpc ListBestEvpnRoutes(ListBestEvpnRoutesRequest) returns (ListBestEvpnRoutesResponse);
+
   // RFC 9107 ORR topology graph, built on demand from every peer's BGP-LS
   // Adj-RIB-In (the union view, not Loc-RIB best-only). Nodes are keyed by
   // canonical descriptor bytes; links carry the IGP Metric (TLV 1095) that
@@ -3848,13 +3863,19 @@ message ListPeerEvpnRoutesRequest {
   string neighbor_address = 1;
   // 0 = all supported types; otherwise 1..=6.
   uint32 route_type_filter = 2;
-  // Route Distinguisher display format. Empty = any.
+  // Exact typed RD: structured text or 0x plus 16 raw hex digits. Empty = any.
   string rd_filter = 3;
   // 0 defaults to 100. Values above 1000 are rejected.
   uint32 page_size = 4;
   // Opaque process-local continuation, bound to scope, filters, and version.
   // Restart with an empty token after ABORTED (a table mutation).
   string page_token = 5;
+  // Exact Type 2 MAC; types without a MAC do not match. Outside current v1.
+  string mac_filter = 6;
+  // Exact 10-byte ESI; types without an ESI do not match. Outside current v1.
+  string esi_filter = 7;
+  // VXLAN (tunnel type 8), NLRI/PMSI VNI, 0..16777215. Outside current v1.
+  optional uint32 vni_filter = 8;
 }
 
 message ListPeerEvpnRoutesResponse {
@@ -4136,6 +4157,96 @@ message ListRtcRoutesRequest {
 
 message ListRtcRoutesResponse {
   repeated RtcRouteEntry routes = 1;
+}
+
+// Family-specific page views. Received is accepted post-policy input;
+// advertised is committed local export state, not proof of remote receipt.
+enum FamilyRouteView {
+  FAMILY_ROUTE_VIEW_UNSPECIFIED = 0; // Invalid: select a view explicitly.
+  FAMILY_ROUTE_VIEW_BEST = 1;
+  FAMILY_ROUTE_VIEW_RECEIVED = 2;
+  FAMILY_ROUTE_VIEW_ADVERTISED = 3;
+}
+
+message ListVpnRibRoutesRequest {
+  FamilyRouteView view = 1;
+  // Required source/destination neighbor for received/advertised; invalid for best.
+  string neighbor_address = 2;
+  // 0 defaults to 100; maximum 1000. Tokens bind scope, filters and table version.
+  uint32 page_size = 3;
+  string page_token = 4;
+  AddressFamily afi_safi = 5; // UNSPECIFIED selects both VPN address families.
+  string prefix_filter = 6; // IP address; empty selects all prefixes.
+  string rd_filter = 7; // Exact typed RD: structured text or 0x plus 16 raw hex digits.
+  string source_peer_filter = 8; // Optional winner source in best; invalid for peer views.
+  uint32 prefix_filter_length = 9;
+  bool longer_prefixes = 10; // Longer-or-equal match, as in unicast listings.
+}
+
+message ListVpnRibRoutesResponse {
+  repeated VpnRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListLabeledRibRoutesRequest {
+  FamilyRouteView view = 1;
+  // Required source/destination neighbor for received/advertised; invalid for best.
+  string neighbor_address = 2;
+  // 0 defaults to 100; maximum 1000. Tokens bind scope, filters and table version.
+  uint32 page_size = 3;
+  string page_token = 4;
+  AddressFamily afi_safi = 5; // UNSPECIFIED selects both labeled address families.
+  string prefix_filter = 6; // IP address; empty selects all prefixes.
+  string source_peer_filter = 7; // Optional winner source in best; invalid for peer views.
+  uint32 prefix_filter_length = 8;
+  bool longer_prefixes = 9; // Longer-or-equal match, as in unicast listings.
+}
+
+message ListLabeledRibRoutesResponse {
+  repeated LabeledRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListRtcRibRoutesRequest {
+  FamilyRouteView view = 1;
+  // Required source/destination neighbor for received/advertised; invalid for best.
+  string neighbor_address = 2;
+  // 0 defaults to 100; maximum 1000. Tokens bind scope, filters and table version.
+  uint32 page_size = 3;
+  string page_token = 4;
+  optional uint32 origin_as_filter = 5;
+  string route_target_filter = 6; // Exact /96 RT: display form or 0x plus 16 raw hex digits.
+  string source_peer_filter = 7; // Optional winner source in best; invalid for peer views.
+  AddressFamily afi_safi = 8; // UNSPECIFIED or IPV4_RT_CONSTRAIN.
+}
+
+message ListRtcRibRoutesResponse {
+  repeated RtcRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListBestEvpnRoutesRequest {
+  uint32 route_type_filter = 1; // 0 = all, otherwise 1..=6.
+  string source_peer_filter = 2; // Optional winner source; unknown sources return an empty page.
+  string rd_filter = 3; // Exact typed RD: structured text or 0x plus 16 raw hex digits.
+  string mac_filter = 4; // Exact Type 2 MAC; other types do not match.
+  string esi_filter = 5; // Exact 10-byte ESI; types without an ESI do not match.
+  optional uint32 vni_filter = 6; // VXLAN (tunnel type 8), NLRI/PMSI VNI, 0..16777215.
+  uint32 page_size = 7;
+  string page_token = 8;
+}
+
+message ListBestEvpnRoutesResponse {
+  repeated EvpnRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
 }
 
 message ListTopologyNodesRequest {}

@@ -4252,6 +4252,51 @@ impl RibManager {
                 page_size,
                 reply,
             ),
+            RibUpdate::QueryVpnRoutesPage {
+                scope,
+                filter,
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_vpn_routes_page(
+                scope,
+                filter.as_ref(),
+                after,
+                expected_version,
+                page_size,
+                reply,
+            ),
+            RibUpdate::QueryLabeledRoutesPage {
+                scope,
+                filter,
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_labeled_routes_page(
+                scope,
+                filter.as_ref(),
+                after,
+                expected_version,
+                page_size,
+                reply,
+            ),
+            RibUpdate::QueryRtcRoutesPage {
+                scope,
+                filter,
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_rtc_routes_page(
+                scope,
+                filter.as_ref(),
+                after,
+                expected_version,
+                page_size,
+                reply,
+            ),
             RibUpdate::QueryEvpnDataplaneRoutes {
                 known_generation,
                 reply,
@@ -4903,6 +4948,8 @@ impl RibManager {
         if old == membership {
             return;
         }
+        // Grouped VPN pages read the current membership even when emission defers.
+        self.advance_advertised_pages();
         let Some(new) = membership else {
             self.peer_rt_membership.remove(&peer);
             return;

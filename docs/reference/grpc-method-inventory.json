@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 118,
+  "method_count": 122,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 71,
+    "sensitive_read": 75,
     "mutating": 22,
     "operator_only": 24
   },
@@ -97,6 +97,10 @@
     { "service": "rustbgpd.v1.RibService", "method": "ListVpnRoutes", "path": "/rustbgpd.v1.RibService/ListVpnRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListLabeledRoutes", "path": "/rustbgpd.v1.RibService/ListLabeledRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListRtcRoutes", "path": "/rustbgpd.v1.RibService/ListRtcRoutes", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.RibService", "method": "ListVpnRibRoutes", "path": "/rustbgpd.v1.RibService/ListVpnRibRoutes", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.RibService", "method": "ListLabeledRibRoutes", "path": "/rustbgpd.v1.RibService/ListLabeledRibRoutes", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.RibService", "method": "ListRtcRibRoutes", "path": "/rustbgpd.v1.RibService/ListRtcRibRoutes", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.RibService", "method": "ListBestEvpnRoutes", "path": "/rustbgpd.v1.RibService/ListBestEvpnRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListTopologyNodes", "path": "/rustbgpd.v1.RibService/ListTopologyNodes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListTopologyLinks", "path": "/rustbgpd.v1.RibService/ListTopologyLinks", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RibService", "method": "ListOrrStatus", "path": "/rustbgpd.v1.RibService/ListOrrStatus", "tier": "sensitive_read" },

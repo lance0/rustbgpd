@@ -45,8 +45,8 @@ A route with a semantically unusable applicable SRv6 Service TLV remains in
 Adj-RIB-In but is excluded from selection and export. For unicast, run
 `rbgp rib --prefix <cidr> --explain`; for EVPN, use an exact selector such as
 `rbgp evpn explain ip-prefix --rd <rd> --prefix <cidr>`. Both report
-`srv6_sid_invalid`; this is not an import-policy rejection. VPN has no
-received-route query. See [the operator troubleshooting entry](../reference/operations.md#srv6-service-route-is-visible-but-cannot-be-selected)
+`srv6_sid_invalid`; this is not an import-policy rejection. For VPN, inspect
+accepted routes with `rbgp rib vpn received <peer>`. See [the operator troubleshooting entry](../reference/operations.md#srv6-service-route-is-visible-but-cannot-be-selected)
 for the distinction from malformed Prefix-SID handling and the
 [canonical SRv6 contract](../reference/path-attribute-registry.md#srv6-service-eligibility).
 
@@ -165,11 +165,13 @@ prefix can still be updated at capacity. Grouped peers use their own admitted
 advertised view, so explain agrees with `rbgp rib advertised <peer>`.
 
 A grouped peer can briefly have no record of what it admitted. This happens
-when its outbound queue was full for a send and no pre-regroup baseline is
-held. Until its next resync is accepted, unicast export explain and
+when its outbound queue was full for a send or its receiver closed before
+peer teardown, and no pre-regroup baseline is held. Until its next resync is
+accepted, unicast export explain and
 `rbgp rib advertised <peer>` both fail with `FAILED_PRECONDITION`. They do not
 report the group's intended routes as already advertised. The refusal is
-transient: retry once the peer's queue drains and the resync completes. A
+transient: retry once the peer's queue drains and the resync completes, or a
+new session registers. A
 regrouped peer that still holds its baseline is not refused. Both commands
 read that baseline until the resync replaces it.
 `--rd <rd>` explains the VPNv4/VPNv6 (RD, prefix) ladder including the RFC 4684

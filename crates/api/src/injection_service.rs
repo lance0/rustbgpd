@@ -1221,7 +1221,7 @@ fn push_extended_community(attrs: &mut Vec<PathAttribute>, community: ExtendedCo
     }
 }
 
-fn parse_route_target(s: &str) -> Result<ExtendedCommunity, Status> {
+pub(crate) fn parse_route_target(s: &str) -> Result<ExtendedCommunity, Status> {
     let (admin, val) = s.split_once(':').ok_or_else(|| {
         Status::invalid_argument(format!("route_target must be \"admin:value\"; got {s:?}"))
     })?;

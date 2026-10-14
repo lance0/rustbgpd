@@ -1374,10 +1374,14 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (vpn)
 _arguments "${_arguments_options[@]}" : \
-'-a+[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:FAMILY:_default' \
-'--family=[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:FAMILY:_default' \
-'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
-'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'-a+[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
+'--family=[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
+'--neighbor=[Source neighbor filter for best routes; peer views take a positional neighbor]:NEIGHBOR:_default' \
+'--peer=[Source neighbor filter for best routes; peer views take a positional neighbor]:NEIGHBOR:_default' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
+'--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1386,19 +1390,116 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+":: :_rbgp__subcmd__rib__subcmd__vpn_commands" \
+"*::: :->vpn" \
 && ret=0
+
+    case $state in
+    (vpn)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-vpn-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-a+[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
+'--family=[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
+'--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Source neighbor whose accepted routes to inspect:_default' \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-a+[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
+'--family=[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:family_view_family:_default' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
+'--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Destination neighbor whose committed exports to inspect:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__rib__subcmd__vpn__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-vpn-help-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
 ;;
 (labeled)
 _arguments "${_arguments_options[@]}" : \
-'-a+[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:FAMILY:_default' \
-'--family=[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:FAMILY:_default' \
-'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
-'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'-a+[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
+'--family=[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
+'--neighbor=[Source neighbor filter for best routes; peer views take a positional neighbor]:NEIGHBOR:_default' \
+'--peer=[Source neighbor filter for best routes; peer views take a positional neighbor]:NEIGHBOR:_default' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1407,17 +1508,113 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+":: :_rbgp__subcmd__rib__subcmd__labeled_commands" \
+"*::: :->labeled" \
 && ret=0
+
+    case $state in
+    (labeled)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-labeled-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-a+[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
+'--family=[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Source neighbor whose accepted routes to inspect:_default' \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-a+[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
+'--family=[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:family_view_family:_default' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--prefix=[Canonical IP prefix; exact unless --longer is set]:family_view_prefix:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-l[Include more specific prefixes matching --prefix]' \
+'--longer[Include more specific prefixes matching --prefix]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Destination neighbor whose committed exports to inspect:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__rib__subcmd__labeled__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-labeled-help-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
 ;;
 (rtc)
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
 '--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--route-target=[Exact full Route Target membership (text or 0x plus 16 raw hex digits)]:ROUTE_TARGET:_default' \
+'--origin-as=[Membership origin AS]:ORIGIN_AS:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1431,7 +1628,91 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+":: :_rbgp__subcmd__rib__subcmd__rtc_commands" \
+"*::: :->rtc" \
 && ret=0
+
+    case $state in
+    (rtc)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-rtc-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--route-target=[Exact full Route Target membership (text or 0x plus 16 raw hex digits)]:ROUTE_TARGET:_default' \
+'--origin-as=[Membership origin AS]:ORIGIN_AS:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Source neighbor whose accepted routes to inspect:_default' \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'--route-target=[Exact full Route Target membership (text or 0x plus 16 raw hex digits)]:ROUTE_TARGET:_default' \
+'--origin-as=[Membership origin AS]:ORIGIN_AS:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Destination neighbor whose committed exports to inspect:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__rib__subcmd__rtc__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-rtc-help-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
 ;;
 (add)
 _arguments "${_arguments_options[@]}" : \
@@ -1517,15 +1798,75 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (vpn)
 _arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__rib__subcmd__help__subcmd__vpn_commands" \
+"*::: :->vpn" \
 && ret=0
+
+    case $state in
+    (vpn)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-help-vpn-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (labeled)
 _arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__rib__subcmd__help__subcmd__labeled_commands" \
+"*::: :->labeled" \
 && ret=0
+
+    case $state in
+    (labeled)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-help-labeled-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (rtc)
 _arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__rib__subcmd__help__subcmd__rtc_commands" \
+"*::: :->rtc" \
 && ret=0
+
+    case $state in
+    (rtc)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-rib-help-rtc-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (add)
 _arguments "${_arguments_options[@]}" : \
@@ -2061,10 +2402,39 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-command-$line[1]:"
         case $line[1] in
-            (received)
+            (best)
+_arguments "${_arguments_options[@]}" : \
+'--route-type=[Only this EVPN route type (1..=6)]:ROUTE_TYPE:_default' \
+'--neighbor=[Source neighbor filter for the installed best route]:PEER:_default' \
+'--peer=[Source neighbor filter for the installed best route]:PEER:_default' \
+'--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
+'--mac=[Exact Type 2 MAC address]:MAC:_default' \
+'--esi=[Exact 10-byte Ethernet Segment Identifier]:ESI:_default' \
+'--vni=[VXLAN VNI in either label; MPLS routes do not match]:VNI:_default' \
+'--limit=[Maximum rows in the page (default 100 for peer views and filtered queries)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token; restart after a route table change]:family_page_token:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 '--route-type=[Only this route type (1..=6)]:ROUTE_TYPE:_default' \
-'--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
+'--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
+'--mac=[Exact Type 2 MAC address]:MAC:_default' \
+'--esi=[Exact 10-byte Ethernet Segment Identifier]:ESI:_default' \
+'--vni=[VXLAN VNI in either label; MPLS routes do not match]:VNI:_default' \
 '--limit=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2086,7 +2456,10 @@ _arguments "${_arguments_options[@]}" : \
 (advertised)
 _arguments "${_arguments_options[@]}" : \
 '--route-type=[Only this route type (1..=6)]:ROUTE_TYPE:_default' \
-'--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
+'--rd=[Exact Route Distinguisher (text or 0x plus 16 raw hex digits)]:RD:_default' \
+'--mac=[Exact Type 2 MAC address]:MAC:_default' \
+'--esi=[Exact 10-byte Ethernet Segment Identifier]:ESI:_default' \
+'--vni=[VXLAN VNI in either label; MPLS routes do not match]:VNI:_default' \
 '--limit=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2744,7 +3117,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-help-command-$line[1]:"
         case $line[1] in
-            (received)
+            (best)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -4552,15 +4929,75 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (vpn)
 _arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__help__subcmd__rib__subcmd__vpn_commands" \
+"*::: :->vpn" \
 && ret=0
+
+    case $state in
+    (vpn)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-help-rib-vpn-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (labeled)
 _arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__help__subcmd__rib__subcmd__labeled_commands" \
+"*::: :->labeled" \
 && ret=0
+
+    case $state in
+    (labeled)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-help-rib-labeled-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (rtc)
 _arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__help__subcmd__rib__subcmd__rtc_commands" \
+"*::: :->rtc" \
 && ret=0
+
+    case $state in
+    (rtc)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-help-rib-rtc-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (add)
 _arguments "${_arguments_options[@]}" : \
@@ -4694,7 +5131,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-evpn-command-$line[1]:"
         case $line[1] in
-            (received)
+            (best)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -5597,6 +6038,7 @@ _rbgp__subcmd__events__subcmd__watch_commands() {
 (( $+functions[_rbgp__subcmd__evpn_commands] )) ||
 _rbgp__subcmd__evpn_commands() {
     local commands; commands=(
+'best:Bounded, filtered page of installed EVPN best routes' \
 'received:Accepted post-policy EVPN routes from a peer; absence does not prove it sent none' \
 'advertised:Committed EVPN routes advertised to a peer (rows retain their source peer)' \
 'explain:Explain one exact EVPN key, its selection, and optional export destination' \
@@ -5638,6 +6080,11 @@ _rbgp__subcmd__evpn__subcmd__add-mac-ip_commands() {
 _rbgp__subcmd__evpn__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__best_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__best_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn best commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__clear-duplicate-mac_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__clear-duplicate-mac_commands() {
@@ -5830,6 +6277,7 @@ _rbgp__subcmd__evpn__subcmd__explain__subcmd__smet_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help_commands() {
     local commands; commands=(
+'best:Bounded, filtered page of installed EVPN best routes' \
 'received:Accepted post-policy EVPN routes from a peer; absence does not prove it sent none' \
 'advertised:Committed EVPN routes advertised to a peer (rows retain their source peer)' \
 'explain:Explain one exact EVPN key, its selection, and optional export destination' \
@@ -5871,6 +6319,11 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__add-mac-ip_commands() {
 _rbgp__subcmd__evpn__subcmd__help__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn help advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__best_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__best_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help best commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__clear-duplicate-mac_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__clear-duplicate-mac_commands() {
@@ -6398,6 +6851,7 @@ _rbgp__subcmd__help__subcmd__events__subcmd__watch_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn_commands() {
     local commands; commands=(
+'best:Bounded, filtered page of installed EVPN best routes' \
 'received:Accepted post-policy EVPN routes from a peer; absence does not prove it sent none' \
 'advertised:Committed EVPN routes advertised to a peer (rows retain their source peer)' \
 'explain:Explain one exact EVPN key, its selection, and optional export destination' \
@@ -6438,6 +6892,11 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__add-mac-ip_commands() {
 _rbgp__subcmd__help__subcmd__evpn__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help evpn advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__best_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__best_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn best commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__clear-duplicate-mac_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__clear-duplicate-mac_commands() {
@@ -6903,8 +7362,8 @@ _rbgp__subcmd__help__subcmd__rib_commands() {
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
 'fib:Show general unicast FIB route install status' \
 'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
-'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
-'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'vpn:Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)' \
+'labeled:Show labeled-unicast best routes or a received/advertised view (RFC 8277)' \
 'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
@@ -6943,8 +7402,21 @@ _rbgp__subcmd__help__subcmd__rib__subcmd__fib_commands() {
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__labeled_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib__subcmd__labeled_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+    )
     _describe -t commands 'rbgp help rib labeled commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__labeled__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__labeled__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib labeled advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__labeled__subcmd__received_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__labeled__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib labeled received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__lookup_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib__subcmd__lookup_commands() {
@@ -6958,13 +7430,39 @@ _rbgp__subcmd__help__subcmd__rib__subcmd__received_commands() {
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__rtc_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib__subcmd__rtc_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+    )
     _describe -t commands 'rbgp help rib rtc commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__rtc__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__rtc__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib rtc advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__rtc__subcmd__received_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__rtc__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib rtc received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__vpn_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib__subcmd__vpn_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+    )
     _describe -t commands 'rbgp help rib vpn commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__vpn__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__vpn__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib vpn advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__vpn__subcmd__received_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__vpn__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib vpn received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rpki_commands] )) ||
 _rbgp__subcmd__help__subcmd__rpki_commands() {
@@ -7592,8 +8090,8 @@ _rbgp__subcmd__rib_commands() {
 'fib:Show general unicast FIB route install status' \
 'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
 'bgp-ls:Show BGP-LS routes learned from peers (RFC 9552)' \
-'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
-'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'vpn:Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)' \
+'labeled:Show labeled-unicast best routes or a received/advertised view (RFC 8277)' \
 'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
@@ -7640,8 +8138,8 @@ _rbgp__subcmd__rib__subcmd__help_commands() {
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
 'fib:Show general unicast FIB route install status' \
 'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
-'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
-'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'vpn:Show VPNv4/VPNv6 best routes or a received/advertised view (RFC 4364/4659)' \
+'labeled:Show labeled-unicast best routes or a received/advertised view (RFC 8277)' \
 'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
@@ -7686,8 +8184,21 @@ _rbgp__subcmd__rib__subcmd__help__subcmd__help_commands() {
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__labeled_commands] )) ||
 _rbgp__subcmd__rib__subcmd__help__subcmd__labeled_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+    )
     _describe -t commands 'rbgp rib help labeled commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__labeled__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__labeled__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help labeled advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__labeled__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__labeled__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help labeled received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__lookup_commands] )) ||
 _rbgp__subcmd__rib__subcmd__help__subcmd__lookup_commands() {
@@ -7701,18 +8212,82 @@ _rbgp__subcmd__rib__subcmd__help__subcmd__received_commands() {
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__rtc_commands] )) ||
 _rbgp__subcmd__rib__subcmd__help__subcmd__rtc_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+    )
     _describe -t commands 'rbgp rib help rtc commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__rtc__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__rtc__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help rtc advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__rtc__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__rtc__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help rtc received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__vpn_commands] )) ||
 _rbgp__subcmd__rib__subcmd__help__subcmd__vpn_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+    )
     _describe -t commands 'rbgp rib help vpn commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__vpn__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__vpn__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help vpn advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__vpn__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__vpn__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help vpn received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__labeled_commands] )) ||
 _rbgp__subcmd__rib__subcmd__labeled_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
     _describe -t commands 'rbgp rib labeled commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__labeled__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__labeled__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib labeled advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__labeled__subcmd__help_commands] )) ||
+_rbgp__subcmd__rib__subcmd__labeled__subcmd__help_commands() {
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp rib labeled help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__labeled__subcmd__help__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__labeled__subcmd__help__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib labeled help advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__labeled__subcmd__help__subcmd__help_commands] )) ||
+_rbgp__subcmd__rib__subcmd__labeled__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib labeled help help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__labeled__subcmd__help__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__labeled__subcmd__help__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib labeled help received commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__labeled__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__labeled__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib labeled received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__lookup_commands] )) ||
 _rbgp__subcmd__rib__subcmd__lookup_commands() {
@@ -7726,13 +8301,89 @@ _rbgp__subcmd__rib__subcmd__received_commands() {
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__rtc_commands] )) ||
 _rbgp__subcmd__rib__subcmd__rtc_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
     _describe -t commands 'rbgp rib rtc commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__rtc__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__rtc__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib rtc advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__rtc__subcmd__help_commands] )) ||
+_rbgp__subcmd__rib__subcmd__rtc__subcmd__help_commands() {
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp rib rtc help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__rtc__subcmd__help__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__rtc__subcmd__help__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib rtc help advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__rtc__subcmd__help__subcmd__help_commands] )) ||
+_rbgp__subcmd__rib__subcmd__rtc__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib rtc help help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__rtc__subcmd__help__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__rtc__subcmd__help__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib rtc help received commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__rtc__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__rtc__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib rtc received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__vpn_commands] )) ||
 _rbgp__subcmd__rib__subcmd__vpn_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
     _describe -t commands 'rbgp rib vpn commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__vpn__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__vpn__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib vpn advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__vpn__subcmd__help_commands] )) ||
+_rbgp__subcmd__rib__subcmd__vpn__subcmd__help_commands() {
+    local commands; commands=(
+'received:Retained accepted post-policy input from one source neighbor' \
+'advertised:Committed local export toward one destination; rows retain source peers' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp rib vpn help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__vpn__subcmd__help__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__rib__subcmd__vpn__subcmd__help__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib vpn help advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__vpn__subcmd__help__subcmd__help_commands] )) ||
+_rbgp__subcmd__rib__subcmd__vpn__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib vpn help help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__vpn__subcmd__help__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__vpn__subcmd__help__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib vpn help received commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__vpn__subcmd__received_commands] )) ||
+_rbgp__subcmd__rib__subcmd__vpn__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib vpn received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rpki_commands] )) ||
 _rbgp__subcmd__rpki_commands() {

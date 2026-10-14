@@ -484,6 +484,23 @@ impl RibManager {
         )
     }
 
+    /// Borrowed VPN advertised view for group-owned members, with current RTC
+    /// membership, split horizon and member-local encoder rejection applied.
+    pub(in crate::manager) fn grouped_advertised_vpn_routes_iter(
+        &self,
+        peer: IpAddr,
+    ) -> Option<impl Iterator<Item = &crate::route::VpnRibRoute>> {
+        let group = self.group_ribs.get(&self.vpn_grouped_member_of(peer)?)?;
+        let rtc = group.rtc_negotiated();
+        let filter = self.peer_rt_membership.get(&peer);
+        let rejected = self.peer_unexportable.get(&peer);
+        Some(group.table.iter_vpn().filter(move |route| {
+            route.peer != peer
+                && (!rtc || filter.is_some_and(|filter| super::rt_passes(Some(filter), route)))
+                && !rejected.is_some_and(|keys| keys.contains(&ExactExportKey::Vpn(route.key())))
+        }))
+    }
+
     /// Ordered sibling used by resumable route listings. The group table's
     /// persistent prefix index resumes at the cursor; member-local split
     /// horizon and exact-export rejection remain streaming filters. A page
