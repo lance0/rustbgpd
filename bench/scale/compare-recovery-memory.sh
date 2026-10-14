@@ -156,7 +156,9 @@ PYCODE
     provenance_sha256_file "$work_root/target-candidate/scale/rrharness" > "$output/candidate-binary.sha256"
     mkdir "$output/scan"
     status=0
-    launch_scope "recovery-scan-$$.scope" bash "$driver" --scope-scan \
+    launch_scope "recovery-scan-$$.scope" env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+        RECOVERY_MEMORY_RUNNER_ENVIRONMENT="${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}}" \
+        bash "$driver" --scope-scan \
         "$work_root/target-candidate/scale/rrharness" "$output/scan" capture-scan \
         "$(cat "$output/candidate-binary.sha256")" "$profile" 1 \
         > "$output/scan/launcher.log" 2>&1 || status=$?

@@ -1217,6 +1217,57 @@ class RecoveryScanTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
+    def test_scan_scope_preserves_only_required_identity_after_sanitized_sudo(self):
+        source = Path(__file__).with_name("compare-recovery-memory.sh").read_text()
+        functions = source[source.index("record_command() {"):source.index("# Probe actual scope")]
+        start = source.index('    launch_scope "recovery-scan-')
+        launch = source[start:source.index("    printf ", start)]
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir()
+        sudo = fake_bin / "sudo"
+        sudo.write_text(textwrap.dedent("""\
+            #!/bin/bash
+            [[ $1 == systemd-run ]] || exit 1
+            shift
+            while [[ $# -gt 0 && $1 != -- ]]; do shift; done
+            [[ ${1:-} == -- ]] || exit 1
+            shift
+            exec env -i PATH="$PATH" "$@"
+            """))
+        sudo.chmod(0o755)
+        driver = self.root / "child.sh"
+        driver.write_text(textwrap.dedent("""\
+            #!/bin/bash
+            [[ $1 == --scope-scan && $# == 7 ]] || exit 1
+            env > "$3/child-environment"
+            """))
+        for override in (False, True):
+            with self.subTest(override=override):
+                output = self.root / str(override)
+                (output / "scan").mkdir(parents=True)
+                (output / "candidate-binary.sha256").write_text("a" * 64 + "\n")
+                environment = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}",
+                                   GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                                   RUNNER_OS="Linux", UNRELATED_PARENT_ONLY="must-not-leak")
+                environment.pop("RECOVERY_MEMORY_RUNNER_ENVIRONMENT", None)
+                if override:
+                    environment.update(RECOVERY_MEMORY_RUNNER_ENVIRONMENT="github-hosted",
+                                       RUNNER_ENVIRONMENT="must-not-pass-through")
+                result = subprocess.run(
+                    ["bash", "-c", functions + '\noutput=$1; work_root=$1; driver=$2; '
+                     'profile=evpn-soak; status=0\n' + launch + '\nexit "$status"',
+                     "scan-fixture", str(output), str(driver)],
+                    env=environment, capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                child = dict(line.split("=", 1) for line in
+                             (output / "scan/child-environment").read_text().splitlines())
+                identity_names = ("GITHUB_ACTIONS", "RECOVERY_MEMORY_RUNNER_ENVIRONMENT",
+                                  "RUNNER_ENVIRONMENT", "RUNNER_OS", "UNRELATED_PARENT_ONLY")
+                self.assertEqual({name: child[name] for name in identity_names if name in child},
+                                 {"GITHUB_ACTIONS": "true",
+                                  "RECOVERY_MEMORY_RUNNER_ENVIRONMENT": "github-hosted"})
+
     def rows(self, profile="evpn-soak"):
         keys = receipt.SCAN_PROFILES[profile]
         return [dict(schema=receipt.SCAN_SCHEMA, profile=profile, keys=keys, records=records,
