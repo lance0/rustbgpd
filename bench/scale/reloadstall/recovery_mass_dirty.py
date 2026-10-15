@@ -81,7 +81,7 @@ def peer(index):
 
 def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=False):
     directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     require(len(str(directory / "grpc.sock").encode()) <= 100, "UDS path exceeds safe length")
     vpn = profile == "full-vpn"
     denied = [fixture_prefix(f, n) for f in range(2) for n in range(2 if vpn else 4)] if pressure else []

@@ -40,6 +40,7 @@ class MassDirtyTests(unittest.TestCase):
         for profile in ("full-uc", "full-vpn"):
             scenario = self.root / profile
             hashes = receipt.generate(scenario, profile, 12, 17986, 19186)
+            self.assertEqual(scenario.stat().st_mode & 0o777, 0o700)
             config = tomllib.loads((scenario / "config.toml").read_text())
             self.assertEqual(config["config_epoch"], 2)
             self.assertTrue(config["global"]["ebgp_requires_policy"])
