@@ -1,0 +1,787 @@
+{
+  "aggregate": {
+    "actual_causal_red_exit": 1,
+    "all_owned_processes_reaped": true,
+    "all_snapshot_journals_empty": true,
+    "healthy_B_A_folds": 12,
+    "healthy_legs": 6,
+    "healthy_withdrawals": 0,
+    "ordinary_snapshot_failure_entries": 0,
+    "owned_processes": 14,
+    "required_snapshot_journals": 7
+  },
+  "build": {
+    "all_build_processes_reaped": true,
+    "all_five_locked_default_builds_verified": true,
+    "all_sources_restored": true,
+    "binaries_sha256": {
+      "rbgp": "d1b406923ef1084b2643c10145c6cd2de0a22f3d95b053049e27f7e35b488999",
+      "reloadstall": "7080c12cab829d2aca76598a5e32d6e8cf1ed633056183ea06910c1f61087289",
+      "rustbgpd-candidate": "4027d03867b3209df798c8c93cd1824df4257e076bd010dffe0079704fdc57a3",
+      "rustbgpd-flat": "0b2cd1c560378f3ea07e05e6bd5fb55b8d93cb5bd06cfd632091468d2963740c",
+      "rustbgpd-mutant": "c496b810f994b2d0a353a053ec69248f2a02852a82bcf36a26926fb990e99857"
+    },
+    "build_commands": [
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "32-63",
+          "cargo",
+          "build",
+          "--release",
+          "--locked",
+          "--bin",
+          "rustbgpd"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "daemon-candidate",
+        "role": "candidate"
+      },
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "32-63",
+          "cargo",
+          "build",
+          "--release",
+          "--locked",
+          "--bin",
+          "rustbgpd"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "daemon-flat",
+        "role": "flat"
+      },
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "32-63",
+          "cargo",
+          "build",
+          "--release",
+          "--locked",
+          "--bin",
+          "rustbgpd"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "daemon-mutant",
+        "role": "mutant"
+      },
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "32-63",
+          "cargo",
+          "build",
+          "--profile",
+          "scale",
+          "--locked",
+          "-p",
+          "reloadstall"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "harness",
+        "role": "candidate"
+      },
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "32-63",
+          "cargo",
+          "build",
+          "--release",
+          "--locked",
+          "--bin",
+          "rbgp"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "rbgp",
+        "role": "candidate"
+      }
+    ],
+    "build_complete_sha256": "64818e00e63491e66f0ba420e2df50b56867907cce8383485cce5438f6ca0b94",
+    "capture_helper_hash_scope": "update_groups.rs only; not a complete runtime-source hash",
+    "cargo_version": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "controller_sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9",
+    "genuine_rib_compilation_all_three_roles": true,
+    "probe_sha256": "c38cf9fac4d35e67813e83eaa7637bccd5c6847a1a2ceac65fef19758a52fffc",
+    "roles": {
+      "candidate": {
+        "capture_helper_source_sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277",
+        "head": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe",
+        "inputs_before_sha256": "6dfa9ecfe47bf0e8b996ded8a5f83cd7819b63da4c9b8fb31771e70103ad90ce",
+        "inputs_built_sha256": "6dfa9ecfe47bf0e8b996ded8a5f83cd7819b63da4c9b8fb31771e70103ad90ce",
+        "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "flat": {
+        "capture_helper_source_sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c",
+        "head": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe",
+        "inputs_before_sha256": "6dfa9ecfe47bf0e8b996ded8a5f83cd7819b63da4c9b8fb31771e70103ad90ce",
+        "inputs_built_sha256": "36bfc4cf615a4fab93a30ebceb63df7b9142400e5de2406ed240d1d7b8772f2a",
+        "patch_sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+      },
+      "mutant": {
+        "capture_helper_source_sha256": "868289c8f5c83c8bd67a6bc0cec5b757d8379df603f8196c296d9527a0fbdfed",
+        "head": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe",
+        "inputs_before_sha256": "6dfa9ecfe47bf0e8b996ded8a5f83cd7819b63da4c9b8fb31771e70103ad90ce",
+        "inputs_built_sha256": "5ca9e3d2fa7159a08d4f797516418f363a867a537193fbd93eeb54ad46a6290e",
+        "patch_sha256": "66f0390b80a540eb1742d684277c48004905737d3cd437625a024f1de0073c49"
+      }
+    },
+    "rustc_verbose": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+    "sources_sha256": "7290d77bced2b73a0b01190061f572a6a4cdf40e014eeaaa1229a8f31fd93888",
+    "terminal_summary_sha256": "f5f09061203f79b8e7d72fafee699faabec441456f1a1319145572b84053bbe2",
+    "three_daemons_distinct": true,
+    "tracked_input_roster": {
+      "canonical_clean": true,
+      "count": 9016,
+      "physical_tracked_entries_match_recorded_roster": true,
+      "scope": "tracked file roster and role/restoration maps, not a claim to list every compiler-opened or generated input",
+      "sha256": "6dfa9ecfe47bf0e8b996ded8a5f83cd7819b63da4c9b8fb31771e70103ad90ce",
+      "symlinks_use_marked_link_text": true
+    }
+  },
+  "cleanup_only_followup": {
+    "acceptance_condition": "independently prove actual a185 outer invocation, frozen finalizer, job status and cleanup/ownership success; old driver.exit marker alone is insufficient",
+    "all_other_tracked_files_identical": true,
+    "changed_paths": [
+      "bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+      "bench/scale/reloadstall/test_recovery_mass_dirty.py"
+    ],
+    "independent_review_sha256": "ca6143071669785d3bf4009c746a32402745febb24f2150ee8088790a611466d",
+    "measurement_scope": "a185 remains the recorded hosted source; no relabel as cleanup-only987",
+    "parent": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe",
+    "publication_sha256": "a3c83a4a808e7de7c40c77c0a7e426a30fd48de8e37063cbfe42210be0847fdb",
+    "root_review_sha256": "076bdf5b85925c643f4bcc1df40e5013ade6587ac90385174484f60b18d93dea",
+    "source": "987ed07828df2227f6ffd48ef9f4230cd689b2b3",
+    "wrapper_outside_exit_handler_identical": true
+  },
+  "document_class": "sanitized derived local correctness-control summary",
+  "historical_files_unchanged": {
+    "invalid-hosted-attempt.json": "1880df8ed7068b665dfd4311966641992edf492634e242ab158a34c62a549266",
+    "invalid-hosted-baf-attempt.json": "30ca70b81f21a82f632469d80ab0f633f7ffdcca1bf5b68a9c0201c4195fd55e",
+    "local-correctness-controls-v3.json": "c24dbbee312f607ffd425ecad580bf088601465f6bce522e231e834a9f49a531",
+    "local-correctness-controls.json": "0c067652ed81b7093bd051a5aca863d81610ee6c65a18fe761dc4117667413d7"
+  },
+  "independent_verdict": "CLEAR_LOCAL_CORRECTNESS_ONLY",
+  "limits": [
+    "local controls do not qualify the hosted full12/24 matrix",
+    "zero local snapshot failures do not exercise actual retry",
+    "online native validation and compact receipt replay, no retained complete ordered packet stream",
+    "no new isolated-native result",
+    "no generic zero-reset claim",
+    "prior local and failed hosted evidence preserved separately and unpooled",
+    "actual release-candidate soak pending",
+    "dataset acknowledgement defect separate",
+    "EVPN group ownership off and unqualified"
+  ],
+  "logical_credit_scope": "proof entries/bytes/peak are correctness diagnostics; VPN full-OLD uses flat storage in both arms, no storage-gain claim",
+  "null_measurements": {
+    "CPU_cost": null,
+    "RSS": null,
+    "cost_ratio": null,
+    "operation_and_native_clocks": null,
+    "reason": "correctness-only; raw operation/native clocks null, no memory.csv or measured cost/RSS result fields"
+  },
+  "ordered_controls": [
+    {
+      "actual_binary_hashes": {
+        "rbgp": "d1b406923ef1084b2643c10145c6cd2de0a22f3d95b053049e27f7e35b488999",
+        "reloadstall": "7080c12cab829d2aca76598a5e32d6e8cf1ed633056183ea06910c1f61087289",
+        "rustbgpd-candidate": "4027d03867b3209df798c8c93cd1824df4257e076bd010dffe0079704fdc57a3",
+        "rustbgpd-flat": "0b2cd1c560378f3ea07e05e6bd5fb55b8d93cb5bd06cfd632091468d2963740c"
+      },
+      "actual_outer_invocation_exit": 0,
+      "all_owned_processes_reaped": true,
+      "campaign_manifest_sha256": "5db34b3cc81efea7e87537da16f9515b87b445d24d8d36e4a510225eaa9a85bf",
+      "control_result_sha256": "8e9d428024deac7f955e8066eb622767ac0738fe3701eba460e0760ef257bce2",
+      "healthy_legs": [
+        {
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "daemon_log_sha256": "d39ec13c2f2db4976fe44faae1d48c8b1171c4279b247c30fcbbfd3e0318c410",
+          "harness_exit": 0,
+          "id": "leg-0-flat",
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "raw_file_count": 29,
+          "result_sha256": "579050301ed8b94bc112f822397fa90c3dbfce8f9e4b1567d61c69f6a60244af",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "timing_rss_cost": null
+        },
+        {
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "daemon_log_sha256": "114c17842d9b2c963fe855f5e84b98d507ea9852a6ea4bbafb4e232d649a5fc1",
+          "harness_exit": 0,
+          "id": "leg-1-candidate",
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 44587944,
+                "entries": 2460000,
+                "peak_bytes": 44587968
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 44587968
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 44587944,
+                "entries": 2460000,
+                "peak_bytes": 44587968
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 44587968
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "raw_file_count": 29,
+          "result_sha256": "4ed03bfb817fc3dbee665c099ce723d1b0f0a50f7b01fdf2fd3d81711ca21029",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "timing_rss_cost": null
+        }
+      ],
+      "id": "uc",
+      "journals": [
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-0-flat",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-1-candidate",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "outcome": "CORRECTNESS_ONLY",
+      "outer_driver_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "outer_driver_log_sha256": "62361d1f410403fd0adebcc950b8ae24e57540ae8db2cf0c57d24e8b9c904d25",
+      "profile": "full-uc",
+      "proof": {
+        "frozen_finalize_replay": {
+          "cohort": "no-refusal",
+          "release_soak_qualified": false,
+          "status": "CORRECTNESS_ONLY"
+        },
+        "raw_verdict_unchanged": true
+      },
+      "raw_verdict_sha256": "06a706a9992e1422af037159b82bc3181c158994bea23681780f37170a178762"
+    },
+    {
+      "actual_binary_hashes": {
+        "rbgp": "d1b406923ef1084b2643c10145c6cd2de0a22f3d95b053049e27f7e35b488999",
+        "reloadstall": "7080c12cab829d2aca76598a5e32d6e8cf1ed633056183ea06910c1f61087289",
+        "rustbgpd-candidate": "c496b810f994b2d0a353a053ec69248f2a02852a82bcf36a26926fb990e99857",
+        "rustbgpd-flat": "0b2cd1c560378f3ea07e05e6bd5fb55b8d93cb5bd06cfd632091468d2963740c"
+      },
+      "actual_missing_age_targets": [
+        "127.1.0.2",
+        "127.1.0.3"
+      ],
+      "actual_outer_invocation_exit": 1,
+      "all_owned_processes_reaped": true,
+      "campaign_manifest_sha256": "5db34b3cc81efea7e87537da16f9515b87b445d24d8d36e4a510225eaa9a85bf",
+      "causal_evidence_sha256": "b44be540aa72597e1835ab54185e9cae1ce6c10a73a1c0932d1bcb69e187a87c",
+      "control_result_sha256": "d561d2e7521292ba0aa03201a79052eefcdeaaaf4955bb40dc3b90b2872f4952",
+      "healthy_legs": [],
+      "id": "uc-timestamp-mutant",
+      "initiating_failure_sha256": "b0f0abcfe9c060ff8451bacadb7a02151b2d65a08502ed66fb9edbcfa89f0492",
+      "journals": [
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-1-candidate",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "native_stderr_empty": true,
+      "outcome": "CAUSAL_RED",
+      "outer_driver_exit_sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "outer_driver_log_sha256": "7e91712004fba05348a141c7eff4690b29f0ba1f2de53ad3b9030b7df2934f3b",
+      "profile": "full-uc",
+      "proof": {
+        "all_targets_pending_original_group": true,
+        "causal_evidence_sha256": "b44be540aa72597e1835ab54185e9cae1ce6c10a73a1c0932d1bcb69e187a87c",
+        "error": "invalid current dirty episode",
+        "full_baseline_and_actual_B_drain": true,
+        "missing_age_targets": [
+          "127.1.0.2",
+          "127.1.0.3"
+        ],
+        "native_readiness_session_error": false,
+        "source_clean": true
+      }
+    },
+    {
+      "actual_binary_hashes": {
+        "rbgp": "d1b406923ef1084b2643c10145c6cd2de0a22f3d95b053049e27f7e35b488999",
+        "reloadstall": "7080c12cab829d2aca76598a5e32d6e8cf1ed633056183ea06910c1f61087289",
+        "rustbgpd-candidate": "4027d03867b3209df798c8c93cd1824df4257e076bd010dffe0079704fdc57a3",
+        "rustbgpd-flat": "0b2cd1c560378f3ea07e05e6bd5fb55b8d93cb5bd06cfd632091468d2963740c"
+      },
+      "actual_outer_invocation_exit": 0,
+      "all_owned_processes_reaped": true,
+      "campaign_manifest_sha256": "5db34b3cc81efea7e87537da16f9515b87b445d24d8d36e4a510225eaa9a85bf",
+      "control_result_sha256": "4db16bfef83401ab51132aea4ebaef9480712188f56b5b7d2e4739e0c9942132",
+      "healthy_legs": [
+        {
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "daemon_log_sha256": "4ccbe546da40ee94168a139901eefec0d32f12728b9ccb5bdb566e62ed715f97",
+          "harness_exit": 0,
+          "id": "leg-0-flat",
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "raw_file_count": 29,
+          "result_sha256": "3c89f30345123baf1e671df290b0ecb127df0d1b3b3b36637461d68ffe0c962f",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "timing_rss_cost": null
+        },
+        {
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "daemon_log_sha256": "c079ce8fbdf2a0cf7afce43da2be52c68ca76b18c9e57e812eb2ec597b9e96f7",
+          "harness_exit": 0,
+          "id": "leg-1-candidate",
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 44587944,
+                "entries": 2460000,
+                "peak_bytes": 44587968
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 44587968
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 44587944,
+                "entries": 2460000,
+                "peak_bytes": 44587968
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 44587968
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "raw_file_count": 29,
+          "result_sha256": "c7f7c219b35f9a4987d09e252c7e2c268f7d3e6b0dc17c031c0e2315243ec326",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "timing_rss_cost": null
+        }
+      ],
+      "id": "uc-restored",
+      "journals": [
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-0-flat",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-1-candidate",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "outcome": "CORRECTNESS_ONLY",
+      "outer_driver_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "outer_driver_log_sha256": "62361d1f410403fd0adebcc950b8ae24e57540ae8db2cf0c57d24e8b9c904d25",
+      "profile": "full-uc",
+      "proof": {
+        "frozen_finalize_replay": {
+          "cohort": "no-refusal",
+          "release_soak_qualified": false,
+          "status": "CORRECTNESS_ONLY"
+        },
+        "raw_verdict_unchanged": true
+      },
+      "raw_verdict_sha256": "06a706a9992e1422af037159b82bc3181c158994bea23681780f37170a178762"
+    },
+    {
+      "actual_binary_hashes": {
+        "rbgp": "d1b406923ef1084b2643c10145c6cd2de0a22f3d95b053049e27f7e35b488999",
+        "reloadstall": "7080c12cab829d2aca76598a5e32d6e8cf1ed633056183ea06910c1f61087289",
+        "rustbgpd-candidate": "4027d03867b3209df798c8c93cd1824df4257e076bd010dffe0079704fdc57a3",
+        "rustbgpd-flat": "0b2cd1c560378f3ea07e05e6bd5fb55b8d93cb5bd06cfd632091468d2963740c"
+      },
+      "actual_outer_invocation_exit": 0,
+      "all_owned_processes_reaped": true,
+      "campaign_manifest_sha256": "65189b196f923a3837fab65c9353f6e57b01ea95318ed58037da82ac9704afcb",
+      "control_result_sha256": "5c78db5d3da30d913cbd9f14e8ad93d644779360c1a3e296479d32b59632e94d",
+      "healthy_legs": [
+        {
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "daemon_log_sha256": "f23b33861b8d2c808d19e2531b4ee719bb560a5c686c4b6444c508c85293b63d",
+          "harness_exit": 0,
+          "id": "leg-0-flat",
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "raw_file_count": 29,
+          "result_sha256": "983be047c1dee7a3a33a6e476cb3f1ce8f8831713d51ba5dad497562b832209d",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "timing_rss_cost": null
+        },
+        {
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "daemon_log_sha256": "a3b1e468996427cc446251b894ad0343db55f34608f87df5d7d23ce6942eaf0d",
+          "harness_exit": 0,
+          "id": "leg-1-candidate",
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "raw_file_count": 29,
+          "result_sha256": "c88ffe40cf5bac5e340fa71f7a4e51b5e142be155c19b1c5c34fafb5731af9b4",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "timing_rss_cost": null
+        }
+      ],
+      "id": "vpn",
+      "journals": [
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-0-flat",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-1-candidate",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "outcome": "CORRECTNESS_ONLY",
+      "outer_driver_exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "outer_driver_log_sha256": "62361d1f410403fd0adebcc950b8ae24e57540ae8db2cf0c57d24e8b9c904d25",
+      "profile": "full-vpn",
+      "proof": {
+        "frozen_finalize_replay": {
+          "cohort": "no-refusal",
+          "release_soak_qualified": false,
+          "status": "CORRECTNESS_ONLY"
+        },
+        "raw_verdict_unchanged": true
+      },
+      "raw_verdict_sha256": "06a706a9992e1422af037159b82bc3181c158994bea23681780f37170a178762"
+    }
+  ],
+  "production_main_relation": {
+    "delta": [],
+    "equal_path_scopes": [
+      "crates",
+      "src",
+      "proto",
+      "Cargo.toml",
+      "Cargo.lock",
+      "docs/reference/v1-stable-surface.json"
+    ],
+    "evidence_sha256": "29cb018f8bc1d1a21fd34f347617c597651dce925fe014d675167a6d8e9a4fc5",
+    "main": "594b0ceb30896c7a864b1a0d730df4051ef080d7",
+    "qualification": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe",
+    "scope": "only the listed production/contract paths; harness source stays a185, no whole-tree equality or exact-main measurement claim"
+  },
+  "protocol": "unchanged 250ms readiness, exact B/A wire/fold, same group/session/current dirty overlap and full retained proof; VPN candidate already flat",
+  "provenance": {
+    "build_final_pin_sha256": "273b8f95344f3a7c38335400aa8621fa36f1c0bbfc2c36609117c542caf2a218",
+    "canonical_tracked_roster_check_sha256": "c38e59ebeac605ddf6e877c9e7ddf56def9ab5291920f1ee201f5fa7fafb2605",
+    "compact_can_replay_raw_checks": false,
+    "independent_closure_sha256": "a54389fa8d93e3e531cdd652b445d8e137172ae6929f991d3b58c1a6878cdc7b",
+    "publication_receipt_sha256": "2116f5ee0d6ae21411c205a1a168b63d9e4f39e58f5d3d00cc848a8b9be51446",
+    "raw_campaigns_retained_separately": true,
+    "sealed_summary_sha256": "aa3de6c55944dd2b92cc3e62dfd672bce80eb2fcdb3568b8b67d3264124afe2f"
+  },
+  "schema": "rustbgpd.local-mass-dirty-control-summary.v4",
+  "scope": "two-receiver full-shape correctness and timestamp-only causal rejection; no timing/RSS/cost, cap-pressure, fleet capacity or full12/24 hosted qualification",
+  "sealed_at_utc": "2026-10-15T13:59:43Z",
+  "shape": {
+    "batch_size": 80,
+    "cohort": "no-refusal",
+    "daemon_cpus": "32-47",
+    "ipv4_keys": 1000000,
+    "ipv6_keys": 230000,
+    "native_cpus": "48-63",
+    "origin_cardinality": 15375,
+    "receivers": 2
+  },
+  "source": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe"
+}
