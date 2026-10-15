@@ -237,3 +237,99 @@ fn evpn_recovery_admission_is_a_refusal_not_a_drop() {
     assert!((refusals(&manager.metrics) - 1.0).abs() < f64::EPSILON);
     assert!(drops(&manager.metrics).abs() < f64::EPSILON);
 }
+
+fn dirty_resync(metrics: &BgpMetrics, outcome: &str) -> f64 {
+    counter_metric_value(
+        metrics,
+        "bgp_rib_dirty_resync_total",
+        &[("outcome", outcome)],
+    )
+}
+
+fn peer_up(
+    peer: IpAddr,
+    router_id: Ipv4Addr,
+    outbound_tx: mpsc::Sender<crate::OutboundRouteUpdate>,
+) -> RibUpdate {
+    RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn: 65000,
+        peer_router_id: router_id,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    }
+}
+
+async fn barrier(tx: &mpsc::Sender<RibUpdate>) {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    response.await.unwrap();
+}
+
+/// A message handler that drains armed resync work (here `PeerDown`) records
+/// one `cleared` outcome, so `BgpOutboundResyncStalled` sees the recovery.
+#[tokio::test(start_paused = true)]
+async fn handler_drained_resync_records_one_cleared_outcome() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    // The target's one-slot queue is left full by its initial EoR.
+    let (target_tx, _target_rx) = mpsc::channel(1);
+    tx.send(peer_up(PEER, Ipv4Addr::new(192, 0, 2, 70), target_tx))
+        .await
+        .unwrap();
+    let source = IpAddr::V4(SOURCE);
+    let (source_tx, _source_rx) = mpsc::channel(64);
+    tx.send(peer_up(source, SOURCE, source_tx)).await.unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            SOURCE,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    barrier(&tx).await;
+
+    // One tick finds the queue still full, so the timer re-arms.
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    barrier(&tx).await;
+    assert!(dirty_resync(&metrics, "still_dirty") >= 1.0);
+    assert!(dirty_resync(&metrics, "cleared").abs() < f64::EPSILON);
+
+    // The session closes before the next tick; its handler drains the work.
+    tx.send(RibUpdate::PeerDown {
+        peer: PEER,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    barrier(&tx).await;
+    assert!((dirty_resync(&metrics, "cleared") - 1.0).abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}

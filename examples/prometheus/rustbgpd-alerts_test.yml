@@ -1763,6 +1763,8 @@ tests:
   # then exported at 0, and its first drain at 12m suppresses the alert. The
   # daemon pre-initializes the series because a series born at 1 has no
   # increase, which would let edge5 fire at 20m across that drain.
+  # edge6 has a short episode every minute: one still_dirty tick, then a
+  # handler drain records cleared a minute later. It never fires.
   - interval: 1m
     input_series:
       - series: 'bgp_rib_dirty_resync_total{outcome="still_dirty", instance="edge1:9179"}'
@@ -1785,6 +1787,10 @@ tests:
         values: "0+60x20 1200x18"
       - series: 'bgp_rib_dirty_resync_total{outcome="cleared", instance="edge5:9179"}'
         values: "_ _ 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2"
+      - series: 'bgp_rib_dirty_resync_total{outcome="still_dirty", instance="edge6:9179"}'
+        values: "0+1x39"
+      - series: 'bgp_rib_dirty_resync_total{outcome="cleared", instance="edge6:9179"}'
+        values: "0 0+1x38"
     alert_rule_test:
       - eval_time: 10m
         alertname: BgpOutboundResyncStalled

@@ -1641,9 +1641,10 @@ impl BgpMetrics {
         let rib_dirty_resync = IntCounterVec::new(
             Opts::new(
                 "bgp_rib_dirty_resync_total",
-                "Dirty-peer resync timer fires, by outcome: 'cleared' (all dirty \
-                 peers resynced) or 'still_dirty' (at least one peer remains dirty \
-                 and the 1s timer re-arms).",
+                "Dirty-peer resync timer outcomes: 'cleared' (the armed timer's \
+                 work drained, on a tick or through a message handler) or \
+                 'still_dirty' (a tick left at least one peer dirty and the 1s \
+                 timer re-arms).",
             ),
             &["outcome"],
         )
