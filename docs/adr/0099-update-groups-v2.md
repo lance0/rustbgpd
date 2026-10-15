@@ -463,6 +463,10 @@ misses the approximately 1.5 times shared/flat target in all 24 unicast/VPN cell
 Linear classification alone does not accept complete-capture cost or the
 CPU/memory trade. See the [capture-cost amendment](#amendment-2026-10-15-capture-cost-candidate-not-accepted).
 
+The [slot-indexed selection amendment](#amendment-2026-10-15-slot-indexed-full-old-selection)
+prepares an indexed candidate for pure-unicast groups and flat full-OLD proofs
+for VPN-negotiated groups. Its measured capture-cost bar remains pending.
+
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
 withdraws equals the per-peer path, with exact NLRI and prepared attribute bytes.
@@ -697,3 +701,42 @@ no-proof contract; do not hide fallback or raise caps to pass a comparison.
 Matched whole-system mass-dirty readiness, receiver convergence and memory
 evidence must exercise the selected path, followed by a soak on the actual
 release candidate. EVPN ownership remains disabled under its existing gates.
+
+## Amendment (2026-10-15): slot-indexed full-OLD selection
+
+Pure-unicast groups retain the immutable sorted key universe and add one
+immutable `u32` slab-slot-to-key-position index, built and charged with that
+universe before publication. Both full capture and empty/incremental admission
+supply the actual slab when creating a pure-unicast pool. Every slot hit checks
+the exact current prefix and path ID; slot reuse, clearing and moved keys cannot
+transfer admission. Old-version hints remain reusable across key-set churn.
+
+Warm full capture makes two authoritative projection walks: sizing and
+population. It allocates no per-member ordering buffer and performs no
+per-member sort. Each walk permits at most 4,096 exact binary fallback lookups
+for mismatched slots. On the next mismatch, sizing stops membership lookups,
+finishes the actual count and selects exact flat storage for the second walk.
+A successful indexed capture can therefore perform up to 8,192 fallback lookups
+across its two walks. Missing-index hints select flat capture explicitly.
+
+The pool index charges the historical slab span, including vacant slots, under
+the unchanged 64 MiB per-peer and 512 MiB daemon budgets. All index/key/header
+capacities and allocation overlap are admitted before allocation and released
+only after storage is freed. Cold pool creation still sorts the shared keys and
+builds the index once; report its complete cost separately from warm capture.
+Sharing selection compares the actual reused-universe mask and sparse additions
+with flat storage. Optional index/share refusal leaves authoritative flat capture
+available; true flat refusal keeps the counted conservative withdrawal fallback.
+
+Any group that negotiates VPN uses exact flat storage for its **whole** full
+common OLD proof, including unicast rows, even when it currently has no VPN
+routes. Private/regroup capture stays flat. This does not disable the separately
+pinned incremental or empty-proof sharing operations. Concurrent flat captures
+retain more per-peer memory and can reach the existing budgets earlier; growth
+still charges replacement overlap and may enter conservative fallback.
+
+This selects a candidate method, not a measured improvement or release verdict.
+Preserve the dated failed-cost receipts. Qualify the new method with fresh,
+source-pinned sorted/shuffled campaigns, the approximately 1.5-times flat cost
+bar, matched whole-system readiness/convergence and memory evidence, and a soak
+on the actual release candidate. EVPN ownership remains disabled.

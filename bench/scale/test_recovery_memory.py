@@ -1349,17 +1349,33 @@ class RecoveryScanTests(unittest.TestCase):
 
     def rows(self, profile="evpn-soak", old_order="sorted"):
         keys = receipt.SCAN_PROFILES[profile]
-        return [dict(schema=receipt.SCAN_SCHEMA, profile=profile, old_order=old_order, keys=keys, records=records,
-                     layout=layout, arm=arm, leg=leg, measured=True, old_keys=keys,
-                     additions=records if layout == "older-sparse" and arm == "shared" else 0,
-                     shape_callbacks=3 * keys if arm == "shared" else keys,
-                     comparisons=2 * keys if arm == "shared" else 0,
-                     proof_keys=keys, shared=arm == "shared", retained_bytes=8192,
-                     peak_bytes=9000, empty_bytes=56, settled_bytes=56, refusal=None,
-                     phases={"shape": {"wall_ns": 1000, "cpu_ticks": 1},
-                             "capture": {"wall_ns": 2000, "cpu_ticks": 2}})
-                for records in (2, 64, 480) for layout in ("dense", "older-sparse")
-                for leg, arm in enumerate(("flat", "shared", "shared", "flat"))]
+        rows = []
+        for records in (2, 64, 480):
+            for layout in ("dense", "older-sparse"):
+                sparse = records if layout == "older-sparse" else 0
+                for leg, arm in enumerate(("flat", "candidate", "candidate", "flat")):
+                    shared = arm == "candidate" and profile != "full-vpn"
+                    comparisons = (keys if profile == "full-uc" else 2 * keys) if shared else 0
+                    slots = keys + sparse // 2 if profile == "full-uc" else 0
+                    rows.append(dict(
+                        schema=receipt.SCAN_SCHEMA, profile=profile, old_order=old_order,
+                        vpn_negotiated=profile == "full-vpn", keys=keys, records=records, layout=layout, arm=arm, leg=leg,
+                        measured=True, old_keys=keys, additions=sparse if shared else 0,
+                        shape_callbacks=(slots if profile == "full-uc" else keys) + comparisons,
+                        comparison_counter_scope="ordered-evpn-checkpoints-minus-old-visits" if profile == "evpn-soak" else "typed-full-old-shape",
+                        comparisons=comparisons, mismatches=sparse if shared and profile == "full-uc" else 0,
+                        source_slots=slots,
+                        selected_strategy=("uc-slab-shared" if profile == "full-uc" else "evpn-sort-shared") if shared else "exact-flat",
+                        selection_reason="explicit-flat-control" if arm == "flat" else ("vpn-negotiated" if profile == "full-vpn" else "eligible"),
+                        cold_anchor_strategy="not-measured" if profile == "evpn-soak" else ("uc-slab-shared" if profile == "full-uc" else "exact-flat"),
+                        cold_anchor_unavailable_reason="evpn-not-production-cold-path" if profile == "evpn-soak" else None,
+                        proof_keys=keys, shared=shared, retained_bytes=8192, peak_bytes=9000,
+                        empty_bytes=56, settled_bytes=56, refusal=None,
+                        phases={"shape": {"wall_ns": 1000, "cpu_ticks": 1},
+                                "capture": {"wall_ns": 2000, "cpu_ticks": 2},
+                                "cold_anchor_capture": None if profile == "evpn-soak" else {"wall_ns": 3000, "cpu_ticks": 3}},
+                    ))
+        return rows
 
     def log(self, rows, old_order=None):
         profile = rows[0]["profile"]
@@ -1367,7 +1383,9 @@ class RecoveryScanTests(unittest.TestCase):
                  "recovery_scan_environment " + json.dumps({"schema": receipt.SCAN_SCHEMA,
                     "old_order": rows[0]["old_order"] if old_order is None else old_order,
                     "cpu_ticks_per_second": 100,
-                    "phase_passes": "independent shape and capture invocations",
+                    "phase_passes": "shape independently invoked; cold anchor and warm capture are separate intervals",
+                    "fixture_lineage": "common families use one actual AdjRibOut; order is insertion order; sparse mutation reuses and appends slots",
+                    "cold_scope": "common anchor begin/full helper/seal; identical policy before both warm arms; no attributable cold arm ratio; EVPN cold unmeasured",
                     "credit_scope": "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS"})]
         lines += ["recovery_scan " + json.dumps(row) for row in rows]
         lines += ["recovery_scan_complete " + json.dumps({"profile": profile, "cells": 6, "legs": 24})]
@@ -1387,10 +1405,10 @@ class RecoveryScanTests(unittest.TestCase):
         inputs = root / "instrumentation.sha256"
         inputs.write_text(inputs.read_text() + receipt.file_digest(path) + "  " + name + "\n")
         manifest = {
-            "schema": "rustbgpd.recovery-scan.campaign.v2", "candidate": "a" * 40,
+            "schema": "rustbgpd.recovery-scan.campaign.v3", "candidate": "a" * 40,
             "instrumentation_manifest_sha256": receipt.file_digest(inputs),
             "profile": rows[0]["profile"], "old_order": rows[0]["old_order"], "build_jobs": 4,
-            "order_per_cell": ["flat", "shared", "shared", "flat"],
+            "order_per_cell": ["flat", "candidate", "candidate", "flat"],
         }
         receipt.write_json(root / "manifest.json", manifest)
         directory = root / "scan"
@@ -1419,7 +1437,8 @@ class RecoveryScanTests(unittest.TestCase):
                 rows = self.rows(profile)
                 for row in rows:
                     for phase in row["phases"].values():
-                        phase["cpu_ticks"] = 0
+                        if phase is not None:
+                            phase["cpu_ticks"] = 0
                 root = self.campaign(rows)
                 result = self.summarize_campaign(root)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -1430,8 +1449,8 @@ class RecoveryScanTests(unittest.TestCase):
                 self.assertEqual(len(summary["comparisons"]), 6)
                 self.assertTrue(all(cell["eligible"] for cell in summary["comparisons"]))
                 for cell in summary["comparisons"]:
-                    self.assertIsNone(cell["shared_over_flat"]["capture"]["cpu_ticks"])
-                    self.assertEqual(cell["shared_over_flat"]["capture"]["wall_ns"], 1.0)
+                    self.assertIsNone(cell["candidate_over_flat"]["capture"]["cpu_ticks"])
+                    self.assertEqual(cell["candidate_over_flat"]["capture"]["wall_ns"], 1.0)
 
     def test_scan_summary_refuses_any_missing_comparison_and_preserves_raw(self):
         for refused in ((1,), (0, 1, 2, 3), tuple(range(24))):
@@ -1451,6 +1470,7 @@ class RecoveryScanTests(unittest.TestCase):
                 self.assertEqual(len(summary["comparisons"]), 6)
                 self.assertTrue(any(not cell["eligible"] for cell in summary["comparisons"]))
                 self.assertEqual((root / "scan/harness.log").read_bytes(), raw)
+
                 finalized = subprocess.run(
                     ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan",
                      str(root), "--failed-driver-exit", str(result.returncode)],
@@ -1467,6 +1487,52 @@ class RecoveryScanTests(unittest.TestCase):
                 self.assertTrue(diagnostic.exists(), "completed refusal diagnostics missing after finalization")
                 self.assertEqual(json.loads(diagnostic.read_text()), summary)
                 self.assertEqual((root / "scan/harness.log").read_bytes(), raw)
+
+
+    def test_scan_v3_requires_the_actual_selected_production_strategy(self):
+        for profile, reason in (("full-uc", "missing-index"), ("full-uc", "slot-churn"),
+                                ("full-vpn", "eligible")):
+            with self.subTest(profile=profile, reason=reason):
+                rows = self.rows(profile)
+                row = rows[1]
+                if profile == "full-uc":
+                    row.update(selected_strategy="exact-flat", selection_reason=reason, shared=False,
+                               additions=0, comparisons=0, shape_callbacks=row["source_slots"])
+                else:
+                    row.update(selected_strategy="uc-slab-shared", selection_reason=reason, shared=True)
+                root = self.campaign(rows)
+                completed = self.summarize_campaign(root)
+                self.assertEqual(completed.returncode, 1, completed.stderr)
+                result = json.loads((root / "comparison.json").read_text())
+                self.assertFalse(result["qualification_passed"])
+                self.assertIsNone(result["comparisons"][0]["candidate_over_flat"])
+                self.assertIsNone(result["samples"][1]["refusal"])
+
+    def test_scan_v3_reports_flat_vpn_and_separates_common_cold_anchor_policy(self):
+        for profile in receipt.SCAN_PROFILES:
+            with self.subTest(profile=profile):
+                rows = self.rows(profile)
+                result = receipt.validate_scan_log(self.log(rows), profile)
+                for cell in result["comparisons"]:
+                    self.assertEqual(set(cell["candidate_over_flat"]), {"shape", "capture"})
+                if profile == "full-vpn":
+                    self.assertTrue(all(not row["shared"] and row["selected_strategy"] == "exact-flat"
+                                        for row in rows))
+                else:
+                    for bad in ("cold-policy", "unavailable-zero", "unavailable-fabricated", "slab-lineage"):
+                        if bad == "unavailable-fabricated" and profile != "evpn-soak":
+                            continue
+                        broken = self.rows(profile)
+                        if bad == "cold-policy":
+                            broken[1]["cold_anchor_strategy"] = "exact-flat"
+                        elif bad.startswith("unavailable"):
+                            broken[1]["phases"]["cold_anchor_capture"] = {
+                                "wall_ns": 0 if bad == "unavailable-zero" else 1, "cpu_ticks": 0}
+                        else:
+                            broken[5]["source_slots"] += 1
+                            broken[5]["shape_callbacks"] += 1
+                        with self.assertRaises(receipt.InvalidReceipt):
+                            receipt.validate_scan_log(self.log(broken), profile)
 
     def test_scan_summary_rejects_incomplete_matrix_or_proof(self):
         for failure in ("missing-leg", "wrong-proof"):
@@ -1487,7 +1553,7 @@ class RecoveryScanTests(unittest.TestCase):
             self.assertEqual(24, len(result["samples"]))
             self.assertEqual(6, len(result["comparisons"]))
             self.assertTrue(all(row["eligible"] for row in result["comparisons"]))
-            self.assertEqual(1.0, result["comparisons"][0]["shared_over_flat"]["shape"]["wall_ns"])
+            self.assertEqual(1.0, result["comparisons"][0]["candidate_over_flat"]["shape"]["wall_ns"])
 
     def test_scan_rejects_false_proof_work_and_measurement_claims(self):
         cases = [(1, "old_keys", 0), (1, "proof_keys", 1), (1, "comparisons", 0),
@@ -1504,7 +1570,7 @@ class RecoveryScanTests(unittest.TestCase):
         with self.assertRaises(receipt.InvalidReceipt):
             receipt.validate_scan_log(self.log(self.rows()[:-1]), "evpn-soak")
 
-    def test_scan_v2_rejects_binary_search_work_and_historical_schema(self):
+    def test_scan_v3_rejects_binary_search_work_and_historical_schema(self):
         keys = receipt.SCAN_PROFILES["evpn-soak"]
         rows = self.rows()
         rows[1]["comparisons"] = keys * keys.bit_length()
@@ -1512,8 +1578,22 @@ class RecoveryScanTests(unittest.TestCase):
         with self.assertRaisesRegex(receipt.InvalidReceipt, "non-linear classification"):
             receipt.validate_scan_log(self.log(rows), "evpn-soak")
         rows = self.rows()
-        rows[1]["schema"] = "rustbgpd.recovery-scan.v1"
+        rows[1]["schema"] = "rustbgpd.recovery-scan.v2"
         with self.assertRaisesRegex(receipt.InvalidReceipt, "scan shape/order/mode mismatch"):
+            receipt.validate_scan_log(self.log(rows), "evpn-soak")
+
+    def test_scan_v3_pins_typed_common_and_derived_evpn_comparison_scopes(self):
+        for profile in receipt.SCAN_PROFILES:
+            rows = self.rows(profile)
+            rows[1]["comparison_counter_scope"] = "callbacks-minus-keys"
+            with self.assertRaisesRegex(receipt.InvalidReceipt, "counter scope differs"):
+                receipt.validate_scan_log(self.log(rows), profile)
+        # Losing the OLD-visit or the per-comparison checkpoint must not
+        # become an apparently cheaper measurement of the unchanged EVPN walk.
+        rows = self.rows()
+        keys = receipt.SCAN_PROFILES["evpn-soak"]
+        rows[1].update(comparisons=keys, shape_callbacks=2 * keys)
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "missing sorted merge work"):
             receipt.validate_scan_log(self.log(rows), "evpn-soak")
 
     def test_scan_refusal_is_retained_without_a_ratio(self):
@@ -1522,7 +1602,7 @@ class RecoveryScanTests(unittest.TestCase):
         result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
         self.assertEqual("peer_limit", result["samples"][1]["refusal"])
         self.assertFalse(result["comparisons"][0]["eligible"])
-        self.assertIsNone(result["comparisons"][0]["shared_over_flat"])
+        self.assertIsNone(result["comparisons"][0]["candidate_over_flat"])
 
     def test_failed_scan_invocation_erases_complete_ratios_or_missing_manifest(self):
         for completed in (False, True):
@@ -1536,7 +1616,7 @@ class RecoveryScanTests(unittest.TestCase):
                     shutil.copyfile(log, root / "harness.log")
                     result = receipt.validate_scan_log(log, "evpn-soak")
                     self.assertTrue(all(c["eligible"] for c in result["comparisons"]))
-                    self.assertTrue(all(c["shared_over_flat"] for c in result["comparisons"]))
+                    self.assertTrue(all(c["candidate_over_flat"] for c in result["comparisons"]))
                     receipt.write_json(root / "comparison.json", result)
                 result = subprocess.run(
                     ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan",
@@ -1562,7 +1642,7 @@ class RecoveryScanTests(unittest.TestCase):
         for row in rows:
             row["phases"]["shape"]["cpu_ticks"] = 0
         result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
-        self.assertIsNone(result["comparisons"][0]["shared_over_flat"]["shape"]["cpu_ticks"])
+        self.assertIsNone(result["comparisons"][0]["candidate_over_flat"]["shape"]["cpu_ticks"])
 
     def test_independent_shape_can_exceed_capture_without_fake_tick_minimum(self):
         rows = self.rows()
@@ -1571,7 +1651,7 @@ class RecoveryScanTests(unittest.TestCase):
             row["phases"]["capture"].update(wall_ns=2000, cpu_ticks=0)
         result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
         self.assertTrue(all(row["eligible"] for row in result["comparisons"]))
-        self.assertIsNone(result["comparisons"][0]["shared_over_flat"]["capture"]["cpu_ticks"])
+        self.assertIsNone(result["comparisons"][0]["candidate_over_flat"]["capture"]["cpu_ticks"])
 
     def test_memory_entrypoint_derivation_is_exact_and_verifiable(self):
         path = self.root / "frozen-instrumentation/bench/scale/rrharness/src/main.rs"
