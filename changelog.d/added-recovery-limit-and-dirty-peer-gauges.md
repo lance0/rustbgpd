@@ -8,9 +8,9 @@
   **Operator-visible:** two new warning alerts ship in the alert pack.
   `BgpUpdateGroupRecoveryLimited` fires when a `peer_limit`, `daemon_limit` or
   `allocation_failure` recovery fallback was recorded in the last 15 minutes.
-  `BgpOutboundResyncStalled` fires when one peer has stayed dirty for 60
-  seconds, the `rbgp doctor` per-peer threshold; churn across peers that
-  keep resyncing does not raise it. The `rbgp doctor`
+  `BgpOutboundResyncStalled` fires when one peer has stayed dirty for 15
+  minutes; churn across peers that keep resyncing does not raise it, and
+  graceful-restart selection-deferral holds end well before it. The `rbgp doctor`
   `rib.update_group_recovery` check also warns when the recovery charge is
   above 75% of the daemon cap. The Grafana overview adds "Update-group
   recovery" and "Outbound dirty peers" panels, and the "Ungrouped (fallback)

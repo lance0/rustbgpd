@@ -1711,7 +1711,7 @@
       "id": 79,
       "type": "timeseries",
       "title": "Outbound dirty peers",
-      "description": "bgp_rib_outbound_dirty_peers: peers marked dirty and awaiting outbound resync (left axis), and bgp_rib_outbound_dirty_oldest_seconds: the age of the oldest current dirty episode (right axis), both sampled from the RIB's dirty set on each loop iteration. Under churn the count can stay above 0 while every episode completes quickly; an oldest age of 60 seconds or more is what BgpOutboundResyncStalled alerts on. Find the peer with rbgp doctor or rbgp neighbor.",
+      "description": "bgp_rib_outbound_dirty_peers: peers marked dirty and awaiting outbound resync (left axis), and bgp_rib_outbound_dirty_oldest_seconds: the age of the oldest current dirty episode (right axis), both sampled from the RIB's dirty set on each loop iteration. Under churn the count can stay above 0 while every episode completes quickly; an oldest age of 900 seconds or more is what BgpOutboundResyncStalled alerts on (rbgp doctor warns per peer from 60 seconds). Find the peer with rbgp doctor or rbgp neighbor.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

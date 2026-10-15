@@ -1530,11 +1530,14 @@ Two shipped alerts cover the same state. `BgpUpdateGroupRecoveryLimited`
 (warning) fires while a limit cause increased in the last 15 minutes.
 `BgpOutboundResyncStalled` (warning) fires when
 `bgp_rib_outbound_dirty_oldest_seconds`, the age of the oldest dirty episode
-among peers that are still dirty, reaches 60 seconds, the same threshold as
-the doctor's per-peer check. An episode starts when a peer becomes dirty and
-ends only when its resync completes, so a busy reflector whose dirty set never
-empties under churn stays quiet while each peer keeps resyncing; one peer that
-stays dirty raises it. Both gauges are sampled from RIB state on every loop
+among peers that are still dirty, reaches 900 seconds. An episode starts when
+a peer becomes dirty and ends only when its resync completes, so a busy
+reflector whose dirty set never empties under churn stays quiet while each
+peer keeps resyncing; one peer that stays dirty raises it. The doctor's 60
+second per-peer warning is the early point-in-time signal; the alert waits
+longer because RFC 4724 selection-deferral holds, bounded by
+`gr_restart_time` (default 120 seconds), and graceful restarts of full-table
+peers routinely keep a peer dirty past a minute. Both gauges are sampled from RIB state on every loop
 iteration and do not depend on `bgp_rib_dirty_resync_total` outcomes. The
 Grafana "Outbound dirty peers" panel, beside the dirty-resync panel, plots the
 dirty count and the oldest age.
@@ -1788,7 +1791,7 @@ exactly under the floods these drops account for.
 | `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor enters `awaiting_refresh`, is re-registered, receives the staged initial table without EoR, and is asked for an inbound ROUTE-REFRESH; matching post-failback BoRR/EoRR completes convergence |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer outcomes: `still_dirty` when a tick leaves work pending and the timer re-arms; `cleared` when a tick drains the work, or when the RIB loop notices at the end of an iteration that a message handler such as session teardown drained it. A drain on a loop path that continues before that check is not counted, so a missing `cleared` does not prove that resync is stalled. Both series are exported at 0 from startup |
 | `bgp_rib_outbound_dirty_peers` | Peers currently marked dirty and awaiting outbound resync, sampled from the RIB's dirty set once per manager loop iteration. A healthy episode returns to 0 within seconds; under steady churn it can stay above 0 while every peer keeps resyncing. `rbgp doctor` and `rbgp neighbor` identify the peers |
-| `bgp_rib_outbound_dirty_oldest_seconds` | Age in whole seconds of the oldest current dirty episode, 0 when no peer is dirty; sampled with `bgp_rib_outbound_dirty_peers`. An episode starts when a peer becomes dirty and ends when its resync completes, so the value tracks the longest-waiting peer, not churn. `BgpOutboundResyncStalled` fires at 60 seconds |
+| `bgp_rib_outbound_dirty_oldest_seconds` | Age in whole seconds of the oldest current dirty episode, 0 when no peer is dirty; sampled with `bgp_rib_outbound_dirty_peers`. An episode starts when a peer becomes dirty and ends when its resync completes, so the value tracks the longest-waiting peer, not churn. `BgpOutboundResyncStalled` fires at 900 seconds |
 | `bgp_rib_ingest_channel_depth` | Queued `RibUpdate` messages (one per inbound UPDATE or control event, not routes) waiting for the RIB manager, sampled once per manager loop iteration: the ingest channel plus at most one update held while a distribution window decides whether to extend. Producers block only when the channel itself is full, which reads capacity + 1 while an update is held and capacity otherwise; a sustained reading at or above the channel capacity means the channel is full or within one message of full |
 | `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). Mutations remain fenced until the transition is terminal; general RIB queries are served from the pre-commit state between the pre-commit polls and wait only through the commit batches, while the dedicated core-readiness lane remains responsive throughout |
 | `bgp_rib_policy_transition_last_duration_milliseconds` | Monotonic elapsed duration of the most recently completed atomic export-policy transition; retained across idle periods for post-event diagnosis |
