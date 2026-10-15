@@ -62,7 +62,7 @@ not by itself make it v1-stable.
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ReplayOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture`, `ListConditionalAdvertisements` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, bounded invalid-validation disposition posture, and conditional-advertisement state |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`, `ListBestEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrTopologyNodes`, `ListOrrTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`, `ListBgpLsRibRoutes`, `ListBestEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
@@ -1612,16 +1612,19 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ListReceivedEvpnRoutes` | Bounded accepted post-policy EVPN Adj-RIB-In for one source neighbor, filterable by type / RD |
 | `ListAdvertisedEvpnRoutes` | Bounded committed EVPN Adj-RIB-Out for one destination neighbor, filterable by type / RD |
 | `ExplainEvpnRoute` | Exact typed EVPN candidate selection, optional destination export trace and caller-selected SRv6 Argument pair inspection, with installed and committed state kept distinct |
-| `ListBgpLsRoutes` | BGP-LS / BGP-LS VPN routes (RFC 9552) in Loc-RIB view, exposed as opaque NLRI/TLV bytes and filterable by family, peer, and NLRI type |
+| `ListBgpLsRoutes` | Deprecated whole-table selected BGP-LS / BGP-LS VPN view, outside v1; use `ListBgpLsRibRoutes` with `view = BEST` |
 | `ListVpnRoutes` | Deprecated whole-table selected VPNv4/VPNv6 view, outside v1; use `ListVpnRibRoutes` with `view = BEST` |
 | `ListLabeledRoutes` | Deprecated whole-table selected labeled-unicast view, outside v1; use `ListLabeledRibRoutes` with `view = BEST` |
 | `ListRtcRoutes` | Deprecated whole-table selected RT-Constrain view, outside v1; use `ListRtcRibRoutes` with `view = BEST` |
 | `ListVpnRibRoutes` | Scoped RR-only L3VPN: bounded best/received/advertised pages with typed family, prefix, RD and peer filters |
 | `ListLabeledRibRoutes` | Scoped RR-only labeled-unicast: bounded best/received/advertised pages with typed family, prefix and peer filters |
 | `ListRtcRibRoutes` | Scoped RR-only RT-Constrain: bounded best/received/advertised pages with membership and peer filters |
+| `ListBgpLsRibRoutes` | Scoped RR-only BGP-LS / BGP-LS VPN (RFC 9552): bounded best/received/advertised pages of opaque NLRI/TLV bytes with family, NLRI type and peer filters |
 | `ListBestEvpnRoutes` | Bounded selected EVPN best pages with source/RD/MAC/ESI/VNI filters; scoped RR-only for Types 1–5, with all-types and Type 6 calls outside v1 |
-| `ListTopologyNodes` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union |
-| `ListTopologyLinks` | RFC 9107 ORR topology links — IGP adjacencies, link addresses, and metrics (the SPF input) |
+| `ListTopologyNodes` | Deprecated whole-graph RFC 9107 ORR node view, outside v1; use `ListOrrTopologyNodes` |
+| `ListTopologyLinks` | Deprecated whole-graph RFC 9107 ORR link view, outside v1; use `ListOrrTopologyLinks` |
+| `ListOrrTopologyNodes` | Scoped RR-only: bounded pages of RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union |
+| `ListOrrTopologyLinks` | Scoped RR-only: bounded pages of RFC 9107 ORR topology links — IGP adjacencies, link addresses, and metrics (the SPF input) |
 | `ListOrrStatus` | RFC 9107 ORR per-vantage status — configured vantages, their resolved topology nodes, and the peers bound to them |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
@@ -1747,7 +1750,7 @@ through one RPC shape.
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rbgp rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
 | ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rbgp events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; durable replay via `SubscribeFromEvent` when `[event_history].enabled = true`; no bounded `List*` history API |
 | EVPN L2/L3 dataplane readiness and managed-netdev ownership status | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`) / `rbgp evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
-| BGP-LS topology objects | `ListBgpLsRoutes` / `rbgp rib bgpls` | Snapshot | Current Loc-RIB only; raw BGP-LS NLRI/TLV bytes preserved |
+| BGP-LS topology objects | `ListBgpLsRibRoutes` / `rbgp rib bgpls` | Bounded pages | Selected Loc-RIB, accepted input or committed export; raw BGP-LS NLRI/TLV bytes preserved |
 | ADR-0067 BFD session state | `BfdService.GetBfdSessions` / `rbgp bfd` | Snapshot | Current BFD actor snapshot |
 | Live BFD session state changes | `EventService.WatchEvents` with `EVENT_CATEGORY_BFD` and `BGP_EVENT_TYPE_BFD_SESSION_*` / `rbgp events watch --category bfd` | Streaming event feed | Live-only; opt-in (not in the default route+session set); slow subscribers can lag |
 | Alerting / counters | Prometheus `/metrics` | Cumulative counters and gauges | Process lifetime, scrape-dependent |
@@ -1892,8 +1895,9 @@ change. FlowSpec routes use `ListFlowSpecRoutes` with
 use the bounded `ListBestEvpnRoutes`, `ListReceivedEvpnRoutes` and
 `ListAdvertisedEvpnRoutes` with EVPN-specific filters; the deprecated
 `ListEvpnRoutes` retains its whole-table view outside v1. BGP-LS routes use
-`ListBgpLsRoutes` with `ADDRESS_FAMILY_BGP_LS` (6),
-`ADDRESS_FAMILY_BGP_LS_VPN` (7), or unspecified (0).
+the bounded `ListBgpLsRibRoutes` with `ADDRESS_FAMILY_BGP_LS` (6),
+`ADDRESS_FAMILY_BGP_LS_VPN` (7), or unspecified (0); the deprecated
+`ListBgpLsRoutes` retains its whole-table view outside v1.
 
 ### Pagination
 
@@ -1901,8 +1905,10 @@ The unicast route-listing RPCs `ListReceivedRoutes`, `ListBestRoutes`, and
 `ListAdvertisedRoutes` support pagination via `page_size` and `page_token`.
 `ListFibRoutes` also supports optional pagination; unlike the route-listing
 RPCs, `page_size = 0` preserves the legacy behavior and returns the full
-filtered FIB status snapshot. `ListBlackholeDiscards`, `ListFlowSpecRoutes`,
-and `ListBgpLsRoutes` do not support pagination.
+filtered FIB status snapshot. The bounded family reads are described in
+[Bounded VPN, labeled, RTC, BGP-LS and EVPN best pages](#bounded-vpn-labeled-rtc-bgp-ls-and-evpn-best-pages).
+`ListBlackholeDiscards`, `ListFlowSpecRoutes`, and the deprecated
+`ListBgpLsRoutes` do not support pagination.
 
 Their shared `ListRoutesRequest` also accepts optional recorded-route
 predicates: typed `rpki_validation` (`VALID`, `INVALID`, or `NOT_FOUND`), typed
@@ -2140,9 +2146,10 @@ Received means retained after import policy, not a historical record of every
 UPDATE. See [the feasibility decision](../adr/0135-flowspec-feasibility.md)
 for opt-in validation and convergence semantics.
 
-### Bounded VPN, labeled, RTC and EVPN best pages
+### Bounded VPN, labeled, RTC, BGP-LS and EVPN best pages
 
-`ListVpnRibRoutes`, `ListLabeledRibRoutes` and `ListRtcRibRoutes` require
+`ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes` and
+`ListBgpLsRibRoutes` require
 `view = BEST` (1), `RECEIVED` (2) or `ADVERTISED` (3). `UNSPECIFIED` (0) and
 unknown values return `INVALID_ARGUMENT`. Received and advertised require
 `neighbor_address`: it names the source for accepted post-policy input,
@@ -2185,6 +2192,13 @@ or `0x` plus 16 raw hexadecimal digits. Raw input must encode a Route Target
 extended community; it preserves the administrator encoding. Default and
 partial RTC memberships remain visible without that full-target filter.
 
+BGP-LS accepts `ADDRESS_FAMILY_UNSPECIFIED` (0), `ADDRESS_FAMILY_BGP_LS` (6)
+or `ADDRESS_FAMILY_BGP_LS_VPN` (7), and an optional raw `nlri_type_filter`
+(0 selects every type). Rows are ordered by family, raw NLRI type, Route
+Distinguisher, opaque NLRI bytes, source and path, so a page walk visits each
+row once. A continuation token carries the last row's NLRI bytes, so BGP-LS
+tokens can be larger than other family tokens.
+
 `ListBestEvpnRoutes` reads installed best routes. Its optional filters are
 `route_type_filter` (0 or 1–6), `source_peer_filter`, `rd_filter`, exact Type 2
 `mac_filter`, exact 10-byte `esi_filter`, and `vni_filter` (0–16777215).
@@ -2204,17 +2218,18 @@ source and Add-Path identity. A table mutation returns `ABORTED`; restart
 with an empty token. Tokens are process-local and cannot survive a daemon
 restart. Changed scope/filter or malformed tokens return `INVALID_ARGUMENT`.
 
-These four RPCs are inventoried within their scoped RR-only roles. EVPN
+These five RPCs are inventoried within their scoped RR-only roles. EVPN
 calls must select each of Types 1–5 separately to stay inside its role;
 all-types and Type 6 calls remain alpha, as do the `prefix_sid` and `smet`
 entry fields. The best-request filters are included; the existing EVPN peer
 MAC/ESI/VNI filters remain explicitly unstable. Authorization is unchanged:
-all four methods require `sensitive_read`.
+all five methods require `sensitive_read`.
 
-The whole-table `ListVpnRoutes`, `ListLabeledRoutes`, `ListRtcRoutes` and
-`ListEvpnRoutes` methods are deprecated and outside v1. Their replacements
-are `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes` with
-`view = BEST`, and `ListBestEvpnRoutes`, respectively. Existing methods retain
+The whole-table `ListVpnRoutes`, `ListLabeledRoutes`, `ListRtcRoutes`,
+`ListBgpLsRoutes` and `ListEvpnRoutes` methods are deprecated and outside v1.
+Their replacements are `ListVpnRibRoutes`, `ListLabeledRibRoutes`,
+`ListRtcRibRoutes`, `ListBgpLsRibRoutes` with `view = BEST`, and
+`ListBestEvpnRoutes`, respectively. Existing methods retain
 their signatures and behavior; this change removes none. Older servers return
 `UNIMPLEMENTED` for the bounded methods: do not silently fall back when a
 caller requires bounded pages or peer views.
@@ -2509,17 +2524,23 @@ then fails explicitly if the requested `srv6_argument` response is absent.
 ### List BGP-LS routes
 
 ```bash
-# All BGP-LS and BGP-LS VPN routes in Loc-RIB
+# First page of BGP-LS and BGP-LS VPN routes in Loc-RIB
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  localhost:50051 rustbgpd.v1.RibService/ListBgpLsRoutes
+  -d '{"view": "FAMILY_ROUTE_VIEW_BEST", "page_size": 1000}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBgpLsRibRoutes
 
-# BGP-LS only, from one peer, for Node NLRI
+# BGP-LS only, selected from one peer, for Node NLRI; repeat with
+# "page_token" set to each non-empty next_page_token
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  -d '{"afi_safi": "ADDRESS_FAMILY_BGP_LS", "peer_filter": "10.0.0.2", "nlri_type_filter": 1}' \
-  localhost:50051 rustbgpd.v1.RibService/ListBgpLsRoutes
+  -d '{"view": "FAMILY_ROUTE_VIEW_BEST", "afi_safi": "ADDRESS_FAMILY_BGP_LS", "source_peer_filter": "10.0.0.2", "nlri_type_filter": 1}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBgpLsRibRoutes
 ```
 
-`ListBgpLsRoutes` is the ADR-0077 controller-facing BGP-LS surface. It
+`ListBgpLsRibRoutes` is the ADR-0077 controller-facing BGP-LS surface; see
+[bounded pages](#bounded-vpn-labeled-rtc-bgp-ls-and-evpn-best-pages) for its
+views, paging and errors. `rbgp rib bgpls` walks every page and prints one
+JSON array. The deprecated whole-table `ListBgpLsRoutes` remains outside v1
+with its original `afi_safi`, `peer_filter` and `nlri_type_filter` request. It
 preserves BGP-LS routes as opaque RFC 9552 objects: raw Route Distinguisher
 bytes for BGP-LS VPN, raw NLRI descriptor/payload bytes, and raw BGP-LS
 Attribute (type 29) bytes when present. Negotiated BGP-LS routes can also be
@@ -2530,8 +2551,37 @@ LLGR stale preservation for BGP-LS and BGP-LS VPN is implemented as part of the
 RR-family stale pipeline.
 Its `afi_safi` filter accepts only unspecified, BGP-LS, or BGP-LS VPN.
 As with EVPN, VPN, labeled-unicast, and RT-Constrain route listings, a
-non-empty `peer_filter` must parse as an IP address and matches by address
+non-empty peer filter must parse as an IP address and matches by address
 identity rather than display spelling.
+
+### List ORR topology nodes and links
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"page_size": 1000}' \
+  localhost:50051 rustbgpd.v1.RibService/ListOrrTopologyNodes
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"page_size": 1000}' \
+  localhost:50051 rustbgpd.v1.RibService/ListOrrTopologyLinks
+```
+
+`ListOrrTopologyNodes` and `ListOrrTopologyLinks` page the RFC 9107 topology
+built from every peer's BGP-LS Adj-RIB-In. Nodes are ordered by canonical
+node key. Links are ordered by local key, remote key, then the Link NLRI
+(Route Distinguisher and bytes), so parallel links between the same
+endpoints each appear once even when their visible fields match. Paging
+follows the [bounded family contract](#bounded-vpn-labeled-rtc-bgp-ls-and-evpn-best-pages):
+`page_size` 0 defaults to 100 and values above 1000 clamp to 1000. Tokens are
+process-local and signed. Any BGP-LS input change returns `ABORTED`; restart
+with an empty token. A changed or malformed token returns `INVALID_ARGUMENT`.
+A link token carries its Link NLRI bytes, so it can be larger than other
+family tokens. `rbgp topology nodes` and `rbgp topology links` walk every
+page and keep their JSON arrays. Both methods require `sensitive_read`.
+
+The whole-graph `ListTopologyNodes` and `ListTopologyLinks` remain functional,
+with unchanged signatures and behavior, but are deprecated and outside v1.
+`ListOrrStatus` stays unpaged: configured vantages bound its size.
 
 ### List BLACKHOLE discard status
 

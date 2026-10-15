@@ -43,7 +43,7 @@ pub enum RouteOrigin {
 /// This is deliberately independent from wire-level `Afi`/`Safi` enums while
 /// the RIB keeps BGP-LS as its own typed family instead of reusing unicast
 /// prefix identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BgpLsFamily {
     /// AFI 16388 / SAFI 71 — base BGP-LS.
     LinkState,

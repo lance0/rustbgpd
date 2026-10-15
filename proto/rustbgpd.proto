@@ -2204,7 +2204,10 @@ service RibService {
   rpc ListAdvertisedEvpnRoutes(ListPeerEvpnRoutesRequest) returns (ListPeerEvpnRoutesResponse);
   // Exact typed EVPN selection and export diagnostics; outside narrow v1.
   rpc ExplainEvpnRoute(ExplainEvpnRouteRequest) returns (ExplainEvpnRouteResponse);
-  rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
+  // Deprecated whole-table best view; use bounded ListBgpLsRibRoutes.
+  rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse) {
+    option deprecated = true;
+  }
   // Deprecated whole-table best view; use bounded ListVpnRibRoutes.
   rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse) {
     option deprecated = true;
@@ -2224,6 +2227,8 @@ service RibService {
   rpc ListLabeledRibRoutes(ListLabeledRibRoutesRequest) returns (ListLabeledRibRoutesResponse);
   // Bounded, mutation-fenced RTC route query within the scoped RR-only role.
   rpc ListRtcRibRoutes(ListRtcRibRoutesRequest) returns (ListRtcRibRoutesResponse);
+  // Bounded, mutation-fenced BGP-LS route query within the scoped RR-only role.
+  rpc ListBgpLsRibRoutes(ListBgpLsRibRoutesRequest) returns (ListBgpLsRibRoutesResponse);
   // Bounded, mutation-fenced EVPN best query; scoped RR-only for Types 1–5.
   rpc ListBestEvpnRoutes(ListBestEvpnRoutesRequest) returns (ListBestEvpnRoutesResponse);
 
@@ -2232,8 +2237,20 @@ service RibService {
   // canonical descriptor bytes; links carry the IGP Metric (TLV 1095) that
   // the SPF engine uses. Links without an IGP Metric are unusable and are
   // not listed, but their endpoint nodes still appear.
-  rpc ListTopologyNodes(ListTopologyNodesRequest) returns (ListTopologyNodesResponse);
-  rpc ListTopologyLinks(ListTopologyLinksRequest) returns (ListTopologyLinksResponse);
+  // Deprecated whole-graph node view; use bounded ListOrrTopologyNodes.
+  rpc ListTopologyNodes(ListTopologyNodesRequest) returns (ListTopologyNodesResponse) {
+    option deprecated = true;
+  }
+  // Deprecated whole-graph link view; use bounded ListOrrTopologyLinks.
+  rpc ListTopologyLinks(ListTopologyLinksRequest) returns (ListTopologyLinksResponse) {
+    option deprecated = true;
+  }
+  // Bounded, mutation-fenced ORR topology nodes ordered by canonical key,
+  // within the scoped RR-only role.
+  rpc ListOrrTopologyNodes(ListOrrTopologyNodesRequest) returns (ListOrrTopologyNodesResponse);
+  // Bounded, mutation-fenced usable ORR topology links ordered by local key,
+  // remote key and Link NLRI identity, within the scoped RR-only role.
+  rpc ListOrrTopologyLinks(ListOrrTopologyLinksRequest) returns (ListOrrTopologyLinksResponse);
   // RFC 9107 ORR status: per configured vantage, its resolution against the
   // BGP-LS topology, SPF reach, and the peers bound to it, plus topology
   // node/link totals. Config + derived state only — the per-vantage best-path
@@ -4267,6 +4284,26 @@ message ListRtcRibRoutesResponse {
   RoutePageVersion page_version = 4;
 }
 
+message ListBgpLsRibRoutesRequest {
+  FamilyRouteView view = 1;
+  // Required source/destination neighbor for received/advertised; invalid for best.
+  string neighbor_address = 2;
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind scope, filters and version.
+  uint32 page_size = 3;
+  string page_token = 4;
+  AddressFamily afi_safi = 5; // UNSPECIFIED selects both BGP-LS and BGP-LS VPN.
+  uint32 nlri_type_filter = 6; // Raw NLRI type; 0 selects all types.
+  string source_peer_filter = 7; // Optional winner source in best; invalid for peer views.
+}
+
+message ListBgpLsRibRoutesResponse {
+  // Ordered by family, raw NLRI type, Route Distinguisher, NLRI bytes, source and path.
+  repeated BgpLsRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
 message ListBestEvpnRoutesRequest {
   uint32 route_type_filter = 1; // 0 = all, otherwise 1..=6.
   string source_peer_filter = 2; // Optional winner source; unknown sources return an empty page.
@@ -4328,6 +4365,32 @@ message TopologyLinkEntry {
 
 message ListTopologyLinksResponse {
   repeated TopologyLinkEntry links = 1;
+}
+
+message ListOrrTopologyNodesRequest {
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind the view and version.
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListOrrTopologyNodesResponse {
+  repeated TopologyNodeEntry nodes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListOrrTopologyLinksRequest {
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind the view and version.
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListOrrTopologyLinksResponse {
+  repeated TopologyLinkEntry links = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
 }
 
 message ListOrrStatusRequest {}

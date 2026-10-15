@@ -673,3 +673,516 @@ fn vpn_grouped_page_rejects_closed_receiver_until_fresh_session() {
     assert_eq!(page.total, 1);
     assert_eq!(page.routes[0].key(), new.key());
 }
+
+fn bgpls_page(
+    manager: &mut RibManager,
+    scope: RouteQueryScope,
+    after: Option<crate::update::BgpLsRouteQueryKey>,
+    version: Option<RoutePageVersion>,
+    size: usize,
+) -> Result<RibRowsPage<BgpLsRibRoute>, RoutePageError> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryBgpLsRoutesPage {
+        scope,
+        filter: None,
+        after,
+        expected_version: version,
+        page_size: size,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+fn bgpls_query_key(route: &BgpLsRibRoute) -> crate::update::BgpLsRouteQueryKey {
+    (
+        route.family,
+        route.nlri.nlri_type.as_u16(),
+        route.nlri.route_distinguisher,
+        route.nlri.payload.clone(),
+        route.peer,
+        route.path_id,
+    )
+}
+
+/// A continuation walk over the selected BGP-LS table returns every row
+/// exactly once in identity order, across both SAFIs and the clamp.
+#[test]
+fn bgpls_family_pages_walk_every_route_once_in_identity_order() {
+    let (mut manager, peer) = fixture();
+    let other = Ipv4Addr::new(192, 0, 2, 2);
+    for suffix in (0..25).rev() {
+        let advertiser = if suffix % 2 == 0 { peer } else { other };
+        manager.handle_bgpls_routes_received(
+            advertiser.into(),
+            vec![make_bgpls_route(advertiser, suffix, 100)],
+            vec![],
+        );
+    }
+    let mut vpn = make_bgpls_route(peer, 0, 100);
+    vpn.family = BgpLsFamily::LinkStateVpn;
+    vpn.nlri.route_distinguisher = Some([0, 0, 0xfd, 0xe8, 0, 0, 0, 1]);
+    manager.handle_bgpls_routes_received(peer.into(), vec![vpn], vec![]);
+
+    let all = bgpls_page(&mut manager, RouteQueryScope::Best, None, None, usize::MAX).unwrap();
+    assert_eq!(all.routes.len(), 26);
+    assert!(!all.has_more);
+    let expected: Vec<_> = all.routes.iter().map(bgpls_query_key).collect();
+    assert!(expected.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(all.routes[25].family, BgpLsFamily::LinkStateVpn);
+
+    let mut walked = Vec::new();
+    let mut after = None;
+    let mut version = None;
+    loop {
+        let page = bgpls_page(&mut manager, RouteQueryScope::Best, after, version, 4).unwrap();
+        assert_eq!(page.total, 26);
+        assert!(page.routes.len() <= 4);
+        walked.extend(page.routes.iter().map(bgpls_query_key));
+        if !page.has_more {
+            break;
+        }
+        after = walked.last().cloned();
+        version = Some(page.version);
+    }
+    assert_eq!(walked, expected);
+
+    let received = bgpls_page(
+        &mut manager,
+        RouteQueryScope::Received {
+            peer: Some(other.into()),
+        },
+        None,
+        None,
+        100,
+    )
+    .unwrap();
+    assert_eq!(received.total, 12);
+    assert!(received.routes.iter().all(|r| r.peer == IpAddr::V4(other)));
+}
+
+/// Receive, withdraw and advertised commits each fence an open BGP-LS walk.
+#[test]
+fn bgpls_family_pages_invalidate_on_receive_withdraw_and_export() {
+    let (mut manager, peer) = fixture();
+    let destination = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: destination,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: bgpls_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    let routes: Vec<_> = (1..=2).map(|s| make_bgpls_route(peer, s, 100)).collect();
+    manager.handle_bgpls_routes_received(peer.into(), routes.clone(), vec![]);
+    while out_rx.try_recv().is_ok() {}
+
+    let best = RouteQueryScope::Best;
+    let first = bgpls_page(&mut manager, best, None, None, 1).unwrap();
+    assert!(first.has_more);
+    let after = Some(bgpls_query_key(&first.routes[0]));
+    manager.handle_bgpls_routes_received(peer.into(), vec![make_bgpls_route(peer, 3, 100)], vec![]);
+    assert_eq!(
+        bgpls_page(&mut manager, best, after.clone(), Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+    let fresh = bgpls_page(&mut manager, best, None, None, 1).unwrap();
+    manager.handle_bgpls_routes_received(peer.into(), vec![], vec![routes[1].key()]);
+    assert_eq!(
+        bgpls_page(&mut manager, best, after, Some(fresh.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+
+    let advertised = RouteQueryScope::Advertised { peer: destination };
+    let first = bgpls_page(&mut manager, advertised, None, None, 1).unwrap();
+    assert_eq!(first.total, 2, "routes 1 and 3 remain exported");
+    let after = Some(bgpls_query_key(&first.routes[0]));
+    manager.handle_bgpls_routes_received(peer.into(), vec![make_bgpls_route(peer, 4, 100)], vec![]);
+    assert_eq!(
+        bgpls_page(&mut manager, advertised, after, Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+}
+
+type OrrPage<T> = Result<RibRowsPage<T>, RoutePageError>;
+
+fn orr_node_page(
+    manager: &mut RibManager,
+    after: Option<crate::update::OrrNodeQueryKey>,
+    version: Option<RoutePageVersion>,
+    size: usize,
+) -> OrrPage<crate::orr::OrrNodeSnapshot> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryOrrTopologyNodesPage {
+        after,
+        expected_version: version,
+        page_size: size,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+fn orr_link_page(
+    manager: &mut RibManager,
+    after: Option<crate::update::OrrLinkQueryKey>,
+    version: Option<RoutePageVersion>,
+    size: usize,
+) -> OrrPage<crate::orr::OrrLinkSnapshot> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryOrrTopologyLinksPage {
+        after,
+        expected_version: version,
+        page_size: size,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+/// Node and link walks visit every topology element once in identity
+/// order. Two parallel links with identical endpoints, cost and (empty)
+/// addresses differ only by their Link NLRI and must both appear.
+#[test]
+fn orr_topology_pages_walk_every_element_once_and_fence_on_change() {
+    use crate::orr::fixtures::{X, Y, link_route, square_topology};
+    let (mut manager, peer) = fixture();
+    let link_id = |id: u8| {
+        rustbgpd_wire::BgpLsTlv::new(258, bytes::Bytes::from(vec![0, 0, 0, id, 0, 0, 0, id]))
+    };
+    let mut routes = square_topology(peer);
+    routes.push(link_route(peer, X, Y, Some(5), &[link_id(1)]));
+    routes.push(link_route(peer, X, Y, Some(5), &[link_id(2)]));
+    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    let topology =
+        crate::orr::OrrTopology::build(manager.ribs.values().flat_map(AdjRibIn::iter_bgpls));
+    assert_eq!(topology.links().len(), 6);
+
+    let all = orr_node_page(&mut manager, None, None, usize::MAX).unwrap();
+    assert_eq!(all.routes.len(), 4);
+    assert!(!all.has_more);
+    assert_eq!(all.routes.iter().map(|n| n.link_count).sum::<u32>(), 6);
+    let mut expected_nodes: Vec<_> = topology
+        .node_keys()
+        .iter()
+        .map(|key| key.as_bytes().to_vec())
+        .collect();
+    expected_nodes.sort();
+    let mut walked = Vec::new();
+    let (mut after, mut version) = (None, None);
+    loop {
+        let page = orr_node_page(&mut manager, after, version, 3).unwrap();
+        assert_eq!(page.total, 4);
+        walked.extend(page.routes.iter().map(|node| node.key_hex.clone()));
+        if !page.has_more {
+            break;
+        }
+        after = Some(expected_nodes[walked.len() - 1].clone());
+        version = Some(page.version);
+    }
+    let mut keys: Vec<_> = topology.node_keys().iter().collect();
+    keys.sort_by_key(|key| key.as_bytes());
+    let expected_hex: Vec<_> = topology
+        .render_nodes(keys)
+        .into_iter()
+        .map(|node| node.key_hex)
+        .collect();
+    assert_eq!(walked, expected_hex);
+
+    let link_key = |link: &crate::orr::OrrLink| {
+        (
+            topology.node_key(link.local).unwrap().as_bytes().to_vec(),
+            topology.node_key(link.remote).unwrap().as_bytes().to_vec(),
+            link.nlri.route_distinguisher,
+            link.nlri.payload.clone(),
+        )
+    };
+    let mut sorted: Vec<_> = topology.links().iter().collect();
+    sorted.sort_by_key(|link| link_key(link));
+    let row = |link: &crate::orr::OrrLinkSnapshot| {
+        (
+            link.local_key_hex.clone(),
+            link.remote_key_hex.clone(),
+            link.cost,
+            link.addresses.clone(),
+        )
+    };
+    let expected_rows: Vec<_> = topology
+        .render_links(sorted.iter().copied())
+        .iter()
+        .map(row)
+        .collect();
+    let mut walked = Vec::new();
+    let (mut after, mut version) = (None, None);
+    loop {
+        let page = orr_link_page(&mut manager, after, version, 1).unwrap();
+        assert_eq!(page.total, 6);
+        walked.extend(page.routes.iter().map(row));
+        if !page.has_more {
+            break;
+        }
+        after = Some(link_key(sorted[walked.len() - 1]));
+        version = Some(page.version);
+    }
+    assert_eq!(walked, expected_rows);
+    assert_eq!(
+        walked.iter().filter(|row| row.2 == 5).count(),
+        2,
+        "both parallel X->Y links appear"
+    );
+
+    let first = orr_node_page(&mut manager, None, None, 1).unwrap();
+    manager.handle_bgpls_routes_received(
+        peer.into(),
+        vec![link_route(peer, Y, X, Some(7), &[])],
+        vec![],
+    );
+    assert_eq!(
+        orr_node_page(
+            &mut manager,
+            Some(expected_nodes[0].clone()),
+            Some(first.version),
+            1
+        )
+        .unwrap_err(),
+        RoutePageError::Invalidated
+    );
+}
+
+/// A topology walk keeps one source when the vantage set fills or empties:
+/// the on-demand build and the vantage cache both exclude BGP-LS families
+/// whose selection is still deferred, so the continuation sees the same
+/// topology page 1 counted.
+#[test]
+fn orr_topology_pages_keep_one_source_across_vantage_changes() {
+    use crate::orr::fixtures::{link_route, square_topology};
+    let (manager, peer) = fixture();
+    let waiter: IpAddr = "192.0.2.50".parse().unwrap();
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: std::time::Duration::from_secs(30),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: waiter,
+            families: vec![(Afi::BgpLs, Safi::BgpLsVpn)],
+        }],
+    });
+    assert!(manager.selection_deferred((Afi::BgpLs, Safi::BgpLsVpn)));
+    let mut routes = square_topology(peer);
+    for (local, remote) in [(5, 6), (6, 5)] {
+        let mut route = link_route(peer, local, remote, Some(1), &[]);
+        route.family = BgpLsFamily::LinkStateVpn;
+        route.nlri.route_distinguisher = Some([0, 0, 0, 1, 0, 0, 0, 1]);
+        routes.push(route);
+    }
+    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    let mut keys: Vec<_> = manager
+        .build_orr_topology()
+        .node_keys()
+        .iter()
+        .map(|key| key.as_bytes().to_vec())
+        .collect();
+    keys.sort();
+
+    let vantage = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 3));
+    for fill in [true, false] {
+        let first = orr_node_page(&mut manager, None, None, 1).unwrap();
+        assert_eq!(
+            first.total, 4,
+            "deferred BGP-LS VPN links are not topology yet"
+        );
+        assert!(first.has_more);
+        if fill {
+            manager.peer_orr_vantage.insert(waiter, vantage);
+        } else {
+            manager.peer_orr_vantage.clear();
+        }
+        manager.recompute_orr();
+        match orr_node_page(&mut manager, Some(keys[0].clone()), Some(first.version), 1) {
+            Err(RoutePageError::Invalidated) => {}
+            Ok(next) => assert_eq!(
+                next.total, first.total,
+                "a continuation must page the topology page 1 counted"
+            ),
+            Err(other) => panic!("unexpected page error {other:?}"),
+        }
+    }
+}
+
+fn register_destination(
+    manager: &mut RibManager,
+    destination: IpAddr,
+    families: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: destination,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: families,
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    out_rx
+}
+
+/// Removing a destination's non-empty Adj-RIB-Out fences an open BGP-LS
+/// advertised walk, so the next page cannot read as a finished walk.
+#[test]
+fn bgpls_advertised_pages_invalidate_when_outbound_state_clears() {
+    let (mut manager, peer) = fixture();
+    let destination: IpAddr = "192.0.2.3".parse().unwrap();
+    let _out = register_destination(&mut manager, destination, bgpls_sendable());
+    let routes: Vec<_> = (1..=2).map(|s| make_bgpls_route(peer, s, 100)).collect();
+    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    let scope = RouteQueryScope::Advertised { peer: destination };
+    let first = bgpls_page(&mut manager, scope, None, None, 1).unwrap();
+    assert_eq!(first.total, 2);
+    let after = Some(bgpls_query_key(&first.routes[0]));
+    manager.clear_outbound_peer_state(destination);
+    assert_eq!(
+        bgpls_page(&mut manager, scope, after, Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+}
+
+/// The same fence covers the sibling families, shown here for labeled
+/// unicast, whose advertised rows also live only in the Adj-RIB-Out.
+#[test]
+fn labeled_advertised_pages_invalidate_when_outbound_state_clears() {
+    let (mut manager, peer) = fixture();
+    let destination: IpAddr = "192.0.2.3".parse().unwrap();
+    let _out = register_destination(&mut manager, destination, labeled_sendable());
+    let routes: Vec<_> = (1..=2)
+        .map(|octet| make_labeled_rib_route(peer, octet, 100, 100))
+        .collect();
+    manager.handle_labeled_routes_received(peer.into(), routes, vec![]);
+    let scope = RouteQueryScope::Advertised { peer: destination };
+    let first = labeled_page(&mut manager, scope, None, None, 1).unwrap();
+    assert_eq!(first.total, 2);
+    let route = &first.routes[0];
+    let after = Some((route.nlri.prefix, route.peer, route.path_id));
+    manager.clear_outbound_peer_state(destination);
+    assert_eq!(
+        labeled_page(&mut manager, scope, after, Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+}
+
+/// Without vantages a whole node and link walk builds the topology once;
+/// a topology change drops that build, fences the walk and the next page
+/// rebuilds. A vantage cache takes over without keeping a second copy.
+#[test]
+fn orr_topology_page_walks_build_once_per_version() {
+    use crate::orr::fixtures::{X, Y, link_route, square_topology};
+    let (mut manager, peer) = fixture();
+    let link_id = |id: u8| {
+        rustbgpd_wire::BgpLsTlv::new(258, bytes::Bytes::from(vec![0, 0, 0, id, 0, 0, 0, id]))
+    };
+    let mut routes = square_topology(peer);
+    routes.push(link_route(peer, X, Y, Some(5), &[link_id(1)]));
+    routes.push(link_route(peer, X, Y, Some(5), &[link_id(2)]));
+    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+
+    let mut keys: Vec<_> = manager
+        .build_orr_topology()
+        .node_keys()
+        .iter()
+        .map(|key| key.as_bytes().to_vec())
+        .collect();
+    keys.sort();
+    let mut nodes = Vec::new();
+    let (mut after, mut version) = (None, None);
+    loop {
+        let page = orr_node_page(&mut manager, after, version, 1).unwrap();
+        nodes.extend(page.routes);
+        if !page.has_more {
+            break;
+        }
+        after = Some(keys[nodes.len() - 1].clone());
+        version = Some(page.version);
+    }
+    assert_eq!(nodes.len(), 4);
+    let links = orr_link_page(&mut manager, None, None, 1000).unwrap();
+    assert_eq!(links.total, 6);
+    assert_eq!(
+        manager.orr_page_topology_builds, 1,
+        "one build serves the walk"
+    );
+
+    // Each reported outgoing count matches a brute-force count over the
+    // links, including the two parallel X->Y links.
+    let topology = manager.build_orr_topology();
+    for node in &nodes {
+        let brute = topology
+            .links()
+            .iter()
+            .filter(|link| {
+                topology
+                    .node_key(link.local)
+                    .is_some_and(|key| hex_of(key.as_bytes()) == node.key_hex)
+            })
+            .count();
+        assert_eq!(node.link_count as usize, brute, "{}", node.key_hex);
+    }
+    let mut counts: Vec<_> = nodes.iter().map(|node| node.link_count).collect();
+    counts.sort_unstable();
+    assert_eq!(counts, [0, 2, 2, 2], "X counts both parallel links");
+
+    let first = orr_node_page(&mut manager, None, None, 1).unwrap();
+    manager.handle_bgpls_routes_received(
+        peer.into(),
+        vec![link_route(peer, Y, X, Some(7), &[])],
+        vec![],
+    );
+    assert!(
+        manager.orr_page_topology.is_none(),
+        "a change drops the build"
+    );
+    assert_eq!(
+        orr_node_page(&mut manager, Some(keys[0].clone()), Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+    let fresh = orr_link_page(&mut manager, None, None, 1000).unwrap();
+    assert_eq!(fresh.total, 7);
+    assert_eq!(manager.orr_page_topology_builds, 2);
+
+    manager
+        .peer_orr_vantage
+        .insert("192.0.2.9".parse().unwrap(), "10.0.1.3".parse().unwrap());
+    manager.recompute_orr();
+    assert!(
+        manager.orr_page_topology.is_none(),
+        "the vantage cache takes over"
+    );
+    assert_eq!(
+        orr_link_page(&mut manager, None, None, 1000).unwrap().total,
+        7
+    );
+    assert_eq!(manager.orr_page_topology_builds, 2);
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}

@@ -673,6 +673,15 @@ pub struct RibManager {
     /// by [`Self::recompute_orr`] at every BGP-LS mutation seam. Empty
     /// while `peer_orr_vantage` is empty (zero non-ORR cost).
     orr: crate::orr::OrrState,
+    /// Topology built on demand for paged topology reads while no vantage
+    /// cache exists, tagged with the table page version it was built under.
+    /// Dropped when that version advances or the vantage cache takes over,
+    /// so a page walk builds once and never holds a second copy.
+    /// Boxed: the manager is embedded in large async fixtures.
+    orr_page_topology: Option<Box<(RoutePageVersion, crate::orr::OrrTopology)>>,
+    /// Counts on-demand topology builds for paged reads.
+    #[cfg(test)]
+    orr_page_topology_builds: usize,
     /// Local cluster ID for route reflection (RFC 4456). `None` = not an RR.
     cluster_id: Option<Ipv4Addr>,
     /// Peers that failed a `try_send()` and need a full export resync.
@@ -2085,6 +2094,9 @@ impl RibManager {
             pending_otc_blocked: HashMap::new(),
             peer_orr_vantage: HashMap::new(),
             orr: crate::orr::OrrState::default(),
+            orr_page_topology: None,
+            #[cfg(test)]
+            orr_page_topology_builds: 0,
             cluster_id,
             dirty_peers: BTreeSet::new(),
             dirty_since: HashMap::new(),
@@ -2797,6 +2809,8 @@ impl RibManager {
 
     fn advance_table_pages(&mut self) {
         Self::advance_route_page_version(&mut self.route_page_table_version);
+        // A topology built under the old version can serve no further page.
+        self.orr_page_topology = None;
     }
 
     pub(super) fn set_peer_group(&mut self, peer: IpAddr, group: Option<String>) {
@@ -4378,6 +4392,21 @@ impl RibManager {
                 page_size,
                 reply,
             ),
+            RibUpdate::QueryBgpLsRoutesPage {
+                scope,
+                filter,
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_bgpls_routes_page(
+                scope,
+                filter.as_ref(),
+                after,
+                expected_version,
+                page_size,
+                reply,
+            ),
             RibUpdate::QueryRtcRoutesPage {
                 scope,
                 filter,
@@ -4465,17 +4494,24 @@ impl RibManager {
                 // seam); without them the cache is intentionally empty,
                 // so build on demand as before.
                 let snapshot = if self.peer_orr_vantage.is_empty() {
-                    crate::orr::OrrTopology::build(
-                        self.ribs
-                            .values()
-                            .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls),
-                    )
-                    .snapshot()
+                    self.build_orr_topology().snapshot()
                 } else {
                     self.orr.topology.snapshot()
                 };
                 let _ = reply.send(snapshot);
             }
+            RibUpdate::QueryOrrTopologyNodesPage {
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_orr_nodes_page(after, expected_version, page_size, reply),
+            RibUpdate::QueryOrrTopologyLinksPage {
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_orr_links_page(after, expected_version, page_size, reply),
             RibUpdate::QueryOrrStatus { reply } => self.handle_query_orr_status(reply),
             RibUpdate::QueryConditionalAdvertisements { reply } => {
                 let _ = reply.send(self.conditional_advertisement_status());
@@ -5214,6 +5250,19 @@ impl RibManager {
     /// bound peers). Early-outs with no
     /// topology build and no SPF while `peer_orr_vantage` is empty, so
     /// non-ORR deployments pay nothing on BGP-LS churn.
+    /// The ORR topology input: every peer's BGP-LS Adj-RIB-In, excluding
+    /// families whose selection is still deferred. The vantage cache and
+    /// every on-demand read share this one definition, so a read cannot
+    /// change source when the vantage set empties or fills.
+    pub(super) fn build_orr_topology(&self) -> crate::orr::OrrTopology {
+        crate::orr::OrrTopology::build(
+            self.ribs
+                .values()
+                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls)
+                .filter(|route| !self.selection_deferred(route.family.to_afi_safi())),
+        )
+    }
+
     pub(super) fn recompute_orr(&mut self) -> HashSet<IpAddr> {
         if self.peer_orr_vantage.is_empty() {
             if !self.orr.is_empty() {
@@ -5230,13 +5279,10 @@ impl RibManager {
                 .set_orr_input_diagnostics(crate::orr::OrrInputDiagnostics::default().values());
             return HashSet::new();
         }
+        // The vantage cache below now serves paged topology reads.
+        self.orr_page_topology = None;
 
-        let topology = crate::orr::OrrTopology::build(
-            self.ribs
-                .values()
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls)
-                .filter(|route| !self.selection_deferred(route.family.to_afi_safi())),
-        );
+        let topology = self.build_orr_topology();
         let input_diagnostics = topology.input_diagnostics();
         log_orr_input_transition(self.orr.topology.input_diagnostics(), input_diagnostics);
         // Next-hop costs also depend on exact address ownership and covering
