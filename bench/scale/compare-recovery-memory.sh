@@ -144,10 +144,10 @@ import json
 from pathlib import Path
 import sys
 Path(sys.argv[1]).write_text(json.dumps({
-    "schema": "rustbgpd.recovery-scan.campaign.v2", "candidate": sys.argv[2],
+    "schema": "rustbgpd.recovery-scan.campaign.v3", "candidate": sys.argv[2],
     "instrumentation_manifest_sha256": sys.argv[3], "profile": sys.argv[4],
     "old_order": sys.argv[5],
-    "build_jobs": 4, "order_per_cell": ["flat", "shared", "shared", "flat"],
+    "build_jobs": 4, "order_per_cell": ["flat", "candidate", "candidate", "flat"],
     "scope": "component capture only; same runtime, no activation or daemon claim",
 }, indent=2, sort_keys=True) + "\n")
 PYCODE

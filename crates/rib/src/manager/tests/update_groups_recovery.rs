@@ -922,3 +922,364 @@ fn grouped_capture_orders_real_old_values_and_recovers_exact_withdrawals() {
         assert!(!manager.pending_group_admitted.contains_record(peer));
     }
 }
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actor control follows actual admission through capture and owed-withdrawal recovery for both families"
+)]
+fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        BgpMetrics::new(),
+    );
+    let member: IpAddr = Ipv4Addr::new(10, 222, 4, 1).into();
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let (outbound, mut receiver) = mpsc::channel(16);
+    let mut registration = peer_up(member, outbound, None);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        route_reflector_client,
+        ..
+    } = &mut registration
+    {
+        if vpn_capable {
+            sendable_families.push((Afi::Ipv4, Safi::MplsVpn));
+        }
+        *route_reflector_client = true;
+    }
+    manager.handle_update(registration);
+    while receiver.try_recv().is_ok() {}
+    let expected: HashSet<_> = if vpn {
+        let routes: Vec<_> = (1..=128)
+            .map(|n| make_vpn_rib_route(source, n, 100, 100))
+            .collect();
+        let mut expected: HashSet<_> = routes
+            .iter()
+            .map(|r| ExactExportKey::Vpn(r.key()))
+            .collect();
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: routes,
+            withdrawn: vec![],
+        });
+        source_update(&mut manager, &(1..=128).collect::<Vec<_>>(), &[]);
+        expected.extend((1..=128).map(|n| ExactExportKey::Unicast(Prefix::V4(prefix(n)), 0)));
+        expected
+    } else {
+        source_update(&mut manager, &(1..=128).collect::<Vec<_>>(), &[]);
+        (1..=128)
+            .map(|n| ExactExportKey::Unicast(Prefix::V4(prefix(n)), 0))
+            .collect()
+    };
+    let mut delivered = HashSet::new();
+    while let Ok(update) = receiver.try_recv() {
+        delivered.extend(
+            update
+                .announce
+                .iter()
+                .map(|r| ExactExportKey::Unicast(r.prefix, r.path_id)),
+        );
+        delivered.extend(
+            update
+                .vpn_announce
+                .iter()
+                .map(|r| ExactExportKey::Vpn(r.key())),
+        );
+    }
+    assert_eq!(
+        delivered, expected,
+        "capture must describe actual admitted OLD"
+    );
+    let gid = manager.grouped_member_of(member).unwrap();
+    assert!(
+        manager.group_ribs[&gid]
+            .recovery_snapshot_for_test()
+            .is_none()
+    );
+    assert!(manager.mark_outbound_dirty(member));
+    let proof = manager.pending_group_admitted.get(&member).unwrap();
+    assert_eq!(proof.iter().collect::<HashSet<_>>(), expected);
+    assert_eq!(
+        manager.group_ribs[&gid]
+            .recovery_snapshot_for_test()
+            .is_some(),
+        !vpn_capable,
+        "full OLD representation follows negotiated VPN capability, not current VPN row count"
+    );
+    let withdrawn = if vpn {
+        let key = make_vpn_rib_route(source, 1, 100, 100).key();
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![key.clone()],
+        });
+        ExactExportKey::Vpn(key)
+    } else {
+        source_update(&mut manager, &[], &[1]);
+        ExactExportKey::Unicast(Prefix::V4(prefix(1)), 0)
+    };
+    while manager.resync_dirty_peers_bounded() {}
+    let mut withdrawals = Vec::new();
+    while let Ok(update) = receiver.try_recv() {
+        withdrawals.extend(
+            update
+                .withdraw
+                .into_iter()
+                .map(|(p, id)| ExactExportKey::Unicast(p, id)),
+        );
+        withdrawals.extend(update.vpn_withdraw.into_iter().map(ExactExportKey::Vpn));
+    }
+    assert_eq!(withdrawals, vec![withdrawn]);
+    assert!(!manager.dirty_peers.contains(&member));
+    assert!(!manager.pending_group_admitted.contains_record(member));
+    assert_eq!(manager.group_recovery_fallback(member), None);
+}
+
+#[test]
+fn vpn_capable_unicast_only_full_old_capture_stays_flat_and_keeps_owed_withdrawals() {
+    full_old_capture_keeps_actual_proof(false, true);
+}
+
+#[test]
+fn mixed_uc_vpn_full_old_capture_stays_flat_and_keeps_owed_withdrawals() {
+    full_old_capture_keeps_actual_proof(true, true);
+}
+
+#[test]
+fn indexed_pure_unicast_full_old_capture_keeps_owed_withdrawals() {
+    full_old_capture_keeps_actual_proof(false, false);
+}
+
+#[test]
+fn initial_dump_creates_an_indexed_pool_before_eor_deferral() {
+    use crate::manager::update_groups::admitted_recovery::Key;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    source_update(&mut manager, &(1..=128).collect::<Vec<_>>(), &[]);
+    let member: IpAddr = Ipv4Addr::new(10, 222, 4, 2).into();
+    let (outbound, mut receiver) = mpsc::channel(1);
+    manager.handle_update(peer_up(member, outbound, None));
+    let delivered = receiver.try_recv().unwrap();
+    assert_eq!(delivered.announce.len(), 128);
+    assert!(manager.dirty_peers.contains(&member));
+    let group = &manager.group_ribs[&manager.grouped_member_of(member).unwrap()];
+    let hint = group.recovery_snapshot_for_test().unwrap();
+    let shape = manager
+        .pending_group_admitted
+        .full_old_shape_with_checkpoint(
+            Some(hint),
+            &group.table,
+            true,
+            |route| Some(Key::Unicast(route.prefix, route.path_id)),
+            |_| None,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(shape.count, 128);
+    assert_eq!(shape.comparisons, 128);
+    assert_eq!(
+        shape.fallback, None,
+        "initial/empty admission must publish an indexed pool too"
+    );
+    assert_eq!(
+        manager.pending_group_admitted.get(&member).unwrap().len(),
+        128
+    );
+}
+
+#[test]
+fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal() {
+    use crate::manager::update_groups::RecoveryFallbackCause;
+    use crate::manager::update_groups::admitted_recovery::AdmittedRecovery;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let member = Ipv4Addr::new(10, 222, 4, 3);
+    let (outbound, mut receiver) = mpsc::channel(16);
+    manager.handle_update(peer_up(member.into(), outbound, None));
+    while receiver.try_recv().is_ok() {}
+    source_update(&mut manager, &(1..=128).collect::<Vec<_>>(), &[]);
+    assert_eq!(receiver.try_recv().unwrap().announce.len(), 128);
+    // These staged own-source rows must never enter the actual admitted OLD set.
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: member.into(),
+        session_id: 0,
+        announced: (0..2_000)
+            .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::from(n), 32), member))
+            .collect(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+    while let Ok(update) = receiver.try_recv() {
+        assert!(update.announce.is_empty());
+    }
+    let gid = manager.grouped_member_of(member.into()).unwrap();
+    assert!(manager.group_ribs[&gid].table.len() >= 2_000);
+    let mut ledger = AdmittedRecovery::with_test_limits(8 * 1024, 512 * 1024 * 1024);
+    let keeper: IpAddr = Ipv4Addr::new(10, 222, 4, 240).into();
+    let spare: IpAddr = Ipv4Addr::new(10, 222, 4, 241).into();
+    ledger.insert_empty(keeper).unwrap();
+    ledger.insert_empty(spare).unwrap();
+    ledger.remove(&spare); // Retain the second record slot, so capture registration cannot consume the fault.
+    ledger.fail_next_allocation_for_test();
+    manager.pending_group_admitted = ledger;
+    assert!(manager.mark_outbound_dirty(member.into()));
+    assert_eq!(
+        manager
+            .pending_group_admitted
+            .optional_share_attempts_for_test(),
+        1
+    );
+    assert_eq!(
+        manager
+            .pending_group_admitted
+            .optional_share_refusals_for_test(),
+        1
+    );
+    // The oversized optional pool refuses by cap; the fitting flat proof reaches
+    // the injected allocator fault. Propagating the first refusal gives the wrong cause.
+    assert_eq!(
+        manager.group_recovery_fallback(member.into()),
+        Some(RecoveryFallbackCause::AllocationFailure)
+    );
+    assert_eq!(fallback_count(&manager, "allocation_failure"), 1.0);
+    assert!(manager.pending_group_admitted.get(&member.into()).is_none());
+    source_update(&mut manager, &[], &[1]);
+    while manager.resync_dirty_peers_bounded() {}
+    let mut withdrawals = Vec::new();
+    while let Ok(update) = receiver.try_recv() {
+        withdrawals.extend(update.withdraw);
+    }
+    assert_eq!(withdrawals, vec![(Prefix::V4(prefix(1)), 0)]);
+    assert_eq!(
+        manager
+            .pending_group_admitted
+            .optional_share_attempts_for_test(),
+        1
+    );
+    assert_eq!(fallback_count(&manager, "allocation_failure"), 1.0);
+    assert!(!manager.dirty_peers.contains(&member.into()));
+    assert_eq!(manager.group_recovery_fallback(member.into()), None);
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actor control keeps actual delivery, retained old ownership, slot churn and exact recovery proof in one ordered scenario"
+)]
+fn actual_full_old_slot_churn_stops_searching_but_keeps_every_admitted_key() {
+    use crate::manager::update_groups::admitted_recovery::{FullCaptureFallback, Key};
+
+    const COUNT: u32 = 5_000;
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let first: IpAddr = Ipv4Addr::new(10, 222, 4, 4).into();
+    let second: IpAddr = Ipv4Addr::new(10, 222, 4, 5).into();
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let (first_tx, mut first_rx) = mpsc::channel(64);
+    let (second_tx, mut second_rx) = mpsc::channel(1024);
+    manager.handle_update(peer_up(first, first_tx, None));
+    manager.handle_update(peer_up(second, second_tx, None));
+    while first_rx.try_recv().is_ok() {}
+    while second_rx.try_recv().is_ok() {}
+    let inject = |manager: &mut RibManager,
+                  announce: std::ops::Range<u32>,
+                  withdraw: std::ops::Range<u32>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: announce
+                .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::from(n), 32), source))
+                .collect(),
+            withdrawn: withdraw
+                .map(|n| (Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
+                .collect(),
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    inject(&mut manager, 0..COUNT, 0..0);
+    let mut first_delivered = 0;
+    while let Ok(update) = first_rx.try_recv() {
+        first_delivered += update.announce.len();
+    }
+    let mut second_delivered = 0;
+    while let Ok(update) = second_rx.try_recv() {
+        second_delivered += update.announce.len();
+    }
+    assert_eq!(first_delivered, COUNT as usize);
+    assert_eq!(second_delivered, COUNT as usize);
+    assert!(manager.mark_outbound_dirty(first));
+    let gid = manager.grouped_member_of(first).unwrap();
+    let hint = manager.group_ribs[&gid]
+        .recovery_snapshot_for_test()
+        .unwrap();
+    while manager.outbound_peers[&first]
+        .try_send(OutboundRouteUpdate::default())
+        .is_ok()
+    {}
+    assert!(manager.outbound_channel_full(first));
+    inject(&mut manager, COUNT..2 * COUNT, 0..COUNT);
+    let mut admitted = HashSet::new();
+    while let Ok(update) = second_rx.try_recv() {
+        admitted.extend(
+            update
+                .announce
+                .iter()
+                .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id)),
+        );
+    }
+    assert_eq!(admitted.len(), COUNT as usize);
+    assert!(!manager.dirty_peers.contains(&second));
+    assert_eq!(
+        manager.group_ribs[&gid].recovery_snapshot_for_test(),
+        Some(hint)
+    );
+    let group = &manager.group_ribs[&gid];
+    let shape = manager
+        .pending_group_admitted
+        .full_old_shape_with_checkpoint(
+            Some(hint),
+            &group.table,
+            true,
+            |route| Some(Key::Unicast(route.prefix, route.path_id)),
+            |_| None,
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        shape.count, COUNT as usize,
+        "the count must continue after lookup stops"
+    );
+    assert_eq!(shape.mismatches, 4_097);
+    assert_eq!(shape.fallback, Some(FullCaptureFallback::SlotChurn));
+    assert!(shape.comparisons < 90_000);
+    assert!(manager.mark_outbound_dirty(second));
+    let proof = manager.pending_group_admitted.get(&second).unwrap();
+    assert_eq!(proof.iter().collect::<HashSet<_>>(), admitted);
+    assert!(!proof.contains(&ExactExportKey::Unicast(
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0), 32)),
+        0
+    )));
+    assert_eq!(manager.group_recovery_fallback(second), None);
+    assert_eq!(
+        manager.pending_group_admitted.get(&first).unwrap().len(),
+        COUNT as usize
+    );
+}

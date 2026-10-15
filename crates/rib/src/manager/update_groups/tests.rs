@@ -6280,7 +6280,7 @@ fn snapshot_capture_channel(
 }
 
 #[test]
-fn snapshot_reuse_unsynchronized_old_views_share_across_uc_vpn_add_and_remove() {
+fn flat_full_capture_preserves_unsynchronized_uc_vpn_old_views() {
     const GID: usize = 2207;
     let mut manager = staging_manager();
     let healthy_charge = manager.pending_group_admitted.bytes();
@@ -6297,7 +6297,7 @@ fn snapshot_reuse_unsynchronized_old_views_share_across_uc_vpn_add_and_remove() 
         .map(|peer| snapshot_capture_channel(&mut manager, *peer, Some(GID)))
         .collect();
     assert!(manager.capture_group_admitted_keys(peers[0]));
-    let handle = manager.group_ribs[&GID].recovery_snapshot.unwrap();
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     let first = manager
         .pending_group_admitted
         .owned_proof(&peers[0])
@@ -6313,7 +6313,7 @@ fn snapshot_reuse_unsynchronized_old_views_share_across_uc_vpn_add_and_remove() 
         .unwrap()
         .apply_delta(&announce_delta(prefix(100), OTHER1, None));
     assert!(manager.capture_group_admitted_keys(peers[1]));
-    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, Some(handle));
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     let second = manager.pending_group_admitted.get(&peers[1]).unwrap();
     assert!(!second.contains(&ExactExportKey::Unicast(prefix(1), 0)));
     assert!(second.contains(&ExactExportKey::Unicast(prefix(100), 0)));
@@ -6340,7 +6340,7 @@ fn snapshot_reuse_unsynchronized_old_views_share_across_uc_vpn_add_and_remove() 
         .unwrap()
         .apply_vpn_delta(&vpn_announce_delta(2, OTHER1, None));
     assert!(manager.capture_group_admitted_keys(peers[2]));
-    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, Some(handle));
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     let third = manager.pending_group_admitted.get(&peers[2]).unwrap();
     assert!(!third.contains(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())));
     assert!(third.contains(&ExactExportKey::Vpn(vpn_route(2, OTHER1).key())));
@@ -6357,18 +6357,14 @@ fn snapshot_reuse_unsynchronized_old_views_share_across_uc_vpn_add_and_remove() 
         manager.release_group_admitted_keys(peer);
     }
     assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
-    assert_eq!(
-        manager.group_ribs[&GID].recovery_snapshot,
-        Some(handle),
-        "hint owns no released storage"
-    );
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     manager
         .group_ribs
         .get_mut(&GID)
         .unwrap()
         .apply_delta(&announce_delta(prefix(101), OTHER1, None));
     assert!(manager.capture_group_admitted_keys(peers[0]));
-    assert_ne!(manager.group_ribs[&GID].recovery_snapshot, Some(handle));
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     let recaptured = manager.pending_group_admitted.get(&peers[0]).unwrap();
     assert_eq!(recaptured.len(), 18);
     assert!(!recaptured.contains(&ExactExportKey::Unicast(prefix(1), 0)));
@@ -6378,7 +6374,7 @@ fn snapshot_reuse_unsynchronized_old_views_share_across_uc_vpn_add_and_remove() 
 }
 
 #[test]
-fn snapshot_reuse_shared_universe_refusal_falls_back_to_small_actual_flat_view() {
+fn flat_full_capture_reserves_only_the_filtered_actual_view() {
     const GID: usize = 2208;
     const RAW: u32 = 2_000;
     const ACTUAL: usize = 32;
@@ -6396,7 +6392,7 @@ fn snapshot_reuse_shared_universe_refusal_falls_back_to_small_actual_flat_view()
     let _receiver = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
     assert!(
         manager.capture_group_admitted_keys(MEMBER),
-        "the 8 KiB peer cap must refuse a 2,000-key universe but permit 32 actual OLD keys"
+        "the 8 KiB peer cap permits 32 actual OLD keys without reserving 2,000 raw keys"
     );
     assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     assert_eq!(manager.group_recovery_fallback(MEMBER), None);
@@ -6428,7 +6424,7 @@ fn snapshot_capture_fallback_total(manager: &RibManager) -> f64 {
 }
 
 #[test]
-fn snapshot_reuse_sparse_share_refusal_falls_back_to_disjoint_actual_flat_view() {
+fn flat_full_capture_preserves_disjoint_old_views_within_the_peer_cap() {
     const GID: usize = 2210;
     let mut manager = staging_manager();
     manager.pending_group_admitted =
@@ -6444,7 +6440,7 @@ fn snapshot_reuse_sparse_share_refusal_falls_back_to_disjoint_actual_flat_view()
     let _first = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
     let _second = snapshot_capture_channel(&mut manager, OTHER2, Some(GID));
     assert!(manager.capture_group_admitted_keys(MEMBER));
-    let handle = manager.group_ribs[&GID].recovery_snapshot.unwrap();
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     let first = manager.pending_group_admitted.owned_proof(&MEMBER).unwrap();
     let group = manager.group_ribs.get_mut(&GID).unwrap();
     for n in 1..=128 {
@@ -6456,9 +6452,9 @@ fn snapshot_reuse_sparse_share_refusal_falls_back_to_disjoint_actual_flat_view()
     group.apply_vpn_delta(&vpn_announce_delta(2, OTHER1, None));
     assert!(
         manager.capture_group_admitted_keys(OTHER2),
-        "base plus mask fits 8 KiB, but sparse additions must refuse before attaching and allow flat OLD capture"
+        "each exact flat OLD proof must fit 8 KiB independently of a disjoint retained proof"
     );
-    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, Some(handle));
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     assert_eq!(
         manager.pending_group_admitted.owned_proof(&MEMBER).unwrap(),
         first
@@ -6503,7 +6499,22 @@ fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
     manager.group_ribs.insert(GID, group);
     let _first = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
     let mut receiver = snapshot_capture_channel(&mut manager, OTHER2, Some(GID));
-    assert!(manager.capture_group_admitted_keys(MEMBER));
+    manager.pending_group_admitted.insert_empty(MEMBER).unwrap();
+    let initial = (1..=128)
+        .map(|n| Key::Unicast(prefix(n), 0))
+        .chain(std::iter::once(
+            Key::try_from(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())).unwrap(),
+        ));
+    manager.prepare_empty_group_recovery_admission(MEMBER, initial.clone());
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_some());
+    manager
+        .pending_group_admitted
+        .reserve_admitted(MEMBER, initial.clone())
+        .unwrap();
+    manager
+        .pending_group_admitted
+        .apply_admitted(MEMBER, initial, std::iter::empty())
+        .unwrap();
     let first = manager.pending_group_admitted.owned_proof(&MEMBER).unwrap();
     manager.pending_group_admitted.insert_empty(OTHER2).unwrap();
     if attach_empty {
@@ -6606,7 +6617,7 @@ fn snapshot_reuse_grouped_full_table_flat_capture_reserves_exact_cardinality() {
     let _receiver = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
     assert!(
         manager.capture_group_admitted_keys(MEMBER),
-        "a refused raw universe must still reserve all 1,048,577 actual OLD keys, not zero sparse additions"
+        "flat full OLD capture must reserve all 1,048,577 actual keys, without geometric growth"
     );
     assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     let proof = manager.pending_group_admitted.get(&MEMBER).unwrap();

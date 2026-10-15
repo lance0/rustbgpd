@@ -10,6 +10,7 @@ use std::net::IpAddr;
 use rustbgpd_wire::{Prefix, VpnRouteKey};
 use smallvec::SmallVec;
 
+use crate::adj_rib_out::AdjRibOut;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::ExactExportKey;
 
@@ -70,27 +71,6 @@ pub(in crate::manager) struct Failure {
     pub(in crate::manager) attempted_daemon_bytes: usize,
 }
 
-/// Borrowed OLD values keep the ordering buffer smaller than a second key set.
-#[derive(Clone, Copy)]
-pub(in crate::manager) enum CaptureRef<'a> {
-    Unicast(&'a Route),
-    Vpn(&'a VpnRibRoute),
-}
-
-impl CaptureRef<'_> {
-    pub(in crate::manager) fn key(self) -> Key {
-        match self {
-            Self::Unicast(route) => Key::Unicast(route.prefix, route.path_id),
-            Self::Vpn(route) => {
-                let key = route.key();
-                Key::Vpn(key.nlri_key, key.path_id)
-            }
-        }
-    }
-}
-
-type CaptureRefs<'a> = SmallVec<[CaptureRef<'a>; 0]>;
-
 type Keys = SmallVec<[Key; 0]>;
 type Records = SmallVec<[Record; 0]>;
 
@@ -102,8 +82,52 @@ pub(in crate::manager) struct AdmittedKeys(Keys);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::manager) struct SnapshotHandle(u64);
 
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::manager) enum FullCaptureStrategy {
+    Indexed,
+    Flat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::manager) enum FullCaptureFallback {
+    SharingDisabled,
+    MissingIndex,
+    SlotChurn,
+    Representation,
+    ShareRefused,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(in crate::manager) struct FullCaptureShape {
+    pub(in crate::manager) count: usize,
+    pub(in crate::manager) additions: usize,
+    /// Capped at budget + 1: classification stops after selecting flat capture.
+    pub(in crate::manager) mismatches: usize,
+    pub(in crate::manager) comparisons: usize,
+    pub(in crate::manager) fallback: Option<FullCaptureFallback>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(in crate::manager) struct FullCaptureOutcome {
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(in crate::manager) keys: usize,
+    pub(in crate::manager) handle: Option<SnapshotHandle>,
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(in crate::manager) strategy: FullCaptureStrategy,
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(in crate::manager) fallback: Option<FullCaptureFallback>,
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(in crate::manager) mismatches: usize,
+}
+
 type Words = SmallVec<[u64; 0]>;
 type Snapshots = SmallVec<[Snapshot; 0]>;
+type SlotPositions = SmallVec<[u32; 0]>;
+const EMPTY_SLOT: u32 = u32::MAX;
+// Each projection permits at most this many exact fallback searches. A successful
+// two-pass capture can therefore perform twice this number under bounded churn.
+const SLOT_MISMATCH_BUDGET: usize = 4_096;
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone, PartialEq, Eq))]
@@ -111,11 +135,15 @@ struct Snapshot {
     handle: SnapshotHandle,
     references: usize,
     keys: Keys,
+    slot_positions: SlotPositions,
+    indexed: bool,
 }
 
 impl Snapshot {
     fn charge(&self) -> usize {
-        size_of::<Self>() + self.keys.capacity() * size_of::<Key>()
+        size_of::<Self>()
+            + self.keys.capacity() * size_of::<Key>()
+            + self.slot_positions.capacity() * size_of::<u32>()
     }
 }
 
@@ -220,7 +248,6 @@ struct Record {
     snapshot: Option<SnapshotHandle>,
     words: Words,
     masked: usize,
-    capture_scratch: usize,
 }
 
 impl Record {
@@ -228,7 +255,6 @@ impl Record {
         size_of::<Self>()
             + self.keys.0.capacity() * size_of::<Key>()
             + self.words.capacity() * size_of::<u64>()
-            + self.capture_scratch
     }
 }
 
@@ -246,6 +272,10 @@ pub(in crate::manager) struct AdmittedRecovery {
     fail_next_allocation: bool,
     #[cfg(test)]
     allocation_countdown: Option<usize>,
+    #[cfg(test)]
+    optional_share_attempts: usize,
+    #[cfg(test)]
+    optional_share_refusals: usize,
 }
 
 impl AdmittedRecovery {
@@ -270,6 +300,10 @@ impl AdmittedRecovery {
             fail_next_allocation: false,
             #[cfg(test)]
             allocation_countdown: None,
+            #[cfg(test)]
+            optional_share_attempts: 0,
+            #[cfg(test)]
+            optional_share_refusals: 0,
         }
     }
 
@@ -281,6 +315,16 @@ impl AdmittedRecovery {
     #[cfg(test)]
     pub(in crate::manager) fn fail_next_allocation_for_test(&mut self) {
         self.fail_next_allocation = true;
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn optional_share_attempts_for_test(&self) -> usize {
+        self.optional_share_attempts
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn optional_share_refusals_for_test(&self) -> usize {
+        self.optional_share_refusals
     }
 
     pub(in crate::manager) fn entries_with_checkpoint(
@@ -378,6 +422,7 @@ impl AdmittedRecovery {
         peer: IpAddr,
         count: usize,
         keys: A,
+        slot_source: Option<&AdjRibOut>,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<SnapshotHandle, Failure> {
         let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
@@ -385,8 +430,14 @@ impl AdmittedRecovery {
         let key_bytes = count
             .checked_mul(size_of::<Key>())
             .ok_or_else(Self::overflow)?;
+        let slot_count = slot_source.map_or(0, AdjRibOut::unicast_slot_count);
+        let slot_bytes = slot_count
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(Self::overflow)?;
         let temporary = key_bytes
-            .checked_add(size_of::<Snapshot>())
+            .checked_add(slot_bytes)
+            .and_then(|n| n.checked_add(size_of::<SlotPositions>()))
+            .and_then(|n| n.checked_add(size_of::<Snapshot>()))
             .and_then(|n| n.checked_add(size_of::<Keys>()))
             .ok_or_else(Self::overflow)?;
         let attempted_peer = self
@@ -402,12 +453,13 @@ impl AdmittedRecovery {
         self.used = daemon;
         self.peak = self.peak.max(daemon);
         let mut owned = Keys::new();
+        let mut slot_positions = SlotPositions::new();
         checkpoint(true);
         let failed = !self.allocation_permitted() || owned.try_grow(count).is_err();
         checkpoint(true);
         if failed {
             checkpoint(true);
-            drop(owned);
+            drop((owned, slot_positions));
             checkpoint(true);
             self.used -= temporary;
             return Err(Failure {
@@ -417,11 +469,29 @@ impl AdmittedRecovery {
                 attempted_daemon_bytes: daemon,
             });
         }
+        if slot_source.is_some() {
+            checkpoint(true);
+            let failed =
+                !self.allocation_permitted() || slot_positions.try_grow(slot_count).is_err();
+            checkpoint(true);
+            if failed {
+                checkpoint(true);
+                drop((owned, slot_positions));
+                checkpoint(true);
+                self.used -= temporary;
+                return Err(Failure {
+                    cause: FailureCause::AllocationFailure,
+                    limiting_peer: None,
+                    attempted_peer_bytes: attempted_peer,
+                    attempted_daemon_bytes: daemon,
+                });
+            }
+        }
         for key in keys {
             checkpoint(false);
             if owned.len() == count {
                 checkpoint(true);
-                drop(owned);
+                drop((owned, slot_positions));
                 checkpoint(true);
                 self.used -= temporary;
                 return Err(self.missing_proof(peer));
@@ -429,13 +499,40 @@ impl AdmittedRecovery {
             owned.push(key);
         }
         Self::sort_keys(&mut owned, checkpoint);
+        if let Some(table) = slot_source {
+            for slot in 0..slot_count {
+                checkpoint(false);
+                let position = if let Some(route) = table.unicast_slot(slot) {
+                    let key = Key::Unicast(route.prefix, route.path_id);
+                    owned
+                        .binary_search_by(|prior| {
+                            checkpoint(false);
+                            prior.cmp(&key)
+                        })
+                        .ok()
+                        .and_then(|position| u32::try_from(position).ok())
+                        .filter(|position| *position != EMPTY_SLOT)
+                } else {
+                    Some(EMPTY_SLOT)
+                };
+                let Some(position) = position else {
+                    checkpoint(true);
+                    drop((owned, slot_positions));
+                    checkpoint(true);
+                    self.used -= temporary;
+                    return Err(self.missing_proof(peer));
+                };
+                slot_positions.push(position);
+            }
+        }
+
         let old_cap = self.snapshots.capacity();
         let new_cap = if old_cap == self.snapshots.len() {
             if let Some(cap) = old_cap.checked_mul(2) {
                 cap.max(1)
             } else {
                 checkpoint(true);
-                drop(owned);
+                drop((owned, slot_positions));
                 checkpoint(true);
                 self.used -= temporary;
                 return Err(Self::overflow());
@@ -452,7 +549,7 @@ impl AdmittedRecovery {
                 n
             } else {
                 checkpoint(true);
-                drop(owned);
+                drop((owned, slot_positions));
                 checkpoint(true);
                 self.used -= temporary;
                 return Err(Self::overflow());
@@ -462,7 +559,7 @@ impl AdmittedRecovery {
         };
         let Some(daemon) = self.used.checked_add(extra) else {
             checkpoint(true);
-            drop(owned);
+            drop((owned, slot_positions));
             checkpoint(true);
             self.used -= temporary;
             return Err(Self::overflow());
@@ -480,7 +577,7 @@ impl AdmittedRecovery {
                         .and_then(|charge| self.check(address, charge, daemon));
                     if let Err(error) = result {
                         checkpoint(true);
-                        drop(owned);
+                        drop((owned, slot_positions));
                         checkpoint(true);
                         self.used -= temporary;
                         return Err(error);
@@ -490,7 +587,7 @@ impl AdmittedRecovery {
         }
         if let Err(error) = self.check(peer, attempted_peer, daemon) {
             checkpoint(true);
-            drop(owned);
+            drop((owned, slot_positions));
             checkpoint(true);
             self.used -= temporary;
             return Err(error);
@@ -503,7 +600,7 @@ impl AdmittedRecovery {
             checkpoint(true);
             if failed {
                 checkpoint(true);
-                drop(owned);
+                drop((owned, slot_positions));
                 checkpoint(true);
                 self.used -= extra + temporary;
                 return Err(Failure {
@@ -521,10 +618,12 @@ impl AdmittedRecovery {
             handle,
             references: 0,
             keys: owned,
+            slot_positions,
+            indexed: slot_source.is_some(),
         });
         checkpoint(true);
         self.next_snapshot = id.checked_add(1);
-        self.used -= size_of::<Snapshot>() + size_of::<Keys>();
+        self.used -= size_of::<Snapshot>() + size_of::<Keys>() + size_of::<SlotPositions>();
         Ok(handle)
     }
 
@@ -535,7 +634,8 @@ impl AdmittedRecovery {
         if self.snapshots[index].references != 0 {
             return;
         }
-        let bytes = self.snapshots[index].keys.capacity() * size_of::<Key>();
+        let bytes = self.snapshots[index].keys.capacity() * size_of::<Key>()
+            + self.snapshots[index].slot_positions.capacity() * size_of::<u32>();
         checkpoint(true);
         drop(self.snapshots.remove(index));
         self.used -= bytes;
@@ -562,6 +662,49 @@ impl AdmittedRecovery {
         shape: (usize, usize),
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<SnapshotHandle>, Failure> {
+        self.share_capture_inner(peer, hint, count, keys, shape, None, checkpoint)
+    }
+
+    /// Pure-unicast group pools receive their immutable slot index before publication.
+    pub(in crate::manager) fn share_group_capture_with_checkpoint(
+        &mut self,
+        peer: IpAddr,
+        hint: Option<SnapshotHandle>,
+        table: &AdjRibOut,
+        shape: (usize, usize),
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<Option<SnapshotHandle>, Failure> {
+        self.share_capture_inner(
+            peer,
+            hint,
+            table.len(),
+            table
+                .iter()
+                .map(|route| Key::Unicast(route.prefix, route.path_id)),
+            shape,
+            Some(table),
+            checkpoint,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "optional sparse storage and indexed or key-only pool publication share one rollback boundary"
+    )]
+    fn share_capture_inner<A: Iterator<Item = Key>>(
+        &mut self,
+        peer: IpAddr,
+        hint: Option<SnapshotHandle>,
+        count: usize,
+        keys: A,
+        shape: (usize, usize),
+        slot_source: Option<&AdjRibOut>,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<Option<SnapshotHandle>, Failure> {
+        #[cfg(test)]
+        {
+            self.optional_share_attempts += 1;
+        }
         let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
         if self.records[index].masked != 0 || !self.records[index].keys.0.is_empty() {
             return Ok(self.records[index].snapshot);
@@ -572,23 +715,51 @@ impl AdmittedRecovery {
         if matches!(self.records[index].state, State::Failed(_)) {
             return Err(self.missing_proof(peer));
         }
+        if slot_source.is_some()
+            && self.records[index].snapshot.is_some_and(|handle| {
+                self.snapshot_index(handle)
+                    .is_none_or(|index| !self.snapshots[index].indexed)
+            })
+        {
+            // Existing empty key-only ownership may have been sized against a
+            // different universe. Let admission reserve its authoritative flat union.
+            self.free_keys(index, checkpoint);
+            return Ok(None);
+        }
         let shared = self.grow_keys(index, shape.1, checkpoint).and_then(|()| {
-            self.attach_snapshot_with_checkpoint(index, hint, count, keys, shape.0, checkpoint)
+            self.attach_snapshot_with_checkpoint(
+                index,
+                hint,
+                count,
+                keys,
+                shape,
+                slot_source,
+                checkpoint,
+            )
         });
         if matches!(shared, Ok(Some(_))) {
             return shared;
+        }
+        #[cfg(test)]
+        if shared.is_err() {
+            self.optional_share_refusals += 1;
         }
         self.free_keys(index, checkpoint);
         shared
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "pool identity, sparse sizing and optional slab source are checked before shared ownership is published"
+    )]
     fn attach_snapshot_with_checkpoint<A: Iterator<Item = Key>>(
         &mut self,
         index: usize,
         hint: Option<SnapshotHandle>,
         count: usize,
         keys: A,
-        filtered: usize,
+        shape: (usize, usize),
+        slot_source: Option<&AdjRibOut>,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<SnapshotHandle>, Failure> {
         if let Some(handle) = self.records[index].snapshot {
@@ -596,16 +767,14 @@ impl AdmittedRecovery {
         }
         let peer = self.records[index].peer;
         let words = Self::shared_words(count)?;
-        let bytes = words
-            .checked_mul(size_of::<u64>())
-            .ok_or_else(Self::overflow)?;
-        let flat = filtered
+        let flat = shape
+            .0
             .checked_mul(size_of::<Key>())
             .ok_or_else(Self::overflow)?;
-        if flat < bytes {
-            return Ok(None);
-        }
-        let reused = hint.filter(|handle| self.snapshot_index(*handle).is_some());
+        let reused = hint.filter(|handle| {
+            self.snapshot_index(*handle)
+                .is_some_and(|index| slot_source.is_none() || self.snapshots[index].indexed)
+        });
         let (actual_words, snapshot_charge) = if let Some(handle) = reused {
             let snapshot = &self.snapshots[self
                 .snapshot_index(handle)
@@ -616,6 +785,13 @@ impl AdmittedRecovery {
                 words,
                 count
                     .checked_mul(size_of::<Key>())
+                    .and_then(|n| {
+                        n.checked_add(
+                            slot_source
+                                .map_or(0, AdjRibOut::unicast_slot_count)
+                                .checked_mul(size_of::<u32>())?,
+                        )
+                    })
                     .and_then(|n| n.checked_add(size_of::<Snapshot>()))
                     .ok_or_else(Self::overflow)?,
             )
@@ -623,6 +799,13 @@ impl AdmittedRecovery {
         let bytes = actual_words
             .checked_mul(size_of::<u64>())
             .ok_or_else(Self::overflow)?;
+        let sparse = shape
+            .1
+            .checked_mul(size_of::<Key>())
+            .ok_or_else(Self::overflow)?;
+        if flat < bytes.checked_add(sparse).ok_or_else(Self::overflow)? {
+            return Ok(None);
+        }
         let attempted_peer = self.records[index]
             .charge()
             .checked_add(snapshot_charge)
@@ -658,7 +841,7 @@ impl AdmittedRecovery {
         // fallible step, so a refusal cannot strand an expanded shared pool.
         let handle = match reused {
             Some(handle) => handle,
-            None => match self.create_snapshot(peer, count, keys, checkpoint) {
+            None => match self.create_snapshot(peer, count, keys, slot_source, checkpoint) {
                 Ok(handle) => handle,
                 Err(error) => {
                     checkpoint(true);
@@ -681,198 +864,253 @@ impl AdmittedRecovery {
         Ok(Some(handle))
     }
 
-    /// Count authoritative OLD keys and the sparse capacity needed beside a
-    /// live older universe, without collecting an uncharged key inventory.
-    pub(in crate::manager) fn capture_shape_with_checkpoint<A: Iterator<Item = Key>>(
-        &self,
-        hint: Option<SnapshotHandle>,
-        keys: A,
-        checkpoint: &mut impl FnMut(bool),
-    ) -> (usize, usize) {
-        let universe = hint
-            .and_then(|handle| self.snapshot_index(handle))
-            .map(|index| self.snapshots[index].keys.as_slice());
-        let mut cursor = None;
-        let mut previous = None;
-        let (count, upper) = keys.size_hint();
-        let mut unordered = universe.is_some_and(|universe| {
-            upper != Some(count)
-                || universe.len()
-                    > count.saturating_mul((usize::BITS - universe.len().leading_zeros()) as usize)
-        });
-        keys.fold((0, 0), |(count, additions), key| {
-            checkpoint(false);
-            let missing = universe.is_some_and(|keys| {
-                Self::capture_position(
-                    keys,
-                    key,
-                    &mut cursor,
-                    &mut previous,
-                    &mut unordered,
-                    checkpoint,
-                )
-                .is_none()
-            });
-            (count + 1, additions + usize::from(missing))
-        })
-    }
-
-    // Monotone inputs visit each skipped universe row once. An unordered input
-    // permanently switches to binary search, avoiding repeated full scans.
-    fn capture_position(
-        keys: &[Key],
-        key: Key,
-        cursor: &mut Option<usize>,
-        previous: &mut Option<Key>,
-        unordered: &mut bool,
-        checkpoint: &mut impl FnMut(bool),
-    ) -> Option<usize> {
-        *unordered |= previous.is_some_and(|prior| prior > key);
-        *previous = Some(key);
-        let mut position = if *unordered || cursor.is_none() {
-            keys.partition_point(|prior| {
-                checkpoint(false);
-                *prior < key
-            })
-        } else {
-            cursor.unwrap()
-        };
-        while let Some(prior) = keys.get(position) {
-            checkpoint(false);
-            match prior.cmp(&key) {
-                std::cmp::Ordering::Less => position += 1,
-                order => {
-                    *cursor = Some(position);
-                    return (order == std::cmp::Ordering::Equal).then_some(position);
-                }
-            }
-        }
-        *cursor = Some(position);
-        None
-    }
-
-    /// Charge and sort a temporary borrowed OLD inventory. Optional refusal
-    /// returns to the caller's existing flat producer after storage is freed.
-    pub(in crate::manager) fn with_ordered_capture<'a, A, F>(
-        &mut self,
-        peer: IpAddr,
-        count: usize,
-        actual: A,
-        checkpoint: &mut F,
-        capture: impl FnOnce(
-            &mut Self,
-            &[CaptureRef<'a>],
-            &mut F,
-        ) -> Result<Option<SnapshotHandle>, Failure>,
-    ) -> Result<Option<SnapshotHandle>, Failure>
+    fn walk_full_old<U, V, C>(
+        table: &AdjRibOut,
+        project_uc: &U,
+        project_vpn: &V,
+        checkpoint: &mut C,
+        mut visit: impl FnMut(Option<usize>, Key, &mut C) -> Result<(), Failure>,
+    ) -> Result<(), Failure>
     where
-        A: Iterator<Item = CaptureRef<'a>>,
-        F: FnMut(bool),
+        U: Fn(&Route) -> Option<Key>,
+        V: Fn(&VpnRibRoute) -> Option<Key>,
+        C: FnMut(bool),
     {
-        let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
-        let extra = count
-            .checked_mul(size_of::<CaptureRef<'_>>())
-            .and_then(|bytes| bytes.checked_add(size_of::<CaptureRefs<'_>>()))
-            .ok_or_else(Self::overflow)?;
-        let peer_bytes = self
-            .peer_charge(index)
-            .checked_add(extra)
-            .ok_or_else(Self::overflow)?;
-        let daemon = self.used.checked_add(extra).ok_or_else(Self::overflow)?;
-        if self.check(peer, peer_bytes, daemon).is_err() {
-            return Ok(None);
-        }
-        self.used = daemon;
-        self.peak = self.peak.max(daemon);
-        self.records[index].capture_scratch += extra;
-        let mut ordered = CaptureRefs::new();
-        checkpoint(true);
-        let allocated = self.allocation_permitted() && ordered.try_grow(count).is_ok();
-        checkpoint(true);
-        let result = if allocated {
-            let mut complete = true;
-            for route in actual {
-                checkpoint(false);
-                if ordered.len() == count {
-                    complete = false;
-                    break;
-                }
-                ordered.push(route);
-            }
-            if !complete || ordered.len() != count {
-                Err(self.missing_proof(peer))
-            } else {
-                checkpoint(true);
-                ordered.sort_unstable_by(|a, b| {
-                    checkpoint(false);
-                    a.key().cmp(&b.key())
-                });
-                checkpoint(true);
-                capture(self, &ordered, checkpoint)
-            }
-        } else {
-            Ok(None)
-        };
-        checkpoint(true);
-        drop(ordered);
-        checkpoint(true);
-        self.records[index].capture_scratch -= extra;
-        self.used -= extra;
-        result
-    }
-
-    /// Populate the shared mask and reserved sparse tail in one merge pass.
-    pub(in crate::manager) fn push_capture_batch_with_checkpoint(
-        &mut self,
-        peer: IpAddr,
-        keys: impl Iterator<Item = Key>,
-        checkpoint: &mut impl FnMut(bool),
-    ) -> Result<(), Failure> {
-        let index = self
-            .index_with_checkpoint(peer, checkpoint)
-            .map_err(|_| self.missing_proof(peer))?;
-        match self.records[index].state {
-            State::Failed(error) => return Err(error),
-            State::Complete => return Err(self.fail(index, self.missing_proof(peer), checkpoint)),
-            State::Capturing => {}
-        }
-        let universe = self.records[index]
-            .snapshot
-            .and_then(|handle| self.snapshot_index(handle));
-        let mut cursor = None;
-        let mut previous = None;
-        let (count, upper) = keys.size_hint();
-        let mut unordered = universe.is_some_and(|index| {
-            let length = self.snapshots[index].keys.len();
-            upper != Some(count)
-                || length > count.saturating_mul((usize::BITS - length.leading_zeros()) as usize)
-        });
-        for key in keys {
+        for slot in 0..table.unicast_slot_count() {
             checkpoint(false);
-            let position = universe.and_then(|snapshot| {
-                Self::capture_position(
-                    &self.snapshots[snapshot].keys,
-                    key,
-                    &mut cursor,
-                    &mut previous,
-                    &mut unordered,
-                    checkpoint,
-                )
-            });
-            if let Some(position) = position {
-                let bit = 1_u64 << (position % 64);
-                if self.records[index].words[position / 64] & bit == 0 {
-                    self.records[index].words[position / 64] |= bit;
-                    self.records[index].masked += 1;
-                }
-            } else {
-                if self.records[index].keys.0.len() == self.records[index].keys.0.capacity() {
-                    return Err(self.fail(index, self.missing_proof(peer), checkpoint));
-                }
-                self.records[index].keys.0.push(key);
+            if let Some(key) = table.unicast_slot(slot).and_then(project_uc) {
+                visit(Some(slot), key, checkpoint)?;
+            }
+        }
+        for route in table.iter_vpn() {
+            checkpoint(false);
+            if let Some(key) = project_vpn(route) {
+                visit(None, key, checkpoint)?;
             }
         }
         Ok(())
+    }
+
+    /// Recycled or cleared slots cannot prove that a different key was admitted.
+    fn indexed_position(
+        snapshot: &Snapshot,
+        slot: Option<usize>,
+        key: Key,
+        mismatches: &mut usize,
+        comparisons: &mut usize,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<Option<usize>, ()> {
+        if let Some(position) = slot
+            .and_then(|slot| snapshot.slot_positions.get(slot))
+            .copied()
+            .filter(|position| *position != EMPTY_SLOT)
+            .map(|position| position as usize)
+            && let Some(prior) = snapshot.keys.get(position)
+        {
+            checkpoint(false);
+            *comparisons += 1;
+            if *prior == key {
+                return Ok(Some(position));
+            }
+        }
+        *mismatches += 1;
+        if *mismatches > SLOT_MISMATCH_BUDGET {
+            return Err(());
+        }
+        Ok(snapshot
+            .keys
+            .binary_search_by(|prior| {
+                checkpoint(false);
+                *comparisons += 1;
+                prior.cmp(&key)
+            })
+            .ok())
+    }
+
+    pub(in crate::manager) fn full_old_shape_with_checkpoint<U, V>(
+        &self,
+        hint: Option<SnapshotHandle>,
+        table: &AdjRibOut,
+        sharing_allowed: bool,
+        project_uc: U,
+        project_vpn: V,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<FullCaptureShape, Failure>
+    where
+        U: Fn(&Route) -> Option<Key>,
+        V: Fn(&VpnRibRoute) -> Option<Key>,
+    {
+        let snapshot = hint
+            .and_then(|handle| self.snapshot_index(handle))
+            .map(|index| &self.snapshots[index]);
+        let mut shape = FullCaptureShape {
+            count: 0,
+            additions: 0,
+            mismatches: 0,
+            comparisons: 0,
+            fallback: if !sharing_allowed {
+                Some(FullCaptureFallback::SharingDisabled)
+            } else if snapshot.is_some_and(|snapshot| !snapshot.indexed) {
+                Some(FullCaptureFallback::MissingIndex)
+            } else {
+                None
+            },
+        };
+        Self::walk_full_old(
+            table,
+            &project_uc,
+            &project_vpn,
+            checkpoint,
+            |slot, key, checkpoint| {
+                shape.count = shape.count.checked_add(1).ok_or_else(Self::overflow)?;
+                if shape.fallback.is_none()
+                    && let Some(snapshot) = snapshot
+                {
+                    match Self::indexed_position(
+                        snapshot,
+                        slot,
+                        key,
+                        &mut shape.mismatches,
+                        &mut shape.comparisons,
+                        checkpoint,
+                    ) {
+                        Ok(None) => {
+                            shape.additions =
+                                shape.additions.checked_add(1).ok_or_else(Self::overflow)?;
+                        }
+                        Ok(Some(_)) => {}
+                        Err(()) => shape.fallback = Some(FullCaptureFallback::SlotChurn),
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        Ok(shape)
+    }
+
+    /// Two actual projections: count/classify, then populate. No member sort or scratch.
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the full OLD capture keeps peer ownership, actual family projections and checkpoint at one fallible boundary"
+    )]
+    pub(in crate::manager) fn capture_full_old_with_checkpoint<U, V>(
+        &mut self,
+        peer: IpAddr,
+        hint: Option<SnapshotHandle>,
+        table: &AdjRibOut,
+        sharing_allowed: bool,
+        project_uc: U,
+        project_vpn: V,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<FullCaptureOutcome, Failure>
+    where
+        U: Fn(&Route) -> Option<Key>,
+        V: Fn(&VpnRibRoute) -> Option<Key>,
+    {
+        let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
+        if let State::Failed(error) = self.records[index].state {
+            return Err(error);
+        }
+        if self.records[index].state != State::Capturing {
+            return Err(self.fail(index, self.missing_proof(peer), checkpoint));
+        }
+        let shape = match self.full_old_shape_with_checkpoint(
+            hint,
+            table,
+            sharing_allowed,
+            &project_uc,
+            &project_vpn,
+            checkpoint,
+        ) {
+            Ok(shape) => shape,
+            Err(error) => return Err(self.fail(index, error, checkpoint)),
+        };
+        let selection = if shape.fallback.is_none() {
+            match self.share_group_capture_with_checkpoint(
+                peer,
+                hint,
+                table,
+                (shape.count, shape.additions),
+                checkpoint,
+            ) {
+                Ok(Some(handle)) => (Some(handle), None),
+                Ok(None) => (None, Some(FullCaptureFallback::Representation)),
+                Err(_) => (None, Some(FullCaptureFallback::ShareRefused)),
+            }
+        } else {
+            (None, shape.fallback)
+        };
+        let handle = selection.0;
+        if handle.is_none() {
+            self.reserve_capture_with_checkpoint(peer, shape.count, checkpoint)?;
+        }
+        let invalid = self.missing_proof(peer);
+        let snapshot = handle
+            .and_then(|handle| self.snapshot_index(handle))
+            .map(|index| &self.snapshots[index]);
+        let record = &mut self.records[index];
+        let mut count = 0_usize;
+        let mut mismatches = 0;
+        let mut comparisons = 0;
+        let population = Self::walk_full_old(
+            table,
+            &project_uc,
+            &project_vpn,
+            checkpoint,
+            |slot, key, checkpoint| {
+                count = count.checked_add(1).ok_or_else(Self::overflow)?;
+                if count > shape.count {
+                    return Err(invalid);
+                }
+                let position = match snapshot {
+                    Some(snapshot) => Self::indexed_position(
+                        snapshot,
+                        slot,
+                        key,
+                        &mut mismatches,
+                        &mut comparisons,
+                        checkpoint,
+                    )
+                    .map_err(|()| invalid)?,
+                    None => None,
+                };
+                if let Some(position) = position {
+                    let bit = 1_u64 << (position % 64);
+                    if record.words[position / 64] & bit == 0 {
+                        record.words[position / 64] |= bit;
+                        record.masked += 1;
+                    }
+                } else {
+                    if record.keys.0.len() == record.keys.0.capacity() {
+                        return Err(invalid);
+                    }
+                    record.keys.0.push(key);
+                }
+                Ok(())
+            },
+        );
+        if let Err(error) = population {
+            return Err(self.fail(index, error, checkpoint));
+        }
+        if count != shape.count {
+            return Err(self.fail(index, invalid, checkpoint));
+        }
+        Ok(FullCaptureOutcome {
+            #[cfg(any(test, feature = "bench-internals"))]
+            keys: count,
+            handle,
+            #[cfg(any(test, feature = "bench-internals"))]
+            strategy: if handle.is_some() {
+                FullCaptureStrategy::Indexed
+            } else {
+                FullCaptureStrategy::Flat
+            },
+            #[cfg(any(test, feature = "bench-internals"))]
+            fallback: selection.1,
+            #[cfg(any(test, feature = "bench-internals"))]
+            mismatches: shape.mismatches,
+        })
     }
 
     /// An attached empty proof's universe takes precedence over a group hint.
@@ -1065,7 +1303,6 @@ impl AdmittedRecovery {
                 snapshot: None,
                 words: Words::new(),
                 masked: 0,
-                capture_scratch: 0,
             },
         );
         checkpoint(true);
@@ -1564,9 +1801,9 @@ impl FromIterator<ExactExportKey> for AdmittedKeys {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
-    use rustbgpd_wire::{Ipv4Prefix, RouteDistinguisher, VpnPrefix};
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, RouteDistinguisher, VpnPrefix};
 
     use super::*;
 
@@ -2031,7 +2268,15 @@ mod tests {
         actual: &[Key],
     ) -> SnapshotHandle {
         ledger.begin_capture(address).unwrap();
-        let shape = ledger.capture_shape_with_checkpoint(hint, actual.iter().copied(), &mut |_| {});
+        let additions = hint
+            .and_then(|handle| ledger.snapshot_index(handle))
+            .map_or(0, |index| {
+                actual
+                    .iter()
+                    .filter(|key| ledger.snapshots[index].keys.binary_search(key).is_err())
+                    .count()
+            });
+        let shape = (actual.len(), additions);
         let handle = ledger
             .share_capture_with_checkpoint(
                 address,
@@ -2451,13 +2696,8 @@ mod tests {
         let raw = [key(1), key(2), bulk_vpn_key(1)];
         let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
         let actual = [bulk_vpn_key(2), key(99), key(2)]; // Deliberately unordered.
-        let mut visits = 0;
-        let (count, additions) =
-            ledger.capture_shape_with_checkpoint(Some(handle), actual.into_iter(), &mut |_| {
-                visits += 1;
-            });
-        assert_eq!((count, additions), (3, 2));
-        assert!(visits >= actual.len());
+        // This fixture has one retained key and two known sparse additions.
+        let (count, additions) = (actual.len(), 2);
         ledger.begin_capture(peer(2)).unwrap();
         assert_eq!(
             ledger
@@ -2524,9 +2764,8 @@ mod tests {
                 )
                 .unwrap()
                 .unwrap();
-            let (count, additions) =
-                ledger.capture_shape_with_checkpoint(Some(handle), actual.into_iter(), &mut |_| {});
-            assert_eq!((count, additions), (3, 2));
+            // The retained unicast key is already masked; both other keys are new.
+            let additions = 2;
             match cause {
                 FailureCause::AllocationFailure => ledger.fail_next_allocation_for_test(),
                 FailureCause::PeerLimit => ledger.peer_limit = ledger.peer_charge(1),
@@ -2554,7 +2793,7 @@ mod tests {
         for stage in 0..2 {
             let mut ledger = AdmittedRecovery::new();
             let raw: Vec<_> = (1..=100).map(key).collect();
-            let actual: Vec<_> = (101..=200).map(key).collect();
+            let actual: Vec<_> = (1..=99).map(key).chain(std::iter::once(key(200))).collect();
             let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
             ledger.begin_capture(peer(2)).unwrap();
             let before = ledger.bytes();
@@ -2565,7 +2804,7 @@ mod tests {
                     Some(handle),
                     actual.len(),
                     actual.iter().copied(),
-                    (actual.len(), actual.len()),
+                    (actual.len(), 1),
                     &mut |_| {},
                 )
                 .unwrap_err();
@@ -2725,12 +2964,12 @@ mod tests {
         assert_eq!(ledger.peer_limit, PEER_LIMIT_BYTES);
         assert_eq!(ledger.daemon_limit, DAEMON_LIMIT_BYTES);
         ledger.insert_empty(peer(1)).unwrap();
+        let table = slot_table(COUNT);
         let handle = ledger
-            .share_capture_with_checkpoint(
+            .share_group_capture_with_checkpoint(
                 peer(1),
                 None,
-                COUNT as usize,
-                (0..COUNT).map(full_key),
+                &table,
                 (COUNT as usize, 0),
                 &mut |_| {},
             )
@@ -2757,6 +2996,11 @@ mod tests {
             .unwrap();
         assert_eq!(ledger.snapshots[0].handle, handle);
         assert_eq!(ledger.snapshots[0].keys.capacity(), COUNT as usize);
+        assert_eq!(
+            ledger.snapshots[0].slot_positions.capacity(),
+            COUNT as usize
+        );
+        assert_retained_credit(&ledger);
         assert_eq!(ledger.get(&peer(1)).unwrap().len(), COUNT as usize + 1);
         assert!(ledger.peer_charge(0) < PEER_LIMIT_BYTES);
         assert!(ledger.peak_bytes() < DAEMON_LIMIT_BYTES);
@@ -2779,260 +3023,545 @@ mod tests {
         assert_eq!(error.cause, FailureCause::PeerLimit);
         assert_eq!(ledger.bytes(), before);
     }
-    #[test]
-    fn ordered_capture_sorts_actual_old_and_releases_charged_scratch() {
-        let mut ledger = AdmittedRecovery::new();
-        let routes: Vec<_> = (0..4097_u32)
-            .map(|n| {
-                crate::test_support::make_route_with_path_id(
-                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)),
-                    0,
-                )
-            })
-            .collect();
-        let raw: Vec<_> = routes[..4096]
+    fn slot_key(n: u32) -> Key {
+        Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0)
+    }
+
+    fn slot_route(n: u32) -> Route {
+        crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::from(n), 32),
+            Ipv4Addr::new(192, 0, 2, 250),
+        )
+    }
+
+    fn slot_table(count: u32) -> AdjRibOut {
+        let mut table = AdjRibOut::with_capacity(peer(250), count as usize);
+        let mut template = slot_route(0);
+        for n in (0..count).rev() {
+            template.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32));
+            table.insert(template.clone());
+        }
+        table
+    }
+
+    fn capture_slots(
+        ledger: &mut AdmittedRecovery,
+        member: IpAddr,
+        hint: Option<SnapshotHandle>,
+        table: &AdjRibOut,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> FullCaptureOutcome {
+        ledger.begin_capture(member).unwrap();
+        let outcome = ledger
+            .capture_full_old_with_checkpoint(
+                member,
+                hint,
+                table,
+                true,
+                |route| Some(Key::Unicast(route.prefix, route.path_id)),
+                |_| None,
+                checkpoint,
+            )
+            .unwrap();
+        ledger.seal_capture(member).unwrap();
+        outcome
+    }
+
+    fn assert_retained_credit(ledger: &AdmittedRecovery) {
+        let record_buffers = ledger
+            .records
             .iter()
-            .map(|r| Key::Unicast(r.prefix, r.path_id))
-            .collect();
-        let hint = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
-        let anchor = ledger.owned_proof(&peer(1)).unwrap();
-        ledger.begin_capture(peer(2)).unwrap();
+            .map(|record| {
+                record.keys.0.capacity() * size_of::<Key>()
+                    + record.words.capacity() * size_of::<u64>()
+            })
+            .sum::<usize>();
+        let pool_buffers = ledger
+            .snapshots
+            .iter()
+            .map(|snapshot| {
+                snapshot.keys.capacity() * size_of::<Key>()
+                    + snapshot.slot_positions.capacity() * size_of::<u32>()
+            })
+            .sum::<usize>();
+        assert_eq!(
+            ledger.bytes(),
+            size_of::<AdmittedRecovery>()
+                + ledger.records.capacity() * size_of::<Record>()
+                + ledger.snapshots.capacity() * size_of::<Snapshot>()
+                + record_buffers
+                + pool_buffers
+        );
+    }
+
+    #[test]
+    fn indexed_tiny_reordered_old_bounds_work_by_slots_and_exact_lookups() {
+        let mut table = slot_table(100_000);
+        let mut ledger = AdmittedRecovery::new();
+        let anchor = capture_slots(&mut ledger, peer(1), None, &table, &mut |_| {});
+        table.clear_unicast();
+        table.insert(slot_route(0));
+        table.insert(slot_route(99_999));
         let mut visits = 0;
-        let shared = ledger
-            .with_ordered_capture(
-                peer(2),
-                4097,
-                routes[1..]
-                    .iter()
-                    .rev()
-                    .chain(std::iter::once(&routes[100]))
-                    .map(CaptureRef::Unicast),
-                &mut |_| {},
-                |ledger, ordered, checkpoint| {
-                    let index = ledger.index(peer(2)).unwrap();
-                    assert_eq!(
-                        ledger.records[index].capture_scratch,
-                        size_of::<CaptureRefs<'_>>() + 4097 * size_of::<CaptureRef<'_>>()
-                    );
-                    let shape = ledger.capture_shape_with_checkpoint(
-                        Some(hint),
-                        ordered.iter().copied().map(CaptureRef::key),
-                        &mut |force| visits += usize::from(!force),
-                    );
-                    assert_eq!(shape, (4097, 1));
-                    assert!(
-                        visits <= 3 * 4097 + 64,
-                        "shape must merge, not binary-search each OLD key"
-                    );
-                    let shared = ledger.share_capture_with_checkpoint(
-                        peer(2),
-                        Some(hint),
-                        raw.len(),
-                        raw.iter().copied(),
-                        shape,
-                        checkpoint,
-                    )?;
-                    let mut population_visits = 0;
-                    ledger.push_capture_batch_with_checkpoint(
-                        peer(2),
-                        ordered.iter().copied().map(CaptureRef::key),
-                        &mut |force| population_visits += usize::from(!force),
-                    )?;
-                    assert!(
-                        population_visits <= 3 * 4097 + 64,
-                        "population must merge, not binary-search each OLD key"
-                    );
-                    Ok(shared)
+        let shape = ledger
+            .full_old_shape_with_checkpoint(
+                anchor.handle,
+                &table,
+                true,
+                |route| Some(Key::Unicast(route.prefix, route.path_id)),
+                |_| None,
+                &mut |force| {
+                    if !force {
+                        visits += 1;
+                    }
                 },
             )
             .unwrap();
-        assert_eq!(shared, Some(hint));
-        assert_eq!(
-            ledger.records[ledger.index(peer(2)).unwrap()].capture_scratch,
-            0
-        );
-        ledger.seal_capture(peer(2)).unwrap();
-        let proof = ledger.get(&peer(2)).unwrap();
-        assert_eq!(proof.len(), 4096);
-        assert!(!proof.contains(&raw[0].into()));
-        for route in &routes[1..] {
-            assert!(proof.contains(&ExactExportKey::Unicast(route.prefix, 0)));
-        }
-        assert_eq!(ledger.owned_proof(&peer(1)).unwrap(), anchor);
-        ledger.remove(&peer(1));
-        ledger.remove(&peer(2));
-        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
-    }
-
-    #[test]
-    fn capture_shape_bounds_tiny_and_unordered_old_without_false_sparse_keys() {
-        let mut ledger = AdmittedRecovery::new();
-        let raw: Vec<_> = (0..100_000_u32)
-            .map(|n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
-            .collect();
-        let hint = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
-        let mut visits = 0;
-        assert_eq!(
-            ledger.capture_shape_with_checkpoint(
-                Some(hint),
-                [raw[99_999]].into_iter(),
-                &mut |_| visits += 1
-            ),
-            (1, 0)
-        );
-        assert!(visits < 64, "tiny OLD must not scan the whole universe");
-        let mut visits = 0;
-        let keys = (0..100).flat_map(|_| [raw[99_999], raw[0]]);
-        assert_eq!(
-            ledger.capture_shape_with_checkpoint(Some(hint), keys, &mut |_| visits += 1),
-            (200, 0)
-        );
+        assert_eq!((shape.count, shape.additions, shape.mismatches), (2, 0, 2));
+        assert!(shape.comparisons < 64);
+        assert_eq!(visits, table.unicast_slot_count() + shape.comparisons);
+        let mut capture_visits = 0;
+        let outcome = capture_slots(&mut ledger, peer(2), anchor.handle, &table, &mut |force| {
+            if !force {
+                capture_visits += 1;
+            }
+        });
+        assert_eq!(outcome.strategy, FullCaptureStrategy::Flat);
+        assert_eq!(outcome.fallback, Some(FullCaptureFallback::Representation));
         assert!(
-            visits < 5000,
-            "descent must permanently use bounded binary lookup"
+            capture_visits < 128,
+            "tiny current slab must not scan the older universe"
         );
+        assert_eq!(
+            ledger.get(&peer(2)).unwrap().iter().collect::<Vec<_>>(),
+            [slot_key(0), slot_key(99_999)].map(ExactExportKey::from)
+        );
+        assert_eq!(ledger.get(&peer(1)).unwrap().len(), 100_000);
+        assert_retained_credit(&ledger);
     }
 
     #[test]
-    fn optional_ordering_allocation_refusal_frees_credit_before_flat_retry() {
-        let mut ledger = AdmittedRecovery::new();
-        ledger.begin_capture(peer(1)).unwrap();
-        let routes = [crate::test_support::make_route_with_path_id(
-            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32)),
-            0,
-        )];
-        let before = ledger.bytes();
-        ledger.fail_next_allocation = true;
-        assert_eq!(
-            ledger.with_ordered_capture(
-                peer(1),
-                1,
-                routes.iter().map(CaptureRef::Unicast),
-                &mut |_| {},
-                |_, _, _| panic!("refused buffer reached capture")
-            ),
-            Ok(None)
-        );
-        assert_eq!(ledger.bytes(), before);
-        assert_eq!(ledger.records[0].capture_scratch, 0);
-        ledger
-            .reserve_capture_with_checkpoint(peer(1), 1, &mut |_| {})
-            .unwrap();
-        ledger
-            .push_capture(peer(1), CaptureRef::Unicast(&routes[0]).key())
-            .unwrap();
-        ledger.seal_capture(peer(1)).unwrap();
-        assert_eq!(ledger.get(&peer(1)).unwrap().len(), 1);
-        ledger.remove(&peer(1));
-        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
-    }
-    #[test]
-    fn ordering_cap_and_cardinality_refusals_release_all_temporary_credit() {
-        for mode in ["cap", "short", "long"] {
+    fn full_old_count_drift_hides_partial_proof_and_preserves_other_owner() {
+        const COUNT: u32 = 128;
+        for omit_first in [false, true] {
+            let table = slot_table(COUNT);
             let mut ledger = AdmittedRecovery::new();
-            ledger.begin_capture(peer(1)).unwrap();
-            let routes = [
-                crate::test_support::make_route_with_path_id(
-                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32)),
-                    0,
-                ),
-                crate::test_support::make_route_with_path_id(
-                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 32)),
-                    0,
-                ),
-            ];
-            let count = match mode {
-                "short" => 3,
-                "long" => 1,
-                _ => 2,
-            };
+            let anchor = capture_slots(&mut ledger, peer(1), None, &table, &mut |_| {});
+            ledger.begin_capture(peer(2)).unwrap();
             let before = ledger.bytes();
-            if mode == "cap" {
-                ledger.peer_limit = ledger.peer_charge(0)
-                    + size_of::<CaptureRefs<'_>>()
-                    + count * size_of::<CaptureRef<'_>>()
-                    - 1;
-            }
-            let result = ledger.with_ordered_capture(
-                peer(1),
-                count,
-                routes.iter().map(CaptureRef::Unicast),
-                &mut |_| {},
-                |_, _, _| panic!("refused or drifting OLD reached capture"),
-            );
-            if mode == "cap" {
-                assert_eq!(result, Ok(None));
-            } else {
-                assert_eq!(result.unwrap_err().cause, FailureCause::MissingProof);
-            }
+            let visits = std::cell::Cell::new(0_u32);
+            let excluded = slot_key(0);
+            let error = ledger
+                .capture_full_old_with_checkpoint(
+                    peer(2),
+                    anchor.handle,
+                    &table,
+                    true,
+                    |route| {
+                        let first = visits.get() < COUNT;
+                        visits.set(visits.get() + 1);
+                        let key = Key::Unicast(route.prefix, route.path_id);
+                        (first != omit_first || key != excluded).then_some(key)
+                    },
+                    |_| None,
+                    &mut |_| {},
+                )
+                .unwrap_err();
+            assert_eq!(visits.get(), 2 * COUNT);
+            assert_eq!(error.cause, FailureCause::MissingProof);
+            assert_eq!(ledger.seal_capture(peer(2)), Err(error));
+            assert!(ledger.get(&peer(2)).is_none());
+            let failed = &ledger.records[ledger.index(peer(2)).unwrap()];
+            assert_eq!(failed.words.capacity(), 0);
+            assert_eq!(failed.keys.0.capacity(), 0);
+            assert!(failed.snapshot.is_none());
             assert_eq!(ledger.bytes(), before);
-            assert_eq!(ledger.records[0].capture_scratch, 0);
-            assert!(ledger.get(&peer(1)).is_none());
+            assert_eq!(ledger.snapshots[0].references, 1);
+            let proof = ledger.get(&peer(1)).unwrap();
+            assert_eq!(proof.len(), COUNT as usize);
+            assert!((0..COUNT).all(|n| proof.contains(&slot_key(n).into())));
+            assert_retained_credit(&ledger);
+            ledger.remove(&peer(2));
             ledger.remove(&peer(1));
             assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
         }
     }
+
     #[test]
-    fn loose_hint_shape_does_not_scan_the_universe_for_two_old_keys() {
+    fn indexed_capture_shape_and_population_have_bounded_dense_and_sparse_work() {
+        const COUNT: u32 = 4_097;
+        let mut table = slot_table(COUNT);
         let mut ledger = AdmittedRecovery::new();
-        let raw: Vec<_> = (0..100_000_u32)
-            .map(|n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
-            .collect();
-        let hint = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
-        let actual = raw
-            .iter()
-            .copied()
-            .filter(|key| *key == raw[0] || *key == raw[99_999]);
-        assert_eq!(actual.size_hint(), (0, Some(100_000)));
-        let mut visits = 0;
-        assert_eq!(
-            ledger.capture_shape_with_checkpoint(Some(hint), actual, &mut |_| visits += 1),
-            (2, 0)
-        );
-        assert!(
-            visits < 100,
-            "loose upper bound must not enable a whole-universe shape scan"
-        );
+        let anchor = capture_slots(&mut ledger, peer(1), None, &table, &mut |_| {});
+        assert_eq!(anchor.strategy, FullCaptureStrategy::Indexed);
+        let handle = anchor.handle.unwrap();
+        for (member, sparse) in [(peer(2), 0), (peer(3), 480)] {
+            for n in 0..sparse {
+                let Key::Unicast(prefix, path_id) = slot_key(n) else {
+                    unreachable!()
+                };
+                assert!(table.withdraw(&prefix, path_id));
+                table.insert(slot_route(COUNT + n));
+            }
+            let mut shape_visits = 0;
+            let shape = ledger
+                .full_old_shape_with_checkpoint(
+                    Some(handle),
+                    &table,
+                    true,
+                    |route| Some(Key::Unicast(route.prefix, route.path_id)),
+                    |_| None,
+                    &mut |force| {
+                        if !force {
+                            shape_visits += 1;
+                        }
+                    },
+                )
+                .unwrap();
+            assert_eq!(shape.count, COUNT as usize);
+            assert_eq!(shape.additions, sparse as usize);
+            assert_eq!(shape.mismatches, sparse as usize);
+            assert_eq!(shape.fallback, None);
+            assert!(shape.comparisons <= COUNT as usize + sparse as usize * 15);
+            assert_eq!(shape_visits, COUNT as usize + shape.comparisons);
+            let mut visits = 0;
+            let result = capture_slots(&mut ledger, member, Some(handle), &table, &mut |force| {
+                if !force {
+                    visits += 1;
+                }
+            });
+            assert_eq!(result.strategy, FullCaptureStrategy::Indexed);
+            assert_eq!(result.handle, Some(handle));
+            assert_eq!(result.keys, COUNT as usize);
+            assert_eq!(result.mismatches, sparse as usize);
+            assert!(visits >= 4 * COUNT as usize);
+            assert!(
+                visits <= 5 * COUNT as usize + 2 * sparse as usize * 15 + 128,
+                "population must not repeat per-key binary lookup: {visits}"
+            );
+            let proof = ledger.get(&member).unwrap();
+            assert_eq!(proof.len(), COUNT as usize);
+            for n in 0..sparse {
+                assert!(!proof.contains(&slot_key(n).into()));
+                assert!(proof.contains(&slot_key(COUNT + n).into()));
+                assert!(ledger.get(&peer(1)).unwrap().contains(&slot_key(n).into()));
+            }
+            assert_retained_credit(&ledger);
+        }
     }
 
     #[test]
-    fn loose_hint_population_keeps_sparse_subset_lookup_bounded() {
+    fn indexed_capture_validates_recycled_slots_and_clear_reordering() {
+        let mut table = slot_table(128);
         let mut ledger = AdmittedRecovery::new();
-        let raw: Vec<_> = (0..100_000_u32)
-            .map(|n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
-            .collect();
-        let hint = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
-        ledger.begin_capture(peer(2)).unwrap();
+        let anchor = capture_slots(&mut ledger, peer(1), None, &table, &mut |_| {});
+        table.clear_unicast();
+        for n in 64..192 {
+            table.insert(slot_route(n));
+        }
+        let result = capture_slots(&mut ledger, peer(2), anchor.handle, &table, &mut |_| {});
+        assert_eq!(result.strategy, FullCaptureStrategy::Indexed);
+        assert_eq!(result.handle, anchor.handle);
+        let proof = ledger.get(&peer(2)).unwrap();
+        for n in 0..192 {
+            assert_eq!(proof.contains(&slot_key(n).into()), n >= 64);
+            assert_eq!(
+                ledger.get(&peer(1)).unwrap().contains(&slot_key(n).into()),
+                n < 128
+            );
+        }
+        assert_retained_credit(&ledger);
+    }
+
+    #[test]
+    fn indexed_churn_budget_finishes_count_then_captures_exact_flat_old() {
+        let mut table = slot_table(10_000);
+        let mut ledger = AdmittedRecovery::new();
+        let anchor = capture_slots(&mut ledger, peer(1), None, &table, &mut |_| {});
+        table.clear_unicast();
+        for n in 20_000..30_000 {
+            table.insert(slot_route(n));
+        }
+        let shape = ledger
+            .full_old_shape_with_checkpoint(
+                anchor.handle,
+                &table,
+                true,
+                |route| Some(Key::Unicast(route.prefix, route.path_id)),
+                |_| None,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(shape.count, 10_000);
+        assert_eq!(shape.mismatches, SLOT_MISMATCH_BUDGET + 1);
+        assert_eq!(shape.fallback, Some(FullCaptureFallback::SlotChurn));
+        assert!(shape.comparisons <= (SLOT_MISMATCH_BUDGET + 1) * 16);
+        let result = capture_slots(&mut ledger, peer(2), anchor.handle, &table, &mut |_| {});
+        assert_eq!(result.strategy, FullCaptureStrategy::Flat);
+        assert_eq!(result.fallback, Some(FullCaptureFallback::SlotChurn));
+        let record = &ledger.records[ledger.index(peer(2)).unwrap()];
+        assert!(record.snapshot.is_none());
+        assert_eq!(record.keys.0.capacity(), 10_000);
+        let proof = ledger.get(&peer(2)).unwrap();
+        assert_eq!(proof.len(), 10_000);
+        assert!(!proof.contains(&slot_key(0).into()));
+        assert!(!proof.contains(&slot_key(9_999).into()));
+        assert!(proof.contains(&slot_key(20_000).into()));
+        assert!(proof.contains(&slot_key(29_999).into()));
+        assert_retained_credit(&ledger);
+    }
+
+    #[test]
+    fn indexed_capture_counts_holes_and_preserves_mask_for_filtered_actual_rows() {
+        let mut table = slot_table(128);
+        for n in 0..64 {
+            let Key::Unicast(prefix, path_id) = slot_key(n) else {
+                unreachable!()
+            };
+            assert!(table.withdraw(&prefix, path_id));
+        }
+        let mut ledger = AdmittedRecovery::new();
+        let anchor = capture_slots(&mut ledger, peer(1), None, &table, &mut |_| {});
+        let mut visits = 0;
+        let shape = ledger
+            .full_old_shape_with_checkpoint(
+                anchor.handle,
+                &table,
+                true,
+                |route| {
+                    (route.prefix == slot_route(127).prefix)
+                        .then_some(Key::Unicast(route.prefix, 0))
+                },
+                |_| None,
+                &mut |force| {
+                    if !force {
+                        visits += 1;
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(shape.count, 1);
+        assert_eq!(shape.comparisons, 1);
+        assert_eq!(visits, table.unicast_slot_count() + 1);
+        let handle = anchor.handle.unwrap();
         assert_eq!(
+            ledger.snapshots[ledger.snapshot_index(handle).unwrap()]
+                .slot_positions
+                .capacity(),
+            128
+        );
+        ledger.remove(&peer(1));
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
+
+    #[test]
+    fn indexed_pool_allocation_failures_roll_back_before_truthful_flat_capture() {
+        let table = slot_table(128);
+        for successful_allocations in 0..4 {
+            let mut ledger = AdmittedRecovery::new();
+            ledger.begin_capture(peer(1)).unwrap();
+            let before = ledger.bytes();
+            ledger.allocation_countdown = Some(successful_allocations);
+            assert!(
+                ledger
+                    .share_group_capture_with_checkpoint(
+                        peer(1),
+                        None,
+                        &table,
+                        (128, 0),
+                        &mut |_| {}
+                    )
+                    .is_err()
+            );
+            assert_eq!(ledger.bytes(), before);
+            assert!(ledger.snapshots.is_empty());
+            assert_retained_credit(&ledger);
+            ledger
+                .reserve_capture_with_checkpoint(peer(1), 128, &mut |_| {})
+                .unwrap();
+            for route in table.iter() {
+                ledger
+                    .push_capture(peer(1), Key::Unicast(route.prefix, 0))
+                    .unwrap();
+            }
+            ledger.seal_capture(peer(1)).unwrap();
+            assert_eq!(ledger.get(&peer(1)).unwrap().len(), 128);
+            ledger.remove(&peer(1));
+            assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+        }
+    }
+
+    #[test]
+    fn indexed_missing_hint_is_flat_and_empty_key_only_conversion_is_optional() {
+        let table = slot_table(128);
+        let raw: Vec<_> = table
+            .iter()
+            .map(|route| Key::Unicast(route.prefix, 0))
+            .collect();
+        let mut ledger = AdmittedRecovery::new();
+        let legacy = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let result = capture_slots(&mut ledger, peer(2), Some(legacy), &table, &mut |_| {});
+        assert_eq!(result.strategy, FullCaptureStrategy::Flat);
+        assert_eq!(result.fallback, Some(FullCaptureFallback::MissingIndex));
+        ledger.insert_empty(peer(3)).unwrap();
+        ledger
+            .share_capture_with_checkpoint(
+                peer(3),
+                Some(legacy),
+                128,
+                raw.iter().copied(),
+                (128, 0),
+                &mut |_| {},
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            ledger
+                .share_group_capture_with_checkpoint(
+                    peer(3),
+                    Some(legacy),
+                    &table,
+                    (128, 0),
+                    &mut |_| {}
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(ledger.get(&peer(3)).unwrap().is_empty());
+        assert!(
+            ledger.records[ledger.index(peer(3)).unwrap()]
+                .snapshot
+                .is_none()
+        );
+        assert_eq!(ledger.get(&peer(1)).unwrap().len(), 128);
+        assert_retained_credit(&ledger);
+    }
+
+    #[test]
+    fn indexed_selection_counts_reused_mask_and_actual_sparse_cost() {
+        let table = slot_table(4_096);
+        let mut ledger = AdmittedRecovery::new();
+        let anchor = capture_slots(&mut ledger, peer(1), None, &table, &mut |_| {});
+        let raw: Vec<_> = table
+            .iter()
+            .map(|route| Key::Unicast(route.prefix, 0))
+            .collect();
+        ledger.begin_capture(peer(2)).unwrap();
+        // Two actual keys need64maskwords from the REUSED4,096-key U, not one
+        // word from a current rawcount2. Flat64B is smaller than mask512B.
+        assert!(
             ledger
                 .share_capture_with_checkpoint(
                     peer(2),
-                    Some(hint),
-                    raw.len(),
-                    raw.iter().copied(),
-                    (500, 0),
+                    anchor.handle,
+                    2,
+                    raw[..2].iter().copied(),
+                    (2, 0),
                     &mut |_| {}
                 )
-                .unwrap(),
-            Some(hint)
+                .unwrap()
+                .is_none()
         );
-        let actual = raw
-            .iter()
-            .copied()
-            .filter(|key| *key <= raw[498] || *key == raw[99_999]);
-        assert_eq!(actual.size_hint(), (0, Some(100_000)));
-        let mut visits = 0;
-        ledger
-            .push_capture_batch_with_checkpoint(peer(2), actual, &mut |_| visits += 1)
-            .unwrap();
-        ledger.seal_capture(peer(2)).unwrap();
-        let proof = ledger.get(&peer(2)).unwrap();
-        assert_eq!(proof.len(), 500);
-        assert!(proof.contains(&raw[99_999].into()));
-        assert!(!proof.contains(&raw[499].into()));
+        ledger.remove(&peer(2));
+        ledger.begin_capture(peer(2)).unwrap();
         assert!(
-            visits < 11_000,
-            "loose upper bound must not enable a whole-universe population scan"
+            ledger
+                .share_group_capture_with_checkpoint(
+                    peer(2),
+                    anchor.handle,
+                    &table,
+                    (128, 128),
+                    &mut |_| {}
+                )
+                .unwrap()
+                .is_none()
         );
+        assert!(
+            ledger.records[ledger.index(peer(2)).unwrap()]
+                .snapshot
+                .is_none()
+        );
+        assert_eq!(ledger.get(&peer(1)).unwrap().len(), 4_096);
+        assert_retained_credit(&ledger);
+    }
+    #[test]
+    fn indexed_ipv6_path_identity_and_last_owner_release_remain_exact() {
+        let mut table = slot_table(128);
+        for n in 0..128_u128 {
+            let mut route = crate::test_support::make_v6_route(
+                Ipv6Prefix::new(
+                    Ipv6Addr::from(0x2001_0db8_0000_0000_0000_0000_0000_0000 + n),
+                    128,
+                ),
+                Ipv6Addr::LOCALHOST,
+            );
+            route.path_id = u32::try_from(n % 3).unwrap();
+            table.insert(route);
+        }
+        let mut ledger = AdmittedRecovery::new();
+        let anchor = capture_slots(&mut ledger, peer(1), None, &table, &mut |_| {});
+        let prefix = Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::from(0x2001_0db8_0000_0000_0000_0000_0000_0000),
+            128,
+        ));
+        assert!(table.withdraw(&prefix, 0));
+        let Prefix::V6(v6) = prefix else {
+            unreachable!()
+        };
+        let mut replacement = crate::test_support::make_v6_route(v6, Ipv6Addr::LOCALHOST);
+        replacement.path_id = 7;
+        table.insert(replacement);
+        let second = capture_slots(&mut ledger, peer(2), anchor.handle, &table, &mut |_| {});
+        assert_eq!(second.handle, anchor.handle);
+        assert_eq!(second.mismatches, 1);
+        let expected: std::collections::HashSet<_> = table
+            .iter()
+            .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
+            .collect();
+        assert_eq!(
+            ledger
+                .get(&peer(2))
+                .unwrap()
+                .iter()
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+        assert!(
+            !ledger
+                .get(&peer(2))
+                .unwrap()
+                .contains(&ExactExportKey::Unicast(prefix, 0))
+        );
+        assert!(
+            ledger
+                .get(&peer(1))
+                .unwrap()
+                .contains(&ExactExportKey::Unicast(prefix, 0))
+        );
+        assert_retained_credit(&ledger);
+        ledger.remove(&peer(1));
+        assert_eq!(ledger.snapshots[0].references, 1);
+        assert_eq!(
+            ledger.snapshots[0].slot_positions.len(),
+            table.unicast_slot_count()
+        );
+        assert_eq!(
+            ledger
+                .get(&peer(2))
+                .unwrap()
+                .iter()
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+        assert_retained_credit(&ledger);
+        let stale = anchor.handle;
+        ledger.remove(&peer(2));
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+        let recreated = capture_slots(&mut ledger, peer(3), stale, &table, &mut |_| {});
+        assert_eq!(recreated.strategy, FullCaptureStrategy::Indexed);
+        assert_ne!(recreated.handle, stale);
+        assert_retained_credit(&ledger);
+        ledger.remove(&peer(3));
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
     }
 }
