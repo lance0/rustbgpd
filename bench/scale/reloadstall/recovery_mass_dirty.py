@@ -244,6 +244,16 @@ def dirty_receipts(text, receivers):
     return result
 
 
+def operation_log_slices(log, cursors, previous_end):
+    require(type(cursors) is dict and set(cursors) == {"start", "resume", "end"}, "missing/invalid daemon log byte cursors")
+    start, resume, end = (cursors[key] for key in ("start", "resume", "end"))
+    require(all(type(value) is int for value in (start, resume, end)) and
+            0 <= previous_end <= start <= resume < end <= len(log), "unordered/out-of-bounds daemon log byte cursors")
+    require(all(value == 0 or log[value - 1:value] == b"\n" for value in (start, resume, end)),
+            "daemon log byte cursors split a record")
+    return log[start:end], log[resume:end]
+
+
 def http_metrics(port):
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
         require(response.status == 200, "metrics HTTP failure")
@@ -573,6 +583,7 @@ def run_cell(args):
             require(initial_charge["entries"] == 0, "initial recovery proof is not empty")
             result["recovery_initial"] = initial_charge
             read_record(engine, records, "mass_dirty_readiness", deadline)
+            previous_log_end = 0
             for generation in ("b", "a"):
                 engine.stdin.write(f"pause {generation}\n")
                 engine.stdin.flush()
@@ -639,16 +650,20 @@ def run_cell(args):
                 write_json(leg / f"neighbors-settled-{generation}.json", settled)
                 write_json(leg / f"source-settled-{generation}.json", source_witness(rbgp, "unix://" + str(scenario / "grpc.sock")))
                 while True:
-                    window = (leg / "daemon.log").read_bytes()[resume_log_offset:].decode()
-                    window = window[:window.rfind("\n") + 1]
+                    log_snapshot = (leg / "daemon.log").read_bytes()
+                    log_end = log_snapshot.rfind(b"\n") + 1
+                    window = log_snapshot[resume_log_offset:log_end]
                     try:
-                        actual_dirty = dirty_receipts(window, manifest["receivers"])
+                        actual_dirty = dirty_receipts(window.decode(), manifest["receivers"])
                         break
                     except ValueError as error:
                         require(str(error) == "missing actual dirty resync receipt" and time.monotonic() < deadline, str(error))
                         time.sleep(0.05)
-                (leg / f"daemon-window-{generation}.jsonl").write_text(window)
-                (leg / f"daemon-operation-{generation}.jsonl").write_bytes((leg / "daemon.log").read_bytes()[log_offset:])
+                log_cursors = {"start": log_offset, "resume": resume_log_offset, "end": log_end}
+                operation_log, window = operation_log_slices(log_snapshot, log_cursors, previous_log_end)
+                previous_log_end = log_end
+                (leg / f"daemon-window-{generation}.jsonl").write_bytes(window)
+                (leg / f"daemon-operation-{generation}.jsonl").write_bytes(operation_log)
                 write_json(leg / f"dirty-receipts-{generation}.json", actual_dirty)
                 after = http_metrics(19186)
                 (leg / f"metrics-settled-{generation}.prom").write_text(after)
@@ -662,7 +677,8 @@ def run_cell(args):
                 deltas = fallback_delta(operation_fallback, causes)
                 if manifest["cohort"] == "no-refusal" or (not correct and args.arm == "candidate" and manifest["profile"] == "full-uc"):
                     require(not any(deltas.values()), "indexed/no-refusal cell entered conservative fallback")
-                result["operations"].append({**receipt, "fallback_before": operation_fallback, "fallback_deltas": deltas,
+                result["operations"].append({**receipt, "daemon_log_bytes": log_cursors,
+                    "fallback_before": operation_fallback, "fallback_deltas": deltas,
                     "recovery_paused": paused_charge, "recovery_settled": settled_charge,
                     "trigger_monotonic_seconds": triggered, "drain_monotonic_seconds": drained_at,
                     "resume_monotonic_seconds": resumed_at, "fold_monotonic_seconds": observed_at,
@@ -889,6 +905,8 @@ def validate_leg(leg, manifest, row):
     require(initial_charge["entries"] == 0 and row["recovery_initial"] == initial_charge, "initial recovery charge differs")
     previous_peak = initial_charge["peak_bytes"]
     previous_causes = initial_causes
+    full_log = (leg / "daemon.log").read_bytes()
+    previous_log_end = 0
     for index, generation in enumerate(("b", "a")):
         before_metrics = (leg / f"metrics-before-{generation}.prom").read_text()
         require(metric(before_metrics, "bgp_update_group_regroups_total") == regroup, "group regrouped")
@@ -903,7 +921,11 @@ def validate_leg(leg, manifest, row):
         require(wire["generation"] == generation and wire["receivers"] == manifest["receivers"] and wire["exact_fold"] is True and wire["sessions_continuous"] is True, "wire generation/fold changed")
         require(wire["withdrawals"] == manifest["receivers"] * manifest["withdrawals_per_receiver"], "exact withdrawal duties differ")
         require(all(row["operations"][index][key] == value for key, value in wire.items()), "derived convergence does not match wire record")
-        receipts = dirty_receipts((leg / f"daemon-window-{generation}.jsonl").read_text(), manifest["receivers"])
+        operation_log, window = operation_log_slices(full_log, row["operations"][index].get("daemon_log_bytes"), previous_log_end)
+        previous_log_end = row["operations"][index]["daemon_log_bytes"]["end"]
+        require((leg / f"daemon-operation-{generation}.jsonl").read_bytes() == operation_log, "operation log slice differs")
+        require((leg / f"daemon-window-{generation}.jsonl").read_bytes() == window, "post-resume log slice differs")
+        receipts = dirty_receipts(window.decode(), manifest["receivers"])
         require(receipts == json.loads((leg / f"dirty-receipts-{generation}.json").read_text()), "dirty receipt derivation differs")
         require(records["mass_dirty_paused"][index] == {"generation": generation, "receivers": manifest["receivers"]},
                 "pause receipt differs")

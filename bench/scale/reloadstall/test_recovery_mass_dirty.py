@@ -480,6 +480,57 @@ class MassDirtyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no-refusal.*fallback"):
             receipt.validate_leg(leg, manifest, row)
 
+    def test_operation_log_evidence_cannot_be_reused_from_another_generation(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        leg, row = self.small_leg(manifest)
+        receipt.validate_leg(leg, manifest, row)
+        cursors = row["operations"][1]["daemon_log_bytes"]
+        full_log = (leg / "daemon.log").read_bytes()
+        replacement = b'{"fields":{"message":"no resync in A"}}\n'
+        changed = full_log[:cursors["resume"]] + replacement + full_log[cursors["end"]:]
+        cursors["end"] = cursors["resume"] + len(replacement)
+        (leg / "daemon.log").write_bytes(changed)
+        (leg / "daemon-operation-a.jsonl").write_bytes(changed[cursors["start"]:cursors["end"]])
+        for prefix in ("daemon-window", "dirty-receipts"):
+            suffix = "jsonl" if prefix == "daemon-window" else "json"
+            (leg / f"{prefix}-a.{suffix}").write_bytes((leg / f"{prefix}-b.{suffix}").read_bytes())
+        row["raw_sha256"] = {path.name: receipt.digest(path) for path in leg.iterdir() if path.is_file()}
+        with self.assertRaisesRegex(ValueError, "post-resume log slice differs"):
+            receipt.validate_leg(leg, manifest, row)
+
+    def test_operation_log_byte_cursors_are_required_ordered_and_exact(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        for mutation in ("missing", "missing-end", "bool", "float", "negative", "reversed", "out-of-bounds", "overlap", "shifted", "operation-bytes"):
+            with self.subTest(mutation=mutation):
+                leg, row = self.small_leg(manifest)
+                operation = row["operations"][1]
+                cursors = operation["daemon_log_bytes"]
+                expected = "daemon log byte cursors"
+                if mutation == "missing":
+                    del operation["daemon_log_bytes"]
+                elif mutation == "missing-end":
+                    del cursors["end"]
+                elif mutation == "bool":
+                    cursors["start"] = True
+                elif mutation == "float":
+                    cursors["resume"] = float(cursors["resume"])
+                elif mutation == "negative":
+                    cursors["start"] = -1
+                elif mutation == "reversed":
+                    cursors["resume"] = cursors["start"] - 1
+                elif mutation == "out-of-bounds":
+                    cursors["end"] = len((leg / "daemon.log").read_bytes()) + 1
+                elif mutation == "overlap":
+                    cursors["start"] = row["operations"][0]["daemon_log_bytes"]["start"]
+                elif mutation == "shifted":
+                    cursors["start"] += 1
+                else:
+                    (leg / "daemon-operation-a.jsonl").write_bytes(b"different operation\n")
+                    expected = "operation log slice differs"
+                row["raw_sha256"] = {path.name: receipt.digest(path) for path in leg.iterdir() if path.is_file()}
+                with self.assertRaisesRegex(ValueError, expected):
+                    receipt.validate_leg(leg, manifest, row)
+
     def set_fallback_chain(self, leg, row, cause, counts):
         self.assertEqual(len(counts), 7)
         phases = ("initial", "before-b", "paused-b", "settled-b", "before-a", "paused-a", "settled-a")
@@ -524,6 +575,7 @@ class MassDirtyTests(unittest.TestCase):
                     "\n".join(f'bgp_update_group_recovery_fallback_total{{cause="{cause}"}} 0' for cause in receipt.CAUSES) + "\n" +
                     "\n".join(f"bgp_update_group_recovery_{key} {value}" for key, value in charge.items()))
         (leg / "metrics-initial.prom").write_text(metrics(charge))
+        daemon_log = bytearray(b'{"fields":{"message":"startup"}}\n')
         for generation in ("b", "a"):
             lines.append("mass_dirty_paused " + json.dumps({"generation": generation, "receivers": 2}))
             lines.append("mass_dirty_sent " + json.dumps({"generation": generation, "family_keys": manifest["family_keys"],
@@ -540,8 +592,18 @@ class MassDirtyTests(unittest.TestCase):
                          "resume_monotonic_seconds": None, "fold_monotonic_seconds": None,
                          "readiness_coverage": {"sample_count": None, "max_start_gap_seconds": None}}
             row["operations"].append(operation)
-            dirty = [{"message": "outbound routes resynced", "peer": item["peer"], "dirty": True, "force": False} for item in peers]
-            (leg / f"daemon-window-{generation}.jsonl").write_text("\n".join(json.dumps({"fields": item}) for item in dirty) + "\n")
+            dirty = [{"message": "outbound routes resynced", "peer": item["peer"], "dirty": True, "force": False,
+                      "generation": generation} for item in peers]
+            start = len(daemon_log)
+            daemon_log.extend(json.dumps({"fields": {"message": "held π", "generation": generation}}, ensure_ascii=False).encode() + b"\n")
+            resume = len(daemon_log)
+            window = ("\n".join(json.dumps({"fields": item}) for item in dirty) + "\n").encode()
+            daemon_log.extend(window)
+            end = len(daemon_log)
+            operation["daemon_log_bytes"] = {"start": start, "resume": resume, "end": end}
+            (leg / f"daemon-operation-{generation}.jsonl").write_bytes(daemon_log[start:end])
+            (leg / f"daemon-window-{generation}.jsonl").write_bytes(window)
+            daemon_log.extend(json.dumps({"fields": {"message": "settled", "generation": generation}}).encode() + b"\n")
             receipt.write_json(leg / f"dirty-receipts-{generation}.json", dirty)
             intervals = {"begin_monotonic_seconds": None, "end_monotonic_seconds": None, "proved": True}
             sweep = [{**item, "pending": True, "dirty_seconds": 2, "query_begin_monotonic_seconds": None,
@@ -559,6 +621,7 @@ class MassDirtyTests(unittest.TestCase):
         lines.append("mass_dirty_readiness " + json.dumps({"sequence": 1, "status": 200, "deadline_ms": 250, "elapsed_seconds": None,
                                                           "started_monotonic_seconds": None, "finished_monotonic_seconds": None}))
         (leg / "harness.log").write_text("\n".join(lines) + "\n")
+        (leg / "daemon.log").write_bytes(daemon_log)
         return leg, row
 
     def test_real_dirty_receipt_target_set_cannot_be_fabricated_from_trigger(self):
