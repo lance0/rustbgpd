@@ -199,6 +199,25 @@ fn gauge(manager: &RibManager, name: &str) -> f64 {
         .get_value()
 }
 
+/// The exported caps are the ledger's compiled-in limits, one per scope.
+#[test]
+fn recovery_limit_gauges_export_the_fixed_caps() {
+    use crate::manager::update_groups::admitted_recovery::{DAEMON_LIMIT_BYTES, PEER_LIMIT_BYTES};
+    let (_tx, rx) = mpsc::channel(1);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    for (scope, limit) in [("peer", PEER_LIMIT_BYTES), ("daemon", DAEMON_LIMIT_BYTES)] {
+        assert_eq!(
+            gauge_metric_value(
+                &manager.metrics,
+                "bgp_update_group_recovery_limit_bytes",
+                &[("scope", scope)],
+            ),
+            f64::from(u32::try_from(limit).unwrap()),
+            "{scope}"
+        );
+    }
+}
+
 #[test]
 fn common_recovery_charge_is_truthful_at_startup_capture_and_release() {
     let (_tx, rx) = mpsc::channel(1);

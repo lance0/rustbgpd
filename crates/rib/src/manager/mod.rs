@@ -2026,6 +2026,10 @@ impl RibManager {
             );
         }
         let pending_group_admitted = update_groups::admitted_recovery::AdmittedRecovery::new();
+        metrics.set_update_group_recovery_limit_bytes(
+            i64::try_from(update_groups::admitted_recovery::PEER_LIMIT_BYTES).unwrap_or(i64::MAX),
+            i64::try_from(update_groups::admitted_recovery::DAEMON_LIMIT_BYTES).unwrap_or(i64::MAX),
+        );
         metrics.set_update_group_recovery_entries(0);
         metrics.set_update_group_recovery_bytes(
             i64::try_from(pending_group_admitted.bytes()).unwrap_or(i64::MAX),
@@ -3018,6 +3022,25 @@ impl RibManager {
             };
             self.handle_readiness_query(query, policy_transition_elapsed);
         }
+    }
+
+    /// Publish the dirty-set size and the age of its oldest episode.
+    /// `dirty_since` is stamped when a peer enters the set and outlives it,
+    /// so only peers still dirty count.
+    fn sample_outbound_dirty_gauges(&self) {
+        let now = tokio::time::Instant::now();
+        let oldest = self
+            .dirty_peers
+            .iter()
+            .filter_map(|peer| self.dirty_since.get(peer))
+            .map(|since| now.saturating_duration_since(*since).as_secs())
+            .max()
+            .unwrap_or(0);
+        self.metrics.set_rib_outbound_dirty_peers(
+            i64::try_from(self.dirty_peers.len()).unwrap_or(i64::MAX),
+        );
+        self.metrics
+            .set_rib_outbound_dirty_oldest_seconds(i64::try_from(oldest).unwrap_or(i64::MAX));
     }
 
     /// Whether the resync timer still has runnable work: failed outbound
@@ -5344,6 +5367,7 @@ impl RibManager {
             self.metrics.set_rib_ingest_channel_depth(
                 i64::try_from(self.primary_backlog()).unwrap_or(i64::MAX),
             );
+            self.sample_outbound_dirty_gauges();
 
             if let Some(mut pending) = self.pending_clean_policy_transition.take() {
                 // A newly owned transition supersedes any trace still armed

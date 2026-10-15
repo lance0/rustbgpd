@@ -584,6 +584,54 @@ groups:
             has grown continuously for over an hour. A dirty update-group
             member appears wedged; its resync is not draining residue.
 
+      - alert: BgpUpdateGroupRecoveryLimited
+        # Resource-limit causes only. missing_proof is an ordinary outcome of
+        # some missed sends and does not indicate cap pressure.
+        expr: increase(bgp_update_group_recovery_fallback_total{cause=~"peer_limit|daemon_limit|allocation_failure"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Update-group recovery fell back under a resource limit on {{ $labels.instance }} ({{ $labels.cause }})"
+          description: >-
+            bgp_update_group_recovery_fallback_total{cause="{{ $labels.cause }}"}
+            on {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 15 minutes. Recovery
+            proof for at least one dirty update-group member did not fit the
+            fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+            could not be allocated, so its resync withdraws every candidate
+            prefix and re-announces the current table. Receivers see extra
+            withdrawal churn. The warning log names the peer and the
+            limiting_peer; find why members miss delivery.
+
+      - alert: BgpOutboundResyncStalled
+        # State-based: the gauge is the age of the oldest dirty episode among
+        # peers still dirty, sampled every RIB loop iteration, so it already
+        # integrates time and needs no `for`. An episode ends only when that
+        # peer's resync completes, so constant churn across many peers keeps
+        # it low, while one stuck peer raises it. rbgp doctor warns at 60s as a
+        # point-in-time check; an alert there would fire on every RFC 4724
+        # selection-deferral hold and graceful restart of a full-table peer.
+        # Deferral is bounded by gr_restart_time (default 120s), so 900s
+        # leaves such holds well clear.
+        expr: bgp_rib_outbound_dirty_oldest_seconds >= 900
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound resync stalled on {{ $labels.instance }}"
+          description: >-
+            bgp_rib_outbound_dirty_oldest_seconds on {{ $labels.instance }} is
+            {{ $value | printf "%.0f" }} seconds: at least one peer has been dirty, without its current
+            advertised view, for 15 minutes or more. Churn across peers that
+            keep resyncing does not raise this, and RFC 4724
+            selection-deferral holds, bounded by gr_restart_time (default
+            120 seconds), end well before it. rbgp doctor warns at 60
+            seconds as an early point-in-time signal. Find the peer with
+            rbgp doctor (peer.<addr>.outbound_resync) or rbgp neighbor, and
+            check bgp_peer_slow, bgp_peer_outbound_queue_depth and
+            bgp_outbound_commit_refusals_total for the cause.
+
       - alert: BgpPolicyTransitionStalled
         # Healthy transitions are expected to finish well below this window.
         # Readiness fails closed at 30s; the alert requires persistence for a

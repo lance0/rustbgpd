@@ -980,13 +980,15 @@ fn outbound_resync_check(identity: &str, n: &crate::proto::NeighborState) -> Opt
 }
 
 /// Daemon-lifetime fallbacks caused by the fixed recovery caps or allocation
-/// failure. `None` when the metrics snapshot is unavailable or the daemon
-/// predates the counter.
+/// failure, plus a current recovery charge above 75% of the daemon cap when
+/// the daemon exports that cap. `None` when the metrics snapshot is
+/// unavailable or the daemon predates the counter.
 fn update_group_recovery_check(metrics: Option<&str>) -> Option<Check> {
     const NAME: &str = "bgp_update_group_recovery_fallback_total{";
+    let metrics = metrics?;
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
     let mut malformed = false;
-    for line in metrics?.lines() {
+    for line in metrics.lines() {
         let Some(rest) = line.strip_prefix(NAME) else {
             continue;
         };
@@ -1011,12 +1013,27 @@ fn update_group_recovery_check(metrics: Option<&str>) -> Option<Check> {
                 .map(|count| format!("{cause}={count}"))
         })
         .collect();
+    let gauge = |prefix: &str| {
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix)?.trim().parse::<u64>().ok())
+    };
+    let pressure = gauge("bgp_update_group_recovery_bytes ")
+        .zip(gauge("bgp_update_group_recovery_limit_bytes{scope=\"daemon\"} "))
+        .filter(|(charge, cap)| u128::from(*charge) * 4 > u128::from(*cap) * 3)
+        .map(|(charge, cap)| {
+            format!(
+                "the update-group recovery charge is {} of the fixed {} daemon cap (above 75%); further captures can fall back with daemon_limit",
+                human_bytes(charge),
+                human_bytes(cap)
+            )
+        });
     let (status, detail) = if malformed {
         (
             CheckStatus::Warn,
             "bgp_update_group_recovery_fallback_total is malformed; inspect /metrics".to_string(),
         )
-    } else if limited.is_empty() {
+    } else if limited.is_empty() && pressure.is_none() {
         (
             CheckStatus::Ok,
             format!(
@@ -1025,12 +1042,19 @@ fn update_group_recovery_check(metrics: Option<&str>) -> Option<Check> {
             ),
         )
     } else {
-        (
-            CheckStatus::Warn,
+        let fallback = (!limited.is_empty()).then(|| {
             format!(
                 "update-group recovery fell back to conservative withdrawal under a resource limit since daemon start ({}); affected members over-withdraw and re-announce on resync. Find them with rbgp neighbor <addr> (Recovery Fallback) and the warning log's limiting_peer field",
                 limited.join(", ")
-            ),
+            )
+        });
+        (
+            CheckStatus::Warn,
+            fallback
+                .into_iter()
+                .chain(pressure)
+                .collect::<Vec<_>>()
+                .join("; "),
         )
     };
     Some(Check {
@@ -6301,6 +6325,51 @@ paths = ["x"]
             "{}",
             duplicate.detail
         );
+    }
+
+    /// Red proofs: dropping the charge leg, comparing against the per-peer
+    /// cap, or warning at exactly 75% fails below.
+    #[test]
+    fn update_group_recovery_check_warns_above_three_quarters_of_daemon_cap() {
+        const COUNTERS: &str = "bgp_update_group_recovery_fallback_total{cause=\"peer_limit\"} 0\n\
+                                bgp_update_group_recovery_fallback_total{cause=\"daemon_limit\"} 0\n\
+                                bgp_update_group_recovery_fallback_total{cause=\"allocation_failure\"} 0\n\
+                                bgp_update_group_recovery_fallback_total{cause=\"missing_proof\"} 0\n\
+                                bgp_update_group_recovery_limit_bytes{scope=\"peer\"} 100\n\
+                                bgp_update_group_recovery_limit_bytes{scope=\"daemon\"} 400\n";
+        let check = |charge: u64| {
+            update_group_recovery_check(Some(&format!(
+                "{COUNTERS}bgp_update_group_recovery_bytes {charge}\n"
+            )))
+            .unwrap()
+        };
+        assert_eq!(check(300).status, CheckStatus::Ok);
+        let warn = check(301);
+        assert_eq!(warn.status, CheckStatus::Warn);
+        assert!(warn.detail.contains("above 75%"), "{}", warn.detail);
+        assert!(!warn.detail.contains("fell back"), "{}", warn.detail);
+
+        // A daemon without the cap gauge keeps the counter-only verdict.
+        let uncapped: String = COUNTERS
+            .lines()
+            .filter(|line| !line.starts_with("bgp_update_group_recovery_limit_bytes"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let uncapped = update_group_recovery_check(Some(&format!(
+            "{uncapped}bgp_update_group_recovery_bytes 999\n"
+        )))
+        .unwrap();
+        assert_eq!(uncapped.status, CheckStatus::Ok);
+
+        // Both conditions are reported together.
+        let both = format!(
+            "{}bgp_update_group_recovery_bytes 400\n",
+            COUNTERS.replace("peer_limit\"} 0", "peer_limit\"} 1")
+        );
+        let both = update_group_recovery_check(Some(&both)).unwrap();
+        assert_eq!(both.status, CheckStatus::Warn);
+        assert!(both.detail.contains("peer_limit=1"), "{}", both.detail);
+        assert!(both.detail.contains("above 75%"), "{}", both.detail);
     }
 
     /// Red proofs: zero-as-OK and dropping the configured guard fail below.

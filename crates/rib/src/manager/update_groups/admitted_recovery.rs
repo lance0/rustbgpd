@@ -14,8 +14,8 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::ExactExportKey;
 
-const PEER_LIMIT_BYTES: usize = 64 * 1024 * 1024;
-const DAEMON_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+pub(in crate::manager) const PEER_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+pub(in crate::manager) const DAEMON_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::manager) enum Key {

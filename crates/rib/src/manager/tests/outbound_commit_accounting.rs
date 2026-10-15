@@ -337,3 +337,105 @@ async fn handler_drained_resync_records_one_cleared_outcome() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// The dirty-peer gauge follows the actor's dirty set: one peer whose writer
+/// queue stays full reads 1 across a failed resync tick, and 0 once the
+/// session's teardown drains it.
+#[tokio::test(start_paused = true)]
+async fn outbound_dirty_peers_gauge_tracks_dirty_set() {
+    let metrics = BgpMetrics::new();
+    let dirty_peers = || gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_peers", &[]);
+    let oldest = || gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_oldest_seconds", &[]);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    // The target's one-slot queue is left full by its initial EoR.
+    let (target_tx, _target_rx) = mpsc::channel(1);
+    tx.send(peer_up(PEER, Ipv4Addr::new(192, 0, 2, 70), target_tx))
+        .await
+        .unwrap();
+    let source = IpAddr::V4(SOURCE);
+    let (source_tx, _source_rx) = mpsc::channel(64);
+    tx.send(peer_up(source, SOURCE, source_tx)).await.unwrap();
+    barrier(&tx).await;
+    assert!(dirty_peers().abs() < f64::EPSILON);
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            SOURCE,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    barrier(&tx).await;
+    assert!((dirty_peers() - 1.0).abs() < f64::EPSILON);
+
+    // A tick that finds the queue still full leaves the peer dirty.
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    barrier(&tx).await;
+    assert!(dirty_resync(&metrics, "still_dirty") >= 1.0);
+    assert!((dirty_peers() - 1.0).abs() < f64::EPSILON);
+    assert!(oldest() >= 1.0);
+
+    tx.send(RibUpdate::PeerDown {
+        peer: PEER,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    barrier(&tx).await;
+    assert!(dirty_peers().abs() < f64::EPSILON);
+    assert!(oldest().abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The age is the oldest episode among peers still dirty: a lingering
+/// `dirty_since` stamp from a finished episode does not count.
+#[tokio::test(start_paused = true)]
+async fn outbound_dirty_oldest_seconds_is_max_over_current_episodes() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let oldest = |m: &RibManager| {
+        gauge_metric_value(&m.metrics, "bgp_rib_outbound_dirty_oldest_seconds", &[])
+    };
+    let [settled, old, young] = [70, 71, 72].map(|o| IpAddr::V4(Ipv4Addr::new(192, 0, 2, o)));
+    manager
+        .dirty_since
+        .insert(settled, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_mins(15)).await;
+    manager.dirty_peers.insert(old);
+    manager.dirty_since.insert(old, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(95)).await;
+    manager.dirty_peers.insert(young);
+    manager
+        .dirty_since
+        .insert(young, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(5)).await;
+
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(oldest(&manager), 100.0);
+    assert_eq!(
+        gauge_metric_value(&manager.metrics, "bgp_rib_outbound_dirty_peers", &[]),
+        2.0
+    );
+
+    manager.dirty_peers.remove(&old);
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(oldest(&manager), 5.0);
+
+    manager.dirty_peers.clear();
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(oldest(&manager), 0.0);
+}
