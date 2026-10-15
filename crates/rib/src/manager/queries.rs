@@ -3095,6 +3095,26 @@ impl RibManager {
             outbound: self.peer_outbound_state(peer),
             remote_asn: self.peer_asn.get(&peer).copied(),
             gr_retention: self.gr_retention_snapshot(peer),
+            outbound_resync: self.outbound_resync_state(peer),
+        }
+    }
+
+    /// The count is pending under the same rule the advertised listing uses
+    /// to leave the group view: an unsettled grouped member.
+    fn outbound_resync_state(&self, peer: IpAddr) -> crate::update::OutboundResyncState {
+        let pending = self.dirty_peers.contains(&peer);
+        crate::update::OutboundResyncState {
+            pending,
+            dirty_secs: self
+                .dirty_since
+                .get(&peer)
+                .filter(|_| pending)
+                .map(|since| since.elapsed().as_secs()),
+            advertised_count_pending: self.grouped_member_of(peer).is_some()
+                && (pending || self.outbound_channel_gone(peer)),
+            recovery_fallback: self
+                .group_recovery_fallback(peer)
+                .map(super::update_groups::RecoveryFallbackCause::as_str),
         }
     }
 
@@ -3645,6 +3665,7 @@ mod cancellation_tests {
                         },
                         remote_asn: None,
                         gr_retention: Vec::new(),
+                        outbound_resync: crate::update::OutboundResyncState::default(),
                     }
                 }
             },
@@ -3681,6 +3702,7 @@ mod cancellation_tests {
                     },
                     remote_asn: None,
                     gr_retention: Vec::new(),
+                    outbound_resync: crate::update::OutboundResyncState::default(),
                 }
             },
             |_, _| panic!("comparison must not be built after the final row canceled"),
