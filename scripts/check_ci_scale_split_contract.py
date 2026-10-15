@@ -272,14 +272,23 @@ def check(root: Path) -> list[str]:
         ) for cell in cells
     ]
     if selected_memory != expected_memory or selected_scan != [
-        {"profile": profile, "cell": "capture-scan"} for profile in ("full-uc", "full-vpn", "evpn-soak")
+        {"profile": profile, "cell": "capture-scan", "old_order": old_order}
+        for profile in ("full-uc", "full-vpn", "evpn-soak") for old_order in ("sorted", "shuffled")
     ]:
-        errors.append("recovery receipt matrix must preserve memory cells and isolate scan profiles")
+        errors.append("recovery receipt matrix must preserve memory cells and isolate scan profiles/OLD orders")
     if (
         'RECOVERY_RECEIPT_MODE: ${{ inputs.recovery_receipt_mode || \'memory\' }}' not in recovery
         or '--mode "$RECOVERY_RECEIPT_MODE"' not in recovery
     ):
         errors.append("recovery receipt driver must receive the selected mode")
+    if any(required not in recovery for required in (
+        "RECOVERY_SCAN_OLD_ORDER: ${{ matrix.old_order || 'sorted' }}",
+        'if [[ $RECOVERY_RECEIPT_MODE == scan && $RECOVERY_SCAN_OLD_ORDER == shuffled ]]; then',
+        'scan_options=(--shuffled-old)',
+        '--cell "$RECOVERY_MEMORY_CELL" "${scan_options[@]}"',
+        "${{ matrix.old_order && format('-{0}', matrix.old_order) || '' }}",
+    )):
+        errors.append("component scans must preserve OLD order through invocation and artifact identity")
 
     scale_commands = Counter(command for _, command in _cargo_commands(jobs.get("scale_receipts", "")))
     for command in SCALE_COMMANDS:

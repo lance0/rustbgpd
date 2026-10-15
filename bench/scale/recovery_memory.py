@@ -17,7 +17,7 @@ import time
 
 BASELINE = "c862af9338aa828b7462f3cf85781f63b0e79fe8"
 INTERMEDIATE = "bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00"
-SCAN_SCHEMA = "rustbgpd.recovery-scan.v1"
+SCAN_SCHEMA = "rustbgpd.recovery-scan.v2"
 SCAN_PROFILES = {"full-uc": 1_230_000, "full-vpn": 1_230_000, "evpn-soak": 37_500}
 SCAN_DISPATCH = (
     "mod recovery_scan;\n",
@@ -438,6 +438,7 @@ def run_scope(
     profile: str,
     clients: int,
     scan: bool = False,
+    shuffled_old: bool = False,
 ) -> None:
     """Run inside the already fenced scope; capture before its owner exits."""
     output.mkdir(parents=True, exist_ok=True)
@@ -460,7 +461,10 @@ def run_scope(
     if scan:
         require(profile in SCAN_PROFILES and cell == "capture-scan", "invalid scan profile")
         command = [str(binary), "recovery-scan", profile]
+        if shuffled_old:
+            command.append("--shuffled-old")
     else:
+        require(not shuffled_old, "shuffled OLD is only valid for component scans")
         require(profile in PROFILES and clients > 0, "invalid workload profile")
         command = [str(binary), "recovery-memory", cell, str(clients), profile]
     write_json(output / "command.json", command)
@@ -1128,9 +1132,10 @@ def validate_memory_derivation(root: Path, digest: str) -> None:
             "memory entrypoint is not the exact recorded derivation")
 
 
-def validate_scan_log(path: Path, profile: str) -> dict:
+def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> dict:
     """A distinct component schema: never infer daemon or memory qualification."""
     require(profile in SCAN_PROFILES, "unknown scan profile")
+    require(old_order in ("sorted", "shuffled"), "unknown OLD key order")
     groups = {name: [] for name in (
         "recovery_scan", "recovery_scan_environment", "recovery_scan_complete", "recovery_identity"
     )}
@@ -1141,6 +1146,7 @@ def validate_scan_log(path: Path, profile: str) -> dict:
     environment = groups["recovery_scan_environment"]
     require(len(environment) == 1 and environment[0].get("schema") == SCAN_SCHEMA,
             "missing scan environment")
+    require(environment[0].get("old_order") == old_order, "scan environment OLD order mismatch")
     require(environment[0].get("phase_passes") == "independent shape and capture invocations"
             and environment[0].get("credit_scope") ==
             "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS",
@@ -1160,6 +1166,7 @@ def validate_scan_log(path: Path, profile: str) -> dict:
             cursor += 4
             for leg, (row, arm) in enumerate(zip(rows, ("flat", "shared", "shared", "flat"))):
                 require(row.get("schema") == SCAN_SCHEMA and row.get("profile") == profile
+                        and row.get("old_order") == old_order
                         and row.get("keys") == SCAN_PROFILES[profile]
                         and row.get("records") == records and row.get("layout") == layout
                         and row.get("leg") == leg and row.get("arm") == arm
@@ -1182,9 +1189,9 @@ def validate_scan_log(path: Path, profile: str) -> dict:
                         "incorrect OLD sparse classification")
                 require(row["shape_callbacks"] == keys + row["comparisons"],
                         "comparison count is not separate from key visits")
-                require((keys <= row["comparisons"] <= keys * (keys.bit_length() + 1))
+                require((keys <= row["comparisons"] <= 2 * keys + keys.bit_length() + 2)
                         if arm == "shared" else row["comparisons"] == 0,
-                        "missing binary-search work or non-linear flat classification")
+                        "missing sorted merge work or non-linear classification")
                 require(row["settled_bytes"] == row["empty_bytes"] > 0
                         and row["empty_bytes"] < row["retained_bytes"] <= row["peak_bytes"],
                         "proof charge or last-owner retirement differs")
@@ -1208,7 +1215,7 @@ def validate_scan_log(path: Path, profile: str) -> dict:
                         ratios[phase][quantity] = shared / flat if flat else None
             summaries.append({"records": records, "layout": layout, "eligible": eligible,
                               "shared_over_flat": ratios if eligible else None})
-    return {"schema": SCAN_SCHEMA, "profile": profile, "samples": samples,
+    return {"schema": SCAN_SCHEMA, "profile": profile, "old_order": old_order, "samples": samples,
             "comparisons": summaries, "cpu_ticks_per_second": ticks,
             "phase_passes": environment[0]["phase_passes"],
             "credit_scope": environment[0]["credit_scope"],
@@ -1218,9 +1225,10 @@ def validate_scan_log(path: Path, profile: str) -> dict:
 
 def summarize_scan(root: Path) -> None:
     manifest = json.loads((root / "manifest.json").read_text())
-    require(manifest.get("schema") == "rustbgpd.recovery-scan.campaign.v1", "wrong scan manifest")
+    require(manifest.get("schema") == "rustbgpd.recovery-scan.campaign.v2", "wrong scan manifest")
     require(manifest.get("profile") in SCAN_PROFILES and manifest.get("build_jobs") == 4,
             "wrong scan profile/build")
+    require(manifest.get("old_order") in ("sorted", "shuffled"), "wrong scan OLD order")
     require(manifest.get("order_per_cell") == ["flat", "shared", "shared", "flat"],
             "wrong scan comparison order")
     require(bool(re.fullmatch(r"[0-9a-f]{40}", manifest.get("candidate", ""))), "wrong scan source")
@@ -1244,7 +1252,7 @@ def summarize_scan(root: Path) -> None:
     status = json.loads((directory / "status.json").read_text())
     require(status == {"exit": 0, "timeout": False, "cgroup_valid": True, "ownership_valid": True},
             "scan workload/scope failed")
-    result = validate_scan_log(directory / "harness.log", manifest["profile"])
+    result = validate_scan_log(directory / "harness.log", manifest["profile"], manifest["old_order"])
     identity = result["workload_identity"]
     process = json.loads((directory / "binary-process.json").read_text())
     digest = (root / "candidate-binary.sha256").read_text().strip()
@@ -1274,6 +1282,7 @@ def summarize_scan(root: Path) -> None:
     require(result["qualification_passed"],
             "all 6 scan cells must have complete, proof-checked non-refused comparisons")
     print(json.dumps({"schema": SCAN_SCHEMA, "profile": manifest["profile"],
+                      "old_order": manifest["old_order"],
                       "component_cells": 6, "timed_legs": 24, "refused_legs": refused_legs,
                       "qualification_passed": result["qualification_passed"]}))
 
@@ -1300,6 +1309,7 @@ def main() -> None:
     run.add_argument("profile", choices=(*PROFILES, "evpn-soak"))
     run.add_argument("clients", type=int)
     run.add_argument("--scan", action="store_true")
+    run.add_argument("--shuffled-old", action="store_true")
     scan = sub.add_parser("summarize-scan")
     scan.add_argument("root", type=Path)
     scan.add_argument("--failed-driver-exit", type=int)
@@ -1326,6 +1336,7 @@ def main() -> None:
                 args.profile,
                 args.clients,
                 scan=args.scan,
+                shuffled_old=args.shuffled_old,
             )
         elif args.command == "summarize-scan":
             if args.failed_driver_exit is not None:
