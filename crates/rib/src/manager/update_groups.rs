@@ -1835,170 +1835,129 @@ impl RibManager {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
-        let result =
-            if self.pending_regroup_baseline.contains_key(&peer) || gid.is_none() {
-                let count = self.pending_regroup_baseline.get(&peer).map_or_else(
-                    || {
-                        self.adj_ribs_out
-                            .get(&peer)
-                            .map_or(0, |rib| rib.len().saturating_add(rib.vpn_len()))
-                    },
-                    |base| base.unicast.len().saturating_add(base.vpn.len()),
-                );
-                let ledger = &mut self.pending_group_admitted;
-                (|| {
-                    ledger.reserve_capture_with_checkpoint(peer, count, &mut checkpoint)?;
-                    if let Some(base) = self.pending_regroup_baseline.get(&peer) {
-                        for &(prefix, path_id) in base.unicast.keys() {
-                            checkpoint(false);
-                            ledger.push_capture_with_checkpoint(
-                                peer,
-                                Key::Unicast(prefix, path_id),
-                                &mut checkpoint,
-                            )?;
-                        }
-                        for &key in base.vpn.keys() {
-                            checkpoint(false);
-                            ledger.push_capture_with_checkpoint(
-                                peer,
-                                Key::Vpn(key, 0),
-                                &mut checkpoint,
-                            )?;
-                        }
-                    } else if let Some(rib) = self.adj_ribs_out.get(&peer) {
-                        for route in rib.iter() {
-                            checkpoint(false);
-                            ledger.push_capture_with_checkpoint(
-                                peer,
-                                Key::Unicast(route.prefix, route.path_id),
-                                &mut checkpoint,
-                            )?;
-                        }
-                        for route in rib.iter_vpn() {
-                            checkpoint(false);
-                            let key = route.key();
-                            ledger.push_capture_with_checkpoint(
-                                peer,
-                                Key::Vpn(key.nlri_key, key.path_id),
-                                &mut checkpoint,
-                            )?;
-                        }
+        let result = if self.pending_regroup_baseline.contains_key(&peer) || gid.is_none() {
+            let count = self.pending_regroup_baseline.get(&peer).map_or_else(
+                || {
+                    self.adj_ribs_out
+                        .get(&peer)
+                        .map_or(0, |rib| rib.len().saturating_add(rib.vpn_len()))
+                },
+                |base| base.unicast.len().saturating_add(base.vpn.len()),
+            );
+            let ledger = &mut self.pending_group_admitted;
+            (|| {
+                ledger.reserve_capture_with_checkpoint(peer, count, &mut checkpoint)?;
+                if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                    for &(prefix, path_id) in base.unicast.keys() {
+                        checkpoint(false);
+                        ledger.push_capture_with_checkpoint(
+                            peer,
+                            Key::Unicast(prefix, path_id),
+                            &mut checkpoint,
+                        )?;
                     }
-                    Ok(())
-                })()
-            } else if let Some(group) = gid.and_then(|gid| self.group_ribs.get_mut(&gid)) {
-                let rejected = self.peer_unexportable.get(&peer);
-                let limits = self.outbound_prefix_limits.get(&peer);
-                let projected: &GroupRibOut = group;
-                let projection_readiness = &readiness;
-                let old_filter = filter.as_ref();
-                let actual = move || {
-                    projected
-                        .table
-                        .iter()
-                        .inspect(move |_| {
-                            super::replacement_readiness_checkpoint(projection_readiness, false);
-                        })
-                        .filter_map(move |staged| {
-                            let entry = projected.adv_entry_post_backstop(
-                                peer,
-                                &staged.prefix,
-                                staged.path_id,
-                            )?;
-                            let route = entry.route;
-                            let key = ExactExportKey::Unicast(route.prefix, route.path_id);
-                            if rejected.is_some_and(|keys| keys.contains(&key))
-                                || limits
-                                    .is_some_and(|limits| !limits.admits_grouped(&route.prefix))
-                            {
-                                return None;
-                            }
-                            let (communities, large) =
-                                projected.source_control_for_route(route, entry.source_attrs);
-                            (!super::distribution::rs_control::rs_control_suppressed(
-                                communities,
-                                large,
-                                rs_control,
-                            ))
-                            .then_some(Key::Unicast(route.prefix, route.path_id))
-                        })
-                        .chain(
-                            projected
-                                .table
-                                .iter_vpn()
-                                .inspect(move |_| {
-                                    super::replacement_readiness_checkpoint(
-                                        projection_readiness,
-                                        false,
-                                    );
-                                })
-                                .filter(move |route| {
-                                    projected.stages_vpn()
-                                        && route.peer != peer
-                                        && rt_passes(old_filter, route)
-                                        && !rejected.is_some_and(|keys| {
-                                            keys.contains(&ExactExportKey::Vpn(route.key()))
-                                        })
-                                })
-                                .map(|route| {
-                                    let key = route.key();
-                                    Key::Vpn(key.nlri_key, key.path_id)
-                                }),
-                        )
-                };
-                let (count, additions) = self.pending_group_admitted.capture_shape_with_checkpoint(
-                    group.recovery_snapshot,
-                    actual(),
-                    &mut checkpoint,
-                );
-                let raw_count = group.table.len().saturating_add(if group.stages_vpn() {
-                    group.table.vpn_len()
-                } else {
-                    0
-                });
-                let raw =
-                    group
-                        .table
-                        .iter()
-                        .map(|route| Key::Unicast(route.prefix, route.path_id))
-                        .chain(group.table.iter_vpn().filter(|_| group.stages_vpn()).map(
-                            |route| {
+                    for &key in base.vpn.keys() {
+                        checkpoint(false);
+                        ledger.push_capture_with_checkpoint(
+                            peer,
+                            Key::Vpn(key, 0),
+                            &mut checkpoint,
+                        )?;
+                    }
+                } else if let Some(rib) = self.adj_ribs_out.get(&peer) {
+                    for route in rib.iter() {
+                        checkpoint(false);
+                        ledger.push_capture_with_checkpoint(
+                            peer,
+                            Key::Unicast(route.prefix, route.path_id),
+                            &mut checkpoint,
+                        )?;
+                    }
+                    for route in rib.iter_vpn() {
+                        checkpoint(false);
+                        let key = route.key();
+                        ledger.push_capture_with_checkpoint(
+                            peer,
+                            Key::Vpn(key.nlri_key, key.path_id),
+                            &mut checkpoint,
+                        )?;
+                    }
+                }
+                Ok(())
+            })()
+        } else if let Some(group) = gid.and_then(|gid| self.group_ribs.get(&gid)) {
+            let rejected = self.peer_unexportable.get(&peer);
+            let limits = self.outbound_prefix_limits.get(&peer);
+            let projected: &GroupRibOut = group;
+            let projection_readiness = &readiness;
+            let old_filter = filter.as_ref();
+            let actual = move || {
+                projected
+                    .table
+                    .iter()
+                    .inspect(move |_| {
+                        super::replacement_readiness_checkpoint(projection_readiness, false);
+                    })
+                    .filter_map(move |staged| {
+                        let entry = projected.adv_entry_post_backstop(
+                            peer,
+                            &staged.prefix,
+                            staged.path_id,
+                        )?;
+                        let route = entry.route;
+                        let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+                        if rejected.is_some_and(|keys| keys.contains(&key))
+                            || limits.is_some_and(|limits| !limits.admits_grouped(&route.prefix))
+                        {
+                            return None;
+                        }
+                        let (communities, large) =
+                            projected.source_control_for_route(route, entry.source_attrs);
+                        (!super::distribution::rs_control::rs_control_suppressed(
+                            communities,
+                            large,
+                            rs_control,
+                        ))
+                        .then_some(Key::Unicast(route.prefix, route.path_id))
+                    })
+                    .chain(
+                        projected
+                            .table
+                            .iter_vpn()
+                            .inspect(move |_| {
+                                super::replacement_readiness_checkpoint(
+                                    projection_readiness,
+                                    false,
+                                );
+                            })
+                            .filter(move |route| {
+                                projected.stages_vpn()
+                                    && route.peer != peer
+                                    && rt_passes(old_filter, route)
+                                    && !rejected.is_some_and(|keys| {
+                                        keys.contains(&ExactExportKey::Vpn(route.key()))
+                                    })
+                            })
+                            .map(|route| {
                                 let key = route.key();
                                 Key::Vpn(key.nlri_key, key.path_id)
-                            },
-                        ));
-                let ledger = &mut self.pending_group_admitted;
-                let shared = ledger.share_capture_with_checkpoint(
-                    peer,
-                    group.recovery_snapshot,
-                    raw_count,
-                    raw,
-                    (count, additions),
-                    &mut checkpoint,
-                );
-                let handle = shared.ok().flatten();
-                let captured = (|| {
-                    // An oversized unfiltered hint or failed optional allocation
-                    // must not reject a smaller authoritative flat proof.
-                    ledger.reserve_capture_with_checkpoint(
-                        peer,
-                        if handle.is_some() { additions } else { count },
-                        &mut checkpoint,
-                    )?;
-                    for key in actual() {
-                        ledger.push_capture_with_checkpoint(peer, key, &mut checkpoint)?;
-                    }
-                    Ok(())
-                })();
-                if captured.is_ok()
-                    && let Some(handle) = handle
-                {
-                    group.recovery_snapshot = Some(handle);
-                }
-                captured
-            } else {
-                Ok(())
+                            }),
+                    )
             };
+            // Full OLD capture stays flat: shared-universe classification and
+            // population exceed the accepted capture-work budget.
+            let count = actual().count();
+            let ledger = &mut self.pending_group_admitted;
+            (|| {
+                ledger.reserve_capture_with_checkpoint(peer, count, &mut checkpoint)?;
+                for key in actual() {
+                    ledger.push_capture_with_checkpoint(peer, key, &mut checkpoint)?;
+                }
+                Ok(())
+            })()
+        } else {
+            Ok(())
+        };
         if let Err(error) = result {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;

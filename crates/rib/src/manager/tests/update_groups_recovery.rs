@@ -871,3 +871,126 @@ fn a_same_session_table_replay_rejection_withdraws_the_actual_prior() {
     assert_eq!(withdrawals, vec![(Prefix::V4(prefix(1)), 0)]);
     assert!(!manager.pending_group_admitted.contains_key(&member));
 }
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actor control follows actual admission through capture and owed-withdrawal recovery for both families"
+)]
+fn full_old_capture_uses_flat_storage(vpn: bool) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        BgpMetrics::new(),
+    );
+    let member: IpAddr = Ipv4Addr::new(10, 222, 4, 1).into();
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let (outbound, mut receiver) = mpsc::channel(16);
+    let mut registration = peer_up(member, outbound, None);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        route_reflector_client,
+        ..
+    } = &mut registration
+    {
+        sendable_families.push((Afi::Ipv4, Safi::MplsVpn));
+        *route_reflector_client = true;
+    }
+    manager.handle_update(registration);
+    while receiver.try_recv().is_ok() {}
+    let expected: HashSet<_> = if vpn {
+        let routes: Vec<_> = (1..=128)
+            .map(|n| make_vpn_rib_route(source, n, 100, 100))
+            .collect();
+        let expected = routes
+            .iter()
+            .map(|r| ExactExportKey::Vpn(r.key()))
+            .collect();
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: routes,
+            withdrawn: vec![],
+        });
+        expected
+    } else {
+        source_update(&mut manager, &(1..=128).collect::<Vec<_>>(), &[]);
+        (1..=128)
+            .map(|n| ExactExportKey::Unicast(Prefix::V4(prefix(n)), 0))
+            .collect()
+    };
+    let mut delivered = HashSet::new();
+    while let Ok(update) = receiver.try_recv() {
+        delivered.extend(
+            update
+                .announce
+                .iter()
+                .map(|r| ExactExportKey::Unicast(r.prefix, r.path_id)),
+        );
+        delivered.extend(
+            update
+                .vpn_announce
+                .iter()
+                .map(|r| ExactExportKey::Vpn(r.key())),
+        );
+    }
+    assert_eq!(
+        delivered, expected,
+        "capture must describe actual admitted OLD"
+    );
+    let gid = manager.grouped_member_of(member).unwrap();
+    assert!(
+        manager.group_ribs[&gid]
+            .recovery_snapshot_for_test()
+            .is_none()
+    );
+    assert!(manager.mark_outbound_dirty(member));
+    let proof = manager.pending_group_admitted.get(&member).unwrap();
+    assert_eq!(proof.iter().collect::<HashSet<_>>(), expected);
+    assert!(
+        manager.group_ribs[&gid]
+            .recovery_snapshot_for_test()
+            .is_none(),
+        "full OLD capture must reserve exact flat keys without attaching a shared universe"
+    );
+    let withdrawn = if vpn {
+        let key = make_vpn_rib_route(source, 1, 100, 100).key();
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![key.clone()],
+        });
+        ExactExportKey::Vpn(key)
+    } else {
+        source_update(&mut manager, &[], &[1]);
+        ExactExportKey::Unicast(Prefix::V4(prefix(1)), 0)
+    };
+    while manager.resync_dirty_peers_bounded() {}
+    let mut withdrawals = Vec::new();
+    while let Ok(update) = receiver.try_recv() {
+        withdrawals.extend(
+            update
+                .withdraw
+                .into_iter()
+                .map(|(p, id)| ExactExportKey::Unicast(p, id)),
+        );
+        withdrawals.extend(update.vpn_withdraw.into_iter().map(ExactExportKey::Vpn));
+    }
+    assert_eq!(withdrawals, vec![withdrawn]);
+    assert!(!manager.dirty_peers.contains(&member));
+    assert!(!manager.pending_group_admitted.contains_record(member));
+    assert_eq!(manager.group_recovery_fallback(member), None);
+}
+
+#[test]
+fn full_old_unicast_capture_uses_exact_flat_storage_and_keeps_owed_withdrawals() {
+    full_old_capture_uses_flat_storage(false);
+}
+
+#[test]
+fn full_old_vpn_capture_uses_exact_flat_storage_and_keeps_owed_withdrawals() {
+    full_old_capture_uses_flat_storage(true);
+}

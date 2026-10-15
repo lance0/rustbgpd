@@ -660,6 +660,7 @@ impl AdmittedRecovery {
 
     /// Count authoritative OLD keys and the sparse capacity needed beside a
     /// live older universe, without collecting an uncharged key inventory.
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(in crate::manager) fn capture_shape_with_checkpoint<A: Iterator<Item = Key>>(
         &self,
         hint: Option<SnapshotHandle>,
