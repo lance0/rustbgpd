@@ -1537,12 +1537,15 @@ def validate_retirement_readiness(row: dict, measured: bool, required: bool) -> 
     require(set(data["owners"]) == names, "readiness owner roster differs")
     counters = {"owners", "invalid_owners", "callbacks", "body_callbacks", "admitted", "serviced", "replied", "body_replied"}
     owner_clocks = {"max_checkpoint_interval_ns", "max_eligible_opportunity_gap_ns", "service_budget_ns"}
+    owner_replies = owner_admissions = 0
     for name, owner in data["owners"].items():
         require(set(owner) == counters | owner_clocks | {"overlap", "eligible"}, "readiness owner fields differ")
         v = {field: uint(owner[field], field) for field in counters}
         require(v["owners"] <= 1 and v["invalid_owners"] == 0
                 and v["body_replied"] <= v["replied"] <= v["admitted"] <= v["serviced"],
                 "mixed/cross-boundary or invalid owner replies")
+        owner_replies += v["replied"]
+        owner_admissions += v["admitted"]
         require((v["callbacks"] >= v["body_callbacks"] + 2) if v["owners"] else
                 all(value == 0 for value in v.values()), "missing owner entry/body/exit coverage")
         keys = row["keys"] if name == target else 0
@@ -1564,6 +1567,15 @@ def validate_retirement_readiness(row: dict, measured: bool, required: bool) -> 
             # they are evidence, not a second strict 25 ms assertion.
         else:
             require(all(owner[field] is None for field in owner_clocks), "unmeasured owner clocks must be null")
+    # The sole producer completes one request before capture and starts its
+    # final request after the FIFO barrier. Neither can belong to an owner.
+    # Other interior requests may be served outside owners, so these are bounds,
+    # not equalities. Serviced also includes requests queued before owner entry.
+    boundary_replies = values["before_capture_replies"] + values["after_barrier_replies"]
+    require(owner_replies <= values["replied"] - boundary_replies,
+            "owner replies exceed interior producer replies")
+    require(owner_admissions <= values["admitted"] - boundary_replies,
+            "owner admissions exceed interior producer admissions")
 
 
 def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bool = True,

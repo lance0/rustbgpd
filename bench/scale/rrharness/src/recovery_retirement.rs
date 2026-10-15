@@ -5,7 +5,7 @@ use super::recovery_memory::{
     EvpnCounts, RecoveryHarness, Spec,
 };
 use super::{oneshot, RibManager, RibUpdate};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,7 +27,7 @@ struct ProbeReceipt {
 }
 
 impl ProbeReceipt {
-    fn json(&self, measured: bool) -> String {
+    fn assert_valid(&self, measured: bool) {
         assert_eq!(self.errors, 0, "real readiness query failed");
         assert_eq!(self.attempts, self.admitted);
         assert_eq!(self.admitted, self.replied);
@@ -39,6 +39,9 @@ impl ProbeReceipt {
                 "RIB readiness component exceeded its unchanged 200 ms deadline"
             );
         }
+    }
+
+    fn json(&self, measured: bool) -> String {
         format!(
             "{{\"attempts\":{},\"admitted\":{},\"replied\":{},\"errors\":{},\"max_inflight\":{},\"before_capture_replies\":{},\"after_barrier_replies\":{},\"max_reserve_wait_ns\":{},\"max_enqueue_reply_ns\":{},\"max_attempt_reply_ns\":{},\"max_refill_gap_ns\":{}}}",
             self.attempts,
@@ -161,8 +164,8 @@ impl ReadinessProbe {
     }
 }
 
-fn owner_json(values: &[u64], measured: bool, keys: u64) -> String {
-    let overlap = keys > 0
+fn owner_overlap(values: &[u64], keys: u64) -> bool {
+    keys > 0
         && values[0] == 1
         && values[1] == 0
         && values[3] >= keys
@@ -170,14 +173,12 @@ fn owner_json(values: &[u64], measured: bool, keys: u64) -> String {
         && values[4] > 0
         && values[6] == values[4]
         && values[5] >= values[6]
-        && values[7] > 0;
+        && values[7] > 0
+}
+
+fn owner_json(values: &[u64], measured: bool, keys: u64) -> String {
+    let overlap = owner_overlap(values, keys);
     let eligible = measured && overlap;
-    if eligible {
-        assert!(
-            values[8] <= 25_000_000,
-            "instrumented cleanup callback interval exceeded the existing 25 ms budget"
-        );
-    }
     format!(
         "{{\"owners\":{},\"invalid_owners\":{},\"callbacks\":{},\"body_callbacks\":{},\"admitted\":{},\"serviced\":{},\"replied\":{},\"body_replied\":{},\"overlap\":{},\"eligible\":{},\"max_checkpoint_interval_ns\":{},\"max_eligible_opportunity_gap_ns\":{},\"service_budget_ns\":{}}}",
         values[0],
@@ -198,13 +199,48 @@ fn owner_json(values: &[u64], measured: bool, keys: u64) -> String {
 
 fn readiness_json(probes: &ProbeReceipt, measured: bool, phases: &[u64; 16]) -> String {
     let owners = RibManager::bench_retirement_readiness();
-    format!(
+    readiness_json_to(
+        &mut std::io::stderr().lock(),
+        probes,
+        measured,
+        phases,
+        &owners,
+    )
+}
+
+fn readiness_json_to(
+    output: &mut impl Write,
+    probes: &ProbeReceipt,
+    measured: bool,
+    phases: &[u64; 16],
+    owners: &[u64; 33],
+) -> String {
+    let observation = format!(
         "{{\"probe\":{},\"owners\":{{\"received_cleanup_including_gc\":{},\"private_outbound_cleanup\":{},\"regroup_baseline_cleanup\":{}}}}}",
         probes.json(measured),
         owner_json(&owners[..11], measured, phases[5]),
         owner_json(&owners[11..22], measured, phases[9]),
         owner_json(&owners[22..], measured, phases[13])
-    )
+    );
+    // Capture and the observer have finished. Retain their actual observations
+    // before a bound rejects this cell; this is not a completion receipt.
+    writeln!(output, "retirement_readiness_observation {observation}")
+        .expect("failed to retain retirement readiness observation");
+    probes.assert_valid(measured);
+    for (values, keys) in owners
+        .as_chunks::<11>()
+        .0
+        .iter()
+        .zip([phases[5], phases[9], phases[13]])
+    {
+        if measured && owner_overlap(values, keys) {
+            assert!(
+                values[8] <= 25_000_000,
+                "instrumented cleanup callback interval exceeded the existing 25 ms budget"
+            );
+        }
+    }
+    observation
 }
 
 fn wait_for_ownership_ack(input: &mut impl Read) {
@@ -741,9 +777,95 @@ mod tests {
         assert_eq!((receipt.attempts, receipt.replied), (3, 3));
         assert_eq!((receipt.max_inflight, receipt.inflight), (1, 0));
         assert_eq!((receipt.before_capture, receipt.after_barrier), (1, 1));
+        receipt.assert_valid(false);
         assert!(receipt
             .json(false)
             .contains("\"max_enqueue_reply_ns\":null"));
+    }
+
+    fn completed_observation(
+        attempt_ns: u128,
+        interval_ns: u64,
+    ) -> (super::ProbeReceipt, [u64; 16], [u64; 33]) {
+        let probes = super::ProbeReceipt {
+            attempts: 3,
+            admitted: 3,
+            replied: 3,
+            before_capture: 1,
+            after_barrier: 1,
+            max_inflight: 1,
+            max_attempt_reply_ns: attempt_ns,
+            ..Default::default()
+        };
+        let mut phases = [0; 16];
+        phases[5] = 200;
+        let mut owners = [0; 33];
+        owners[..11].copy_from_slice(&[
+            1,
+            0,
+            202,
+            200,
+            1,
+            1,
+            1,
+            1,
+            interval_ns,
+            25_000_000,
+            25_000_000,
+        ]);
+        (probes, phases, owners)
+    }
+
+    #[test]
+    fn readiness_observations_survive_each_bound_failure() {
+        for (attempt_ns, interval_ns, expected) in [
+            (
+                200_000_001,
+                1,
+                "RIB readiness component exceeded its unchanged 200 ms deadline",
+            ),
+            (
+                1,
+                25_000_001,
+                "instrumented cleanup callback interval exceeded the existing 25 ms budget",
+            ),
+        ] {
+            let (probes, phases, owners) = completed_observation(attempt_ns, interval_ns);
+            let mut output = Vec::new();
+            let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::readiness_json_to(&mut output, &probes, true, &phases, &owners)
+            }))
+            .expect_err("a failed bound must still reject the native cell");
+            assert_eq!(failure.downcast_ref::<&str>(), Some(&expected));
+            let retained = String::from_utf8(output).unwrap();
+            assert!(retained.starts_with("retirement_readiness_observation {"));
+            assert_eq!(retained.lines().count(), 1);
+            assert!(retained.contains(&format!("\"max_attempt_reply_ns\":{attempt_ns}")));
+            assert!(retained.contains(&format!("\"max_checkpoint_interval_ns\":{interval_ns}")));
+            assert!(!retained.contains("retirement_receipt "));
+        }
+    }
+
+    #[test]
+    fn readiness_observation_keeps_exact_limits_and_null_correctness_clocks() {
+        let (probes, phases, owners) = completed_observation(200_000_000, 25_000_000);
+        let mut output = Vec::new();
+        let accepted = super::readiness_json_to(&mut output, &probes, true, &phases, &owners);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("retirement_readiness_observation {accepted}\n")
+        );
+        let (probes, phases, owners) = completed_observation(200_000_001, 25_000_001);
+        let mut output = Vec::new();
+        let unmeasured = super::readiness_json_to(&mut output, &probes, false, &phases, &owners);
+        assert!(unmeasured.contains("\"max_attempt_reply_ns\":null"));
+        assert!(unmeasured.contains("\"max_checkpoint_interval_ns\":null"));
+        assert!(!unmeasured.contains("200000001"));
+        assert!(!unmeasured.contains("25000001"));
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("retirement_readiness_observation {unmeasured}\n")
+        );
     }
 
     #[test]

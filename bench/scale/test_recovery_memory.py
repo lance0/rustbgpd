@@ -1813,6 +1813,56 @@ class RetirementReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(receipt.InvalidReceipt, "nonforced cleanup callback"):
             receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
 
+    def test_retirement_readiness_rejects_owner_replies_without_interior_probe(self):
+        for measured in (False, True):
+            with self.subTest(measured=measured):
+                row = self.with_readiness(self.row(measured=measured))
+                # Both producer replies are the required before/after probes;
+                # neither can also prove a reply inside the cleanup owner.
+                row["readiness"]["probe"].update(attempts=2, admitted=2, replied=2)
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "owner replies exceed interior"):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full",
+                                                     measured=measured)
+
+    def test_retirement_readiness_sums_replies_across_owners(self):
+        row = self.with_readiness(self.row())
+        owners = row["readiness"]["owners"]
+        # A separate, empty cleanup owner can answer a request too. Its reply
+        # still consumes a distinct producer request outside the two sentinels.
+        owners["private_outbound_cleanup"].update(
+            owners=1, callbacks=2, admitted=1, serviced=1, replied=1,
+            max_checkpoint_interval_ns=20_000_000,
+            max_eligible_opportunity_gap_ns=40_000_000, service_budget_ns=25_000_000)
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "owner replies exceed interior"):
+            receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+        row["readiness"]["probe"].update(attempts=4, admitted=4, replied=4)
+        receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+
+    def test_retirement_readiness_rejects_owner_admissions_without_interior_probe(self):
+        for count in (1, 2):
+            with self.subTest(owners=count):
+                row = self.with_readiness(self.row(cell="retirement-empty"))
+                total = count + 1  # One fewer interior request than claimed admissions.
+                row["readiness"]["probe"].update(attempts=total, admitted=total, replied=total)
+                names = ("received_cleanup_including_gc", "private_outbound_cleanup")
+                for name in names[:count]:
+                    row["readiness"]["owners"][name].update(
+                        owners=1, callbacks=2, admitted=1, serviced=1,
+                        max_checkpoint_interval_ns=20_000_000,
+                        max_eligible_opportunity_gap_ns=40_000_000, service_budget_ns=25_000_000)
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "owner admissions exceed interior"):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-empty")
+
+    def test_retirement_readiness_accepts_empty_boundaries_and_preowner_service(self):
+        row = self.with_readiness(self.row(cell="retirement-empty"))
+        row["readiness"]["probe"].update(attempts=2, admitted=2, replied=2)
+        receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-empty")
+        # An interior request queued before owner entry counts as serviced,
+        # without claiming in-owner admission or delivery.
+        row["readiness"]["probe"].update(attempts=3, admitted=3, replied=3)
+        row["readiness"]["owners"]["received_cleanup_including_gc"]["serviced"] = 1
+        receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-empty")
+
     def test_retirement_readiness_correctness_requires_null_all_clocks_and_never_qualifies(self):
         for section, field in (("probe", "max_refill_gap_ns"), ("probe", "max_enqueue_reply_ns"),
                                ("received_cleanup_including_gc", "max_checkpoint_interval_ns"),
