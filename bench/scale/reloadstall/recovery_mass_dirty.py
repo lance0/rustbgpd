@@ -347,7 +347,8 @@ def seal_build(root):
     seal = root / BUILD_EVIDENCE_SEAL
     require(not os.path.lexists(seal), "campaign build evidence is already sealed")
     require(not any(root.glob("leg-*")) and not any(root.glob("controller-*.log"))
-            and not (root / "driver.exit").exists(), "campaign build evidence must be sealed before the first leg")
+            and not (root / "driver.exit").exists() and not (root / "execution.exit").exists(),
+            "campaign build evidence must be sealed before the first leg")
     manifest = load_manifest(root)
     hashes, _ = campaign_build_evidence(root, manifest)
     # Exclusive creation makes this a one-time pre-leg record. Consumers only
@@ -1152,8 +1153,12 @@ def validate_leg(leg, manifest, row):
 def finalize(root):
     root = Path(root)
     try:
-        require((root / "driver.exit").read_text().strip() == "0", "driver failed or was interrupted")
-        return analyze(root)
+        require((root / "execution.exit").read_text().strip() == "0", "driver failed or was interrupted")
+        driver_status = (root / "driver.exit").read_text().strip()
+        result = analyze(root)
+        require(driver_status == ("1" if result["status"] == "FAIL" else "0"),
+                "driver exit differs from replayed acceptance verdict")
+        return result
     except (ValueError, OSError, KeyError, TypeError, IndexError) as error:
         result = {"status": "INVALID", "reason": str(error), "release_soak_qualified": False}
         if root.is_dir():

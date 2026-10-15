@@ -726,8 +726,8 @@ class MassDirtyTests(unittest.TestCase):
         (root / "driver.exit").write_text("0\n")
         self.assertEqual(receipt.finalize(root)["status"], "INVALID")
 
-    def complete_campaign(self):
-        root, manifest = self.manifest()
+    def complete_campaign(self, measured_failure=False):
+        root, manifest = self.manifest(correctness=not measured_failure)
         (root / "candidate.sha").write_text(manifest["head"] + "\n")
         source = ("    fn capture_group_admitted_keys_inner(\n"
                   "        let captured = ledger.capture_full_old_with_checkpoint(\n"
@@ -766,7 +766,10 @@ class MassDirtyTests(unittest.TestCase):
         self.assertEqual(set(seal["files"]), set(self.build_evidence_names()))
         for index, arm in enumerate(manifest["schedule"]):
             leg, row = self.small_leg(manifest)
-            row.update({"arm": arm, "index": index, "source": manifest["head"], "status": "CORRECTNESS_ONLY",
+            if measured_failure:
+                self.measured_leg(leg, row, arm)
+            row.update({"arm": arm, "index": index, "source": manifest["head"],
+                        "status": "PASS" if measured_failure else "CORRECTNESS_ONLY",
                         "capture_source_sha256": receipt.digest(root / "capture-source.rs"),
                         "binary_sha256": receipt.digest(binaries / f"rustbgpd-{arm}"),
                         "harness_sha256": receipt.digest(binaries / "reloadstall"),
@@ -774,8 +777,153 @@ class MassDirtyTests(unittest.TestCase):
             receipt.write_json(leg / "result.json", row)
             leg.rename(root / f"leg-{index}-{arm}")
         (root / "driver.exit").write_text("0\n")
-        self.assertEqual(receipt.finalize(root)["status"], "CORRECTNESS_ONLY")
+        (root / "execution.exit").write_text("0\n")
+        if not measured_failure:
+            self.assertEqual(receipt.finalize(root)["status"], "CORRECTNESS_ONLY")
+        else:
+            self.assertEqual(receipt.analyze(root)["status"], "FAIL")
         return root, manifest
+
+    def measured_leg(self, leg, row, arm):
+        """Synthetic measured records exercise replay; no clocks are sampled."""
+        records = receipt.harness_records(leg / "harness.log")
+        records["mass_dirty_ready"][0]["correctness_only"] = False
+        probes = [{"sequence": index + 1, "status": 200, "deadline_ms": 250,
+                   "elapsed_seconds": .01, "started_monotonic_seconds": float(100 + index),
+                   "finished_monotonic_seconds": 100.01 + index} for index in range(20)]
+        records["mass_dirty_readiness"] = probes
+        records["mass_dirty_exit"][0]["readiness_samples"] = len(probes)
+        for index, generation in enumerate(("b", "a")):
+            start = 100.5 + index * 10
+            duration = 4 if arm == "candidate" else 2
+            drain, resume, fold = start + .5, start + 1.5, start + duration
+            operation = row["operations"][index]
+            operation.update({"trigger_monotonic_seconds": start, "drain_monotonic_seconds": drain,
+                "resume_monotonic_seconds": resume, "fold_monotonic_seconds": fold,
+                "trigger_to_drain_seconds": .5, "drain_to_resume_seconds": 1,
+                "resume_to_observed_fold_seconds": duration - 1.5, "trigger_to_fold_seconds": duration})
+            for name in ("resume_to_fold_p50_seconds", "resume_to_fold_max_seconds"):
+                operation[name] = duration - 1.5
+                records["mass_dirty_complete"][index][name] = duration - 1.5
+            records["mass_dirty_sent"][index]["drained_monotonic_seconds"] = drain
+            path = leg / f"neighbors-paused-{generation}.json"
+            witness = json.loads(path.read_text())
+            for sweep_index, rows in enumerate(witness["sweeps"]):
+                for peer_index, item in enumerate(rows):
+                    begin = drain + .01 * (1 + sweep_index * len(rows) + peer_index)
+                    item["query_begin_monotonic_seconds"] = begin
+                    item["query_end_monotonic_seconds"] = begin + .001
+            witness["overlap"] = [receipt.dirty_overlap(rows) for rows in witness["sweeps"]]
+            witness["stable_overlap"] = receipt.dirty_overlap([item for rows in witness["sweeps"] for item in rows])
+            receipt.write_json(path, witness)
+        for operation, coverage in zip(row["operations"], receipt.readiness_coverage(records, row["operations"], False), strict=True):
+            operation["readiness_coverage"] = coverage
+        (leg / "harness.log").write_text("".join(prefix + " " + json.dumps(record) + "\n"
+            for prefix, values in records.items() for record in values))
+        (leg / "memory.csv").write_text("monotonic_ns,peak_bytes\n100,2048\n")
+        for name, maximum in (("memory_after", receipt.LIMITS["daemon_bytes"]),
+                              ("harness_memory_after", receipt.LIMITS["harness_bytes"])):
+            row[name] = {"memory.max": maximum, "memory.peak": 2048, "memory.current": 1024,
+                         "memory.swap.max": 0, "memory.swap.peak": 0, "memory.swap.current": 0,
+                         "boundary_monotonic_ns": 200, "events": {"oom": 0, "oom_kill": 0, "oom_group_kill": 0}}
+        row["raw_sha256"] = self.raw_hashes(leg)
+
+    def test_actual_analyze_failure_survives_driver_cleanup_and_finalizer(self):
+        root, _ = self.complete_campaign(measured_failure=True)
+        expected = receipt.analyze(root)
+        self.assertEqual(expected["status"], "FAIL")
+        source = Path(__file__).with_name("run-recovery-mass-dirty.sh").read_text()
+        handler = source[source.index("finish() {"):source.index('mkdir -p "$output/bin"')]
+        ending = source[source.rindex("\ndone\n") + len("\ndone\n"):]
+        scratch = self.root / "accepted-failure-scratch"
+        (scratch / "candidate").mkdir(parents=True)
+        (scratch / "flat").mkdir()
+        setup = r'''
+set -euo pipefail
+output=$TEST_OUTPUT scratch=$TEST_SCRATCH repository=$TEST_REPOSITORY checker=$TEST_CHECKER
+active_controller='' active_starttime='' acceptance_status=0
+git() { command rmdir -- "${!#}"; }
+'''
+        completed = subprocess.run(["bash", "-c", setup + handler + ending],
+            env=os.environ | {"TEST_OUTPUT": str(root), "TEST_SCRATCH": str(scratch),
+                "TEST_REPOSITORY": str(self.root), "TEST_CHECKER": str(receipt.HERE / "recovery_mass_dirty.py")},
+            text=True, capture_output=True, timeout=5)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        result = receipt.finalize(root)
+        self.assertEqual(result, expected)
+        self.assertEqual(json.loads((root / "verdict.json").read_text()), expected)
+        finalizer = subprocess.run([sys.executable, str(receipt.HERE / "recovery_mass_dirty.py"), "finalize", str(root)],
+                                   text=True, capture_output=True, timeout=5)
+        self.assertEqual(finalizer.returncode, 1, finalizer.stderr)
+        self.assertEqual(json.loads(finalizer.stdout), expected)
+        self.assertEqual((root / "driver.exit").read_text(), "1\n")
+        self.assertEqual((root / "execution.exit").read_text(), "0\n")
+        self.assertFalse(scratch.exists(), "an acceptance failure must still finish normal cleanup")
+
+    def test_actual_analyzer_or_cleanup_errors_still_invalidate_campaigns(self):
+        source = Path(__file__).with_name("run-recovery-mass-dirty.sh").read_text()
+        handler = source[source.index("finish() {"):source.index('mkdir -p "$output/bin"')]
+        ending = source[source.rindex("\ndone\n") + len("\ndone\n"):]
+        setup = r'''
+set -euo pipefail
+output=$TEST_OUTPUT scratch=$TEST_SCRATCH repository=$TEST_REPOSITORY checker=$TEST_CHECKER
+active_controller='' active_starttime='' acceptance_status=0
+git() {
+    [[ $TEST_CLEANUP_EXIT == 0 ]] || return "$TEST_CLEANUP_EXIT"
+    command rmdir -- "${!#}"
+}
+'''
+        for failure in ("analyzer", "cleanup"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(prefix="rmd-verdict-") as directory:
+                with mock.patch.object(self, "root", Path(directory)):
+                    root, _ = self.complete_campaign(measured_failure=True)
+                    if failure == "analyzer":
+                        (root / "leg-0-flat/result.json").unlink()
+                    scratch = self.root / "failed-scratch"
+                    (scratch / "candidate").mkdir(parents=True)
+                    (scratch / "flat").mkdir()
+                    result = subprocess.run(["bash", "-c", setup + handler + ending],
+                        env=os.environ | {"TEST_OUTPUT": str(root), "TEST_SCRATCH": str(scratch),
+                            "TEST_REPOSITORY": str(self.root), "TEST_CHECKER": str(receipt.HERE / "recovery_mass_dirty.py"),
+                            "TEST_CLEANUP_EXIT": "17" if failure == "cleanup" else "0"},
+                        text=True, capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, 17 if failure == "cleanup" else 1, result.stderr)
+                    self.assertEqual((root / "execution.exit").read_text(), "17\n" if failure == "cleanup" else "0\n")
+                    verdict = receipt.finalize(root)
+                    self.assertEqual(verdict["status"], "INVALID")
+                    self.assertEqual(verdict["reason"], "driver failed or was interrupted" if failure == "cleanup" else "missing complete leg 0")
+                    self.assertEqual(scratch.exists(), failure == "cleanup")
+
+    def test_completed_execution_marker_prevents_build_resealing(self):
+        root, manifest = self.complete_campaign()
+        seal = root / "campaign-build-evidence.json"
+        seal.unlink()
+        (root / "driver.exit").unlink()
+        for leg in root.glob("leg-*"):
+            leg.rename(self.root / leg.name)
+        self.assertEqual((root / "execution.exit").read_text(), "0\n")
+        with self.assertRaisesRegex(ValueError, "before the first leg"):
+            receipt.seal_build(root)
+        self.assertFalse(seal.exists())
+        (root / "execution.exit").unlink()
+        receipt.seal_build(root)
+        receipt.verified_build_evidence(root, manifest)
+
+    def test_terminal_exit_markers_require_execution_success_and_exact_replayed_verdict(self):
+        for measured, marker, value in ((False, "execution.exit", None), (False, "execution.exit", "1\n"),
+                                         (False, "driver.exit", None),
+                                         (False, "driver.exit", "1\n"), (True, "driver.exit", "0\n"),
+                                         (True, "driver.exit", "130\n")):
+            with self.subTest(measured=measured, marker=marker, value=value), tempfile.TemporaryDirectory(prefix="rmd-markers-") as directory:
+                with mock.patch.object(self, "root", Path(directory)):
+                    root, _ = self.complete_campaign(measured_failure=measured)
+                    (root / "driver.exit").write_text("1\n" if measured else "0\n")
+                    self.assertEqual(receipt.finalize(root)["status"], "FAIL" if measured else "CORRECTNESS_ONLY")
+                    if value is None:
+                        (root / marker).unlink()
+                    else:
+                        (root / marker).write_text(value)
+                    self.assertEqual(receipt.finalize(root)["status"], "INVALID")
 
     def build_evidence_names(self):
         return ("campaign.json", "campaign.sha256", "candidate.sha", "capture-source.rs",
@@ -930,7 +1078,7 @@ cargo() {
         setup = r'''
 set -euo pipefail
 output=$TEST_OUTPUT scratch=$TEST_SCRATCH repository=$TEST_REPOSITORY
-active_controller='' active_starttime=''
+active_controller='' active_starttime='' acceptance_status=0
 if [[ $TEST_MISMATCH == 1 ]]; then active_controller=12345 active_starttime=original; fi
 controller_starttime() { printf 'changed\n'; }
 kill() { printf 'kill %s\n' "$*" >>"$TEST_CALLS"; }
@@ -951,13 +1099,14 @@ rm() {
 '''
         for initial, candidate, flat, removal, mismatch in ((0, 17, 0, 0, 0), (0, 0, 18, 0, 0),
                                                            (0, 17, 18, 0, 0), (0, 0, 0, 19, 0),
-                                                           (23, 17, 18, 19, 0), (0, 0, 0, 0, 0),
+                                                           (23, 17, 18, 19, 0), (130, 0, 0, 0, 0),
+                                                           (143, 0, 0, 0, 0), (0, 0, 0, 0, 0),
                                                            (0, 0, 0, 0, 1), (23, 0, 0, 0, 1)):
             with self.subTest(initial=initial, candidate=candidate, flat=flat, removal=removal, mismatch=mismatch):
                 scratch = self.root / f"scratch-{initial}-{candidate}-{flat}-{removal}-{mismatch}"
                 (scratch / "candidate").mkdir(parents=True)
                 (scratch / "flat").mkdir()
-                for name in ("cleanup-error.txt", "scratch-retained.txt", "driver.exit"):
+                for name in ("cleanup-error.txt", "scratch-retained.txt", "driver.exit", "execution.exit"):
                     (root / name).unlink(missing_ok=True)
                 calls = self.root / "cleanup-calls"
                 calls.write_text("")
@@ -972,6 +1121,7 @@ rm() {
                 self.assertEqual(result["status"], "INVALID" if expected else "CORRECTNESS_ONLY")
                 self.assertEqual(completed.returncode, expected, completed.stderr)
                 self.assertEqual((root / "driver.exit").read_text(), f"{expected}\n")
+                self.assertEqual((root / "execution.exit").read_text(), f"{expected}\n")
                 expected_calls = ["wait 12345"] if mismatch else [] if initial else ["git candidate", "git flat"]
                 if not (initial or mismatch or candidate or flat):
                     expected_calls.append("rm")
@@ -1205,12 +1355,13 @@ rm() {
         receipt.write_json(leg / "fixture.sha256.json", {name: receipt.digest(fixture / name) for name in receipt.FIXTURE_INPUTS})
         (leg / "config-check.log").write_text("strict config validation passed\n")
         stimulus = manifest["wire_stimulus"]
-        ready = {"family_keys": manifest["family_keys"], "receivers": 2,
-                 "bitmap_bytes": 2 * sum((count + 63) // 64 * 8 * 3 for count in manifest["family_keys"]),
+        receivers = manifest["receivers"]
+        ready = {"family_keys": manifest["family_keys"], "receivers": receivers,
+                 "bitmap_bytes": receivers * sum((count + 63) // 64 * 8 * 3 for count in manifest["family_keys"]),
                  "correctness_only": True, **{key: stimulus[key] for key in
                     ("batch_size", "origin_cardinality", "baseline_eor_messages", "receiver_receive_buffer_bytes")}}
         lines = ["mass_dirty_ready " + json.dumps(ready)]
-        peers = [{"peer": receipt.peer(i), "group": "group:7", "pending": False} for i in (1, 2)]
+        peers = [{"peer": receipt.peer(i), "group": "group:7", "pending": False} for i in range(1, receivers + 1)]
         source = {"address": receipt.peer(0), "state": "Established", "outbound_resync_pending": False}
         receipt.write_json(leg / "source-initial.json", source)
         receipt.write_json(leg / "neighbors-initial.json", peers)
@@ -1221,11 +1372,11 @@ rm() {
         (leg / "metrics-initial.prom").write_text(metrics(charge))
         daemon_log = bytearray(b'{"fields":{"message":"startup"}}\n')
         for generation in ("b", "a"):
-            lines.append("mass_dirty_paused " + json.dumps({"generation": generation, "receivers": 2}))
+            lines.append("mass_dirty_paused " + json.dumps({"generation": generation, "receivers": receivers}))
             lines.append("mass_dirty_sent " + json.dumps({"generation": generation, "family_keys": manifest["family_keys"],
                 "announcement_messages": stimulus["origin_cardinality"], "eor_messages": stimulus["origin_cardinality"],
                 "origin_cardinality": stimulus["origin_cardinality"], "writer_drained": True, "drained_monotonic_seconds": None}))
-            wire = {"generation": generation, "receivers": 2, "withdrawals": manifest["receivers"] * manifest["withdrawals_per_receiver"], "exact_fold": True,
+            wire = {"generation": generation, "receivers": receivers, "withdrawals": manifest["receivers"] * manifest["withdrawals_per_receiver"], "exact_fold": True,
                     "sessions_continuous": True, "resume_to_fold_p50_seconds": None, "resume_to_fold_max_seconds": None}
             lines.append("mass_dirty_complete " + json.dumps(wire))
             operation = {**wire, "fallback_before": dict.fromkeys(receipt.CAUSES, 0),

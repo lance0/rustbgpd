@@ -52,7 +52,7 @@ python3 "$checker" init "$output" --head "$head" --profile "$profile" --cohort "
     --daemon-cpus "$daemon_cpus" --harness-cpus "$harness_cpus" "${correctness[@]}"
 output=$(realpath -- "$output")
 scratch=$(mktemp -d "${RUNNER_TEMP:-/tmp}/recovery-mass-dirty-build.XXXXXXXX")
-active_controller='' active_starttime=''
+active_controller='' active_starttime='' acceptance_status=0
 controller_starttime() {
     python3 - "$1" <<'PY'
 from pathlib import Path
@@ -100,6 +100,9 @@ finish() {
         # exact scratch paths for inspection rather than removing live inputs.
         printf '%s\n' "$scratch" >"$output/scratch-retained.txt"
     fi
+    # A valid acceptance failure still completes normal execution and cleanup.
+    printf '%s\n' "$status" >"$output/execution.exit"
+    [[ $status != 0 ]] || status=$acceptance_status
     printf '%s\n' "$status" >"$output/driver.exit"
     exit "$status"
 }
@@ -176,4 +179,8 @@ for index in "${!schedule[@]}"; do
         exit "$status"
     fi
 done
-python3 "$checker" analyze "$output"
+if python3 "$checker" analyze "$output"; then
+    acceptance_status=0
+else
+    acceptance_status=$?
+fi
