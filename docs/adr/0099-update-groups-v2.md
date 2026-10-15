@@ -471,6 +471,11 @@ mass-dirty readiness/convergence plus an actual-release-candidate soak as open
 qualification requirements. The earlier failed capture-cost amendments remain
 historical evidence; the component pass does not waive those release gates.
 
+The [wire-driven mass-dirty method](../perf/update-group-recovery-wire-mass-dirty-2026-10-15.md)
+records the fixed whole-system protocol and pending evidence separately from
+those component results. Its [qualification amendment](#amendment-2026-10-15-wire-driven-mass-dirty-qualification)
+does not yet report a whole-system verdict.
+
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
 withdraws equals the per-peer path, with exact NLRI and prepared attribute bytes.
@@ -774,3 +779,56 @@ receiver convergence and memory qualification, followed by the actual release
 candidate's soak, remain pending. The previous key-only and sorted-merge
 receipts remain unchanged and are not attributable absolute comparators or
 pooled samples for this different method. EVPN ownership remains disabled.
+
+## Amendment (2026-10-15): wire-driven mass-dirty qualification
+
+**PENDING — no whole-system result is accepted by this amendment.** The
+[method draft](../perf/update-group-recovery-wire-mass-dirty-2026-10-15.md)
+pins remotely verified source `23fe8425b3b3b7783a44b180b37ec3af91974275`.
+It includes the common-capture dedicated-readiness repair, exact operation-log
+byte-range binding and complete top-level raw-file digest roster. Remote
+publication verification and same-source local correctness/causal prerequisites
+are complete. The full-unicast/full-VPN × 12-member no-refusal/24-member
+cap-pressure campaign is dispatched as hosted run 38717584948; all four results
+remain pending. Candidate and explicit-flat builds require
+identical locked/default-feature commands in isolated targets and different
+actual executable hashes. Measured cells fix three alternating-arm repetitions,
+six legs per cell, with B then A in each. Hosted results and frozen artifact
+replay remain pending. The derived local control evidence records six healthy
+legs / twelve B/A folds around a genuine timestamp-only missing-age RED, exact
+restoration and distinct actual daemon hashes. All local cost/RSS/clocks are
+null; those controls do not qualify the 12/24-member matrix.
+
+Keep configuration, policy and the preloaded dataset unchanged while wire
+attributes alternate at the full 1,000,000 IPv4 / 230,000 IPv6 shape. Prove
+actual all-member dirty overlap using two complete paused sweeps whose
+conservative current-episode intervals have a common intersection across both
+sweeps, bounded after writer drain and before resume. A source writer-drain
+acknowledgement is not a RIB acknowledgement or remote convergence. Require each
+member's post-resume dirty=true/force=false resync receipt and exact final wire
+fold, validated online and retained as compact receipts rather than raw streams.
+Readiness requires bracketed one-second probes, HTTP 200 within 250 ms
+and no start gap above 1.25 s. Only measured no-refusal cells apply the median
+and worst trigger-to-fleet-fold bar: candidate ≤ explicit-flat × 1.10 + 30 ms.
+Pressure cells assess correctness/resources with the same absolute readiness
+bar within a fixed 1,800-second leg deadline. No-refusal forbids all fallback,
+including startup. Operational daemon_limit fallback is required in explicit-flat and already-flat VPN pressure
+arms; indexed unicast pressure requires zero operation fallback deltas. Retain
+all four fallback causes across all six monotonic sampling edges and compute
+each operation delta from its own pre-operation baseline.
+
+Preserve invalid A/B attempts and the failed small saturation trial as invalid
+evidence. Retain the earlier valid full-shape unicast correctness-only controls
+separately, with null published measurement clocks. The old bookkeeping-mutant
+and restored normal-candidate HTTP 503 failures qualify neither the intended
+causal control nor a normal run; logs do not prove the exact blocked frame.
+The source-level cold-capture regression supports the dedicated-readiness repair,
+not a new whole-system result. Keep the independent dataset acknowledgement
+failure separate. The final full-shape correctness-only controls are complete;
+hosted qualification and its replay remain pending. Preserve the external
+naive-bind EADDRINUSE caveat without inferring TIME_WAIT or counting it as RED.
+No prior component sample, correctness-only control or invalid attempt supplies
+a whole-system ratio. The existing provenance caps, bounded flat-memory trade
+and conservative
+no-proof contract remain unchanged. Actual release-candidate soak and EVPN
+activation are not established; EVPN group ownership remains disabled.
