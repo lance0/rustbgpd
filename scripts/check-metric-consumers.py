@@ -216,6 +216,11 @@ CLOSED_LABEL_SOURCES = (
         (("call", "record_message_received", 1),),
     ),
     (("bgp_messages_sent_total",), "type", (("call", "record_message_sent", 1),)),
+    (
+        ("bgp_rib_dirty_resync_total",),
+        "outcome",
+        (("call", "record_rib_dirty_resync", 0),),
+    ),
     (("evpn_df_role",), "role", (("fn", TELEMETRY, None, "set_evpn_df_role"),)),
     (
         ("evpn_es_auto_esi_state",),
@@ -246,6 +251,11 @@ CLOSED_LABEL_SOURCES = (
         ("bgp_outbound_commit_refusals_total",),
         "reason",
         (("fn", REASON_LABELS, "OutboundCommitRefusal", "as_str"),),
+    ),
+    (
+        ("bgp_update_group_recovery_fallback_total",),
+        "cause",
+        (("fn", REASON_LABELS, "UpdateGroupRecoveryFallbackCause", "as_str"),),
     ),
     (
         ("bgp_exact_export_rejections_total",),

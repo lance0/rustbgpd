@@ -361,6 +361,22 @@ TARGETS = {
         "sum by (peer, reason) (rate(bgp_outbound_commit_refusals_total"
         '{instance=~"$instance",peer=~"$peer"}[$__rate_interval]))'
     ),
+    ("Update-group recovery", "A"): (
+        "sum by (instance, cause) (rate(bgp_update_group_recovery_fallback_total"
+        '{instance=~"$instance"}[$__rate_interval]))'
+    ),
+    ("Update-group recovery", "B"): (
+        'bgp_update_group_recovery_bytes{instance=~"$instance"}'
+    ),
+    ("Update-group recovery", "C"): (
+        'bgp_update_group_recovery_peak_bytes{instance=~"$instance"}'
+    ),
+    ("Update-group recovery", "D"): (
+        'bgp_update_group_recovery_limit_bytes{instance=~"$instance"}'
+    ),
+    ("Outbound dirty peers", "A"): (
+        'bgp_rib_outbound_dirty_peers{instance=~"$instance"}'
+    ),
     ("Slow peers", "A"): (
         'bgp_peer_slow{instance=~"$instance",peer=~"$peer"}'
     ),
@@ -522,6 +538,11 @@ REQUIRED_LEGENDS = {
     ("RIB ingest pressure", "B"): "inbound safely parked {{peer}}",
     ("RIB ingest pressure", "C"): "outbound deferred {{peer}}",
     ("RIB ingest pressure", "D"): "outbound refused {{peer}} {{reason}}",
+    ("Update-group recovery", "A"): "{{instance}} fallback {{cause}}",
+    ("Update-group recovery", "B"): "{{instance}} charge bytes",
+    ("Update-group recovery", "C"): "{{instance}} peak bytes",
+    ("Update-group recovery", "D"): "{{instance}} {{scope}} cap bytes",
+    ("Outbound dirty peers", "A"): "{{instance}} dirty peers",
     ("ORR SPF activity and topology", "A"): "{{instance}} SPF runs/s",
     ("ORR SPF activity and topology", "B"): "{{instance}} nodes",
     ("ORR SPF activity and topology", "C"): "{{instance}} usable links",

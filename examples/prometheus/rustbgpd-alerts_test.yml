@@ -1301,6 +1301,152 @@ tests:
                 member appears wedged; its resync is not draining
                 residue.
 
+  # ── BgpUpdateGroupRecoveryLimited ─────────────────────────────
+  # Each limit cause fires; missing_proof never does. The 1m increment
+  # still fires at 14m (pins a window longer than 10m) and has aged out at
+  # 22m while the 11m increment still fires (pins 15m, not 30m).
+  - interval: 1m
+    input_series:
+      - series: 'bgp_update_group_recovery_fallback_total{cause="peer_limit", instance="edge1:9179"}'
+        values: "0 1x29"
+      - series: 'bgp_update_group_recovery_fallback_total{cause="daemon_limit", instance="edge1:9179"}'
+        values: "0x5 1x24"
+      - series: 'bgp_update_group_recovery_fallback_total{cause="allocation_failure", instance="edge1:9179"}'
+        values: "0x10 1x19"
+      - series: 'bgp_update_group_recovery_fallback_total{cause="missing_proof", instance="edge1:9179"}'
+        values: "0+1x29"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: BgpUpdateGroupRecoveryLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cause: peer_limit
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group recovery fell back under a resource limit on edge1:9179 (peer_limit)"
+              description: >-
+                bgp_update_group_recovery_fallback_total{cause="peer_limit"}
+                on edge1:9179 increased by 1 in the last 15 minutes. Recovery
+                proof for at least one dirty update-group member did not fit the
+                fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+                could not be allocated, so its resync withdraws every candidate
+                prefix and re-announces the current table. Receivers see extra
+                withdrawal churn. The warning log names the peer and the
+                limiting_peer; find why members miss delivery.
+          - exp_labels:
+              severity: warning
+              cause: daemon_limit
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group recovery fell back under a resource limit on edge1:9179 (daemon_limit)"
+              description: >-
+                bgp_update_group_recovery_fallback_total{cause="daemon_limit"}
+                on edge1:9179 increased by 1 in the last 15 minutes. Recovery
+                proof for at least one dirty update-group member did not fit the
+                fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+                could not be allocated, so its resync withdraws every candidate
+                prefix and re-announces the current table. Receivers see extra
+                withdrawal churn. The warning log names the peer and the
+                limiting_peer; find why members miss delivery.
+          - exp_labels:
+              severity: warning
+              cause: allocation_failure
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group recovery fell back under a resource limit on edge1:9179 (allocation_failure)"
+              description: >-
+                bgp_update_group_recovery_fallback_total{cause="allocation_failure"}
+                on edge1:9179 increased by 1 in the last 15 minutes. Recovery
+                proof for at least one dirty update-group member did not fit the
+                fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+                could not be allocated, so its resync withdraws every candidate
+                prefix and re-announces the current table. Receivers see extra
+                withdrawal churn. The warning log names the peer and the
+                limiting_peer; find why members miss delivery.
+      - eval_time: 22m
+        alertname: BgpUpdateGroupRecoveryLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cause: allocation_failure
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group recovery fell back under a resource limit on edge1:9179 (allocation_failure)"
+              description: >-
+                bgp_update_group_recovery_fallback_total{cause="allocation_failure"}
+                on edge1:9179 increased by 1 in the last 15 minutes. Recovery
+                proof for at least one dirty update-group member did not fit the
+                fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+                could not be allocated, so its resync withdraws every candidate
+                prefix and re-announces the current table. Receivers see extra
+                withdrawal churn. The warning log names the peer and the
+                limiting_peer; find why members miss delivery.
+      - eval_time: 29m
+        alertname: BgpUpdateGroupRecoveryLimited
+        exp_alerts: []
+
+  # ── BgpOutboundResyncStalled ──────────────────────────────────
+  # edge1 holds dirty peers with no drain: pending at 14m, firing at 16m
+  # (pins for: 15m). edge2 has recurring short episodes with a scraped zero
+  # and no recorded drain (an undercounted `cleared`): the zero resets the
+  # for clock. edge3 never scrapes a zero, but records a full drain every
+  # 4 minutes: the `unless` keeps it quiet.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rib_outbound_dirty_peers{job="rustbgpd", instance="edge1:9179"}'
+        values: "2x40"
+      - series: 'bgp_rib_dirty_resync_total{job="rustbgpd", instance="edge1:9179", outcome="cleared"}'
+        values: "0x40"
+      - series: 'bgp_rib_outbound_dirty_peers{job="rustbgpd", instance="edge2:9179"}'
+        values: "1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1"
+      - series: 'bgp_rib_dirty_resync_total{job="rustbgpd", instance="edge2:9179", outcome="cleared"}'
+        values: "0x40"
+      - series: 'bgp_rib_outbound_dirty_peers{job="rustbgpd", instance="edge3:9179"}'
+        values: "3x40"
+      - series: 'bgp_rib_dirty_resync_total{job="rustbgpd", instance="edge3:9179", outcome="cleared"}'
+        values: "0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8 8 8 9 9 9 9 10"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: rustbgpd
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Outbound resync not draining on edge1:9179"
+              description: >-
+                bgp_rib_outbound_dirty_peers on edge1:9179 has stayed
+                above zero for 15 minutes (now 2) with no
+                full drain of dirty outbound work. The resync timer retries every
+                second, so at least one peer has not received its current
+                advertised view for that long. Find it with rbgp doctor
+                (peer.<addr>.outbound_resync) or rbgp neighbor, and check
+                bgp_peer_slow, bgp_peer_outbound_queue_depth and
+                bgp_outbound_commit_refusals_total for the cause.
+      - eval_time: 40m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: rustbgpd
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Outbound resync not draining on edge1:9179"
+              description: >-
+                bgp_rib_outbound_dirty_peers on edge1:9179 has stayed
+                above zero for 15 minutes (now 2) with no
+                full drain of dirty outbound work. The resync timer retries every
+                second, so at least one peer has not received its current
+                advertised view for that long. Find it with rbgp doctor
+                (peer.<addr>.outbound_resync) or rbgp neighbor, and check
+                bgp_peer_slow, bgp_peer_outbound_queue_depth and
+                bgp_outbound_commit_refusals_total for the cause.
+
   # ── BgpPolicyTransitionStalled ────────────────────────────────
   - interval: 30s
     input_series:

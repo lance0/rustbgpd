@@ -2026,6 +2026,10 @@ impl RibManager {
             );
         }
         let pending_group_admitted = update_groups::admitted_recovery::AdmittedRecovery::new();
+        metrics.set_update_group_recovery_limit_bytes(
+            i64::try_from(update_groups::admitted_recovery::PEER_LIMIT_BYTES).unwrap_or(i64::MAX),
+            i64::try_from(update_groups::admitted_recovery::DAEMON_LIMIT_BYTES).unwrap_or(i64::MAX),
+        );
         metrics.set_update_group_recovery_entries(0);
         metrics.set_update_group_recovery_bytes(
             i64::try_from(pending_group_admitted.bytes()).unwrap_or(i64::MAX),
@@ -5322,6 +5326,9 @@ impl RibManager {
             // (sessions, local originators) are parked on backpressure.
             self.metrics.set_rib_ingest_channel_depth(
                 i64::try_from(self.primary_backlog()).unwrap_or(i64::MAX),
+            );
+            self.metrics.set_rib_outbound_dirty_peers(
+                i64::try_from(self.dirty_peers.len()).unwrap_or(i64::MAX),
             );
 
             if let Some(mut pending) = self.pending_clean_policy_transition.take() {

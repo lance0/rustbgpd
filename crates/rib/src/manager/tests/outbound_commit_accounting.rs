@@ -337,3 +337,63 @@ async fn handler_drained_resync_records_one_cleared_outcome() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// The dirty-peer gauge follows the actor's dirty set: one peer whose writer
+/// queue stays full reads 1 across a failed resync tick, and 0 once the
+/// session's teardown drains it.
+#[tokio::test(start_paused = true)]
+async fn outbound_dirty_peers_gauge_tracks_dirty_set() {
+    let metrics = BgpMetrics::new();
+    let dirty_peers = || gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_peers", &[]);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    // The target's one-slot queue is left full by its initial EoR.
+    let (target_tx, _target_rx) = mpsc::channel(1);
+    tx.send(peer_up(PEER, Ipv4Addr::new(192, 0, 2, 70), target_tx))
+        .await
+        .unwrap();
+    let source = IpAddr::V4(SOURCE);
+    let (source_tx, _source_rx) = mpsc::channel(64);
+    tx.send(peer_up(source, SOURCE, source_tx)).await.unwrap();
+    barrier(&tx).await;
+    assert!(dirty_peers().abs() < f64::EPSILON);
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            SOURCE,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    barrier(&tx).await;
+    assert!((dirty_peers() - 1.0).abs() < f64::EPSILON);
+
+    // A tick that finds the queue still full leaves the peer dirty.
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    barrier(&tx).await;
+    assert!(dirty_resync(&metrics, "still_dirty") >= 1.0);
+    assert!((dirty_peers() - 1.0).abs() < f64::EPSILON);
+
+    tx.send(RibUpdate::PeerDown {
+        peer: PEER,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    barrier(&tx).await;
+    assert!(dirty_peers().abs() < f64::EPSILON);
+
+    drop(tx);
+    handle.await.unwrap();
+}

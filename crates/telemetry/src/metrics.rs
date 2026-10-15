@@ -659,6 +659,7 @@ struct BgpMetricsInner {
     rib_stale_session_message_ignored: IntCounterVec,
     rib_outbound_registration_failover: IntCounterVec,
     rib_dirty_resync: IntCounterVec,
+    rib_outbound_dirty_peers: IntGauge,
     rib_ingest_channel_depth: IntGauge,
     rib_policy_transition_in_progress: IntGauge,
     rib_policy_transition_last_duration_milliseconds: IntGauge,
@@ -680,6 +681,7 @@ struct BgpMetricsInner {
     update_group_recovery_entries: IntGauge,
     update_group_recovery_bytes: IntGauge,
     update_group_recovery_peak_bytes: IntGauge,
+    update_group_recovery_limit_bytes: IntGaugeVec,
     update_group_recovery_fallback: IntCounterVec,
     update_group_runner_up_entries: IntGauge,
     update_group_interned_chains: IntGauge,
@@ -1655,6 +1657,13 @@ impl BgpMetrics {
             rib_dirty_resync.with_label_values(&[outcome]);
         }
 
+        let rib_outbound_dirty_peers = IntGauge::new(
+            "bgp_rib_outbound_dirty_peers",
+            "Peers currently marked dirty and awaiting outbound resync, sampled \
+             once per RIB manager loop iteration.",
+        )
+        .expect("valid metric definition");
+
         let rib_ingest_channel_depth = IntGauge::new(
             "bgp_rib_ingest_channel_depth",
             "Queued RibUpdate messages (not routes) waiting for the RIB manager: the \
@@ -1836,6 +1845,15 @@ impl BgpMetrics {
             "bgp_update_group_recovery_peak_bytes",
             "Highest unicast/VPN recovery capacity reservation charge, including overlapping replacement allocations and reservations rolled back on allocation refusal; not measured RSS.",
         ).expect("valid metric definition");
+        let update_group_recovery_limit_bytes = IntGaugeVec::new(
+            Opts::new(
+                "bgp_update_group_recovery_limit_bytes",
+                "Fixed unicast/VPN recovery capacity caps compared with the recovery \
+                 charge: scope 'peer' (one peer's proof) or 'daemon' (all retained proofs).",
+            ),
+            &["scope"],
+        )
+        .expect("valid metric definition");
         let update_group_recovery_fallback = IntCounterVec::new(
             Opts::new("bgp_update_group_recovery_fallback_total",
                 "Update-group recoveries entering conservative unicast/VPN withdrawal fallback because complete admitted proof is unavailable."),
@@ -3190,6 +3208,9 @@ impl BgpMetrics {
             .register(Box::new(rib_ingest_channel_depth.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_dirty_peers.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_policy_transition_in_progress.clone()))
             .expect("metric not already registered");
         registry
@@ -3252,6 +3273,9 @@ impl BgpMetrics {
         registry
             .register(Box::new(update_group_recovery_fallback.clone()))
             .expect("register update group recovery fallback");
+        registry
+            .register(Box::new(update_group_recovery_limit_bytes.clone()))
+            .expect("register update group recovery limits");
         registry
             .register(Box::new(update_group_runner_up_entries.clone()))
             .expect("metric not already registered");
@@ -3719,6 +3743,7 @@ impl BgpMetrics {
             rib_stale_session_message_ignored,
             rib_outbound_registration_failover,
             rib_dirty_resync,
+            rib_outbound_dirty_peers,
             rib_ingest_channel_depth,
             rib_policy_transition_in_progress,
             rib_policy_transition_last_duration_milliseconds,
@@ -3738,6 +3763,7 @@ impl BgpMetrics {
             update_group_recovery_entries,
             update_group_recovery_bytes,
             update_group_recovery_peak_bytes,
+            update_group_recovery_limit_bytes,
             update_group_recovery_fallback,
             update_group_runner_up_entries,
             update_group_interned_chains,
@@ -5209,6 +5235,13 @@ impl BgpMetrics {
         self.0.update_group_recovery_peak_bytes.set(count);
     }
 
+    /// Export the fixed per-peer and per-daemon recovery capacity caps.
+    pub fn set_update_group_recovery_limit_bytes(&self, peer: i64, daemon: i64) {
+        let limits = &self.0.update_group_recovery_limit_bytes;
+        limits.with_label_values(&["peer"]).set(peer);
+        limits.with_label_values(&["daemon"]).set(daemon);
+    }
+
     /// Record entry into a conservative common-family recovery fallback.
     pub fn record_update_group_recovery_fallback(
         &self,
@@ -5377,6 +5410,11 @@ impl BgpMetrics {
             .rib_policy_transition_outcomes
             .with_label_values(&[outcome.as_str()])
             .inc();
+    }
+
+    /// Set the sampled number of peers awaiting dirty outbound resync.
+    pub fn set_rib_outbound_dirty_peers(&self, count: i64) {
+        self.0.rib_outbound_dirty_peers.set(count);
     }
 
     /// Set the sampled depth of the RIB manager ingest channel.
@@ -10436,6 +10474,21 @@ mod tests {
                 0.0
             };
             assert_eq!(metric.get_counter().get_value(), expected);
+        }
+    }
+
+    #[test]
+    fn recovery_limits_and_dirty_peers_export_set_values() {
+        let metrics = BgpMetrics::new();
+        metrics.set_update_group_recovery_limit_bytes(64, 512);
+        metrics.set_rib_outbound_dirty_peers(3);
+        let text = gather_text(&metrics);
+        for series in [
+            "bgp_update_group_recovery_limit_bytes{scope=\"peer\"} 64",
+            "bgp_update_group_recovery_limit_bytes{scope=\"daemon\"} 512",
+            "bgp_rib_outbound_dirty_peers 3",
+        ] {
+            assert!(text.lines().any(|line| line == series), "missing {series}");
         }
     }
 }

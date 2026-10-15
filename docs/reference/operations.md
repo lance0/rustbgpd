@@ -1489,9 +1489,12 @@ Each fallback carries one cause, the `cause` label of
 | `missing_proof` | No complete pre-commit proof or valid admitted batch existed for the missed delivery. This is the ordinary outcome of some missed sends, not resource pressure |
 
 The two caps are compiled-in constants that account for reserved proof
-capacity, not configuration settings or RSS limits. Use
-`bgp_update_group_recovery_bytes` and `bgp_update_group_recovery_peak_bytes`
-against 512 MiB to judge daemon headroom.
+capacity, not configuration settings or RSS limits. The daemon exports them as
+`bgp_update_group_recovery_limit_bytes{scope="peer"}` and
+`{scope="daemon"}`; compare `bgp_update_group_recovery_bytes` and
+`bgp_update_group_recovery_peak_bytes` with the daemon cap to judge headroom.
+The Grafana "Update-group recovery" panel plots the fallback rate by cause
+with the charge, peak and both caps.
 
 The daemon logs a warning naming the affected `peer` and `cause` when a
 fallback starts. For a limit cause, the admitted-key warning also carries
@@ -1518,8 +1521,22 @@ seconds or more (about sixty failed retries, twice the default
 `slow_peer_duration`), and green while a shorter resync is pending; settled
 peers add no check. `rib.update_group_recovery` is yellow when the
 `peer_limit`, `daemon_limit` or `allocation_failure` count is above zero since
-daemon start, and green otherwise; `missing_proof` alone stays green. Both
-warnings retain exit status 0.
+daemon start, or when the current recovery charge is above 75% of the daemon
+cap, and green otherwise; `missing_proof` alone stays green. A daemon that does
+not export the cap gauge gets the counter verdict only. Both warnings retain
+exit status 0.
+
+Two shipped alerts cover the same state. `BgpUpdateGroupRecoveryLimited`
+(warning) fires while a limit cause increased in the last 15 minutes.
+`BgpOutboundResyncStalled` (warning) fires when
+`bgp_rib_outbound_dirty_peers`, the current size of the RIB's dirty set, has
+stayed above zero for 15 minutes without a recorded full drain. The gauge is
+sampled from state on every RIB loop iteration, so it does not depend on
+every drain path recording `bgp_rib_dirty_resync_total{outcome="cleared"}`;
+a recorded drain only clears the alert sooner. A healthy episode drains
+within seconds, so recurring short episodes return the gauge to zero and do
+not fire. The Grafana "Outbound dirty peers" panel sits beside the dirty-resync
+panel.
 
 A persistent limit cause means recovery proofs outgrow the fixed caps: many
 members going dirty against a large table at the same time. Find why members
@@ -1757,6 +1774,7 @@ exactly under the floods these drops account for.
 | `bgp_update_group_recovery_entries` | Unicast/VPN admitted keys retained for dirty or interrupted update-group recovery, including captures in progress. Healthy members retain no key proof |
 | `bgp_update_group_recovery_bytes` | Current recovery capacity charge: fixed ledger/owned headers and exact reserved metadata/key capacities. Freed keys release their charge; deleting a key alone retains capacity. The fixed ledger header remains counted when no proof is retained. Excludes allocator bookkeeping and RSS |
 | `bgp_update_group_recovery_peak_bytes` | Highest recovery capacity reservation charge, including full overlapping replacement allocations and reservations rolled back after allocation refusal. This is a conservative accounting high-water mark, not a cgroup-memory measurement |
+| `bgp_update_group_recovery_limit_bytes{scope}` | The fixed recovery capacity caps the charge is compared against: `scope="peer"` (64 MiB, one peer's proof) and `scope="daemon"` (512 MiB, all retained proofs). Compiled-in constants, not configuration |
 | `bgp_update_group_recovery_fallback_total{cause}` | Recoveries entering conservative unicast/VPN withdrawal fallback because complete admitted proof is unavailable. Fixed causes: `peer_limit`, `daemon_limit`, `allocation_failure`, `missing_proof`. The peer and, if different, the limiting peer appear in diagnostics rather than metric labels |
 | `bgp_peer_slow{peer}` | 1 while the peer is flagged slow: Established and alive (keepalives flowing, so the RFC 9687 send-hold teardown never fires) but persistently not draining its outbound queue — backlog at or above `slow_peer_threshold_pct` of the writer buffer for `slow_peer_duration` seconds. See "Slow peers" below for interpretation and actions. Refreshed on both transitions and on session teardown; series reaped on peer delete |
 | `bgp_route_refresh_in_progress{peer,afi_safi}` | Active inbound Enhanced Route Refresh window for a peer/family (1 = active, 0 = inactive) |
@@ -1768,6 +1786,7 @@ exactly under the floods these drops account for.
 | `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded by the same session-identity rule — a superseded session's queued message processed after the replacement's `PeerUp`. `kind` labels: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`, `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`. These identify the combined unicast / FlowSpec / EVPN `RoutesReceived` envelope, the separate BGP-LS, VPN, labeled-unicast, and RT-Constrain route-message variants, End-of-RIB, route-refresh request / RFC 7313 BoRR/EoRR, RFC 5291 ORF push, peer-group policy identity, and slow-peer state respectively. The registered session's state is untouched |
 | `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor enters `awaiting_refresh`, is re-registered, receives the staged initial table without EoR, and is asked for an inbound ROUTE-REFRESH; matching post-failback BoRR/EoRR completes convergence |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer outcomes: `still_dirty` when a tick leaves work pending and the timer re-arms; `cleared` when a tick drains the work, or when the RIB loop notices at the end of an iteration that a message handler such as session teardown drained it. A drain on a loop path that continues before that check is not counted, so a missing `cleared` does not prove that resync is stalled. Both series are exported at 0 from startup |
+| `bgp_rib_outbound_dirty_peers` | Peers currently marked dirty and awaiting outbound resync, sampled from the RIB's dirty set once per manager loop iteration. A healthy episode returns to 0 within seconds; `BgpOutboundResyncStalled` fires when it stays above 0 for 15 minutes without a recorded full drain. `rbgp doctor` and `rbgp neighbor` identify the peers |
 | `bgp_rib_ingest_channel_depth` | Queued `RibUpdate` messages (one per inbound UPDATE or control event, not routes) waiting for the RIB manager, sampled once per manager loop iteration: the ingest channel plus at most one update held while a distribution window decides whether to extend. Producers block only when the channel itself is full, which reads capacity + 1 while an update is held and capacity otherwise; a sustained reading at or above the channel capacity means the channel is full or within one message of full |
 | `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). Mutations remain fenced until the transition is terminal; general RIB queries are served from the pre-commit state between the pre-commit polls and wait only through the commit batches, while the dedicated core-readiness lane remains responsive throughout |
 | `bgp_rib_policy_transition_last_duration_milliseconds` | Monotonic elapsed duration of the most recently completed atomic export-policy transition; retained across idle periods for post-event diagnosis |

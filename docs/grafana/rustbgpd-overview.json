@@ -232,7 +232,7 @@
       "id": 4,
       "type": "stat",
       "title": "Ungrouped (fallback) peers",
-      "description": "bgp_update_group_fallback_peers: peers on the per-peer distribution path because a v1 disqualifier (peer-context policy, Add-Path send, ORR vantage, negotiated ORF) applies.",
+      "description": "bgp_update_group_fallback_peers: peers on the per-peer distribution path because of peer-context policy, Add-Path send, per-client best on a VPN or RT-Constrain session, ORR vantage, negotiated ORF, or recoverable slow-peer isolation. rbgp neighbor shows each peer's reason.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1609,6 +1609,154 @@
           "expr": "bgp_update_group_residue_entries{instance=~\"$instance\"}",
           "legendFormat": "residue entries",
           "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 78,
+      "type": "timeseries",
+      "title": "Update-group recovery",
+      "description": "Unicast/VPN update-group recovery: bgp_update_group_recovery_fallback_total as a rate by cause (left axis), and the recovery charge, its peak and the fixed per-peer and per-daemon caps from bgp_update_group_recovery_limit_bytes (right axis). peer_limit, daemon_limit and allocation_failure mean a dirty member over-withdraws because its proof did not fit; missing_proof is an ordinary missed delivery. The charge is reserved proof capacity, not RSS.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 71
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* bytes$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (instance, cause) (rate(bgp_update_group_recovery_fallback_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} fallback {{cause}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_update_group_recovery_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} charge bytes",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_update_group_recovery_peak_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} peak bytes",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_update_group_recovery_limit_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{scope}} cap bytes",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 79,
+      "type": "timeseries",
+      "title": "Outbound dirty peers",
+      "description": "bgp_rib_outbound_dirty_peers: peers marked dirty and awaiting outbound resync, sampled from the RIB's dirty set on each loop iteration. The resync timer retries every second, so a healthy episode returns to 0 within seconds; a value that never returns to 0 is what BgpOutboundResyncStalled alerts on. Find the peer with rbgp doctor or rbgp neighbor.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 71
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_rib_outbound_dirty_peers{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} dirty peers",
+          "refId": "A"
         }
       ]
     },
