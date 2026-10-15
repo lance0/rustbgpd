@@ -451,6 +451,12 @@ attachment; refusal retries a fitting flat proof before the counted no-proof
 fallback. The [snapshot-churn receipt](../perf/update-group-recovery-snapshot-churn-2026-10-14.md)
 qualifies its recorded shapes, not arbitrary churn or general regroup scale.
 
+Capture cost remains a release gate for the live unicast/VPN path. The
+[merge-capture receipt](../perf/update-group-recovery-merge-capture-scans-2026-10-15.md)
+misses the approximately 1.5 times shared/flat target in all 24 unicast/VPN cells.
+Linear classification alone does not accept complete-capture cost or the
+CPU/memory trade. See the [capture-cost amendment](#amendment-2026-10-15-capture-cost-candidate-not-accepted).
+
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
 withdraws equals the per-peer path, with exact NLRI and prepared attribute bytes.
@@ -626,3 +632,27 @@ Qualify mass reevaluation and peer-down with matched off-box cgroup receipts
 against the original parent and the bounded-flat implementation before accepting
 the release memory envelope. Do not replace the earlier receipt or extrapolate a
 modelled component charge into a whole-daemon memory claim.
+
+## Amendment (2026-10-15): capture-cost candidate not accepted
+
+The [merge-capture receipt](../perf/update-group-recovery-merge-capture-scans-2026-10-15.md)
+records unmerged candidate `7e9fbd30f36c826a64943781b1ced1001f98f183` in
+hosted run 38670839102. Its six fresh profile/order campaigns completed all
+36 cells and 144 legs with exact proofs, zero refusals and clean settlement.
+That is evidence completeness, not acceptance of runtime cost.
+
+Live OLD iteration is not guaranteed to be sorted. The candidate accounts for
+borrowed-reference collection and sorting before linear classification and
+population. Shared/flat complete-capture ratios reach 2.989 for shuffled
+unicast and 6.691 for shuffled VPN; all 24 unicast/VPN cells miss the agreed
+approximate 1.5 target. Sorting remains O(n log n). The earlier key-only,
+presorted receipt is preserved and cannot establish an attributable absolute
+speedup across these methods.
+
+This candidate does not settle the live unicast/VPN capture cost. Review a
+bounded sharing gate or exact-reserved flat full-OLD capture as a separate
+CPU/memory decision. Keep the existing 64 MiB / 512 MiB limits and conservative
+no-proof contract; do not hide fallback or raise caps to pass a comparison.
+Matched whole-system mass-dirty readiness, receiver convergence and memory
+evidence must exercise the selected path, followed by a soak on the actual
+release candidate. EVPN ownership remains disabled under its existing gates.
