@@ -1811,16 +1811,11 @@ impl RibManager {
         self.capture_group_admitted_keys_inner(peer, false)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep the fallible old-view capture and its failure publication in one actor transaction"
-    )]
     fn capture_group_admitted_keys_inner(
         &mut self,
         peer: IpAddr,
         mark_dirty_on_refusal: bool,
     ) -> bool {
-        use admitted_recovery::Key;
         if self.pending_group_admitted.contains_record(peer)
             || self.group_recovery_fallback(peer).is_some()
             || self.dirty_peers.contains(&peer)
@@ -1828,6 +1823,25 @@ impl RibManager {
         {
             return false;
         }
+        // Ingest can capture OLD before its peer-boundary readiness drain.
+        // Activate the interior checkpoints without admitting other work.
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                manager.capture_group_admitted_keys_with_readiness(peer, mark_dirty_on_refusal)
+            })
+        })
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the fallible old-view capture and its failure publication in one actor transaction"
+    )]
+    fn capture_group_admitted_keys_with_readiness(
+        &mut self,
+        peer: IpAddr,
+        mark_dirty_on_refusal: bool,
+    ) -> bool {
+        use admitted_recovery::Key;
         let gid = self.grouped_member_of(peer);
         let filter = self.member_rt_filter(peer);
         let rs_control = self
@@ -1836,7 +1850,15 @@ impl RibManager {
             .copied()
             .zip(self.peer_asn.get(&peer).copied());
         let readiness = self.replacement_readiness.clone();
-        let mut checkpoint = |force| super::replacement_readiness_checkpoint(&readiness, force);
+        #[cfg(test)]
+        let observer = self.replacement_readiness_test_hook.clone();
+        let mut checkpoint = |force| {
+            #[cfg(test)]
+            if force && let Some(observer) = &observer {
+                observer("common_capture");
+            }
+            super::replacement_readiness_checkpoint(&readiness, force);
+        };
         if let Err(error) = self
             .pending_group_admitted
             .begin_capture_with_checkpoint(peer, &mut checkpoint)

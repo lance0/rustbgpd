@@ -9287,6 +9287,190 @@ fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actual ingest control keeps cold capture, held checkpoints, fenced lanes and exact recovery together"
+)]
+async fn ingest_cold_capture_services_readiness_and_fences_other_lanes() {
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (stuck, live) = ("10.43.1.1".parse().unwrap(), "10.43.1.2".parse().unwrap());
+    let mut receivers = Vec::new();
+    for peer in [stuck, live] {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        receivers.push(outbound_rx);
+    }
+    let mut live_rx = receivers.pop().unwrap();
+    let mut stuck_rx = receivers.pop().unwrap();
+    full_channel_pass(&mut manager, &(0..128).collect::<Vec<_>>(), &[]);
+    assert_eq!(stuck_rx.try_recv().unwrap().announce.len(), 128);
+    while live_rx.try_recv().is_ok() {}
+    for n in 240..248 {
+        full_channel_pass(&mut manager, &[n], &[]);
+        while live_rx.try_recv().is_ok() {}
+    }
+    let gid = manager.grouped_member_of(stuck).unwrap();
+    assert!(manager.outbound_channel_full(stuck));
+    assert!(manager.dirty_peers.is_empty());
+    assert!(!manager.pending_group_admitted.contains_record(stuck));
+    assert!(
+        manager.group_ribs[&gid]
+            .recovery_snapshot_for_test()
+            .is_none()
+    );
+    let empty_credit = manager.pending_group_admitted.bytes();
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let calls = AtomicUsize::new(0);
+    manager.replacement_readiness_test_hook = Some(Arc::new(move |stage| {
+        if stage == "common_capture" {
+            let call = calls.fetch_add(1, Ordering::Relaxed);
+            if call < 2 {
+                entered_tx.send(call).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+    }));
+    // Drive the actual primary admission and chunk/settlement path, returning
+    // the actor so the captured OLD proof can be checked before recovery.
+    let capture = tokio::spawn(async move {
+        let update = manager.rx.recv().await.unwrap();
+        manager.handle_update(update);
+        while manager.process_next_route_chunk() {}
+        manager
+    });
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: FULL_CHANNEL_SOURCE.into(),
+        announced: vec![],
+        withdrawn: vec![(full_channel_prefix(0), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    let mut readiness = queue_replacement_readiness(&readiness_tx);
+    let (reply, mut general) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(RibUpdate::PeerDown {
+        peer: live,
+        session_id: 0,
+    })
+    .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let interior_reply = readiness.try_recv();
+    let general_held = matches!(general.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    let mutation_held = tx.capacity() == 7;
+    release_tx.send(()).unwrap();
+    let mut manager = capture.await.unwrap();
+    manager.replacement_readiness_test_hook = None;
+    let expected: HashSet<_> = (0..128)
+        .chain(240..248)
+        .map(|n| crate::update::ExactExportKey::Unicast(full_channel_prefix(n), 0))
+        .collect();
+    assert_eq!(
+        manager
+            .pending_group_admitted
+            .get(&stuck)
+            .unwrap()
+            .iter()
+            .collect::<HashSet<_>>(),
+        expected
+    );
+    assert!(
+        manager.group_ribs[&gid]
+            .recovery_snapshot_for_test()
+            .is_some(),
+        "the real ingest must build the cold indexed pool"
+    );
+    assert!(manager.dirty_peers.contains(&stuck));
+    for n in 240..248 {
+        assert_eq!(
+            stuck_rx.try_recv().unwrap().announce[0].prefix,
+            full_channel_prefix(n)
+        );
+    }
+    manager.resync_dirty_peers_bounded();
+    let recovered = stuck_rx.try_recv().unwrap();
+    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    let announced: HashSet<_> = recovered
+        .announce
+        .iter()
+        .map(|r| crate::update::ExactExportKey::Unicast(r.prefix, r.path_id))
+        .collect();
+    let mut final_expected = expected;
+    final_expected.remove(&crate::update::ExactExportKey::Unicast(
+        full_channel_prefix(0),
+        0,
+    ));
+    assert_eq!(announced, final_expected);
+    assert!(manager.dirty_peers.is_empty());
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    assert_eq!(manager.group_recovery_fallback(stuck), None);
+    let update = manager.query_rx.try_recv().unwrap();
+    manager.handle_update(update);
+    assert_eq!(general.await.unwrap(), 135);
+    let update = manager.rx.try_recv().unwrap();
+    assert!(matches!(update, RibUpdate::PeerDown { peer, .. } if peer == live));
+    manager.handle_update(update);
+    assert!(general_held, "ordinary queries stay queued during capture");
+    assert!(
+        mutation_held,
+        "ordinary mutations stay queued during capture"
+    );
+    assert!(
+        matches!(interior_reply, Ok(Ok(135))),
+        "dedicated readiness must complete between actual cold capture checkpoints: {interior_reply:?}"
+    );
+}
+
 struct DirtyResyncProbeHold {
     calls: AtomicUsize,
     entered: mpsc::UnboundedSender<usize>,
@@ -9526,13 +9710,22 @@ async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
 fn dirty_resync_nested_readiness_keeps_owner_age_and_exact_count() {
     let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
     let peer = fleet.members[0];
-    fleet.manager.mark_outbound_dirty(peer);
     let (tx, rx) = mpsc::channel(8);
     fleet.manager.readiness_rx = Some(rx);
     fleet.manager.with_replacement_readiness_age(
         super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE,
         |manager| {
             let original = manager.replacement_readiness.clone().unwrap();
+            let mut response = queue_replacement_readiness(&tx);
+            manager.mark_outbound_dirty(peer);
+            assert_eq!(
+                response.try_recv().unwrap(),
+                Err(crate::update::RibReadinessError::PolicyTransitionStalled)
+            );
+            assert!(Arc::ptr_eq(
+                &original,
+                manager.replacement_readiness.as_ref().unwrap()
+            ));
             let mut response = queue_replacement_readiness(&tx);
             manager.resync_dirty_peers_bounded();
             assert!(Arc::ptr_eq(
@@ -9548,7 +9741,7 @@ fn dirty_resync_nested_readiness_keeps_owner_age_and_exact_count() {
     );
     assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
     assert_eq!(fleet.manager.replacement_readiness_receipts[0].count, 4);
-    assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
+    assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 2);
     assert!(fleet.manager.dirty_peers.is_empty());
     assert!(fleet.manager.pending_group_admitted.is_empty());
     assert_eq!(fleet.receivers[0].try_recv().unwrap().announce.len(), 4);
@@ -9789,6 +9982,12 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
             community_chain(0xFDE8_0002)
         };
         let mut fleet = replacement_readiness_fleet(&old);
+        if stage == "family_commit" {
+            // Establish the pre-existing dirty member before observing the
+            // replacement command's single ownership episode.
+            fleet.manager.mark_outbound_dirty(fleet.members[3]);
+            fleet.manager.replacement_readiness_receipts.clear();
+        }
         if stage == "outbound_limits" {
             for &peer in &fleet.members {
                 let limits = fleet
@@ -9895,7 +10094,6 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
             // A pre-existing dirty member outside the replacement batch must
             // also finish the forced repair before its command acknowledges.
             let members = if stage == "family_commit" {
-                fleet.manager.mark_outbound_dirty(fleet.members[3]);
                 &fleet.members[..3]
             } else {
                 &fleet.members
