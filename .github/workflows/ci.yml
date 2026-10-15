@@ -878,7 +878,7 @@ jobs:
       RECOVERY_MASS_DIRTY_PROFILE: ${{ matrix.profile }}
       RECOVERY_MASS_DIRTY_COHORT: ${{ matrix.cohort }}
       # Fill all literal source pins after committing the runtime-source tranche.
-      RECOVERY_MASS_DIRTY_RUNTIME_SOURCE: "cc3684922df285d954c252a465e3609af08a6d64"
+      RECOVERY_MASS_DIRTY_RUNTIME_SOURCE: "9b2d84e244285793c732f5392cbcabda34acdf27"
       RUSTBGPD_WORKER_THREADS: "2"
     steps:
       - name: Reserve time for mass-dirty evidence finalization
@@ -893,7 +893,7 @@ jobs:
           PY
       - uses: actions/checkout@v7
         with:
-          ref: cc3684922df285d954c252a465e3609af08a6d64
+          ref: 9b2d84e244285793c732f5392cbcabda34acdf27
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@v1 # stable
         with:
@@ -938,7 +938,7 @@ jobs:
                       "qualified_cost": None, "original_four_cell_qualification": False,
                       "release_qualified": False}
           (evidence / "http-phase-diagnostic.json").write_text(json.dumps(metadata, indent=2) + "\n")
-          if runtime != os.environ["RECOVERY_MASS_DIRTY_RUNTIME_SOURCE"] or runtime != "cc3684922df285d954c252a465e3609af08a6d64":
+          if runtime != os.environ["RECOVERY_MASS_DIRTY_RUNTIME_SOURCE"] or runtime != "9b2d84e244285793c732f5392cbcabda34acdf27":
               raise SystemExit("HTTP trace runtime source changed")
           if metadata["requested_worker_threads"] != "2" or metadata["parent_affinity"] != [0, 1, 2, 3]:
               raise SystemExit("HTTP trace baseline workers or runner affinity changed")
