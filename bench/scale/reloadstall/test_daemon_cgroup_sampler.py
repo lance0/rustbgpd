@@ -11,8 +11,9 @@ import signal
 import subprocess
 import tempfile
 import time
+import traceback
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 spec = importlib.util.spec_from_file_location(
     "sampler", Path(__file__).with_name("sample-daemon-cgroup.py")
@@ -317,6 +318,120 @@ class SamplerTests(unittest.TestCase):
                         patch.object(Path, "read_text", changed_after_stat), \
                         self.assertRaises(ValueError):
                     sampler.sample(pid, root / "out.csv", 0.025)
+
+
+    def test_ownership_rejection_notes_keep_actual_operands_and_original_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc, cgroup, pid = self.scope_fixture(Path(directory))
+            owner = {"kind": "native-daemon-only", "starttime": 42, "cgroup": str(cgroup)}
+            actual = "0::/unexpected.scope (deleted)\n"
+            (proc / "cgroup").write_text(actual)
+            read_text, reads = Path.read_text, []
+
+            def replace_after_read(path, *args, **kwargs):
+                text = read_text(path, *args, **kwargs)
+                if path == proc / "cgroup":
+                    reads.append(text)
+                    path.write_text("0::/later.scope\n")
+                return text
+
+            with patch.object(Path, "read_text", replace_after_read), self.assertRaises(ValueError) as raised:
+                sampler.verify_container_membership(proc, cgroup, pid, owner)
+            error = raised.exception
+            self.assertIs(type(error), ValueError)
+            self.assertEqual(error.args, ("container daemon PID/start/cgroup ownership changed",))
+            self.assertEqual(reads, [actual], "diagnostics must retain the predicate's single read")
+            rendered = "".join(traceback.format_exception(error))
+            for field in [f"actual_proc_cgroup={actual!r}", f"expected_proc_cgroup={'0::' + str(cgroup)!r}",
+                          "kind='native-daemon-only'", "starttime=42", "state='S'"]:
+                self.assertIn(field, rendered)
+            self.assertNotIn("later.scope", rendered)
+
+            (proc / "stat").write_text(read_text(proc / "stat")[:-2] + "43")
+            with self.assertRaises(ValueError) as raised:
+                sampler.owned_process_state(proc, owner)
+            self.assertEqual(raised.exception.args, error.args)
+            self.assertIn("actual_starttime=43", "".join(traceback.format_exception(raised.exception)))
+
+    def sample_deleted_native_scope(self, missing_memory=False, fault=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc, cgroup, pid = self.scope_fixture(root)
+            read_text, path_stat = Path.read_text, Path.stat
+            sleeps, terminal, interleaved = 0, False, False
+
+            def advance_exit(_interval):
+                nonlocal sleeps, terminal
+                sleeps += 1
+                if missing_memory and sleeps == 1:
+                    (proc / "stat").write_text(read_text(proc / "stat").replace(") S ", ") R "))
+                    (proc / "status").write_text("State: R\n")
+                    return
+                terminal = True
+                state = {"live": "R", "dead": "X"}.get(fault, "Z")
+                stat = read_text(proc / "stat").replace(") S ", f") {state} ").replace(") R ", f") {state} ")
+                (proc / "stat").write_text(stat[:-2] + "43" if fault == "reuse" else stat)
+                (proc / "status").write_text("State: Z\n")
+                membership = "0::" + str(cgroup) + " (deleted)"
+                if fault == "path":
+                    membership = "0::/other.scope (deleted)"
+                elif fault == "suffix":
+                    membership += " extra"
+                elif fault == "whitespace":
+                    membership = " " + membership
+                (proc / "cgroup").write_text(membership + ("" if fault == "missing_newline" else "\n"))
+                if fault == "present":
+                    (cgroup / "cgroup.procs").write_text("")
+                else:
+                    shutil.rmtree(cgroup)
+                    if fault == "recreated":
+                        cgroup.mkdir()
+
+            def inspect_scope(path, *args, **kwargs):
+                nonlocal interleaved
+                if path == cgroup and terminal:
+                    if fault == "unreadable":
+                        raise PermissionError("scope stat denied")
+                    if fault in {"changed_identity", "changed_state"}:
+                        interleaved = True
+                        stat = read_text(proc / "stat")
+                        (proc / "stat").write_text(stat[:-2] + "43" if fault == "changed_identity"
+                                                   else stat.replace(") Z ", ") R "))
+                        raise FileNotFoundError(path)
+                return path_stat(path, *args, **kwargs)
+
+            owner = {"starttime": 42, "cgroup": str(cgroup)} if fault in {"container", "untagged"} else None
+            if fault == "container":
+                owner["kind"] = "container-daemon-only"
+            paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": Path("/")}
+            with patch.object(sampler, "Path", side_effect=lambda value: paths[value]), \
+                    patch.object(Path, "stat", inspect_scope), \
+                    patch.object(sampler.time, "monotonic", return_value=0.0), \
+                    patch.object(sampler.time, "sleep", side_effect=advance_exit) as sleep:
+                if fault:
+                    with self.assertRaises(PermissionError if fault == "unreadable" else ValueError):
+                        sampler.sample(pid, root / "out.csv", 0.025, owner=owner)
+                else:
+                    sampler.sample(pid, root / "out.csv", 0.025)
+            self.assertTrue(terminal)
+            self.assertEqual(sleep.call_args_list, [call(0.025)] * (2 if missing_memory else 1))
+            if fault in {"changed_identity", "changed_state"}:
+                self.assertTrue(interleaved, "the final identity/state recheck must follow the absence check")
+            rows = list(sampler.csv.DictReader((root / "out.csv").read_text().splitlines()))
+            self.assertEqual(len(rows), 1, "only the complete live sample is retained")
+            self.assertEqual((rows[0]["vmrss_kib"], rows[0]["vmhwm_kib"]), ("4096", "8192"))
+
+    def test_native_deleted_scope_zombie_status_finishes_without_partial_row(self):
+        self.sample_deleted_native_scope()
+
+    def test_native_deleted_scope_missing_memory_recheck_finishes_without_partial_row(self):
+        self.sample_deleted_native_scope(missing_memory=True)
+
+    def test_native_deleted_scope_requires_terminal_owned_absent_scope(self):
+        for fault in ["live", "dead", "reuse", "path", "suffix", "whitespace", "missing_newline",
+                      "present", "recreated", "unreadable", "container", "untagged", "changed_identity", "changed_state"]:
+            with self.subTest(fault=fault):
+                self.sample_deleted_native_scope(fault=fault)
 
 
 class ContainerOwnershipTests(unittest.TestCase):
