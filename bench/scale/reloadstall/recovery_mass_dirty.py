@@ -261,6 +261,11 @@ def fallback(text):
     return {cause: integer_metric(text, "bgp_update_group_recovery_fallback_total", f'{{cause="{cause}"}}') for cause in CAUSES}
 
 
+def fallback_delta(before, after):
+    require(all(after[cause] >= before[cause] for cause in CAUSES), "fallback counter regressed")
+    return {cause: after[cause] - before[cause] for cause in CAUSES}
+
+
 def integer_metric(text, name, labels=""):
     value = metric(text, name, labels)
     require(value.is_integer(), f"noninteger metric {name}{labels}")
@@ -561,6 +566,7 @@ def run_cell(args):
             regroup = metric(before, "bgp_update_group_regroups_total")
             initial_fallback = fallback(before)
             result["fallback_initial"] = initial_fallback
+            previous_fallback = initial_fallback
             if manifest["cohort"] == "no-refusal":
                 require(not any(initial_fallback.values()), "no-refusal startup entered conservative fallback")
             initial_charge = recovery_charge(before)
@@ -573,6 +579,13 @@ def run_cell(args):
                 paused = read_record(engine, records, "mass_dirty_paused", deadline)
                 require(paused == {"generation": generation, "receivers": manifest["receivers"]}, "pause handshake incomplete")
                 validate_fixture(scenario, hashes)
+                operation_metrics = http_metrics(19186)
+                (leg / f"metrics-before-{generation}.prom").write_text(operation_metrics)
+                require(metric(operation_metrics, "bgp_update_group_regroups_total") == regroup, "group changed before churn")
+                operation_fallback = fallback(operation_metrics)
+                fallback_delta(previous_fallback, operation_fallback)
+                if manifest["cohort"] == "no-refusal":
+                    require(not any(operation_fallback.values()), "no-refusal cell entered conservative fallback before churn")
                 log_offset = (leg / "daemon.log").stat().st_size
                 triggered = None if correct else time.monotonic()
                 engine.stdin.write(f"churn {generation}\n")
@@ -597,6 +610,8 @@ def run_cell(args):
                 current = http_metrics(19186)
                 require(metric(current, "bgp_update_group_regroups_total") == regroup, "wire churn regrouped peers")
                 (leg / f"metrics-paused-{generation}.prom").write_text(current)
+                paused_fallback = fallback(current)
+                fallback_delta(operation_fallback, paused_fallback)
                 paused_charge = recovery_charge(current)
                 require(paused_charge["entries"] > 0 and paused_charge["bytes"] > initial_charge["bytes"],
                         "held dirty recovery proof was not retained")
@@ -636,17 +651,18 @@ def run_cell(args):
                 (leg / f"daemon-operation-{generation}.jsonl").write_bytes((leg / "daemon.log").read_bytes()[log_offset:])
                 write_json(leg / f"dirty-receipts-{generation}.json", actual_dirty)
                 after = http_metrics(19186)
+                (leg / f"metrics-settled-{generation}.prom").write_text(after)
                 require(metric(after, "bgp_update_group_regroups_total") == regroup, "group changed during recovery")
                 causes = fallback(after)
+                fallback_delta(paused_fallback, causes)
+                previous_fallback = causes
                 settled_charge = recovery_charge(after)
                 require(all(settled_charge[key] == initial_charge[key] for key in ("entries", "bytes")),
                         "settled recovery charge did not return to empty baseline")
-                deltas = {cause: causes[cause] - initial_fallback[cause] for cause in CAUSES}
-                require(all(value >= 0 for value in deltas.values()), "fallback counters decreased")
+                deltas = fallback_delta(operation_fallback, causes)
                 if manifest["cohort"] == "no-refusal" or (not correct and args.arm == "candidate" and manifest["profile"] == "full-uc"):
                     require(not any(deltas.values()), "indexed/no-refusal cell entered conservative fallback")
-                (leg / f"metrics-settled-{generation}.prom").write_text(after)
-                result["operations"].append({**receipt, "fallback_deltas": deltas,
+                result["operations"].append({**receipt, "fallback_before": operation_fallback, "fallback_deltas": deltas,
                     "recovery_paused": paused_charge, "recovery_settled": settled_charge,
                     "trigger_monotonic_seconds": triggered, "drain_monotonic_seconds": drained_at,
                     "resume_monotonic_seconds": resumed_at, "fold_monotonic_seconds": observed_at,
@@ -872,7 +888,16 @@ def validate_leg(leg, manifest, row):
     initial_charge = recovery_charge(initial_metrics)
     require(initial_charge["entries"] == 0 and row["recovery_initial"] == initial_charge, "initial recovery charge differs")
     previous_peak = initial_charge["peak_bytes"]
+    previous_causes = initial_causes
     for index, generation in enumerate(("b", "a")):
+        before_metrics = (leg / f"metrics-before-{generation}.prom").read_text()
+        require(metric(before_metrics, "bgp_update_group_regroups_total") == regroup, "group regrouped")
+        operation_causes = fallback(before_metrics)
+        fallback_delta(previous_causes, operation_causes)
+        require(row["operations"][index]["fallback_before"] == operation_causes, "operation fallback baseline differs")
+        if manifest["cohort"] == "no-refusal":
+            require(not any(operation_causes.values()), "no-refusal cell entered conservative fallback before churn")
+        previous_causes = operation_causes
         require(row["operations"][index]["readiness_coverage"] == coverage[index], "readiness coverage derivation differs")
         wire = records["mass_dirty_complete"][index]
         require(wire["generation"] == generation and wire["receivers"] == manifest["receivers"] and wire["exact_fold"] is True and wire["sessions_continuous"] is True, "wire generation/fold changed")
@@ -899,7 +924,8 @@ def validate_leg(leg, manifest, row):
             metrics = (leg / f"metrics-{phase}-{generation}.prom").read_text()
             require(metric(metrics, "bgp_update_group_regroups_total") == regroup, "group regrouped")
             causes = fallback(metrics)
-            require(all(causes[cause] >= initial_causes[cause] for cause in CAUSES), "fallback counter regressed")
+            fallback_delta(previous_causes, causes)
+            previous_causes = causes
             charge = recovery_charge(metrics)
             require(row["operations"][index][f"recovery_{phase}"] == charge, "recovery charge derivation differs")
             if phase == "settled":
@@ -913,7 +939,7 @@ def validate_leg(leg, manifest, row):
                             "no-refusal held proof does not cover the full initial fleet")
             require(charge["peak_bytes"] >= previous_peak, "recovery reservation peak regressed")
             previous_peak = charge["peak_bytes"]
-        deltas = {cause: causes[cause] - initial_causes[cause] for cause in CAUSES}
+        deltas = fallback_delta(operation_causes, causes)
         require(row["operations"][index]["fallback_deltas"] == deltas, "fallback derivation differs")
         if manifest["cohort"] == "no-refusal" or (not manifest["correctness_only"] and row["arm"] == "candidate" and manifest["profile"] == "full-uc"):
             require(not any(deltas.values()), "indexed/no-refusal cohort refused proof")

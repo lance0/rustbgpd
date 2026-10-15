@@ -448,6 +448,51 @@ class MassDirtyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected_error):
                     receipt.validate_leg(leg, manifest, altered)
 
+    def test_fallback_deltas_use_each_churn_baseline(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        for cause in receipt.CAUSES:
+            with self.subTest(cause=cause):
+                leg, row = self.small_leg(manifest)
+                self.set_fallback_chain(leg, row, cause, [0, 0, 7, 7, 7, 7, 7])
+                receipt.validate_leg(leg, manifest, row)
+                self.assertEqual([operation["fallback_deltas"][cause] for operation in row["operations"]], [7, 0])
+                row["operations"][1]["fallback_deltas"][cause] = 7
+                with self.assertRaisesRegex(ValueError, "fallback derivation differs"):
+                    receipt.validate_leg(leg, manifest, row)
+
+    def test_fallback_counters_cannot_decrease_between_consecutive_snapshots(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        for cause in receipt.CAUSES:
+            for edge in range(1, 7):
+                with self.subTest(cause=cause, edge=edge):
+                    leg, row = self.small_leg(manifest)
+                    counts = [0] * 7
+                    counts[edge - 1] = 3
+                    counts[edge:] = [2] * (7 - edge)
+                    self.set_fallback_chain(leg, row, cause, counts)
+                    with self.assertRaisesRegex(ValueError, "fallback counter regressed"):
+                        receipt.validate_leg(leg, manifest, row)
+
+    def test_no_refusal_cannot_hide_fallback_before_churn(self):
+        _, manifest = self.manifest()
+        leg, row = self.small_leg(manifest)
+        self.set_fallback_chain(leg, row, "daemon_limit", [0, 7, 7, 7, 7, 7, 7])
+        with self.assertRaisesRegex(ValueError, "no-refusal.*fallback"):
+            receipt.validate_leg(leg, manifest, row)
+
+    def set_fallback_chain(self, leg, row, cause, counts):
+        self.assertEqual(len(counts), 7)
+        phases = ("initial", "before-b", "paused-b", "settled-b", "before-a", "paused-a", "settled-a")
+        metric = f'bgp_update_group_recovery_fallback_total{{cause="{cause}"}}'
+        for phase, count in zip(phases, counts, strict=True):
+            path = leg / f"metrics-{phase}.prom"
+            path.write_text("\n".join(f"{metric} {count}" if line.startswith(metric + " ") else line
+                                      for line in path.read_text().splitlines()) + "\n")
+        row["fallback_initial"][cause] = counts[0]
+        for index, before in enumerate((1, 4)):
+            row["operations"][index]["fallback_before"][cause] = counts[before]
+            row["operations"][index]["fallback_deltas"][cause] = counts[before + 2] - counts[before]
+
     def small_leg(self, manifest):
         leg = self.root / "small-leg"
         leg.mkdir(exist_ok=True)
@@ -484,10 +529,11 @@ class MassDirtyTests(unittest.TestCase):
             lines.append("mass_dirty_sent " + json.dumps({"generation": generation, "family_keys": manifest["family_keys"],
                 "announcement_messages": stimulus["origin_cardinality"], "eor_messages": stimulus["origin_cardinality"],
                 "origin_cardinality": stimulus["origin_cardinality"], "writer_drained": True, "drained_monotonic_seconds": None}))
-            wire = {"generation": generation, "receivers": 2, "withdrawals": 16, "exact_fold": True,
+            wire = {"generation": generation, "receivers": 2, "withdrawals": manifest["receivers"] * manifest["withdrawals_per_receiver"], "exact_fold": True,
                     "sessions_continuous": True, "resume_to_fold_p50_seconds": None, "resume_to_fold_max_seconds": None}
             lines.append("mass_dirty_complete " + json.dumps(wire))
-            operation = {**wire, "fallback_deltas": dict.fromkeys(receipt.CAUSES, 0), "trigger_to_fold_seconds": None,
+            operation = {**wire, "fallback_before": dict.fromkeys(receipt.CAUSES, 0),
+                         "fallback_deltas": dict.fromkeys(receipt.CAUSES, 0), "trigger_to_fold_seconds": None,
                          "recovery_paused": held_charge, "recovery_settled": {**charge, "peak_bytes": held_charge["peak_bytes"]},
                          "trigger_to_drain_seconds": None, "drain_to_resume_seconds": None, "resume_to_observed_fold_seconds": None,
                          "trigger_monotonic_seconds": None, "drain_monotonic_seconds": None,
@@ -506,6 +552,7 @@ class MassDirtyTests(unittest.TestCase):
                                {"sweeps": [sweep, sweep], "overlap": [intervals, intervals], "stable_overlap": intervals, "source": source})
             receipt.write_json(leg / f"neighbors-settled-{generation}.json", peers)
             receipt.write_json(leg / f"source-settled-{generation}.json", source)
+            (leg / f"metrics-before-{generation}.prom").write_text(metrics(charge if generation == "b" else operation["recovery_settled"]))
             (leg / f"metrics-paused-{generation}.prom").write_text(metrics(held_charge))
             (leg / f"metrics-settled-{generation}.prom").write_text(metrics(operation["recovery_settled"]))
         lines.append("mass_dirty_exit " + json.dumps({"readiness_samples": 1, "readiness_deadline_ms": 250, "status": "PASS"}))
