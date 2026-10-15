@@ -30,9 +30,9 @@ on:
         default: false
         required: false
       recovery_receipt_mode:
-        description: Select memory, capture scan or retirement attribution
+        description: Select memory, scan, retirement or diagnostic mass-dirty
         type: choice
-        options: [memory, scan, retirement]
+        options: [memory, scan, retirement, mass-dirty]
         default: memory
         required: false
 
@@ -71,9 +71,9 @@ jobs:
                   default: false
                   required: false
                 recovery_receipt_mode:
-                  description: Select memory, capture scan or retirement attribution
+                  description: Select memory, scan, retirement or diagnostic mass-dirty
                   type: choice
-                  options: [memory, scan, retirement]
+                  options: [memory, scan, retirement, mass-dirty]
                   default: memory
                   required: false'
           if [[ "$actual" != "$expected" ]]; then
@@ -774,7 +774,7 @@ jobs:
   recovery_memory_receipt:
     # Bounded, operator-dispatched qualification; never part of push/PR,
     # ordinary main/release re-tests, or the reserved self-hosted soak runner.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode != 'mass-dirty' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -861,4 +861,169 @@ jobs:
           name: update-group-recovery-memory-${{ matrix.profile }}-${{ matrix.cell }}${{ matrix.old_order && format('-{0}', matrix.old_order) || '' }}-${{ github.sha }}
           path: ${{ runner.temp }}/update-group-recovery-memory
           if-no-files-found: warn
+          retention-days: 30
+
+  recovery_mass_dirty_receipt:
+    # Research branch only: one HTTP phase trace, never a merge/release candidate.
+    # The original workload, wrapper and acceptance bounds stay frozen.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode == 'mass-dirty' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON('[{"profile":"full-vpn","cohort":"no-refusal"}]') }}
+    env:
+      CARGO_BUILD_JOBS: "4"
+      RECOVERY_MASS_DIRTY_PROFILE: ${{ matrix.profile }}
+      RECOVERY_MASS_DIRTY_COHORT: ${{ matrix.cohort }}
+      # Fill all literal source pins after committing the runtime-source tranche.
+      RECOVERY_MASS_DIRTY_RUNTIME_SOURCE: "cc3684922df285d954c252a465e3609af08a6d64"
+      RUSTBGPD_WORKER_THREADS: "2"
+    steps:
+      - name: Reserve time for mass-dirty evidence finalization
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/update-group-recovery-mass-dirty"
+          python3 - <<'PY'
+          import os
+          import time
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"RECOVERY_MASS_DIRTY_DRIVER_DEADLINE={time.monotonic() + 110 * 60}\n")
+          PY
+      - uses: actions/checkout@v7
+        with:
+          ref: cc3684922df285d954c252a465e3609af08a6d64
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1 # stable
+        with:
+          toolchain: stable
+      - uses: ./.github/actions/install-protobuf
+      - name: Check mass-dirty receipt negative fixtures
+        run: |
+          bash -n bench/scale/reloadstall/run-recovery-mass-dirty.sh
+          python3 -m unittest discover -s bench/scale/reloadstall -p test_recovery_mass_dirty.py -v
+      - name: Run frozen-source daemon mass-dirty comparison
+        shell: bash
+        run: |
+          evidence="$RUNNER_TEMP/update-group-recovery-mass-dirty"
+          mkdir -p "$evidence"
+          status=0
+          python3 - <<'PY' > "$evidence/preflight.log" 2>&1 || status=$?
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          runtime = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          workflow_head = os.environ["GITHUB_SHA"]
+          workflow = subprocess.check_output(["git", "show", workflow_head + ":.github/workflows/ci.yml"])
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "update-group-recovery-mass-dirty"
+          (evidence / "workflow-control.yml").write_bytes(workflow)
+          trace_source = Path("src/metrics_server.rs").read_bytes()
+          (evidence / "http-phase-runtime-source.rs").write_bytes(trace_source)
+          (evidence / "http-phase-source.patch").write_bytes(subprocess.check_output([
+              "git", "diff", "4f8ea8ce9d1f8cf1b7fdcd5c28c48a0c0e8d71e5..." + runtime, "--",
+              "src/metrics_server.rs", "bench/scale/reloadstall"]))
+          metadata = {"status": "PENDING_STARTUP_EVIDENCE", "classification": "DIAGNOSTIC_ONLY",
+                      "workflow_event_head": workflow_head, "runtime_source": runtime,
+                      "workflow_sha256": hashlib.sha256(workflow).hexdigest(),
+                      "runtime_trace_sha256": hashlib.sha256(trace_source).hexdigest(),
+                      "requested_worker_threads": os.environ["RUSTBGPD_WORKER_THREADS"],
+                      "runtime_base": "4f8ea8ce9d1f8cf1b7fdcd5c28c48a0c0e8d71e5",
+                      "frozen_instrument_source": "4dac2d09f661501ef476196c7b68d5ec3df2e1be",
+                      "research_branch_must_never_merge": True,
+                      "parent_affinity": sorted(os.sched_getaffinity(0)),
+                      "daemon_cpus": [0, 1], "harness_cpus": [2, 3],
+                      "qualified_cost": None, "original_four_cell_qualification": False,
+                      "release_qualified": False}
+          (evidence / "http-phase-diagnostic.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          if runtime != os.environ["RECOVERY_MASS_DIRTY_RUNTIME_SOURCE"] or runtime != "cc3684922df285d954c252a465e3609af08a6d64":
+              raise SystemExit("HTTP trace runtime source changed")
+          if metadata["requested_worker_threads"] != "2" or metadata["parent_affinity"] != [0, 1, 2, 3]:
+              raise SystemExit("HTTP trace baseline workers or runner affinity changed")
+          values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+          available = int(values["MemAvailable"].split()[0]) * 1024
+          required = 12 * 1024**3
+          print(f"MemAvailable={available}; minimum={required}; daemon=10GiB; harness=2GiB; cgroup_swap=0")
+          if available < required:
+              raise SystemExit("fresh runner has less than 12 GiB available; refusing qualification")
+          PY
+          if [[ $status == 0 ]]; then
+            remaining=$(python3 - <<'PY'
+          import os
+          import time
+          print(max(0, int(float(os.environ["RECOVERY_MASS_DIRTY_DRIVER_DEADLINE"]) - time.monotonic())))
+          PY
+            )
+            if [[ $remaining -gt 0 ]]; then
+              timeout --foreground --signal=TERM --kill-after=150s "${remaining}s" \
+                bash bench/scale/reloadstall/run-recovery-mass-dirty.sh \
+                --head "$RECOVERY_MASS_DIRTY_RUNTIME_SOURCE" \
+                --output-dir "$evidence/campaign" \
+                --profile "$RECOVERY_MASS_DIRTY_PROFILE" \
+                --cohort "$RECOVERY_MASS_DIRTY_COHORT" \
+                --daemon-cpus "0,1" --harness-cpus "2,3" \
+                > "$evidence/driver.log" 2>&1 || status=$?
+            else
+              status=124
+              printf '%s\n' 'aggregate driver deadline expired during setup' > "$evidence/driver.log"
+            fi
+          fi
+          printf '%s\n' "$status" > "$evidence/driver-invocation.exit"
+          exit "$status"
+      - name: Verify two-worker diagnostic startup
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "update-group-recovery-mass-dirty"
+          path = evidence / "http-phase-diagnostic.json"
+          metadata = json.loads(path.read_text()) if path.is_file() else {"classification": "DIAGNOSTIC_ONLY"}
+          observations = []
+          for log in sorted((evidence / "campaign").glob("leg-*/daemon.log")):
+              startups = []
+              for number, line in enumerate(log.read_text().splitlines(), 1):
+                  try:
+                      record = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if record.get("fields", {}).get("message") == "initializing tokio runtime":
+                      startups.append({"line": number, "record": record})
+              observations.append({"path": str(log.relative_to(evidence)),
+                                   "sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
+                                   "startups": startups})
+          valid = metadata.get("requested_worker_threads") == "2" and bool(observations) and all(
+              len(row["startups"]) == 1 and type(row["startups"][0]["record"]["fields"].get("worker_threads")) is int
+              and row["startups"][0]["record"]["fields"]["worker_threads"] == 2 for row in observations)
+          metadata.update(status="DIAGNOSTIC_ONLY" if valid else "INVALID", startup_observations=observations,
+                          startup_validation="PASS" if valid else "INVALID")
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(metadata, indent=2) + "\n")
+          if not valid:
+              raise SystemExit("HTTP trace startup must prove exactly two workers in every started leg")
+          PY
+      - name: Finalize mass-dirty evidence even after failure
+        if: always()
+        shell: bash
+        run: |
+          evidence="$RUNNER_TEMP/update-group-recovery-mass-dirty"
+          mkdir -p "$evidence"
+          status=0
+          timeout --foreground --signal=TERM --kill-after=5s 60s \
+            python3 bench/scale/reloadstall/recovery_mass_dirty.py finalize "$evidence/campaign" \
+            > "$evidence/finalizer.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$evidence/finalizer.exit"
+          exit "$status"
+      - name: Upload mass-dirty evidence even after refusal or failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recovery-http-phase-${{ matrix.profile }}-${{ matrix.cohort }}-runtime-${{ env.RECOVERY_MASS_DIRTY_RUNTIME_SOURCE }}-workflow-${{ github.sha }}
+          path: ${{ runner.temp }}/update-group-recovery-mass-dirty
+          if-no-files-found: error
           retention-days: 30
