@@ -995,3 +995,30 @@ All earlier data remain source-pinned and unpooled, including the historical
 `a1854eee` single-cell pass. Full-matrix qualification and an actual identified
 release-candidate soak remain required; the separate dataset acknowledgement
 path and EVPN ownership-off boundary are not qualified here.
+
+
+### `4dac2d09`: two unicast passes, VPN qualification still open
+
+The separate [wire-driven receipt at `4dac2d09`](../perf/update-group-recovery-wire-mass-dirty-4dac2d09-2026-10-15.md)
+records two complete UC cells and two INVALID VPN cells. UC no-refusal passes
+its original `flat × 1.10 + 0.030 s` median/maximum bars at 0.950252/0.938036 times
+flat. UC pressure passes correctness, availability and resource bars, but costs
+**1.430931 times flat by median / 1.406350 by maximum**; those descriptive pressure
+costs are not governed by the no-refusal relative bar. Candidate pressure holds
+47,974,568 logical proof bytes versus flat's 511,684,448, with different bounded
+proof coverage. Logical charge is not RSS or attribution of total cgroup memory.
+
+Retain indexed shared pure-unicast proofs, supported by the component result and
+this no-refusal comparison. VPN-negotiated groups retain exact flat full-OLD
+proofs; both VPN cells fail initial flat/B on the unchanged 250 ms readiness
+deadline before any fold. No underlying daemon cause or VPN cost/resource result
+is established. Full qualification remains **UNQUALIFIED**, release remains held,
+and an actual identified release-candidate soak is still required. EVPN ownership
+stays disabled; the separate dataset acknowledgement path is not qualified.
+
+The measured source remains `4dac2d09f661501ef476196c7b68d5ec3df2e1be`. Its tracked
+production source matches historical main `f95dd04df0eca75b1ccaefae060e68c557771d56`
+outside the ten qualification harness/workflow paths, not literal tree or RC
+measurement equivalence. Local controls remain at their actual `123847d7` source.
+All earlier dated amendments and evidence, including the four-attempt failed
+receipt and `a1854eee` single-cell pass, remain unchanged and unpooled.
