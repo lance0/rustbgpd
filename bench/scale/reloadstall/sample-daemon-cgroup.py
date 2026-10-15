@@ -87,6 +87,8 @@ def owned_process_state(proc, owner):
 
 
 def verify_container_membership(proc, cgroup, pid, owner):
+    # True: live sole member; False: proved exit; None: owned empty group,
+    # still nonterminal. Pending exit must never authorize a sample or success.
     state = owned_process_state(proc, owner)
     if (str(cgroup) != owner["cgroup"]
             or (proc / "cgroup").read_text().strip() != "0::" + str(cgroup).removeprefix("/sys/fs/cgroup")):
@@ -100,18 +102,29 @@ def verify_container_membership(proc, cgroup, pid, owner):
         return True
     # Exit can empty cgroup.procs after the loop read a live /proc/status.
     # Recheck the original identity; an unrelated zombie is not owned exit.
-    if not members and owned_process_state(proc, owner) == "Z":
-        return False
+    if not members:
+        state = owned_process_state(proc, owner)
+        if state == "Z":
+            return False
+        if state not in {"X", "x"}:
+            return None
     raise ValueError("container daemon must be the sole process in its cgroup")
 
 
 def owned_process_exited(proc, cgroup, pid, owner):
     try:
-        return not verify_container_membership(proc, cgroup, pid, owner)
+        return verify_container_membership(proc, cgroup, pid, owner) is False
     except FileNotFoundError:
         if not proc.exists():
             return True
         raise
+
+
+def recheck_owned_exit(proc, cgroup, pid, owner, interval):
+    if owned_process_exited(proc, cgroup, pid, owner):
+        return True
+    time.sleep(interval)
+    return owned_process_exited(proc, cgroup, pid, owner)
 
 
 def sample(pid, out, interval, expected_pgid=None, owner=None):
@@ -123,7 +136,7 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
         raise ValueError("daemon must have exactly one cgroup v2 membership")
     cgroup = Path("/sys/fs/cgroup") / unified[0].lstrip("/")
     if owner is not None:
-        if not verify_container_membership(proc, cgroup, pid, owner):
+        if verify_container_membership(proc, cgroup, pid, owner) is not True:
             raise ValueError("container daemon exited before sampling started")
     elif not cgroup.name.endswith(".scope") or (cgroup / "memory.swap.max").read_text().strip() != "0":
         raise ValueError("daemon must run in its own swap-fenced systemd scope")
@@ -156,8 +169,13 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
                     raise ValueError("daemon PID was reused")
                 status = key_values((proc / "status").read_text())
                 if owner is not None:
-                    if not verify_container_membership(proc, cgroup, pid, owner):
+                    membership = verify_container_membership(proc, cgroup, pid, owner)
+                    if membership is False:
                         break
+                    if membership is None:
+                        if recheck_owned_exit(proc, cgroup, pid, owner, interval):
+                            break
+                        raise ValueError("container daemon exit remains unconfirmed")
                 elif status["State"] == "Z" and owned_process_exited(proc, cgroup, pid, process_owner):
                     break
                 try:
@@ -165,10 +183,7 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
                 except KeyError:
                     # Memory fields can disappear while stat still reports R.
                     # Discard this sample; only a fresh owned exit permits success.
-                    if owned_process_exited(proc, cgroup, pid, process_owner):
-                        break
-                    time.sleep(interval)
-                    if owned_process_exited(proc, cgroup, pid, process_owner):
+                    if recheck_owned_exit(proc, cgroup, pid, process_owner, interval):
                         break
                     raise
                 before = int((cgroup / "memory.current").read_text())
@@ -221,7 +236,7 @@ def main():
             parser.error("container mode needs image-id and cannot use expected-pgid")
         cid = args.container_cidfile.read_text().strip()
         owner = container_owner(cid, args.image_id, exe)
-        if not verify_container_membership(Path(f"/proc/{owner['pid']}"), Path(owner["cgroup"]), owner["pid"], owner):
+        if verify_container_membership(Path(f"/proc/{owner['pid']}"), Path(owner["cgroup"]), owner["pid"], owner) is not True:
             raise ValueError("container daemon exited before sampling started")
         args.out.with_suffix(".owner.json").write_text(json.dumps(owner, indent=2) + "\n")
         sample(owner["pid"], args.out, args.interval, owner=owner)

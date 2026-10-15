@@ -216,6 +216,59 @@ class SamplerTests(unittest.TestCase):
                 self.assertEqual(list(sampler.csv.DictReader(
                     (root / "out.csv").read_text().splitlines())), [])
 
+    def test_empty_membership_before_zombie_retries_without_emitting_a_sample(self):
+        for container, memory_fields in [(False, False), (True, False), (True, True)]:
+            with self.subTest(container=container, memory_fields=memory_fields), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                proc, cgroup, pid = self.scope_fixture(root)
+                read_text = Path.read_text
+
+                def pending_exit(path, *args, proc=proc, cgroup=cgroup,
+                                 memory_fields=memory_fields, read_text=read_text, **kwargs):
+                    if path == proc / "status":
+                        (proc / "stat").write_text(read_text(proc / "stat").replace(") S ", ") R "))
+                        (cgroup / "cgroup.procs").write_text("")
+                        return "State: R\n" + ("VmRSS: 4096 kB\nVmHWM: 8192 kB\n" if memory_fields else "")
+                    return read_text(path, *args, **kwargs)
+
+                def finish_exit(_interval, proc=proc, read_text=read_text):
+                    (proc / "stat").write_text(read_text(proc / "stat").replace(") R ", ") Z "))
+
+                owner = {"starttime": 42, "cgroup": str(cgroup)} if container else None
+                paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": Path("/")}
+                with patch.object(sampler, "Path", side_effect=lambda value, paths=paths: paths[value]), \
+                        patch.object(Path, "read_text", pending_exit), \
+                        patch.object(sampler.time, "sleep", side_effect=finish_exit) as sleep:
+                    sampler.sample(pid, root / "out.csv", 0.025, owner=owner)
+                    sleep.assert_called_once_with(0.025)
+                self.assertEqual(list(sampler.csv.DictReader(
+                    (root / "out.csv").read_text().splitlines())), [])
+
+    def test_empty_membership_still_live_after_one_recheck_fails(self):
+        for container in [False, True]:
+            with self.subTest(container=container), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                proc, cgroup, pid = self.scope_fixture(root)
+                read_text = Path.read_text
+
+                def pending_exit(path, *args, proc=proc, cgroup=cgroup, read_text=read_text, **kwargs):
+                    if path == proc / "status":
+                        (proc / "stat").write_text(read_text(proc / "stat").replace(") S ", ") R "))
+                        (cgroup / "cgroup.procs").write_text("")
+                        return "State: R\n"
+                    return read_text(path, *args, **kwargs)
+
+                owner = {"starttime": 42, "cgroup": str(cgroup)} if container else None
+                paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": Path("/")}
+                with patch.object(sampler, "Path", side_effect=lambda value, paths=paths: paths[value]), \
+                        patch.object(Path, "read_text", pending_exit), \
+                        patch.object(sampler.time, "sleep") as sleep:
+                    with self.assertRaises(ValueError if container else KeyError):
+                        sampler.sample(pid, root / "out.csv", 0.025, owner=owner)
+                    sleep.assert_called_once_with(0.025)
+                self.assertEqual(list(sampler.csv.DictReader(
+                    (root / "out.csv").read_text().splitlines())), [])
+
     def test_native_pid_reuse_is_fatal_before_any_sample(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -334,6 +387,8 @@ class ContainerOwnershipTests(unittest.TestCase):
                     (cgroup / "memory.swap.max").unlink()
                 if fault is None:
                     self.assertFalse(sampler.verify_container_membership(proc, cgroup, pid, owner))
+                elif fault == "live":
+                    self.assertIsNone(sampler.verify_container_membership(proc, cgroup, pid, owner))
                 else:
                     with self.assertRaises(FileNotFoundError if fault == "missing" else ValueError):
                         sampler.verify_container_membership(proc, cgroup, pid, owner)
@@ -376,16 +431,17 @@ class ContainerOwnershipTests(unittest.TestCase):
                     sampler.verify_container_membership(proc, cgroup, pid, owner)
 
     def test_sampling_start_requires_live_container(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            proc, cgroup, pid, owner = self.exit_fixture(root)
-            (proc / "stat").write_text((proc / "stat").read_text().replace(") S ", ") Z "))
-            (cgroup / "cgroup.procs").write_text("")
-            paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": Path("/")}
-            with patch.object(sampler, "Path", side_effect=lambda value: paths[value]):
-                with self.assertRaisesRegex(ValueError, "before sampling started"):
-                    sampler.sample(pid, root / "out.csv", 0.025, owner=owner)
-            self.assertFalse((root / "out.csv").exists())
+        for state in ["R", "Z"]:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                proc, cgroup, pid, owner = self.exit_fixture(root)
+                (proc / "stat").write_text((proc / "stat").read_text().replace(") S ", f") {state} "))
+                (cgroup / "cgroup.procs").write_text("")
+                paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": Path("/")}
+                with patch.object(sampler, "Path", side_effect=lambda value, paths=paths: paths[value]):
+                    with self.assertRaisesRegex(ValueError, "before sampling started"):
+                        sampler.sample(pid, root / "out.csv", 0.025, owner=owner)
+                self.assertFalse((root / "out.csv").exists())
 
     def test_main_does_not_publish_owner_for_an_already_exited_container(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -396,13 +452,15 @@ class ContainerOwnershipTests(unittest.TestCase):
             owner = {"pid": 123, "cgroup": str(root / "group")}
             argv = ["sample-daemon-cgroup.py", "--exe", str(exe), "--out", str(out),
                     "--container-cidfile", str(cidfile), "--image-id", "sha256:" + "b" * 64]
-            with patch("sys.argv", argv), patch.object(sampler, "container_owner", return_value=owner), \
-                    patch.object(sampler, "verify_container_membership", return_value=False), \
-                    patch.object(sampler, "sample") as sample:
-                with self.assertRaisesRegex(ValueError, "before sampling started"):
-                    sampler.main()
-                sample.assert_not_called()
-            self.assertFalse(out.with_suffix(".owner.json").exists())
+            for membership in [False, None]:
+                with self.subTest(membership=membership), patch("sys.argv", argv), \
+                        patch.object(sampler, "container_owner", return_value=owner), \
+                        patch.object(sampler, "verify_container_membership", return_value=membership), \
+                        patch.object(sampler, "sample") as sample:
+                    with self.assertRaisesRegex(ValueError, "before sampling started"):
+                        sampler.main()
+                    sample.assert_not_called()
+                self.assertFalse(out.with_suffix(".owner.json").exists())
 
     def test_missing_sample_file_requires_owned_exit_or_actual_disappearance(self):
         for fault in [None, "reuse", "missing", "swap", "gone"]:
