@@ -250,31 +250,298 @@ class MassDirtyTests(unittest.TestCase):
         def row(index):
             return {"state": "Established", "slow_peer": False, "outbound_resync_pending": True,
                     "update_group": "group:7", "update_group_recovery_fallback": "", "address": receipt.peer(index)}
-        with mock.patch.object(receipt, "command", side_effect=[json.dumps(row(1)), json.dumps(row(2))]):
-            actual = receipt.neighbor_witness("rbgp", "unix:///owned.sock", 2, pending=True)
-            self.assertEqual(len(actual), 2)
+        snapshot = mock.Mock(side_effect=[(row(1), 0, 0), (row(2), 0, 0)])
+        actual = receipt.neighbor_witness(snapshot, 2, pending=True)
+        self.assertEqual(len(actual), 2)
         omitted = row(1)
         omitted.pop("slow_peer")
-        with mock.patch.object(receipt, "command", side_effect=[json.dumps(omitted), json.dumps(row(2))]):
-            receipt.neighbor_witness("rbgp", "unix:///owned.sock", 2, pending=True)
+        receipt.neighbor_witness(mock.Mock(side_effect=[(omitted, 0, 0), (row(2), 0, 0)]), 2, pending=True)
         for invalid in ({**row(1), "slow_peer": True}, {**row(1), "slow_peer": 0},
                         {**row(1), "address": receipt.peer(2)}):
-            with mock.patch.object(receipt, "command", return_value=json.dumps(invalid)), self.assertRaises(ValueError):
-                receipt.neighbor_witness("rbgp", "unix:///owned.sock", 2, pending=True)
+            with self.assertRaises(ValueError):
+                receipt.neighbor_witness(mock.Mock(return_value=(invalid, 0, 0)), 2, pending=True)
         bad = row(2)
         bad["outbound_resync_pending"] = False
-        with mock.patch.object(receipt, "command", side_effect=[json.dumps(row(1)), json.dumps(bad)]):
-            with self.assertRaisesRegex(ValueError, "actual dirty"):
-                receipt.neighbor_witness("rbgp", "unix:///owned.sock", 2, pending=True)
-        with mock.patch.object(receipt, "command", side_effect=[json.dumps(row(1)), json.dumps(row(2))]):
-            with self.assertRaisesRegex(ValueError, "group identity"):
-                receipt.neighbor_witness("rbgp", "unix:///owned.sock", 2, expected=[(receipt.peer(1), "group:6"), (receipt.peer(2), "group:6")], pending=True)
+        with self.assertRaisesRegex(ValueError, "actual dirty"):
+            receipt.neighbor_witness(mock.Mock(side_effect=[(row(1), 0, 0), (bad, 0, 0)]), 2, pending=True)
+        with self.assertRaisesRegex(ValueError, "group identity"):
+            receipt.neighbor_witness(mock.Mock(side_effect=[(row(1), 0, 0), (row(2), 0, 0)]), 2,
+                                     expected=[(receipt.peer(1), "group:6"), (receipt.peer(2), "group:6")], pending=True)
 
     def test_all_fallback_causes_are_required(self):
         text = "\n".join(f'bgp_update_group_recovery_fallback_total{{cause="{cause}"}} 0' for cause in receipt.CAUSES)
         self.assertEqual(receipt.fallback(text), dict.fromkeys(receipt.CAUSES, 0))
         with self.assertRaisesRegex(ValueError, "missing/invalid metric"):
             receipt.fallback(text.replace('cause="missing_proof"', 'cause="other"'))
+
+    def snapshot_row(self, address, pending=False, **fields):
+        return {"address": address, "state": "Established", "update_group": "group:7",
+                "outbound_resync_pending": pending, "outbound_dirty_seconds": 3, **fields}
+
+    def snapshot_error(self):
+        return subprocess.CalledProcessError(1, ["rbgp", "neighbor"], output="",
+            stderr="Error: deadline exceeded: RIB snapshot query timed out\n")
+
+    def test_snapshot_retry_restarts_both_held_sweeps_with_success_only_clocks(self):
+        failures = self.root / "failures.jsonl"
+        failures.write_text("")
+        clock, calls = [0.0], []
+        def run(args, **kwargs):
+            calls.append(args[-1])
+            clock[0] += .1
+            if len(calls) == 3:
+                raise self.snapshot_error()
+            row = self.snapshot_row(args[-1], args[-1] != receipt.peer(0),
+                                    epoch="discarded" if len(calls) < 3 else "complete")
+            return subprocess.CompletedProcess(args, 0, json.dumps(row), "")
+        def pause(duration):
+            clock[0] += duration
+        groups = [(receipt.peer(index), "group:7") for index in (1, 2)]
+        with mock.patch.object(receipt.subprocess, "run", side_effect=run), \
+             mock.patch.object(receipt.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(receipt.time, "sleep", side_effect=pause):
+            witness = receipt.poll_snapshot_witness(lambda query: receipt.held_dirty_witness(query, 2, groups, False),
+                "rbgp", "unix:///owned.sock", 10, failures, "held-b")
+        self.assertEqual(len(calls), 8)
+        self.assertTrue(all(row["raw"]["epoch"] == "complete" for sweep in witness["sweeps"] for row in sweep))
+        self.assertAlmostEqual(witness["sweeps"][0][0]["query_begin_monotonic_seconds"], .35)
+        receipt.validate_held_witness(witness, groups, False,
+            {"trigger_monotonic_seconds": 0, "drain_monotonic_seconds": 0, "resume_monotonic_seconds": 10})
+        record = json.loads(failures.read_text())
+        self.assertEqual((record["stderr"], record["stdout"], record["phase"], record["peer"]),
+                         (self.snapshot_error().stderr, "", "held-b", receipt.peer(1)))
+        self.assertEqual(receipt.snapshot_failure_counts(failures, 2),
+                         {"total": 1, "by_phase": {"held-b": {receipt.peer(1): 1}}})
+
+    def test_snapshot_retry_covers_initial_source_held_source_and_settled_callers(self):
+        groups = [(receipt.peer(index), "group:7") for index in (1, 2)]
+        readers = {
+            "initial": lambda query: receipt.neighbor_witness(query, 2, pending=False),
+            "initial-source": receipt.source_witness,
+            "held-b": lambda query: receipt.held_dirty_witness(query, 2, groups, True),
+            "settled-b": lambda query: receipt.neighbor_witness(query, 2, expected=groups, pending=False),
+            "settled-b-source": receipt.source_witness}
+        for phase, read in readers.items():
+            with self.subTest(phase=phase):
+                failures = self.root / "failures.jsonl"
+                failures.write_text("")
+                failed = []
+                target = receipt.peer(0) if phase.endswith("source") or phase == "held-b" else receipt.peer(1)
+                def run(args, target=target, failed=failed, phase=phase, **kwargs):
+                    if args[-1] == target and not failed:
+                        failed.append(True)
+                        raise self.snapshot_error()
+                    row = self.snapshot_row(args[-1], phase == "held-b" and args[-1] != receipt.peer(0))
+                    return subprocess.CompletedProcess(args, 0, json.dumps(row), "")
+                with mock.patch.object(receipt.subprocess, "run", side_effect=run) as cli, \
+                     mock.patch.object(receipt.time, "monotonic", return_value=0), \
+                     mock.patch.object(receipt.time, "sleep"):
+                    receipt.poll_snapshot_witness(read, "rbgp", "unix:///owned.sock", 1800, failures, phase)
+                self.assertTrue(all(call.kwargs["timeout"] == 30 for call in cli.call_args_list))
+                self.assertEqual(receipt.snapshot_failure_counts(failures, 2),
+                                 {"total": 1, "by_phase": {phase: {target: 1}}})
+
+    def test_snapshot_retry_stays_inside_original_leg_deadline(self):
+        failures = self.root / "failures.jsonl"
+        failures.write_text("")
+        clock, budgets = [0.0], []
+        def run(args, **kwargs):
+            budgets.append(kwargs["timeout"])
+            clock[0] += kwargs["timeout"]
+            raise self.snapshot_error()
+        def pause(duration):
+            clock[0] += duration
+        with mock.patch.object(receipt.subprocess, "run", side_effect=run), \
+             mock.patch.object(receipt.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(receipt.time, "sleep", side_effect=pause):
+            with self.assertRaisesRegex(TimeoutError, "fixed leg deadline expired"):
+                receipt.poll_snapshot_witness(lambda query: receipt.neighbor_witness(query, 1, pending=True),
+                    "rbgp", "unix:///owned.sock", 31, failures, "held-b")
+        self.assertEqual(budgets[0], 30)
+        self.assertAlmostEqual(budgets[1], .95)
+        self.assertAlmostEqual(clock[0], 31)
+        self.assertEqual(receipt.snapshot_failure_counts(failures, 1)["total"], 2)
+
+    def test_snapshot_nonmatching_errors_and_malformed_json_are_fatal(self):
+        errors = [subprocess.CalledProcessError(code, ["rbgp"], output=stdout, stderr=stderr) for code, stdout, stderr in (
+            (1, "", "Error: permission denied: unauthorized\n"),
+            (1, "", "Error: transport error\n"),
+            (1, "", "Error: deadline exceeded: another query timed out\n"),
+            (2, "", self.snapshot_error().stderr),
+            (1, "unexpected stdout", self.snapshot_error().stderr),
+            (1, "", self.snapshot_error().stderr + "another error\n"),
+            (1, "", "Error: unavailable: RIB export-policy transition stalled\n"))]
+        errors.append(subprocess.TimeoutExpired(["rbgp"], 30, output=b"partial", stderr=b"timeout stderr"))
+        errors.append(FileNotFoundError("missing rbgp"))
+        for error in [*errors, None]:
+            with self.subTest(error=error):
+                failures = self.root / "failures.jsonl"
+                failures.write_text("")
+                clock = [0.0]
+                def run(args, clock=clock, error=error, **kwargs):
+                    clock[0] += 1
+                    if error is not None:
+                        raise error
+                    return subprocess.CompletedProcess(args, 0, "{", "malformed stderr\n")
+                expected = type(error) if error is not None else json.JSONDecodeError
+                with mock.patch.object(receipt.subprocess, "run", side_effect=run) as cli, \
+                     mock.patch.object(receipt.time, "monotonic", side_effect=lambda clock=clock: clock[0]), \
+                     mock.patch.object(receipt.time, "sleep") as pause:
+                    with self.assertRaises(expected):
+                        receipt.poll_snapshot_witness(lambda query: receipt.neighbor_witness(query, 1, pending=False),
+                            "rbgp", "unix:///owned.sock", 3, failures, "initial")
+                self.assertEqual(cli.call_count, 1)
+                pause.assert_not_called()
+                record = json.loads(failures.read_text())
+                self.assertEqual(record["error"], expected.__name__)
+                stderr = getattr(error, "stderr", None)
+                self.assertEqual(record["stderr"], (stderr.decode() if isinstance(stderr, bytes) else stderr)
+                                 if error is not None else "malformed stderr\n")
+
+    def test_snapshot_semantic_errors_and_owned_harness_exit_are_fatal(self):
+        for mutation in ("identity", "group", "missing-age", "harness-exit"):
+            with self.subTest(mutation=mutation):
+                failures = self.root / "failures.jsonl"
+                failures.write_text("")
+                process = mock.Mock()
+                process.poll.return_value = None
+                def run(args, mutation=mutation, process=process, **kwargs):
+                    if mutation == "harness-exit":
+                        process.poll.return_value = 1
+                        raise self.snapshot_error()
+                    row = self.snapshot_row(args[-1], mutation == "missing-age")
+                    if mutation == "identity":
+                        row["address"] = receipt.peer(2)
+                    elif mutation == "group":
+                        row["update_group"] = "group:8"
+                    else:
+                        del row["outbound_dirty_seconds"]
+                    return subprocess.CompletedProcess(args, 0, json.dumps(row), "")
+                groups = [(receipt.peer(1), "group:7")]
+                read = (lambda query, groups=groups: receipt.held_dirty_witness(query, 1, groups, True)) if mutation == "missing-age" else \
+                       (lambda query, groups=groups: receipt.neighbor_witness(query, 1, expected=groups, pending=False))
+                expected = {"identity": "identity changed", "group": "group identity", "missing-age": "invalid current dirty episode",
+                            "harness-exit": "owned process exited"}[mutation]
+                with mock.patch.object(receipt.subprocess, "run", side_effect=run), \
+                     mock.patch.object(receipt.time, "monotonic", return_value=0), mock.patch.object(receipt.time, "sleep") as pause:
+                    with self.assertRaisesRegex(ValueError, expected):
+                        receipt.poll_snapshot_witness(read, "rbgp", "unix:///owned.sock", 1800, failures,
+                                                      "held-b" if mutation == "missing-age" else "initial", (process,))
+                pause.assert_not_called()
+
+    def test_snapshot_invalid_reply_cannot_be_discarded_by_later_timeout(self):
+        mutations = {"group": "group identity changed", "group-clean": "group identity changed",
+                     "group-type": "receiver is not grouped", "initial-cohort": "receivers do not share one group",
+                     "missing-age": "invalid current dirty episode", "negative-age": "invalid current dirty episode",
+                     "boolean-age": "invalid current dirty episode", "string-age": "invalid current dirty episode",
+                     "reversed-clock": "invalid dirty query clock", "nan-clock": "invalid dirty query clock",
+                     "boolean-clock": "invalid dirty query clock"}
+        for mutation, expected in mutations.items():
+            with self.subTest(mutation=mutation):
+                failures = self.root / "failures.jsonl"
+                failures.write_text("")
+                clock, calls = [0.0], []
+                invalid_call = 2 if mutation == "initial-cohort" else 1
+                def run(args, mutation=mutation, clock=clock, calls=calls, invalid_call=invalid_call, **kwargs):
+                    calls.append(args[-1])
+                    clock[0] = 0.0
+                    if len(calls) == invalid_call + 1:
+                        raise self.snapshot_error()
+                    row = self.snapshot_row(args[-1], mutation != "initial-cohort" and args[-1] != receipt.peer(0))
+                    if len(calls) == invalid_call:
+                        if mutation in ("group", "group-clean", "initial-cohort"):
+                            row["update_group"] = "group:8"
+                            if mutation == "group-clean":
+                                row["outbound_resync_pending"] = False
+                                del row["outbound_dirty_seconds"]
+                        elif mutation == "group-type":
+                            row["update_group"] = 7
+                        elif mutation == "missing-age":
+                            del row["outbound_dirty_seconds"]
+                        elif mutation.endswith("age"):
+                            row["outbound_dirty_seconds"] = {"negative-age": -1, "boolean-age": True, "string-age": "3"}[mutation]
+                        else:
+                            clock[0] = {"reversed-clock": -1.0, "nan-clock": float("nan"), "boolean-clock": False}[mutation]
+                    return subprocess.CompletedProcess(args, 0, json.dumps(row), "")
+                groups = [(receipt.peer(index), "group:7") for index in (1, 2, 3)]
+                read = (lambda query: receipt.neighbor_witness(query, 3, pending=False)) if mutation == "initial-cohort" else \
+                       (lambda query, groups=groups: receipt.held_dirty_witness(query, 3, groups, True))
+                with mock.patch.object(receipt.subprocess, "run", side_effect=run), \
+                     mock.patch.object(receipt.time, "monotonic", side_effect=lambda clock=clock: clock[0]), \
+                     mock.patch.object(receipt.time, "sleep") as pause:
+                    with self.assertRaisesRegex(ValueError, expected):
+                        receipt.poll_snapshot_witness(read, "rbgp", "unix:///owned.sock", 1800, failures,
+                                                      "initial" if mutation == "initial-cohort" else "held-b")
+                self.assertEqual(len(calls), invalid_call)
+                self.assertEqual(failures.read_text(), "")
+                pause.assert_not_called()
+
+    def test_snapshot_clean_and_zero_age_keep_original_overlap_transients(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                failures = self.root / "failures.jsonl"
+                failures.write_text("")
+                clock = [0.0]
+                def run(args, pending=pending, clock=clock, **kwargs):
+                    clock[0] += .1
+                    row = self.snapshot_row(args[-1], pending, outbound_dirty_seconds=0)
+                    if not pending:
+                        del row["outbound_dirty_seconds"]
+                    return subprocess.CompletedProcess(args, 0, json.dumps(row), "")
+                groups = [(receipt.peer(index), "group:7") for index in (1, 2)]
+                with mock.patch.object(receipt.subprocess, "run", side_effect=run) as cli, \
+                     mock.patch.object(receipt.time, "monotonic", side_effect=lambda clock=clock: clock[0]), \
+                     mock.patch.object(receipt.time, "sleep") as pause:
+                    expected = "no common current dirty instant" if pending else "actual dirty overlap/settlement missing"
+                    with self.assertRaisesRegex(ValueError, expected):
+                        receipt.poll_snapshot_witness(lambda query, groups=groups: receipt.held_dirty_witness(query, 2, groups, True),
+                                                      "rbgp", "unix:///owned.sock", 1800, failures, "held-b")
+                self.assertEqual(cli.call_count, 4 if pending else 1)
+                self.assertEqual(failures.read_text(), "")
+                pause.assert_not_called()
+
+    def test_snapshot_failure_replay_reclassifies_raw_attempts_and_counts(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        original = [{"sequence": 1, "phase": "held-b", "peer": receipt.peer(1), "attempt": 1,
+                     "error": "CalledProcessError", "returncode": 1, "stdout": "", "stderr": self.snapshot_error().stderr},
+                    {"sequence": 2, "phase": "settled-b-source", "peer": receipt.peer(0), "attempt": 1,
+                     "error": "CalledProcessError", "returncode": 1, "stdout": "", "stderr": self.snapshot_error().stderr}]
+        for mutation in (None, "stderr", "stdout", "status", "kind", "phase", "phase-order", "peer", "attempt", "sequence", "omitted", "counts", "raw-digest"):
+            with self.subTest(mutation=mutation):
+                leg, row = self.small_leg(manifest)
+                records = copy.deepcopy(original)
+                counts = {"total": 2, "by_phase": {"held-b": {receipt.peer(1): 1}, "settled-b-source": {receipt.peer(0): 1}}}
+                if mutation == "stderr":
+                    records[0].update(stderr="Error: permission denied\n", retryable=True)
+                elif mutation == "stdout":
+                    records[0]["stdout"] = "unexpected output"
+                elif mutation == "status":
+                    records[0]["returncode"] = 2
+                elif mutation == "kind":
+                    records[0]["error"] = "TimeoutExpired"
+                elif mutation == "phase":
+                    records[0]["phase"] = "unknown"
+                elif mutation == "phase-order":
+                    records[1]["phase"] = "initial-source"
+                    counts["by_phase"] = {"held-b": {receipt.peer(1): 1}, "initial-source": {receipt.peer(0): 1}}
+                elif mutation == "peer":
+                    records[0]["peer"] = receipt.peer(3)
+                elif mutation in ("attempt", "sequence"):
+                    records[0][mutation] = 2
+                elif mutation == "omitted":
+                    records.pop()
+                elif mutation == "counts":
+                    counts["total"] = 3
+                path = leg / "ordinary-snapshot-failures.jsonl"
+                path.write_text("".join(json.dumps(record) + "\n" for record in records))
+                row["snapshot_failure_counts"] = counts
+                if mutation != "raw-digest":
+                    row["raw_sha256"] = self.raw_hashes(leg)
+                if mutation is None:
+                    receipt.validate_leg(leg, manifest, row)
+                else:
+                    with self.assertRaises(ValueError):
+                        receipt.validate_leg(leg, manifest, row)
 
     def test_held_episode_receipt_binds_raw_current_state_and_both_sweeps(self):
         identities = [(receipt.peer(i), "group:7") for i in (1, 2)]
@@ -595,6 +862,8 @@ class MassDirtyTests(unittest.TestCase):
         leg = self.root / "small-leg"
         leg.mkdir(exist_ok=True)
         row = {"daemon_exit": 0, "harness_exit": 0, "config_check_exit": 0, "raw_sha256": {}, "operations": []}
+        (leg / "ordinary-snapshot-failures.jsonl").write_text("")
+        row["snapshot_failure_counts"] = {"total": 0, "by_phase": {}}
         charge = {"entries": 0, "bytes": 1024, "peak_bytes": 2048}
         held_charge = {"entries": manifest["receivers"] * sum(manifest["family_keys"]),
                        "bytes": manifest["receivers"] * sum(manifest["family_keys"]) * 32 + 1024}

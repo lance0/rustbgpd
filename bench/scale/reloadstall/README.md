@@ -47,6 +47,15 @@ and the source clean. A CURRENT dirty episode with floored age d and query bound
 a common instant. Raw bounds, ages and the intersection are retained; correctness
 mode publishes null clocks and the proof boolean. This establishes actual
 overlapping dirty episodes rather than treating sequential queries as atomic.
+An ordinary neighbor snapshot that returns the specific RIB snapshot
+`DeadlineExceeded` error retries the complete witness, discarding any partial
+sweeps. Each CLI process remains capped at 30 seconds and the remaining original
+whole-leg budget. `ordinary-snapshot-failures.jsonl` retains every failed CLI or
+JSON parsing attempt's phase, peer, failure sequence, exit status and exact stdout/stderr; leg
+results disclose the derived counts. Replay checks these records independently
+under the complete raw-evidence hash roster, including an empty failure file.
+Successful calls alone supply the dirty-query bounds. Public readiness retains
+its 250 ms deadline, and any watcher failure remains fatal.
 Dirty retained recovery entries/capacity are sampled before release. After resume,
 every target needs a real JSON `outbound routes resynced` receipt with dirty=true
 and force=false, exact final wire fold, unchanged identity/group and clean state.

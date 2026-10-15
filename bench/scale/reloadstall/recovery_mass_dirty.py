@@ -58,8 +58,82 @@ def write_json(path, data):
     Path(path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
-def command(args, **kwargs):
-    return subprocess.check_output([str(arg) for arg in args], text=True, timeout=30, **kwargs).strip()
+def snapshot_timeout(returncode, stdout, stderr):
+    return (type(returncode) is int and returncode == 1 and stdout == "" and isinstance(stderr, str) and
+            stderr.strip() == "Error: deadline exceeded: RIB snapshot query timed out")
+
+
+def snapshot_failure_counts(path, receivers):
+    counts = {}
+    records = [json.loads(line) for line in Path(path).read_text().splitlines()]
+    phases = ("initial", "initial-source", "held-b", "settled-b", "settled-b-source",
+              "held-a", "settled-a", "settled-a-source")
+    previous_phase = -1
+    for sequence, record in enumerate(records, 1):
+        phase, address = record["phase"], record["peer"]
+        sources = {"initial-source", "settled-b-source", "settled-a-source"}
+        members = {"initial", "settled-b", "settled-a"}
+        held = {"held-b", "held-a"}
+        require(phase in sources | members | held, "unknown ordinary snapshot phase")
+        require(phases.index(phase) >= previous_phase, "ordinary snapshot phase order differs")
+        previous_phase = phases.index(phase)
+        expected = {peer(0)} if phase in sources else {peer(index) for index in range(1, receivers + 1)}
+        if phase in held:
+            expected.add(peer(0))
+        require(address in expected, "ordinary snapshot peer/phase differs")
+        peers = counts.setdefault(phase, {})
+        attempt = peers.get(address, 0) + 1
+        require(type(record["sequence"]) is int and record["sequence"] == sequence and
+                type(record["attempt"]) is int and record["attempt"] == attempt, "ordinary snapshot attempt order differs")
+        require(record["error"] == "CalledProcessError" and
+                snapshot_timeout(record["returncode"], record["stdout"], record["stderr"]),
+                "non-retryable ordinary snapshot failure in completed leg")
+        peers[address] = attempt
+    return {"total": len(records), "by_phase": counts}
+
+
+def poll_snapshot_witness(read, rbgp, addr, deadline, failures, phase, processes=()):
+    def active():
+        require(all(process.poll() is None for process in processes), "owned process exited during ordinary snapshot polling")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("fixed leg deadline expired during ordinary snapshot polling")
+
+    def query(address):
+        active()
+        begin = time.monotonic()
+        if begin >= deadline:
+            raise TimeoutError("fixed leg deadline expired during ordinary snapshot polling")
+        completed = None
+        try:
+            completed = subprocess.run([str(rbgp), "--addr", addr, "--json", "neighbor", address],
+                                       text=True, capture_output=True, timeout=min(30, deadline - begin), check=True)
+            row = json.loads(completed.stdout)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as error:
+            stdout = completed.stdout if completed is not None else getattr(error, "output", None)
+            stderr = completed.stderr if completed is not None else getattr(error, "stderr", None)
+            previous = [json.loads(line) for line in Path(failures).read_text().splitlines()]
+            record = {"sequence": len(previous) + 1, "phase": phase, "peer": address,
+                      "attempt": 1 + sum(item["phase"] == phase and item["peer"] == address for item in previous),
+                      "error": type(error).__name__,
+                      "returncode": completed.returncode if completed is not None else getattr(error, "returncode", None),
+                      "stdout": stdout.decode("utf-8", "surrogateescape") if isinstance(stdout, bytes) else stdout,
+                      "stderr": stderr.decode("utf-8", "surrogateescape") if isinstance(stderr, bytes) else stderr}
+            with Path(failures).open("a") as stream:
+                stream.write(json.dumps(record) + "\n")
+            raise
+        return row, begin, time.monotonic()
+
+    while True:
+        active()
+        try:
+            result = read(query)
+            active()
+            return result
+        except subprocess.CalledProcessError as error:
+            if not snapshot_timeout(error.returncode, error.output, error.stderr):
+                raise
+            active()
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
 def cpu_set(text):
@@ -292,61 +366,66 @@ def recovery_charge(text):
     return charge
 
 
-def neighbor_witness(rbgp, addr, receivers, expected=None, pending=None, observe_episode=False):
+def neighbor_witness(snapshot, receivers, expected=None, pending=None, observe_episode=False):
     rows = []
     for index in range(1, receivers + 1):
-        begin = time.monotonic()
-        row = json.loads(command([rbgp, "--addr", addr, "--json", "neighbor", peer(index)]))
-        end = time.monotonic()
+        row, begin, end = snapshot(peer(index))
         require(row["address"] == peer(index), "receiver identity changed")
         # The CLI contract omits this boolean while false; true is explicit.
         require(row["state"] == "Established" and row.get("slow_peer", False) is False, "receiver state/isolation changed")
-        require(row.get("outbound_resync_pending") is pending, "actual dirty overlap/settlement missing")
         group = row.get("update_group")
         require(isinstance(group, str) and group.startswith("group:"), "receiver is not grouped")
-        rows.append({"peer": peer(index), "group": group,
-                     "pending": row["outbound_resync_pending"],
-                     "fallback": row.get("update_group_recovery_fallback", "")})
+        require(not rows or group == rows[0]["group"], "receivers do not share one group")
+        if expected is not None:
+            require(index <= len(expected) and (peer(index), group) == expected[index - 1], "group identity changed")
+        observed = {"peer": peer(index), "group": group, "pending": row.get("outbound_resync_pending"),
+                    "fallback": row.get("update_group_recovery_fallback", "")}
         if observe_episode:
-            rows[-1].update({"dirty_seconds": row.get("outbound_dirty_seconds"), "raw": row,
+            observed.update({"dirty_seconds": row.get("outbound_dirty_seconds"), "raw": row,
                              "query_begin_monotonic_seconds": begin, "query_end_monotonic_seconds": end})
-    require(len({row["group"] for row in rows}) == 1, "receivers do not share one group")
+            if observed["pending"] is True:
+                dirty_interval(observed)
+        require(observed["pending"] is pending, "actual dirty overlap/settlement missing")
+        rows.append(observed)
+    require(rows, "receivers do not share one group")
     if expected is not None:
         require([(row["peer"], row["group"]) for row in rows] == expected, "group identity changed")
     return rows
 
 
+def dirty_interval(row):
+    age = row["dirty_seconds"]
+    begin, end = row["query_begin_monotonic_seconds"], row["query_end_monotonic_seconds"]
+    require(row["pending"] is True and type(age) is int and age >= 0, "invalid current dirty episode")
+    require(all(isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value)
+                for value in (begin, end)) and 0 <= begin <= end, "invalid dirty query clock")
+    # The actor samples age inside this RPC. A floored CURRENT age proves
+    # that episode covers [query_end-age, query_begin], conservatively.
+    return end - age, begin
+
+
 def dirty_overlap(rows):
     require(rows, "empty dirty witness")
-    intervals = []
-    for row in rows:
-        age = row["dirty_seconds"]
-        begin, end = row["query_begin_monotonic_seconds"], row["query_end_monotonic_seconds"]
-        require(row["pending"] is True and type(age) is int and age >= 0, "invalid current dirty episode")
-        require(all(isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value)
-                    for value in (begin, end)) and 0 <= begin <= end, "invalid dirty query clock")
-        # The actor samples age inside this RPC. A floored CURRENT age proves
-        # that episode covers [query_end-age, query_begin], conservatively.
-        intervals.append((end - age, begin))
+    intervals = [dirty_interval(row) for row in rows]
     begin, end = max(pair[0] for pair in intervals), min(pair[1] for pair in intervals)
     require(begin <= end, "no common current dirty instant")
     return {"begin_monotonic_seconds": begin, "end_monotonic_seconds": end, "proved": True}
 
 
-def source_witness(rbgp, addr):
-    row = json.loads(command([rbgp, "--addr", addr, "--json", "neighbor", peer(0)]))
+def source_witness(snapshot):
+    row, _, _ = snapshot(peer(0))
     validate_source_witness(row)
     return row
 
 
-def held_dirty_witness(rbgp, addr, receivers, groups, correctness):
-    sweeps = [neighbor_witness(rbgp, addr, receivers, expected=groups, pending=True, observe_episode=True)
+def held_dirty_witness(snapshot, receivers, groups, correctness):
+    sweeps = [neighbor_witness(snapshot, receivers, expected=groups, pending=True, observe_episode=True)
               for _ in range(2)]
     individual = [dirty_overlap(rows) for rows in sweeps]
     # Combining both sweeps proves the second CURRENT episodes still cover
     # the first common instant; a cleared-and-recreated episode cannot pass.
     stable = dirty_overlap([row for rows in sweeps for row in rows])
-    source = source_witness(rbgp, addr)
+    source = source_witness(snapshot)
     if correctness:
         for rows in sweeps:
             for row in rows:
@@ -512,6 +591,8 @@ def run_cell(args):
             "run-cell binary identity differs")
     leg = root / f"leg-{args.index}-{args.arm}"
     leg.mkdir()
+    snapshot_failures = leg / "ordinary-snapshot-failures.jsonl"
+    snapshot_failures.write_text("")
     correct = manifest["correctness_only"]
     if not correct:
         require(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "measurement requires fresh hosted runner")
@@ -567,10 +648,13 @@ def run_cell(args):
             write_json(leg / "harness-owner.json", result["harness_owner"])
             ready = read_record(engine, records, "mass_dirty_ready", deadline)
             require(ready["family_keys"] == manifest["family_keys"] and ready["receivers"] == manifest["receivers"], "wire population shape changed")
-            initial = neighbor_witness(rbgp, "unix://" + str(scenario / "grpc.sock"), manifest["receivers"], pending=False)
+            def snapshot(read, phase):
+                return poll_snapshot_witness(read, rbgp, "unix://" + str(scenario / "grpc.sock"), deadline,
+                                             snapshot_failures, phase, (daemon, engine))
+            initial = snapshot(lambda query: neighbor_witness(query, manifest["receivers"], pending=False), "initial")
             groups = [(row["peer"], row["group"]) for row in initial]
             write_json(leg / "neighbors-initial.json", initial)
-            write_json(leg / "source-initial.json", source_witness(rbgp, "unix://" + str(scenario / "grpc.sock")))
+            write_json(leg / "source-initial.json", snapshot(source_witness, "initial-source"))
             before = http_metrics(19186)
             (leg / "metrics-initial.prom").write_text(before)
             regroup = metric(before, "bgp_update_group_regroups_total")
@@ -611,8 +695,8 @@ def run_cell(args):
                     require(time.monotonic() < deadline and daemon.poll() is None and engine.poll() is None,
                             "actual mass-dirty witness did not arrive within fixed leg deadline")
                     try:
-                        witness = held_dirty_witness(rbgp, "unix://" + str(scenario / "grpc.sock"),
-                                                     manifest["receivers"], groups, correct)
+                        witness = snapshot(lambda query: held_dirty_witness(query, manifest["receivers"], groups, correct),
+                                           f"held-{generation}")
                         break
                     except ValueError as error:
                         require(str(error) in ("actual dirty overlap/settlement missing", "no common current dirty instant"), str(error))
@@ -642,13 +726,14 @@ def run_cell(args):
                     require(time.monotonic() < deadline and daemon.poll() is None and engine.poll() is None,
                             "recovery did not settle within fixed leg deadline")
                     try:
-                        settled = neighbor_witness(rbgp, "unix://" + str(scenario / "grpc.sock"), manifest["receivers"], expected=groups, pending=False)
+                        settled = snapshot(lambda query: neighbor_witness(query, manifest["receivers"], expected=groups, pending=False),
+                                           f"settled-{generation}")
                         break
                     except ValueError as error:
                         require(str(error) == "actual dirty overlap/settlement missing", str(error))
                         time.sleep(0.05)
                 write_json(leg / f"neighbors-settled-{generation}.json", settled)
-                write_json(leg / f"source-settled-{generation}.json", source_witness(rbgp, "unix://" + str(scenario / "grpc.sock")))
+                write_json(leg / f"source-settled-{generation}.json", snapshot(source_witness, f"settled-{generation}-source"))
                 while True:
                     log_snapshot = (leg / "daemon.log").read_bytes()
                     log_end = log_snapshot.rfind(b"\n") + 1
@@ -713,6 +798,7 @@ def run_cell(args):
             if manifest["cohort"] == "cap-pressure" and not correct and (args.arm == "flat" or manifest["profile"] == "full-vpn"):
                 require(any(operation["fallback_deltas"]["daemon_limit"] for operation in result["operations"]), "pressure control did not exercise daemon cap")
             result["status"] = "CORRECTNESS_ONLY" if correct else "PASS"
+            result["snapshot_failure_counts"] = snapshot_failure_counts(snapshot_failures, manifest["receivers"])
             result["raw_sha256"] = {path.name: digest(path) for path in leg.iterdir() if path.is_file() and path.name not in ("memory.csv", "sampler.log")}
             write_json(leg / "result.json", result)
     except BaseException as error:
@@ -882,6 +968,8 @@ def validate_leg(leg, manifest, row):
     require(type(row.get("raw_sha256")) is dict and set(row["raw_sha256"]) == raw_files, "raw evidence hash roster differs")
     for name, expected in row["raw_sha256"].items():
         require(Path(name).name == name and digest(leg / name) == expected, "raw evidence changed")
+    require(row.get("snapshot_failure_counts") == snapshot_failure_counts(leg / "ordinary-snapshot-failures.jsonl", manifest["receivers"]),
+            "ordinary snapshot failure counts differ")
     validate_fixture(leg / "fixture", json.loads((leg / "fixture.sha256.json").read_text()))
     records = harness_records(leg / "harness.log")
     coverage = readiness_coverage(records, row["operations"], manifest["correctness_only"])
