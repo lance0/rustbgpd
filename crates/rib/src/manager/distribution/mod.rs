@@ -3888,6 +3888,21 @@ impl RibManager {
                 }
                 self.mark_outbound_dirty_inner(peer, false);
                 self.retry_evpn_recovery_reset(peer);
+                #[cfg(test)]
+                if let Some(observer) = &retirement_observer {
+                    observer("evpn_count_refusal_prior_retirement_before");
+                }
+                super::retire_hash_set(&mut group_prior, &mut || {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "evpn_count_refusal_prior_retirement",
+                        false,
+                    );
+                });
+                #[cfg(test)]
+                if let Some(observer) = &retirement_observer {
+                    observer("evpn_count_refusal_prior_retirement_after");
+                }
                 return self.outbound_commit_failed(
                     peer,
                     OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
@@ -3900,6 +3915,21 @@ impl RibManager {
         if !self.preflight_final_evpn_recovery(peer, &mut evpn_announce, &mut evpn_withdraw)
             || !self.admit_evpn_recovery_batch(peer, &evpn_announce, &evpn_withdraw)
         {
+            #[cfg(test)]
+            if let Some(observer) = &retirement_observer {
+                observer("evpn_admission_refusal_prior_retirement_before");
+            }
+            super::retire_hash_set(&mut group_prior, &mut || {
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "evpn_admission_refusal_prior_retirement",
+                    false,
+                );
+            });
+            #[cfg(test)]
+            if let Some(observer) = &retirement_observer {
+                observer("evpn_admission_refusal_prior_retirement_after");
+            }
             return self.outbound_commit_failed(
                 peer,
                 OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),

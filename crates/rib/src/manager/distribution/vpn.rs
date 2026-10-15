@@ -804,6 +804,8 @@ impl RibManager {
         affected: &HashSet<VpnRibRouteKey>,
     ) {
         let readiness = self.replacement_readiness.clone();
+        #[cfg(test)]
+        let retirement_observer = self.replacement_readiness_test_hook.clone();
         let mut checkpoint = || {
             super::super::replacement_readiness_checkpoint_at(&readiness, "selection_vpn", false);
         };
@@ -912,7 +914,7 @@ impl RibManager {
                 speculative_group_admitted.push(peer);
             }
         }
-        let vpn_group_stage = self.stage_vpn_update_groups(&changed_keys);
+        let mut vpn_group_stage = self.stage_vpn_update_groups(&changed_keys);
 
         let peers: Vec<IpAddr> = self
             .outbound_peers
@@ -1145,6 +1147,24 @@ impl RibManager {
             }
         }
         self.release_speculative_group_admitted_keys(&speculative_group_admitted);
+        for (_, mut stage) in vpn_group_stage.drain() {
+            #[cfg(test)]
+            if let Some(observer) = &retirement_observer {
+                observer("vpn_group_stage_retirement_before");
+            }
+            stage.retire_with(&mut |force| {
+                super::super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "vpn_group_stage_retirement",
+                    force,
+                );
+            });
+            #[cfg(test)]
+            if let Some(observer) = &retirement_observer {
+                observer("vpn_group_stage_retirement_after");
+            }
+        }
+        crate::adj_rib_out::release_hash_map(&mut vpn_group_stage, &mut checkpoint);
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
         super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
     }
