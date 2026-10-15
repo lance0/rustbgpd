@@ -94,8 +94,8 @@ fn evpn_shared_empty_capture_checkpoints_completeness_count_and_population() {
     );
     assert_eq!(
         visits.load(Ordering::SeqCst),
-        routes.len() * 3,
-        "completeness, filtered cardinality and population each visit every excluded row"
+        routes.len() * 4,
+        "completeness, cardinality, ordered reference collection and flat fallback each visit every excluded row"
     );
     let handle = manager.evpn_recovery_handle(member).unwrap();
     assert_eq!(

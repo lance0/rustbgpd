@@ -451,6 +451,12 @@ attachment; refusal retries a fitting flat proof before the counted no-proof
 fallback. The [snapshot-churn receipt](../perf/update-group-recovery-snapshot-churn-2026-10-14.md)
 qualifies its recorded shapes, not arbitrary churn or general regroup scale.
 
+Reuse also has a capture-cost gate. The
+[capture-scan amendment](#amendment-2026-10-15-recovery-capture-scan-cost)
+requires ordering costs in the measured phase, separate sorted/shuffled receipts
+and a matched whole-system comparison; logical byte savings alone do not accept
+the live unicast/VPN CPU trade.
+
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
 withdraws equals the per-peer path, with exact NLRI and prepared attribute bytes.
@@ -626,3 +632,38 @@ Qualify mass reevaluation and peer-down with matched off-box cgroup receipts
 against the original parent and the bounded-flat implementation before accepting
 the release memory envelope. Do not replace the earlier receipt or extrapolate a
 modelled component charge into a whole-daemon memory claim.
+
+## Amendment (2026-10-15): recovery capture scan cost
+
+The shared unicast/VPN capture path is live; only EVPN group ownership remains
+disabled. The [initial capture-scan receipt](../perf/update-group-recovery-capture-scans-2026-10-15.md)
+found shared capture substantially slower than explicit flat capture. Its OLD
+fixtures were sorted before timing. Live unicast slab iteration and VPN/EVPN
+hash-map iteration do not promise sorted OLD keys, so a linear merge cannot
+assume that ordering.
+
+Order borrowed route references in a fallibly allocated temporary buffer before
+shared capture. Charge its actual capacity and header throughout ordering,
+universe attachment and proof population; free it before refunding credit or
+retrying flat capture. Keep the existing peer and daemon limits. Allocation or
+budget refusal for this optional buffer must leave flat capture available.
+Sorted shape classification and population walk the universe monotonically;
+generic unordered callers retain a safe bounded-search fallback. Sorting itself
+remains O(n log n), and sparse OLD subsets may use binary lookup rather than
+walking a much larger universe.
+
+Requalify on fresh hosted runners with sorted and deterministically shuffled OLD
+fixtures reported separately for every capture-scan profile. Complete capture
+includes the production count traversal, temporary allocation, collection,
+ordering, classification, reservation, population, sealing and buffer release.
+Classification counters exclude sorting comparisons and do not establish an
+O(n) bound for the complete operation. Preserve the initial receipt; a new
+method needs its own source-pinned receipt.
+
+The acceptance target is shared complete capture within approximately 1.5 times
+flat, with no proof loss or refusal hidden from ratios. A component result alone
+does not qualify release: compare whole-system mass-dirty readiness and
+convergence with sharing enabled and disabled, and run the soak on the actual
+release candidate. If the capture target is missed, review a size/churn sharing
+gate or a return to flat unicast/VPN capture before release. The earlier
+component and memory receipts do not waive this cost gate.

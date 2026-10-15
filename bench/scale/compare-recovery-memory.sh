@@ -25,10 +25,11 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-s
         python3 "$checker" scope-snapshot "$cgroup" "$1/raw"
         record_scope_peak "$cgroup" "$1/compatibility-peak.txt"
     else
-        [[ $# == 6 ]] || fail 'invalid scope worker arguments'
+        [[ $# == 6 || ( $mode == --scope-scan && $# == 7 && ${7:-} == --shuffled-old ) ]] || fail 'invalid scope worker arguments'
         status=0
         scan_option=()
         [[ $mode != --scope-scan ]] || scan_option=(--scan)
+        [[ $# != 7 ]] || scan_option+=(--shuffled-old)
         python3 "$checker" run-scope "$1" "$2" "$3" "$cgroup" "$4" "$5" "$6" "${scan_option[@]}" || status=$?
         record_scope_peak "$cgroup" "$2/compatibility-peak.txt" || status=1
         exit "$status"
@@ -37,7 +38,7 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-s
 fi
 
 [[ $# -ge 4 && $1 == --head && $3 == --output-dir ]] ||
-    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--mode memory|scan] [--phase pilot|qualified] [--profile PROFILE] [--cell all|dataset-reevaluate|peer-down|widen|unsynchronized-dirty]'
+    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--mode memory|scan] [--shuffled-old] [--phase pilot|qualified] [--profile PROFILE] [--cell all|dataset-reevaluate|peer-down|widen|unsynchronized-dirty]'
 head=$2
 output=$4
 shift 4
@@ -45,7 +46,15 @@ phase=pilot
 receipt_mode=memory
 profile=all
 selected_cell=all
+old_order=sorted
+scan_options=()
 while [[ $# -gt 0 ]]; do
+    if [[ $1 == --shuffled-old ]]; then
+        old_order=shuffled
+        scan_options=(--shuffled-old)
+        shift
+        continue
+    fi
     [[ $# -ge 2 ]] || fail 'missing selector value'
     case $1 in --mode) receipt_mode=$2 ;; --phase) phase=$2 ;; --profile) profile=$2 ;; --cell) selected_cell=$2 ;; *) fail 'unknown selector' ;; esac
     shift 2
@@ -55,6 +64,7 @@ done
 if [[ $receipt_mode == scan ]]; then
     [[ $phase == qualified && ( $profile == full-uc || $profile == full-vpn || $profile == evpn-soak ) && $selected_cell == capture-scan ]] || fail 'invalid component scan selection'
 else
+    [[ $old_order == sorted ]] || fail 'shuffled OLD is only valid for component scans'
     [[ $profile == all || $profile == ipv4-100k || $profile == full-uc || $profile == full-vpn || $profile == mixed-widen ]] || fail 'invalid campaign profile'
     [[ $selected_cell == all || $selected_cell == dataset-reevaluate || $selected_cell == peer-down || $selected_cell == widen || $selected_cell == unsynchronized-dirty ]] || fail 'invalid campaign cell'
 fi
@@ -129,13 +139,14 @@ for path in "${inputs[@]}"; do
 done
 instrumentation=$(provenance_sha256_file "$output/instrumentation.sha256")
 if [[ $receipt_mode == scan ]]; then
-    python3 - "$output/manifest.json" "$head" "$instrumentation" "$profile" <<'PYCODE'
+    python3 - "$output/manifest.json" "$head" "$instrumentation" "$profile" "$old_order" <<'PYCODE'
 import json
 from pathlib import Path
 import sys
 Path(sys.argv[1]).write_text(json.dumps({
-    "schema": "rustbgpd.recovery-scan.campaign.v1", "candidate": sys.argv[2],
+    "schema": "rustbgpd.recovery-scan.campaign.v2", "candidate": sys.argv[2],
     "instrumentation_manifest_sha256": sys.argv[3], "profile": sys.argv[4],
+    "old_order": sys.argv[5],
     "build_jobs": 4, "order_per_cell": ["flat", "shared", "shared", "flat"],
     "scope": "component capture only; same runtime, no activation or daemon claim",
 }, indent=2, sort_keys=True) + "\n")
@@ -160,7 +171,7 @@ PYCODE
         RECOVERY_MEMORY_RUNNER_ENVIRONMENT="${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}}" \
         bash "$driver" --scope-scan \
         "$work_root/target-candidate/scale/rrharness" "$output/scan" capture-scan \
-        "$(cat "$output/candidate-binary.sha256")" "$profile" 1 \
+        "$(cat "$output/candidate-binary.sha256")" "$profile" 1 "${scan_options[@]}" \
         > "$output/scan/launcher.log" 2>&1 || status=$?
     printf '%s\n' "$status" > "$output/scan/launcher.exit"
     awk '$1 == "oom_kill" { print $2 }' /proc/vmstat > "$output/host-oom.after"

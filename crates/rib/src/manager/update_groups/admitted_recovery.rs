@@ -10,7 +10,7 @@ use std::net::IpAddr;
 use rustbgpd_wire::{Prefix, VpnRouteKey};
 use smallvec::SmallVec;
 
-use crate::route::VpnRibRouteKey;
+use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::ExactExportKey;
 
 const PEER_LIMIT_BYTES: usize = 64 * 1024 * 1024;
@@ -69,6 +69,27 @@ pub(in crate::manager) struct Failure {
     pub(in crate::manager) attempted_peer_bytes: usize,
     pub(in crate::manager) attempted_daemon_bytes: usize,
 }
+
+/// Borrowed OLD values keep the ordering buffer smaller than a second key set.
+#[derive(Clone, Copy)]
+pub(in crate::manager) enum CaptureRef<'a> {
+    Unicast(&'a Route),
+    Vpn(&'a VpnRibRoute),
+}
+
+impl CaptureRef<'_> {
+    pub(in crate::manager) fn key(self) -> Key {
+        match self {
+            Self::Unicast(route) => Key::Unicast(route.prefix, route.path_id),
+            Self::Vpn(route) => {
+                let key = route.key();
+                Key::Vpn(key.nlri_key, key.path_id)
+            }
+        }
+    }
+}
+
+type CaptureRefs<'a> = SmallVec<[CaptureRef<'a>; 0]>;
 
 type Keys = SmallVec<[Key; 0]>;
 type Records = SmallVec<[Record; 0]>;
@@ -199,6 +220,7 @@ struct Record {
     snapshot: Option<SnapshotHandle>,
     words: Words,
     masked: usize,
+    capture_scratch: usize,
 }
 
 impl Record {
@@ -206,6 +228,7 @@ impl Record {
         size_of::<Self>()
             + self.keys.0.capacity() * size_of::<Key>()
             + self.words.capacity() * size_of::<u64>()
+            + self.capture_scratch
     }
 }
 
@@ -669,17 +692,187 @@ impl AdmittedRecovery {
         let universe = hint
             .and_then(|handle| self.snapshot_index(handle))
             .map(|index| self.snapshots[index].keys.as_slice());
+        let mut cursor = None;
+        let mut previous = None;
+        let mut unordered = universe.is_some_and(|universe| {
+            keys.size_hint().1.is_none_or(|count| {
+                universe.len()
+                    > count.saturating_mul((usize::BITS - universe.len().leading_zeros()) as usize)
+            })
+        });
         keys.fold((0, 0), |(count, additions), key| {
             checkpoint(false);
             let missing = universe.is_some_and(|keys| {
-                keys.binary_search_by(|prior| {
-                    checkpoint(false);
-                    prior.cmp(&key)
-                })
-                .is_err()
+                Self::capture_position(
+                    keys,
+                    key,
+                    &mut cursor,
+                    &mut previous,
+                    &mut unordered,
+                    checkpoint,
+                )
+                .is_none()
             });
             (count + 1, additions + usize::from(missing))
         })
+    }
+
+    // Monotone inputs visit each skipped universe row once. An unordered input
+    // permanently switches to binary search, avoiding repeated full scans.
+    fn capture_position(
+        keys: &[Key],
+        key: Key,
+        cursor: &mut Option<usize>,
+        previous: &mut Option<Key>,
+        unordered: &mut bool,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Option<usize> {
+        *unordered |= previous.is_some_and(|prior| prior > key);
+        *previous = Some(key);
+        let mut position = if *unordered || cursor.is_none() {
+            keys.partition_point(|prior| {
+                checkpoint(false);
+                *prior < key
+            })
+        } else {
+            cursor.unwrap()
+        };
+        while let Some(prior) = keys.get(position) {
+            checkpoint(false);
+            match prior.cmp(&key) {
+                std::cmp::Ordering::Less => position += 1,
+                order => {
+                    *cursor = Some(position);
+                    return (order == std::cmp::Ordering::Equal).then_some(position);
+                }
+            }
+        }
+        *cursor = Some(position);
+        None
+    }
+
+    /// Charge and sort a temporary borrowed OLD inventory. Optional refusal
+    /// returns to the caller's existing flat producer after storage is freed.
+    pub(in crate::manager) fn with_ordered_capture<'a, A, F>(
+        &mut self,
+        peer: IpAddr,
+        count: usize,
+        actual: A,
+        checkpoint: &mut F,
+        capture: impl FnOnce(
+            &mut Self,
+            &[CaptureRef<'a>],
+            &mut F,
+        ) -> Result<Option<SnapshotHandle>, Failure>,
+    ) -> Result<Option<SnapshotHandle>, Failure>
+    where
+        A: Iterator<Item = CaptureRef<'a>>,
+        F: FnMut(bool),
+    {
+        let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
+        let extra = count
+            .checked_mul(size_of::<CaptureRef<'_>>())
+            .and_then(|bytes| bytes.checked_add(size_of::<CaptureRefs<'_>>()))
+            .ok_or_else(Self::overflow)?;
+        let peer_bytes = self
+            .peer_charge(index)
+            .checked_add(extra)
+            .ok_or_else(Self::overflow)?;
+        let daemon = self.used.checked_add(extra).ok_or_else(Self::overflow)?;
+        if self.check(peer, peer_bytes, daemon).is_err() {
+            return Ok(None);
+        }
+        self.used = daemon;
+        self.peak = self.peak.max(daemon);
+        self.records[index].capture_scratch += extra;
+        let mut ordered = CaptureRefs::new();
+        checkpoint(true);
+        let allocated = self.allocation_permitted() && ordered.try_grow(count).is_ok();
+        checkpoint(true);
+        let result = if allocated {
+            let mut complete = true;
+            for route in actual {
+                checkpoint(false);
+                if ordered.len() == count {
+                    complete = false;
+                    break;
+                }
+                ordered.push(route);
+            }
+            if !complete || ordered.len() != count {
+                Err(self.missing_proof(peer))
+            } else {
+                checkpoint(true);
+                ordered.sort_unstable_by(|a, b| {
+                    checkpoint(false);
+                    a.key().cmp(&b.key())
+                });
+                checkpoint(true);
+                capture(self, &ordered, checkpoint)
+            }
+        } else {
+            Ok(None)
+        };
+        checkpoint(true);
+        drop(ordered);
+        checkpoint(true);
+        self.records[index].capture_scratch -= extra;
+        self.used -= extra;
+        result
+    }
+
+    /// Populate the shared mask and reserved sparse tail in one merge pass.
+    pub(in crate::manager) fn push_capture_batch_with_checkpoint(
+        &mut self,
+        peer: IpAddr,
+        keys: impl Iterator<Item = Key>,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<(), Failure> {
+        let index = self
+            .index_with_checkpoint(peer, checkpoint)
+            .map_err(|_| self.missing_proof(peer))?;
+        match self.records[index].state {
+            State::Failed(error) => return Err(error),
+            State::Complete => return Err(self.fail(index, self.missing_proof(peer), checkpoint)),
+            State::Capturing => {}
+        }
+        let universe = self.records[index]
+            .snapshot
+            .and_then(|handle| self.snapshot_index(handle));
+        let mut cursor = None;
+        let mut previous = None;
+        let mut unordered = universe.is_some_and(|index| {
+            let length = self.snapshots[index].keys.len();
+            keys.size_hint().1.is_none_or(|count| {
+                length > count.saturating_mul((usize::BITS - length.leading_zeros()) as usize)
+            })
+        });
+        for key in keys {
+            checkpoint(false);
+            let position = universe.and_then(|snapshot| {
+                Self::capture_position(
+                    &self.snapshots[snapshot].keys,
+                    key,
+                    &mut cursor,
+                    &mut previous,
+                    &mut unordered,
+                    checkpoint,
+                )
+            });
+            if let Some(position) = position {
+                let bit = 1_u64 << (position % 64);
+                if self.records[index].words[position / 64] & bit == 0 {
+                    self.records[index].words[position / 64] |= bit;
+                    self.records[index].masked += 1;
+                }
+            } else {
+                if self.records[index].keys.0.len() == self.records[index].keys.0.capacity() {
+                    return Err(self.fail(index, self.missing_proof(peer), checkpoint));
+                }
+                self.records[index].keys.0.push(key);
+            }
+        }
+        Ok(())
     }
 
     /// An attached empty proof's universe takes precedence over a group hint.
@@ -872,6 +1065,7 @@ impl AdmittedRecovery {
                 snapshot: None,
                 words: Words::new(),
                 masked: 0,
+                capture_scratch: 0,
             },
         );
         checkpoint(true);
@@ -2584,5 +2778,198 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.cause, FailureCause::PeerLimit);
         assert_eq!(ledger.bytes(), before);
+    }
+    #[test]
+    fn ordered_capture_sorts_actual_old_and_releases_charged_scratch() {
+        let mut ledger = AdmittedRecovery::new();
+        let routes: Vec<_> = (0..4097_u32)
+            .map(|n| {
+                crate::test_support::make_route_with_path_id(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)),
+                    0,
+                )
+            })
+            .collect();
+        let raw: Vec<_> = routes[..4096]
+            .iter()
+            .map(|r| Key::Unicast(r.prefix, r.path_id))
+            .collect();
+        let hint = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let anchor = ledger.owned_proof(&peer(1)).unwrap();
+        ledger.begin_capture(peer(2)).unwrap();
+        let mut visits = 0;
+        let shared = ledger
+            .with_ordered_capture(
+                peer(2),
+                4097,
+                routes[1..]
+                    .iter()
+                    .rev()
+                    .chain(std::iter::once(&routes[100]))
+                    .map(CaptureRef::Unicast),
+                &mut |_| {},
+                |ledger, ordered, checkpoint| {
+                    let index = ledger.index(peer(2)).unwrap();
+                    assert_eq!(
+                        ledger.records[index].capture_scratch,
+                        size_of::<CaptureRefs<'_>>() + 4097 * size_of::<CaptureRef<'_>>()
+                    );
+                    let shape = ledger.capture_shape_with_checkpoint(
+                        Some(hint),
+                        ordered.iter().copied().map(CaptureRef::key),
+                        &mut |force| visits += usize::from(!force),
+                    );
+                    assert_eq!(shape, (4097, 1));
+                    assert!(
+                        visits <= 3 * 4097 + 64,
+                        "shape must merge, not binary-search each OLD key"
+                    );
+                    let shared = ledger.share_capture_with_checkpoint(
+                        peer(2),
+                        Some(hint),
+                        raw.len(),
+                        raw.iter().copied(),
+                        shape,
+                        checkpoint,
+                    )?;
+                    let mut population_visits = 0;
+                    ledger.push_capture_batch_with_checkpoint(
+                        peer(2),
+                        ordered.iter().copied().map(CaptureRef::key),
+                        &mut |force| population_visits += usize::from(!force),
+                    )?;
+                    assert!(
+                        population_visits <= 3 * 4097 + 64,
+                        "population must merge, not binary-search each OLD key"
+                    );
+                    Ok(shared)
+                },
+            )
+            .unwrap();
+        assert_eq!(shared, Some(hint));
+        assert_eq!(
+            ledger.records[ledger.index(peer(2)).unwrap()].capture_scratch,
+            0
+        );
+        ledger.seal_capture(peer(2)).unwrap();
+        let proof = ledger.get(&peer(2)).unwrap();
+        assert_eq!(proof.len(), 4096);
+        assert!(!proof.contains(&raw[0].into()));
+        for route in &routes[1..] {
+            assert!(proof.contains(&ExactExportKey::Unicast(route.prefix, 0)));
+        }
+        assert_eq!(ledger.owned_proof(&peer(1)).unwrap(), anchor);
+        ledger.remove(&peer(1));
+        ledger.remove(&peer(2));
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
+
+    #[test]
+    fn capture_shape_bounds_tiny_and_unordered_old_without_false_sparse_keys() {
+        let mut ledger = AdmittedRecovery::new();
+        let raw: Vec<_> = (0..100_000_u32)
+            .map(|n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
+            .collect();
+        let hint = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let mut visits = 0;
+        assert_eq!(
+            ledger.capture_shape_with_checkpoint(
+                Some(hint),
+                [raw[99_999]].into_iter(),
+                &mut |_| visits += 1
+            ),
+            (1, 0)
+        );
+        assert!(visits < 64, "tiny OLD must not scan the whole universe");
+        let mut visits = 0;
+        let keys = (0..100).flat_map(|_| [raw[99_999], raw[0]]);
+        assert_eq!(
+            ledger.capture_shape_with_checkpoint(Some(hint), keys, &mut |_| visits += 1),
+            (200, 0)
+        );
+        assert!(
+            visits < 5000,
+            "descent must permanently use bounded binary lookup"
+        );
+    }
+
+    #[test]
+    fn optional_ordering_allocation_refusal_frees_credit_before_flat_retry() {
+        let mut ledger = AdmittedRecovery::new();
+        ledger.begin_capture(peer(1)).unwrap();
+        let routes = [crate::test_support::make_route_with_path_id(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32)),
+            0,
+        )];
+        let before = ledger.bytes();
+        ledger.fail_next_allocation = true;
+        assert_eq!(
+            ledger.with_ordered_capture(
+                peer(1),
+                1,
+                routes.iter().map(CaptureRef::Unicast),
+                &mut |_| {},
+                |_, _, _| panic!("refused buffer reached capture")
+            ),
+            Ok(None)
+        );
+        assert_eq!(ledger.bytes(), before);
+        assert_eq!(ledger.records[0].capture_scratch, 0);
+        ledger
+            .reserve_capture_with_checkpoint(peer(1), 1, &mut |_| {})
+            .unwrap();
+        ledger
+            .push_capture(peer(1), CaptureRef::Unicast(&routes[0]).key())
+            .unwrap();
+        ledger.seal_capture(peer(1)).unwrap();
+        assert_eq!(ledger.get(&peer(1)).unwrap().len(), 1);
+        ledger.remove(&peer(1));
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
+    #[test]
+    fn ordering_cap_and_cardinality_refusals_release_all_temporary_credit() {
+        for mode in ["cap", "short", "long"] {
+            let mut ledger = AdmittedRecovery::new();
+            ledger.begin_capture(peer(1)).unwrap();
+            let routes = [
+                crate::test_support::make_route_with_path_id(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32)),
+                    0,
+                ),
+                crate::test_support::make_route_with_path_id(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 32)),
+                    0,
+                ),
+            ];
+            let count = match mode {
+                "short" => 3,
+                "long" => 1,
+                _ => 2,
+            };
+            let before = ledger.bytes();
+            if mode == "cap" {
+                ledger.peer_limit = ledger.peer_charge(0)
+                    + size_of::<CaptureRefs<'_>>()
+                    + count * size_of::<CaptureRef<'_>>()
+                    - 1;
+            }
+            let result = ledger.with_ordered_capture(
+                peer(1),
+                count,
+                routes.iter().map(CaptureRef::Unicast),
+                &mut |_| {},
+                |_, _, _| panic!("refused or drifting OLD reached capture"),
+            );
+            if mode == "cap" {
+                assert_eq!(result, Ok(None));
+            } else {
+                assert_eq!(result.unwrap_err().cause, FailureCause::MissingProof);
+            }
+            assert_eq!(ledger.bytes(), before);
+            assert_eq!(ledger.records[0].capture_scratch, 0);
+            assert!(ledger.get(&peer(1)).is_none());
+            ledger.remove(&peer(1));
+            assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+        }
     }
 }

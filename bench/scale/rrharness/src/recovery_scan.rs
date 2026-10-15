@@ -55,7 +55,14 @@ fn checked_refusal(
     refusal
 }
 
-fn sample(profile: &'static str, keys: usize, records: usize, sparse: bool, measured: bool) {
+fn sample(
+    profile: &'static str,
+    keys: usize,
+    records: usize,
+    sparse: bool,
+    measured: bool,
+    shuffled: bool,
+) {
     // Count instrumentation never shares a pass with timing. Each timed arm
     // creates fresh ledgers, with identical setup outside the measured phases.
     let spec = RecoveryScanSpec {
@@ -64,10 +71,12 @@ fn sample(profile: &'static str, keys: usize, records: usize, sparse: bool, meas
         records,
         sparse,
         shared: true,
+        shuffled,
     };
     let counted = [false, true].map(|shared| {
         bench_recovery_capture_scan(RecoveryScanSpec { shared, ..spec }, true, |_, _| {})
     });
+    let old_order = if shuffled { "shuffled" } else { "sorted" };
     for (leg, shared) in [false, true, true, false].into_iter().enumerate() {
         let spec = RecoveryScanSpec { shared, ..spec };
         let (receipt, mut phases) = capture(spec, measured, "capture");
@@ -97,17 +106,35 @@ fn sample(profile: &'static str, keys: usize, records: usize, sparse: bool, meas
             .collect::<Vec<_>>()
             .join(",");
         let refusal = refusal.map_or_else(|| "null".to_owned(), |cause| format!("\"{cause}\""));
-        println!("recovery_scan {{\"schema\":\"rustbgpd.recovery-scan.v1\",\"profile\":\"{profile}\",\"keys\":{keys},\"records\":{records},\"layout\":\"{}\",\"arm\":\"{}\",\"leg\":{leg},\"measured\":{measured},\"old_keys\":{},\"additions\":{},\"shape_callbacks\":{callbacks},\"comparisons\":{comparisons},\"proof_keys\":{},\"shared\":{},\"retained_bytes\":{},\"peak_bytes\":{},\"empty_bytes\":{},\"settled_bytes\":{},\"refusal\":{refusal},\"phases\":{{{phases}}}}}",
-            if sparse { "older-sparse" } else { "dense" }, if shared { "shared" } else { "flat" },
-            receipt.old_keys, receipt.additions, receipt.proof_keys, receipt.shared,
-            receipt.retained_bytes, receipt.peak_bytes, receipt.empty_bytes, receipt.settled_bytes);
+        println!(
+            "recovery_scan {{\"schema\":\"rustbgpd.recovery-scan.v2\",\"profile\":\"{profile}\",\"old_order\":\"{old_order}\",\"keys\":{keys},\"records\":{records},\"layout\":\"{}\",\"arm\":\"{}\",\"leg\":{leg},\"measured\":{measured},\"old_keys\":{},\"additions\":{},\"shape_callbacks\":{callbacks},\"comparisons\":{comparisons},\"proof_keys\":{},\"shared\":{},\"retained_bytes\":{},\"peak_bytes\":{},\"empty_bytes\":{},\"settled_bytes\":{},\"refusal\":{refusal},\"phases\":{{{phases}}}}}",
+            if sparse { "older-sparse" } else { "dense" },
+            if shared { "shared" } else { "flat" },
+            receipt.old_keys,
+            receipt.additions,
+            receipt.proof_keys,
+            receipt.shared,
+            receipt.retained_bytes,
+            receipt.peak_bytes,
+            receipt.empty_bytes,
+            receipt.settled_bytes
+        );
     }
 }
 
 pub(super) fn main(args: &[String]) {
     assert!(
-        args.len() == 1 || (args.len() == 2 && args[1] == "--correctness-only"),
-        "usage: rrharness recovery-scan <full-uc|full-vpn|evpn-soak> [--correctness-only]"
+        !args.is_empty()
+            && args[1..]
+                .iter()
+                .all(|arg| matches!(arg.as_str(), "--correctness-only" | "--shuffled-old"))
+            && args
+                .iter()
+                .filter(|arg| *arg == "--correctness-only")
+                .count()
+                <= 1
+            && args.iter().filter(|arg| *arg == "--shuffled-old").count() <= 1,
+        "usage: rrharness recovery-scan <full-uc|full-vpn|evpn-soak> [--shuffled-old] [--correctness-only]"
     );
     let profile = match args[0].as_str() {
         "full-uc" => "full-uc",
@@ -115,7 +142,9 @@ pub(super) fn main(args: &[String]) {
         "evpn-soak" => "evpn-soak",
         _ => panic!("unknown component scan profile"),
     };
-    let measured = args.len() == 1;
+    let measured = !args.iter().any(|arg| arg == "--correctness-only");
+    let shuffled = args.iter().any(|arg| arg == "--shuffled-old");
+    let old_order = if shuffled { "shuffled" } else { "sorted" };
     let ticks = if measured {
         assert_eq!(
             std::env::var("GITHUB_ACTIONS").as_deref(),
@@ -135,7 +164,9 @@ pub(super) fn main(args: &[String]) {
         None
     };
     let ticks = ticks.map_or_else(|| "null".to_owned(), |n| n.to_string());
-    println!("recovery_scan_environment {{\"schema\":\"rustbgpd.recovery-scan.v1\",\"cpu_ticks_per_second\":{ticks},\"phase_passes\":\"independent shape and capture invocations\",\"credit_scope\":\"logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS\",\"scope\":\"component-only; no live ownership, delivery, readiness, fleet or daemon-memory qualification\"}}");
+    println!(
+        "recovery_scan_environment {{\"schema\":\"rustbgpd.recovery-scan.v2\",\"old_order\":\"{old_order}\",\"cpu_ticks_per_second\":{ticks},\"phase_passes\":\"independent shape and capture invocations\",\"credit_scope\":\"logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS\",\"scope\":\"component-only; no live ownership, delivery, readiness, fleet or daemon-memory qualification\"}}"
+    );
     let keys = if !measured {
         64
     } else if profile == "evpn-soak" {
@@ -145,7 +176,7 @@ pub(super) fn main(args: &[String]) {
     };
     for records in if measured { [2, 64, 480] } else { [2, 4, 8] } {
         for sparse in [false, true] {
-            sample(profile, keys, records, sparse, measured);
+            sample(profile, keys, records, sparse, measured, shuffled);
         }
     }
     println!("recovery_scan_complete {{\"profile\":\"{profile}\",\"cells\":6,\"legs\":24}}");
@@ -195,6 +226,7 @@ mod tests {
                     records: 4,
                     sparse: true,
                     shared,
+                    shuffled: true,
                 };
                 let counted = bench_recovery_capture_scan(spec, true, |_, _| {});
                 let (receipt, phases) = capture(spec, false, "capture");

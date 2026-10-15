@@ -780,7 +780,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.recovery_receipt_mode == 'scan' && '[{"profile":"full-uc","cell":"capture-scan"},{"profile":"full-vpn","cell":"capture-scan"},{"profile":"evpn-soak","cell":"capture-scan"}]' || '[{"profile":"ipv4-100k","cell":"dataset-reevaluate"},{"profile":"ipv4-100k","cell":"peer-down"},{"profile":"full-uc","cell":"dataset-reevaluate"},{"profile":"full-uc","cell":"peer-down"},{"profile":"full-vpn","cell":"dataset-reevaluate"},{"profile":"full-vpn","cell":"peer-down"},{"profile":"full-vpn","cell":"widen"},{"profile":"mixed-widen","cell":"widen"},{"profile":"full-uc","cell":"unsynchronized-dirty"},{"profile":"full-vpn","cell":"unsynchronized-dirty"}]') }}
+        include: ${{ fromJSON(inputs.recovery_receipt_mode == 'scan' && '[{"profile":"full-uc","cell":"capture-scan","old_order":"sorted"},{"profile":"full-uc","cell":"capture-scan","old_order":"shuffled"},{"profile":"full-vpn","cell":"capture-scan","old_order":"sorted"},{"profile":"full-vpn","cell":"capture-scan","old_order":"shuffled"},{"profile":"evpn-soak","cell":"capture-scan","old_order":"sorted"},{"profile":"evpn-soak","cell":"capture-scan","old_order":"shuffled"}]' || '[{"profile":"ipv4-100k","cell":"dataset-reevaluate"},{"profile":"ipv4-100k","cell":"peer-down"},{"profile":"full-uc","cell":"dataset-reevaluate"},{"profile":"full-uc","cell":"peer-down"},{"profile":"full-vpn","cell":"dataset-reevaluate"},{"profile":"full-vpn","cell":"peer-down"},{"profile":"full-vpn","cell":"widen"},{"profile":"mixed-widen","cell":"widen"},{"profile":"full-uc","cell":"unsynchronized-dirty"},{"profile":"full-vpn","cell":"unsynchronized-dirty"}]') }}
     env:
       CARGO_BUILD_JOBS: "4"
       # Each complete qualified cell runs on its own fresh VM.
@@ -788,6 +788,7 @@ jobs:
       RECOVERY_RECEIPT_MODE: ${{ inputs.recovery_receipt_mode || 'memory' }}
       RECOVERY_MEMORY_PROFILE: ${{ matrix.profile }}
       RECOVERY_MEMORY_CELL: ${{ matrix.cell }}
+      RECOVERY_SCAN_OLD_ORDER: ${{ matrix.old_order || 'sorted' }}
     steps:
       - name: Reserve time for recovery evidence finalization
         shell: bash
@@ -823,6 +824,10 @@ jobs:
           PY
           )
           status=0
+          scan_options=()
+          if [[ $RECOVERY_RECEIPT_MODE == scan && $RECOVERY_SCAN_OLD_ORDER == shuffled ]]; then
+            scan_options=(--shuffled-old)
+          fi
           if [[ $remaining -gt 0 ]]; then
             timeout --signal=TERM --kill-after=30s "${remaining}s" \
               bash bench/scale/compare-recovery-memory.sh \
@@ -831,7 +836,7 @@ jobs:
               --mode "$RECOVERY_RECEIPT_MODE" \
               --phase "$RECOVERY_MEMORY_PHASE" \
               --profile "$RECOVERY_MEMORY_PROFILE" \
-              --cell "$RECOVERY_MEMORY_CELL" \
+              --cell "$RECOVERY_MEMORY_CELL" "${scan_options[@]}" \
               > "$evidence/driver.log" 2>&1 || status=$?
           else
             status=124
@@ -852,7 +857,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: update-group-recovery-memory-${{ matrix.profile }}-${{ matrix.cell }}-${{ github.sha }}
+          name: update-group-recovery-memory-${{ matrix.profile }}-${{ matrix.cell }}${{ matrix.old_order && format('-{0}', matrix.old_order) || '' }}-${{ github.sha }}
           path: ${{ runner.temp }}/update-group-recovery-memory
           if-no-files-found: warn
           retention-days: 30

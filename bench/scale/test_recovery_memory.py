@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 import tempfile
 import subprocess
+import sys
 import textwrap
 import time
 import unittest
@@ -838,8 +839,9 @@ class RecoveryReceiptTests(unittest.TestCase):
         script = step.split("        run: |\n", 1)[1].split("\n      - ", 1)[0]
         return textwrap.dedent(script)
 
-    def run_workflow_failure(self, status: int, *, expired: bool = False, mode: str = "memory") -> Path:
-        commands = self.root / f"commands-{status}-{expired}"
+    def run_workflow_failure(self, status: int, *, expired: bool = False, mode: str = "memory",
+                             old_order: str = "sorted") -> Path:
+        commands = self.root / f"commands-{status}-{expired}-{old_order}"
         commands.mkdir()
         timeout_command = commands / "timeout"
         timeout_command.write_text(
@@ -853,7 +855,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             encoding="utf-8",
         )
         timeout_command.chmod(0o755)
-        temporary = self.root / f"runner-{status}-{expired}"
+        temporary = self.root / f"runner-{status}-{expired}-{old_order}"
         temporary.mkdir()
         arguments = temporary / "driver-arguments.json"
         environment = dict(
@@ -869,6 +871,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             RECOVERY_RECEIPT_MODE=mode,
             RECOVERY_MEMORY_PROFILE="full-vpn",
             RECOVERY_MEMORY_CELL="capture-scan" if mode == "scan" else "widen",
+            RECOVERY_SCAN_OLD_ORDER=old_order,
         )
         result = subprocess.run(
             [
@@ -903,6 +906,8 @@ class RecoveryReceiptTests(unittest.TestCase):
             self.assertGreater(int(invocation[2].removesuffix("s")), 0)
             self.assertLessEqual(int(invocation[2].removesuffix("s")), 6600)
             self.assertEqual(invocation[3:5], ["bash", "bench/scale/compare-recovery-memory.sh"])
+            self.assertEqual("--shuffled-old" in invocation,
+                             mode == "scan" and old_order == "shuffled")
         return evidence
 
     def test_workflow_finalizes_timeout_and_kill_preserving_original_exit(self) -> None:
@@ -914,9 +919,10 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.run_workflow_failure(124, expired=True)
 
     def test_scan_workflow_finalizes_failure_preserving_original_exit(self) -> None:
-        for status, expired in ((124, False), (137, False), (124, True)):
-            with self.subTest(status=status, expired=expired):
-                self.run_workflow_failure(status, expired=expired, mode="scan")
+        for old_order in ("sorted", "shuffled"):
+            for status, expired in ((124, False), (137, False), (124, True)):
+                with self.subTest(status=status, expired=expired, old_order=old_order):
+                    self.run_workflow_failure(status, expired=expired, mode="scan", old_order=old_order)
 
     def test_historical_route_failure_does_not_excuse_phase_swap(self) -> None:
         root = self.campaign()
@@ -1223,6 +1229,69 @@ class RecoveryScanTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
+    def test_scope_scan_forwards_the_old_order_flag(self):
+        source = Path(__file__).with_name("compare-recovery-memory.sh").read_text()
+        scoped = source[source.index('if [[ ${1:-} == --scope-worker'):source.index('\n[[ $# -ge 4')]
+        fixture = ('set -euo pipefail\n'
+                   'daemon_scope_cgroup() { printf /fixture.scope; }\n'
+                   'record_scope_peak() { :; }\n'
+                   'python3() { printf "%s\\n" "$@"; }\n'
+                   'fail() { exit 1; }\nchecker=fixture-checker\n')
+        for shuffled in (False, True):
+            with self.subTest(shuffled=shuffled):
+                options = ["--shuffled-old"] if shuffled else []
+                result = subprocess.run(
+                    ["bash", "-c", fixture + scoped, "scope-fixture", "--scope-scan",
+                     "/binary", "/output", "capture-scan", "a" * 64, "full-uc", "1", *options],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["fixture-checker", "run-scope",
+                    "/binary", "/output", "capture-scan", "/fixture.scope", "a" * 64,
+                    "full-uc", "1", "--scan", *options])
+
+    def test_run_scope_forwards_order_to_the_actual_harness_command(self):
+        for shuffled in (False, True):
+            with self.subTest(shuffled=shuffled):
+                output = self.root / str(shuffled)
+                checker = {"pid": 1, "executable": str(Path(sys.executable).resolve())}
+                launcher = {"pid": 2, "executable": str(Path(shutil.which("bash")).resolve())}
+                with (patch.object(receipt, "proc_identity", side_effect=[checker, launcher]),
+                      patch.object(receipt, "snapshot_scope"),
+                      patch.object(receipt, "capture_ownership"),
+                      patch.object(receipt.subprocess, "Popen", side_effect=RuntimeError("stop before spawn"))):
+                    with self.assertRaisesRegex(RuntimeError, "stop before spawn"):
+                        receipt.run_scope(Path("/binary"), output, "capture-scan", Path("/fixture.scope"),
+                                          "a" * 64, "full-uc", 1, scan=True, shuffled_old=shuffled)
+                self.assertEqual(json.loads((output / "command.json").read_text()),
+                                 ["/binary", "recovery-scan", "full-uc"] +
+                                 (["--shuffled-old"] if shuffled else []))
+
+    def test_scan_order_is_pinned_across_manifest_environment_and_every_sample(self):
+        for old_order in ("sorted", "shuffled"):
+            with self.subTest(old_order=old_order):
+                rows = self.rows(old_order=old_order)
+                root = self.campaign(rows)
+                result = self.summarize_campaign(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads((root / "comparison.json").read_text())["old_order"], old_order)
+                for bad_order in (None, "random", "shuffled" if old_order == "sorted" else "sorted"):
+                    manifest = json.loads((root / "manifest.json").read_text())
+                    manifest["old_order"] = bad_order
+                    receipt.write_json(root / "manifest.json", manifest)
+                    self.assertEqual(self.summarize_campaign(root).returncode, 1)
+                for bad_row in (0, 1, 23):
+                    broken = self.rows(old_order=old_order)
+                    broken[bad_row]["old_order"] = "shuffled" if old_order == "sorted" else None
+                    with self.assertRaisesRegex(receipt.InvalidReceipt, "scan shape/order/mode mismatch"):
+                        receipt.validate_scan_log(self.log(broken, old_order), "evpn-soak", old_order)
+                path = self.log(rows)
+                text = path.read_text().replace('"old_order": "' + old_order + '"',
+                                                '"old_order": "random"', 1)
+                path.write_text(text)
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "environment OLD order mismatch"):
+                    receipt.validate_scan_log(path, "evpn-soak", old_order)
+
     def test_scan_scope_preserves_only_required_identity_after_sanitized_sudo(self):
         source = Path(__file__).with_name("compare-recovery-memory.sh").read_text()
         functions = source[source.index("record_command() {"):source.index("# Probe actual scope")]
@@ -1244,12 +1313,13 @@ class RecoveryScanTests(unittest.TestCase):
         driver = self.root / "child.sh"
         driver.write_text(textwrap.dedent("""\
             #!/bin/bash
-            [[ $1 == --scope-scan && $# == 7 ]] || exit 1
+            [[ $1 == --scope-scan && ( $# == 7 || $# == 8 ) ]] || exit 1
             env > "$3/child-environment"
+            printf '%s\n' "$@" > "$3/child-arguments"
             """))
-        for override in (False, True):
-            with self.subTest(override=override):
-                output = self.root / str(override)
+        for override, shuffled in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(override=override, shuffled=shuffled):
+                output = self.root / str((override, shuffled))
                 (output / "scan").mkdir(parents=True)
                 (output / "candidate-binary.sha256").write_text("a" * 64 + "\n")
                 environment = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}",
@@ -1261,26 +1331,29 @@ class RecoveryScanTests(unittest.TestCase):
                                        RUNNER_ENVIRONMENT="must-not-pass-through")
                 result = subprocess.run(
                     ["bash", "-c", functions + '\noutput=$1; work_root=$1; driver=$2; '
-                     'profile=evpn-soak; status=0\n' + launch + '\nexit "$status"',
-                     "scan-fixture", str(output), str(driver)],
+                     'profile=evpn-soak; status=0; scan_options=(); '
+                     '[[ $3 != shuffled ]] || scan_options=(--shuffled-old)\n' + launch + '\nexit "$status"',
+                     "scan-fixture", str(output), str(driver), "shuffled" if shuffled else "sorted"],
                     env=environment, capture_output=True, text=True, check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 child = dict(line.split("=", 1) for line in
                              (output / "scan/child-environment").read_text().splitlines())
+                self.assertEqual("--shuffled-old" in
+                                 (output / "scan/child-arguments").read_text().splitlines(), shuffled)
                 identity_names = ("GITHUB_ACTIONS", "RECOVERY_MEMORY_RUNNER_ENVIRONMENT",
                                   "RUNNER_ENVIRONMENT", "RUNNER_OS", "UNRELATED_PARENT_ONLY")
                 self.assertEqual({name: child[name] for name in identity_names if name in child},
                                  {"GITHUB_ACTIONS": "true",
                                   "RECOVERY_MEMORY_RUNNER_ENVIRONMENT": "github-hosted"})
 
-    def rows(self, profile="evpn-soak"):
+    def rows(self, profile="evpn-soak", old_order="sorted"):
         keys = receipt.SCAN_PROFILES[profile]
-        return [dict(schema=receipt.SCAN_SCHEMA, profile=profile, keys=keys, records=records,
+        return [dict(schema=receipt.SCAN_SCHEMA, profile=profile, old_order=old_order, keys=keys, records=records,
                      layout=layout, arm=arm, leg=leg, measured=True, old_keys=keys,
                      additions=records if layout == "older-sparse" and arm == "shared" else 0,
-                     shape_callbacks=keys * (keys.bit_length() + 1) if arm == "shared" else keys,
-                     comparisons=keys * keys.bit_length() if arm == "shared" else 0,
+                     shape_callbacks=3 * keys if arm == "shared" else keys,
+                     comparisons=2 * keys if arm == "shared" else 0,
                      proof_keys=keys, shared=arm == "shared", retained_bytes=8192,
                      peak_bytes=9000, empty_bytes=56, settled_bytes=56, refusal=None,
                      phases={"shape": {"wall_ns": 1000, "cpu_ticks": 1},
@@ -1288,10 +1361,11 @@ class RecoveryScanTests(unittest.TestCase):
                 for records in (2, 64, 480) for layout in ("dense", "older-sparse")
                 for leg, arm in enumerate(("flat", "shared", "shared", "flat"))]
 
-    def log(self, rows):
+    def log(self, rows, old_order=None):
         profile = rows[0]["profile"]
         lines = ["recovery_identity " + json.dumps({"pid": 123, "start_ticks": 456}),
                  "recovery_scan_environment " + json.dumps({"schema": receipt.SCAN_SCHEMA,
+                    "old_order": rows[0]["old_order"] if old_order is None else old_order,
                     "cpu_ticks_per_second": 100,
                     "phase_passes": "independent shape and capture invocations",
                     "credit_scope": "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS"})]
@@ -1313,9 +1387,9 @@ class RecoveryScanTests(unittest.TestCase):
         inputs = root / "instrumentation.sha256"
         inputs.write_text(inputs.read_text() + receipt.file_digest(path) + "  " + name + "\n")
         manifest = {
-            "schema": "rustbgpd.recovery-scan.campaign.v1", "candidate": "a" * 40,
+            "schema": "rustbgpd.recovery-scan.campaign.v2", "candidate": "a" * 40,
             "instrumentation_manifest_sha256": receipt.file_digest(inputs),
-            "profile": rows[0]["profile"], "build_jobs": 4,
+            "profile": rows[0]["profile"], "old_order": rows[0]["old_order"], "build_jobs": 4,
             "order_per_cell": ["flat", "shared", "shared", "flat"],
         }
         receipt.write_json(root / "manifest.json", manifest)
@@ -1429,6 +1503,18 @@ class RecoveryScanTests(unittest.TestCase):
                     receipt.validate_scan_log(self.log(rows), "evpn-soak")
         with self.assertRaises(receipt.InvalidReceipt):
             receipt.validate_scan_log(self.log(self.rows()[:-1]), "evpn-soak")
+
+    def test_scan_v2_rejects_binary_search_work_and_historical_schema(self):
+        keys = receipt.SCAN_PROFILES["evpn-soak"]
+        rows = self.rows()
+        rows[1]["comparisons"] = keys * keys.bit_length()
+        rows[1]["shape_callbacks"] = keys + rows[1]["comparisons"]
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "non-linear classification"):
+            receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        rows = self.rows()
+        rows[1]["schema"] = "rustbgpd.recovery-scan.v1"
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "scan shape/order/mode mismatch"):
+            receipt.validate_scan_log(self.log(rows), "evpn-soak")
 
     def test_scan_refusal_is_retained_without_a_ratio(self):
         rows = self.rows()
