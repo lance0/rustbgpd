@@ -59,13 +59,8 @@ impl RibManager {
                 || prev_gid
                     .is_some_and(|gid| !self.group_ribs[&gid].dirty_members.contains(&peer))))
             || (old_evpn_owned && self.evpn_feed_is_current(peer));
-        // Classification interns a gid without installing its table. Build
-        // only a missing destination before inspecting its ownership; an
-        // occupied destination may still be another mover's actual OLD.
-        if let Some(gid) = new_gid.filter(|gid| Some(*gid) != prev_gid) {
-            self.discard_destination_prestage_on_membership(gid);
-            self.ensure_group_table(gid, peer);
-        }
+        // New groups are EVPN-private. Inspect installed destinations only;
+        // join_group builds an absent table after the last OLD member leaves.
         let new_evpn_owned = new_gid.is_some_and(|gid| {
             self.group_ribs
                 .get(&gid)
@@ -533,6 +528,14 @@ impl RibManager {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
         if !self.group_ribs.contains_key(&gid) {
+            #[cfg(test)]
+            if let Some(observer) = &self.replacement_readiness_test_hook {
+                observer(if self.group_ribs.is_empty() {
+                    "destination_build_without_installed_tables"
+                } else {
+                    "destination_build_with_installed_tables"
+                });
+            }
             self.replacement_checkpoint(true);
             let mut group = GroupRibOut::new(
                 // `share()`, not `clone()`: the snapshot must keep

@@ -2373,6 +2373,90 @@ async fn content_identical_policy_replace_is_key_stable() {
     handle.await.unwrap();
 }
 
+#[test]
+fn regroup_destination_build_follows_last_member_leave() {
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(1, 2, None);
+    let peer = peers[0];
+    let old_gid = manager.grouped_member_of(peer).unwrap();
+    assert_eq!(manager.group_ribs.len(), 1);
+    assert_eq!(manager.group_ribs[&old_gid].members.len(), 1);
+    assert_eq!(manager.group_ribs[&old_gid].table.len(), 2);
+    let builds = Arc::new(Mutex::new(Vec::new()));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let builds = Arc::clone(&builds);
+        move |site| {
+            if site.starts_with("destination_build_") {
+                builds.lock().unwrap().push(site);
+            }
+        }
+    }));
+
+    manager
+        .replace_peer_export_policy_synchronously(peer, Some(community_chain(0xFDE8_2102)))
+        .unwrap();
+
+    let new_gid = manager.grouped_member_of(peer).unwrap();
+    assert_ne!(new_gid, old_gid);
+    assert_eq!(
+        *builds.lock().unwrap(),
+        ["destination_build_without_installed_tables"],
+        "the last OLD member/table must retire before the absent destination is built"
+    );
+    assert!(!manager.group_ribs.contains_key(&old_gid));
+    assert_eq!(manager.group_ribs[&new_gid].members, HashSet::from([peer]));
+    assert_eq!(manager.group_ribs[&new_gid].table.len(), 2);
+}
+
+#[test]
+fn regroup_destination_absent_after_owned_refusal() {
+    let (mut manager, peer, old_gid, mut output) = super::evpn_group_storage::fixture();
+    let route = super::evpn_group_storage::received(100);
+    manager
+        .ribs
+        .entry(route.peer)
+        .or_insert_with(|| AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
+    assert_eq!(output.try_recv().unwrap().evpn_announce.len(), 1);
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some(vec![route.key()])
+    );
+    // Retained actual OLD remains complete, but the body projection cannot
+    // seed a private destination. Refusal must keep the existing owner.
+    manager
+        .group_ribs
+        .get_mut(&old_gid)
+        .unwrap()
+        .evpn_inputs
+        .clear();
+    manager
+        .replace_peer_export_policy_synchronously(peer, Some(community_chain(0xFDE8_2102)))
+        .unwrap();
+    let crate::manager::update_groups::GroupMembership::Grouped(destination) =
+        manager.compute_update_group_membership(peer)
+    else {
+        panic!("groupable policy destination");
+    };
+    assert_ne!(destination, old_gid);
+    assert_eq!(manager.grouped_member_of(peer), Some(old_gid));
+    assert_eq!(manager.group_ribs[&old_gid].members, HashSet::from([peer]));
+    assert!(
+        manager.group_ribs[&old_gid]
+            .table
+            .get_evpn(&route.key())
+            .is_some()
+    );
+    assert!(manager.evpn_recovery_reset_pending(peer));
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(
+        !manager.group_ribs.contains_key(&destination),
+        "an owned precommit refusal must not leave a memberless destination table"
+    );
+    assert!(output.try_recv().is_err());
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
