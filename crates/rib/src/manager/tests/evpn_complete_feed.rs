@@ -1762,3 +1762,409 @@ fn review_receipt_count_tracks_replay_replacement_retirement_and_teardown() {
     assert_count(&manager);
     assert_eq!(manager.evpn_feed_receipt_count, 0);
 }
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one control keeps selection ingress, Stage, release and terminal assertions in their causal order"
+)]
+fn assert_review2_selection_release(nonempty: bool, staged: bool) {
+    use crate::manager::selection_deferral::SelectionDeferralTransition;
+    let (manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    let survivor = Ipv4Addr::new(192, 0, 2, 99).into();
+    let mut waiters = vec![crate::SelectionDeferralWaiterConfig {
+        peer: route.peer,
+        families: vec![EVPN],
+    }];
+    if staged {
+        waiters.push(crate::SelectionDeferralWaiterConfig {
+            peer: survivor,
+            families: vec![EVPN],
+        });
+    }
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters,
+    });
+    let gr = HashSet::from([EVPN]);
+    let metrics = manager.metrics.clone();
+    let selection = manager.selection_deferral.as_mut().unwrap();
+    assert_eq!(
+        selection.classify_session(route.peer, 12, false, &gr, &metrics),
+        [] as [SelectionDeferralTransition; 0]
+    );
+    if staged {
+        assert_eq!(
+            selection.await_collision_failback_refresh(survivor, 11, false, &gr, true, &metrics),
+            Some(vec![])
+        );
+    }
+    assert!(manager.capture_private_evpn_admitted(peer));
+    manager.send_initial_table(peer);
+    while let Ok(update) = output.try_recv() {
+        assert!(!update.end_of_rib.contains(&EVPN));
+        assert!(update.evpn_announce.is_empty());
+    }
+    let resets = count_reset_attempts(&mut manager);
+    if nonempty {
+        manager
+            .ribs
+            .entry(route.peer)
+            .or_insert_with(|| AdjRibIn::new(route.peer));
+        manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
+        assert!(manager.loc_rib.get_evpn(&route.key()).is_none());
+    }
+    let transition = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .end_of_rib(route.peer, 12, EVPN, &metrics)
+        .unwrap();
+    assert_eq!(
+        matches!(transition, SelectionDeferralTransition::Stage { .. }),
+        staged
+    );
+    manager.apply_selection_deferral_transitions(
+        [transition],
+        "test EVPN completion stage or release",
+    );
+    let mut announces = Vec::new();
+    let mut eors = 0;
+    while let Ok(update) = output.try_recv() {
+        announces.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+        eors += usize::from(update.end_of_rib.contains(&EVPN));
+        assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+    }
+    if staged {
+        assert_eq!(eors, 0);
+        assert!(manager.eor_held(peer, EVPN));
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(selection.begin_route_refresh(survivor, 11, EVPN).is_none());
+        let release = selection
+            .end_route_refresh(survivor, 11, EVPN, &metrics)
+            .unwrap();
+        assert!(matches!(
+            release,
+            SelectionDeferralTransition::Release {
+                already_staged: true,
+                ..
+            }
+        ));
+        manager
+            .apply_selection_deferral_transitions([release], "test EVPN staged refresh completion");
+        while let Ok(update) = output.try_recv() {
+            announces.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+            eors += usize::from(update.end_of_rib.contains(&EVPN));
+            assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+        }
+    }
+    assert_eq!(announces, if nonempty { vec![route.key()] } else { vec![] });
+    assert_eq!(
+        eors, 1,
+        "selection release owes one covered terminal even for an empty inventory"
+    );
+    assert!(
+        !manager
+            .pending_eor
+            .get(&peer)
+            .is_some_and(|families| families.contains(&EVPN))
+    );
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(manager.evpn_grouped_member_of(peer), Some(gid));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn review2_selection_release_covers_empty_owned_inventory() {
+    assert_review2_selection_release(false, false);
+}
+
+#[test]
+fn review2_selection_release_covers_nonempty_owned_inventory() {
+    assert_review2_selection_release(true, false);
+}
+
+#[test]
+fn review2_selection_stage_then_release_keeps_terminal_without_reannouncement() {
+    assert_review2_selection_release(true, true);
+}
+
+fn assert_review2_direct_family_refusal(family: u8) {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    let source = Ipv4Addr::new(192, 0, 2, 10);
+    let extra = if family == 0 {
+        (Afi::Ipv4, Safi::FlowSpec)
+    } else {
+        (Afi::BgpLs, Safi::BgpLs)
+    };
+    manager
+        .peer_sendable_families
+        .get_mut(&peer)
+        .unwrap()
+        .push(extra);
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    let resets = count_reset_attempts(&mut manager);
+    if family == 0 {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![make_flowspec_route(source)],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    } else if family == 1 {
+        manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: vec![make_bgpls_route(source, 42, 100)],
+            withdrawn: vec![],
+        });
+    } else {
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: source.into(),
+            session_id: 0,
+            announced: vec![make_vpn_rib_route(source, 42, 100, 100)],
+            withdrawn: vec![],
+        });
+    }
+    assert!(
+        manager.dirty_peers.contains(&peer),
+        "the actual direct family send must refuse"
+    );
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some(vec![route.key()]),
+        "direct refusal must retain actual EVPN OLD before another change"
+    );
+    manager.process_evpn_withdraw_chunk(route.peer, vec![route.key()]);
+    while output.try_recv().is_ok() {}
+    manager.resync_dirty_peers_bounded();
+    let mut family_announces = 0;
+    let mut withdrawals = Vec::new();
+    while let Ok(update) = output.try_recv() {
+        family_announces += match family {
+            0 => update.flowspec_announce.len(),
+            1 => update.bgpls_announce.len(),
+            _ => update.vpn_announce.len(),
+        };
+        assert!(update.evpn_announce.is_empty());
+        withdrawals.extend(update.evpn_withdraw);
+    }
+    assert_eq!(family_announces, 1);
+    assert_eq!(withdrawals, [route.key()]);
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.evpn_recovery.is_dormant(handle));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn review2_direct_flowspec_refusal_preserves_evpn_recovery() {
+    assert_review2_direct_family_refusal(0);
+}
+
+#[test]
+fn review2_direct_bgpls_refusal_preserves_evpn_recovery() {
+    assert_review2_direct_family_refusal(1);
+}
+
+#[test]
+fn review2_direct_grouped_vpn_refusal_preserves_evpn_recovery() {
+    assert_review2_direct_family_refusal(2);
+}
+
+#[test]
+fn review2_conditional_attachment_removal_preserves_complete_sparse_handoff() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let keeper = Ipv4Addr::new(192, 0, 2, 31).into();
+    let (keeper_sender, mut keeper_output) = mpsc::channel(8);
+    register(&mut manager, keeper, keeper_sender);
+    while keeper_output.try_recv().is_ok() {}
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    while keeper_output.try_recv().is_ok() {}
+    let definition = crate::ConditionalAdvertisement {
+        name: Arc::from("conditional"),
+        advertise_policy: rustbgpd_policy::PolicyChain::default(),
+        advertise_if: crate::ConditionalAdvertiseIf::Absent,
+        condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(Prefix::V4(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 254), 32),
+        ))],
+        condition_policy: None,
+        settle_time: Duration::ZERO,
+    };
+    let _ = manager.handle_install_conditional_advertisements(
+        crate::ConditionalAdvertisementSet {
+            definitions: vec![definition.clone()],
+            attachments: [(peer, vec![Arc::from("conditional")])]
+                .into_iter()
+                .collect(),
+        },
+        &[],
+    );
+    assert!(manager.evpn_grouped_member_of(peer).is_none());
+    assert!(manager.adj_ribs_out[&peer].get_evpn(&route.key()).is_some());
+    while output.try_recv().is_ok() {}
+    let resets = count_reset_attempts(&mut manager);
+    let _ = manager.handle_install_conditional_advertisements(
+        crate::ConditionalAdvertisementSet {
+            definitions: vec![definition],
+            attachments: std::collections::BTreeMap::new(),
+        },
+        &[],
+    );
+    assert_eq!(manager.evpn_grouped_member_of(peer), Some(gid));
+    assert!(
+        !manager.dirty_peers.contains(&peer),
+        "the prepared complete no-op must survive regroup dirty bookkeeping"
+    );
+    manager.resync_dirty_peers_bounded();
+    while let Ok(update) = output.try_recv() {
+        assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
+    }
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn review2_implicit_capture_does_not_trust_dirty_or_incomplete_old() {
+    for incomplete in [false, true] {
+        let (mut manager, peer, gid, mut output) = fixture();
+        admit_converged_owned(&mut manager, peer, gid, &mut output, &received(100));
+        let handle = manager.evpn_recovery_handle(peer).unwrap();
+        if incomplete {
+            assert!(
+                manager
+                    .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+                    .is_some()
+            );
+            assert!(manager.has_evpn_feed_completion(peer));
+        } else {
+            // An already-dirty caller has no right to reinterpret current
+            // desired values as OLD, even when an old handle is dormant.
+            manager.dirty_peers.insert(peer);
+        }
+        assert!(manager.evpn_recovery.is_dormant(handle));
+        assert!(manager.mark_outbound_dirty_inner(peer, false));
+        assert_eq!(manager.evpn_recovery.proof_keys(handle).unwrap(), None);
+        assert!(manager.evpn_recovery.is_dormant(handle));
+    }
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    assert!(
+        manager
+            .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+            .is_some()
+    );
+    assert!(manager.mark_outbound_dirty_inner(peer, false));
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some(vec![route.key()])
+    );
+    assert!(!manager.evpn_recovery_reset_pending(peer));
+}
+
+#[test]
+fn review2_implicit_capture_allocation_refusal_returns_without_recursion() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &received(100));
+    let resets = count_reset_attempts(&mut manager);
+    // Optional sharing can fall back successfully. Refuse that optional
+    // allocation and the following required authoritative flat reservation.
+    manager
+        .evpn_recovery
+        .fail_allocation_after_for_test(Some(0));
+    manager.evpn_recovery.fail_next_allocation_for_test();
+    assert!(manager.mark_outbound_dirty_inner(peer, false));
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(manager.evpn_recovery_reset_pending(peer));
+    assert!(resets.load(Ordering::SeqCst) > 0);
+    assert!(output.try_recv().is_err());
+}
+
+fn assert_review2_selection_resync_terminal(private: bool) {
+    let (mut manager, peer, gid, mut output) = fixture();
+    assert!(manager.capture_private_evpn_admitted(peer));
+    manager
+        .rtc_eor_hold
+        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.send_initial_table(peer);
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(manager.pending_eor[&peer].contains(&EVPN));
+    while output.try_recv().is_ok() {}
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    if private {
+        manager.handle_update(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 7,
+            slow: true,
+        });
+        assert!(manager.has_private_evpn_handoff(peer));
+        assert!(manager.evpn_grouped_member_of(peer).is_none());
+    } else {
+        review_announce_unicast(&mut manager, 93);
+        assert_eq!(manager.evpn_grouped_member_of(peer), Some(gid));
+    }
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(!manager.evpn_feed_is_current(peer));
+    while output.try_recv().is_ok() {}
+    let source = Ipv4Addr::new(192, 0, 2, 99).into();
+    manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: source,
+            families: vec![EVPN],
+        }],
+    });
+    manager.rtc_eor_hold.remove(&peer);
+    let metrics = manager.metrics.clone();
+    let selection = manager.selection_deferral.as_mut().unwrap();
+    assert_eq!(
+        selection.classify_session(source, 12, false, &HashSet::from([EVPN]), &metrics),
+        [] as [crate::manager::selection_deferral::SelectionDeferralTransition; 0]
+    );
+    let release = selection.end_of_rib(source, 12, EVPN, &metrics).unwrap();
+    let resets = count_reset_attempts(&mut manager);
+    manager.apply_selection_deferral_transitions([release], "test EVPN dirty completion");
+    let mut eors = 0;
+    while let Ok(update) = output.try_recv() {
+        assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
+        eors += usize::from(update.end_of_rib.contains(&EVPN));
+    }
+    assert_eq!(
+        eors, 1,
+        "the resync's admitted terminal cannot be reinserted"
+    );
+    assert!(
+        !manager
+            .pending_eor
+            .get(&peer)
+            .is_some_and(|families| families.contains(&EVPN)),
+        "completed selection must not recreate terminal debt"
+    );
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn review2_private_selection_resync_does_not_duplicate_its_terminal() {
+    assert_review2_selection_resync_terminal(true);
+}
+
+#[test]
+fn review2_dirty_owned_selection_resync_does_not_recreate_its_terminal_debt() {
+    assert_review2_selection_resync_terminal(false);
+}

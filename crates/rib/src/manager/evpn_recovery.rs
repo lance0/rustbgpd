@@ -1086,6 +1086,22 @@ impl RibManager {
         self.capture_evpn_admitted(peer, true, &[], Some(destination))
     }
 
+    /// Only a settled clean owner proves the installed table is actual OLD.
+    /// Capturing/exhausted or missing owners cannot recurse into this capture.
+    pub(in crate::manager) fn capture_clean_evpn_before_dirty(&mut self, peer: IpAddr) {
+        if !self.dirty_peers.contains(&peer)
+            && self
+                .evpn_completion_record(peer)
+                .is_some_and(|record| record.evpn_feed_completion.is_none())
+            && self.evpn_grouped_member_of(peer).is_some()
+            && self
+                .evpn_recovery_handle(peer)
+                .is_some_and(|handle| self.evpn_recovery.is_dormant(handle))
+        {
+            self.capture_shared_evpn_admitted(peer);
+        }
+    }
+
     pub(in crate::manager) fn capture_shared_evpn_admitted(&mut self, peer: IpAddr) -> bool {
         self.capture_evpn_admitted(peer, false, &[], None)
     }

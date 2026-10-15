@@ -2383,6 +2383,9 @@ impl RibManager {
             self.drop_gone_dirty_peer(peer);
             return false;
         }
+        // The common capture flag does not waive this family's actual OLD.
+        // Existing live feed/proof state excludes post-EVPN-mutation callers.
+        self.capture_clean_evpn_before_dirty(peer);
         self.invalidate_evpn_feed_completion(peer);
         if capture && self.grouped_member_of(peer).is_some() {
             self.capture_group_admitted_keys(peer);
