@@ -103,6 +103,41 @@ impl RibManager {
             })
     }
 
+    fn replace_evpn_feed_completion(
+        &mut self,
+        peer: IpAddr,
+        completion: Option<EvpnFeedCompletion>,
+    ) -> bool {
+        let Some(record) = self.evpn_completion_record_mut(peer) else {
+            return false;
+        };
+        let had = record.evpn_feed_completion.is_some();
+        let has = completion.is_some();
+        record.evpn_feed_completion = completion;
+        match (had, has) {
+            (false, true) => self.evpn_feed_receipt_count += 1,
+            (true, false) => self.evpn_feed_receipt_count -= 1,
+            _ => {}
+        }
+        true
+    }
+
+    /// Physical record removal owns this adjustment, before later ledger cleanup.
+    pub(in crate::manager) fn drop_evpn_feed_receipts(
+        &mut self,
+        peer: IpAddr,
+        session_id: Option<u64>,
+    ) {
+        let removed = self.live_sessions.get_mut(&peer).map_or(0, |records| {
+            records
+                .iter_mut()
+                .filter(|record| session_id.is_none_or(|id| record.session_id == id))
+                .map(|record| usize::from(record.evpn_feed_completion.take().is_some()))
+                .sum::<usize>()
+        });
+        self.evpn_feed_receipt_count -= removed;
+    }
+
     fn ensure_evpn_feed_receipt(&mut self, peer: IpAddr, target: EvpnFeedTarget) -> Option<u64> {
         let provenance = self.evpn_recovery_handle(peer)?;
         if let Some(completion) = self
@@ -113,14 +148,17 @@ impl RibManager {
             return Some(completion.revision);
         }
         let revision = self.next_evpn_table_stamp()?;
-        self.evpn_completion_record_mut(peer)?.evpn_feed_completion = Some(EvpnFeedCompletion {
-            provenance,
-            target,
-            revision,
-            complete: false,
-            owed_markers: 0,
-        });
-        Some(revision)
+        self.replace_evpn_feed_completion(
+            peer,
+            Some(EvpnFeedCompletion {
+                provenance,
+                target,
+                revision,
+                complete: false,
+                owed_markers: 0,
+            }),
+        )
+        .then_some(revision)
     }
 
     pub(in crate::manager) fn invalidate_evpn_feed_completion(&mut self, peer: IpAddr) {
@@ -152,17 +190,16 @@ impl RibManager {
         let Some(revision) = self.next_evpn_table_stamp() else {
             return false;
         };
-        let Some(record) = self.evpn_completion_record_mut(peer) else {
-            return false;
-        };
-        record.evpn_feed_completion = Some(EvpnFeedCompletion {
-            provenance,
-            target: EvpnFeedTarget::PrivateHandoff,
-            revision,
-            complete: false,
-            owed_markers,
-        });
-        true
+        self.replace_evpn_feed_completion(
+            peer,
+            Some(EvpnFeedCompletion {
+                provenance,
+                target: EvpnFeedTarget::PrivateHandoff,
+                revision,
+                complete: false,
+                owed_markers,
+            }),
+        )
     }
 
     /// This caller's dirty bookkeeping does not change its already-built
@@ -308,6 +345,7 @@ impl RibManager {
             })?
             .evpn_feed_completion
             .take()?;
+        self.evpn_feed_receipt_count -= 1;
         completion.complete = false;
         completion.revision = self.next_evpn_table_stamp().unwrap_or(0);
         Some(completion)
@@ -513,10 +551,9 @@ impl RibManager {
                 | if pending_eor { EVPN_EOR } else { 0 })
                 & !admitted_markers,
         };
-        let Some(record) = self.evpn_completion_record_mut(peer) else {
+        if !self.replace_evpn_feed_completion(peer, Some(completion)) {
             return false;
-        };
-        record.evpn_feed_completion = Some(completion);
+        }
         self.try_settle_evpn_feed(peer);
         true
     }
@@ -613,35 +650,87 @@ impl RibManager {
         if self.evpn_recovery.finish_recovery(handle) != Ok(true) {
             return false;
         }
-        if let Some(record) = self.evpn_completion_record_mut(peer) {
-            record.evpn_feed_completion = None;
-        }
+        self.replace_evpn_feed_completion(peer, None);
         true
     }
 
-    pub(in crate::manager) fn evpn_marker_retry_runnable(&self, peer: IpAddr) -> bool {
-        self.evpn_feed_is_current(peer)
-            && !self.dirty_peers.contains(&peer)
-            && !self.eor_held(peer, EVPN_FAMILY)
+    pub(in crate::manager) fn evpn_resync_data_is_covered(
+        &mut self,
+        peer: IpAddr,
+        complete_producer: bool,
+    ) -> bool {
+        if complete_producer
+            && (self.evpn_feed_is_current(peer)
+                || self
+                    .evpn_recovery_handle(peer)
+                    .is_some_and(|handle| self.evpn_recovery.is_dormant(handle)))
+        {
+            return true;
+        }
+        // An admitted common envelope cannot complete a missing or rejected
+        // EVPN feed. Keep its duty without undoing that envelope's enqueue.
+        self.mark_outbound_dirty_inner(peer, false);
+        if !self.selection_deferred(EVPN_FAMILY) {
+            if let Some(handle) = self.evpn_recovery_handle(peer) {
+                self.evpn_recovery.fail_admission(handle);
+            }
+            self.retry_evpn_recovery_reset(peer);
+        }
+        false
+    }
+
+    fn pending_marker_family_ready(
+        &self,
+        peer: IpAddr,
+        family: (rustbgpd_wire::Afi, rustbgpd_wire::Safi),
+    ) -> bool {
+        !self.eor_held(peer, family)
             && !self
                 .peer_orf_pending
                 .get(&peer)
-                .is_some_and(|families| families.contains(&EVPN_FAMILY))
+                .is_some_and(|families| families.contains(&family))
             && !self
                 .gr_deferred_eor
                 .get(&peer)
-                .is_some_and(|families| families.contains(&EVPN_FAMILY))
-            && self
-                .evpn_completion_record(peer)
-                .and_then(|record| record.evpn_feed_completion.as_ref())
-                .is_some_and(|completion| completion.owed_markers != 0)
+                .is_some_and(|families| families.contains(&family))
+            && (family != EVPN_FAMILY
+                || (self.evpn_grouped_member_of(peer).is_none()
+                    && !self.has_private_evpn_handoff(peer))
+                || self.evpn_feed_is_current(peer))
+    }
+
+    pub(in crate::manager) fn evpn_marker_retry_runnable(&self, peer: IpAddr) -> bool {
+        #[cfg(test)]
+        if let Some(observer) = &self.replacement_readiness_test_hook {
+            observer("evpn_marker_candidate");
+        }
+        !self.dirty_peers.contains(&peer)
+            && !self.evpn_recovery_reset_pending(peer)
+            && !self.outbound_channel_gone(peer)
+            && (self.pending_eor.get(&peer).is_some_and(|families| {
+                families
+                    .iter()
+                    .any(|&family| self.pending_marker_family_ready(peer, family))
+            }) || (self.evpn_feed_is_current(peer)
+                && self.pending_marker_family_ready(peer, EVPN_FAMILY)
+                && self
+                    .evpn_completion_record(peer)
+                    .and_then(|record| record.evpn_feed_completion.as_ref())
+                    .is_some_and(|completion| completion.owed_markers != 0)))
     }
 
     pub(in crate::manager) fn retry_evpn_feed_markers_bounded(&mut self) {
+        if self.evpn_feed_receipt_count == 0 && self.pending_eor.is_empty() {
+            return;
+        }
         let mut peers = Vec::with_capacity(super::RESYNC_PEERS_PER_TICK);
-        for &peer in self.live_sessions.keys() {
+        let completion_peers = (self.evpn_feed_receipt_count != 0)
+            .then_some(&self.live_sessions)
+            .into_iter()
+            .flat_map(|sessions| sessions.keys().copied());
+        for peer in completion_peers.chain(self.pending_eor.keys().copied()) {
             self.replacement_checkpoint(false);
-            if !self.evpn_marker_retry_runnable(peer) {
+            if peers.contains(&peer) || !self.evpn_marker_retry_runnable(peer) {
                 continue;
             }
             let order = |peer: IpAddr| {
@@ -659,36 +748,58 @@ impl RibManager {
             }
         }
         for peer in peers {
-            // Advance even after refusal, so the next tick reaches ready peers
-            // beyond a full first slice without repeating route inventories.
             self.evpn_marker_cursor = Some(peer);
-            let Some(record) = self.evpn_completion_record(peer) else {
+            let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
                 continue;
             };
-            let Some(completion) = record.evpn_feed_completion.as_ref() else {
-                continue;
+            let session_id = self.outbound_session_ids.get(&peer).copied();
+            let owed = if self.evpn_feed_is_current(peer) {
+                self.evpn_completion_record(peer)
+                    .and_then(|record| record.evpn_feed_completion.as_ref())
+                    .map_or(0, |completion| completion.owed_markers)
+            } else {
+                0
             };
-            let owed = completion.owed_markers;
-            let sender = record.outbound_tx.clone();
+            let mut end_of_rib = self
+                .pending_eor
+                .get(&peer)
+                .into_iter()
+                .flat_map(|families| families.iter().copied())
+                .filter(|&family| self.pending_marker_family_ready(peer, family))
+                .collect::<Vec<_>>();
+            let evpn_ready = self.pending_marker_family_ready(peer, EVPN_FAMILY);
+            if owed & EVPN_EOR != 0 && evpn_ready && !end_of_rib.contains(&EVPN_FAMILY) {
+                end_of_rib.push(EVPN_FAMILY);
+            }
+            let refresh_markers = if owed & EVPN_EORR != 0 && evpn_ready {
+                vec![(
+                    EVPN_FAMILY.0,
+                    EVPN_FAMILY.1,
+                    rustbgpd_wire::RouteRefreshSubtype::EoRR,
+                )]
+            } else {
+                vec![]
+            };
+            let bits = Self::evpn_admitted_marker_bits(&end_of_rib, &refresh_markers);
             let update = OutboundRouteUpdate {
-                end_of_rib: if owed & EVPN_EOR != 0 {
-                    vec![EVPN_FAMILY]
-                } else {
-                    vec![]
-                },
-                refresh_markers: if owed & EVPN_EORR != 0 {
-                    vec![(
-                        EVPN_FAMILY.0,
-                        EVPN_FAMILY.1,
-                        rustbgpd_wire::RouteRefreshSubtype::EoRR,
-                    )]
-                } else {
-                    vec![]
-                },
+                end_of_rib: end_of_rib.clone(),
+                refresh_markers,
                 ..OutboundRouteUpdate::default()
             };
-            if sender.try_send(update).is_ok() {
-                self.evpn_feed_markers_admitted(peer, &sender, owed);
+            if sender.try_send(update).is_ok()
+                && self.outbound_session_ids.get(&peer).copied() == session_id
+                && self
+                    .outbound_peers
+                    .get(&peer)
+                    .is_some_and(|current| current.same_channel(&sender))
+            {
+                if let Some(pending) = self.pending_eor.get_mut(&peer) {
+                    pending.retain(|family| !end_of_rib.contains(family));
+                    if pending.is_empty() {
+                        self.pending_eor.remove(&peer);
+                    }
+                }
+                self.evpn_feed_markers_admitted(peer, &sender, bits);
             }
         }
     }
@@ -1600,7 +1711,8 @@ impl RibManager {
             record.evpn_recovery_reset = None;
             record.evpn_recovery_reset_receipt = None;
             record.evpn_recovery_reset_retry_reported = false;
-            record.evpn_feed_completion = None;
+            self.evpn_feed_receipt_count -=
+                usize::from(record.evpn_feed_completion.take().is_some());
         }
     }
 }

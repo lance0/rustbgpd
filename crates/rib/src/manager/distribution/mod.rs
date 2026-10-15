@@ -6027,6 +6027,11 @@ impl RibManager {
         // applied later in transport, invisible to this RIB diff). The
         // distribution loop clears the entry on successful emission so
         // the force is one-shot.
+        // A settled owned member has released its recovery proof. Capture
+        // actual OLD while still clean, before force disables equality.
+        if !self.dirty_peers.contains(&peer) && self.evpn_grouped_member_of(peer).is_some() {
+            self.capture_shared_evpn_admitted(peer);
+        }
         self.force_outbound_peers.insert(peer);
         self.distribute_changes(&HashSet::new(), &HashSet::new());
         let _ = reply.send(Ok(()));
@@ -6970,6 +6975,7 @@ impl RibManager {
             // helpers — see `RibUpdate::RefreshPeerOutbound` rationale on
             // `force_outbound_peers`.
             let is_force = self.force_outbound_peers.contains(&peer);
+            let evpn_coverage_required = evpn_group_owned || self.has_private_evpn_handoff(peer);
             // A grouped force-only resync intentionally re-announces the
             // current group table and ignores pass tombstones/deltas. Its
             // setters synchronously run an empty distribution pass, so it
@@ -8120,7 +8126,7 @@ impl RibManager {
                     rtc_filter.as_ref(),
                     &mut evpn_announce,
                     &mut evpn_withdraw,
-                    is_force && private_evpn_feed_seal.is_none(),
+                    is_force,
                     &mut || checkpoint(),
                 );
                 if let Some(handle) = private_evpn_recovery
@@ -8144,6 +8150,7 @@ impl RibManager {
             if evpn_complete_feed.is_none() {
                 evpn_complete_feed = private_evpn_feed_seal;
             }
+            let complete_evpn_producer = evpn_complete_feed.is_some();
 
             if resync && !effective_bgpls_keys.is_empty() {
                 Self::stage_bgpls_routes_with_checkpoint(
@@ -8363,7 +8370,7 @@ impl RibManager {
                 // dump-deferral pattern). A force-only resync is a
                 // GShut-style outbound-attribute refresh and never
                 // carries pending EoR by definition.
-                let pending_eor = if is_dirty {
+                let mut pending_eor: Vec<_> = if is_dirty {
                     self.pending_eor
                         .get(&peer)
                         .map(|families| {
@@ -8378,6 +8385,15 @@ impl RibManager {
                 } else {
                     vec![]
                 };
+                if evpn_coverage_required && pending_eor.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                    if let Some(seal) = evpn_complete_feed.as_mut() {
+                        seal.required_markers |=
+                            Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
+                    }
+                    // Enqueue succeeds before the post-admission coverage
+                    // check. Its EVPN terminal needs a later current receipt.
+                    pending_eor.retain(|&family| family != (Afi::L2Vpn, Safi::Evpn));
+                }
                 let announced_count = announce.len();
                 let withdrawn_count = unicast.withdraw.len();
                 let has_non_unicast_route_payload = !fs_announce.is_empty()
@@ -8525,27 +8541,28 @@ impl RibManager {
                             force = is_force,
                             "outbound routes resynced"
                         );
+                        let evpn_covered = !evpn_coverage_required
+                            || self.evpn_resync_data_is_covered(peer, complete_evpn_producer);
                         if is_dirty {
-                            self.dirty_peers.remove(&peer);
-                            self.clear_grouped_member_synced(peer);
-                            if pending_eor.is_empty() {
-                                self.flush_pending_eor(peer);
-                            } else {
-                                let empty =
-                                    self.pending_eor.get_mut(&peer).is_some_and(|families| {
-                                        families.retain(|family| !pending_eor.contains(family));
-                                        families.is_empty()
-                                    });
-                                if empty {
-                                    self.pending_eor.remove(&peer);
-                                }
+                            // Other-family markers in this admitted envelope
+                            // are done even if EVPN coverage was rejected.
+                            let empty = self.pending_eor.get_mut(&peer).is_some_and(|families| {
+                                families.retain(|family| !pending_eor.contains(family));
+                                families.is_empty()
+                            });
+                            if empty {
+                                self.pending_eor.remove(&peer);
                             }
-                            self.retry_pending_refresh(peer);
+                            if evpn_covered {
+                                self.dirty_peers.remove(&peer);
+                                self.clear_grouped_member_synced(peer);
+                                self.flush_pending_eor(peer);
+                                self.retry_pending_refresh(peer);
+                            }
                         }
-                        // Force is one-shot: clear after a successful
-                        // emission so a subsequent unrelated dirty
-                        // resync doesn't re-bypass equality checks.
-                        if is_force {
+                        // A force request is complete only when every covered
+                        // family's data reached its actual admission boundary.
+                        if is_force && evpn_covered {
                             self.force_outbound_peers.remove(&peer);
                         }
                     }
@@ -8579,7 +8596,9 @@ impl RibManager {
                 if resync {
                     // Resync triggered but no diff — already in sync.
                     debug!(%peer, "outbound routes unchanged after resync");
-                    if is_dirty {
+                    let evpn_covered = !evpn_coverage_required
+                        || self.evpn_resync_data_is_covered(peer, complete_evpn_producer);
+                    if is_dirty && evpn_covered {
                         self.dirty_peers.remove(&peer);
                         self.clear_grouped_member_synced(peer);
                         self.flush_pending_eor(peer);
@@ -8587,7 +8606,7 @@ impl RibManager {
                             self.retry_pending_refresh(peer);
                         }
                     }
-                    if is_force {
+                    if is_force && evpn_covered {
                         self.force_outbound_peers.remove(&peer);
                     }
                 }

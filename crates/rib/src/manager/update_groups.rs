@@ -2127,6 +2127,11 @@ impl RibManager {
         group_stage: &HashMap<usize, GroupStageOutput>,
         checkpoint: &impl Fn(),
     ) {
+        // Common-family staging has not advanced EVPN. Preserve its actual
+        // clean OLD before this missed admission makes the member dirty.
+        if !self.dirty_peers.contains(&peer) && self.evpn_grouped_member_of(peer).is_some() {
+            self.capture_shared_evpn_admitted(peer);
+        }
         if member_of.is_some() && !self.pending_group_admitted.contains_key(&peer) {
             self.set_group_recovery_fallback(peer, RecoveryFallbackCause::MissingProof);
         }

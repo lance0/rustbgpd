@@ -160,6 +160,7 @@ impl RibManager {
         self.pending_peer_gr_context.remove(&(peer, session_id));
         self.pending_peer_source_context.remove(&(peer, session_id));
         self.pending_peer_policy_context.remove(&(peer, session_id));
+        self.drop_evpn_feed_receipts(peer, Some(session_id));
         let Some(&registered) = self.outbound_session_ids.get(&peer) else {
             // No registration. Ordinarily `live_sessions` is empty for the
             // peer here and the full teardown proceeds; during the LAN-475
@@ -464,6 +465,7 @@ impl RibManager {
         // for teardowns, fresh registration for PeerUp). Pending registration
         // contexts belong to their stamped sessions: ordinary teardown and
         // GR expiry must preserve a replacement staged before its PeerUp.
+        self.drop_evpn_feed_receipts(peer, None);
         self.live_sessions.remove(&peer);
         self.clear_policy_filtered_routes_for_peer(peer);
         if self.gr_peers.remove(&peer).is_some() {
@@ -955,6 +957,8 @@ impl RibManager {
             evpn_admitted_count,
             group_recovery_fallback,
         };
+        self.drop_evpn_feed_receipts(peer, Some(session_id));
+        self.evpn_feed_receipt_count += usize::from(record.evpn_feed_completion.is_some());
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0
         // emitters collapse every session to one id): replace in place so
@@ -963,6 +967,7 @@ impl RibManager {
         sessions.push(record);
         if sessions.len() > MAX_LIVE_SESSIONS_PER_PEER {
             let dropped = sessions.remove(0);
+            self.evpn_feed_receipt_count -= usize::from(dropped.evpn_feed_completion.is_some());
             warn!(
                 %peer,
                 dropped_session_id = dropped.session_id,

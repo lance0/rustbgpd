@@ -1347,3 +1347,418 @@ fn successful_replacement_during_held_eor_or_eorr_preserves_sparse_sequence() {
         assert_eq!(resets.load(Ordering::SeqCst), 0);
     }
 }
+
+fn review_announce_unicast(manager: &mut RibManager, octet: u8) -> Route {
+    let source = Ipv4Addr::new(192, 0, 2, 10);
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32),
+        source,
+    );
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source.into(),
+        session_id: 0,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+    route
+}
+
+#[test]
+fn review_forced_settled_owned_replay_emits_the_actual_inventory() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    let resets = count_reset_attempts(&mut manager);
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+    assert!(response.try_recv().unwrap().is_ok());
+    let mut announced = Vec::new();
+    while let Ok(update) = output.try_recv() {
+        announced.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+        assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+    }
+    assert_eq!(
+        announced,
+        [route.key()],
+        "explicit force must reach transport"
+    );
+    assert!(!manager.force_outbound_peers.contains(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn review_forced_private_handoff_replay_preserves_held_marker_debt() {
+    for eorr in [false, true] {
+        let (mut manager, peer, gid, mut output) = fixture();
+        let route = received(100);
+        admit_waiting_for_marker(&mut manager, peer, gid, &route, eorr);
+        output.try_recv().unwrap();
+        manager
+            .rtc_eor_hold
+            .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+        manager.handle_update(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 7,
+            slow: true,
+        });
+        assert!(manager.has_private_evpn_handoff(peer));
+        assert!(manager.evpn_feed_is_current(peer));
+        assert!(output.try_recv().is_err());
+        let resets = count_reset_attempts(&mut manager);
+        let (reply, mut response) = tokio::sync::oneshot::channel();
+        manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+        assert!(response.try_recv().unwrap().is_ok());
+        let mut announced = Vec::new();
+        while let Ok(update) = output.try_recv() {
+            announced.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+            assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+            assert!(!update.end_of_rib.contains(&EVPN));
+            assert!(
+                !update
+                    .refresh_markers
+                    .iter()
+                    .any(|&(afi, safi, _)| (afi, safi) == EVPN)
+            );
+        }
+        assert_eq!(
+            announced,
+            [route.key()],
+            "a private completion seal must not consume explicit force"
+        );
+        assert!(manager.evpn_feed_is_current(peer));
+        manager.rtc_eor_hold.remove(&peer);
+        manager.retry_evpn_feed_markers_bounded();
+        let marker = output.try_recv().unwrap();
+        assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+        assert_eq!(marker.end_of_rib, if eorr { vec![] } else { vec![EVPN] });
+        assert_eq!(
+            marker.refresh_markers,
+            if eorr {
+                vec![(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+            } else {
+                vec![]
+            }
+        );
+        assert!(output.try_recv().is_err());
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn review_common_deferral_captures_actual_evpn_before_dirty_churn() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    let resets = count_reset_attempts(&mut manager);
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    let unicast = review_announce_unicast(&mut manager, 90);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some(vec![route.key()]),
+        "another family's refused admission must capture EVPN before making its owner dirty"
+    );
+    manager.process_evpn_withdraw_chunk(route.peer, vec![route.key()]);
+    assert!(manager.loc_rib.get_evpn(&route.key()).is_none());
+    while let Ok(update) = output.try_recv() {
+        assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
+    }
+    manager.resync_dirty_peers_bounded();
+    let mut withdrawn = Vec::new();
+    let mut unicast_announced = Vec::new();
+    while let Ok(update) = output.try_recv() {
+        assert!(update.evpn_announce.is_empty());
+        withdrawn.extend(update.evpn_withdraw);
+        unicast_announced.extend(update.announce.iter().map(|route| route.prefix));
+    }
+    assert_eq!(withdrawn, [route.key()]);
+    assert_eq!(unicast_announced, [unicast.prefix]);
+    assert_eq!(manager.evpn_admitted_count(peer), 0);
+    assert!(manager.evpn_recovery.is_dormant(handle));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+}
+
+fn assert_review_dirty_mixed_resync_terminal(fault: u8) {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    let unicast = review_announce_unicast(&mut manager, 91);
+    assert!(manager.dirty_peers.contains(&peer));
+    while output.try_recv().is_ok() {}
+    manager
+        .pending_eor
+        .insert(peer, HashSet::from([(Afi::Ipv4, Safi::Unicast), EVPN]));
+    if fault == 0 {
+        manager.group_ribs.get_mut(&gid).unwrap().evpn_table_stamp = 0;
+    } else if fault == 1 {
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .evpn_inputs
+            .clear();
+    } else {
+        manager.adj_rib_out_commit_stats.fail_evpn_feed_completion = true;
+    }
+    assert!(
+        !manager.evpn_recovery_reset_pending(peer),
+        "the fault control must not start behind a reset fence"
+    );
+    let enqueues = manager.adj_rib_out_commit_stats.successful_enqueues;
+    manager.resync_dirty_peers_bounded();
+    let updates = std::iter::from_fn(|| output.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        updates.iter().any(|update| update
+            .announce
+            .iter()
+            .any(|route| route.prefix == unicast.prefix)),
+        "the actual mixed-family data transaction must admit"
+    );
+    assert!(manager.adj_rib_out_commit_stats.successful_enqueues > enqueues);
+    if fault == 2 {
+        assert!(
+            !manager.adj_rib_out_commit_stats.fail_evpn_feed_completion,
+            "the fault must reach the real post-admission coverage check"
+        );
+    }
+    assert!(
+        updates
+            .iter()
+            .all(|update| !update.end_of_rib.contains(&EVPN)),
+        "dirty data admission cannot authorize EVPN EoR before current coverage"
+    );
+    assert!(manager.pending_eor[&peer].contains(&EVPN));
+    assert!(!manager.evpn_feed_is_current(peer));
+    assert!(manager.dirty_peers.contains(&peer));
+}
+
+#[test]
+fn review_dirty_mixed_resync_invalid_stamp_holds_evpn_terminal() {
+    assert_review_dirty_mixed_resync_terminal(0);
+}
+
+#[test]
+fn review_dirty_mixed_resync_missing_input_holds_evpn_terminal() {
+    assert_review_dirty_mixed_resync_terminal(1);
+}
+
+#[test]
+fn review_dirty_mixed_resync_postadmission_failure_holds_evpn_terminal() {
+    assert_review_dirty_mixed_resync_terminal(2);
+}
+
+#[test]
+fn review_mixed_family_marker_refusal_retries_every_ready_family_without_data() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
+    output.try_recv().unwrap();
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    manager.pending_eor.get_mut(&peer).unwrap().insert(unicast);
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    manager.flush_pending_eor(peer);
+    assert_eq!(manager.pending_eor[&peer], HashSet::from([unicast, EVPN]));
+    assert!(!manager.dirty_peers.contains(&peer));
+    while output.try_recv().is_ok() {}
+    assert!(manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    let mut markers = HashSet::new();
+    while let Ok(update) = output.try_recv() {
+        assert!(update.announce.is_empty() && update.withdraw.is_empty());
+        assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
+        markers.extend(update.end_of_rib);
+    }
+    assert_eq!(
+        markers,
+        HashSet::from([unicast, EVPN]),
+        "the EVPN receipt must not strand another ready family"
+    );
+    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(!manager.resync_tick_pending());
+}
+
+#[test]
+fn review_inactive_marker_scheduler_visits_no_ordinary_peers() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    manager.retire_evpn_recovery(peer);
+    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = false;
+    let mut receivers = Vec::new();
+    for suffix in 31..=62 {
+        let (sender, mut receiver) = mpsc::channel(8);
+        register(
+            &mut manager,
+            Ipv4Addr::new(192, 0, 2, suffix).into(),
+            sender,
+        );
+        while receiver.try_recv().is_ok() {}
+        receivers.push(receiver);
+    }
+    assert_eq!(receivers.len(), 32);
+    assert_eq!(manager.live_sessions.len(), 33);
+    assert!(manager.dirty_peers.is_empty());
+    let visits = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = visits.clone();
+        move |seam| {
+            if seam == "evpn_marker_candidate" {
+                visits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }));
+    for _ in 0..2 {
+        assert!(!manager.resync_tick_pending());
+        manager.retry_evpn_feed_markers_bounded();
+    }
+    assert_eq!(
+        visits.load(Ordering::SeqCst),
+        0,
+        "inactive actor turns must not walk ordinary peers"
+    );
+    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    assert!(manager.register_evpn_recovery(peer, false));
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
+    output.try_recv().unwrap();
+    visits.store(0, Ordering::SeqCst);
+    assert!(manager.resync_tick_pending());
+    assert!(
+        visits.load(Ordering::SeqCst) > 0,
+        "the visit observer must see real active debt"
+    );
+    manager.retry_evpn_feed_markers_bounded();
+    assert_eq!(output.try_recv().unwrap().end_of_rib, [EVPN]);
+    visits.store(0, Ordering::SeqCst);
+    assert!(!manager.resync_tick_pending());
+    manager.retry_evpn_feed_markers_bounded();
+    assert_eq!(
+        visits.load(Ordering::SeqCst),
+        0,
+        "settled actor turns must return to the zero-scan path"
+    );
+}
+
+#[test]
+fn review_ready_unicast_marker_does_not_wait_for_held_evpn() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
+    output.try_recv().unwrap();
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    manager.pending_eor.get_mut(&peer).unwrap().insert(unicast);
+    manager
+        .rtc_eor_hold
+        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    assert!(manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert_eq!(marker.end_of_rib, [unicast]);
+    assert!(marker.announce.is_empty() && marker.evpn_announce.is_empty());
+    assert!(marker.withdraw.is_empty() && marker.evpn_withdraw.is_empty());
+    assert_eq!(manager.pending_eor[&peer], HashSet::from([EVPN]));
+    assert!(manager.evpn_feed_is_current(peer));
+    assert_eq!(manager.evpn_feed_receipt_count, 1);
+    assert!(!manager.resync_tick_pending());
+    manager.rtc_eor_hold.remove(&peer);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(output.try_recv().unwrap().end_of_rib, [EVPN]);
+    assert_eq!(manager.evpn_feed_receipt_count, 0);
+    assert!(output.try_recv().is_err());
+}
+
+#[test]
+fn review_held_unicast_marker_outlives_retired_evpn_proof_without_route_replay() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
+    output.try_recv().unwrap();
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    manager.pending_eor.get_mut(&peer).unwrap().insert(unicast);
+    manager
+        .gr_deferred_eor
+        .insert(peer, HashSet::from([unicast]));
+    manager.resync_dirty_peers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert!(marker.announce.is_empty() && marker.evpn_announce.is_empty());
+    assert!(marker.withdraw.is_empty() && marker.evpn_withdraw.is_empty());
+    assert!(manager.evpn_recovery.is_dormant(handle));
+    assert_eq!(manager.evpn_feed_receipt_count, 0);
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert_eq!(manager.pending_eor[&peer], HashSet::from([unicast]));
+    assert!(!manager.resync_tick_pending());
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    manager.gr_deferred_eor.remove(&peer);
+    assert!(manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert_eq!(marker.end_of_rib, [unicast]);
+    assert!(marker.announce.is_empty() && marker.evpn_announce.is_empty());
+    assert!(marker.withdraw.is_empty() && marker.evpn_withdraw.is_empty());
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(!manager.resync_tick_pending());
+    assert!(output.try_recv().is_err());
+}
+
+#[test]
+fn review_receipt_count_tracks_replay_replacement_retirement_and_teardown() {
+    fn assert_count(manager: &RibManager) {
+        let actual = manager
+            .live_sessions
+            .values()
+            .flatten()
+            .filter(|record| record.evpn_feed_completion.is_some())
+            .count();
+        assert_eq!(manager.evpn_feed_receipt_count, actual);
+    }
+    let (mut manager, peer, gid, mut output) = fixture();
+    let keeper = Ipv4Addr::new(192, 0, 2, 31).into();
+    let (keeper_sender, mut keeper_output) = mpsc::channel(8);
+    register(&mut manager, keeper, keeper_sender);
+    while keeper_output.try_recv().is_ok() {}
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
+    output.try_recv().unwrap();
+    assert_count(&manager);
+    assert_eq!(manager.evpn_feed_receipt_count, 1);
+    manager
+        .rtc_eor_hold
+        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    register(&mut manager, peer, sender);
+    while output.try_recv().is_ok() {}
+    assert_count(&manager);
+    assert_eq!(manager.evpn_feed_receipt_count, 1);
+    let (sender, mut replacement) = mpsc::channel(8);
+    register(&mut manager, peer, sender);
+    while replacement.try_recv().is_ok() {}
+    assert_count(&manager);
+    manager.retire_evpn_recovery(peer);
+    assert_count(&manager);
+    assert_eq!(manager.evpn_feed_receipt_count, 0);
+    assert!(manager.register_evpn_recovery(peer, false));
+    let destination = manager.evpn_grouped_member_of(peer).unwrap();
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    assert!(
+        manager
+            .prepare_complete_evpn_feed(peer, destination, None, true)
+            .is_some()
+    );
+    assert_count(&manager);
+    assert_eq!(manager.evpn_feed_receipt_count, 1);
+    manager.peer_down_teardown(peer);
+    assert_count(&manager);
+    assert_eq!(manager.evpn_feed_receipt_count, 0);
+}

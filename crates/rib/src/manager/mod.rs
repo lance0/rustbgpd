@@ -603,6 +603,9 @@ pub struct RibManager {
     /// an Established session. Entries are removed by their session's own
     /// `PeerDown`/GR-down or by full peer teardown.
     live_sessions: HashMap<IpAddr, Vec<LiveSessionRecord>>,
+    /// Physical live-session completion options, including collision records.
+    /// Zero avoids fleet scans while EVPN completion control is inactive.
+    evpn_feed_receipt_count: usize,
     /// Session-stamped local role staged before `PeerUp`, so the initial
     /// Adj-RIB-Out build can enforce RFC 9234 OTC egress rules.
     pending_peer_export_context: HashMap<(IpAddr, u64), Option<BgpRole>>,
@@ -2054,6 +2057,7 @@ impl RibManager {
             flush_poll_budget: FLUSH_POLL_BUDGET,
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
+            evpn_feed_receipt_count: 0,
             pending_peer_export_context: HashMap::new(),
             pending_peer_rs_control: HashMap::new(),
             pending_peer_export_encoders: HashMap::new(),
@@ -3003,10 +3007,15 @@ impl RibManager {
     fn resync_tick_pending(&self) -> bool {
         !self.dirty_peers.is_empty()
             || !self.pending_inbound_refresh.is_empty()
-            || self
-                .live_sessions
-                .keys()
-                .any(|&peer| self.evpn_marker_retry_runnable(peer))
+            || (self.evpn_feed_receipt_count != 0
+                && self.live_sessions.keys().any(|&peer| {
+                    self.replacement_checkpoint(false);
+                    self.evpn_marker_retry_runnable(peer)
+                }))
+            || self.pending_eor.keys().any(|&peer| {
+                self.replacement_checkpoint(false);
+                self.evpn_marker_retry_runnable(peer)
+            })
             || self.outbound_limit_recovery_runnable()
     }
 
