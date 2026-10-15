@@ -87,9 +87,9 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
     denied = [fixture_prefix(f, n) for f in range(2) for n in range(2 if vpn else 4)] if pressure else []
     policy = ("dataset asn-set generation_b\n" +
               (f"prefix-set denied {{ {', '.join(denied)} }}\n" if pressure else "") +
-              "policy member-out {\n"
+              "policy member-out {\n" +
+              ("    term deny-b { if route.origin-as in generation_b && route.prefix in denied { reject } }\n" if pressure else "") +
               "    term b { if route.origin-as in generation_b {\n"
-              + ("        if route.prefix in denied { reject }\n" if pressure else "") +
               "        add community 65400:2000; accept\n"
               "    } }\n"
               "    term a { add community 65400:1000; accept }\n"

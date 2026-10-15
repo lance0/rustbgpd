@@ -37,9 +37,9 @@ class MassDirtyTests(unittest.TestCase):
         return root, receipt.init(args)
 
     def test_fixed_policy_and_raw_family_split(self):
-        for profile in ("full-uc", "full-vpn"):
-            scenario = self.root / profile
-            hashes = receipt.generate(scenario, profile, 12, 17986, 19186)
+        for profile, pressure in (("full-uc", False), ("full-vpn", False), ("full-uc", True), ("full-vpn", True)):
+            scenario = self.root / f"{profile}-{pressure}"
+            hashes = receipt.generate(scenario, profile, 12, 17986, 19186, pressure=pressure)
             self.assertEqual(scenario.stat().st_mode & 0o777, 0o700)
             config = tomllib.loads((scenario / "config.toml").read_text())
             self.assertEqual(config["config_epoch"], 2)
@@ -52,6 +52,7 @@ class MassDirtyTests(unittest.TestCase):
             policy = (scenario / "member.rpol").read_text()
             self.assertIn("route.origin-as in generation_b", policy)
             self.assertNotIn("peer.asn", policy)
+            self.assertEqual("route.prefix in denied" in policy, pressure)
             before = receipt.digest(scenario / "member.rpol")
             (scenario / "generation.list").write_text((scenario / "generation-b.list").read_text())
             self.assertEqual(receipt.digest(scenario / "member.rpol"), before)
