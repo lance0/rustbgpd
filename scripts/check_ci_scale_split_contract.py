@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import json
 import sys
 import tomllib
 from collections import Counter
@@ -233,6 +234,13 @@ def check(root: Path) -> list[str]:
         for name, value in (("type", "boolean"), ("default", "false"), ("required", "false"))
     ):
         errors.append("recovery_memory_receipt input must be an optional default-false boolean")
+    scan_input = re.search(r"(?m)^      recovery_receipt_mode:\n(?:        [^\n]*\n)+", dispatch)
+    if scan_input is None or any(
+        re.findall(rf"(?m)^        {name}:[ \t]*(.*?)[ \t]*$", scan_input.group()) != [value]
+        for name, value in (("type", "choice"), ("options", "[memory, scan]"),
+                            ("default", "memory"), ("required", "false"))
+    ):
+        errors.append("recovery receipt mode must be an optional choice defaulting to memory")
     recovery = jobs.get("recovery_memory_receipt", "")
     if re.findall(r"(?m)^ {4}if:[ \t]*(.*?)[ \t]*$", recovery) != [RECOVERY_MEMORY_SELECTOR]:
         errors.append("recovery_memory_receipt must keep its operator-dispatch selector")
@@ -243,6 +251,35 @@ def check(root: Path) -> list[str]:
         recovery,
     )) != 1:
         errors.append("recovery_memory_receipt must provide the stable toolchain input")
+
+    matrix = re.findall(
+        r"(?m)^        include: \$\{\{ fromJSON\(inputs\.recovery_receipt_mode == 'scan' && '([^']*)' \|\| '([^']*)'\) \}\}[ \t]*$",
+        recovery,
+    )
+    try:
+        selected_scan, selected_memory = map(json.loads, matrix[0]) if len(matrix) == 1 else (None, None)
+    except ValueError:
+        selected_scan = selected_memory = None
+    expected_memory = [
+        {"profile": profile, "cell": cell}
+        for profile, cells in (
+            ("ipv4-100k", ("dataset-reevaluate", "peer-down")),
+            ("full-uc", ("dataset-reevaluate", "peer-down")),
+            ("full-vpn", ("dataset-reevaluate", "peer-down", "widen")),
+            ("mixed-widen", ("widen",)),
+            ("full-uc", ("unsynchronized-dirty",)),
+            ("full-vpn", ("unsynchronized-dirty",)),
+        ) for cell in cells
+    ]
+    if selected_memory != expected_memory or selected_scan != [
+        {"profile": profile, "cell": "capture-scan"} for profile in ("full-uc", "full-vpn", "evpn-soak")
+    ]:
+        errors.append("recovery receipt matrix must preserve memory cells and isolate scan profiles")
+    if (
+        'RECOVERY_RECEIPT_MODE: ${{ inputs.recovery_receipt_mode || \'memory\' }}' not in recovery
+        or '--mode "$RECOVERY_RECEIPT_MODE"' not in recovery
+    ):
+        errors.append("recovery receipt driver must receive the selected mode")
 
     scale_commands = Counter(command for _, command in _cargo_commands(jobs.get("scale_receipts", "")))
     for command in SCALE_COMMANDS:

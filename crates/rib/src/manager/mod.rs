@@ -8,9 +8,10 @@ mod bench_support;
 #[cfg(feature = "bench-internals")]
 pub use bench_support::{
     AdjRibOutFanoutBenchReceipt, DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt,
-    PolicyTransitionBenchReceipt, UnicastPrefixPeersMemoryReceipt,
-    bench_evpn_dataplane_generation_query, bench_evpn_dataplane_generation_snapshot,
-    bench_evpn_dataplane_legacy_snapshot,
+    PolicyTransitionBenchReceipt, RecoveryScanReceipt, RecoveryScanSpec,
+    UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
+    bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
+    bench_recovery_capture_scan,
 };
 mod conditional_advertisement;
 mod dampening_history;

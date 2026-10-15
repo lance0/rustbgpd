@@ -526,6 +526,16 @@ tests.
    against the maintained contract without changing the stable inventory here.
    Keep unqualified RTC EVPN on its private-family fallback.
 
+Qualify recovery capture scans separately with same-revision shared and explicit
+flat controls. Exercise live older universes, sparse OLD additions/removals and
+owner-record scaling; count key visits and search comparisons in passes separate
+from measured count/capture phases. Preserve refusals without reporting a ratio.
+Materialize OLD inputs before timing and measure count and complete capture in
+independent invocations. Credit rows describe logical daemon ledger reservation,
+excluding input fixtures, allocator overhead and RSS.
+These component receipts do not qualify complete-feed settlement, fleet regroup,
+readiness, daemon memory or wire behavior.
+
 Before activating grouping in main, repeat the fixed-route-total,
 two-receiver-count memory cells with release,
 jemalloc and a daemon-only cgroup with no swap. Record allocated/live and peak/
