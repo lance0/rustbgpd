@@ -1348,17 +1348,6 @@ mod tests {
             harness.verify_group().await;
             populate(&harness, spec.seed).await;
             harness.settle(spec.seed).await;
-            let (release, retained) = harness.retain_unsynchronized(spec).await;
-            assert_eq!(harness.health().await.0, CLIENTS as usize);
-            let expected_keys = u64::from(CLIENTS) * spec.seed.iter().sum::<usize>() as u64
-                + u64::from(CLIENTS * (CLIENTS - 1) / 2);
-            assert_eq!(
-                retained
-                    .iter()
-                    .map(|row| row.present.iter().sum::<usize>() as u64)
-                    .sum::<u64>(),
-                expected_keys
-            );
             let gauge = |name: &str| {
                 harness
                     .metrics
@@ -1371,18 +1360,41 @@ mod tests {
                     .get_gauge()
                     .get_value() as u64
             };
+            let healthy_bytes = gauge("bgp_update_group_recovery_bytes");
+            let (release, retained) = harness.retain_unsynchronized(spec).await;
+            assert_eq!(harness.health().await.0, CLIENTS as usize);
+            let expected_keys = u64::from(CLIENTS) * spec.seed.iter().sum::<usize>() as u64
+                + u64::from(CLIENTS * (CLIENTS - 1) / 2);
+            assert_eq!(
+                retained
+                    .iter()
+                    .map(|row| row.present.iter().sum::<usize>() as u64)
+                    .sum::<u64>(),
+                expected_keys
+            );
             assert_eq!(gauge("bgp_update_group_recovery_entries"), expected_keys);
             // Logical component credits, not an RSS or timing measurement.
-            assert!(
-                gauge("bgp_update_group_recovery_bytes") < 16 * 1024,
-                "three small unsynchronized proofs must not clone three key universes"
-            );
+            let retained_bytes = gauge("bgp_update_group_recovery_bytes");
+            if profile == "smoke-uc" {
+                assert!(
+                    retained_bytes < 16 * 1024,
+                    "three small unicast proofs must share their indexed key universe"
+                );
+            } else {
+                // Each VPN-capable receiver retains its own exact flat key set.
+                // Fixed record/slack credits must not hide another route-sized array.
+                let key_payload =
+                    expected_keys * u64::try_from(std::mem::size_of::<VpnRibRouteKey>()).unwrap();
+                assert!(retained_bytes >= healthy_bytes + key_payload);
+                assert!(retained_bytes < healthy_bytes + key_payload + u64::from(CLIENTS) * 1024);
+            }
             for resume in release {
                 resume.send(()).unwrap();
             }
             let final_counts = harness.settle(limits).await;
             assert!(final_counts.iter().all(|row| row.withdraws == [0; 4]));
             assert_eq!(gauge("bgp_update_group_recovery_entries"), 0);
+            assert_eq!(gauge("bgp_update_group_recovery_bytes"), healthy_bytes);
         }
     }
 
