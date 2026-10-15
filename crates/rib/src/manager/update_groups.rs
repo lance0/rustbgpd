@@ -2322,7 +2322,9 @@ impl RibManager {
         if capture && self.grouped_member_of(peer).is_some() {
             self.capture_group_admitted_keys(peer);
         }
-        self.dirty_peers.insert(peer);
+        if self.dirty_peers.insert(peer) {
+            self.dirty_since.insert(peer, tokio::time::Instant::now());
+        }
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)
         {

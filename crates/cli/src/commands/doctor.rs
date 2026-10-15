@@ -58,6 +58,17 @@ const STUCK_PEER_SECS: u64 = 120;
 /// Investigation policy, not a bound on legitimate registration deferral.
 const OUTBOUND_REGISTRATION_GRACE_SECS: u64 = 300;
 
+/// The RIB retries a dirty peer's full export resync every second, so a
+/// resync still pending after this long has failed about sixty consecutive
+/// attempts. It is twice the default `slow_peer_duration`, so a merely slow
+/// receiver is flagged as a slow peer first.
+const OUTBOUND_RESYNC_WARN_SECS: u64 = 60;
+
+/// Fallback causes from the fixed recovery caps or allocation failure; the
+/// fourth cause, `missing_proof`, is an ordinary missed delivery.
+const UPDATE_GROUP_RECOVERY_LIMIT_CAUSES: [&str; 3] =
+    ["peer_limit", "daemon_limit", "allocation_failure"];
+
 /// Established peers that have flapped at least this often get an
 /// additional check. It is red only when retained history also proves
 /// recent instability; the counter itself covers the daemon lifetime.
@@ -921,6 +932,112 @@ fn peer_checks(
         });
     }
     checks
+}
+
+/// A grouped member in update-group recovery fallback resyncs by withdrawing
+/// every candidate it might have advertised; a resync pending well past the
+/// one-second retry means the peer is not draining. A short pending resync is
+/// reported green so the window stays visible.
+fn outbound_resync_check(identity: &str, n: &crate::proto::NeighborState) -> Option<Check> {
+    let cause = n.update_group_recovery_fallback.as_str();
+    let pending = n.outbound_resync_pending == Some(true);
+    if cause.is_empty() && !pending {
+        return None;
+    }
+    let age = n
+        .outbound_dirty_seconds
+        .map_or_else(|| "an unknown time".to_string(), output::format_duration);
+    let (status, detail) = if !cause.is_empty() {
+        (
+            CheckStatus::Warn,
+            format!(
+                "peer {identity} is in update-group recovery fallback (cause {cause}); its resync withdraws every candidate prefix it may have advertised, then re-announces the current table; outbound resync pending: {}. For a limit cause, the daemon warning log names the limiting_peer",
+                if pending { age.as_str() } else { "no" }
+            ),
+        )
+    } else if n.outbound_dirty_seconds.unwrap_or(0) >= OUTBOUND_RESYNC_WARN_SECS {
+        // Metric `peer` labels carry the bare IP, never the `%interface` scope.
+        let label = n.config.as_ref().map_or(identity, |c| c.address.as_str());
+        (
+            CheckStatus::Warn,
+            format!(
+                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{label}\"}} and the peer's receive path"
+            ),
+        )
+    } else {
+        (
+            CheckStatus::Ok,
+            format!(
+                "peer {identity} outbound resync pending for {age}, under the {OUTBOUND_RESYNC_WARN_SECS}s warning threshold"
+            ),
+        )
+    };
+    Some(Check {
+        name: format!("peer.{identity}.outbound_resync"),
+        status,
+        detail,
+    })
+}
+
+/// Daemon-lifetime fallbacks caused by the fixed recovery caps or allocation
+/// failure. `None` when the metrics snapshot is unavailable or the daemon
+/// predates the counter.
+fn update_group_recovery_check(metrics: Option<&str>) -> Option<Check> {
+    const NAME: &str = "bgp_update_group_recovery_fallback_total{";
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut malformed = false;
+    for line in metrics?.lines() {
+        let Some(rest) = line.strip_prefix(NAME) else {
+            continue;
+        };
+        let parsed = rest.split_once("} ").and_then(|(labels, value)| {
+            let cause = parse_metric_labels(labels)?.remove("cause")?;
+            Some((cause, value.trim().parse::<u64>().ok()?))
+        });
+        // A duplicate cause row would let a later value hide an earlier one.
+        if parsed.is_none_or(|(cause, value)| counts.insert(cause, value).is_some()) {
+            malformed = true;
+        }
+    }
+    if counts.is_empty() && !malformed {
+        return None;
+    }
+    let limited: Vec<String> = UPDATE_GROUP_RECOVERY_LIMIT_CAUSES
+        .iter()
+        .filter_map(|cause| {
+            counts
+                .get(*cause)
+                .filter(|count| **count > 0)
+                .map(|count| format!("{cause}={count}"))
+        })
+        .collect();
+    let (status, detail) = if malformed {
+        (
+            CheckStatus::Warn,
+            "bgp_update_group_recovery_fallback_total is malformed; inspect /metrics".to_string(),
+        )
+    } else if limited.is_empty() {
+        (
+            CheckStatus::Ok,
+            format!(
+                "no update-group recovery fallback from the fixed recovery caps or allocation failure since daemon start (missing_proof={})",
+                counts.get("missing_proof").copied().unwrap_or(0)
+            ),
+        )
+    } else {
+        (
+            CheckStatus::Warn,
+            format!(
+                "update-group recovery fell back to conservative withdrawal under a resource limit since daemon start ({}); affected members over-withdraw and re-announce on resync. Find them with rbgp neighbor <addr> (Recovery Fallback) and the warning log's limiting_peer field",
+                limited.join(", ")
+            ),
+        )
+    };
+    Some(Check {
+        name: "rib.update_group_recovery".to_string(),
+        status,
+        detail,
+    })
 }
 
 /// A blocking outbound family is intentionally withholding routes. Rows that
@@ -3304,6 +3421,9 @@ async fn run_with_deadlines(
                 Ok(resp) => {
                     let text = resp.into_inner().prometheus_text;
                     bundle.add("system/metrics.prom", redact_text(&text).into_bytes());
+                    if let Some(check) = update_group_recovery_check(Some(&text)) {
+                        reporter.record(check.name, check.status, check.detail)?;
+                    }
                     metrics_text = Some(text);
                 }
                 Err(e) => {
@@ -3608,6 +3728,7 @@ async fn run_with_deadlines(
                                         &n.inbound_prefix_limits,
                                     ))
                                     .chain(inbound_prefix_bound_check(&identity, n, local_asn))
+                                    .chain(outbound_resync_check(&identity, n))
                             {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
@@ -3627,6 +3748,7 @@ async fn run_with_deadlines(
                                 uptime_seconds: n.uptime_seconds,
                                 prefixes_received: n.prefixes_received,
                                 prefixes_sent: n.prefixes_sent,
+                                prefixes_sent_pending: n.prefixes_sent_pending == Some(true),
                                 messages_received: n.messages_received,
                                 messages_sent: n.messages_sent,
                                 flap_count: n.flap_count,
@@ -4125,6 +4247,7 @@ mod tests {
                 uptime_seconds: 0,
                 prefixes_received: 0,
                 prefixes_sent: 0,
+                prefixes_sent_pending: false,
                 messages_received: 0,
                 messages_sent: 0,
                 flap_count: 0,
@@ -6076,6 +6199,108 @@ paths = ["x"]
         let failed = rpki_cache_session_checks(&caches, Err("ListCaches RPC failed: denied"));
         assert!(failed.iter().all(|check| check.status == CheckStatus::Warn
             && check.detail.contains("RPC failed: denied")));
+    }
+
+    /// Red proofs: inverting the threshold comparison, dropping the cause
+    /// branch, or emitting a row for a settled peer fails below.
+    #[test]
+    fn outbound_resync_check_warns_on_fallback_or_long_dirty_window() {
+        let mut n = crate::proto::NeighborState {
+            outbound_resync_pending: Some(false),
+            ..Default::default()
+        };
+        assert!(outbound_resync_check("10.0.0.1", &n).is_none());
+
+        n.outbound_resync_pending = Some(true);
+        n.outbound_dirty_seconds = Some(OUTBOUND_RESYNC_WARN_SECS - 1);
+        let short = outbound_resync_check("10.0.0.1", &n).unwrap();
+        assert_eq!(short.name, "peer.10.0.0.1.outbound_resync");
+        assert_eq!(short.status, CheckStatus::Ok);
+
+        n.outbound_dirty_seconds = Some(OUTBOUND_RESYNC_WARN_SECS);
+        let long = outbound_resync_check("10.0.0.1", &n).unwrap();
+        assert_eq!(long.status, CheckStatus::Warn);
+        assert!(
+            long.detail.contains("pending for 00:01:00"),
+            "{}",
+            long.detail
+        );
+
+        // A link-local neighbor keeps its scope in the name and description,
+        // but the metric selector must use the bare `peer` label value.
+        let mut scoped = n.clone();
+        scoped.config = Some(crate::proto::NeighborConfig {
+            address: "fe80::1".to_string(),
+            interface: "eth0".to_string(),
+            ..Default::default()
+        });
+        let scoped = outbound_resync_check("fe80::1%eth0", &scoped).unwrap();
+        assert_eq!(scoped.name, "peer.fe80::1%eth0.outbound_resync");
+        assert!(scoped.detail.starts_with("peer fe80::1%eth0 "));
+        assert!(
+            scoped
+                .detail
+                .contains("bgp_peer_outbound_queue_depth{peer=\"fe80::1\"}"),
+            "{}",
+            scoped.detail
+        );
+
+        n.outbound_dirty_seconds = Some(1);
+        n.update_group_recovery_fallback = "peer_limit".to_string();
+        let fallback = outbound_resync_check("10.0.0.1", &n).unwrap();
+        assert_eq!(fallback.status, CheckStatus::Warn);
+        assert!(fallback.detail.contains("cause peer_limit"));
+
+        // The cause outlives the dirty window until the member resyncs.
+        n.outbound_resync_pending = Some(false);
+        n.outbound_dirty_seconds = None;
+        assert_eq!(
+            outbound_resync_check("10.0.0.1", &n).unwrap().status,
+            CheckStatus::Warn
+        );
+    }
+
+    /// Red proofs: counting `missing_proof` as a limit cause, or treating an
+    /// absent counter family as green, fails below.
+    #[test]
+    fn update_group_recovery_check_warns_only_on_limit_causes() {
+        const ZERO: &str = "bgp_update_group_recovery_fallback_total{cause=\"peer_limit\"} 0\n\
+                            bgp_update_group_recovery_fallback_total{cause=\"daemon_limit\"} 0\n\
+                            bgp_update_group_recovery_fallback_total{cause=\"allocation_failure\"} 0\n\
+                            bgp_update_group_recovery_fallback_total{cause=\"missing_proof\"} 3\n";
+        assert!(update_group_recovery_check(None).is_none());
+        assert!(update_group_recovery_check(Some("unrelated_metric 1\n")).is_none());
+
+        let ok = update_group_recovery_check(Some(ZERO)).unwrap();
+        assert_eq!(ok.name, "rib.update_group_recovery");
+        assert_eq!(ok.status, CheckStatus::Ok);
+        assert!(ok.detail.contains("missing_proof=3"));
+
+        let limited = ZERO.replace("daemon_limit\"} 0", "daemon_limit\"} 2");
+        let warn = update_group_recovery_check(Some(&limited)).unwrap();
+        assert_eq!(warn.status, CheckStatus::Warn);
+        assert!(warn.detail.contains("daemon_limit=2"), "{}", warn.detail);
+        assert!(!warn.detail.contains("peer_limit="));
+
+        let malformed = ZERO.replace("peer_limit\"} 0", "peer_limit\"} x");
+        assert_eq!(
+            update_group_recovery_check(Some(&malformed))
+                .unwrap()
+                .status,
+            CheckStatus::Warn
+        );
+
+        // A duplicate cause row must not let a trailing zero hide a positive
+        // limit count.
+        let duplicate =
+            format!("bgp_update_group_recovery_fallback_total{{cause=\"peer_limit\"}} 1\n{ZERO}");
+        let duplicate = update_group_recovery_check(Some(&duplicate)).unwrap();
+        assert_eq!(duplicate.status, CheckStatus::Warn);
+        assert!(
+            duplicate.detail.contains("malformed"),
+            "{}",
+            duplicate.detail
+        );
     }
 
     /// Red proofs: zero-as-OK and dropping the configured guard fail below.

@@ -480,6 +480,11 @@ fn apply_rib_snapshot(state: &mut proto::NeighborState, snapshot: &NeighborRibSn
         })
         .collect();
     state.gr_retention_available = Some(true);
+    let resync = &snapshot.outbound_resync;
+    state.outbound_resync_pending = Some(resync.pending);
+    state.outbound_dirty_seconds = resync.dirty_secs;
+    state.update_group_recovery_fallback = resync.recovery_fallback.unwrap_or_default().to_string();
+    state.prefixes_sent_pending = Some(resync.advertised_count_pending);
 }
 
 /// A row for an address with no neighbor-inventory entry whose GR/LLGR stale
@@ -1194,6 +1199,11 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         gr_retention: Vec::new(),
         gr_retention_available: None,
         retention_only: None,
+        // RIB-owned; the snapshot query fills these in.
+        outbound_resync_pending: None,
+        outbound_dirty_seconds: None,
+        update_group_recovery_fallback: String::new(),
+        prefixes_sent_pending: None,
         effective_posture: Some(proto::EffectiveNeighborPosture {
             next_hop_ownership: if info.next_hop_ownership_strict_peer {
                 proto::NextHopOwnershipMode::StrictPeer
@@ -2148,6 +2158,7 @@ mod tests {
                             },
                             remote_asn: None,
                             gr_retention: Vec::new(),
+                            outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                         }],
                         retained: Vec::new(),
                         comparison: None,
@@ -3859,6 +3870,7 @@ mod tests {
                                     remaining_secs: Some(86_400),
                                     stale_routes: 12,
                                 }],
+                                outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                             }],
                             retained: Vec::new(),
                             comparison: None,
@@ -3957,6 +3969,7 @@ mod tests {
                 },
                 remote_asn: None,
                 gr_retention: Vec::new(),
+                outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
             };
             reply
                 .send(NeighborRibSnapshotResponse {
@@ -3977,6 +3990,7 @@ mod tests {
                             },
                             remote_asn: None,
                             gr_retention: Vec::new(),
+                            outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                         },
                         NeighborRibSnapshot {
                             peer: tenth,
@@ -3995,6 +4009,7 @@ mod tests {
                             },
                             remote_asn: None,
                             gr_retention: Vec::new(),
+                            outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                         },
                         // RIB identity is address-only and forbids this duplicate
                         // live topology; identical clones isolate comparator order.
@@ -4101,6 +4116,7 @@ mod tests {
                         outbound: empty_outbound_state(),
                         remote_asn: None,
                         gr_retention: Vec::new(),
+                        outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                     },
                     NeighborRibSnapshot {
                         peer: second,
@@ -4109,6 +4125,7 @@ mod tests {
                         outbound: empty_outbound_state(),
                         remote_asn: None,
                         gr_retention: Vec::new(),
+                        outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                     },
                 ],
                 retained: Vec::new(),
@@ -4195,6 +4212,7 @@ mod tests {
                         outbound: empty_outbound_state(),
                         remote_asn: None,
                         gr_retention: Vec::new(),
+                        outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                     }],
                     retained: Vec::new(),
                     comparison: None,
@@ -4259,6 +4277,7 @@ mod tests {
                         outbound: empty_outbound_state(),
                         remote_asn: None,
                         gr_retention: Vec::new(),
+                        outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                     }],
                     retained: Vec::new(),
                     comparison: None,
@@ -4404,6 +4423,7 @@ mod tests {
                     },
                     remote_asn: None,
                     gr_retention: Vec::new(),
+                    outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
                 }],
                 retained: Vec::new(),
                 comparison: Some(UpdateGroupPeerComparison {
@@ -4440,6 +4460,51 @@ mod tests {
                 proto::UpdateGroupComparisonDifference::PerClientBest as i32,
             ]
         );
+    }
+
+    /// Each outbound-resync field maps from the RIB snapshot, and a current
+    /// daemon reports explicit false presence rather than an older daemon's
+    /// absence.
+    #[test]
+    fn rib_snapshot_maps_outbound_resync_state() {
+        let mut snapshot = NeighborRibSnapshot {
+            peer: "10.0.0.1".parse().unwrap(),
+            advertised_count: 7,
+            policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
+            outbound: rustbgpd_rib::PeerOutboundState {
+                update_group: "group:1".into(),
+                effective_distribution_mode: EffectiveDistributionMode::Unknown,
+                selection_deferral: Vec::new(),
+                outbound_prefix_limits: Vec::new(),
+            },
+            remote_asn: None,
+            gr_retention: Vec::new(),
+            outbound_resync: rustbgpd_rib::OutboundResyncState {
+                pending: true,
+                dirty_secs: Some(42),
+                advertised_count_pending: false,
+                recovery_fallback: Some("daemon_limit"),
+            },
+        };
+        let mut state = proto::NeighborState::default();
+        apply_rib_snapshot(&mut state, &snapshot);
+        assert_eq!(state.prefixes_sent, 7);
+        assert_eq!(state.outbound_resync_pending, Some(true));
+        assert_eq!(state.outbound_dirty_seconds, Some(42));
+        assert_eq!(state.update_group_recovery_fallback, "daemon_limit");
+        assert_eq!(state.prefixes_sent_pending, Some(false));
+
+        // A grouped member whose channel closed is unsettled without a retry.
+        snapshot.outbound_resync = rustbgpd_rib::OutboundResyncState {
+            advertised_count_pending: true,
+            ..Default::default()
+        };
+        let mut state = proto::NeighborState::default();
+        apply_rib_snapshot(&mut state, &snapshot);
+        assert_eq!(state.outbound_resync_pending, Some(false));
+        assert_eq!(state.outbound_dirty_seconds, None);
+        assert_eq!(state.update_group_recovery_fallback, "");
+        assert_eq!(state.prefixes_sent_pending, Some(true));
     }
 
     /// Load-bearing: the comparison is optional response detail, not a
@@ -4488,6 +4553,7 @@ mod tests {
             },
             remote_asn: None,
             gr_retention: Vec::new(),
+            outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
         };
         let peer_task = tokio::spawn(async move {
             for expected in [primary, primary, secondary] {

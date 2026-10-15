@@ -308,6 +308,10 @@ pub struct JsonNeighbor {
     pub uptime_seconds: u64,
     pub prefixes_received: u64,
     pub prefixes_sent: u64,
+    /// `prefixes_sent` is the update group's desired count while a grouped
+    /// member awaits outbound resync. Omitted while false.
+    #[serde(skip_serializing_if = "is_false")]
+    pub prefixes_sent_pending: bool,
     /// Total BGP messages received/sent, all types (daemon-lifetime;
     /// persists across session flaps, includes KEEPALIVEs).
     pub messages_received: u64,
@@ -390,6 +394,22 @@ pub struct JsonNeighborDetail {
     pub prefixes_received_ipv4: u64,
     pub prefixes_received_ipv6: u64,
     pub prefixes_sent: u64,
+    /// `Some(true)` while `prefixes_sent` is the update group's desired
+    /// count for a member awaiting outbound resync, not the routes the peer
+    /// is known to hold. `None` means an older daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefixes_sent_pending: Option<bool>,
+    /// The peer missed outbound delivery and waits for a full export resync.
+    /// `None` means an older daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbound_resync_pending: Option<bool>,
+    /// Seconds the current outbound resync has been pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbound_dirty_seconds: Option<u64>,
+    /// Update-group recovery fallback cause for the current session:
+    /// `peer_limit`, `daemon_limit`, `allocation_failure` or `missing_proof`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub update_group_recovery_fallback: String,
     pub updates_received: u64,
     pub updates_sent: u64,
     pub notifications_received: u64,
@@ -907,7 +927,13 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
                 state_colored: colored_state_with_stale(n.state, n.stale),
                 uptime: format_duration(n.uptime_seconds),
                 rx: n.prefixes_received.to_string(),
-                tx: n.prefixes_sent.to_string(),
+                // `~` marks a grouped member's desired count while its
+                // delivery awaits outbound resync.
+                tx: if n.prefixes_sent_pending == Some(true) {
+                    format!("~{}", n.prefixes_sent)
+                } else {
+                    n.prefixes_sent.to_string()
+                },
                 desc: cfg.map(|c| c.description.clone()).unwrap_or_default(),
                 msg_rcvd,
                 msg_sent,
@@ -1932,6 +1958,10 @@ mod tests {
             prefixes_received_ipv4: 7,
             prefixes_received_ipv6: 3,
             prefixes_sent: 2,
+            prefixes_sent_pending: None,
+            outbound_resync_pending: None,
+            outbound_dirty_seconds: None,
+            update_group_recovery_fallback: String::new(),
             updates_received: 3,
             updates_sent: 4,
             notifications_received: 5,

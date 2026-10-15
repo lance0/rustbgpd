@@ -789,6 +789,23 @@ message NeighborState {
   // default. The row disappears when retention ends. Absent on ordinary rows
   // and from older daemons.
   optional bool retention_only = 61;
+  // True while this peer missed outbound delivery and waits for the RIB's
+  // full export resync (retried every second). Absence means an older daemon.
+  optional bool outbound_resync_pending = 62;
+  // Whole seconds the current outbound resync has been pending. Present only
+  // while outbound_resync_pending is true.
+  optional uint64 outbound_dirty_seconds = 63;
+  // Update-group recovery fallback cause recorded for the current session:
+  // "peer_limit", "daemon_limit", "allocation_failure", or "missing_proof",
+  // the cause label of bgp_update_group_recovery_fallback_total. While set,
+  // the member's resync withdraws every candidate prefix it might have
+  // advertised instead of only the ones it is known to have advertised.
+  // Empty when no fallback is recorded.
+  string update_group_recovery_fallback = 64;
+  // True while prefixes_sent is the update group's desired count for a
+  // member whose delivery is unconfirmed (a grouped member awaiting resync),
+  // not the routes the peer is known to hold. Absence means an older daemon.
+  optional bool prefixes_sent_pending = 65;
 }
 
 // Stale routes one family of a neighbor still holds for GR or LLGR.

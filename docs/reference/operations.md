@@ -1465,6 +1465,67 @@ The [M112 EVPN receipt](../artifacts/interop/m112-srv6-semantic-20260906T200333Z
 records invalid-candidate exclusion and recovery for one MAC-only Type 2 SID
 Structure replacement.
 
+### Update-group recovery fallback
+
+A grouped member whose outbound UPDATE could not be sent is marked dirty and
+resynced by the RIB, retried every second. Before the group's shared view
+advances, the RIB keeps a compact proof of the unicast and VPN keys that member
+actually admitted, so the resync withdraws exactly what the peer holds and no
+longer should. When that proof is unavailable, the member falls back to
+conservative withdrawal: its resync withdraws every candidate prefix it may
+have advertised, including some the peer never received, then re-announces
+the current table. The session is not reset and EVPN recovery is unaffected,
+but receivers see extra withdrawals, and a large fallback produces withdrawal
+churn downstream.
+
+Each fallback carries one cause, the `cause` label of
+`bgp_update_group_recovery_fallback_total`:
+
+| Cause | Meaning |
+|-------|---------|
+| `peer_limit` | One peer's proof would exceed the fixed 64 MiB per-peer recovery cap |
+| `daemon_limit` | All retained proofs would exceed the fixed 512 MiB per-daemon recovery cap |
+| `allocation_failure` | A proof allocation or checked capacity calculation failed |
+| `missing_proof` | No complete pre-commit proof or valid admitted batch existed for the missed delivery. This is the ordinary outcome of some missed sends, not resource pressure |
+
+The two caps are compiled-in constants that account for reserved proof
+capacity, not configuration settings or RSS limits. Use
+`bgp_update_group_recovery_bytes` and `bgp_update_group_recovery_peak_bytes`
+against 512 MiB to judge daemon headroom.
+
+The daemon logs a warning naming the affected `peer` and `cause` when a
+fallback starts. For a limit cause, the admitted-key warning also carries
+`limiting_peer`, the peer whose recovery charge exceeded the per-peer cap
+(`None` for the other causes), with the attempted per-peer and per-daemon
+byte charges. The counter counts each peer once per fallback episode and never
+resets before a daemon restart.
+
+Per-peer state is in `rbgp neighbor <addr>` and `NeighborState`:
+
+- `Outbound Resync: pending for <duration>` (`outbound_resync_pending`,
+  `outbound_dirty_seconds`) while the resync is outstanding.
+- `Recovery Fallback: <cause>` (`update_group_recovery_fallback`) until the
+  member's resync completes.
+- `Prefixes Sent: <n> (pending outbound resync)` (`prefixes_sent_pending`)
+  while `<n>` is the group's desired count rather than delivered state. The
+  neighbor table shows the same count as `~<n>`. `rbgp rib advertised <addr>`
+  lists the member's admitted baseline in this window, or refuses when it has
+  none.
+
+`rbgp doctor` adds two checks. `peer.<scoped-address>.outbound_resync` is
+yellow while a fallback cause is set or a resync has been pending for 60
+seconds or more (about sixty failed retries, twice the default
+`slow_peer_duration`), and green while a shorter resync is pending; settled
+peers add no check. `rib.update_group_recovery` is yellow when the
+`peer_limit`, `daemon_limit` or `allocation_failure` count is above zero since
+daemon start, and green otherwise; `missing_proof` alone stays green. Both
+warnings retain exit status 0.
+
+A persistent limit cause means recovery proofs outgrow the fixed caps: many
+members going dirty against a large table at the same time. Find why members
+miss delivery (slow receivers, `bgp_peer_outbound_queue_depth`, `slow_peer`)
+before the next episode.
+
 ---
 
 ## Key metrics to watch
@@ -2914,6 +2975,10 @@ configuration to be available. This advisory warning retains exit status 0.
 RIB holds in the RFC 9494 LLGR phase. The detail names the time until the
 LLGR sweep; long retention is a configured outcome, so
 the warning retains exit status 0. GR-phase families add no check.
+
+`peer.<scoped-address>.outbound_resync` and `rib.update_group_recovery` report
+outbound resync and update-group recovery fallback; see
+[Update-group recovery fallback](#update-group-recovery-fallback).
 
 Doctor parses the effective-config document once and reads probe targets from
 its documented key paths. With `global.listen_addresses`, a local check uses

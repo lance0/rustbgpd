@@ -1444,6 +1444,7 @@ mod orf;
 mod orr;
 mod outbound_commit_accounting;
 mod outbound_prefix_limits;
+mod outbound_resync_state;
 mod paged_query;
 mod per_client_best;
 mod policy;
