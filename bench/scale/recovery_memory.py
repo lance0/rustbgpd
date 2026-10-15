@@ -1263,10 +1263,19 @@ def summarize_scan(root: Path) -> None:
     before = (root / "host-oom.before").read_text().strip()
     require(before.isdigit() and before == (root / "host-oom.after").read_text().strip(),
             "host OOM invalidates scan receipt")
+    refused_legs = sum(row["refusal"] is not None for row in result["samples"])
+    result["qualification_passed"] = (
+        len(result["samples"]) == 24 and len(result["comparisons"]) == 6
+        and refused_legs == 0 and all(cell["eligible"] for cell in result["comparisons"])
+    )
+    if not result["qualification_passed"]:
+        write_json(root / "unqualified-comparison.json", result)
     write_json(root / "comparison.json", result)
+    require(result["qualification_passed"],
+            "all 6 scan cells must have complete, proof-checked non-refused comparisons")
     print(json.dumps({"schema": SCAN_SCHEMA, "profile": manifest["profile"],
-                      "component_cells": 6, "timed_legs": 24,
-                      "refused_legs": sum(row["refusal"] is not None for row in result["samples"])}))
+                      "component_cells": 6, "timed_legs": 24, "refused_legs": refused_legs,
+                      "qualification_passed": result["qualification_passed"]}))
 
 
 def main() -> None:

@@ -1301,6 +1301,112 @@ class RecoveryScanTests(unittest.TestCase):
         path.write_text("\n".join(lines) + "\n")
         return path
 
+    def campaign(self, rows):
+        # Reuse the complete process/cgroup fixture, replacing scan inputs only.
+        fixture = RecoveryReceiptTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        root = fixture.campaign(selected_cell="peer-down")
+        name = "bench/scale/rrharness/src/recovery_scan.rs"
+        path = root / "frozen-instrumentation" / name
+        path.write_text(name)
+        inputs = root / "instrumentation.sha256"
+        inputs.write_text(inputs.read_text() + receipt.file_digest(path) + "  " + name + "\n")
+        manifest = {
+            "schema": "rustbgpd.recovery-scan.campaign.v1", "candidate": "a" * 40,
+            "instrumentation_manifest_sha256": receipt.file_digest(inputs),
+            "profile": rows[0]["profile"], "build_jobs": 4,
+            "order_per_cell": ["flat", "shared", "shared", "flat"],
+        }
+        receipt.write_json(root / "manifest.json", manifest)
+        directory = root / "scan"
+        shutil.copytree(root / "ipv4-100k-peer-down-baseline-2-candidate", directory)
+        process = json.loads((directory / "binary-process.json").read_text())
+        identity = {
+            "pid": process["pid"], "start_ticks": process["start_ticks"],
+            "cgroup": (directory / "cgroup-path.txt").read_text().strip(),
+            "source_sha": manifest["candidate"],
+            "instrumentation_sha256": manifest["instrumentation_manifest_sha256"],
+        }
+        lines = self.log(rows).read_text().splitlines()
+        lines[0] = "recovery_identity " + json.dumps(identity)
+        (directory / "harness.log").write_text("\n".join(lines) + "\n")
+        return root
+
+    def summarize_campaign(self, root):
+        return subprocess.run(
+            ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan", str(root)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+
+    def test_scan_summary_qualifies_complete_profiles_with_unresolved_cpu_ratios(self):
+        for profile in receipt.SCAN_PROFILES:
+            with self.subTest(profile=profile):
+                rows = self.rows(profile)
+                for row in rows:
+                    for phase in row["phases"].values():
+                        phase["cpu_ticks"] = 0
+                root = self.campaign(rows)
+                result = self.summarize_campaign(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                summary = json.loads((root / "comparison.json").read_text())
+                self.assertTrue(summary.get("qualification_passed", False))
+                self.assertTrue(json.loads(result.stdout)["qualification_passed"])
+                self.assertEqual(len(summary["samples"]), 24)
+                self.assertEqual(len(summary["comparisons"]), 6)
+                self.assertTrue(all(cell["eligible"] for cell in summary["comparisons"]))
+                for cell in summary["comparisons"]:
+                    self.assertIsNone(cell["shared_over_flat"]["capture"]["cpu_ticks"])
+                    self.assertEqual(cell["shared_over_flat"]["capture"]["wall_ns"], 1.0)
+
+    def test_scan_summary_refuses_any_missing_comparison_and_preserves_raw(self):
+        for refused in ((1,), (0, 1, 2, 3), tuple(range(24))):
+            with self.subTest(refused=refused):
+                rows = self.rows()
+                for index in refused:
+                    rows[index].update(refusal="peer_limit", proof_keys=0, phases={})
+                root = self.campaign(rows)
+                raw = (root / "scan/harness.log").read_bytes()
+                result = self.summarize_campaign(root)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("all 6 scan cells", result.stderr)
+                summary = json.loads((root / "comparison.json").read_text())
+                self.assertFalse(summary["qualification_passed"])
+                self.assertEqual(len(summary["samples"]), 24)
+                self.assertEqual(sum(row["refusal"] is not None for row in summary["samples"]), len(refused))
+                self.assertEqual(len(summary["comparisons"]), 6)
+                self.assertTrue(any(not cell["eligible"] for cell in summary["comparisons"]))
+                self.assertEqual((root / "scan/harness.log").read_bytes(), raw)
+                finalized = subprocess.run(
+                    ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan",
+                     str(root), "--failed-driver-exit", str(result.returncode)],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(finalized.returncode, 1, finalized.stdout + finalized.stderr)
+                envelope = json.loads((root / "comparison.json").read_text())
+                self.assertFalse(envelope["qualification_passed"])
+                self.assertEqual(envelope["driver_invocation_exit"], result.returncode)
+                self.assertEqual(envelope["samples"], [])
+                self.assertEqual(envelope["comparisons"], [])
+                self.assertNotIn("ratio", json.dumps(envelope))
+                diagnostic = root / "unqualified-comparison.json"
+                self.assertTrue(diagnostic.exists(), "completed refusal diagnostics missing after finalization")
+                self.assertEqual(json.loads(diagnostic.read_text()), summary)
+                self.assertEqual((root / "scan/harness.log").read_bytes(), raw)
+
+    def test_scan_summary_rejects_incomplete_matrix_or_proof(self):
+        for failure in ("missing-leg", "wrong-proof"):
+            with self.subTest(failure=failure):
+                rows = self.rows()
+                if failure == "missing-leg":
+                    rows.pop()
+                else:
+                    rows[1]["proof_keys"] = 0
+                root = self.campaign(rows)
+                result = self.summarize_campaign(root)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse((root / "comparison.json").exists())
+
     def test_scan_profiles_and_same_runtime_paired_ratios(self):
         for profile in receipt.SCAN_PROFILES:
             result = receipt.validate_scan_log(self.log(self.rows(profile)), profile)
