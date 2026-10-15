@@ -35,7 +35,167 @@ use crate::update::{
 // here adds no fields or clocks to the normal manager build.
 static RETIREMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static RETIREMENT_MEASURED: AtomicBool = AtomicBool::new(false);
-static RETIREMENT_COUNTS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static RETIREMENT_COUNTS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+static RETIREMENT_EPOCH: AtomicU64 = AtomicU64::new(0);
+static RETIREMENT_READINESS: [AtomicU64; 33] = [const { AtomicU64::new(0) }; 33];
+
+/// One synchronous owner, with no route inventories or per-query history.
+/// These clocks are instrumented-build evidence, never normal-build work.
+pub(in crate::manager) struct RetirementReadiness {
+    epoch: u64,
+    entered: tokio::time::Instant,
+    last_callback: tokio::time::Instant,
+    max_interval: std::time::Duration,
+    labels: u8,
+    other_stage: bool,
+    callbacks: u64,
+    body_callbacks: u64,
+    admitted: u64,
+    serviced: u64,
+    delivered: u64,
+    body_replied: u64,
+}
+
+fn retirement_epoch() -> u64 {
+    if RETIREMENT_ACTIVE.load(Ordering::Acquire) {
+        RETIREMENT_EPOCH.load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+pub(in crate::manager) fn retirement_body_stage(stage: Option<&'static str>) -> bool {
+    matches!(
+        stage,
+        Some(
+            "peer_adj_in_retirement"
+                | "peer_attribute_gc"
+                | "peer_adj_out_retirement"
+                | "peer_regroup_retirement"
+        )
+    )
+}
+
+impl RetirementReadiness {
+    pub(in crate::manager) fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            epoch: retirement_epoch(),
+            entered: now,
+            last_callback: now,
+            max_interval: std::time::Duration::ZERO,
+            labels: 0,
+            other_stage: false,
+            callbacks: 0,
+            body_callbacks: 0,
+            admitted: 0,
+            serviced: 0,
+            delivered: 0,
+            body_replied: 0,
+        }
+    }
+
+    pub(in crate::manager) fn entered(&self) -> tokio::time::Instant {
+        self.entered
+    }
+
+    pub(in crate::manager) fn checkpoint(
+        &mut self,
+        now: tokio::time::Instant,
+        stage: Option<&'static str>,
+        force: bool,
+    ) {
+        if self.epoch == 0 && retirement_epoch() == 0 {
+            return;
+        }
+        self.max_interval = self
+            .max_interval
+            .max(now.duration_since(self.last_callback));
+        self.last_callback = now;
+        self.callbacks += 1;
+        let label = match stage {
+            Some("peer_adj_in_retirement" | "peer_attribute_gc") => 1,
+            Some("peer_adj_out_retirement") => 2,
+            Some("peer_regroup_retirement") => 4,
+            Some("terminal_cleanup") | None => 0,
+            Some(_) => {
+                self.other_stage = true;
+                0
+            }
+        };
+        self.labels |= label;
+        if label != 0 && !force {
+            self.body_callbacks += 1;
+        }
+    }
+
+    pub(in crate::manager) fn reply(
+        &mut self,
+        in_owner: bool,
+        delivered: bool,
+        cleanup_body: bool,
+    ) {
+        if self.epoch == 0 && retirement_epoch() == 0 {
+            return;
+        }
+        self.serviced += 1;
+        if in_owner {
+            self.admitted += 1;
+            self.delivered += u64::from(delivered);
+            self.body_replied += u64::from(delivered && cleanup_body);
+        }
+    }
+
+    fn values(
+        &self,
+        epoch: u64,
+        max_gap: std::time::Duration,
+        budget: std::time::Duration,
+    ) -> [u64; 11] {
+        let invalid = self.epoch == 0
+            || self.epoch != epoch
+            || self.labels.count_ones() != 1
+            || self.other_stage;
+        [
+            1,
+            u64::from(invalid),
+            self.callbacks,
+            self.body_callbacks,
+            self.admitted,
+            self.serviced,
+            self.delivered,
+            self.body_replied,
+            u64::try_from(self.max_interval.as_nanos()).expect("callback interval fits u64"),
+            u64::try_from(max_gap.as_nanos()).expect("opportunity gap fits u64"),
+            u64::try_from(budget.as_nanos()).expect("service budget fits u64"),
+        ]
+    }
+
+    pub(in crate::manager) fn finish(
+        &self,
+        max_gap: std::time::Duration,
+        budget: std::time::Duration,
+    ) {
+        let epoch = retirement_epoch();
+        // Owners wholly outside a capture do not contaminate later receipts.
+        if epoch == 0 || self.labels == 0 {
+            return;
+        }
+        let values = self.values(epoch, max_gap, budget);
+        for phase in 0..3 {
+            if self.labels & (1 << phase) == 0 {
+                continue;
+            }
+            for (field, value) in values.into_iter().enumerate() {
+                let counter = &RETIREMENT_READINESS[phase * 11 + field];
+                if field >= 8 {
+                    counter.fetch_max(value, Ordering::Relaxed);
+                } else {
+                    counter.fetch_add(value, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
 
 pub(in crate::manager) struct RetirementSample {
     keys: usize,
@@ -78,9 +238,214 @@ pub(in crate::manager) fn retirement_end(phase: usize, sample: Option<Retirement
     }
 }
 
+#[cfg(test)]
+mod retirement_readiness_tests {
+    use super::RetirementReadiness;
+    use std::time::Duration;
+
+    fn manager_with_queries(
+        age: Duration,
+    ) -> (
+        super::RibManager,
+        tokio::sync::mpsc::Sender<crate::RibReadinessQuery>,
+    ) {
+        let (_, updates) = tokio::sync::mpsc::channel(1);
+        let (_, queries) = tokio::sync::mpsc::channel(1);
+        let (tx, readiness) = tokio::sync::mpsc::channel(64);
+        let mut manager = super::RibManager::new(
+            updates,
+            queries,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        )
+        .with_readiness_queries(readiness);
+        assert!(manager.begin_readiness_owner(age, false));
+        manager
+            .replacement_readiness
+            .as_ref()
+            .unwrap()
+            .state
+            .lock()
+            .unwrap()
+            .retirement
+            .epoch = 7;
+        (manager, tx)
+    }
+
+    fn enqueue(
+        tx: &tokio::sync::mpsc::Sender<crate::RibReadinessQuery>,
+    ) -> tokio::sync::oneshot::Receiver<Result<usize, crate::RibReadinessError>> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        tx.try_send(crate::RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: tokio::time::Instant::now().into_std(),
+        })
+        .unwrap();
+        answer
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actual_checkpoint_service_excludes_boundary_only_replies() {
+        let (manager, tx) = manager_with_queries(Duration::ZERO);
+        let entry = enqueue(&tx);
+        manager.replacement_checkpoint_at("peer_adj_out_retirement", true);
+        assert_eq!(entry.await.unwrap(), Ok(0));
+        for _ in 0..200 {
+            manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+        }
+        let terminal = enqueue(&tx);
+        manager.replacement_checkpoint_at("terminal_cleanup", true);
+        assert_eq!(terminal.await.unwrap(), Ok(0));
+        {
+            let state = manager
+                .replacement_readiness
+                .as_ref()
+                .unwrap()
+                .state
+                .lock()
+                .unwrap();
+            assert_eq!(
+                (
+                    state.retirement.body_callbacks,
+                    state.retirement.admitted,
+                    state.retirement.delivered,
+                    state.retirement.body_replied
+                ),
+                (200, 2, 2, 0)
+            );
+        }
+        let body = enqueue(&tx);
+        tokio::time::advance(Duration::from_millis(25)).await;
+        manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+        assert_eq!(body.await.unwrap(), Ok(0));
+        let state = manager
+            .replacement_readiness
+            .as_ref()
+            .unwrap()
+            .state
+            .lock()
+            .unwrap();
+        assert_eq!(
+            state.retirement.body_replied, 1,
+            "only the real nonforced cleanup service supplies overlap"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actual_body_service_requires_a_healthy_delivered_reply() {
+        for age in [Duration::ZERO, Duration::from_secs(31)] {
+            let (manager, tx) = manager_with_queries(age);
+            let answer = enqueue(&tx);
+            if age.is_zero() {
+                drop(answer);
+            } else {
+                tokio::time::advance(Duration::from_millis(25)).await;
+                manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+                assert!(answer.await.unwrap().is_err());
+            }
+            if age.is_zero() {
+                tokio::time::advance(Duration::from_millis(25)).await;
+                manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+            }
+            let state = manager
+                .replacement_readiness
+                .as_ref()
+                .unwrap()
+                .state
+                .lock()
+                .unwrap();
+            assert_eq!(
+                (state.retirement.admitted, state.retirement.body_replied),
+                (1, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_capture_does_not_collect_checkpoint_or_reply_counters() {
+        let now = tokio::time::Instant::now();
+        let mut owner = RetirementReadiness::new(now);
+        assert_eq!(owner.epoch, 0);
+        owner.checkpoint(
+            now + Duration::from_secs(1),
+            Some("peer_adj_out_retirement"),
+            false,
+        );
+        owner.reply(true, true, true);
+        assert_eq!(
+            (
+                owner.callbacks,
+                owner.body_callbacks,
+                owner.serviced,
+                owner.body_replied
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(owner.last_callback, now);
+        assert_eq!(
+            owner.values(7, Duration::ZERO, Duration::ZERO)[1],
+            1,
+            "a later active epoch cannot adopt an old owner"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn callback_intervals_include_entry_body_gc_and_final_tail() {
+        let now = tokio::time::Instant::now();
+        let mut owner = RetirementReadiness::new(now);
+        owner.epoch = 7;
+        owner.checkpoint(now, None, true);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        owner.checkpoint(
+            tokio::time::Instant::now(),
+            Some("peer_adj_in_retirement"),
+            false,
+        );
+        tokio::time::advance(Duration::from_millis(20)).await;
+        owner.checkpoint(
+            tokio::time::Instant::now(),
+            Some("peer_attribute_gc"),
+            false,
+        );
+        owner.reply(false, true, true); // Already queued before this owner began.
+        tokio::time::advance(Duration::from_millis(10)).await;
+        owner.reply(true, true, true); // Query service must not reset callback spacing.
+        // The last sample must include the final backing-allocation tail.
+        tokio::time::advance(Duration::from_millis(21)).await;
+        owner.checkpoint(tokio::time::Instant::now(), Some("terminal_cleanup"), true);
+        let values = owner.values(7, Duration::from_millis(40), Duration::from_millis(25));
+        assert_eq!(&values[..8], &[1, 0, 4, 2, 1, 2, 1, 1]);
+        assert_eq!(&values[8..], &[31_000_000, 40_000_000, 25_000_000]);
+    }
+
+    #[test]
+    fn mixed_and_cross_capture_owners_never_supply_valid_attribution() {
+        let now = tokio::time::Instant::now();
+        let mut owner = RetirementReadiness::new(now);
+        owner.epoch = 7;
+        owner.checkpoint(now, Some("peer_adj_out_retirement"), false);
+        assert_eq!(owner.values(8, Duration::ZERO, Duration::ZERO)[1], 1);
+        owner.checkpoint(now, Some("peer_regroup_retirement"), false);
+        assert_eq!(owner.values(7, Duration::ZERO, Duration::ZERO)[1], 1);
+        owner.labels = 2;
+        owner.checkpoint(now, Some("other_work"), false);
+        assert_eq!(owner.values(7, Duration::ZERO, Duration::ZERO)[1], 1);
+    }
+
+    #[test]
+    fn a_dropped_or_unhealthy_reply_is_not_successful_owner_overlap() {
+        let now = tokio::time::Instant::now();
+        let mut owner = RetirementReadiness::new(now);
+        owner.epoch = 7;
+        owner.reply(true, false, true);
+        assert_eq!((owner.admitted, owner.serviced, owner.delivered), (1, 1, 0));
+    }
+}
+
 impl RibManager {
     /// Start one process-local, bench-only capture after fixture convergence.
-    /// Correctness mode records inventories without reading a clock.
+    /// Correctness mode exposes inventories and counters without durations.
     ///
     /// # Panics
     /// Panics when a prior capture has not finished.
@@ -89,6 +454,10 @@ impl RibManager {
         for counter in &RETIREMENT_COUNTS {
             counter.store(0, Ordering::Relaxed);
         }
+        for counter in &RETIREMENT_READINESS {
+            counter.store(0, Ordering::Relaxed);
+        }
+        RETIREMENT_EPOCH.fetch_add(1, Ordering::Relaxed);
         RETIREMENT_MEASURED.store(measured, Ordering::Relaxed);
         RETIREMENT_ACTIVE.store(true, Ordering::Release);
     }
@@ -96,13 +465,26 @@ impl RibManager {
     /// Stop after an actor FIFO barrier. Each four-field phase is calls,
     /// retired keys, groups, and elapsed nanoseconds (zero when unmeasured).
     /// Phase zero covers the VPN stage map; phase one only detached Adj-RIB-In.
+    /// Phases two and three cover detached private Adj-RIB-Out and retained
+    /// regroup baseline retirement, including their emptied backing allocations.
     ///
     /// # Panics
     /// Panics when no capture is active.
     #[must_use]
-    pub fn bench_finish_retirement_capture() -> [u64; 8] {
+    pub fn bench_finish_retirement_capture() -> [u64; 16] {
         assert!(RETIREMENT_ACTIVE.swap(false, Ordering::Acquire));
         std::array::from_fn(|index| RETIREMENT_COUNTS[index].load(Ordering::Relaxed))
+    }
+
+    /// Three bounded cleanup-owner aggregates: received rows including GC,
+    /// private outbound rows, and regroup baseline. Each eleven-field slot holds
+    /// owners, invalid owners, callbacks, productive callbacks, in-owner query
+    /// admissions, serviced queries, delivered in-owner replies, successful
+    /// replies at nonforced tagged cleanup callbacks, maximum callback
+    /// interval, eligible-opportunity gap, and the existing service budget.
+    #[must_use]
+    pub fn bench_retirement_readiness() -> [u64; 33] {
+        std::array::from_fn(|index| RETIREMENT_READINESS[index].load(Ordering::Relaxed))
     }
 }
 

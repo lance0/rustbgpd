@@ -1318,6 +1318,8 @@ struct ReplacementReadiness {
     max_gap: std::time::Duration,
     #[cfg(any(test, feature = "bench-internals"))]
     serviced: usize,
+    #[cfg(feature = "bench-internals")]
+    retirement: bench_support::RetirementReadiness,
 }
 
 #[cfg(test)]
@@ -1350,14 +1352,18 @@ fn replacement_readiness_checkpoint_at(
             observer(stage);
         }
     }
-    #[cfg(not(test))]
+    #[cfg(all(not(test), not(feature = "bench-internals")))]
     let _ = stage;
+    #[cfg(feature = "bench-internals")]
+    replacement_readiness_checkpoint_tagged(readiness, force, Some(stage));
+    #[cfg(not(feature = "bench-internals"))]
     replacement_readiness_checkpoint(readiness, force);
 }
 
 /// Call only on the actor while its synchronous readiness owner is held.
 /// The shared handle exposes readiness and frozen values; canonical RIB
 /// state remains exclusively owned by the actor.
+#[cfg(not(feature = "bench-internals"))]
 #[expect(
     clippy::ref_option,
     reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
@@ -1369,10 +1375,7 @@ fn replacement_readiness_checkpoint(
     let Some(context) = readiness else {
         return;
     };
-    // Instrumented builds still measure every eligible opportunity, including
-    // idle checkpoints. Once armed, production idle dispatch needs no mutex
-    // or clock. A capped drain retains its hint until it can rearm below.
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     {
         let mut readiness = context
             .state
@@ -1389,7 +1392,70 @@ fn replacement_readiness_checkpoint(
     service_replacement_readiness(context, force);
 }
 
+#[cfg(feature = "bench-internals")]
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+fn replacement_readiness_checkpoint(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    force: bool,
+) {
+    replacement_readiness_checkpoint_tagged(readiness, force, None);
+}
+
+#[cfg(feature = "bench-internals")]
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+fn replacement_readiness_checkpoint_tagged(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    force: bool,
+    stage: Option<&'static str>,
+) {
+    let Some(context) = readiness else {
+        return;
+    };
+    // Instrumented builds still measure every eligible opportunity, including
+    // idle checkpoints. Once armed, production idle dispatch needs no mutex
+    // or clock. A capped drain retains its hint until it can rearm below.
+    {
+        let mut readiness = context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = tokio::time::Instant::now();
+        readiness.retirement.checkpoint(now, stage, force);
+        if force || now.duration_since(readiness.last_service) >= readiness.budget {
+            readiness.max_gap = readiness
+                .max_gap
+                .max(now.duration_since(readiness.last_opportunity));
+            readiness.last_opportunity = now;
+        }
+    }
+    service_replacement_readiness_with_origin(
+        context,
+        force,
+        !force && bench_support::retirement_body_stage(stage),
+    );
+}
+
+#[cfg(not(feature = "bench-internals"))]
+use self::service_replacement_readiness_with_origin as service_replacement_readiness;
+
+// Existing unit controls invoke the untagged service seam directly. It cannot
+// supply evidence of service at a productive cleanup checkpoint.
+#[cfg(all(test, feature = "bench-internals"))]
 fn service_replacement_readiness(context: &ReplacementReadinessContext, force: bool) {
+    service_replacement_readiness_with_origin(context, force, false);
+}
+
+fn service_replacement_readiness_with_origin(
+    context: &ReplacementReadinessContext,
+    force: bool,
+    #[cfg(feature = "bench-internals")] cleanup_body: bool,
+) {
     if !force && !context.wake.pending.load(Ordering::Acquire) {
         return;
     }
@@ -1442,6 +1508,16 @@ fn service_replacement_readiness(context: &ReplacementReadinessContext, force: b
         } else {
             Ok(readiness.count)
         };
+        #[cfg(feature = "bench-internals")]
+        {
+            let in_owner = enqueued >= readiness.retirement.entered().into_std();
+            let healthy = result.is_ok();
+            let delivered = reply.send(result).is_ok();
+            readiness
+                .retirement
+                .reply(in_owner, delivered && healthy, cleanup_body);
+        }
+        #[cfg(not(feature = "bench-internals"))]
         let _ = reply.send(result);
         #[cfg(any(test, feature = "bench-internals"))]
         {
@@ -2328,7 +2404,8 @@ impl RibManager {
         if self.replacement_readiness.is_some() {
             return false;
         }
-        let started = tokio::time::Instant::now() - age;
+        let entered = tokio::time::Instant::now();
+        let started = entered - age;
         self.replacement_readiness = Some(Arc::new(ReplacementReadinessContext {
             wake: Arc::new(ReadinessWake {
                 pending: AtomicBool::new(true),
@@ -2352,6 +2429,8 @@ impl RibManager {
                 max_gap: std::time::Duration::ZERO,
                 #[cfg(any(test, feature = "bench-internals"))]
                 serviced: 0,
+                #[cfg(feature = "bench-internals")]
+                retirement: bench_support::RetirementReadiness::new(entered),
             }),
         }));
         self.replacement_checkpoint(true);
@@ -2381,6 +2460,10 @@ impl RibManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         debug_assert_eq!(readiness.count, self.loc_rib.len());
         self.readiness_rx = readiness.rx.take();
+        #[cfg(feature = "bench-internals")]
+        readiness
+            .retirement
+            .finish(readiness.max_gap, readiness.budget);
         #[cfg(all(feature = "bench-internals", not(test)))]
         info!(target: "replacement_readiness", count = readiness.count,
             elapsed_us = readiness.started.elapsed().as_micros(),

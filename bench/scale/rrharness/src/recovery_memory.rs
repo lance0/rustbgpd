@@ -5,8 +5,11 @@ use super::*;
 
 use std::net::Ipv6Addr;
 
-use rustbgpd_rib::route::{VpnRibRoute, VpnRibRouteKey};
-use rustbgpd_wire::{Ipv6Prefix, MplsLabelEntry, RouteDistinguisher, VpnNlri, VpnPrefix};
+use rustbgpd_rib::route::{EvpnRibRoute, VpnRibRoute, VpnRibRouteKey};
+use rustbgpd_wire::{
+    EthernetTagId, EvpnImet, EvpnRoute, EvpnRouteKey, Ipv6Prefix, MplsLabelEntry,
+    RouteDistinguisher, VpnNlri, VpnPrefix,
+};
 
 const RECOVERY_QUEUE_CAPACITY: usize = 8;
 const RECOVERY_CELL_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -41,6 +44,7 @@ pub(super) struct Spec {
     pub(super) name: &'static str,
     pub(super) seed: [usize; 4],
     additions: [usize; 4],
+    private_evpn: Option<usize>,
 }
 impl Spec {
     pub(super) fn named(name: &str) -> Self {
@@ -66,7 +70,12 @@ impl Spec {
             name,
             seed,
             additions,
+            private_evpn: None,
         }
+    }
+    pub(super) fn with_private_evpn(mut self, keys: usize) -> Self {
+        self.private_evpn = Some(keys);
+        self
     }
     fn counts(self, widened: bool) -> [usize; 4] {
         std::array::from_fn(|f| self.seed[f] + if widened { self.additions[f] } else { 0 })
@@ -86,18 +95,38 @@ impl Spec {
         std::array::from_fn(|f| self.seed[f] + additions[f])
     }
     fn families(self) -> Vec<(Afi, Safi)> {
-        FAMILIES
+        let mut families: Vec<_> = FAMILIES
             .into_iter()
             .enumerate()
             .filter_map(|(f, family)| (self.seed[f] + self.additions[f] > 0).then_some(family))
-            .collect()
+            .collect();
+        if self.private_evpn.is_some() {
+            families.push((Afi::L2Vpn, Safi::Evpn));
+        }
+        families
     }
 }
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Counts {
     pub(super) present: [usize; 4],
     pub(super) announces: [u64; 4],
     pub(super) withdraws: [u64; 4],
+    pub(super) evpn: EvpnCounts,
+}
+
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct EvpnCounts {
+    pub(super) present: usize,
+    pub(super) announces: u64,
+    pub(super) withdrawals: u64,
+}
+impl EvpnCounts {
+    pub(super) fn json(self) -> String {
+        format!(
+            "{{\"present\":{},\"announces\":{},\"withdrawals\":{}}}",
+            self.present, self.announces, self.withdrawals
+        )
+    }
 }
 impl Counts {
     pub(super) fn json(self) -> String {
@@ -244,19 +273,81 @@ fn fixture_vpn_route(family: usize, index: usize) -> VpnRibRoute {
     }
 }
 
+fn fixture_evpn_route(index: usize) -> EvpnRibRoute {
+    EvpnRibRoute {
+        route: EvpnRoute::Imet(EvpnImet {
+            rd: RDS[0],
+            ethernet_tag: EthernetTagId(u32::try_from(index + 1).unwrap()),
+            originator_ip: source_addr(0).into(),
+        }),
+        next_hop: source_addr(0).into(),
+        link_local_next_hop: None,
+        peer: source_addr(0).into(),
+        attributes: expected_attributes(true, 0),
+        received_at: Instant::now(),
+        origin_type: RouteOrigin::Ibgp,
+        peer_router_id: source_addr(0),
+        is_stale: false,
+        is_llgr_stale: false,
+    }
+}
+
+fn evpn_index(key: EvpnRouteKey) -> usize {
+    let EvpnRouteKey::Imet {
+        rd,
+        ethernet_tag,
+        originator_ip,
+    } = key
+    else {
+        panic!("unexpected EVPN route type");
+    };
+    assert_eq!(rd, RDS[0], "wrong raw EVPN RD");
+    assert_eq!(
+        originator_ip,
+        IpAddr::V4(source_addr(0)),
+        "wrong IMET originator"
+    );
+    usize::try_from(ethernet_tag.0.checked_sub(1).expect("unknown EVPN tag")).unwrap()
+}
+
 struct Inventory {
     words: [Vec<u64>; 4],
     limits: [usize; 4],
     expected_attrs: [Arc<AttrSet>; 4],
     counts: Counts,
+    evpn_limit: Option<usize>,
+    evpn_words: Vec<u64>,
 }
 impl Inventory {
-    fn new(limits: [usize; 4]) -> Self {
+    fn new(limits: [usize; 4], evpn_limit: Option<usize>) -> Self {
         Self {
             words: limits.map(|n| vec![0; n.div_ceil(64)]),
             limits,
             expected_attrs: std::array::from_fn(|f| expected_attributes(f >= 2, f % 2)),
             counts: Counts::default(),
+            evpn_limit,
+            evpn_words: vec![0; evpn_limit.unwrap_or(0).div_ceil(64)],
+        }
+    }
+    fn evpn_event(&mut self, key: EvpnRouteKey, announce: bool) {
+        let index = evpn_index(key);
+        assert!(
+            index < self.evpn_limit.expect("unexpected fixture family"),
+            "EVPN route outside the exact finite inventory"
+        );
+        let bit = 1_u64 << (index % 64);
+        let word = &mut self.evpn_words[index / 64];
+        if announce {
+            if *word & bit == 0 {
+                self.counts.evpn.present += 1;
+            }
+            *word |= bit;
+            self.counts.evpn.announces += 1;
+        } else {
+            assert_ne!(*word & bit, 0, "withdrawal of an unadmitted EVPN key");
+            *word &= !bit;
+            self.counts.evpn.present -= 1;
+            self.counts.evpn.withdrawals += 1;
         }
     }
     fn event(&mut self, family: usize, index: usize, announce: bool) {
@@ -287,8 +378,6 @@ impl Inventory {
         assert!(
             update.flowspec_announce.is_empty()
                 && update.flowspec_withdraw.is_empty()
-                && update.evpn_announce.is_empty()
-                && update.evpn_withdraw.is_empty()
                 && update.bgpls_announce.is_empty()
                 && update.bgpls_withdraw.is_empty()
                 && update.labeled_announce.is_empty()
@@ -297,6 +386,28 @@ impl Inventory {
                 && update.rtc_withdraw.is_empty(),
             "unexpected fixture family"
         );
+        for key in update.evpn_withdraw {
+            self.evpn_event(key, false);
+        }
+        for value in update.evpn_announce {
+            // IMET's entire NLRI payload is its key; evpn_event checks the raw
+            // RD, originator, tag and exact finite bitmap position.
+            assert_eq!(
+                value.next_hop,
+                IpAddr::V4(source_addr(0)),
+                "wrong EVPN next hop"
+            );
+            assert_eq!(value.peer, IpAddr::V4(source_addr(0)), "wrong EVPN source");
+            assert_eq!(
+                value.attributes, self.expected_attrs[2],
+                "wrong EVPN attributes"
+            );
+            assert!(value.link_local_next_hop.is_none());
+            assert_eq!(value.origin_type, RouteOrigin::Ibgp);
+            assert_eq!(value.peer_router_id, source_addr(0));
+            assert!(!value.is_stale && !value.is_llgr_stale);
+            self.evpn_event(value.key(), true);
+        }
         for (prefix, path_id) in update.withdraw {
             assert_eq!(path_id, 0, "the fixture did not negotiate Add-Path");
             let (family, index) = prefix_index(prefix);
@@ -373,7 +484,7 @@ impl Receiver {
         result.await.expect("receiver fold failed")
     }
 
-    async fn pause(&self) -> oneshot::Sender<()> {
+    async fn pause_without_fill(&self) -> oneshot::Sender<()> {
         let (ready, acknowledged) = oneshot::channel();
         let (release, resume) = oneshot::channel();
         self.control
@@ -381,6 +492,11 @@ impl Receiver {
             .await
             .unwrap();
         acknowledged.await.expect("receiver pause failed");
+        release
+    }
+
+    async fn pause(&self) -> oneshot::Sender<()> {
+        let release = self.pause_without_fill().await;
         // Empty queue fillers carry no fabricated route event.
         while self.outbound.capacity() > 0 {
             self.outbound
@@ -396,8 +512,9 @@ async fn consume(
     mut outbound: mpsc::Receiver<OutboundRouteUpdate>,
     mut control: mpsc::Receiver<Control>,
     limits: [usize; 4],
+    evpn_limit: Option<usize>,
 ) {
-    let mut inventory = Inventory::new(limits);
+    let mut inventory = Inventory::new(limits, evpn_limit);
     loop {
         tokio::select! {
             biased;
@@ -497,12 +614,14 @@ pub(super) struct RecoveryHarness {
     pub(super) source: IpAddr,
     source_receiver: Option<Receiver>,
     _query_tx: mpsc::Sender<RibUpdate>,
+    pub(super) readiness_tx: mpsc::Sender<rustbgpd_rib::RibReadinessQuery>,
 }
 
 impl RecoveryHarness {
     pub(super) async fn setup(clients: u32, spec: Spec, limits: [usize; 4]) -> Self {
         let (tx, rx) = mpsc::channel(1024);
         let (query_tx, query_rx) = mpsc::channel(1);
+        let (readiness_tx, readiness_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
         let manager_metrics = metrics.clone();
         std::thread::Builder::new()
@@ -520,6 +639,7 @@ impl RecoveryHarness {
                         Some(Ipv4Addr::new(10, 255, 255, 255)),
                         manager_metrics,
                     )
+                    .with_readiness_queries(readiness_rx)
                     .run(),
                 );
             })
@@ -532,6 +652,7 @@ impl RecoveryHarness {
             source,
             source_receiver: None,
             _query_tx: query_tx,
+            readiness_tx,
         };
         for i in 0..clients {
             harness.register(client_addr(i), true, spec, limits).await;
@@ -547,7 +668,10 @@ impl RecoveryHarness {
     async fn register(&mut self, peer: IpAddr, rr_client: bool, spec: Spec, limits: [usize; 4]) {
         let (outbound, receiver) = mpsc::channel(RECOVERY_QUEUE_CAPACITY);
         let (control, commands) = mpsc::channel(1);
-        tokio::spawn(consume(receiver, commands, limits));
+        let evpn_limit = spec
+            .private_evpn
+            .map(|limit| if rr_client { limit } else { 0 });
+        tokio::spawn(consume(receiver, commands, limits, evpn_limit));
         self.tx
             .send(RibUpdate::SetPeerExportEncoder {
                 peer,
@@ -587,13 +711,111 @@ impl RecoveryHarness {
         });
     }
 
-    async fn health(&self) -> (usize, usize, usize, usize, usize, usize) {
+    pub(super) async fn health(&self) -> (usize, usize, usize, usize, usize, usize) {
         let (reply, result) = oneshot::channel();
         self.tx
             .send(RibUpdate::TestQueryOutboundHealth { reply })
             .await
             .unwrap();
         result.await.unwrap()
+    }
+
+    pub(super) fn receiver_peer(&self, index: usize) -> IpAddr {
+        self.receivers[index].peer
+    }
+
+    pub(super) fn receiver_capacity(&self, index: usize) -> usize {
+        self.receivers[index].outbound.capacity()
+    }
+
+    pub(super) async fn pause_without_fill(&self, index: usize) -> oneshot::Sender<()> {
+        self.receivers[index].pause_without_fill().await
+    }
+
+    pub(super) async fn source_counts(&self) -> Counts {
+        self.source_receiver.as_ref().unwrap().snapshot().await
+    }
+
+    pub(super) async fn group_label(&self, index: usize) -> String {
+        self.peer_group_label(self.receiver_peer(index)).await
+    }
+
+    pub(super) async fn peer_group_label(&self, peer: IpAddr) -> String {
+        let (reply, answer) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+            .await
+            .unwrap();
+        answer.await.unwrap()
+    }
+
+    pub(super) async fn staged_evpn(&self) -> HashMap<IpAddr, u64> {
+        let (reply, answer) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::QueryBmpPeerStats { reply })
+            .await
+            .unwrap();
+        answer
+            .await
+            .unwrap()
+            .adj_rib_out_post
+            .into_iter()
+            .map(|(peer, families)| {
+                let count = families
+                    .iter()
+                    .find(|(family, _)| *family == (Afi::L2Vpn, Safi::Evpn))
+                    .map_or(0, |(_, count)| *count);
+                (peer, count)
+            })
+            .collect()
+    }
+
+    pub(super) async fn loc_counts(&self) -> [u64; 4] {
+        let (reply, answer) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::QueryBmpLocRibStats { reply })
+            .await
+            .unwrap();
+        let counts = answer.await.unwrap();
+        FAMILIES.map(|(afi, safi)| {
+            counts
+                .iter()
+                .find(|(actual_afi, actual_safi, _)| {
+                    *actual_afi == afi as u16 && *actual_safi == safi as u8
+                })
+                .map_or(0, |(_, _, count)| *count)
+        })
+    }
+
+    pub(super) async fn evpn_received_best(&self) -> [u64; 2] {
+        use rustbgpd_rib::update::RouteQueryScope;
+        let mut totals = [0; 2];
+        for (index, scope) in [
+            RouteQueryScope::Received {
+                peer: Some(self.source),
+            },
+            RouteQueryScope::Best,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (reply, answer) = oneshot::channel();
+            self.tx
+                .send(RibUpdate::QueryEvpnRoutesPage {
+                    scope,
+                    filter: None,
+                    after: None,
+                    expected_version: None,
+                    page_size: 1,
+                    reply,
+                })
+                .await
+                .unwrap();
+            // The existing bounded page computes total without cloning the
+            // full table. This source/selection check is outside capture.
+            totals[index] = answer.await.unwrap().unwrap().total;
+        }
+        totals
     }
 
     pub(super) async fn staged(&self) -> HashMap<IpAddr, [u64; 4]> {
@@ -619,7 +841,7 @@ impl RecoveryHarness {
             .collect()
     }
 
-    async fn counts(&self) -> Vec<Counts> {
+    pub(super) async fn counts(&self) -> Vec<Counts> {
         let mut counts = Vec::with_capacity(self.receivers.len());
         for receiver in &self.receivers {
             counts.push(receiver.snapshot().await);
@@ -977,6 +1199,81 @@ pub(super) async fn populate(harness: &RecoveryHarness, seed: [usize; 4]) {
         }
     }
 }
+
+pub(super) async fn populate_evpn(harness: &RecoveryHarness, keys: usize) {
+    for start in (0..keys).step_by(BATCH) {
+        let mut update = empty_routes_received(harness.source, Vec::new());
+        if let RibUpdate::RoutesReceived {
+            session_id,
+            evpn_announced,
+            ..
+        } = &mut update
+        {
+            *session_id = 1;
+            *evpn_announced = (start..(start + BATCH).min(keys))
+                .map(fixture_evpn_route)
+                .collect();
+        }
+        harness.tx.send(update).await.unwrap();
+    }
+}
+
+/// One actual input with one known key; callers wait for its folded witness
+/// and target queue credit before admitting the next input.
+pub(super) fn key_update(source: IpAddr, family: usize, announce: bool) -> RibUpdate {
+    if family >= 2 {
+        let value = fixture_vpn_route(family % 2, 0);
+        RibUpdate::VpnRoutesReceived {
+            peer: source,
+            session_id: 1,
+            announced: if announce {
+                vec![value.clone()]
+            } else {
+                Vec::new()
+            },
+            withdrawn: if announce {
+                Vec::new()
+            } else {
+                vec![value.key()]
+            },
+        }
+    } else {
+        let mut update = empty_routes_received(
+            source,
+            if announce {
+                vec![fixture_route(family, 0)]
+            } else {
+                Vec::new()
+            },
+        );
+        if let RibUpdate::RoutesReceived {
+            session_id,
+            withdrawn,
+            ..
+        } = &mut update
+        {
+            *session_id = 1;
+            if !announce {
+                *withdrawn = vec![(fixture_prefix(family, 0), 0)];
+            }
+        }
+        update
+    }
+}
+
+pub(super) fn evpn_withdrawal(source: IpAddr) -> RibUpdate {
+    let mut update = empty_routes_received(source, Vec::new());
+    if let RibUpdate::RoutesReceived {
+        session_id,
+        evpn_withdrawn,
+        ..
+    } = &mut update
+    {
+        *session_id = 1;
+        *evpn_withdrawn = vec![fixture_evpn_route(0).key()];
+    }
+    update
+}
 async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Path>) {
     assert!(clients > 0 && spec.seed.iter().sum::<usize>() > 0);
     if cell == Cell::Widen {
@@ -1175,6 +1472,83 @@ pub(super) fn main(args: &[String]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn private_evpn_bitmap_tracks_exact_imet_keys_and_empty_control() {
+        let mut inventory = Inventory::new([0; 4], Some(2));
+        let first = fixture_evpn_route(0);
+        let second = fixture_evpn_route(1);
+        inventory.apply(OutboundRouteUpdate {
+            evpn_announce: vec![first.clone(), second.clone()],
+            ..Default::default()
+        });
+        assert_eq!(
+            inventory.counts.evpn,
+            EvpnCounts {
+                present: 2,
+                announces: 2,
+                withdrawals: 0
+            }
+        );
+        inventory.apply(OutboundRouteUpdate {
+            evpn_withdraw: vec![first.key(), second.key()],
+            ..Default::default()
+        });
+        assert_eq!(
+            inventory.counts.evpn,
+            EvpnCounts {
+                present: 0,
+                announces: 2,
+                withdrawals: 2
+            }
+        );
+        assert_eq!(inventory.counts.present, [0; 4]);
+        assert_eq!(inventory.evpn_words, [0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong raw EVPN RD")]
+    fn private_evpn_bitmap_rejects_ambiguous_display_rd() {
+        let mut value = fixture_evpn_route(0);
+        let EvpnRoute::Imet(imet) = &mut value.route else {
+            unreachable!()
+        };
+        assert_eq!(RDS[0].to_string(), RDS[1].to_string());
+        imet.rd = RDS[1];
+        Inventory::new([0; 4], Some(1)).apply(OutboundRouteUpdate {
+            evpn_announce: vec![value],
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong EVPN attributes")]
+    fn private_evpn_bitmap_rejects_wrong_attributes() {
+        let mut value = fixture_evpn_route(0);
+        value.attributes = expected_attributes(false, 0);
+        Inventory::new([0; 4], Some(1)).apply(OutboundRouteUpdate {
+            evpn_announce: vec![value],
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "unadmitted EVPN key")]
+    fn private_evpn_bitmap_rejects_unknown_withdrawal() {
+        Inventory::new([0; 4], Some(1)).apply(OutboundRouteUpdate {
+            evpn_withdraw: vec![fixture_evpn_route(0).key()],
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected fixture family")]
+    fn ordinary_recovery_bitmap_still_rejects_evpn() {
+        Inventory::new([0; 4], None).apply(OutboundRouteUpdate {
+            evpn_announce: vec![fixture_evpn_route(0)],
+            ..Default::default()
+        });
+    }
+
     #[tokio::test]
     async fn snapshot_rechecks_release_after_a_pending_resume_poll() {
         let (outbound, mut updates) = mpsc::channel(1);
@@ -1185,7 +1559,7 @@ mod tests {
             })
             .unwrap();
         let (release, mut resume) = oneshot::channel();
-        let mut inventory = Inventory::new([1, 0, 0, 0]);
+        let mut inventory = Inventory::new([1, 0, 0, 0], None);
         let (reply, snapshot) = oneshot::channel();
         assert!(!paused_snapshot(
             &mut inventory,
@@ -1219,7 +1593,7 @@ mod tests {
         for _ in 0..32 {
             let (outbound, updates) = mpsc::channel(RECOVERY_QUEUE_CAPACITY);
             let (control, commands) = mpsc::channel(4);
-            let consumer = tokio::spawn(consume(updates, commands, [1, 0, 0, 0]));
+            let consumer = tokio::spawn(consume(updates, commands, [1, 0, 0, 0], None));
             let receiver = Receiver {
                 peer: IpAddr::V4(source_addr(1)),
                 outbound,
@@ -1259,7 +1633,7 @@ mod tests {
 
     #[test]
     fn bitmap_tracks_full_family_and_raw_rd_identity() {
-        let mut inventory = Inventory::new([100; 4]);
+        let mut inventory = Inventory::new([100; 4], None);
         for f in 0..2 {
             inventory.apply(OutboundRouteUpdate {
                 announce: vec![fixture_route(f, 99)].into(),
@@ -1289,7 +1663,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "unadmitted exact key")]
     fn bitmap_rejects_unknown_withdrawal() {
-        Inventory::new([100; 4]).apply(OutboundRouteUpdate {
+        Inventory::new([100; 4], None).apply(OutboundRouteUpdate {
             withdraw: vec![(fixture_prefix(0, 1), 0)],
             ..Default::default()
         });
@@ -1297,7 +1671,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "unadmitted exact key")]
     fn bitmap_rejects_repeated_vpn_withdrawal() {
-        let mut inventory = Inventory::new([100; 4]);
+        let mut inventory = Inventory::new([100; 4], None);
         let value = fixture_vpn_route(1, 1);
         inventory.apply(OutboundRouteUpdate {
             vpn_announce: vec![value.clone()],
@@ -1315,7 +1689,7 @@ mod tests {
     fn bitmap_rejects_wrong_vpn_label() {
         let mut value = fixture_vpn_route(0, 0);
         value.nlri.labels[0].label += 1;
-        Inventory::new([100; 4]).apply(OutboundRouteUpdate {
+        Inventory::new([100; 4], None).apply(OutboundRouteUpdate {
             vpn_announce: vec![value],
             ..Default::default()
         });
@@ -1325,7 +1699,7 @@ mod tests {
     fn bitmap_rejects_wrong_attributes() {
         let mut value = fixture_vpn_route(0, 0);
         value.attributes = expected_attributes(false, 0);
-        Inventory::new([100; 4]).apply(OutboundRouteUpdate {
+        Inventory::new([100; 4], None).apply(OutboundRouteUpdate {
             vpn_announce: vec![value],
             ..Default::default()
         });
@@ -1333,7 +1707,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "outside the exact finite inventory")]
     fn bitmap_rejects_unnegotiated_family() {
-        Inventory::new([100, 0, 0, 0]).apply(OutboundRouteUpdate {
+        Inventory::new([100, 0, 0, 0], None).apply(OutboundRouteUpdate {
             announce: vec![fixture_route(1, 0)].into(),
             ..Default::default()
         });

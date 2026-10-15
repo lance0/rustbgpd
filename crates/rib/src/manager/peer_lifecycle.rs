@@ -751,6 +751,19 @@ impl RibManager {
             if !rib.is_empty_all_families() {
                 self.advance_advertised_pages();
             }
+            #[cfg(feature = "bench-internals")]
+            let retirement = super::bench_support::retirement_begin(|| {
+                (
+                    rib.len()
+                        + rib.vpn_len()
+                        + rib.evpn_len()
+                        + rib.flowspec_len()
+                        + rib.bgpls_len()
+                        + rib.labeled_len()
+                        + rib.rtc_len(),
+                    0,
+                )
+            });
             super::with_executor_handoff(|| {
                 self.with_replacement_readiness(|manager| {
                     #[cfg(test)]
@@ -763,6 +776,8 @@ impl RibManager {
                         manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
                     });
                     drop(rib);
+                    #[cfg(feature = "bench-internals")]
+                    super::bench_support::retirement_end(2, retirement);
                     #[cfg(test)]
                     if let Some(observer) = &observer {
                         observer("peer_adj_out_retirement_after");
@@ -873,6 +888,10 @@ impl RibManager {
         // restarts from zero if that exact identity is later installed again.
         self.export_policy_stats.remove(&peer);
         if let Some(mut baseline) = self.pending_regroup_baseline.remove(&peer) {
+            #[cfg(feature = "bench-internals")]
+            let retirement = super::bench_support::retirement_begin(|| {
+                (baseline.unicast.len() + baseline.vpn.len(), 0)
+            });
             super::with_executor_handoff(|| {
                 self.with_replacement_readiness(|manager| {
                     #[cfg(test)]
@@ -885,6 +904,8 @@ impl RibManager {
                         manager.replacement_checkpoint_at("peer_regroup_retirement", false);
                     });
                     drop(baseline);
+                    #[cfg(feature = "bench-internals")]
+                    super::bench_support::retirement_end(3, retirement);
                     #[cfg(test)]
                     if let Some(observer) = &observer {
                         observer("peer_regroup_retirement_after");
