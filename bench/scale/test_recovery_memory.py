@@ -1896,6 +1896,49 @@ class RetirementReceiptTests(unittest.TestCase):
         self.assertEqual(len(result["summaries"]), 4)
         self.assertNotIn("qualification_passed", result)
 
+    def test_retirement_accepts_ansi_cargo_compile_logs_without_rewriting_them(self):
+        root = self.campaign()
+        logs = {}
+        for role in ("candidate", "old-drop"):
+            path = root / f"{role}-build.log"
+            logs[path] = (
+                "\x1b[1m\x1b[92m   Compiling\x1b[0m rustbgpd-rib v0.77.0 "
+                f"(/fixture/{role}/crates/rib)\n"
+            ).encode()
+            path.write_bytes(logs[path])
+        receipt.summarize_retirement(root)
+        self.assertEqual(json.loads((root / "comparison.json").read_text())["status"], "COMPLETE")
+        for path, original in logs.items():
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_retirement_compile_log_still_requires_rib_compilation_and_zero_exit(self):
+        root = self.campaign()
+        for role in ("candidate", "old-drop"):
+            path = root / f"{role}-build.log"
+            original = path.read_bytes()
+            for line in (
+                "\x1b[1m\x1b[92m       Fresh\x1b[0m rustbgpd-rib v0.77.0\n",
+                "\x1b[1m\x1b[92m   Compiling\x1b[0m rustbgpd-wire v0.25.0\n",
+                "\x1b[1m\x1b[92m   Compiling\x1b[0m rustbgpd-rib-helper v0.1.0\n",
+                "warning: Compiling rustbgpd-rib v0.77.0\n",
+            ):
+                with self.subTest(role=role, line=line):
+                    path.write_text(line)
+                    with self.assertRaisesRegex(receipt.InvalidReceipt, "RIB build missing or failed"):
+                        receipt.summarize_retirement(root)
+            path.write_text("\x1b[1m\x1b[92m   Compiling\x1b[0m rustbgpd-rib v0.77.0\n")
+            exit_path = root / f"{role}-build.exit"
+            exit_path.write_text("1\n")
+            with self.subTest(role=role, exit=1), self.assertRaisesRegex(
+                receipt.InvalidReceipt, "RIB build missing or failed"
+            ):
+                receipt.summarize_retirement(root)
+            exit_path.write_text("0\n")
+            path.write_bytes(original)
+        (root / "driver.exit").write_text("1\n")
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "driver/cleanup failed"):
+            receipt.summarize_retirement(root)
+
     def test_retirement_rejects_resealed_duplicate_leg_scope_or_workload(self):
         root = self.campaign()
         source = root / "retirement-full-1-candidate"

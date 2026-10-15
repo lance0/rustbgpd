@@ -1509,7 +1509,10 @@ def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> N
         require(maps[role][RETIREMENT_SOURCE] == hashlib.sha256(source.encode()).hexdigest(),
                 "retirement built stage source differs")
         require((root / f"{role}-build.exit").read_text().strip() == "0"
-                and "Compiling rustbgpd-rib " in (root / f"{role}-build.log").read_text(),
+                and re.search(
+                    r"(?m)^[ \t]*Compiling[ \t]+rustbgpd-rib[ \t]+",
+                    re.sub(r"\x1b\[[0-9;]*m", "", (root / f"{role}-build.log").read_text()),
+                ) is not None,
                 "retirement RIB build missing or failed")
     for name in expected_inputs:
         require(maps["candidate"].get(name) == hashlib.sha256((root / "frozen-instrumentation" / name).read_bytes()).hexdigest(),
