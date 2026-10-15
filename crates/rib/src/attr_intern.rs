@@ -67,7 +67,16 @@ impl AttrInternTable {
     /// (`strong_count == 1`): no route in any RIB, Loc-RIB clone, or
     /// in-flight export still uses them.
     pub fn gc(&mut self) {
-        self.set.retain(|a| Arc::strong_count(a) > 1);
+        self.gc_with_checkpoint(&mut || {});
+    }
+
+    pub(crate) fn gc_with_checkpoint(&mut self, checkpoint: &mut impl FnMut()) {
+        checkpoint();
+        self.set.retain(|a| {
+            checkpoint();
+            Arc::strong_count(a) > 1
+        });
+        checkpoint();
     }
 
     /// Number of unique interned attribute sets.

@@ -9725,6 +9725,470 @@ async fn vpn_probe_result_retirement_services_readiness() {
     Box::pin(vpn_export_retirement_readiness("exact_probe_retirement")).await;
 }
 
+#[derive(Clone, Copy)]
+enum PeerRetirement {
+    Unicast,
+    Vpn,
+    PrivateEvpn,
+    Regroup,
+    Attributes,
+}
+
+impl PeerRetirement {
+    fn stage(self) -> &'static str {
+        match self {
+            Self::Unicast | Self::Vpn => "peer_adj_in_retirement",
+            Self::PrivateEvpn => "peer_adj_out_retirement",
+            Self::Regroup => "peer_regroup_retirement",
+            Self::Attributes => "peer_attribute_gc",
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_down_unicast_retirement_services_readiness() {
+    Box::pin(peer_retirement_readiness(PeerRetirement::Unicast, None)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_down_vpn_retirement_services_readiness() {
+    Box::pin(peer_retirement_readiness(PeerRetirement::Vpn, None)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_down_private_evpn_retirement_services_readiness() {
+    Box::pin(peer_retirement_readiness(PeerRetirement::PrivateEvpn, None)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_down_regroup_retirement_services_readiness() {
+    Box::pin(peer_retirement_readiness(PeerRetirement::Regroup, None)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_down_attribute_gc_services_readiness_and_preserves_live_attrs() {
+    Box::pin(peer_retirement_readiness(PeerRetirement::Attributes, None)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_down_retirement_preserves_nested_owner_identity_and_age() {
+    for age in [Duration::from_secs(5), Duration::from_secs(31)] {
+        Box::pin(peer_retirement_readiness(
+            PeerRetirement::PrivateEvpn,
+            Some(age),
+        ))
+        .await;
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actual peer-down control keeps admission, detached retirement progress, readiness fences and terminal ownership assertions in one ordered scenario"
+)]
+async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Duration>) {
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        BgpMetrics::new(),
+    );
+    manager.flush_poll_budget = Duration::ZERO;
+    let peer: IpAddr = Ipv4Addr::new(10, 223, 4, 1).into();
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let source_peer = IpAddr::V4(source);
+    let empty_credit = manager.pending_group_admitted.bytes();
+    if matches!(kind, PeerRetirement::Regroup) {
+        manager.handle_update(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 0,
+            slow: true,
+        });
+    }
+    let (outbound_tx, mut output) = mpsc::channel(8);
+    let mut registration = super::update_groups_recovery::peer_up(peer, outbound_tx, None);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        route_reflector_client,
+        ..
+    } = &mut registration
+    {
+        sendable_families.extend([(Afi::Ipv4, Safi::MplsVpn), (Afi::L2Vpn, Safi::Evpn)]);
+        *route_reflector_client = true;
+    }
+    manager.handle_update(registration);
+    manager.peer_export_encoders.insert(
+        peer,
+        super::exportability::MockExactExportEncoder::accepting(1),
+    );
+    while output.try_recv().is_ok() {}
+    let unicast = |n: u8, med| {
+        let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source);
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::Med(med));
+        });
+        route
+    };
+    let vpn = matches!(kind, PeerRetirement::Vpn);
+    let evpn = matches!(kind, PeerRetirement::PrivateEvpn);
+    let expected_keys: HashSet<_> = (0..128)
+        .map(|n| {
+            if evpn {
+                crate::update::ExactExportKey::Evpn(make_evpn_imet(source, u32::from(n)).key())
+            } else if vpn {
+                crate::update::ExactExportKey::Vpn(
+                    make_vpn_rib_route(source, n, 100, u32::from(n)).key(),
+                )
+            } else {
+                crate::update::ExactExportKey::Unicast(unicast(n, u32::from(n)).prefix, 0)
+            }
+        })
+        .collect();
+    let received = |peer, announced| RibUpdate::RoutesReceived {
+        peer,
+        session_id: 0,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    let mut update = received(source_peer, Vec::new());
+    if let RibUpdate::RoutesReceived {
+        announced,
+        evpn_announced,
+        ..
+    } = &mut update
+    {
+        if evpn {
+            *evpn_announced = (0..128)
+                .map(|n| {
+                    let mut route = make_evpn_imet(source, n);
+                    route.attributes = AttrSet::new(vec![PathAttribute::Med(n)]);
+                    route
+                })
+                .collect();
+        } else if !vpn {
+            *announced = (0..128).map(|n| unicast(n, u32::from(n))).collect();
+        }
+    }
+    if vpn {
+        update = RibUpdate::VpnRoutesReceived {
+            peer: source_peer,
+            session_id: 0,
+            announced: (0..128)
+                .map(|n| make_vpn_rib_route(source, n, 100, u32::from(n)))
+                .collect(),
+            withdrawn: vec![],
+        };
+    }
+    manager.handle_update(update);
+    while manager.process_next_route_chunk() {}
+    let initial = output.try_recv().unwrap();
+    assert_eq!(
+        (
+            initial.announce.len(),
+            initial.vpn_announce.len(),
+            initial.evpn_announce.len()
+        ),
+        if evpn {
+            (0, 0, 128)
+        } else if vpn {
+            (0, 128, 0)
+        } else {
+            (128, 0, 0)
+        }
+    );
+    assert!(initial.withdraw.is_empty() && initial.vpn_withdraw.is_empty());
+    let admitted_keys: HashSet<_> = initial
+        .announce
+        .iter()
+        .map(|route| crate::update::ExactExportKey::Unicast(route.prefix, route.path_id))
+        .chain(
+            initial
+                .vpn_announce
+                .iter()
+                .map(|route| crate::update::ExactExportKey::Vpn(route.key())),
+        )
+        .chain(
+            initial
+                .evpn_announce
+                .iter()
+                .map(|route| crate::update::ExactExportKey::Evpn(route.key())),
+        )
+        .collect();
+    assert_eq!(admitted_keys, expected_keys);
+    drop(initial);
+    if evpn {
+        assert!(manager.grouped_member_of(peer).is_some());
+        assert!(manager.evpn_grouped_member_of(peer).is_none());
+        assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 128);
+    }
+    if matches!(kind, PeerRetirement::Regroup) {
+        assert!(manager.grouped_member_of(peer).is_none());
+        assert_eq!(manager.adj_ribs_out[&peer].len(), 128);
+        for n in 0..8 {
+            manager.handle_update(received(
+                source_peer,
+                vec![unicast(n, 1_000 + u32::from(n))],
+            ));
+            while manager.process_next_route_chunk() {}
+        }
+        assert!(manager.outbound_channel_full(peer));
+        manager.handle_update(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 0,
+            slow: false,
+        });
+        assert!(manager.grouped_member_of(peer).is_some());
+        assert_eq!(manager.pending_regroup_baseline[&peer].unicast.len(), 128);
+        assert!(manager.dirty_peers.contains(&peer));
+        while output.try_recv().is_ok() {}
+    }
+    let live_attrs = if matches!(kind, PeerRetirement::Attributes) {
+        let survivor = Ipv4Addr::new(192, 0, 2, 2);
+        let route = make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32),
+            survivor,
+        );
+        manager.handle_update(received(survivor.into(), vec![route]));
+        while manager.process_next_route_chunk() {}
+        assert_eq!(output.try_recv().unwrap().announce.len(), 1);
+        Some(Arc::downgrade(
+            &manager.ribs[&IpAddr::V4(survivor)]
+                .iter()
+                .next()
+                .unwrap()
+                .attributes,
+        ))
+    } else {
+        None
+    };
+    let attrs: Vec<_> = match kind {
+        PeerRetirement::PrivateEvpn => manager.adj_ribs_out[&peer]
+            .iter_evpn()
+            .map(|route| Arc::downgrade(&route.attributes))
+            .collect(),
+        PeerRetirement::Regroup => manager.pending_regroup_baseline[&peer]
+            .unicast
+            .values()
+            .map(|route| Arc::downgrade(&route.attributes))
+            .collect(),
+        PeerRetirement::Vpn => manager.ribs[&source_peer]
+            .iter_vpn()
+            .map(|route| Arc::downgrade(&route.attributes))
+            .collect(),
+        PeerRetirement::Unicast | PeerRetirement::Attributes => manager.ribs[&source_peer]
+            .iter()
+            .map(|route| Arc::downgrade(&route.attributes))
+            .collect(),
+    };
+    assert_eq!(attrs.len(), 128);
+    let retired_attrs = attrs.clone();
+    let departing = if matches!(kind, PeerRetirement::PrivateEvpn | PeerRetirement::Regroup) {
+        peer
+    } else {
+        source_peer
+    };
+    let expected_count = if matches!(kind, PeerRetirement::Regroup) {
+        128
+    } else {
+        usize::from(live_attrs.is_some())
+    };
+    let stage = kind.stage();
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let counts = Mutex::new(Vec::<usize>::new());
+    let progressed = Arc::new(AtomicBool::new(false));
+    let after_held = AtomicBool::new(false);
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let progressed = Arc::clone(&progressed);
+        move |site| {
+            let before = site.strip_suffix("_before") == Some(stage);
+            let exit = site.strip_suffix("_after") == Some(stage);
+            if before {
+                *counts.lock().unwrap() = attrs.iter().map(std::sync::Weak::strong_count).collect();
+            }
+            let removed = if site == stage {
+                let counts = counts.lock().unwrap();
+                counts
+                    .iter()
+                    .zip(&attrs)
+                    .map(|(count, attr)| count.saturating_sub(attr.strong_count()))
+                    .sum()
+            } else {
+                0_usize
+            };
+            let progress = removed == 1 && !progressed.swap(true, Ordering::Relaxed);
+            let after = (removed == 2 || exit) && !after_held.swap(true, Ordering::Relaxed);
+            if before || progress || after {
+                entered_tx
+                    .send(if progress {
+                        "progress"
+                    } else if after && removed == 2 {
+                        "after_two"
+                    } else if after {
+                        "after"
+                    } else {
+                        site
+                    })
+                    .unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+    }));
+    let actor = tokio::spawn(async move {
+        let operation = |manager: &mut RibManager| {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer: departing,
+                session_id: 0,
+            });
+        };
+        if let Some(age) = outer_age {
+            super::super::with_executor_handoff(|| {
+                manager.with_replacement_readiness_age(age, |manager| {
+                    let owner = manager.replacement_readiness.as_ref().unwrap().clone();
+                    let started = owner.state.lock().unwrap().started;
+                    operation(manager);
+                    assert!(Arc::ptr_eq(
+                        manager.replacement_readiness.as_ref().unwrap(),
+                        &owner
+                    ));
+                    assert_eq!(owner.state.lock().unwrap().started, started);
+                });
+            });
+        } else {
+            operation(&mut manager);
+        }
+        manager
+    });
+    assert_eq!(entered_rx.recv().await.unwrap(), format!("{stage}_before"));
+    let mut readiness = queue_replacement_readiness(&readiness_tx);
+    let (reply, mut ordinary) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(RibUpdate::PeerDown {
+        peer: departing,
+        session_id: 0,
+    })
+    .unwrap();
+    release_tx.send(()).unwrap();
+    let interior = entered_rx.recv().await.unwrap();
+    let interior_reply = readiness.try_recv();
+    let mut ordinary_held = matches!(
+        ordinary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    let mut mutation_held = tx.capacity() == 7;
+    let mut second = (interior == "progress").then(|| queue_replacement_readiness(&readiness_tx));
+    release_tx.send(()).unwrap();
+    let (second_reply, second_site) = if let Some(second) = second.as_mut() {
+        let site = entered_rx.recv().await.unwrap();
+        let reply = second.try_recv();
+        ordinary_held &= matches!(
+            ordinary.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        mutation_held &= tx.capacity() == 7;
+        release_tx.send(()).unwrap();
+        (Some(reply), Some(site))
+    } else {
+        (None, None)
+    };
+    let mut manager = actor.await.unwrap();
+    if departing == source_peer {
+        let withdrawn = output.try_recv().unwrap();
+        assert_eq!(
+            (withdrawn.withdraw.len(), withdrawn.vpn_withdraw.len()),
+            if vpn { (0, 128) } else { (128, 0) }
+        );
+        assert!(withdrawn.announce.is_empty() && withdrawn.vpn_announce.is_empty());
+        let withdrawn_keys: HashSet<_> = withdrawn
+            .withdraw
+            .iter()
+            .map(|&(prefix, path_id)| crate::update::ExactExportKey::Unicast(prefix, path_id))
+            .chain(
+                withdrawn
+                    .vpn_withdraw
+                    .into_iter()
+                    .map(crate::update::ExactExportKey::Vpn),
+            )
+            .collect();
+        assert_eq!(withdrawn_keys, expected_keys);
+        assert!(withdrawn.end_of_rib.is_empty() && withdrawn.refresh_markers.is_empty());
+        assert!(!manager.ribs.contains_key(&departing));
+        assert!(
+            retired_attrs.iter().all(|attrs| attrs.strong_count() == 0),
+            "the detached source and following GC must release every obsolete attribute"
+        );
+    } else {
+        assert!(output.try_recv().is_err());
+        assert_eq!(
+            manager.ribs[&source_peer].len() + manager.ribs[&source_peer].evpn_len(),
+            128
+        );
+        assert!(!manager.adj_ribs_out.contains_key(&peer));
+        assert!(!manager.pending_regroup_baseline.contains_key(&peer));
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert!(!manager.pending_group_admitted.contains_record(peer));
+    }
+    assert_eq!(manager.loc_rib.len(), expected_count);
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    if let Some(live) = live_attrs {
+        assert!(
+            live.strong_count() > 1,
+            "live peer attributes survive the same GC predicate"
+        );
+    }
+    assert!(manager.replacement_readiness.is_none());
+    assert!(ordinary_held && mutation_held);
+    let ordinary_query = manager.query_rx.try_recv().unwrap();
+    manager.handle_update(ordinary_query);
+    assert_eq!(ordinary.await.unwrap(), expected_count);
+    assert!(
+        matches!(manager.rx.try_recv().unwrap(), RibUpdate::PeerDown { peer, .. } if peer == departing)
+    );
+    let expected = if outer_age.is_some_and(|age| age >= Duration::from_secs(30)) {
+        Err(crate::update::RibReadinessError::PolicyTransitionStalled)
+    } else {
+        Ok(expected_count)
+    };
+    assert_eq!(
+        interior_reply,
+        Ok(expected),
+        "dedicated readiness must finish inside {stage}"
+    );
+    assert_eq!(
+        second_reply,
+        Some(Ok(expected)),
+        "a probe queued after the first release must complete before the second release's checkpoint"
+    );
+    assert_eq!(
+        second_site,
+        Some("after_two"),
+        "the second probe must complete while 126 values remain, before the explicit exit fallback"
+    );
+    assert_eq!(
+        interior, "progress",
+        "retirement must yield after one value is released, before the remaining 127"
+    );
+    assert!(progressed.load(Ordering::Relaxed));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vpn_prior_key_retirement_services_readiness() {
     Box::pin(vpn_export_retirement_readiness("group_prior_retirement")).await;
