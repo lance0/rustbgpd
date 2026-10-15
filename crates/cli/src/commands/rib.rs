@@ -203,7 +203,7 @@ pub(crate) enum RouteListRpc {
 
 /// Requested page size for transparent pagination — matches the
 /// server's per-page cap so the loop takes the fewest round trips.
-const ROUTE_PAGE_SIZE: u32 = 1000;
+pub(crate) const ROUTE_PAGE_SIZE: u32 = 1000;
 
 struct RouteListing {
     routes: Vec<Route>,

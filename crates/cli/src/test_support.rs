@@ -36,6 +36,27 @@ pub(crate) enum MockSubscribeFromEventPlan {
     },
 }
 
+fn sample_topology_node() -> server_proto::TopologyNodeEntry {
+    server_proto::TopologyNodeEntry {
+        key: "02aabb".to_string(),
+        asn: 64512,
+        bgp_ls_id: 0,
+        router_id: "000000000001".to_string(),
+        link_count: 2,
+    }
+}
+
+fn sample_topology_link() -> server_proto::TopologyLinkEntry {
+    server_proto::TopologyLinkEntry {
+        local_key: "02aabb".to_string(),
+        local_router_id: "000000000001".to_string(),
+        remote_key: "02ccdd".to_string(),
+        remote_router_id: "000000000002".to_string(),
+        cost: 10,
+        addresses: vec!["10.0.8.1".to_string()],
+    }
+}
+
 fn sample_bgpls_route(peer_filter: &str) -> server_proto::BgpLsRouteEntry {
     server_proto::BgpLsRouteEntry {
         afi_safi: server_proto::AddressFamily::BgpLs as i32,
@@ -257,6 +278,12 @@ pub(crate) struct MockState {
     pub(crate) last_list_rejected: Mutex<Option<server_proto::ListRejectedRoutesRequest>>,
     pub(crate) last_list_topology_nodes: Mutex<Option<server_proto::ListTopologyNodesRequest>>,
     pub(crate) last_list_topology_links: Mutex<Option<server_proto::ListTopologyLinksRequest>>,
+    // Paged topology requests in order; canned pages are served by request
+    // index, and an empty list serves the sample row as one page.
+    pub(crate) orr_node_page_requests: Mutex<Vec<server_proto::ListOrrTopologyNodesRequest>>,
+    pub(crate) orr_node_pages: Mutex<Vec<server_proto::ListOrrTopologyNodesResponse>>,
+    pub(crate) orr_link_page_requests: Mutex<Vec<server_proto::ListOrrTopologyLinksRequest>>,
+    pub(crate) orr_link_pages: Mutex<Vec<server_proto::ListOrrTopologyLinksResponse>>,
     pub(crate) last_list_orr_status: Mutex<Option<server_proto::ListOrrStatusRequest>>,
     // Policy / neighbor-set / chain captures used by the policy.rs +
     // neighbor_set.rs CLI tests.
@@ -2440,14 +2467,29 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ListTopologyNodesResponse>, Status> {
         *self.state.last_list_topology_nodes.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::ListTopologyNodesResponse {
-            nodes: vec![server_proto::TopologyNodeEntry {
-                key: "02aabb".to_string(),
-                asn: 64512,
-                bgp_ls_id: 0,
-                router_id: "000000000001".to_string(),
-                link_count: 2,
-            }],
+            nodes: vec![sample_topology_node()],
         }))
+    }
+
+    async fn list_orr_topology_nodes(
+        &self,
+        request: Request<server_proto::ListOrrTopologyNodesRequest>,
+    ) -> Result<Response<server_proto::ListOrrTopologyNodesResponse>, Status> {
+        let mut requests = self.state.orr_node_page_requests.lock().await;
+        requests.push(request.into_inner());
+        let pages = self.state.orr_node_pages.lock().await;
+        if pages.is_empty() {
+            return Ok(Response::new(server_proto::ListOrrTopologyNodesResponse {
+                nodes: vec![sample_topology_node()],
+                total_count: 1,
+                ..Default::default()
+            }));
+        }
+        pages
+            .get(requests.len() - 1)
+            .cloned()
+            .map(Response::new)
+            .ok_or_else(|| Status::invalid_argument("unexpected topology node page request"))
     }
 
     async fn list_topology_links(
@@ -2456,15 +2498,29 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ListTopologyLinksResponse>, Status> {
         *self.state.last_list_topology_links.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::ListTopologyLinksResponse {
-            links: vec![server_proto::TopologyLinkEntry {
-                local_key: "02aabb".to_string(),
-                local_router_id: "000000000001".to_string(),
-                remote_key: "02ccdd".to_string(),
-                remote_router_id: "000000000002".to_string(),
-                cost: 10,
-                addresses: vec!["10.0.8.1".to_string()],
-            }],
+            links: vec![sample_topology_link()],
         }))
+    }
+
+    async fn list_orr_topology_links(
+        &self,
+        request: Request<server_proto::ListOrrTopologyLinksRequest>,
+    ) -> Result<Response<server_proto::ListOrrTopologyLinksResponse>, Status> {
+        let mut requests = self.state.orr_link_page_requests.lock().await;
+        requests.push(request.into_inner());
+        let pages = self.state.orr_link_pages.lock().await;
+        if pages.is_empty() {
+            return Ok(Response::new(server_proto::ListOrrTopologyLinksResponse {
+                links: vec![sample_topology_link()],
+                total_count: 1,
+                ..Default::default()
+            }));
+        }
+        pages
+            .get(requests.len() - 1)
+            .cloned()
+            .map(Response::new)
+            .ok_or_else(|| Status::invalid_argument("unexpected topology link page request"))
     }
 
     async fn list_orr_status(

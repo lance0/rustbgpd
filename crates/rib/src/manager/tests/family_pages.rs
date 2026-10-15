@@ -814,3 +814,146 @@ fn bgpls_family_pages_invalidate_on_receive_withdraw_and_export() {
         RoutePageError::Invalidated
     );
 }
+
+type OrrPage<T> = Result<RibRowsPage<T>, RoutePageError>;
+
+fn orr_node_page(
+    manager: &mut RibManager,
+    after: Option<crate::update::OrrNodeQueryKey>,
+    version: Option<RoutePageVersion>,
+    size: usize,
+) -> OrrPage<crate::orr::OrrNodeSnapshot> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryOrrTopologyNodesPage {
+        after,
+        expected_version: version,
+        page_size: size,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+fn orr_link_page(
+    manager: &mut RibManager,
+    after: Option<crate::update::OrrLinkQueryKey>,
+    version: Option<RoutePageVersion>,
+    size: usize,
+) -> OrrPage<crate::orr::OrrLinkSnapshot> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryOrrTopologyLinksPage {
+        after,
+        expected_version: version,
+        page_size: size,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+/// Node and link walks visit every topology element once in identity
+/// order. Two parallel links with identical endpoints, cost and (empty)
+/// addresses differ only by their Link NLRI and must both appear.
+#[test]
+fn orr_topology_pages_walk_every_element_once_and_fence_on_change() {
+    use crate::orr::fixtures::{X, Y, link_route, square_topology};
+    let (mut manager, peer) = fixture();
+    let link_id = |id: u8| {
+        rustbgpd_wire::BgpLsTlv::new(258, bytes::Bytes::from(vec![0, 0, 0, id, 0, 0, 0, id]))
+    };
+    let mut routes = square_topology(peer);
+    routes.push(link_route(peer, X, Y, Some(5), &[link_id(1)]));
+    routes.push(link_route(peer, X, Y, Some(5), &[link_id(2)]));
+    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    let topology =
+        crate::orr::OrrTopology::build(manager.ribs.values().flat_map(AdjRibIn::iter_bgpls));
+    assert_eq!(topology.links().len(), 6);
+
+    let all = orr_node_page(&mut manager, None, None, usize::MAX).unwrap();
+    assert_eq!(all.routes.len(), 4);
+    assert!(!all.has_more);
+    assert_eq!(all.routes.iter().map(|n| n.link_count).sum::<u32>(), 6);
+    let mut expected_nodes: Vec<_> = topology
+        .node_keys()
+        .iter()
+        .map(|key| key.as_bytes().to_vec())
+        .collect();
+    expected_nodes.sort();
+    let mut walked = Vec::new();
+    let (mut after, mut version) = (None, None);
+    loop {
+        let page = orr_node_page(&mut manager, after, version, 3).unwrap();
+        assert_eq!(page.total, 4);
+        walked.extend(page.routes.iter().map(|node| node.key_hex.clone()));
+        if !page.has_more {
+            break;
+        }
+        after = Some(expected_nodes[walked.len() - 1].clone());
+        version = Some(page.version);
+    }
+    let mut keys: Vec<_> = topology.node_keys().iter().collect();
+    keys.sort_by_key(|key| key.as_bytes());
+    let expected_hex: Vec<_> = topology
+        .render_nodes(keys)
+        .into_iter()
+        .map(|node| node.key_hex)
+        .collect();
+    assert_eq!(walked, expected_hex);
+
+    let link_key = |link: &crate::orr::OrrLink| {
+        (
+            topology.node_key(link.local).unwrap().as_bytes().to_vec(),
+            topology.node_key(link.remote).unwrap().as_bytes().to_vec(),
+            link.nlri.route_distinguisher,
+            link.nlri.payload.clone(),
+        )
+    };
+    let mut sorted: Vec<_> = topology.links().iter().collect();
+    sorted.sort_by_key(|link| link_key(link));
+    let row = |link: &crate::orr::OrrLinkSnapshot| {
+        (
+            link.local_key_hex.clone(),
+            link.remote_key_hex.clone(),
+            link.cost,
+            link.addresses.clone(),
+        )
+    };
+    let expected_rows: Vec<_> = topology
+        .render_links(sorted.iter().copied())
+        .iter()
+        .map(row)
+        .collect();
+    let mut walked = Vec::new();
+    let (mut after, mut version) = (None, None);
+    loop {
+        let page = orr_link_page(&mut manager, after, version, 1).unwrap();
+        assert_eq!(page.total, 6);
+        walked.extend(page.routes.iter().map(row));
+        if !page.has_more {
+            break;
+        }
+        after = Some(link_key(sorted[walked.len() - 1]));
+        version = Some(page.version);
+    }
+    assert_eq!(walked, expected_rows);
+    assert_eq!(
+        walked.iter().filter(|row| row.2 == 5).count(),
+        2,
+        "both parallel X->Y links appear"
+    );
+
+    let first = orr_node_page(&mut manager, None, None, 1).unwrap();
+    manager.handle_bgpls_routes_received(
+        peer.into(),
+        vec![link_route(peer, Y, X, Some(7), &[])],
+        vec![],
+    );
+    assert_eq!(
+        orr_node_page(
+            &mut manager,
+            Some(expected_nodes[0].clone()),
+            Some(first.version),
+            1
+        )
+        .unwrap_err(),
+        RoutePageError::Invalidated
+    );
+}

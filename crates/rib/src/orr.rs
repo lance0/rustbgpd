@@ -91,6 +91,9 @@ pub struct OrrLink {
     /// Interface + neighbor addresses from the link descriptors
     /// (TLVs 259-262), in interface-then-neighbor order.
     pub addresses: Vec<IpAddr>,
+    /// The deduplicated Link NLRI: the identity that separates parallel
+    /// links between the same endpoints.
+    pub nlri: BgpLsNlri,
 }
 
 /// Display-only node descriptor fields parsed from a canonical node key.
@@ -651,6 +654,7 @@ impl OrrTopology {
                 remote,
                 cost,
                 addresses,
+                nlri: nlri.clone(),
             });
         }
     }
@@ -694,6 +698,64 @@ impl OrrTopology {
     #[must_use]
     pub fn input_diagnostics(&self) -> OrrInputDiagnostics {
         self.input_diagnostics
+    }
+
+    /// Interned node keys, in index order.
+    #[must_use]
+    pub fn node_keys(&self) -> &[BgpLsNodeKey] {
+        &self.node_keys
+    }
+
+    /// Display rows for the selected nodes; link counts take one pass
+    /// over the links.
+    #[must_use]
+    pub fn render_nodes<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a BgpLsNodeKey>,
+    ) -> Vec<OrrNodeSnapshot> {
+        let mut link_counts = vec![0_u32; self.node_keys.len()];
+        for link in &self.links {
+            link_counts[link.local.index()] += 1;
+        }
+        keys.into_iter()
+            .map(|key| {
+                let desc = NodeDescriptors::parse(key);
+                OrrNodeSnapshot {
+                    key_hex: hex(key.as_bytes()),
+                    asn: desc.asn,
+                    bgp_ls_id: desc.bgp_ls_id,
+                    router_id_hex: desc.router_id.as_deref().map(hex).unwrap_or_default(),
+                    link_count: self.node_ix(key).map_or(0, |ix| link_counts[ix.index()]),
+                }
+            })
+            .collect()
+    }
+
+    /// Display rows for the selected links.
+    #[must_use]
+    pub fn render_links<'a>(
+        &self,
+        links: impl IntoIterator<Item = &'a OrrLink>,
+    ) -> Vec<OrrLinkSnapshot> {
+        let router_id_hex = |ix: NodeIx| {
+            NodeDescriptors::parse(&self.node_keys[ix.index()])
+                .router_id
+                .as_deref()
+                .map(hex)
+                .unwrap_or_default()
+        };
+        links
+            .into_iter()
+            .map(|link| OrrLinkSnapshot {
+                local_key_hex: hex(self.node_keys[link.local.index()].as_bytes()),
+                local_router_id_hex: router_id_hex(link.local),
+                remote_key_hex: hex(self.node_keys[link.remote.index()].as_bytes()),
+                remote_router_id_hex: router_id_hex(link.remote),
+                cost: link.cost,
+                addresses: link.addresses.iter().map(ToString::to_string).collect(),
+                nlri: link.nlri.clone(),
+            })
+            .collect()
     }
 
     /// The canonical key of an interned node.
@@ -838,46 +900,8 @@ impl OrrTopology {
     /// Serializable snapshot for the read-only topology API.
     #[must_use]
     pub fn snapshot(&self) -> OrrTopologySnapshot {
-        let mut link_counts = vec![0_u32; self.node_keys.len()];
-        for link in &self.links {
-            link_counts[link.local.index()] += 1;
-        }
-        let descriptors: Vec<NodeDescriptors> =
-            self.node_keys.iter().map(NodeDescriptors::parse).collect();
-        let router_id_hex = |ix: NodeIx| {
-            descriptors[ix.index()]
-                .router_id
-                .as_deref()
-                .map(hex)
-                .unwrap_or_default()
-        };
-
-        let nodes = self
-            .node_keys
-            .iter()
-            .zip(&descriptors)
-            .zip(&link_counts)
-            .map(|((key, desc), &link_count)| OrrNodeSnapshot {
-                key_hex: hex(key.as_bytes()),
-                asn: desc.asn,
-                bgp_ls_id: desc.bgp_ls_id,
-                router_id_hex: desc.router_id.as_deref().map(hex).unwrap_or_default(),
-                link_count,
-            })
-            .collect();
-
-        let links = self
-            .links
-            .iter()
-            .map(|link| OrrLinkSnapshot {
-                local_key_hex: hex(self.node_keys[link.local.index()].as_bytes()),
-                local_router_id_hex: router_id_hex(link.local),
-                remote_key_hex: hex(self.node_keys[link.remote.index()].as_bytes()),
-                remote_router_id_hex: router_id_hex(link.remote),
-                cost: link.cost,
-                addresses: link.addresses.iter().map(ToString::to_string).collect(),
-            })
-            .collect();
+        let nodes = self.render_nodes(&self.node_keys);
+        let links = self.render_links(&self.links);
 
         let mut prefixes = Vec::new();
         for (net, advertisers) in &self.prefix_v4 {
@@ -975,7 +999,7 @@ impl SpfResult {
     }
 }
 
-/// Serializable topology snapshot for `ListTopologyNodes`/`ListTopologyLinks`.
+/// Serializable topology snapshot for the whole-graph `ListTopologyNodes`/`ListTopologyLinks`.
 #[derive(Debug, Clone, Default)]
 pub struct OrrTopologySnapshot {
     /// Interned nodes in index order.
@@ -1016,6 +1040,8 @@ pub struct OrrLinkSnapshot {
     pub cost: u32,
     /// Link interface/neighbor addresses.
     pub addresses: Vec<String>,
+    /// The Link NLRI that identifies this link among parallel links.
+    pub nlri: BgpLsNlri,
 }
 
 /// One Prefix NLRI reachability entry, display-ready.

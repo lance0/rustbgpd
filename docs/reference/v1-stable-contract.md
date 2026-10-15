@@ -152,12 +152,15 @@ defines the typed family selectors, filters and continuation behavior.
 
 Before the v1 freeze, the inventory replaces the unbounded `ListVpnRoutes`,
 `ListLabeledRoutes`, `ListRtcRoutes` and `ListBgpLsRoutes` calls with those
-bounded methods. The older calls are deprecated and outside v1, as is
+bounded methods, and the whole-graph `ListTopologyNodes` and
+`ListTopologyLinks` with the bounded `ListOrrTopologyNodes` and
+`ListOrrTopologyLinks`. The older calls are deprecated and outside v1, as is
 `ListEvpnRoutes`; `ListBestEvpnRoutes` is its bounded replacement. Every older
 method retains its signature and behavior. This change removes no RPC and sets
 no removal schedule. Existing plain CLI listings retain their JSON arrays;
-`rbgp rib bgpls` builds its array by walking every `ListBgpLsRibRoutes` page,
-and the other plain listings keep their whole-table calls. Promoting the RPCs
+`rbgp rib bgpls`, `rbgp topology nodes` and `rbgp topology links` build their
+arrays by walking every bounded page, and the other plain listings keep their
+whole-table calls. Promoting the RPCs
 does not promote additional CLI dimensions.
 
 ### EVPN route-reflector boundary

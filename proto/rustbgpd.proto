@@ -2237,8 +2237,20 @@ service RibService {
   // canonical descriptor bytes; links carry the IGP Metric (TLV 1095) that
   // the SPF engine uses. Links without an IGP Metric are unusable and are
   // not listed, but their endpoint nodes still appear.
-  rpc ListTopologyNodes(ListTopologyNodesRequest) returns (ListTopologyNodesResponse);
-  rpc ListTopologyLinks(ListTopologyLinksRequest) returns (ListTopologyLinksResponse);
+  // Deprecated whole-graph node view; use bounded ListOrrTopologyNodes.
+  rpc ListTopologyNodes(ListTopologyNodesRequest) returns (ListTopologyNodesResponse) {
+    option deprecated = true;
+  }
+  // Deprecated whole-graph link view; use bounded ListOrrTopologyLinks.
+  rpc ListTopologyLinks(ListTopologyLinksRequest) returns (ListTopologyLinksResponse) {
+    option deprecated = true;
+  }
+  // Bounded, mutation-fenced ORR topology nodes ordered by canonical key,
+  // within the scoped RR-only role.
+  rpc ListOrrTopologyNodes(ListOrrTopologyNodesRequest) returns (ListOrrTopologyNodesResponse);
+  // Bounded, mutation-fenced usable ORR topology links ordered by local key,
+  // remote key and Link NLRI identity, within the scoped RR-only role.
+  rpc ListOrrTopologyLinks(ListOrrTopologyLinksRequest) returns (ListOrrTopologyLinksResponse);
   // RFC 9107 ORR status: per configured vantage, its resolution against the
   // BGP-LS topology, SPF reach, and the peers bound to it, plus topology
   // node/link totals. Config + derived state only — the per-vantage best-path
@@ -4353,6 +4365,32 @@ message TopologyLinkEntry {
 
 message ListTopologyLinksResponse {
   repeated TopologyLinkEntry links = 1;
+}
+
+message ListOrrTopologyNodesRequest {
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind the view and version.
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListOrrTopologyNodesResponse {
+  repeated TopologyNodeEntry nodes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
+}
+
+message ListOrrTopologyLinksRequest {
+  // 0 defaults to 100; values above 1000 clamp. Tokens bind the view and version.
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListOrrTopologyLinksResponse {
+  repeated TopologyLinkEntry links = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
 }
 
 message ListOrrStatusRequest {}

@@ -1493,6 +1493,50 @@ fn parse_bgpls_page_key(value: &str) -> Result<rustbgpd_rib::BgpLsRouteQueryKey,
     ))
 }
 
+fn parse_orr_node_page_key(value: &str) -> Result<rustbgpd_rib::OrrNodeQueryKey, Status> {
+    parse_hex_octets(value)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| Status::invalid_argument("invalid topology node page cursor"))
+}
+
+fn encode_orr_link_page_key(link: &OrrLinkSnapshot) -> String {
+    format!(
+        "{}~{}",
+        link.nlri
+            .route_distinguisher
+            .map_or_else(|| "-".to_string(), |rd| hex_octets(&rd)),
+        hex_octets(&link.nlri.payload)
+    )
+}
+
+/// The cursor carries only the Link NLRI; its endpoint keys are derived
+/// exactly as the topology build derives them.
+fn parse_orr_link_page_key(value: &str) -> Result<rustbgpd_rib::OrrLinkQueryKey, Status> {
+    let invalid = || Status::invalid_argument("invalid topology link page cursor");
+    let (rd, payload) = value.split_once('~').ok_or_else(invalid)?;
+    let route_distinguisher = match rd {
+        "-" => None,
+        rd => Some(
+            parse_hex_octets(rd)
+                .and_then(|rd| <[u8; 8]>::try_from(rd).ok())
+                .ok_or_else(invalid)?,
+        ),
+    };
+    let nlri = rustbgpd_wire::bgpls::BgpLsNlri {
+        nlri_type: rustbgpd_wire::bgpls::BgpLsNlriType::Link,
+        route_distinguisher,
+        payload: parse_hex_octets(payload).ok_or_else(invalid)?.into(),
+    };
+    let local = nlri.local_node_key().ok_or_else(invalid)?;
+    let remote = nlri.remote_node_key().ok_or_else(invalid)?;
+    Ok((
+        local.as_bytes().to_vec(),
+        remote.as_bytes().to_vec(),
+        nlri.route_distinguisher,
+        nlri.payload,
+    ))
+}
+
 fn evpn_loc_filter(
     req: &proto::ListBestEvpnRoutesRequest,
 ) -> Result<(Option<RibRowFilter<EvpnRibRoute>>, String), Status> {
@@ -3441,6 +3485,97 @@ impl proto::rib_service_server::RibService for RibService {
         }))
     }
 
+    async fn list_orr_topology_nodes(
+        &self,
+        request: Request<proto::ListOrrTopologyNodesRequest>,
+    ) -> Result<Response<proto::ListOrrTopologyNodesResponse>, Status> {
+        let req = request.into_inner();
+        let scope = RouteQueryScope::Best;
+        let identity = family_query_identity("orr-nodes", "");
+        let (page_size, after, expected_version) = family_page_params_within(
+            req.page_size,
+            &req.page_token,
+            scope,
+            &identity,
+            BGPLS_PAGE_TOKEN_MAX_LEN,
+            parse_orr_node_page_key,
+        )?;
+        let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryOrrTopologyNodesPage {
+            after,
+            expected_version,
+            page_size,
+            reply,
+        })
+        .await?
+        .map_err(family_page_error)?;
+        let next_page_token = if page.has_more {
+            page.routes
+                .last()
+                .map(|node| encode_family_page_token(scope, &identity, &node.key_hex, page.version))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(proto::ListOrrTopologyNodesResponse {
+            nodes: page.routes.iter().map(topology_node_to_proto).collect(),
+            next_page_token,
+            total_count: page.total,
+            page_version: Some(proto::RoutePageVersion {
+                epoch: page.version.epoch,
+                generation: page.version.generation,
+            }),
+        }))
+    }
+
+    async fn list_orr_topology_links(
+        &self,
+        request: Request<proto::ListOrrTopologyLinksRequest>,
+    ) -> Result<Response<proto::ListOrrTopologyLinksResponse>, Status> {
+        let req = request.into_inner();
+        let scope = RouteQueryScope::Best;
+        let identity = family_query_identity("orr-links", "");
+        let (page_size, after, expected_version) = family_page_params_within(
+            req.page_size,
+            &req.page_token,
+            scope,
+            &identity,
+            BGPLS_PAGE_TOKEN_MAX_LEN,
+            parse_orr_link_page_key,
+        )?;
+        let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryOrrTopologyLinksPage {
+            after,
+            expected_version,
+            page_size,
+            reply,
+        })
+        .await?
+        .map_err(family_page_error)?;
+        let next_page_token = if page.has_more {
+            page.routes
+                .last()
+                .map(|link| {
+                    encode_family_page_token(
+                        scope,
+                        &identity,
+                        &encode_orr_link_page_key(link),
+                        page.version,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(proto::ListOrrTopologyLinksResponse {
+            links: page.routes.iter().map(topology_link_to_proto).collect(),
+            next_page_token,
+            total_count: page.total,
+            page_version: Some(proto::RoutePageVersion {
+                epoch: page.version.epoch,
+                generation: page.version.generation,
+            }),
+        }))
+    }
+
     async fn list_orr_status(
         &self,
         _request: Request<proto::ListOrrStatusRequest>,
@@ -4398,10 +4533,12 @@ mod tests {
         ListBestEvpnRoutes,
         ListTopologyNodes,
         ListTopologyLinks,
+        ListOrrTopologyNodes,
+        ListOrrTopologyLinks,
         ListOrrStatus,
     }
 
-    const UNARY_RIB_READS: [UnaryRibRead; 26] = [
+    const UNARY_RIB_READS: [UnaryRibRead; 28] = [
         UnaryRibRead::ListReceivedRoutes,
         UnaryRibRead::ListBestRoutes,
         UnaryRibRead::ListAdvertisedRoutes,
@@ -4427,6 +4564,8 @@ mod tests {
         UnaryRibRead::ListBestEvpnRoutes,
         UnaryRibRead::ListTopologyNodes,
         UnaryRibRead::ListTopologyLinks,
+        UnaryRibRead::ListOrrTopologyNodes,
+        UnaryRibRead::ListOrrTopologyLinks,
         UnaryRibRead::ListOrrStatus,
     ];
 
@@ -4568,6 +4707,18 @@ mod tests {
                 .map(|_| ()),
             UnaryRibRead::ListTopologyLinks => svc
                 .list_topology_links(Request::new(proto::ListTopologyLinksRequest {}))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListOrrTopologyNodes => svc
+                .list_orr_topology_nodes(
+                    Request::new(proto::ListOrrTopologyNodesRequest::default()),
+                )
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListOrrTopologyLinks => svc
+                .list_orr_topology_links(
+                    Request::new(proto::ListOrrTopologyLinksRequest::default()),
+                )
                 .await
                 .map(|_| ()),
             UnaryRibRead::ListOrrStatus => svc
@@ -7294,6 +7445,11 @@ mod tests {
                         remote_router_id_hex: String::new(),
                         cost: 10,
                         addresses: vec!["10.0.8.1".to_string()],
+                        nlri: rustbgpd_wire::bgpls::BgpLsNlri {
+                            nlri_type: rustbgpd_wire::bgpls::BgpLsNlriType::Link,
+                            route_distinguisher: None,
+                            payload: bytes::Bytes::new(),
+                        },
                     }],
                     prefixes: vec![],
                 });

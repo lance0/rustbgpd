@@ -37,11 +37,13 @@ In particular:
 - The scoped L3VPN, labeled-unicast, RT-Constrain and BGP-LS roles inventory
   the bounded `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`
   and `ListBgpLsRibRoutes` queries, with explicit best/received/advertised
-  views. EVPN best uses `ListBestEvpnRoutes` with a Type 1–5 filter. The older
-  whole-table `ListVpnRoutes`, `ListLabeledRoutes`, `ListRtcRoutes`,
-  `ListBgpLsRoutes` and `ListEvpnRoutes` remain functional but are deprecated
-  and outside v1; use their bounded replacements for new integrations. This
-  does not change plain CLI output.
+  views. ORR topology uses the bounded `ListOrrTopologyNodes` and
+  `ListOrrTopologyLinks`. EVPN best uses `ListBestEvpnRoutes` with a Type 1–5
+  filter. The older whole-table `ListVpnRoutes`, `ListLabeledRoutes`,
+  `ListRtcRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`
+  and `ListEvpnRoutes` remain functional but are deprecated and outside v1;
+  use their bounded replacements for new integrations. This does not change
+  plain CLI output.
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.

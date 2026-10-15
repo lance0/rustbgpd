@@ -726,3 +726,83 @@ async fn bgpls_listing_walks_every_page_with_unchanged_filters() {
     );
     assert_eq!(server.state.bgpls_page_requests.lock().await.len(), 2);
 }
+
+/// `topology nodes` and `topology links` follow every continuation and print
+/// all pages as one JSON array; a failed continuation fails the command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn topology_listings_walk_every_page() {
+    let server = test_support::spawn_mock_server(None).await;
+    let node = |key: &str| proto::TopologyNodeEntry {
+        key: key.to_string(),
+        ..Default::default()
+    };
+    let link = |cost: u32| proto::TopologyLinkEntry {
+        local_key: "02aa".to_string(),
+        remote_key: "02bb".to_string(),
+        cost,
+        ..Default::default()
+    };
+    *server.state.orr_node_pages.lock().await = vec![
+        proto::ListOrrTopologyNodesResponse {
+            nodes: vec![node("02aa"), node("02bb")],
+            next_page_token: "nodes".to_string(),
+            total_count: 3,
+            ..Default::default()
+        },
+        proto::ListOrrTopologyNodesResponse {
+            nodes: vec![node("02cc")],
+            total_count: 3,
+            ..Default::default()
+        },
+    ];
+    *server.state.orr_link_pages.lock().await = vec![
+        proto::ListOrrTopologyLinksResponse {
+            links: vec![link(1)],
+            next_page_token: "links".to_string(),
+            total_count: 2,
+            ..Default::default()
+        },
+        proto::ListOrrTopologyLinksResponse {
+            links: vec![link(2)],
+            total_count: 2,
+            ..Default::default()
+        },
+    ];
+    let output = run(&server.addr, &["topology", "nodes", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let keys: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(keys, ["02aa", "02bb", "02cc"]);
+    let requests = server.state.orr_node_page_requests.lock().await.clone();
+    let tokens: Vec<_> = requests.iter().map(|r| r.page_token.as_str()).collect();
+    assert_eq!(tokens, ["", "nodes"]);
+    assert!(requests.iter().all(|r| r.page_size == 1000));
+
+    let output = run(&server.addr, &["topology", "links", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let costs: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["cost"].as_u64().unwrap())
+        .collect();
+    assert_eq!(costs, [1, 2]);
+    let requests = server.state.orr_link_page_requests.lock().await.clone();
+    let tokens: Vec<_> = requests.iter().map(|r| r.page_token.as_str()).collect();
+    assert_eq!(tokens, ["", "links"]);
+
+    server.state.orr_link_pages.lock().await.truncate(1);
+    server.state.orr_link_page_requests.lock().await.clear();
+    let output = run(&server.addr, &["topology", "links", "--json"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "a partial walk must not print rows"
+    );
+}

@@ -921,6 +921,101 @@ impl RibManager {
         let _ = reply.send(result);
     }
 
+    /// Run `page` over the current ORR topology under the table page
+    /// fence. The topology is the BGP-LS Adj-RIB-In union, so the table
+    /// version covers every change to it.
+    fn orr_topology_page<T>(
+        &self,
+        continued: bool,
+        expected_version: Option<RoutePageVersion>,
+        page: impl FnOnce(&crate::orr::OrrTopology) -> crate::update::RibRowsPage<T>,
+    ) -> Result<crate::update::RibRowsPage<T>, RoutePageError> {
+        let version = self.route_page_version(RouteQueryScope::Best)?;
+        if continued != expected_version.is_some()
+            || expected_version.is_some_and(|expected| expected != version)
+        {
+            return Err(RoutePageError::Invalidated);
+        }
+        // Without vantages the cache is intentionally empty; build on demand.
+        let built;
+        let topology = if self.peer_orr_vantage.is_empty() {
+            built =
+                crate::orr::OrrTopology::build(self.ribs.values().flat_map(AdjRibIn::iter_bgpls));
+            &built
+        } else {
+            &self.orr.topology
+        };
+        let mut page = page(topology);
+        page.version = version;
+        Ok(page)
+    }
+
+    pub(super) fn handle_query_orr_nodes_page(
+        &self,
+        after: Option<crate::update::OrrNodeQueryKey>,
+        expected_version: Option<RoutePageVersion>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::RibRowsPage<crate::orr::OrrNodeSnapshot>, RoutePageError>,
+        >,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let continued = after.is_some();
+        let result = self.orr_topology_page(continued, expected_version, |topology| {
+            let page = page_family_rows(topology.node_keys().iter(), None, after, page_size, |k| {
+                k.as_bytes().to_vec()
+            });
+            crate::update::RibRowsPage {
+                routes: topology.render_nodes(&page.routes),
+                total: page.total,
+                has_more: page.has_more,
+                version: page.version,
+            }
+        });
+        let _ = reply.send(result);
+    }
+
+    pub(super) fn handle_query_orr_links_page(
+        &self,
+        after: Option<crate::update::OrrLinkQueryKey>,
+        expected_version: Option<RoutePageVersion>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::RibRowsPage<crate::orr::OrrLinkSnapshot>, RoutePageError>,
+        >,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let continued = after.is_some();
+        let result = self.orr_topology_page(continued, expected_version, |topology| {
+            let key = |link: &crate::orr::OrrLink| {
+                let endpoint = |ix| {
+                    topology
+                        .node_key(ix)
+                        .map(|key| key.as_bytes().to_vec())
+                        .unwrap_or_default()
+                };
+                (
+                    endpoint(link.local),
+                    endpoint(link.remote),
+                    link.nlri.route_distinguisher,
+                    link.nlri.payload.clone(),
+                )
+            };
+            let page = page_family_rows(topology.links().iter(), None, after, page_size, key);
+            crate::update::RibRowsPage {
+                routes: topology.render_links(&page.routes),
+                total: page.total,
+                has_more: page.has_more,
+                version: page.version,
+            }
+        });
+        let _ = reply.send(result);
+    }
+
     pub(super) fn handle_query_rtc_routes_page(
         &self,
         scope: RouteQueryScope,

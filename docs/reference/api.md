@@ -62,7 +62,7 @@ not by itself make it v1-stable.
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ReplayOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture`, `ListConditionalAdvertisements` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, bounded invalid-validation disposition posture, and conditional-advertisement state |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`, `ListBgpLsRibRoutes`, `ListBestEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrTopologyNodes`, `ListOrrTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`, `ListBgpLsRibRoutes`, `ListBestEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
@@ -1621,8 +1621,10 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ListRtcRibRoutes` | Scoped RR-only RT-Constrain: bounded best/received/advertised pages with membership and peer filters |
 | `ListBgpLsRibRoutes` | Scoped RR-only BGP-LS / BGP-LS VPN (RFC 9552): bounded best/received/advertised pages of opaque NLRI/TLV bytes with family, NLRI type and peer filters |
 | `ListBestEvpnRoutes` | Bounded selected EVPN best pages with source/RD/MAC/ESI/VNI filters; scoped RR-only for Types 1–5, with all-types and Type 6 calls outside v1 |
-| `ListTopologyNodes` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union |
-| `ListTopologyLinks` | RFC 9107 ORR topology links — IGP adjacencies, link addresses, and metrics (the SPF input) |
+| `ListTopologyNodes` | Deprecated whole-graph RFC 9107 ORR node view, outside v1; use `ListOrrTopologyNodes` |
+| `ListTopologyLinks` | Deprecated whole-graph RFC 9107 ORR link view, outside v1; use `ListOrrTopologyLinks` |
+| `ListOrrTopologyNodes` | Scoped RR-only: bounded pages of RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union |
+| `ListOrrTopologyLinks` | Scoped RR-only: bounded pages of RFC 9107 ORR topology links — IGP adjacencies, link addresses, and metrics (the SPF input) |
 | `ListOrrStatus` | RFC 9107 ORR per-vantage status — configured vantages, their resolved topology nodes, and the peers bound to them |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
@@ -2551,6 +2553,35 @@ Its `afi_safi` filter accepts only unspecified, BGP-LS, or BGP-LS VPN.
 As with EVPN, VPN, labeled-unicast, and RT-Constrain route listings, a
 non-empty peer filter must parse as an IP address and matches by address
 identity rather than display spelling.
+
+### List ORR topology nodes and links
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"page_size": 1000}' \
+  localhost:50051 rustbgpd.v1.RibService/ListOrrTopologyNodes
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"page_size": 1000}' \
+  localhost:50051 rustbgpd.v1.RibService/ListOrrTopologyLinks
+```
+
+`ListOrrTopologyNodes` and `ListOrrTopologyLinks` page the RFC 9107 topology
+built from every peer's BGP-LS Adj-RIB-In. Nodes are ordered by canonical
+node key. Links are ordered by local key, remote key, then the Link NLRI
+(Route Distinguisher and bytes), so parallel links between the same
+endpoints each appear once even when their visible fields match. Paging
+follows the [bounded family contract](#bounded-vpn-labeled-rtc-bgp-ls-and-evpn-best-pages):
+`page_size` 0 defaults to 100 and values above 1000 clamp to 1000. Tokens are
+process-local and signed. Any BGP-LS input change returns `ABORTED`; restart
+with an empty token. A changed or malformed token returns `INVALID_ARGUMENT`.
+A link token carries its Link NLRI bytes, so it can be larger than other
+family tokens. `rbgp topology nodes` and `rbgp topology links` walk every
+page and keep their JSON arrays. Both methods require `sensitive_read`.
+
+The whole-graph `ListTopologyNodes` and `ListTopologyLinks` remain functional,
+with unchanged signatures and behavior, but are deprecated and outside v1.
+`ListOrrStatus` stays unpaged: configured vantages bound its size.
 
 ### List BLACKHOLE discard status
 

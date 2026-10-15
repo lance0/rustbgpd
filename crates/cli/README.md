@@ -484,7 +484,7 @@ verdict. Use `rbgp rpki caches` or `rbgp doctor` for validator readiness—the
 route field alone cannot prove it.
 
 The full unary listings (`rib vpn|labeled|rtc|blackholes`, `rib fib`
-without `--limit`, `flowspec`, `evpn|evpn diagnose`, `topology nodes|links`, `orr`) return the
+without `--limit`, `flowspec`, `evpn|evpn diagnose`, `orr`) return the
 whole table in one response and decode up to a finite 64 MiB ceiling (roughly
 0.7-1.3 million rows). A response above the ceiling still fails closed,
 currently as `out of range`. The ceiling is client-side compatibility headroom
@@ -638,7 +638,7 @@ rbgp events policy
 rbgp events evpn
 rbgp watch              # legacy route-update stream
 
-rbgp topology nodes|links   # RFC 9107 ORR topology graph from BGP-LS
+rbgp topology nodes|links   # RFC 9107 ORR topology graph from BGP-LS, walking every bounded page
 rbgp orr                # RFC 9107 ORR per-vantage status
 rbgp gshut (--all | --neighbor <addr>) [--clear] [--yes]   # RFC 8326 graceful-shutdown toggle
 rbgp mrt-dump

@@ -4491,6 +4491,18 @@ impl RibManager {
                 };
                 let _ = reply.send(snapshot);
             }
+            RibUpdate::QueryOrrTopologyNodesPage {
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_orr_nodes_page(after, expected_version, page_size, reply),
+            RibUpdate::QueryOrrTopologyLinksPage {
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_orr_links_page(after, expected_version, page_size, reply),
             RibUpdate::QueryOrrStatus { reply } => self.handle_query_orr_status(reply),
             RibUpdate::QueryConditionalAdvertisements { reply } => {
                 let _ = reply.send(self.conditional_advertisement_status());

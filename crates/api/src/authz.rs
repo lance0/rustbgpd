@@ -661,6 +661,18 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.RibService",
+        "ListOrrTopologyNodes",
+        "/rustbgpd.v1.RibService/ListOrrTopologyNodes",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
+        "ListOrrTopologyLinks",
+        "/rustbgpd.v1.RibService/ListOrrTopologyLinks",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.RibService",
         "ListOrrStatus",
         "/rustbgpd.v1.RibService/ListOrrStatus",
         AuthTier::SensitiveRead,
@@ -891,7 +903,7 @@ mod tests {
     const INVENTORY_JSON: &str = include_str!("../../../docs/reference/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/reference/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 1 | 0.8% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 76 | 61.8% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 78 | 62.4% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1131,7 +1143,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 123);
+        assert_eq!(METHODS.len(), 125);
     }
 
     #[test]
@@ -1172,7 +1184,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 1);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 76);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 78);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 22);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 24);
     }
@@ -1335,7 +1347,7 @@ mod tests {
 
     #[test]
     fn markdown_totals_rejects_stale_percentage() {
-        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 76 | 57.0% |");
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 78 | 57.0% |");
         assert_eq!(
             verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
             Err("percentage mismatch")
@@ -1399,6 +1411,8 @@ mod tests {
             "ListLabeledRibRoutes",
             "ListRtcRibRoutes",
             "ListBgpLsRibRoutes",
+            "ListOrrTopologyNodes",
+            "ListOrrTopologyLinks",
             "ListBestEvpnRoutes",
         ] {
             let path = format!("/rustbgpd.v1.RibService/{method}");

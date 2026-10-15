@@ -1412,6 +1412,8 @@ mod tests {
             ".list_fib_routes(",
             ".list_topology_nodes(",
             ".list_topology_links(",
+            ".list_orr_topology_nodes(",
+            ".list_orr_topology_links(",
             ".list_orr_status(",
             ".list_conditional_advertisements(",
         ];

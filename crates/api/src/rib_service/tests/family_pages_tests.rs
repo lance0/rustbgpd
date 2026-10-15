@@ -3,14 +3,14 @@ use super::*;
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "one table sends every page size through all seven bounded family paths"
+    reason = "one table sends every page size through all nine bounded family paths"
 )]
 async fn family_and_evpn_page_sizes_default_and_clamp_before_actor_dispatch() {
     let (tx, mut rx) = mpsc::channel(1);
     let service = RibService::new(tx);
     let actor = tokio::spawn(async move {
         for expected in [100, 1, 1000, 1000, 1000] {
-            for _ in 0..7 {
+            for _ in 0..9 {
                 match rx.recv().await.unwrap() {
                     RibUpdate::QueryVpnRoutesPage {
                         page_size, reply, ..
@@ -42,13 +42,25 @@ async fn family_and_evpn_page_sizes_default_and_clamp_before_actor_dispatch() {
                         assert_eq!(page_size, expected);
                         reply.send(Err(RoutePageError::Invalidated)).unwrap();
                     }
+                    RibUpdate::QueryOrrTopologyNodesPage {
+                        page_size, reply, ..
+                    } => {
+                        assert_eq!(page_size, expected);
+                        reply.send(Err(RoutePageError::Invalidated)).unwrap();
+                    }
+                    RibUpdate::QueryOrrTopologyLinksPage {
+                        page_size, reply, ..
+                    } => {
+                        assert_eq!(page_size, expected);
+                        reply.send(Err(RoutePageError::Invalidated)).unwrap();
+                    }
                     _ => panic!("expected bounded family page"),
                 }
             }
         }
     });
     for page_size in [0, 1, 1000, 1001, u32::MAX] {
-        for method in 0..7 {
+        for method in 0..9 {
             let view = proto::FamilyRouteView::Best as i32;
             let result = match method {
                 0 => service
@@ -85,6 +97,20 @@ async fn family_and_evpn_page_sizes_default_and_clamp_before_actor_dispatch() {
                 6 => service
                     .list_bgp_ls_rib_routes(Request::new(proto::ListBgpLsRibRoutesRequest {
                         view,
+                        page_size,
+                        ..Default::default()
+                    }))
+                    .await
+                    .map(|_| ()),
+                7 => service
+                    .list_orr_topology_nodes(Request::new(proto::ListOrrTopologyNodesRequest {
+                        page_size,
+                        ..Default::default()
+                    }))
+                    .await
+                    .map(|_| ()),
+                8 => service
+                    .list_orr_topology_links(Request::new(proto::ListOrrTopologyLinksRequest {
                         page_size,
                         ..Default::default()
                     }))
@@ -1615,6 +1641,244 @@ async fn bgpls_page_tokens_reject_forgery_and_foreign_queries() {
         assert_eq!(
             service
                 .list_bgp_ls_rib_routes(Request::new(bad))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "rejections must not reach the actor"
+    );
+}
+
+/// One IS-IS Link NLRI route `local -> remote` with an IGP metric and an
+/// optional Link Local/Remote Identifier (TLV 258) separating parallel links.
+fn topology_link_route(peer: IpAddr, local: u8, remote: u8, link_id: Option<u8>) -> BgpLsRibRoute {
+    use rustbgpd_wire::{BgpLsTlv, encode_bgpls_tlvs};
+    let encode = |tlvs: &[BgpLsTlv]| {
+        let mut bytes = Vec::new();
+        encode_bgpls_tlvs(tlvs, &mut bytes).unwrap();
+        bytes::Bytes::from(bytes)
+    };
+    let node = |id: u8| {
+        encode(&[
+            BgpLsTlv::new(
+                rustbgpd_wire::BGP_LS_TLV_AUTONOMOUS_SYSTEM,
+                bytes::Bytes::from_static(&[0, 0, 0xfc, 0]),
+            ),
+            BgpLsTlv::new(
+                rustbgpd_wire::BGP_LS_TLV_IGP_ROUTER_ID,
+                bytes::Bytes::from(vec![0, 0, 0, 0, 0, id]),
+            ),
+        ])
+    };
+    let mut tlvs = vec![
+        BgpLsTlv::new(
+            rustbgpd_wire::BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS,
+            node(local),
+        ),
+        BgpLsTlv::new(
+            rustbgpd_wire::BGP_LS_TLV_REMOTE_NODE_DESCRIPTORS,
+            node(remote),
+        ),
+    ];
+    if let Some(id) = link_id {
+        tlvs.push(BgpLsTlv::new(
+            258,
+            bytes::Bytes::from(vec![0, 0, 0, id, 0, 0, 0, id]),
+        ));
+    }
+    let mut payload = vec![2_u8];
+    payload.extend_from_slice(&0_u64.to_be_bytes());
+    payload.extend_from_slice(&encode(&tlvs));
+    let metric = encode(&[BgpLsTlv::new(
+        rustbgpd_wire::BGP_LS_TLV_IGP_METRIC,
+        bytes::Bytes::from_static(&[0, 0, 10]),
+    )]);
+    let mut route = bgpls_test_routes(peer).remove(0);
+    route.nlri = rustbgpd_wire::bgpls::BgpLsNlri {
+        nlri_type: rustbgpd_wire::bgpls::BgpLsNlriType::Link,
+        route_distinguisher: None,
+        payload: payload.into(),
+    };
+    route.attributes = AttrSet::new(vec![rustbgpd_wire::PathAttribute::Unknown(
+        rustbgpd_wire::RawAttribute {
+            flags: 0x80,
+            type_code: 29,
+            data: metric,
+        },
+    )]);
+    route
+}
+
+/// Real actor walks return every ORR node and link once in identity
+/// order through continuation tokens, including two parallel links that
+/// differ only in their Link NLRI.
+#[tokio::test]
+async fn orr_topology_pages_walk_every_element_once_through_the_real_rib() {
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let mut routes: Vec<_> = (1..=5)
+        .map(|node| topology_link_route(peer, node, node % 5 + 1, None))
+        .collect();
+    routes.push(topology_link_route(peer, 1, 3, Some(1)));
+    routes.push(topology_link_route(peer, 1, 3, Some(2)));
+    let (tx, rx) = mpsc::channel(8);
+    let (_query_tx, query_rx) = mpsc::channel(1);
+    let manager = rustbgpd_rib::RibManager::new(
+        rx,
+        query_rx,
+        None,
+        None,
+        rustbgpd_telemetry::BgpMetrics::new(),
+    );
+    let actor = tokio::spawn(manager.run());
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        peer,
+        session_id: 0,
+        announced: routes,
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let service = RibService::new(tx.clone());
+
+    let mut nodes = Vec::new();
+    let mut request = proto::ListOrrTopologyNodesRequest {
+        page_size: 2,
+        ..Default::default()
+    };
+    loop {
+        let page = service
+            .list_orr_topology_nodes(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(page.total_count, 5);
+        assert!(page.nodes.len() <= 2);
+        nodes.extend(page.nodes.into_iter().map(|node| node.key));
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    let mut sorted = nodes.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(nodes, sorted);
+    assert_eq!(nodes.len(), 5);
+
+    let mut links = Vec::new();
+    let mut request = proto::ListOrrTopologyLinksRequest {
+        page_size: 1,
+        ..Default::default()
+    };
+    loop {
+        let page = service
+            .list_orr_topology_links(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(page.total_count, 7);
+        links.extend(
+            page.links
+                .into_iter()
+                .map(|link| (link.local_key, link.remote_key)),
+        );
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    assert_eq!(links.len(), 7, "parallel links are not skipped");
+    assert!(links.windows(2).all(|pair| pair[0] <= pair[1]));
+    let parallel = links
+        .iter()
+        .filter(|(local, remote)| local == &nodes[0] && remote == &nodes[2])
+        .count();
+    assert_eq!(parallel, 2);
+
+    let legacy = service
+        .list_topology_links(Request::new(proto::ListTopologyLinksRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .links;
+    assert_eq!(legacy.len(), links.len());
+    drop((service, tx));
+    actor.await.unwrap();
+}
+
+/// Altered, foreign, oversized and malformed topology tokens, and a
+/// signed link cursor that is not a Link NLRI, never reach the actor.
+#[tokio::test]
+async fn orr_topology_page_tokens_reject_forgery_and_foreign_queries() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let service = RibService::new(tx);
+    let scope = RouteQueryScope::Best;
+    let version = RoutePageVersion {
+        epoch: 1,
+        generation: 2,
+    };
+    let nodes = family_query_identity("orr-nodes", "");
+    let links = family_query_identity("orr-links", "");
+    let node_token = encode_family_page_token(scope, &nodes, "02aabb", version);
+    let link = topology_link_route("192.0.2.1".parse().unwrap(), 1, 2, None);
+    let link_cursor = format!("-~{}", hex_octets(&link.nlri.payload));
+    let link_token = encode_family_page_token(scope, &links, &link_cursor, version);
+    let (_, after, _) = family_page_params_within(
+        0,
+        &link_token,
+        scope,
+        &links,
+        BGPLS_PAGE_TOKEN_MAX_LEN,
+        parse_orr_link_page_key,
+    )
+    .unwrap();
+    let after = after.unwrap();
+    assert_eq!(
+        after.0,
+        link.nlri.local_node_key().unwrap().as_bytes(),
+        "the cursor re-derives the ordering key"
+    );
+    assert_eq!(after.1, link.nlri.remote_node_key().unwrap().as_bytes());
+
+    let bad_nodes = [
+        node_token.replacen("02aabb", "02aabc", 1),
+        "garbage".to_string(),
+        "x".repeat(BGPLS_PAGE_TOKEN_MAX_LEN + 1),
+        encode_family_page_token(scope, &links, "02aabb", version),
+        encode_family_page_token(scope, &nodes, "", version),
+        encode_family_page_token(scope, &nodes, "0g", version),
+    ];
+    for token in bad_nodes {
+        assert_eq!(
+            service
+                .list_orr_topology_nodes(Request::new(proto::ListOrrTopologyNodesRequest {
+                    page_token: token,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+    let bad_links = [
+        link_token.replacen('~', "~0", 1),
+        node_token.clone(),
+        encode_family_page_token(scope, &links, "-~02aabb", version),
+        encode_family_page_token(scope, &links, "0102~00", version),
+        encode_family_page_token(scope, &links, &link_cursor.replace('~', ""), version),
+    ];
+    for token in bad_links {
+        assert_eq!(
+            service
+                .list_orr_topology_links(Request::new(proto::ListOrrTopologyLinksRequest {
+                    page_token: token,
+                    ..Default::default()
+                }))
                 .await
                 .unwrap_err()
                 .code(),
