@@ -8587,6 +8587,9 @@ impl RibManager {
                             let mut prior = HashSet::new();
                             if is_dirty || is_force {
                                 if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                                    self.replacement_checkpoint(true);
+                                    prior.reserve(admitted.len());
+                                    self.replacement_checkpoint(true);
                                     prior.extend(admitted.iter_with_checkpoint(|_| checkpoint()));
                                 }
                             } else if !defer_clean_group_prior
