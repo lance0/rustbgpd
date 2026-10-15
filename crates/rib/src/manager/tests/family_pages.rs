@@ -1085,3 +1085,104 @@ fn labeled_advertised_pages_invalidate_when_outbound_state_clears() {
         RoutePageError::Invalidated
     );
 }
+
+/// Without vantages a whole node and link walk builds the topology once;
+/// a topology change drops that build, fences the walk and the next page
+/// rebuilds. A vantage cache takes over without keeping a second copy.
+#[test]
+fn orr_topology_page_walks_build_once_per_version() {
+    use crate::orr::fixtures::{X, Y, link_route, square_topology};
+    let (mut manager, peer) = fixture();
+    let link_id = |id: u8| {
+        rustbgpd_wire::BgpLsTlv::new(258, bytes::Bytes::from(vec![0, 0, 0, id, 0, 0, 0, id]))
+    };
+    let mut routes = square_topology(peer);
+    routes.push(link_route(peer, X, Y, Some(5), &[link_id(1)]));
+    routes.push(link_route(peer, X, Y, Some(5), &[link_id(2)]));
+    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+
+    let mut keys: Vec<_> = manager
+        .build_orr_topology()
+        .node_keys()
+        .iter()
+        .map(|key| key.as_bytes().to_vec())
+        .collect();
+    keys.sort();
+    let mut nodes = Vec::new();
+    let (mut after, mut version) = (None, None);
+    loop {
+        let page = orr_node_page(&mut manager, after, version, 1).unwrap();
+        nodes.extend(page.routes);
+        if !page.has_more {
+            break;
+        }
+        after = Some(keys[nodes.len() - 1].clone());
+        version = Some(page.version);
+    }
+    assert_eq!(nodes.len(), 4);
+    let links = orr_link_page(&mut manager, None, None, 1000).unwrap();
+    assert_eq!(links.total, 6);
+    assert_eq!(
+        manager.orr_page_topology_builds, 1,
+        "one build serves the walk"
+    );
+
+    // Each reported outgoing count matches a brute-force count over the
+    // links, including the two parallel X->Y links.
+    let topology = manager.build_orr_topology();
+    for node in &nodes {
+        let brute = topology
+            .links()
+            .iter()
+            .filter(|link| {
+                topology
+                    .node_key(link.local)
+                    .is_some_and(|key| hex_of(key.as_bytes()) == node.key_hex)
+            })
+            .count();
+        assert_eq!(node.link_count as usize, brute, "{}", node.key_hex);
+    }
+    let mut counts: Vec<_> = nodes.iter().map(|node| node.link_count).collect();
+    counts.sort_unstable();
+    assert_eq!(counts, [0, 2, 2, 2], "X counts both parallel links");
+
+    let first = orr_node_page(&mut manager, None, None, 1).unwrap();
+    manager.handle_bgpls_routes_received(
+        peer.into(),
+        vec![link_route(peer, Y, X, Some(7), &[])],
+        vec![],
+    );
+    assert!(
+        manager.orr_page_topology.is_none(),
+        "a change drops the build"
+    );
+    assert_eq!(
+        orr_node_page(&mut manager, Some(keys[0].clone()), Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+    let fresh = orr_link_page(&mut manager, None, None, 1000).unwrap();
+    assert_eq!(fresh.total, 7);
+    assert_eq!(manager.orr_page_topology_builds, 2);
+
+    manager
+        .peer_orr_vantage
+        .insert("192.0.2.9".parse().unwrap(), "10.0.1.3".parse().unwrap());
+    manager.recompute_orr();
+    assert!(
+        manager.orr_page_topology.is_none(),
+        "the vantage cache takes over"
+    );
+    assert_eq!(
+        orr_link_page(&mut manager, None, None, 1000).unwrap().total,
+        7
+    );
+    assert_eq!(manager.orr_page_topology_builds, 2);
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}

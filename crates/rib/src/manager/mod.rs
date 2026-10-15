@@ -673,6 +673,15 @@ pub struct RibManager {
     /// by [`Self::recompute_orr`] at every BGP-LS mutation seam. Empty
     /// while `peer_orr_vantage` is empty (zero non-ORR cost).
     orr: crate::orr::OrrState,
+    /// Topology built on demand for paged topology reads while no vantage
+    /// cache exists, tagged with the table page version it was built under.
+    /// Dropped when that version advances or the vantage cache takes over,
+    /// so a page walk builds once and never holds a second copy.
+    /// Boxed: the manager is embedded in large async fixtures.
+    orr_page_topology: Option<Box<(RoutePageVersion, crate::orr::OrrTopology)>>,
+    /// Counts on-demand topology builds for paged reads.
+    #[cfg(test)]
+    orr_page_topology_builds: usize,
     /// Local cluster ID for route reflection (RFC 4456). `None` = not an RR.
     cluster_id: Option<Ipv4Addr>,
     /// Peers that failed a `try_send()` and need a full export resync.
@@ -2085,6 +2094,9 @@ impl RibManager {
             pending_otc_blocked: HashMap::new(),
             peer_orr_vantage: HashMap::new(),
             orr: crate::orr::OrrState::default(),
+            orr_page_topology: None,
+            #[cfg(test)]
+            orr_page_topology_builds: 0,
             cluster_id,
             dirty_peers: BTreeSet::new(),
             dirty_since: HashMap::new(),
@@ -2797,6 +2809,8 @@ impl RibManager {
 
     fn advance_table_pages(&mut self) {
         Self::advance_route_page_version(&mut self.route_page_table_version);
+        // A topology built under the old version can serve no further page.
+        self.orr_page_topology = None;
     }
 
     pub(super) fn set_peer_group(&mut self, peer: IpAddr, group: Option<String>) {
@@ -5265,6 +5279,8 @@ impl RibManager {
                 .set_orr_input_diagnostics(crate::orr::OrrInputDiagnostics::default().values());
             return HashSet::new();
         }
+        // The vantage cache below now serves paged topology reads.
+        self.orr_page_topology = None;
 
         let topology = self.build_orr_topology();
         let input_diagnostics = topology.input_diagnostics();

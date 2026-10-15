@@ -706,17 +706,14 @@ impl OrrTopology {
         &self.node_keys
     }
 
-    /// Display rows for the selected nodes; link counts take one pass
-    /// over the links.
+    /// Display rows for the selected nodes. A node's outgoing usable link
+    /// count is its adjacency length: `add_link` pushes one adjacency entry
+    /// per usable link record, parallel links included.
     #[must_use]
     pub fn render_nodes<'a>(
         &self,
         keys: impl IntoIterator<Item = &'a BgpLsNodeKey>,
     ) -> Vec<OrrNodeSnapshot> {
-        let mut link_counts = vec![0_u32; self.node_keys.len()];
-        for link in &self.links {
-            link_counts[link.local.index()] += 1;
-        }
         keys.into_iter()
             .map(|key| {
                 let desc = NodeDescriptors::parse(key);
@@ -725,7 +722,9 @@ impl OrrTopology {
                     asn: desc.asn,
                     bgp_ls_id: desc.bgp_ls_id,
                     router_id_hex: desc.router_id.as_deref().map(hex).unwrap_or_default(),
-                    link_count: self.node_ix(key).map_or(0, |ix| link_counts[ix.index()]),
+                    link_count: self.node_ix(key).map_or(0, |ix| {
+                        u32::try_from(self.adj[ix.index()].len()).unwrap_or(u32::MAX)
+                    }),
                 }
             })
             .collect()

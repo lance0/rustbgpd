@@ -925,7 +925,7 @@ impl RibManager {
     /// fence. The topology is the BGP-LS Adj-RIB-In union, so the table
     /// version covers every change to it.
     fn orr_topology_page<T>(
-        &self,
+        &mut self,
         continued: bool,
         expected_version: Option<RoutePageVersion>,
         page: impl FnOnce(&crate::orr::OrrTopology) -> crate::update::RibRowsPage<T>,
@@ -936,13 +936,28 @@ impl RibManager {
         {
             return Err(RoutePageError::Invalidated);
         }
-        // Without vantages the cache is intentionally empty; build on demand
-        // from the same input the cache uses.
-        let built;
+        // Without vantages the vantage cache is intentionally empty; build
+        // from the same input once per table version and reuse it across the
+        // walk's pages.
         let topology = if self.peer_orr_vantage.is_empty() {
-            built = self.build_orr_topology();
-            &built
+            if self
+                .orr_page_topology
+                .as_ref()
+                .is_none_or(|cached| cached.0 != version)
+            {
+                #[cfg(test)]
+                {
+                    self.orr_page_topology_builds += 1;
+                }
+                self.orr_page_topology = Some(Box::new((version, self.build_orr_topology())));
+            }
+            &self
+                .orr_page_topology
+                .as_ref()
+                .expect("page topology built above")
+                .1
         } else {
+            self.orr_page_topology = None;
             &self.orr.topology
         };
         let mut page = page(topology);
@@ -951,7 +966,7 @@ impl RibManager {
     }
 
     pub(super) fn handle_query_orr_nodes_page(
-        &self,
+        &mut self,
         after: Option<crate::update::OrrNodeQueryKey>,
         expected_version: Option<RoutePageVersion>,
         page_size: usize,
@@ -978,7 +993,7 @@ impl RibManager {
     }
 
     pub(super) fn handle_query_orr_links_page(
-        &self,
+        &mut self,
         after: Option<crate::update::OrrLinkQueryKey>,
         expected_version: Option<RoutePageVersion>,
         page_size: usize,
