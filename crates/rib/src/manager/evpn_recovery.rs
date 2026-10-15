@@ -659,9 +659,9 @@ impl RibManager {
         peer: IpAddr,
         complete_producer: bool,
     ) -> bool {
-        if complete_producer
-            && (self.evpn_feed_is_current(peer)
-                || self
+        if self.evpn_feed_is_current(peer)
+            || (complete_producer
+                && self
                     .evpn_recovery_handle(peer)
                     .is_some_and(|handle| self.evpn_recovery.is_dormant(handle)))
         {
