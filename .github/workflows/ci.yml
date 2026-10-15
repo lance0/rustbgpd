@@ -863,20 +863,21 @@ jobs:
           retention-days: 30
 
   recovery_mass_dirty_receipt:
-    # Separate fresh-VM daemon qualification; never run the component campaign
-    # for this mode. The controller fixes cohort sizes and cgroup limits.
+    # Research branch only: one worker-count counterfactual, not qualification.
+    # The runtime checkout, wrapper, workload and acceptance bounds stay frozen.
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode == 'mass-dirty' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        # no-refusal has 12 receivers; cap-pressure has 24, without resizing.
-        include: ${{ fromJSON('[{"profile":"full-uc","cohort":"no-refusal"},{"profile":"full-uc","cohort":"cap-pressure"},{"profile":"full-vpn","cohort":"no-refusal"},{"profile":"full-vpn","cohort":"cap-pressure"}]') }}
+        include: ${{ fromJSON('[{"profile":"full-vpn","cohort":"no-refusal"}]') }}
     env:
       CARGO_BUILD_JOBS: "4"
       RECOVERY_MASS_DIRTY_PROFILE: ${{ matrix.profile }}
       RECOVERY_MASS_DIRTY_COHORT: ${{ matrix.cohort }}
+      RECOVERY_MASS_DIRTY_RUNTIME_SOURCE: "4dac2d09f661501ef476196c7b68d5ec3df2e1be"
+      RUSTBGPD_WORKER_THREADS: "4"
     steps:
       - name: Reserve time for mass-dirty evidence finalization
         shell: bash
@@ -890,7 +891,7 @@ jobs:
           PY
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: 4dac2d09f661501ef476196c7b68d5ec3df2e1be
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@v1 # stable
         with:
@@ -907,7 +908,29 @@ jobs:
           mkdir -p "$evidence"
           status=0
           python3 - <<'PY' > "$evidence/preflight.log" 2>&1 || status=$?
+          import hashlib
+          import json
+          import os
+          import subprocess
           from pathlib import Path
+          runtime = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          workflow_head = os.environ["GITHUB_SHA"]
+          workflow = subprocess.check_output(["git", "show", workflow_head + ":.github/workflows/ci.yml"])
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "update-group-recovery-mass-dirty"
+          (evidence / "workflow-control.yml").write_bytes(workflow)
+          metadata = {"status": "PENDING_STARTUP_EVIDENCE", "classification": "DIAGNOSTIC_ONLY",
+                      "workflow_event_head": workflow_head, "runtime_source": runtime,
+                      "workflow_sha256": hashlib.sha256(workflow).hexdigest(),
+                      "requested_worker_threads": os.environ["RUSTBGPD_WORKER_THREADS"],
+                      "parent_affinity": sorted(os.sched_getaffinity(0)),
+                      "daemon_cpus": [0, 1], "harness_cpus": [2, 3],
+                      "qualified_cost": None, "original_four_cell_qualification": False,
+                      "release_qualified": False}
+          (evidence / "worker-counterfactual.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          if runtime != os.environ["RECOVERY_MASS_DIRTY_RUNTIME_SOURCE"] or runtime != "4dac2d09f661501ef476196c7b68d5ec3df2e1be":
+              raise SystemExit("counterfactual runtime source changed")
+          if metadata["requested_worker_threads"] != "4" or metadata["parent_affinity"] != [0, 1, 2, 3]:
+              raise SystemExit("counterfactual workers or runner affinity changed")
           values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
           available = int(values["MemAvailable"].split()[0]) * 1024
           required = 12 * 1024**3
@@ -925,10 +948,11 @@ jobs:
             if [[ $remaining -gt 0 ]]; then
               timeout --foreground --signal=TERM --kill-after=150s "${remaining}s" \
                 bash bench/scale/reloadstall/run-recovery-mass-dirty.sh \
-                --head "$GITHUB_SHA" \
+                --head "$RECOVERY_MASS_DIRTY_RUNTIME_SOURCE" \
                 --output-dir "$evidence/campaign" \
                 --profile "$RECOVERY_MASS_DIRTY_PROFILE" \
                 --cohort "$RECOVERY_MASS_DIRTY_COHORT" \
+                --daemon-cpus "0,1" --harness-cpus "2,3" \
                 > "$evidence/driver.log" 2>&1 || status=$?
             else
               status=124
@@ -937,6 +961,41 @@ jobs:
           fi
           printf '%s\n' "$status" > "$evidence/driver-invocation.exit"
           exit "$status"
+      - name: Verify four-worker counterfactual startup
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "update-group-recovery-mass-dirty"
+          path = evidence / "worker-counterfactual.json"
+          metadata = json.loads(path.read_text()) if path.is_file() else {"classification": "DIAGNOSTIC_ONLY"}
+          observations = []
+          for log in sorted((evidence / "campaign").glob("leg-*/daemon.log")):
+              startups = []
+              for number, line in enumerate(log.read_text().splitlines(), 1):
+                  try:
+                      record = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if record.get("fields", {}).get("message") == "initializing tokio runtime":
+                      startups.append({"line": number, "record": record})
+              observations.append({"path": str(log.relative_to(evidence)),
+                                   "sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
+                                   "startups": startups})
+          valid = metadata.get("requested_worker_threads") == "4" and bool(observations) and all(
+              len(row["startups"]) == 1 and type(row["startups"][0]["record"]["fields"].get("worker_threads")) is int
+              and row["startups"][0]["record"]["fields"]["worker_threads"] == 4 for row in observations)
+          metadata.update(status="DIAGNOSTIC_ONLY" if valid else "INVALID", startup_observations=observations,
+                          startup_validation="PASS" if valid else "INVALID")
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(metadata, indent=2) + "\n")
+          if not valid:
+              raise SystemExit("counterfactual startup must prove exactly four workers in every started leg")
+          PY
       - name: Finalize mass-dirty evidence even after failure
         if: always()
         shell: bash
@@ -953,7 +1012,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: update-group-recovery-mass-dirty-${{ matrix.profile }}-${{ matrix.cohort }}-${{ github.sha }}
+          name: recovery-workers4-${{ matrix.profile }}-${{ matrix.cohort }}-runtime-4dac2d09f-workflow-${{ github.sha }}
           path: ${{ runner.temp }}/update-group-recovery-mass-dirty
           if-no-files-found: error
           retention-days: 30
