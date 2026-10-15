@@ -4480,12 +4480,7 @@ impl RibManager {
                 // seam); without them the cache is intentionally empty,
                 // so build on demand as before.
                 let snapshot = if self.peer_orr_vantage.is_empty() {
-                    crate::orr::OrrTopology::build(
-                        self.ribs
-                            .values()
-                            .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls),
-                    )
-                    .snapshot()
+                    self.build_orr_topology().snapshot()
                 } else {
                     self.orr.topology.snapshot()
                 };
@@ -5241,6 +5236,19 @@ impl RibManager {
     /// bound peers). Early-outs with no
     /// topology build and no SPF while `peer_orr_vantage` is empty, so
     /// non-ORR deployments pay nothing on BGP-LS churn.
+    /// The ORR topology input: every peer's BGP-LS Adj-RIB-In, excluding
+    /// families whose selection is still deferred. The vantage cache and
+    /// every on-demand read share this one definition, so a read cannot
+    /// change source when the vantage set empties or fills.
+    pub(super) fn build_orr_topology(&self) -> crate::orr::OrrTopology {
+        crate::orr::OrrTopology::build(
+            self.ribs
+                .values()
+                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls)
+                .filter(|route| !self.selection_deferred(route.family.to_afi_safi())),
+        )
+    }
+
     pub(super) fn recompute_orr(&mut self) -> HashSet<IpAddr> {
         if self.peer_orr_vantage.is_empty() {
             if !self.orr.is_empty() {
@@ -5258,12 +5266,7 @@ impl RibManager {
             return HashSet::new();
         }
 
-        let topology = crate::orr::OrrTopology::build(
-            self.ribs
-                .values()
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls)
-                .filter(|route| !self.selection_deferred(route.family.to_afi_safi())),
-        );
+        let topology = self.build_orr_topology();
         let input_diagnostics = topology.input_diagnostics();
         log_orr_input_transition(self.orr.topology.input_diagnostics(), input_diagnostics);
         // Next-hop costs also depend on exact address ownership and covering

@@ -936,11 +936,11 @@ impl RibManager {
         {
             return Err(RoutePageError::Invalidated);
         }
-        // Without vantages the cache is intentionally empty; build on demand.
+        // Without vantages the cache is intentionally empty; build on demand
+        // from the same input the cache uses.
         let built;
         let topology = if self.peer_orr_vantage.is_empty() {
-            built =
-                crate::orr::OrrTopology::build(self.ribs.values().flat_map(AdjRibIn::iter_bgpls));
+            built = self.build_orr_topology();
             &built
         } else {
             &self.orr.topology

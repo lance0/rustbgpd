@@ -957,3 +957,131 @@ fn orr_topology_pages_walk_every_element_once_and_fence_on_change() {
         RoutePageError::Invalidated
     );
 }
+
+/// A topology walk keeps one source when the vantage set fills or empties:
+/// the on-demand build and the vantage cache both exclude BGP-LS families
+/// whose selection is still deferred, so the continuation sees the same
+/// topology page 1 counted.
+#[test]
+fn orr_topology_pages_keep_one_source_across_vantage_changes() {
+    use crate::orr::fixtures::{link_route, square_topology};
+    let (manager, peer) = fixture();
+    let waiter: IpAddr = "192.0.2.50".parse().unwrap();
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: std::time::Duration::from_secs(30),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: waiter,
+            families: vec![(Afi::BgpLs, Safi::BgpLsVpn)],
+        }],
+    });
+    assert!(manager.selection_deferred((Afi::BgpLs, Safi::BgpLsVpn)));
+    let mut routes = square_topology(peer);
+    for (local, remote) in [(5, 6), (6, 5)] {
+        let mut route = link_route(peer, local, remote, Some(1), &[]);
+        route.family = BgpLsFamily::LinkStateVpn;
+        route.nlri.route_distinguisher = Some([0, 0, 0, 1, 0, 0, 0, 1]);
+        routes.push(route);
+    }
+    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    let mut keys: Vec<_> = manager
+        .build_orr_topology()
+        .node_keys()
+        .iter()
+        .map(|key| key.as_bytes().to_vec())
+        .collect();
+    keys.sort();
+
+    let vantage = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 3));
+    for fill in [true, false] {
+        let first = orr_node_page(&mut manager, None, None, 1).unwrap();
+        assert_eq!(
+            first.total, 4,
+            "deferred BGP-LS VPN links are not topology yet"
+        );
+        assert!(first.has_more);
+        if fill {
+            manager.peer_orr_vantage.insert(waiter, vantage);
+        } else {
+            manager.peer_orr_vantage.clear();
+        }
+        manager.recompute_orr();
+        match orr_node_page(&mut manager, Some(keys[0].clone()), Some(first.version), 1) {
+            Err(RoutePageError::Invalidated) => {}
+            Ok(next) => assert_eq!(
+                next.total, first.total,
+                "a continuation must page the topology page 1 counted"
+            ),
+            Err(other) => panic!("unexpected page error {other:?}"),
+        }
+    }
+}
+
+fn register_destination(
+    manager: &mut RibManager,
+    destination: IpAddr,
+    families: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: destination,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: families,
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    out_rx
+}
+
+/// Removing a destination's non-empty Adj-RIB-Out fences an open BGP-LS
+/// advertised walk, so the next page cannot read as a finished walk.
+#[test]
+fn bgpls_advertised_pages_invalidate_when_outbound_state_clears() {
+    let (mut manager, peer) = fixture();
+    let destination: IpAddr = "192.0.2.3".parse().unwrap();
+    let _out = register_destination(&mut manager, destination, bgpls_sendable());
+    let routes: Vec<_> = (1..=2).map(|s| make_bgpls_route(peer, s, 100)).collect();
+    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    let scope = RouteQueryScope::Advertised { peer: destination };
+    let first = bgpls_page(&mut manager, scope, None, None, 1).unwrap();
+    assert_eq!(first.total, 2);
+    let after = Some(bgpls_query_key(&first.routes[0]));
+    manager.clear_outbound_peer_state(destination);
+    assert_eq!(
+        bgpls_page(&mut manager, scope, after, Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+}
+
+/// The same fence covers the sibling families, shown here for labeled
+/// unicast, whose advertised rows also live only in the Adj-RIB-Out.
+#[test]
+fn labeled_advertised_pages_invalidate_when_outbound_state_clears() {
+    let (mut manager, peer) = fixture();
+    let destination: IpAddr = "192.0.2.3".parse().unwrap();
+    let _out = register_destination(&mut manager, destination, labeled_sendable());
+    let routes: Vec<_> = (1..=2)
+        .map(|octet| make_labeled_rib_route(peer, octet, 100, 100))
+        .collect();
+    manager.handle_labeled_routes_received(peer.into(), routes, vec![]);
+    let scope = RouteQueryScope::Advertised { peer: destination };
+    let first = labeled_page(&mut manager, scope, None, None, 1).unwrap();
+    assert_eq!(first.total, 2);
+    let route = &first.routes[0];
+    let after = Some((route.nlri.prefix, route.peer, route.path_id));
+    manager.clear_outbound_peer_state(destination);
+    assert_eq!(
+        labeled_page(&mut manager, scope, after, Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+}
