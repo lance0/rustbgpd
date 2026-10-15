@@ -99,7 +99,8 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
         (directory / f"generation-{name}.list").write_text(value)
     shutil.copyfile(directory / "generation-a.list", directory / "generation.list")
     families = '["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"]' if vpn else '["ipv4_unicast", "ipv6_unicast"]'
-    lines = ["[global]", "asn = 64512", 'router_id = "10.0.0.1"',
+    lines = ["config_epoch = 2", "", "[global]", "asn = 64512", 'router_id = "10.0.0.1"',
+             "ebgp_requires_policy = true",
              'cluster_id = "10.0.0.1"', f"listen_port = {bgp_port}",
              f"runtime_state_dir = {json.dumps(str(directory))}", "",
              "[global.telemetry]", 'log_format = "json"',

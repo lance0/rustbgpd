@@ -41,6 +41,8 @@ class MassDirtyTests(unittest.TestCase):
             scenario = self.root / profile
             hashes = receipt.generate(scenario, profile, 12, 17986, 19186)
             config = tomllib.loads((scenario / "config.toml").read_text())
+            self.assertEqual(config["config_epoch"], 2)
+            self.assertTrue(config["global"]["ebgp_requires_policy"])
             self.assertEqual(len(config["neighbors"]), 13)
             self.assertFalse(config["neighbors"][0]["route_reflector_client"])
             self.assertTrue(all(row["route_reflector_client"] for row in config["neighbors"][1:]))
