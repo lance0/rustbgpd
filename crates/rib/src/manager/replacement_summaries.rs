@@ -69,6 +69,7 @@ impl ReplacementSummaries {
                                     outbound: self.view.unknown_outbound.clone(),
                                     remote_asn: None,
                                     gr_retention: Vec::new(),
+                                    outbound_resync: crate::update::OutboundResyncState::default(),
                                 }
                             })
                         },

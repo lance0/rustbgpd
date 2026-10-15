@@ -797,7 +797,7 @@ fn fallback_causes_json(metrics: &BgpMetrics) -> String {
     )
 }
 
-fn verify_memory_identity(path: &std::path::Path) {
+pub(super) fn verify_memory_identity(path: &std::path::Path) {
     let Some(source_sha) = option_env!("RRHARNESS_RECOVERY_SOURCE_SHA") else {
         panic!("measured binary must embed its original source SHA");
     };

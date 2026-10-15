@@ -1193,45 +1193,83 @@ impl RibManager {
                 let cluster_id = self.cluster_id;
                 let rejected = self.peer_unexportable.get(&peer);
                 let actual = || {
-                    projected
-                        .evpn_member_projection_before_deltas(
-                            old_deltas,
-                            peer,
-                            cluster_id,
-                            filter.as_ref(),
-                            rejected,
-                            || checkpoint.borrow_mut()(),
-                        )
-                        .map(EvpnRibRoute::key)
+                    projected.evpn_member_projection_before_deltas(
+                        old_deltas,
+                        peer,
+                        cluster_id,
+                        filter.as_ref(),
+                        rejected,
+                        || checkpoint.borrow_mut()(),
+                    )
                 };
                 let mut allocation_checkpoint =
                     |force| super::replacement_readiness_checkpoint(&readiness, force);
                 let ledger = &mut self.evpn_recovery;
                 let captured = (|| {
-                    let (count, additions) = ledger.capture_shape(
-                        group.evpn_recovery_universe,
-                        actual(),
-                        &mut allocation_checkpoint,
-                    )?;
-                    let shared = ledger
-                        .share_capture(
+                    let count = actual().count();
+                    // A fresh universe uses NEW keys, which may omit displaced OLD.
+                    let shared = if !old_deltas.is_empty()
+                        && !group
+                            .evpn_recovery_universe
+                            .is_some_and(|hint| ledger.universe_is_live(hint))
+                    {
+                        None
+                    } else {
+                        ledger.with_ordered_capture(
                             handle,
-                            group.evpn_recovery_universe,
-                            group.table.evpn_len(),
-                            group.table.iter_evpn().map(EvpnRibRoute::key),
-                            (count, additions),
+                            count,
+                            actual(),
                             &mut allocation_checkpoint,
+                            |ledger, ordered, checkpoint| {
+                                let shape = ledger.capture_shape(
+                                    group.evpn_recovery_universe,
+                                    ordered.iter().map(|route| route.key()),
+                                    checkpoint,
+                                )?;
+                                let shared = ledger
+                                    .share_capture(
+                                        handle,
+                                        group.evpn_recovery_universe,
+                                        group.table.evpn_len(),
+                                        group.table.iter_evpn().map(EvpnRibRoute::key),
+                                        shape,
+                                        checkpoint,
+                                    )
+                                    .ok()
+                                    .flatten();
+                                if shared.is_some()
+                                    && !ledger.capture_batch_with_checkpoint(
+                                        handle,
+                                        ordered.iter().map(|route| route.key()),
+                                        checkpoint,
+                                    )?
+                                {
+                                    return Err(
+                                        super::update_groups::recovery_provenance::Exhaustion {
+                                            cause: super::update_groups::recovery_provenance::ExhaustionCause::CaptureUnavailable,
+                                            limiting_peer: None,
+                                            attempted_peer_bytes: 0,
+                                            attempted_daemon_bytes: 0,
+                                        },
+                                    );
+                                }
+                                Ok(shared)
+                            },
+                        )?
+                    };
+                    let populated = if shared.is_some() {
+                        true
+                    } else {
+                        ledger.reserve_capture(handle, count, &mut allocation_checkpoint)?;
+                        capture_admitted_keys(
+                            ledger,
+                            handle,
+                            actual().map(EvpnRibRoute::key),
+                            &mut || {
+                                checkpoint.borrow_mut()();
+                            },
                         )
-                        .ok()
-                        .flatten();
-                    ledger.reserve_capture(
-                        handle,
-                        if shared.is_some() { additions } else { count },
-                        &mut allocation_checkpoint,
-                    )?;
-                    let populated = capture_admitted_keys(ledger, handle, actual(), &mut || {
-                        checkpoint.borrow_mut()();
-                    });
+                    };
                     Ok::<_, super::update_groups::recovery_provenance::Exhaustion>((
                         populated, shared,
                     ))

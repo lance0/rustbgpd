@@ -1912,6 +1912,25 @@ pub struct NeighborRibSnapshot {
     /// family the RIB tracks in a GR or LLGR phase. Empty when nothing is
     /// retained.
     pub gr_retention: Vec<GrRetentionFamilyState>,
+    /// Outbound resync and update-group recovery state.
+    pub outbound_resync: OutboundResyncState,
+}
+
+/// A peer's outbound resync state, read in the same actor turn as its
+/// advertised count.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboundResyncState {
+    /// The peer missed outbound delivery and waits for a full export resync.
+    pub pending: bool,
+    /// Whole seconds the current resync has been pending; `None` when not
+    /// pending.
+    pub dirty_secs: Option<u64>,
+    /// `advertised_count` is the update group's desired count for a member
+    /// whose delivery is unconfirmed, not routes the peer is known to hold.
+    pub advertised_count_pending: bool,
+    /// Update-group recovery fallback cause label recorded for the current
+    /// session (`bgp_update_group_recovery_fallback_total{cause}`).
+    pub recovery_fallback: Option<&'static str>,
 }
 
 /// Helper-side retention phase of one family's stale routes.

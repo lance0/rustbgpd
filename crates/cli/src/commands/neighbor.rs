@@ -78,6 +78,7 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         uptime_seconds: n.uptime_seconds,
         prefixes_received: n.prefixes_received,
         prefixes_sent: n.prefixes_sent,
+        prefixes_sent_pending: n.prefixes_sent_pending == Some(true),
         messages_received: n.messages_received,
         messages_sent: n.messages_sent,
         flap_count: n.flap_count,
@@ -351,6 +352,10 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
         prefixes_received_ipv4: n.prefixes_received_ipv4,
         prefixes_received_ipv6: n.prefixes_received_ipv6,
         prefixes_sent: n.prefixes_sent,
+        prefixes_sent_pending: n.prefixes_sent_pending,
+        outbound_resync_pending: n.outbound_resync_pending,
+        outbound_dirty_seconds: n.outbound_dirty_seconds,
+        update_group_recovery_fallback: n.update_group_recovery_fallback.clone(),
         updates_received: n.updates_received,
         updates_sent: n.updates_sent,
         notifications_received: n.notifications_received,
@@ -764,7 +769,27 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
             n.stale,
         ),
     );
-    rows.field(0, "Prefixes Sent", n.prefixes_sent);
+    rows.field(0, "Prefixes Sent", prefixes_sent_label(n));
+    if n.outbound_resync_pending == Some(true) {
+        rows.field(
+            0,
+            "Outbound Resync",
+            n.outbound_dirty_seconds.map_or_else(
+                || "pending".to_string(),
+                |seconds| format!("pending for {}", output::format_duration(seconds)),
+            ),
+        );
+    }
+    if !n.update_group_recovery_fallback.is_empty() {
+        rows.field(
+            0,
+            "Recovery Fallback",
+            format!(
+                "{} (resync withdraws conservatively)",
+                n.update_group_recovery_fallback
+            ),
+        );
+    }
     rows.field(0, "Updates Received", n.updates_received);
     rows.field(0, "Updates Sent", n.updates_sent);
     rows.field(0, "Notifications Received", n.notifications_received);
@@ -945,6 +970,16 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
         rows.field(0, "Last Error", &n.last_error);
     }
     rows.render()
+}
+
+/// The update group's desired count is not delivery evidence for a member
+/// awaiting resync; `rbgp rib advertised` reads its admitted state instead.
+fn prefixes_sent_label(n: &crate::proto::NeighborState) -> String {
+    if n.prefixes_sent_pending == Some(true) {
+        format!("{} (pending outbound resync)", n.prefixes_sent)
+    } else {
+        n.prefixes_sent.to_string()
+    }
 }
 
 pub(crate) fn negotiation_status_label(state: &crate::proto::NeighborState) -> &'static str {
@@ -1808,6 +1843,10 @@ mod tests {
             }],
             gr_retention_available: Some(true),
             retention_only: None,
+            outbound_resync_pending: Some(true),
+            outbound_dirty_seconds: Some(163),
+            update_group_recovery_fallback: "update_group_recovery_fallback-value".to_string(),
+            prefixes_sent_pending: Some(true),
         }
     }
 
@@ -1894,6 +1933,73 @@ mod tests {
         state.gr_retention_available = None;
         let value = serde_json::to_value(json_neighbor(&state)).unwrap();
         assert!(value.get("gr_retention_available").is_none());
+    }
+
+    /// A grouped member's desired count is marked in every neighbor view
+    /// while its delivery awaits resync. Red proof: dropping the marker in
+    /// any one view fails below.
+    #[test]
+    fn pending_prefixes_sent_is_marked_in_detail_list_and_table() {
+        let mut state = crate::proto::NeighborState {
+            config: Some(crate::proto::NeighborConfig {
+                address: "10.0.0.1".to_string(),
+                ..Default::default()
+            }),
+            prefixes_sent: 42,
+            prefixes_sent_pending: Some(true),
+            outbound_resync_pending: Some(true),
+            outbound_dirty_seconds: Some(75),
+            update_group_recovery_fallback: "daemon_limit".to_string(),
+            ..Default::default()
+        };
+        let human = collapse_value_padding(render_neighbor_detail_human(&state).as_bytes());
+        assert!(
+            human.contains("Prefixes Sent: 42 (pending outbound resync)\n"),
+            "{human}"
+        );
+        assert!(
+            human.contains("Outbound Resync: pending for 00:01:15\n"),
+            "{human}"
+        );
+        assert!(
+            human.contains("Recovery Fallback: daemon_limit (resync withdraws conservatively)\n"),
+            "{human}"
+        );
+        assert_eq!(
+            serde_json::to_value(json_neighbor(&state)).unwrap()["prefixes_sent_pending"],
+            true
+        );
+        let detail = captured_neighbor_detail(&state);
+        assert_eq!(detail["prefixes_sent_pending"], true);
+        assert_eq!(detail["outbound_resync_pending"], true);
+        assert_eq!(detail["outbound_dirty_seconds"], 75);
+        assert_eq!(detail["update_group_recovery_fallback"], "daemon_limit");
+        let mut table = Vec::new();
+        output::write_neighbor_table(&mut table, std::slice::from_ref(&state), false).unwrap();
+        assert!(String::from_utf8(table).unwrap().contains(" ~42 "));
+
+        state.prefixes_sent_pending = Some(false);
+        state.outbound_resync_pending = Some(false);
+        state.outbound_dirty_seconds = None;
+        state.update_group_recovery_fallback.clear();
+        let human = collapse_value_padding(render_neighbor_detail_human(&state).as_bytes());
+        assert!(human.contains("Prefixes Sent: 42\n"), "{human}");
+        assert!(!human.contains("Outbound Resync"));
+        assert!(!human.contains("Recovery Fallback"));
+        assert!(
+            serde_json::to_value(json_neighbor(&state))
+                .unwrap()
+                .get("prefixes_sent_pending")
+                .is_none()
+        );
+        let detail = captured_neighbor_detail(&state);
+        assert_eq!(detail["prefixes_sent_pending"], false);
+        assert_eq!(detail["outbound_resync_pending"], false);
+        assert!(detail.get("outbound_dirty_seconds").is_none());
+        assert!(detail.get("update_group_recovery_fallback").is_none());
+        let mut table = Vec::new();
+        output::write_neighbor_table(&mut table, std::slice::from_ref(&state), false).unwrap();
+        assert!(!String::from_utf8(table).unwrap().contains('~'));
     }
 
     #[test]
@@ -2289,7 +2395,9 @@ Prefixes Received:        104
 Max Prefixes:             143 (146 remaining)
   IPv4 Unicast:           144 (147 remaining)
   IPv6 Unicast:           145 (148 remaining)
-Prefixes Sent:            105
+Prefixes Sent:            105 (pending outbound resync)
+Outbound Resync:          pending for 00:02:43
+Recovery Fallback:        update_group_recovery_fallback-value (resync withdraws conservatively)
 Updates Received:         106
 Updates Sent:             107
 Notifications Received:   108

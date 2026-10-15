@@ -870,7 +870,7 @@ impl RibManager {
         );
 
         if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
-            && !self.try_send_and_commit_outbound_update(
+            && let Err(failure) = self.try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
                     evpn_announce,
@@ -879,6 +879,7 @@ impl RibManager {
                 },
             )
             && self.mark_outbound_dirty(peer)
+            && failure == super::OutboundCommitFailure::WriterUnavailable
         {
             warn!(%peer, "outbound channel full — EVPN update deferred");
         }
@@ -960,20 +961,23 @@ impl RibManager {
                 }
                 None
             };
-            if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
-                peer,
-                OutboundCommitBatch {
-                    evpn_announce: announce,
-                    evpn_withdraw: withdraw,
-                    evpn_complete_feed: complete,
-                    ..OutboundCommitBatch::default()
-                },
-                HashSet::new(),
-                None,
-                None,
-                None,
-                Some(&stage),
-            ) {
+            if self
+                .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+                    peer,
+                    OutboundCommitBatch {
+                        evpn_announce: announce,
+                        evpn_withdraw: withdraw,
+                        evpn_complete_feed: complete,
+                        ..OutboundCommitBatch::default()
+                    },
+                    HashSet::new(),
+                    None,
+                    None,
+                    None,
+                    Some(&stage),
+                )
+                .is_err()
+            {
                 // Queue capacity can disappear after the opportunistic
                 // pre-stage probe. The operation still owns actual OLD here.
                 self.capture_shared_evpn_before_deltas(peer, &stage.deltas);

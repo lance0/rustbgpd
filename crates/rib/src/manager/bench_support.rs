@@ -31,6 +31,578 @@ use crate::update::{
     RouteQueryScope,
 };
 
+/// Component-only inputs; no live group ownership or route delivery is enabled.
+#[derive(Clone, Copy, Debug)]
+pub struct RecoveryScanSpec {
+    pub family: &'static str,
+    pub keys: usize,
+    pub records: usize,
+    pub sparse: bool,
+    pub shared: bool,
+    pub shuffled: bool,
+}
+
+/// Proof-checked capture result, separate from timing collected by the caller.
+#[derive(Clone, Debug, Default)]
+pub struct RecoveryScanReceipt {
+    pub old_keys: usize,
+    pub additions: usize,
+    pub shape_callbacks: usize,
+    pub proof_keys: usize,
+    pub retained_bytes: usize,
+    pub peak_bytes: usize,
+    pub empty_bytes: usize,
+    pub settled_bytes: usize,
+    pub shared: bool,
+    pub refusal: Option<&'static str>,
+}
+
+fn scan_peer(index: usize) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::from(
+        0xc000_0200_u32 + u32::try_from(index).expect("bounded scan owner index"),
+    ))
+}
+
+fn scan_old(spec: RecoveryScanSpec) -> impl Iterator<Item = usize> {
+    let additions = if spec.sparse {
+        spec.records.min(spec.keys)
+    } else {
+        0
+    };
+    additions..spec.keys + additions
+}
+
+fn scan_common_key(
+    spec: RecoveryScanSpec,
+    n: usize,
+) -> super::update_groups::admitted_recovery::Key {
+    use super::update_groups::admitted_recovery::Key;
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, RouteDistinguisher, VpnPrefix, VpnRouteKey};
+    let v4 = if spec.keys == 1_230_000 {
+        1_000_000
+    } else {
+        spec.keys * 4 / 5
+    };
+    let prefix = if n < v4 {
+        rustbgpd_wire::Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::from(u32::try_from(n).unwrap()),
+            32,
+        ))
+    } else {
+        rustbgpd_wire::Prefix::V6(Ipv6Prefix::new(std::net::Ipv6Addr::from(n as u128), 128))
+    };
+    if spec.family == "full-uc" {
+        Key::Unicast(prefix, 0)
+    } else {
+        Key::Vpn(
+            VpnRouteKey {
+                route_distinguisher: RouteDistinguisher::ZERO,
+                prefix: match prefix {
+                    rustbgpd_wire::Prefix::V4(prefix) => VpnPrefix::V4 {
+                        addr: prefix.addr,
+                        len: prefix.len,
+                    },
+                    rustbgpd_wire::Prefix::V6(prefix) => VpnPrefix::V6 {
+                        addr: prefix.addr,
+                        len: prefix.len,
+                    },
+                },
+            },
+            0,
+        )
+    }
+}
+
+fn scan_evpn_key(n: usize) -> rustbgpd_wire::EvpnRouteKey {
+    use rustbgpd_wire::{
+        EthernetTagId, EvpnIpPrefixValue, EvpnRouteKey, Ipv4Prefix, MacAddress, RouteDistinguisher,
+    };
+    let n = u32::try_from(n).expect("bounded scan key");
+    if n.is_multiple_of(5) {
+        EvpnRouteKey::IpPrefix {
+            rd: RouteDistinguisher::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            prefix: EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)),
+        }
+    } else {
+        let octets = n.to_be_bytes();
+        EvpnRouteKey::MacIp {
+            rd: RouteDistinguisher::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress([2, 0, octets[0], octets[1], octets[2], octets[3]]),
+            ip: None,
+        }
+    }
+}
+
+enum ScanCommonRoute {
+    Unicast(Route),
+    Vpn(crate::route::VpnRibRoute),
+}
+
+impl ScanCommonRoute {
+    fn borrowed(&self) -> super::update_groups::admitted_recovery::CaptureRef<'_> {
+        use super::update_groups::admitted_recovery::CaptureRef;
+        match self {
+            Self::Unicast(route) => CaptureRef::Unicast(route),
+            Self::Vpn(route) => CaptureRef::Vpn(route),
+        }
+    }
+}
+
+fn scan_common_route(spec: RecoveryScanSpec, n: usize, at: std::time::Instant) -> ScanCommonRoute {
+    use super::update_groups::admitted_recovery::Key;
+    use crate::route::{ReceivedAt, RouteOrigin, VpnRibRoute};
+    let attributes = crate::attr_set::AttrSet::new(vec![]);
+    match scan_common_key(spec, n) {
+        Key::Unicast(prefix, path_id) => ScanCommonRoute::Unicast(Route {
+            prefix,
+            path_id,
+            next_hop: scan_peer(0),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: scan_peer(0),
+            attributes,
+            received_at: ReceivedAt::from_instant(at),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::LOCALHOST,
+            is_stale: false,
+            is_llgr_stale: false,
+            validation_state: rustbgpd_wire::RpkiValidation::default(),
+            aspa_state: rustbgpd_wire::AspaValidation::default(),
+            received_as_path: None,
+            aspa_context: crate::route::AspaContextId::default(),
+        }),
+        Key::Vpn(key, path_id) => ScanCommonRoute::Vpn(VpnRibRoute {
+            nlri: rustbgpd_wire::VpnNlri {
+                labels: vec![],
+                route_distinguisher: key.route_distinguisher,
+                prefix: key.prefix,
+            },
+            path_id,
+            next_hop: scan_peer(0),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: scan_peer(0),
+            attributes,
+            received_at: at,
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::LOCALHOST,
+            is_stale: false,
+            is_llgr_stale: false,
+        }),
+    }
+}
+
+fn scan_evpn_route(n: usize, at: std::time::Instant) -> crate::route::EvpnRibRoute {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EvpnIpPrefixRoute, EvpnMacIp, EvpnRoute, EvpnRouteKey, MplsLabel,
+    };
+    let label = MplsLabel::new(100);
+    let route = match scan_evpn_key(n) {
+        EvpnRouteKey::MacIp {
+            rd,
+            ethernet_tag,
+            mac,
+            ip,
+        } => EvpnRoute::MacIp(EvpnMacIp {
+            rd,
+            ethernet_tag,
+            mac,
+            ip,
+            esi: EthernetSegmentIdentifier::ZERO,
+            label1: label,
+            label2: None,
+        }),
+        EvpnRouteKey::IpPrefix {
+            rd,
+            ethernet_tag,
+            prefix,
+        } => EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+            rd,
+            ethernet_tag,
+            prefix,
+            esi: EthernetSegmentIdentifier::ZERO,
+            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            label,
+        }),
+        _ => unreachable!("scan fixture uses only Type2/5"),
+    };
+    crate::route::EvpnRibRoute {
+        route,
+        next_hop: scan_peer(0),
+        link_local_next_hop: None,
+        peer: scan_peer(0),
+        attributes: crate::attr_set::AttrSet::new(vec![]),
+        received_at: at,
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: Ipv4Addr::LOCALHOST,
+        is_stale: false,
+        is_llgr_stale: false,
+    }
+}
+
+fn shuffle_scan<T>(rows: &mut [T]) {
+    let mut state = 0x2b41_fe6c_b924_4b17_u64;
+    for index in (1..rows.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let target = usize::try_from(state % u64::try_from(index + 1).unwrap()).unwrap();
+        rows.swap(index, target);
+    }
+}
+
+/// Exercise the production count/reserve/populate/seal paths with a live older
+/// universe. `phase` brackets only target work: fixture setup and proof checking
+/// are outside it. A counted pass is deliberately distinct from a timed pass.
+///
+/// # Panics
+///
+/// Panics for unsupported profiles, out-of-range key/record counts, or a proof
+/// that differs from the authoritative fixture or fails to release its credit.
+pub fn bench_recovery_capture_scan(
+    spec: RecoveryScanSpec,
+    counted: bool,
+    mut phase: impl FnMut(&'static str, bool),
+) -> RecoveryScanReceipt {
+    assert!(matches!(spec.family, "full-uc" | "full-vpn" | "evpn-soak"));
+    assert!((2..=480).contains(&spec.records) && (1..=1_230_000).contains(&spec.keys));
+    let mut receipt = RecoveryScanReceipt::default();
+    let mut callbacks = 0;
+    let mut checkpoint = |force: bool| {
+        if !force {
+            callbacks += 1;
+        }
+    };
+    let result = if counted {
+        run_recovery_scan(spec, &mut receipt, &mut phase, &mut checkpoint)
+    } else {
+        run_recovery_scan(spec, &mut receipt, &mut phase, &mut |_| {})
+    };
+    receipt.shape_callbacks = callbacks;
+    receipt.refusal = result.err();
+    receipt
+}
+
+fn run_recovery_scan(
+    spec: RecoveryScanSpec,
+    receipt: &mut RecoveryScanReceipt,
+    phase: &mut impl FnMut(&'static str, bool),
+    checkpoint: &mut impl FnMut(bool),
+) -> Result<(), &'static str> {
+    if spec.family == "evpn-soak" {
+        run_evpn_recovery_scan(spec, receipt, phase, checkpoint)
+    } else {
+        run_common_recovery_scan(spec, receipt, phase, checkpoint)
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the component fixture keeps untimed setup, measured capture and proof settlement in one ordered path"
+)]
+fn run_common_recovery_scan(
+    spec: RecoveryScanSpec,
+    receipt: &mut RecoveryScanReceipt,
+    phase: &mut impl FnMut(&'static str, bool),
+    shape_checkpoint: &mut impl FnMut(bool),
+) -> Result<(), &'static str> {
+    use super::update_groups::admitted_recovery::{AdmittedRecovery, CaptureRef};
+    let mut ledger = AdmittedRecovery::new();
+    receipt.empty_bytes = ledger.bytes();
+    // Keep the universe alive under a different owner in both arms. Empty
+    // records isolate record-count scaling without a fleet of full proofs.
+    for index in 1..spec.records - 1 {
+        ledger
+            .insert_empty_with_checkpoint(scan_peer(index), &mut |_| {})
+            .map_err(|e| e.cause.as_str())?;
+    }
+    let anchor = scan_peer(0);
+    ledger
+        .begin_capture_with_checkpoint(anchor, &mut |_| {})
+        .map_err(|e| e.cause.as_str())?;
+    let hint = ledger
+        .share_capture_with_checkpoint(
+            anchor,
+            None,
+            spec.keys,
+            (0..spec.keys).map(|n| scan_common_key(spec, n)),
+            (spec.keys, 0),
+            &mut |_| {},
+        )
+        .map_err(|e| e.cause.as_str())?
+        .ok_or("anchor_not_shared")?;
+    for n in 0..spec.keys {
+        ledger
+            .push_capture_with_checkpoint(anchor, scan_common_key(spec, n), &mut |_| {})
+            .map_err(|e| e.cause.as_str())?;
+    }
+    ledger
+        .seal_capture_with_checkpoint(anchor, &mut |_| {})
+        .map_err(|e| e.cause.as_str())?;
+    let peer = scan_peer(spec.records - 1);
+    // Ordinary fixture timestamp only; no measurement clock is sampled by correctness mode.
+    let at = std::time::Instant::now();
+    let mut old = scan_old(spec)
+        .map(|n| scan_common_route(spec, n, at))
+        .collect::<Vec<_>>();
+    old.sort_unstable_by_key(|route| route.borrowed().key());
+    if spec.shuffled {
+        shuffle_scan(&mut old);
+    }
+    phase("capture", true);
+    let captured = (|| {
+        ledger
+            .begin_capture_with_checkpoint(peer, &mut |_| {})
+            .map_err(|e| e.cause.as_str())?;
+        if spec.shared {
+            let count = old
+                .iter()
+                .inspect(|route| {
+                    std::hint::black_box(route.borrowed().key());
+                })
+                .count();
+            receipt.shared = ledger
+                .with_ordered_capture(
+                    peer,
+                    count,
+                    old.iter().map(ScanCommonRoute::borrowed),
+                    &mut |_| {},
+                    |ledger, ordered, checkpoint| {
+                        phase("shape", true);
+                        let shape = ledger.capture_shape_with_checkpoint(
+                            Some(hint),
+                            ordered.iter().copied().map(CaptureRef::key),
+                            shape_checkpoint,
+                        );
+                        phase("shape", false);
+                        (receipt.old_keys, receipt.additions) = shape;
+                        let shared = ledger.share_capture_with_checkpoint(
+                            peer,
+                            Some(hint),
+                            spec.keys,
+                            (0..spec.keys).map(|n| scan_common_key(spec, n)),
+                            shape,
+                            checkpoint,
+                        )?;
+                        if shared.is_some() {
+                            ledger.push_capture_batch_with_checkpoint(
+                                peer,
+                                ordered.iter().copied().map(CaptureRef::key),
+                                checkpoint,
+                            )?;
+                        }
+                        Ok(shared)
+                    },
+                )
+                .map_err(|error| error.cause.as_str())?
+                .is_some();
+            if !receipt.shared {
+                return Err("capture_unavailable");
+            }
+        } else {
+            phase("shape", true);
+            let shape = ledger.capture_shape_with_checkpoint(
+                None,
+                old.iter().map(|route| route.borrowed().key()),
+                shape_checkpoint,
+            );
+            phase("shape", false);
+            (receipt.old_keys, receipt.additions) = shape;
+            ledger
+                .reserve_capture_with_checkpoint(peer, shape.0, &mut |_| {})
+                .map_err(|error| error.cause.as_str())?;
+            for route in &old {
+                ledger
+                    .push_capture_with_checkpoint(peer, route.borrowed().key(), &mut |_| {})
+                    .map_err(|error| error.cause.as_str())?;
+            }
+        }
+        ledger
+            .seal_capture_with_checkpoint(peer, &mut |_| {})
+            .map_err(|e| e.cause.as_str())
+    })();
+    phase("capture", false);
+    receipt.retained_bytes = ledger.bytes();
+    receipt.peak_bytes = ledger.peak_bytes();
+    if captured.is_ok() {
+        let proof = ledger.get(&peer).expect("sealed target proof");
+        receipt.proof_keys = proof.len();
+        assert_eq!(proof.len(), spec.keys);
+        assert!(
+            old.iter()
+                .all(|route| proof.contains(&route.borrowed().key().into()))
+        );
+        if spec.sparse {
+            assert!(!proof.contains(&scan_common_key(spec, 0).into()));
+        }
+    }
+    for index in 0..spec.records {
+        ledger.remove_with_checkpoint(&scan_peer(index), &mut |_| {});
+    }
+    receipt.settled_bytes = ledger.bytes();
+    assert_eq!(receipt.settled_bytes, receipt.empty_bytes);
+    captured
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the component fixture keeps untimed setup, measured capture and proof settlement in one ordered path"
+)]
+fn run_evpn_recovery_scan(
+    spec: RecoveryScanSpec,
+    receipt: &mut RecoveryScanReceipt,
+    phase: &mut impl FnMut(&'static str, bool),
+    shape_checkpoint: &mut impl FnMut(bool),
+) -> Result<(), &'static str> {
+    use super::update_groups::recovery_provenance::{EvpnRecoveryProvenance, PeerSession};
+    let mut ledger = EvpnRecoveryProvenance::new();
+    receipt.empty_bytes = ledger.daemon_usage().retained;
+    let owner = |index| PeerSession {
+        peer: scan_peer(index),
+        session_id: 1,
+    };
+    for index in 0..spec.records {
+        ledger
+            .register(owner(index))
+            .map_err(|e| e.cause.as_str())?;
+    }
+    let anchor = ledger.primary_handle(owner(0)).unwrap();
+    ledger
+        .finish_recovery(anchor)
+        .map_err(|e| e.cause.as_str())?;
+    ledger.begin_capture(anchor).map_err(|e| e.cause.as_str())?;
+    let hint = ledger
+        .share_capture(
+            anchor,
+            None,
+            spec.keys,
+            (0..spec.keys).map(scan_evpn_key),
+            (spec.keys, 0),
+            &mut |_| {},
+        )
+        .map_err(|e| e.cause.as_str())?
+        .ok_or("anchor_not_shared")?;
+    for n in 0..spec.keys {
+        ledger
+            .capture_key_with_checkpoint(anchor, scan_evpn_key(n), &mut |_| {})
+            .map_err(|e| e.cause.as_str())?;
+    }
+    ledger
+        .seal_capture_with_checkpoint(anchor, &mut |_| {})
+        .map_err(|e| e.cause.as_str())?;
+    let target = ledger.primary_handle(owner(spec.records - 1)).unwrap();
+    let at = std::time::Instant::now();
+    let mut old = scan_old(spec)
+        .map(|n| scan_evpn_route(n, at))
+        .collect::<Vec<_>>();
+    old.sort_unstable_by_key(crate::route::EvpnRibRoute::key);
+    if spec.shuffled {
+        shuffle_scan(&mut old);
+    }
+    phase("capture", true);
+    let captured = (|| {
+        ledger
+            .finish_recovery(target)
+            .map_err(|e| e.cause.as_str())?;
+        ledger.begin_capture(target).map_err(|e| e.cause.as_str())?;
+        if spec.shared {
+            let count = old
+                .iter()
+                .inspect(|route| {
+                    std::hint::black_box(route.key());
+                })
+                .count();
+            receipt.shared = ledger
+                .with_ordered_capture(
+                    target,
+                    count,
+                    old.iter(),
+                    &mut |_| {},
+                    |ledger, ordered, checkpoint| {
+                        phase("shape", true);
+                        let shape = ledger.capture_shape(
+                            Some(hint),
+                            ordered.iter().map(|route| route.key()),
+                            shape_checkpoint,
+                        );
+                        phase("shape", false);
+                        let shape = shape?;
+                        (receipt.old_keys, receipt.additions) = shape;
+                        let shared = ledger.share_capture(
+                            target,
+                            Some(hint),
+                            spec.keys,
+                            (0..spec.keys).map(scan_evpn_key),
+                            shape,
+                            checkpoint,
+                        )?;
+                        if shared.is_some() {
+                            assert!(ledger.capture_batch_with_checkpoint(
+                                target,
+                                ordered.iter().map(|route| route.key()),
+                                checkpoint
+                            )?);
+                        }
+                        Ok(shared)
+                    },
+                )
+                .map_err(|error| error.cause.as_str())?
+                .is_some();
+            if !receipt.shared {
+                return Err("capture_unavailable");
+            }
+        } else {
+            phase("shape", true);
+            let shape = ledger.capture_shape(
+                None,
+                old.iter().map(crate::route::EvpnRibRoute::key),
+                shape_checkpoint,
+            );
+            phase("shape", false);
+            let shape = shape.map_err(|error| error.cause.as_str())?;
+            (receipt.old_keys, receipt.additions) = shape;
+            ledger
+                .reserve_capture(target, shape.0, &mut |_| {})
+                .map_err(|error| error.cause.as_str())?;
+            for route in &old {
+                assert!(
+                    ledger
+                        .capture_key_with_checkpoint(target, route.key(), &mut |_| {})
+                        .map_err(|error| error.cause.as_str())?
+                );
+            }
+        }
+        assert!(
+            ledger
+                .seal_capture_with_checkpoint(target, &mut |_| {})
+                .map_err(|e| e.cause.as_str())?
+        );
+        Ok(())
+    })();
+    phase("capture", false);
+    receipt.retained_bytes = ledger.daemon_usage().retained;
+    receipt.peak_bytes = ledger.daemon_usage().peak;
+    if captured.is_ok() {
+        let proof = ledger.proof(target).unwrap().expect("sealed target proof");
+        receipt.proof_keys = proof.len();
+        assert_eq!(proof.len(), spec.keys);
+        assert!(old.iter().all(|route| proof.contains(&route.key())));
+        if spec.sparse {
+            assert!(!proof.contains(&scan_evpn_key(0)));
+        }
+    }
+    for index in 0..spec.records {
+        if let Some(handle) = ledger.primary_handle(owner(index)) {
+            assert!(ledger.retire(handle));
+        }
+    }
+    receipt.settled_bytes = ledger.daemon_usage().retained;
+    assert_eq!(receipt.settled_bytes, receipt.empty_bytes);
+    captured
+}
+
 /// Structural receipt for the production prefix-to-announcing-peers index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnicastPrefixPeersMemoryReceipt {

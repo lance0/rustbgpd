@@ -98,6 +98,21 @@ class ScaleSplitContractTests(unittest.TestCase):
                 self.mutate(original, replacement)
         self.mutate("  cancel-in-progress: true\n", "  cancel-in-progress: false\n")
 
+    def test_component_scan_mode_is_explicit_and_preserves_memory_matrix(self) -> None:
+        for old, new in (
+            ("        default: memory\n", "        default: scan\n"),
+            ("        options: [memory, scan]\n", "        options: [scan]\n"),
+            ("        type: choice\n", "        type: boolean\n"),
+            ("      recovery_receipt_mode:\n", "      ignored_mode:\n"),
+            ("inputs.recovery_receipt_mode == 'scan'", "github.event_name == 'workflow_dispatch'"),
+            ('{"profile":"evpn-soak","cell":"capture-scan","old_order":"sorted"}', '{"profile":"full-uc","cell":"capture-scan","old_order":"sorted"}'),
+            ('{"profile":"full-vpn","cell":"capture-scan","old_order":"shuffled"}', '{"profile":"full-vpn","cell":"capture-scan","old_order":"sorted"}'),
+            ('{"profile":"full-vpn","cell":"unsynchronized-dirty"}', '{"profile":"full-vpn","cell":"peer-down"}'),
+            ('--mode "$RECOVERY_RECEIPT_MODE"', '--mode memory'),
+        ):
+            with self.subTest(old=old, replacement=new):
+                self.mutate(old, new)
+
     def test_recovery_memory_receipt_requires_an_actual_toolchain_input(self) -> None:
         tail = "      - name: Check recovery receipt negative fixtures\n"
         original = "        with:\n          toolchain: stable\n      - uses: ./.github/actions/install-protobuf\n" + tail
@@ -108,6 +123,18 @@ class ScaleSplitContractTests(unittest.TestCase):
         ):
             with self.subTest(replacement=replacement):
                 self.mutate(original, replacement + "      - uses: ./.github/actions/install-protobuf\n" + tail)
+
+    def test_component_scan_old_order_reaches_driver_and_artifact_identity(self) -> None:
+        for old, new in (
+            ("RECOVERY_SCAN_OLD_ORDER: ${{ matrix.old_order || 'sorted' }}", "RECOVERY_SCAN_OLD_ORDER: sorted"),
+            ('if [[ $RECOVERY_RECEIPT_MODE == scan && $RECOVERY_SCAN_OLD_ORDER == shuffled ]]; then',
+             'if [[ $RECOVERY_RECEIPT_MODE == scan ]]; then'),
+            ('scan_options=(--shuffled-old)', 'scan_options=()'),
+            ('--cell "$RECOVERY_MEMORY_CELL" "${scan_options[@]}"', '--cell "$RECOVERY_MEMORY_CELL"'),
+            ("${{ matrix.old_order && format('-{0}', matrix.old_order) || '' }}", ""),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(old, new)
 
     def test_scale_profile_and_membership_are_required(self) -> None:
         for old, new in (

@@ -30,15 +30,19 @@ fn admit_waiting_for_marker(
         manager.pending_eor.insert(peer, HashSet::from([EVPN]));
         RibManager::evpn_admitted_marker_bits(&[EVPN], &[])
     };
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_announce: feed.announce,
-            evpn_withdraw: feed.withdraw,
-            evpn_complete_feed: Some(feed.seal),
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: feed.announce,
+                    evpn_withdraw: feed.withdraw,
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     assert!(manager.evpn_feed_is_current(peer));
     assert!(
         !manager
@@ -152,13 +156,17 @@ fn stale_completion_cannot_invalidate_a_newer_complete_feed() {
         .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
         .unwrap();
     assert!(current.announce.is_empty() && current.withdraw.is_empty());
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_complete_feed: Some(current.seal),
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_complete_feed: Some(current.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     assert!(manager.evpn_feed_is_current(peer));
     assert!(!manager.complete_evpn_feed_admitted(peer, old.seal, 0));
     assert!(manager.evpn_feed_is_current(peer));
@@ -248,9 +256,30 @@ fn displaced_projection_preserves_removed_old_rows_without_including_new_rows() 
 
 #[test]
 fn late_capture_uses_displaced_admitted_keys_instead_of_advanced_group_rows() {
+    assert_late_capture_uses_displaced_keys(false);
+}
+
+#[test]
+fn late_capture_with_expired_universe_keeps_displaced_admitted_keys() {
+    assert_late_capture_uses_displaced_keys(true);
+}
+
+fn assert_late_capture_uses_displaced_keys(expired_hint: bool) {
     let (mut manager, peer, gid, _output) = fixture();
     let old = received(100);
     stage(&mut manager, gid, &old);
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    if expired_hint {
+        assert!(manager.capture_shared_evpn_admitted(peer));
+        let hint = manager.group_ribs[&gid].evpn_recovery_universe.unwrap();
+        assert!(manager.evpn_recovery.universe_is_live(hint));
+        assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
+        assert!(!manager.evpn_recovery.universe_is_live(hint));
+        assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
+    } else {
+        assert!(manager.group_ribs[&gid].evpn_recovery_universe.is_none());
+    }
+    let resets = count_reset_attempts(&mut manager);
     let new = make_evpn_imet(Ipv4Addr::new(192, 0, 2, 11), 2);
     manager
         .loc_rib
@@ -260,15 +289,12 @@ fn late_capture_uses_displaced_admitted_keys_instead_of_advanced_group_rows() {
         .recompute_evpn(new.key(), [&new].into_iter());
     let changed = manager.stage_group_evpn_keys(gid, &HashSet::from([old.key(), new.key()]));
     assert!(manager.capture_shared_evpn_before_deltas(peer, &changed.deltas));
-    let proof = manager
-        .evpn_recovery
-        .proof(manager.evpn_recovery_handle(peer).unwrap())
-        .unwrap()
-        .unwrap();
+    let proof = manager.evpn_recovery.proof(handle).unwrap().unwrap();
     assert_eq!(proof.len(), 1);
     assert!(proof.contains(&old.key()));
     assert!(!proof.contains(&new.key()));
     assert!(!manager.evpn_recovery_reset_pending(peer));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -659,15 +685,19 @@ fn private_join_refusal_retains_old_values_until_changed_and_removed_routes_are_
         .prepare_complete_evpn_feed(peer, gid, None, true)
         .unwrap();
     assert_eq!(feed.announce.len(), 2);
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_announce: feed.announce,
-            evpn_withdraw: feed.withdraw,
-            evpn_complete_feed: Some(feed.seal),
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: feed.announce,
+                    evpn_withdraw: feed.withdraw,
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     while output.try_recv().is_ok() {}
     manager.handle_update(RibUpdate::PeerSlowState {
         peer,
@@ -748,15 +778,19 @@ fn private_join_refusal_retains_old_values_until_changed_and_removed_routes_are_
         .unwrap();
     assert_eq!(feed.announce.len(), 1);
     assert_eq!(feed.withdraw, [removed.key()]);
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            evpn_announce: feed.announce,
-            evpn_withdraw: feed.withdraw,
-            evpn_complete_feed: Some(feed.seal),
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: feed.announce,
+                    evpn_withdraw: feed.withdraw,
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     let update = output.try_recv().unwrap();
     assert_eq!(update.evpn_announce.len(), 1);
     assert_eq!(update.evpn_announce[0].key(), changed.key());
@@ -1290,15 +1324,19 @@ fn successful_replacement_during_held_eor_or_eorr_preserves_sparse_sequence() {
             manager.pending_eor.insert(peer, HashSet::from([EVPN]));
             RibManager::evpn_admitted_marker_bits(&[EVPN], &[])
         };
-        assert!(manager.try_send_and_commit_outbound_update(
-            peer,
-            OutboundCommitBatch {
-                evpn_announce: feed.announce,
-                evpn_withdraw: feed.withdraw,
-                evpn_complete_feed: Some(feed.seal),
-                ..OutboundCommitBatch::default()
-            }
-        ));
+        assert!(
+            manager
+                .try_send_and_commit_outbound_update(
+                    peer,
+                    OutboundCommitBatch {
+                        evpn_announce: feed.announce,
+                        evpn_withdraw: feed.withdraw,
+                        evpn_complete_feed: Some(feed.seal),
+                        ..OutboundCommitBatch::default()
+                    }
+                )
+                .is_ok()
+        );
         assert!(output.try_recv().is_err());
         manager
             .rtc_eor_hold

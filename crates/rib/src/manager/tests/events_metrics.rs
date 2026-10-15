@@ -1130,13 +1130,17 @@ fn commit_family_gauge_fixture(
         .insert(peer, permissive_test_exact_export_encoder());
     manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
     let next_hop_override = vec![None; announce.len()].into();
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            vpn_announce,
-            ..OutboundCommitBatch::with_unicast(announce.into(), next_hop_override)
-        },
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    vpn_announce,
+                    ..OutboundCommitBatch::with_unicast(announce.into(), next_hop_override)
+                },
+            )
+            .is_ok()
+    );
     let gathered = metrics.registry().gather();
     let gauge = gathered
         .iter()

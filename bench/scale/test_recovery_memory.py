@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 import tempfile
 import subprocess
+import sys
 import textwrap
 import time
 import unittest
@@ -756,12 +757,13 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(len(result["rows"]), 16)
         self.assertEqual(len(result["candidate_failures"]), 1)
 
-    def assert_failure_envelope(self, root: Path, status: int) -> None:
+    def assert_failure_envelope(self, root: Path, status: int, *, scan: bool = False) -> None:
+        self.assertTrue((root / "comparison.json").exists(), "structured failure envelope missing")
         result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
         self.assertFalse(result["qualification_passed"])
         self.assertEqual(result["driver_invocation_exit"], status)
-        self.assertEqual(result["rows"], [])
-        self.assertEqual(result["summaries"], [])
+        for field in (("samples", "comparisons") if scan else ("rows", "summaries")):
+            self.assertEqual(result[field], [])
         self.assertTrue(result["candidate_failures"])
         self.assertNotIn("ratio", json.dumps(result))
 
@@ -837,8 +839,9 @@ class RecoveryReceiptTests(unittest.TestCase):
         script = step.split("        run: |\n", 1)[1].split("\n      - ", 1)[0]
         return textwrap.dedent(script)
 
-    def run_workflow_failure(self, status: int, *, expired: bool = False) -> Path:
-        commands = self.root / f"commands-{status}-{expired}"
+    def run_workflow_failure(self, status: int, *, expired: bool = False, mode: str = "memory",
+                             old_order: str = "sorted") -> Path:
+        commands = self.root / f"commands-{status}-{expired}-{old_order}"
         commands.mkdir()
         timeout_command = commands / "timeout"
         timeout_command.write_text(
@@ -852,7 +855,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             encoding="utf-8",
         )
         timeout_command.chmod(0o755)
-        temporary = self.root / f"runner-{status}-{expired}"
+        temporary = self.root / f"runner-{status}-{expired}-{old_order}"
         temporary.mkdir()
         arguments = temporary / "driver-arguments.json"
         environment = dict(
@@ -865,8 +868,10 @@ class RecoveryReceiptTests(unittest.TestCase):
             GITHUB_SHA="a" * 40,
             RECOVERY_MEMORY_DRIVER_DEADLINE=str(time.monotonic() + (-1 if expired else 6600)),
             RECOVERY_MEMORY_PHASE="qualified",
+            RECOVERY_RECEIPT_MODE=mode,
             RECOVERY_MEMORY_PROFILE="full-vpn",
-            RECOVERY_MEMORY_CELL="widen",
+            RECOVERY_MEMORY_CELL="capture-scan" if mode == "scan" else "widen",
+            RECOVERY_SCAN_OLD_ORDER=old_order,
         )
         result = subprocess.run(
             [
@@ -893,7 +898,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             (evidence / "driver-invocation.exit").read_text().strip(), str(expected_status)
         )
         self.assertEqual((evidence / "failure-summary.exit").read_text().strip(), "1")
-        self.assert_failure_envelope(evidence / "campaign", expected_status)
+        self.assert_failure_envelope(evidence / "campaign", expected_status, scan=mode == "scan")
         if expired:
             self.assertFalse(arguments.exists())
         else:
@@ -901,6 +906,8 @@ class RecoveryReceiptTests(unittest.TestCase):
             self.assertGreater(int(invocation[2].removesuffix("s")), 0)
             self.assertLessEqual(int(invocation[2].removesuffix("s")), 6600)
             self.assertEqual(invocation[3:5], ["bash", "bench/scale/compare-recovery-memory.sh"])
+            self.assertEqual("--shuffled-old" in invocation,
+                             mode == "scan" and old_order == "shuffled")
         return evidence
 
     def test_workflow_finalizes_timeout_and_kill_preserving_original_exit(self) -> None:
@@ -910,6 +917,12 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_workflow_expired_setup_budget_does_not_start_driver(self) -> None:
         self.run_workflow_failure(124, expired=True)
+
+    def test_scan_workflow_finalizes_failure_preserving_original_exit(self) -> None:
+        for old_order in ("sorted", "shuffled"):
+            for status, expired in ((124, False), (137, False), (124, True)):
+                with self.subTest(status=status, expired=expired, old_order=old_order):
+                    self.run_workflow_failure(status, expired=expired, mode="scan", old_order=old_order)
 
     def test_historical_route_failure_does_not_excuse_phase_swap(self) -> None:
         root = self.campaign()
@@ -1208,6 +1221,394 @@ class RecoveryReceiptTests(unittest.TestCase):
         path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
         with self.assertRaisesRegex(receipt.InvalidReceipt, "identity or membership changed"):
             receipt.summarize(root)
+
+
+class RecoveryScanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def test_scope_scan_forwards_the_old_order_flag(self):
+        source = Path(__file__).with_name("compare-recovery-memory.sh").read_text()
+        scoped = source[source.index('if [[ ${1:-} == --scope-worker'):source.index('\n[[ $# -ge 4')]
+        fixture = ('set -euo pipefail\n'
+                   'daemon_scope_cgroup() { printf /fixture.scope; }\n'
+                   'record_scope_peak() { :; }\n'
+                   'python3() { printf "%s\\n" "$@"; }\n'
+                   'fail() { exit 1; }\nchecker=fixture-checker\n')
+        for shuffled in (False, True):
+            with self.subTest(shuffled=shuffled):
+                options = ["--shuffled-old"] if shuffled else []
+                result = subprocess.run(
+                    ["bash", "-c", fixture + scoped, "scope-fixture", "--scope-scan",
+                     "/binary", "/output", "capture-scan", "a" * 64, "full-uc", "1", *options],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["fixture-checker", "run-scope",
+                    "/binary", "/output", "capture-scan", "/fixture.scope", "a" * 64,
+                    "full-uc", "1", "--scan", *options])
+
+    def test_run_scope_forwards_order_to_the_actual_harness_command(self):
+        for shuffled in (False, True):
+            with self.subTest(shuffled=shuffled):
+                output = self.root / str(shuffled)
+                checker = {"pid": 1, "executable": str(Path(sys.executable).resolve())}
+                launcher = {"pid": 2, "executable": str(Path(shutil.which("bash")).resolve())}
+                with (patch.object(receipt, "proc_identity", side_effect=[checker, launcher]),
+                      patch.object(receipt, "snapshot_scope"),
+                      patch.object(receipt, "capture_ownership"),
+                      patch.object(receipt.subprocess, "Popen", side_effect=RuntimeError("stop before spawn"))):
+                    with self.assertRaisesRegex(RuntimeError, "stop before spawn"):
+                        receipt.run_scope(Path("/binary"), output, "capture-scan", Path("/fixture.scope"),
+                                          "a" * 64, "full-uc", 1, scan=True, shuffled_old=shuffled)
+                self.assertEqual(json.loads((output / "command.json").read_text()),
+                                 ["/binary", "recovery-scan", "full-uc"] +
+                                 (["--shuffled-old"] if shuffled else []))
+
+    def test_scan_order_is_pinned_across_manifest_environment_and_every_sample(self):
+        for old_order in ("sorted", "shuffled"):
+            with self.subTest(old_order=old_order):
+                rows = self.rows(old_order=old_order)
+                root = self.campaign(rows)
+                result = self.summarize_campaign(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads((root / "comparison.json").read_text())["old_order"], old_order)
+                for bad_order in (None, "random", "shuffled" if old_order == "sorted" else "sorted"):
+                    manifest = json.loads((root / "manifest.json").read_text())
+                    manifest["old_order"] = bad_order
+                    receipt.write_json(root / "manifest.json", manifest)
+                    self.assertEqual(self.summarize_campaign(root).returncode, 1)
+                for bad_row in (0, 1, 23):
+                    broken = self.rows(old_order=old_order)
+                    broken[bad_row]["old_order"] = "shuffled" if old_order == "sorted" else None
+                    with self.assertRaisesRegex(receipt.InvalidReceipt, "scan shape/order/mode mismatch"):
+                        receipt.validate_scan_log(self.log(broken, old_order), "evpn-soak", old_order)
+                path = self.log(rows)
+                text = path.read_text().replace('"old_order": "' + old_order + '"',
+                                                '"old_order": "random"', 1)
+                path.write_text(text)
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "environment OLD order mismatch"):
+                    receipt.validate_scan_log(path, "evpn-soak", old_order)
+
+    def test_scan_scope_preserves_only_required_identity_after_sanitized_sudo(self):
+        source = Path(__file__).with_name("compare-recovery-memory.sh").read_text()
+        functions = source[source.index("record_command() {"):source.index("# Probe actual scope")]
+        start = source.index('    launch_scope "recovery-scan-')
+        launch = source[start:source.index("    printf ", start)]
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir()
+        sudo = fake_bin / "sudo"
+        sudo.write_text(textwrap.dedent("""\
+            #!/bin/bash
+            [[ $1 == systemd-run ]] || exit 1
+            shift
+            while [[ $# -gt 0 && $1 != -- ]]; do shift; done
+            [[ ${1:-} == -- ]] || exit 1
+            shift
+            exec env -i PATH="$PATH" "$@"
+            """))
+        sudo.chmod(0o755)
+        driver = self.root / "child.sh"
+        driver.write_text(textwrap.dedent("""\
+            #!/bin/bash
+            [[ $1 == --scope-scan && ( $# == 7 || $# == 8 ) ]] || exit 1
+            env > "$3/child-environment"
+            printf '%s\n' "$@" > "$3/child-arguments"
+            """))
+        for override, shuffled in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(override=override, shuffled=shuffled):
+                output = self.root / str((override, shuffled))
+                (output / "scan").mkdir(parents=True)
+                (output / "candidate-binary.sha256").write_text("a" * 64 + "\n")
+                environment = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}",
+                                   GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                                   RUNNER_OS="Linux", UNRELATED_PARENT_ONLY="must-not-leak")
+                environment.pop("RECOVERY_MEMORY_RUNNER_ENVIRONMENT", None)
+                if override:
+                    environment.update(RECOVERY_MEMORY_RUNNER_ENVIRONMENT="github-hosted",
+                                       RUNNER_ENVIRONMENT="must-not-pass-through")
+                result = subprocess.run(
+                    ["bash", "-c", functions + '\noutput=$1; work_root=$1; driver=$2; '
+                     'profile=evpn-soak; status=0; scan_options=(); '
+                     '[[ $3 != shuffled ]] || scan_options=(--shuffled-old)\n' + launch + '\nexit "$status"',
+                     "scan-fixture", str(output), str(driver), "shuffled" if shuffled else "sorted"],
+                    env=environment, capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                child = dict(line.split("=", 1) for line in
+                             (output / "scan/child-environment").read_text().splitlines())
+                self.assertEqual("--shuffled-old" in
+                                 (output / "scan/child-arguments").read_text().splitlines(), shuffled)
+                identity_names = ("GITHUB_ACTIONS", "RECOVERY_MEMORY_RUNNER_ENVIRONMENT",
+                                  "RUNNER_ENVIRONMENT", "RUNNER_OS", "UNRELATED_PARENT_ONLY")
+                self.assertEqual({name: child[name] for name in identity_names if name in child},
+                                 {"GITHUB_ACTIONS": "true",
+                                  "RECOVERY_MEMORY_RUNNER_ENVIRONMENT": "github-hosted"})
+
+    def rows(self, profile="evpn-soak", old_order="sorted"):
+        keys = receipt.SCAN_PROFILES[profile]
+        return [dict(schema=receipt.SCAN_SCHEMA, profile=profile, old_order=old_order, keys=keys, records=records,
+                     layout=layout, arm=arm, leg=leg, measured=True, old_keys=keys,
+                     additions=records if layout == "older-sparse" and arm == "shared" else 0,
+                     shape_callbacks=3 * keys if arm == "shared" else keys,
+                     comparisons=2 * keys if arm == "shared" else 0,
+                     proof_keys=keys, shared=arm == "shared", retained_bytes=8192,
+                     peak_bytes=9000, empty_bytes=56, settled_bytes=56, refusal=None,
+                     phases={"shape": {"wall_ns": 1000, "cpu_ticks": 1},
+                             "capture": {"wall_ns": 2000, "cpu_ticks": 2}})
+                for records in (2, 64, 480) for layout in ("dense", "older-sparse")
+                for leg, arm in enumerate(("flat", "shared", "shared", "flat"))]
+
+    def log(self, rows, old_order=None):
+        profile = rows[0]["profile"]
+        lines = ["recovery_identity " + json.dumps({"pid": 123, "start_ticks": 456}),
+                 "recovery_scan_environment " + json.dumps({"schema": receipt.SCAN_SCHEMA,
+                    "old_order": rows[0]["old_order"] if old_order is None else old_order,
+                    "cpu_ticks_per_second": 100,
+                    "phase_passes": "independent shape and capture invocations",
+                    "credit_scope": "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS"})]
+        lines += ["recovery_scan " + json.dumps(row) for row in rows]
+        lines += ["recovery_scan_complete " + json.dumps({"profile": profile, "cells": 6, "legs": 24})]
+        path = self.root / "scan.log"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def campaign(self, rows):
+        # Reuse the complete process/cgroup fixture, replacing scan inputs only.
+        fixture = RecoveryReceiptTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        root = fixture.campaign(selected_cell="peer-down")
+        name = "bench/scale/rrharness/src/recovery_scan.rs"
+        path = root / "frozen-instrumentation" / name
+        path.write_text(name)
+        inputs = root / "instrumentation.sha256"
+        inputs.write_text(inputs.read_text() + receipt.file_digest(path) + "  " + name + "\n")
+        manifest = {
+            "schema": "rustbgpd.recovery-scan.campaign.v2", "candidate": "a" * 40,
+            "instrumentation_manifest_sha256": receipt.file_digest(inputs),
+            "profile": rows[0]["profile"], "old_order": rows[0]["old_order"], "build_jobs": 4,
+            "order_per_cell": ["flat", "shared", "shared", "flat"],
+        }
+        receipt.write_json(root / "manifest.json", manifest)
+        directory = root / "scan"
+        shutil.copytree(root / "ipv4-100k-peer-down-baseline-2-candidate", directory)
+        process = json.loads((directory / "binary-process.json").read_text())
+        identity = {
+            "pid": process["pid"], "start_ticks": process["start_ticks"],
+            "cgroup": (directory / "cgroup-path.txt").read_text().strip(),
+            "source_sha": manifest["candidate"],
+            "instrumentation_sha256": manifest["instrumentation_manifest_sha256"],
+        }
+        lines = self.log(rows).read_text().splitlines()
+        lines[0] = "recovery_identity " + json.dumps(identity)
+        (directory / "harness.log").write_text("\n".join(lines) + "\n")
+        return root
+
+    def summarize_campaign(self, root):
+        return subprocess.run(
+            ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan", str(root)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+
+    def test_scan_summary_qualifies_complete_profiles_with_unresolved_cpu_ratios(self):
+        for profile in receipt.SCAN_PROFILES:
+            with self.subTest(profile=profile):
+                rows = self.rows(profile)
+                for row in rows:
+                    for phase in row["phases"].values():
+                        phase["cpu_ticks"] = 0
+                root = self.campaign(rows)
+                result = self.summarize_campaign(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                summary = json.loads((root / "comparison.json").read_text())
+                self.assertTrue(summary.get("qualification_passed", False))
+                self.assertTrue(json.loads(result.stdout)["qualification_passed"])
+                self.assertEqual(len(summary["samples"]), 24)
+                self.assertEqual(len(summary["comparisons"]), 6)
+                self.assertTrue(all(cell["eligible"] for cell in summary["comparisons"]))
+                for cell in summary["comparisons"]:
+                    self.assertIsNone(cell["shared_over_flat"]["capture"]["cpu_ticks"])
+                    self.assertEqual(cell["shared_over_flat"]["capture"]["wall_ns"], 1.0)
+
+    def test_scan_summary_refuses_any_missing_comparison_and_preserves_raw(self):
+        for refused in ((1,), (0, 1, 2, 3), tuple(range(24))):
+            with self.subTest(refused=refused):
+                rows = self.rows()
+                for index in refused:
+                    rows[index].update(refusal="peer_limit", proof_keys=0, phases={})
+                root = self.campaign(rows)
+                raw = (root / "scan/harness.log").read_bytes()
+                result = self.summarize_campaign(root)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("all 6 scan cells", result.stderr)
+                summary = json.loads((root / "comparison.json").read_text())
+                self.assertFalse(summary["qualification_passed"])
+                self.assertEqual(len(summary["samples"]), 24)
+                self.assertEqual(sum(row["refusal"] is not None for row in summary["samples"]), len(refused))
+                self.assertEqual(len(summary["comparisons"]), 6)
+                self.assertTrue(any(not cell["eligible"] for cell in summary["comparisons"]))
+                self.assertEqual((root / "scan/harness.log").read_bytes(), raw)
+                finalized = subprocess.run(
+                    ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan",
+                     str(root), "--failed-driver-exit", str(result.returncode)],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(finalized.returncode, 1, finalized.stdout + finalized.stderr)
+                envelope = json.loads((root / "comparison.json").read_text())
+                self.assertFalse(envelope["qualification_passed"])
+                self.assertEqual(envelope["driver_invocation_exit"], result.returncode)
+                self.assertEqual(envelope["samples"], [])
+                self.assertEqual(envelope["comparisons"], [])
+                self.assertNotIn("ratio", json.dumps(envelope))
+                diagnostic = root / "unqualified-comparison.json"
+                self.assertTrue(diagnostic.exists(), "completed refusal diagnostics missing after finalization")
+                self.assertEqual(json.loads(diagnostic.read_text()), summary)
+                self.assertEqual((root / "scan/harness.log").read_bytes(), raw)
+
+    def test_scan_summary_rejects_incomplete_matrix_or_proof(self):
+        for failure in ("missing-leg", "wrong-proof"):
+            with self.subTest(failure=failure):
+                rows = self.rows()
+                if failure == "missing-leg":
+                    rows.pop()
+                else:
+                    rows[1]["proof_keys"] = 0
+                root = self.campaign(rows)
+                result = self.summarize_campaign(root)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse((root / "comparison.json").exists())
+
+    def test_scan_profiles_and_same_runtime_paired_ratios(self):
+        for profile in receipt.SCAN_PROFILES:
+            result = receipt.validate_scan_log(self.log(self.rows(profile)), profile)
+            self.assertEqual(24, len(result["samples"]))
+            self.assertEqual(6, len(result["comparisons"]))
+            self.assertTrue(all(row["eligible"] for row in result["comparisons"]))
+            self.assertEqual(1.0, result["comparisons"][0]["shared_over_flat"]["shape"]["wall_ns"])
+
+    def test_scan_rejects_false_proof_work_and_measurement_claims(self):
+        cases = [(1, "old_keys", 0), (1, "proof_keys", 1), (1, "comparisons", 0),
+                 (0, "comparisons", 1), (0, "shared", True), (1, "shared", False),
+                 (1, "shape_callbacks", 0), (1, "measured", False), (1, "settled_bytes", 57),
+                 (5, "additions", 0), (0, "phases", {}), (1, "leg", 0),
+                 (1, "refusal", "unrecognized")]
+        for index, field, value in cases:
+            with self.subTest(field=field, value=value):
+                rows = self.rows()
+                rows[index][field] = value
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        with self.assertRaises(receipt.InvalidReceipt):
+            receipt.validate_scan_log(self.log(self.rows()[:-1]), "evpn-soak")
+
+    def test_scan_v2_rejects_binary_search_work_and_historical_schema(self):
+        keys = receipt.SCAN_PROFILES["evpn-soak"]
+        rows = self.rows()
+        rows[1]["comparisons"] = keys * keys.bit_length()
+        rows[1]["shape_callbacks"] = keys + rows[1]["comparisons"]
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "non-linear classification"):
+            receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        rows = self.rows()
+        rows[1]["schema"] = "rustbgpd.recovery-scan.v1"
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "scan shape/order/mode mismatch"):
+            receipt.validate_scan_log(self.log(rows), "evpn-soak")
+
+    def test_scan_refusal_is_retained_without_a_ratio(self):
+        rows = self.rows()
+        rows[1].update(refusal="peer_limit", proof_keys=0, phases={})
+        result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        self.assertEqual("peer_limit", result["samples"][1]["refusal"])
+        self.assertFalse(result["comparisons"][0]["eligible"])
+        self.assertIsNone(result["comparisons"][0]["shared_over_flat"])
+
+    def test_failed_scan_invocation_erases_complete_ratios_or_missing_manifest(self):
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                root = self.root / str(completed)
+                raw = None
+                if completed:
+                    root.mkdir()
+                    log = self.log(self.rows())
+                    raw = log.read_bytes()
+                    shutil.copyfile(log, root / "harness.log")
+                    result = receipt.validate_scan_log(log, "evpn-soak")
+                    self.assertTrue(all(c["eligible"] for c in result["comparisons"]))
+                    self.assertTrue(all(c["shared_over_flat"] for c in result["comparisons"]))
+                    receipt.write_json(root / "comparison.json", result)
+                result = subprocess.run(
+                    ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan",
+                     str(root), "--failed-driver-exit", "137"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue((root / "comparison.json").exists(), "structured failure envelope missing")
+                envelope = json.loads((root / "comparison.json").read_text())
+                self.assertFalse(envelope.get("qualification_passed", True))
+                self.assertEqual(envelope["schema"], receipt.SCAN_SCHEMA)
+                self.assertEqual(envelope["driver_invocation_exit"], 137)
+                self.assertEqual(envelope["samples"], [])
+                self.assertEqual(envelope["comparisons"], [])
+                self.assertTrue(envelope["candidate_failures"])
+                self.assertNotIn("ratio", json.dumps(envelope))
+                self.assertEqual(result.returncode, 1)
+                if raw is not None:
+                    self.assertEqual((root / "harness.log").read_bytes(), raw)
+
+    def test_scan_zero_tick_denominator_has_no_cpu_ratio(self):
+        rows = self.rows()
+        for row in rows:
+            row["phases"]["shape"]["cpu_ticks"] = 0
+        result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        self.assertIsNone(result["comparisons"][0]["shared_over_flat"]["shape"]["cpu_ticks"])
+
+    def test_independent_shape_can_exceed_capture_without_fake_tick_minimum(self):
+        rows = self.rows()
+        for row in rows:
+            row["phases"]["shape"].update(wall_ns=3000, cpu_ticks=1)
+            row["phases"]["capture"].update(wall_ns=2000, cpu_ticks=0)
+        result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        self.assertTrue(all(row["eligible"] for row in result["comparisons"]))
+        self.assertIsNone(result["comparisons"][0]["shared_over_flat"]["capture"]["cpu_ticks"])
+
+    def test_memory_entrypoint_derivation_is_exact_and_verifiable(self):
+        path = self.root / "frozen-instrumentation/bench/scale/rrharness/src/main.rs"
+        path.parent.mkdir(parents=True)
+        original = "// fixture\n" + "".join(receipt.SCAN_DISPATCH) + "// memory path\n"
+        path.write_text(original)
+        metadata = self.root / "memory-entrypoint-derivation.json"
+        receipt.normalize_memory_entrypoint(path, metadata)
+        digest = receipt.hashlib.sha256(metadata.read_bytes()).hexdigest()
+        receipt.validate_memory_derivation(self.root, digest)
+        self.assertEqual("// fixture\n// memory path\n", path.read_text())
+        path.write_text(path.read_text() + "// unrelated removal\n")
+        with self.assertRaises(receipt.InvalidReceipt):
+            receipt.validate_memory_derivation(self.root, digest)
+
+    def test_memory_entrypoint_missing_duplicate_or_mutated_anchor_fails_closed(self):
+        original = "".join(receipt.SCAN_DISPATCH)
+        for block in receipt.SCAN_DISPATCH:
+            for broken in (original.replace(block, ""), original + block,
+                           original.replace(block, block.replace("recovery_scan", "wrong_scan"))):
+                with self.subTest(block=block, broken=broken):
+                    path = self.root / "main.rs"
+                    path.write_text(broken)
+                    with self.assertRaises(receipt.InvalidReceipt):
+                        receipt.normalize_memory_entrypoint(path, self.root / "derivation.json")
+                    self.assertEqual(broken, path.read_text())
+
+    def test_live_memory_entrypoint_derives_without_other_source_changes(self):
+        source = Path(__file__).parent / "rrharness/src/main.rs"
+        path = self.root / "main.rs"
+        original = source.read_text()
+        path.write_text(original)
+        receipt.normalize_memory_entrypoint(path, self.root / "derivation.json")
+        expected = original
+        for block in receipt.SCAN_DISPATCH:
+            expected = expected.replace(block, "", 1)
+        self.assertEqual(expected, path.read_text())
 
 
 if __name__ == "__main__":

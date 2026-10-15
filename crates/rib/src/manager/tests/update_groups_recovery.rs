@@ -452,16 +452,20 @@ fn common_recovery_fallback_does_not_invent_private_flowspec_delivery() {
     let encoder = MockExactExportEncoder::accepting(1);
     encoder.set_profile(1, [key.clone()]);
     manager.peer_export_encoders.insert(member, encoder);
-    assert!(manager.try_send_and_commit_outbound_update(
-        member,
-        crate::manager::distribution::OutboundCommitBatch {
-            flowspec_announce: vec![flowspec],
-            ..crate::manager::distribution::OutboundCommitBatch::with_unicast(
-                vec![make_route(prefix(1), Ipv4Addr::new(192, 0, 2, 1))].into(),
-                vec![None].into(),
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                member,
+                crate::manager::distribution::OutboundCommitBatch {
+                    flowspec_announce: vec![flowspec],
+                    ..crate::manager::distribution::OutboundCommitBatch::with_unicast(
+                        vec![make_route(prefix(1), Ipv4Addr::new(192, 0, 2, 1))].into(),
+                        vec![None].into(),
+                    )
+                },
             )
-        },
-    ));
+            .is_ok()
+    );
     let update = receiver.try_recv().unwrap();
     assert_eq!(update.announce.len(), 1);
     assert!(update.flowspec_announce.is_empty());
@@ -866,4 +870,55 @@ fn a_same_session_table_replay_rejection_withdraws_the_actual_prior() {
     }
     assert_eq!(withdrawals, vec![(Prefix::V4(prefix(1)), 0)]);
     assert!(!manager.pending_group_admitted.contains_key(&member));
+}
+
+#[test]
+fn grouped_capture_orders_real_old_values_and_recovers_exact_withdrawals() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let keys: Vec<_> = (1..=64).rev().collect();
+    source_update(&mut manager, &keys, &[]);
+    let peers = [
+        IpAddr::from(Ipv4Addr::new(10, 222, 4, 1)),
+        IpAddr::from(Ipv4Addr::new(10, 222, 4, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for peer in peers {
+        let (outbound, mut receiver) = mpsc::channel(128);
+        manager.handle_update(peer_up(peer, outbound, None));
+        let mut admitted = HashSet::new();
+        while let Ok(update) = receiver.try_recv() {
+            admitted.extend(update.announce.iter().map(|route| route.prefix));
+        }
+        assert_eq!(
+            admitted,
+            keys.iter().map(|n| Prefix::V4(prefix(*n))).collect()
+        );
+        assert!(manager.mark_outbound_dirty(peer));
+        let proof = manager.pending_group_admitted.get(&peer).unwrap();
+        assert_eq!(proof.len(), 64);
+        for n in &keys {
+            assert!(proof.contains(&ExactExportKey::Unicast(Prefix::V4(prefix(*n)), 0)));
+        }
+        receivers.push(receiver);
+    }
+    let withdrawn: Vec<_> = keys.iter().copied().filter(|n| n % 2 == 0).collect();
+    source_update(&mut manager, &[], &withdrawn);
+    while manager.resync_dirty_peers_bounded() {}
+    for (peer, mut receiver) in peers.into_iter().zip(receivers) {
+        let mut actual = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            actual.extend(update.withdraw);
+        }
+        assert_eq!(actual.len(), withdrawn.len());
+        assert_eq!(
+            actual.into_iter().collect::<HashSet<_>>(),
+            withdrawn
+                .iter()
+                .map(|n| (Prefix::V4(prefix(*n)), 0))
+                .collect()
+        );
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert!(!manager.pending_group_admitted.contains_record(peer));
+    }
 }

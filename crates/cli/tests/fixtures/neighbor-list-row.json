@@ -7,6 +7,7 @@
   "uptime_seconds": 18446744073709551615,
   "prefixes_received": 104,
   "prefixes_sent": 105,
+  "prefixes_sent_pending": true,
   "messages_received": 123,
   "messages_sent": 124,
   "flap_count": 110,

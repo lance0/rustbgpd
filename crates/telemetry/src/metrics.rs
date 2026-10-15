@@ -647,6 +647,7 @@ struct BgpMetricsInner {
 
     // ── RIB drops ───────────────────────────────────────────────
     outbound_route_drops: IntCounterVec,
+    outbound_commit_refusals: IntCounterVec,
     inbound_rib_backpressure: IntCounterVec,
     hold_timer_rearmed_pending_input: IntCounterVec,
     send_hold_expirations: IntCounterVec,
@@ -1513,9 +1514,18 @@ impl BgpMetrics {
         let outbound_route_drops = IntCounterVec::new(
             Opts::new(
                 "bgp_outbound_route_drops_total",
-                "Outbound BGP work dropped because the peer writer channel was full or closed.",
+                "Outbound BGP work of any address family not handed to the peer writer because its channel was full or closed; the RIB marks the peer dirty and resyncs it.",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let outbound_commit_refusals = IntCounterVec::new(
+            Opts::new(
+                "bgp_outbound_commit_refusals_total",
+                "Outbound transactions refused fail-closed before reaching the peer writer, by bounded reason; the RIB marks the peer dirty and resyncs it once the condition clears.",
+            ),
+            &["peer", "reason"],
         )
         .expect("valid metric definition");
 
@@ -1631,13 +1641,19 @@ impl BgpMetrics {
         let rib_dirty_resync = IntCounterVec::new(
             Opts::new(
                 "bgp_rib_dirty_resync_total",
-                "Dirty-peer resync timer fires, by outcome: 'cleared' (all dirty \
-                 peers resynced) or 'still_dirty' (at least one peer remains dirty \
-                 and the 1s timer re-arms).",
+                "Dirty-peer resync timer outcomes: 'still_dirty' (a tick left \
+                 at least one peer dirty and the 1s timer re-arms) or 'cleared' \
+                 (a tick drained the work, or the loop saw a message handler drain \
+                 it; drains on early-continue loop paths may go uncounted).",
             ),
             &["outcome"],
         )
         .expect("valid metric definition");
+        // Both outcomes exist at 0 from startup, so the first increment of
+        // either one is a visible `increase()` rather than a new series.
+        for outcome in ["cleared", "still_dirty"] {
+            rib_dirty_resync.with_label_values(&[outcome]);
+        }
 
         let rib_ingest_channel_depth = IntGauge::new(
             "bgp_rib_ingest_channel_depth",
@@ -3141,6 +3157,9 @@ impl BgpMetrics {
             .register(Box::new(outbound_route_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(outbound_commit_refusals.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(inbound_rib_backpressure.clone()))
             .expect("metric not already registered");
         registry
@@ -3690,6 +3709,7 @@ impl BgpMetrics {
             outbound_prefix_blocked,
             orf_capacity_rejections,
             outbound_route_drops,
+            outbound_commit_refusals,
             inbound_rib_backpressure,
             hold_timer_rearmed_pending_input,
             send_hold_expirations,
@@ -3989,6 +4009,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocked, peer);
         Self::reap_peer_series_from_vec(&self.0.orf_capacity_rejections, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_route_drops, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_commit_refusals, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_outbound_registration_replaced, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_stale_peer_down_ignored, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_stale_session_message_ignored, peer);
@@ -5059,9 +5080,22 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Record an outbound route update drop for a peer.
+    /// Record outbound work of any family that the peer writer channel did
+    /// not accept (full or closed).
     pub fn record_outbound_route_drop(&self, peer: &str) {
         self.0.outbound_route_drops.with_label_values(&[peer]).inc();
+    }
+
+    /// Record an outbound transaction refused before the peer writer.
+    pub fn record_outbound_commit_refusal(
+        &self,
+        peer: &str,
+        reason: crate::reason_labels::OutboundCommitRefusal,
+    ) {
+        self.0
+            .outbound_commit_refusals
+            .with_label_values(&[peer, reason.as_str()])
+            .inc();
     }
 
     /// Record an inbound route batch that blocked on a full RIB channel
@@ -7347,7 +7381,7 @@ mod tests {
         let text = gather_text(&m);
 
         assert!(text.lines().any(|line| {
-            line == "# HELP bgp_outbound_route_drops_total Outbound BGP work dropped because the peer writer channel was full or closed."
+            line == "# HELP bgp_outbound_route_drops_total Outbound BGP work of any address family not handed to the peer writer because its channel was full or closed; the RIB marks the peer dirty and resyncs it."
         }));
         assert!(text.lines().any(|line| {
             line == "# HELP bgp_event_outbox_dropped_total Events lost before durable storage, or committed events skipped during durable cursor delivery, by category and reason (ADR-0072)."
@@ -9766,6 +9800,17 @@ mod tests {
         assert_eq!(m.0.rib_ingest_channel_depth.get(), 17);
     }
 
+    /// `increase()` cannot see the first increment of a series created by that
+    /// increment, so both outcomes must exist at 0 from startup.
+    #[test]
+    fn dirty_resync_outcomes_are_exported_at_zero_before_any_tick() {
+        let text = gather_text(&BgpMetrics::new());
+        for outcome in ["cleared", "still_dirty"] {
+            let series = format!("bgp_rib_dirty_resync_total{{outcome=\"{outcome}\"}} 0");
+            assert!(text.lines().any(|line| line == series), "missing {series}");
+        }
+    }
+
     fn repo_doc(path: &str) -> String {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -9850,6 +9895,10 @@ mod tests {
         m.record_orf_capacity_rejection(peer, "ipv4_unicast");
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
+        m.record_outbound_commit_refusal(
+            peer,
+            crate::reason_labels::OutboundCommitRefusal::SelectionGate,
+        );
         m.record_inbound_rib_backpressure(peer);
         m.record_hold_timer_rearmed_pending_input(peer);
         m.record_send_hold_expiration(peer);
@@ -9922,10 +9971,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 75 peer-labeled series; state transitions and EVPN discard types
+        // 76 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 75);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 76);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -9935,7 +9984,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 75);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 76);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -10221,7 +10270,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 63] = [
+    const PEER_LABELED_FAMILIES: [&str; 64] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -10247,6 +10296,7 @@ mod tests {
         "bgp_notifications_sent_total",
         "bgp_orf_capacity_rejections_total",
         "bgp_otc_routes_blocked_total",
+        "bgp_outbound_commit_refusals_total",
         "bgp_outbound_prefix_blocked_total",
         "bgp_outbound_prefix_blocking",
         "bgp_outbound_prefix_headroom",

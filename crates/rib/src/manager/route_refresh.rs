@@ -1940,53 +1940,54 @@ impl RibManager {
                 probe_cache: &mut shared.probe_cache,
                 lazy_group_prior: None,
             });
-        if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
-            peer,
-            OutboundCommitBatch {
-                force_unicast_replay: true,
-                defer_grouped_refresh_prior,
-                unicast_otc_prechecked,
-                announce_source_exclusion,
-                shared_group_encode,
-                withdraw: unicast.withdraw,
-                end_of_rib,
-                refresh_markers,
-                flowspec_announce: fs_announce,
-                flowspec_withdraw: fs_withdraw,
-                evpn_announce,
-                evpn_withdraw,
-                evpn_complete_feed,
-                bgpls_announce,
-                bgpls_withdraw,
-                vpn_announce,
-                vpn_withdraw,
-                labeled_announce,
-                labeled_withdraw,
-                rtc_announce,
-                rtc_withdraw,
-                ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
-            },
-            group_prior,
-            shared_unicast_precommit,
-            member_of.is_none().then_some(&all_prefixes),
-            None,
-            None,
-        ) {
+        if let Err(failure) = self
+            .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+                peer,
+                OutboundCommitBatch {
+                    force_unicast_replay: true,
+                    defer_grouped_refresh_prior,
+                    unicast_otc_prechecked,
+                    announce_source_exclusion,
+                    shared_group_encode,
+                    withdraw: unicast.withdraw,
+                    end_of_rib,
+                    refresh_markers,
+                    flowspec_announce: fs_announce,
+                    flowspec_withdraw: fs_withdraw,
+                    evpn_announce,
+                    evpn_withdraw,
+                    evpn_complete_feed,
+                    bgpls_announce,
+                    bgpls_withdraw,
+                    vpn_announce,
+                    vpn_withdraw,
+                    labeled_announce,
+                    labeled_withdraw,
+                    rtc_announce,
+                    rtc_withdraw,
+                    ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
+                },
+                group_prior,
+                shared_unicast_precommit,
+                member_of.is_none().then_some(&all_prefixes),
+                None,
+                None,
+            )
+        {
             if let Some(blocking) = prior_blocking {
                 self.set_outbound_blocking(peer, afi, blocking);
             }
-            self.metrics.record_outbound_route_drop(&peer.to_string());
             match replay_kind {
                 FamilyReplayKind::PeerRefresh { .. } => {
-                    warn!(%peer, ?family, "outbound channel full during route refresh response");
+                    warn!(%peer, ?family, reason = failure.as_str(), "route refresh response not sent");
                     self.pending_refresh.entry(peer).or_default().insert(family);
                     self.mark_outbound_dirty(peer);
                 }
                 FamilyReplayKind::PrefixLimitRecovery => {
-                    warn!(%peer, ?family, "outbound channel full during prefix-limit recovery");
+                    warn!(%peer, ?family, reason = failure.as_str(), "prefix-limit recovery replay not sent");
                 }
                 FamilyReplayKind::OperatorReplay => {
-                    warn!(%peer, ?family, "outbound channel full during explicit outbound replay");
+                    warn!(%peer, ?family, reason = failure.as_str(), "explicit outbound replay not sent");
                 }
             }
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);

@@ -451,6 +451,18 @@ attachment; refusal retries a fitting flat proof before the counted no-proof
 fallback. The [snapshot-churn receipt](../perf/update-group-recovery-snapshot-churn-2026-10-14.md)
 qualifies its recorded shapes, not arbitrary churn or general regroup scale.
 
+Reuse also has a capture-cost gate. The
+[capture-scan amendment](#amendment-2026-10-15-recovery-capture-scan-cost)
+requires ordering costs in the measured phase, separate sorted/shuffled receipts
+and a matched whole-system comparison; logical byte savings alone do not accept
+the live unicast/VPN CPU trade.
+
+Capture cost remains a release gate for the live unicast/VPN path. The
+[merge-capture receipt](../perf/update-group-recovery-merge-capture-scans-2026-10-15.md)
+misses the approximately 1.5 times shared/flat target in all 24 unicast/VPN cells.
+Linear classification alone does not accept complete-capture cost or the
+CPU/memory trade. See the [capture-cost amendment](#amendment-2026-10-15-capture-cost-candidate-not-accepted).
+
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
 withdraws equals the per-peer path, with exact NLRI and prepared attribute bytes.
@@ -525,6 +537,16 @@ tests.
    invalidation, metrics and BMP surfaces; review any dirty-read status change
    against the maintained contract without changing the stable inventory here.
    Keep unqualified RTC EVPN on its private-family fallback.
+
+Qualify recovery capture scans separately with same-revision shared and explicit
+flat controls. Exercise live older universes, sparse OLD additions/removals and
+owner-record scaling; count key visits and search comparisons in passes separate
+from measured count/capture phases. Preserve refusals without reporting a ratio.
+Materialize OLD inputs before timing and measure count and complete capture in
+independent invocations. Credit rows describe logical daemon ledger reservation,
+excluding input fixtures, allocator overhead and RSS.
+These component receipts do not qualify complete-feed settlement, fleet regroup,
+readiness, daemon memory or wire behavior.
 
 Before activating grouping in main, repeat the fixed-route-total,
 two-receiver-count memory cells with release,
@@ -616,3 +638,62 @@ Qualify mass reevaluation and peer-down with matched off-box cgroup receipts
 against the original parent and the bounded-flat implementation before accepting
 the release memory envelope. Do not replace the earlier receipt or extrapolate a
 modelled component charge into a whole-daemon memory claim.
+
+## Amendment (2026-10-15): recovery capture scan cost
+
+The shared unicast/VPN capture path is live; only EVPN group ownership remains
+disabled. The [initial capture-scan receipt](../perf/update-group-recovery-capture-scans-2026-10-15.md)
+found shared capture substantially slower than explicit flat capture. Its OLD
+fixtures were sorted before timing. Live unicast slab iteration and VPN/EVPN
+hash-map iteration do not promise sorted OLD keys, so a linear merge cannot
+assume that ordering.
+
+Order borrowed route references in a fallibly allocated temporary buffer before
+shared capture. Charge its actual capacity and header throughout ordering,
+universe attachment and proof population; free it before refunding credit or
+retrying flat capture. Keep the existing peer and daemon limits. Allocation or
+budget refusal for this optional buffer must leave flat capture available.
+Sorted shape classification and population walk the universe monotonically;
+generic unordered callers retain a safe bounded-search fallback. Sorting itself
+remains O(n log n), and sparse OLD subsets may use binary lookup rather than
+walking a much larger universe.
+
+Requalify on fresh hosted runners with sorted and deterministically shuffled OLD
+fixtures reported separately for every capture-scan profile. Complete capture
+includes the production count traversal, temporary allocation, collection,
+ordering, classification, reservation, population, sealing and buffer release.
+Classification counters exclude sorting comparisons and do not establish an
+O(n) bound for the complete operation. Preserve the initial receipt; a new
+method needs its own source-pinned receipt.
+
+The acceptance target is shared complete capture within approximately 1.5 times
+flat, with no proof loss or refusal hidden from ratios. A component result alone
+does not qualify release: compare whole-system mass-dirty readiness and
+convergence with sharing enabled and disabled, and run the soak on the actual
+release candidate. If the capture target is missed, review a size/churn sharing
+gate or a return to flat unicast/VPN capture before release. The earlier
+component and memory receipts do not waive this cost gate.
+
+## Amendment (2026-10-15): capture-cost candidate not accepted
+
+The [merge-capture receipt](../perf/update-group-recovery-merge-capture-scans-2026-10-15.md)
+records unmerged candidate `7e9fbd30f36c826a64943781b1ced1001f98f183` in
+hosted run 38670839102. Its six fresh profile/order campaigns completed all
+36 cells and 144 legs with exact proofs, zero refusals and clean settlement.
+That is evidence completeness, not acceptance of runtime cost.
+
+Live OLD iteration is not guaranteed to be sorted. The candidate accounts for
+borrowed-reference collection and sorting before linear classification and
+population. Shared/flat complete-capture ratios reach 2.989 for shuffled
+unicast and 6.691 for shuffled VPN; all 24 unicast/VPN cells miss the agreed
+approximate 1.5 target. Sorting remains O(n log n). The earlier key-only,
+presorted receipt is preserved and cannot establish an attributable absolute
+speedup across these methods.
+
+This candidate does not settle the live unicast/VPN capture cost. Review a
+bounded sharing gate or exact-reserved flat full-OLD capture as a separate
+CPU/memory decision. Keep the existing 64 MiB / 512 MiB limits and conservative
+no-proof contract; do not hide fallback or raise caps to pass a comparison.
+Matched whole-system mass-dirty readiness, receiver convergence and memory
+evidence must exercise the selected path, followed by a soak on the actual
+release candidate. EVPN ownership remains disabled under its existing gates.

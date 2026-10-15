@@ -12,9 +12,12 @@ pub(in crate::manager) use crate::update::EvpnRecoveryExhaustionCause as Exhaust
 use rustbgpd_wire::EvpnRouteKey;
 use smallvec::SmallVec;
 
+use crate::route::EvpnRibRoute;
+
 pub(in crate::manager) const PEER_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 pub(in crate::manager) const DAEMON_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 
+type CaptureRefs<'a> = SmallVec<[&'a EvpnRibRoute; 0]>;
 type Keys = SmallVec<[EvpnRouteKey; 0]>;
 type Records = SmallVec<[Record; 0]>;
 type Words = SmallVec<[u64; 0]>;
@@ -144,6 +147,7 @@ struct Record {
     universe_charge: usize,
     words: Words,
     masked: usize,
+    capture_scratch: usize,
     peer_peak: usize,
     // Duplicated within the charged peer range; mutations maintain one total.
     peer_retained: usize,
@@ -154,6 +158,7 @@ impl Record {
         size_of::<Self>()
             + self.keys.capacity() * size_of::<EvpnRouteKey>()
             + self.words.capacity() * size_of::<u64>()
+            + self.capture_scratch
     }
 }
 
@@ -240,7 +245,7 @@ impl EvpnRecoveryProvenance {
     }
 
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "bench-internals")),
         expect(
             dead_code,
             reason = "G4 mass-dirty qualification will consume retained and peak daemon credits"
@@ -609,6 +614,7 @@ impl EvpnRecoveryProvenance {
                 universe_charge: 0,
                 words: Words::new(),
                 masked: 0,
+                capture_scratch: 0,
                 peer_peak: target_peak.max(prior_peak),
                 peer_retained: prior_usage.retained + size_of::<Record>(),
             },
@@ -634,6 +640,10 @@ impl EvpnRecoveryProvenance {
         self.universes
             .binary_search_by_key(&handle.0, |universe| universe.handle.0)
             .ok()
+    }
+
+    pub(in crate::manager) fn universe_is_live(&self, handle: UniverseHandle) -> bool {
+        self.universe_index(handle).is_some()
     }
 
     fn peer_references_universe(&self, peer: IpAddr, universe: UniverseHandle) -> bool {
@@ -679,14 +689,26 @@ impl EvpnRecoveryProvenance {
         let universe = hint
             .and_then(|handle| self.universe_index(handle))
             .map(|index| self.universes[index].keys.as_slice());
+        let mut cursor = None;
+        let mut previous = None;
+        let (count, upper) = keys.size_hint();
+        let mut unordered = universe.is_some_and(|universe| {
+            upper != Some(count)
+                || universe.len()
+                    > count.saturating_mul((usize::BITS - universe.len().leading_zeros()) as usize)
+        });
         keys.try_fold((0_usize, 0_usize), |(count, additions), key| {
             checkpoint(false);
             let missing = universe.is_some_and(|keys| {
-                keys.binary_search_by(|prior| {
-                    checkpoint(false);
-                    prior.cmp(&key)
-                })
-                .is_err()
+                Self::capture_position(
+                    keys,
+                    key,
+                    &mut cursor,
+                    &mut previous,
+                    &mut unordered,
+                    checkpoint,
+                )
+                .is_none()
             });
             Ok((
                 count.checked_add(1).ok_or_else(Self::overflow)?,
@@ -695,6 +717,174 @@ impl EvpnRecoveryProvenance {
                     .ok_or_else(Self::overflow)?,
             ))
         })
+    }
+
+    // Monotone inputs visit each skipped universe row once. An unordered input
+    // permanently switches to binary search, avoiding repeated full scans.
+    fn capture_position(
+        keys: &[EvpnRouteKey],
+        key: EvpnRouteKey,
+        cursor: &mut Option<usize>,
+        previous: &mut Option<EvpnRouteKey>,
+        unordered: &mut bool,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Option<usize> {
+        *unordered |= previous.is_some_and(|prior| prior > key);
+        *previous = Some(key);
+        let mut position = if *unordered || cursor.is_none() {
+            keys.partition_point(|prior| {
+                checkpoint(false);
+                *prior < key
+            })
+        } else {
+            cursor.unwrap()
+        };
+        while let Some(prior) = keys.get(position) {
+            checkpoint(false);
+            match prior.cmp(&key) {
+                std::cmp::Ordering::Less => position += 1,
+                order => {
+                    *cursor = Some(position);
+                    return (order == std::cmp::Ordering::Equal).then_some(position);
+                }
+            }
+        }
+        *cursor = Some(position);
+        None
+    }
+
+    /// Sort actual OLD route references under the existing peer/daemon caps.
+    /// A refused optional buffer is freed before the flat caller retries.
+    pub(in crate::manager) fn with_ordered_capture<'a, A, F>(
+        &mut self,
+        handle: ProvenanceHandle,
+        count: usize,
+        actual: A,
+        checkpoint: &mut F,
+        capture: impl FnOnce(
+            &mut Self,
+            &[&'a EvpnRibRoute],
+            &mut F,
+        ) -> Result<Option<UniverseHandle>, Exhaustion>,
+    ) -> Result<Option<UniverseHandle>, Exhaustion>
+    where
+        A: Iterator<Item = &'a EvpnRibRoute>,
+        F: FnMut(bool),
+    {
+        let Some(index) = self.checked_handle_index(handle)? else {
+            return Ok(None);
+        };
+        let extra = count
+            .checked_mul(size_of::<&EvpnRibRoute>())
+            .and_then(|bytes| bytes.checked_add(size_of::<CaptureRefs<'_>>()))
+            .ok_or_else(Self::overflow)?;
+        let peer_bytes = self
+            .peer_usage(handle.owner.peer)
+            .retained
+            .checked_add(extra)
+            .ok_or_else(Self::overflow)?;
+        let daemon = self
+            .daemon_used
+            .checked_add(extra)
+            .ok_or_else(Self::overflow)?;
+        if self.check(handle.owner.peer, peer_bytes, daemon).is_err() {
+            return Ok(None);
+        }
+        self.daemon_used = daemon;
+        self.daemon_peak = self.daemon_peak.max(daemon);
+        self.note_peer_peak(handle.owner.peer, peer_bytes);
+        self.set_peer_retained(handle.owner.peer, peer_bytes);
+        self.records[index].capture_scratch += extra;
+        let mut ordered = CaptureRefs::new();
+        checkpoint(true);
+        let allocated = self.allocation_permitted() && ordered.try_grow(count).is_ok();
+        checkpoint(true);
+        let result = if allocated {
+            let mut complete = true;
+            for route in actual {
+                checkpoint(false);
+                if ordered.len() == count {
+                    complete = false;
+                    break;
+                }
+                ordered.push(route);
+            }
+            if !complete || ordered.len() != count {
+                Err(self.mark_exhausted(handle, Self::admission_invariant()))
+            } else {
+                checkpoint(true);
+                ordered.sort_unstable_by(|a, b| {
+                    checkpoint(false);
+                    a.key().cmp(&b.key())
+                });
+                checkpoint(true);
+                capture(self, &ordered, checkpoint)
+            }
+        } else {
+            Ok(None)
+        };
+        checkpoint(true);
+        drop(ordered);
+        checkpoint(true);
+        self.records[index].capture_scratch -= extra;
+        self.daemon_used -= extra;
+        self.set_peer_retained(
+            handle.owner.peer,
+            self.peer_usage(handle.owner.peer).retained - extra,
+        );
+        result
+    }
+
+    /// Mark only actual OLD keys, using local ordered cursors for the batch.
+    pub(in crate::manager) fn capture_batch_with_checkpoint(
+        &mut self,
+        handle: ProvenanceHandle,
+        keys: impl Iterator<Item = EvpnRouteKey>,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<bool, Exhaustion> {
+        let Some(index) = self.checked_handle_index(handle)? else {
+            return Ok(false);
+        };
+        if !self.records[index].primary || !matches!(self.records[index].state, State::Capturing) {
+            return Ok(false);
+        }
+        let universe = self.records[index]
+            .universe
+            .and_then(|handle| self.universe_index(handle));
+        let mut cursor = None;
+        let mut previous = None;
+        let (count, upper) = keys.size_hint();
+        let mut unordered = universe.is_some_and(|index| {
+            let length = self.universes[index].keys.len();
+            upper != Some(count)
+                || length > count.saturating_mul((usize::BITS - length.leading_zeros()) as usize)
+        });
+        for key in keys {
+            checkpoint(false);
+            let position = universe.and_then(|universe| {
+                Self::capture_position(
+                    &self.universes[universe].keys,
+                    key,
+                    &mut cursor,
+                    &mut previous,
+                    &mut unordered,
+                    checkpoint,
+                )
+            });
+            if let Some(position) = position {
+                let bit = 1_u64 << (position % 64);
+                if self.records[index].words[position / 64] & bit == 0 {
+                    self.records[index].words[position / 64] |= bit;
+                    self.records[index].masked += 1;
+                }
+            } else {
+                if self.records[index].keys.len() == self.records[index].keys.capacity() {
+                    return Err(self.mark_exhausted(handle, Self::admission_invariant()));
+                }
+                self.records[index].keys.push(key);
+            }
+        }
+        Ok(true)
     }
 
     /// The current empty record's base takes precedence over a group hint.
@@ -1959,7 +2149,8 @@ mod tests {
             .sum::<usize>();
         for record in &ledger.records {
             daemon += record.keys.capacity() * size_of::<EvpnRouteKey>()
-                + record.words.capacity() * size_of::<u64>();
+                + record.words.capacity() * size_of::<u64>()
+                + record.capture_scratch;
             let mut expected = 0;
             let mut referenced = Vec::new();
             for other in ledger
@@ -1969,7 +2160,8 @@ mod tests {
             {
                 expected += size_of::<Record>()
                     + other.keys.capacity() * size_of::<EvpnRouteKey>()
-                    + other.words.capacity() * size_of::<u64>();
+                    + other.words.capacity() * size_of::<u64>()
+                    + other.capture_scratch;
                 if let Some(handle) = other.universe {
                     let universe = &ledger.universes[ledger.universe_index(handle).unwrap()];
                     let charge = size_of::<Universe>()
@@ -3279,5 +3471,253 @@ mod tests {
             assert_eq!(ledger.proof_keys(first).unwrap(), Some(raw.to_vec()));
             assert_running_charges(&ledger);
         }
+    }
+    fn ordered_route(n: u32) -> EvpnRibRoute {
+        EvpnRibRoute {
+            route: rustbgpd_wire::EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+                rd: RouteDistinguisher::ZERO,
+                ethernet_tag: EthernetTagId(n),
+                originator_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            }),
+            next_hop: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            link_local_next_hop: None,
+            peer: owner(1, 1).peer,
+            attributes: crate::attr_set::AttrSet::new(vec![]),
+            received_at: std::time::Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::LOCALHOST,
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    #[test]
+    fn ordered_capture_sorts_old_values_and_keeps_only_actual_mask_and_sparse_keys() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let routes: Vec<_> = (0..4097).map(ordered_route).collect();
+        let raw: Vec<_> = routes[..4096].iter().map(EvpnRibRoute::key).collect();
+        let anchor = ledger.register(owner(1, 1)).unwrap();
+        let hint = shared_capture(&mut ledger, anchor, None, &raw, &raw);
+        let target = ledger.register(owner(2, 1)).unwrap();
+        ledger.finish_recovery(target).unwrap();
+        ledger.begin_capture(target).unwrap();
+        let mut visits = 0;
+        assert_eq!(
+            ledger
+                .with_ordered_capture(
+                    target,
+                    4097,
+                    routes[1..]
+                        .iter()
+                        .rev()
+                        .chain(std::iter::once(&routes[100])),
+                    &mut |_| {},
+                    |ledger, ordered, checkpoint| {
+                        let index = ledger.index(target).unwrap();
+                        assert_eq!(
+                            ledger.records[index].capture_scratch,
+                            size_of::<CaptureRefs<'_>>() + 4097 * size_of::<&EvpnRibRoute>()
+                        );
+                        assert_running_charges(ledger);
+                        let shape = ledger.capture_shape(
+                            Some(hint),
+                            ordered.iter().map(|route| route.key()),
+                            &mut |force| visits += usize::from(!force),
+                        )?;
+                        assert_eq!(shape, (4097, 1));
+                        assert!(visits <= 3 * 4097 + 64);
+                        let shared = ledger.share_capture(
+                            target,
+                            Some(hint),
+                            raw.len(),
+                            raw.iter().copied(),
+                            shape,
+                            checkpoint,
+                        )?;
+                        let mut population_visits = 0;
+                        assert!(ledger.capture_batch_with_checkpoint(
+                            target,
+                            ordered.iter().map(|route| route.key()),
+                            &mut |force| population_visits += usize::from(!force)
+                        )?);
+                        assert!(
+                            population_visits <= 3 * 4097 + 64,
+                            "population must merge, not binary-search each OLD key"
+                        );
+                        Ok(shared)
+                    }
+                )
+                .unwrap(),
+            Some(hint)
+        );
+        assert_eq!(
+            ledger.records[ledger.index(target).unwrap()].capture_scratch,
+            0
+        );
+        ledger.seal_capture(target).unwrap();
+        let proof = ledger.proof(target).unwrap().unwrap();
+        assert_eq!(proof.len(), 4096);
+        assert!(!proof.contains(&raw[0]));
+        assert!(routes[1..].iter().all(|route| proof.contains(&route.key())));
+        assert_eq!(ledger.proof(anchor).unwrap().unwrap().len(), 4096);
+        ledger.retire_member(anchor);
+        ledger.retire_member(target);
+        assert_eq!(
+            ledger.daemon_usage().retained,
+            size_of::<EvpnRecoveryProvenance>()
+        );
+    }
+
+    #[test]
+    fn optional_ordering_failure_preserves_flat_capture_and_owner_credit() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let handle = ledger.register(owner(1, 1)).unwrap();
+        ledger.finish_recovery(handle).unwrap();
+        ledger.begin_capture(handle).unwrap();
+        let routes = [ordered_route(1)];
+        let before = ledger.daemon_usage().retained;
+        ledger.fail_next_allocation = true;
+        assert_eq!(
+            ledger.with_ordered_capture(handle, 1, routes.iter(), &mut |_| {}, |_, _, _| panic!(
+                "refused buffer reached capture"
+            )),
+            Ok(None)
+        );
+        assert_eq!(ledger.daemon_usage().retained, before);
+        assert_eq!(
+            ledger.records[ledger.index(handle).unwrap()].capture_scratch,
+            0
+        );
+        ledger.reserve_capture(handle, 1, &mut |_| {}).unwrap();
+        ledger.capture_key(handle, routes[0].key()).unwrap();
+        ledger.seal_capture(handle).unwrap();
+        assert!(
+            ledger
+                .proof(handle)
+                .unwrap()
+                .unwrap()
+                .contains(&routes[0].key())
+        );
+        ledger.retire_member(handle);
+        assert_eq!(
+            ledger.daemon_usage().retained,
+            size_of::<EvpnRecoveryProvenance>()
+        );
+    }
+    #[test]
+    fn ordering_cap_and_cardinality_refusals_release_capacity_and_preserve_cause() {
+        for mode in ["cap", "short", "long"] {
+            let mut ledger = EvpnRecoveryProvenance::new();
+            let handle = ledger.register(owner(1, 1)).unwrap();
+            ledger.finish_recovery(handle).unwrap();
+            ledger.begin_capture(handle).unwrap();
+            let routes = [ordered_route(1), ordered_route(2)];
+            let count = match mode {
+                "short" => 3,
+                "long" => 1,
+                _ => 2,
+            };
+            let before = ledger.daemon_usage().retained;
+            if mode == "cap" {
+                ledger.peer_limit = ledger.peer_usage(handle.owner.peer).retained
+                    + size_of::<CaptureRefs<'_>>()
+                    + count * size_of::<&EvpnRibRoute>()
+                    - 1;
+            }
+            let result = ledger.with_ordered_capture(
+                handle,
+                count,
+                routes.iter(),
+                &mut |_| {},
+                |_, _, _| panic!("refused or drifting OLD reached capture"),
+            );
+            if mode == "cap" {
+                assert_eq!(result, Ok(None));
+            } else {
+                assert_eq!(
+                    result.unwrap_err().cause,
+                    ExhaustionCause::AdmissionInvariant
+                );
+            }
+            assert_eq!(ledger.daemon_usage().retained, before);
+            assert_eq!(
+                ledger.records[ledger.index(handle).unwrap()].capture_scratch,
+                0
+            );
+            assert_running_charges(&ledger);
+            ledger.retire_member(handle);
+            assert_eq!(
+                ledger.daemon_usage().retained,
+                size_of::<EvpnRecoveryProvenance>()
+            );
+        }
+    }
+    #[test]
+    fn loose_hint_shape_does_not_scan_the_universe_for_two_old_keys() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let raw: Vec<_> = (0..100_000).map(key).collect();
+        let anchor = ledger.register(owner(1, 1)).unwrap();
+        let hint = shared_capture(&mut ledger, anchor, None, &raw, &raw);
+        let actual = raw
+            .iter()
+            .copied()
+            .filter(|key| *key == raw[0] || *key == raw[99_999]);
+        assert_eq!(actual.size_hint(), (0, Some(100_000)));
+        let mut visits = 0;
+        assert_eq!(
+            ledger
+                .capture_shape(Some(hint), actual, &mut |_| visits += 1)
+                .unwrap(),
+            (2, 0)
+        );
+        assert!(
+            visits < 100,
+            "loose upper bound must not enable a whole-universe shape scan"
+        );
+    }
+
+    #[test]
+    fn loose_hint_population_keeps_sparse_subset_lookup_bounded() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let raw: Vec<_> = (0..100_000).map(key).collect();
+        let anchor = ledger.register(owner(1, 1)).unwrap();
+        let hint = shared_capture(&mut ledger, anchor, None, &raw, &raw);
+        let target = ledger.register(owner(2, 1)).unwrap();
+        ledger.finish_recovery(target).unwrap();
+        ledger.begin_capture(target).unwrap();
+        assert_eq!(
+            ledger
+                .share_capture(
+                    target,
+                    Some(hint),
+                    raw.len(),
+                    raw.iter().copied(),
+                    (500, 0),
+                    &mut |_| {}
+                )
+                .unwrap(),
+            Some(hint)
+        );
+        let actual = raw
+            .iter()
+            .copied()
+            .filter(|key| *key <= raw[498] || *key == raw[99_999]);
+        assert_eq!(actual.size_hint(), (0, Some(100_000)));
+        let mut visits = 0;
+        assert!(
+            ledger
+                .capture_batch_with_checkpoint(target, actual, &mut |_| visits += 1)
+                .unwrap()
+        );
+        ledger.seal_capture(target).unwrap();
+        let proof = ledger.proof(target).unwrap().unwrap();
+        assert_eq!(proof.len(), 500);
+        assert!(proof.contains(&raw[99_999]));
+        assert!(!proof.contains(&raw[499]));
+        assert!(
+            visits < 11_000,
+            "loose upper bound must not enable a whole-universe population scan"
+        );
+        assert_running_charges(&ledger);
     }
 }
