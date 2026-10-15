@@ -248,6 +248,11 @@ CLOSED_LABEL_SOURCES = (
         (("fn", REASON_LABELS, "OutboundCommitRefusal", "as_str"),),
     ),
     (
+        ("bgp_update_group_recovery_fallback_total",),
+        "cause",
+        (("fn", REASON_LABELS, "UpdateGroupRecoveryFallbackCause", "as_str"),),
+    ),
+    (
         ("bgp_exact_export_rejections_total",),
         "family",
         (("fn", TELEMETRY, None, "exact_export_family_label"),),

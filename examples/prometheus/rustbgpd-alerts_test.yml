@@ -1301,6 +1301,163 @@ tests:
                 member appears wedged; its resync is not draining
                 residue.
 
+  # ── BgpUpdateGroupRecoveryLimited ─────────────────────────────
+  # Each limit cause fires; missing_proof never does. The 1m increment
+  # still fires at 14m (pins a window longer than 10m) and has aged out at
+  # 22m while the 11m increment still fires (pins 15m, not 30m).
+  - interval: 1m
+    input_series:
+      - series: 'bgp_update_group_recovery_fallback_total{cause="peer_limit", instance="edge1:9179"}'
+        values: "0 1x29"
+      - series: 'bgp_update_group_recovery_fallback_total{cause="daemon_limit", instance="edge1:9179"}'
+        values: "0x5 1x24"
+      - series: 'bgp_update_group_recovery_fallback_total{cause="allocation_failure", instance="edge1:9179"}'
+        values: "0x10 1x19"
+      - series: 'bgp_update_group_recovery_fallback_total{cause="missing_proof", instance="edge1:9179"}'
+        values: "0+1x29"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: BgpUpdateGroupRecoveryLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cause: peer_limit
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group recovery fell back under a resource limit on edge1:9179 (peer_limit)"
+              description: >-
+                bgp_update_group_recovery_fallback_total{cause="peer_limit"}
+                on edge1:9179 increased by 1 in the last 15 minutes. Recovery
+                proof for at least one dirty update-group member did not fit the
+                fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+                could not be allocated, so its resync withdraws every candidate
+                prefix and re-announces the current table. Receivers see extra
+                withdrawal churn. The warning log names the peer and the
+                limiting_peer; find why members miss delivery.
+          - exp_labels:
+              severity: warning
+              cause: daemon_limit
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group recovery fell back under a resource limit on edge1:9179 (daemon_limit)"
+              description: >-
+                bgp_update_group_recovery_fallback_total{cause="daemon_limit"}
+                on edge1:9179 increased by 1 in the last 15 minutes. Recovery
+                proof for at least one dirty update-group member did not fit the
+                fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+                could not be allocated, so its resync withdraws every candidate
+                prefix and re-announces the current table. Receivers see extra
+                withdrawal churn. The warning log names the peer and the
+                limiting_peer; find why members miss delivery.
+          - exp_labels:
+              severity: warning
+              cause: allocation_failure
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group recovery fell back under a resource limit on edge1:9179 (allocation_failure)"
+              description: >-
+                bgp_update_group_recovery_fallback_total{cause="allocation_failure"}
+                on edge1:9179 increased by 1 in the last 15 minutes. Recovery
+                proof for at least one dirty update-group member did not fit the
+                fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+                could not be allocated, so its resync withdraws every candidate
+                prefix and re-announces the current table. Receivers see extra
+                withdrawal churn. The warning log names the peer and the
+                limiting_peer; find why members miss delivery.
+      - eval_time: 22m
+        alertname: BgpUpdateGroupRecoveryLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cause: allocation_failure
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group recovery fell back under a resource limit on edge1:9179 (allocation_failure)"
+              description: >-
+                bgp_update_group_recovery_fallback_total{cause="allocation_failure"}
+                on edge1:9179 increased by 1 in the last 15 minutes. Recovery
+                proof for at least one dirty update-group member did not fit the
+                fixed recovery caps (bgp_update_group_recovery_limit_bytes) or
+                could not be allocated, so its resync withdraws every candidate
+                prefix and re-announces the current table. Receivers see extra
+                withdrawal churn. The warning log names the peer and the
+                limiting_peer; find why members miss delivery.
+      - eval_time: 29m
+        alertname: BgpUpdateGroupRecoveryLimited
+        exp_alerts: []
+
+  # ── BgpOutboundResyncStalled ──────────────────────────────────
+  # edge1 is a busy reflector: peers are always dirty (a dirty-peers > 0
+  # alert would fire) but every episode completes within a minute, peaking
+  # at 59 seconds. edge3 holds one peer dirty for 600 seconds, as an RFC 4724
+  # selection deferral does, then resyncs: an alert at the doctor's 60s
+  # would fire, this one must not. On edge2 one peer stays dirty from 1m
+  # while others churn: the oldest age reaches exactly 900 at 16m (pins
+  # >= 900 and for: 0m) and clears at 18m when that peer resyncs.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rib_outbound_dirty_peers{job="rustbgpd", instance="edge1:9179"}'
+        values: "40 55 38 61 47 52 44 58 41 50 39 45 52 38 60 44 51 47 40 56 42"
+      - series: 'bgp_rib_outbound_dirty_oldest_seconds{job="rustbgpd", instance="edge1:9179"}'
+        values: "12 40 59 8 33 51 20 45 59 30 14 22 59 37 9 48 59 26 31 55 18"
+      - series: 'bgp_rib_outbound_dirty_oldest_seconds{job="rustbgpd", instance="edge3:9179"}'
+        values: "0 0+60x10 0x10"
+      - series: 'bgp_rib_outbound_dirty_oldest_seconds{job="rustbgpd", instance="edge2:9179"}'
+        values: "30 0+60x16 25 40 14"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: rustbgpd
+              instance: edge2:9179
+            exp_annotations:
+              summary: "Outbound resync stalled on edge2:9179"
+              description: >-
+                bgp_rib_outbound_dirty_oldest_seconds on edge2:9179 is
+                900 seconds: at least one peer has been dirty, without its current
+                advertised view, for 15 minutes or more. Churn across peers that
+                keep resyncing does not raise this, and RFC 4724
+                selection-deferral holds, bounded by gr_restart_time (default
+                120 seconds), end well before it. rbgp doctor warns at 60
+                seconds as an early point-in-time signal. Find the peer with
+                rbgp doctor (peer.<addr>.outbound_resync) or rbgp neighbor, and
+                check bgp_peer_slow, bgp_peer_outbound_queue_depth and
+                bgp_outbound_commit_refusals_total for the cause.
+      - eval_time: 17m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: rustbgpd
+              instance: edge2:9179
+            exp_annotations:
+              summary: "Outbound resync stalled on edge2:9179"
+              description: >-
+                bgp_rib_outbound_dirty_oldest_seconds on edge2:9179 is
+                960 seconds: at least one peer has been dirty, without its current
+                advertised view, for 15 minutes or more. Churn across peers that
+                keep resyncing does not raise this, and RFC 4724
+                selection-deferral holds, bounded by gr_restart_time (default
+                120 seconds), end well before it. rbgp doctor warns at 60
+                seconds as an early point-in-time signal. Find the peer with
+                rbgp doctor (peer.<addr>.outbound_resync) or rbgp neighbor, and
+                check bgp_peer_slow, bgp_peer_outbound_queue_depth and
+                bgp_outbound_commit_refusals_total for the cause.
+      - eval_time: 18m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts: []
+
   # ── BgpPolicyTransitionStalled ────────────────────────────────
   - interval: 30s
     input_series:
