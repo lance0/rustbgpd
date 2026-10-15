@@ -16,7 +16,7 @@ intermediate=bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00
 fail() { echo "recovery-memory: $*" >&2; exit 1; }
 
 # These are scoped child commands, never a fallback to the caller's cgroup.
-if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-scan ]]; then
+if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-scan || ${1:-} == --scope-retirement ]]; then
     mode=$1
     shift
     cgroup=$(daemon_scope_cgroup "$$") || fail 'scope membership or swap fence unavailable'
@@ -29,6 +29,7 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-s
         status=0
         scan_option=()
         [[ $mode != --scope-scan ]] || scan_option=(--scan)
+        [[ $mode != --scope-retirement ]] || scan_option=(--retirement)
         [[ $# != 7 ]] || scan_option+=(--shuffled-old)
         python3 "$checker" run-scope "$1" "$2" "$3" "$cgroup" "$4" "$5" "$6" "${scan_option[@]}" || status=$?
         record_scope_peak "$cgroup" "$2/compatibility-peak.txt" || status=1
@@ -60,8 +61,10 @@ while [[ $# -gt 0 ]]; do
     shift 2
 done
 [[ $phase == pilot || $phase == qualified ]] || fail 'invalid campaign phase'
-[[ $receipt_mode == memory || $receipt_mode == scan ]] || fail 'invalid receipt mode'
-if [[ $receipt_mode == scan ]]; then
+[[ $receipt_mode == memory || $receipt_mode == scan || $receipt_mode == retirement ]] || fail 'invalid receipt mode'
+if [[ $receipt_mode == retirement ]]; then
+    [[ $phase == qualified && ( $profile == full-uc || $profile == full-vpn ) && $selected_cell == retirement && $old_order == sorted ]] || fail 'invalid retirement selection'
+elif [[ $receipt_mode == scan ]]; then
     [[ $phase == qualified && ( $profile == full-uc || $profile == full-vpn || $profile == evpn-soak ) && $selected_cell == capture-scan ]] || fail 'invalid component scan selection'
 else
     [[ $old_order == sorted ]] || fail 'shuffled OLD is only valid for component scans'
@@ -96,6 +99,28 @@ finish() {
     rm -rf -- "$work_root"
     exit "$status"
 }
+finish_retirement() {
+    local status=$? candidate_status=0 old_status=0 remove_status=0
+    trap - EXIT
+    awk '$1 == "oom_kill" { print $2 }' /proc/vmstat > "$output/host-oom.after" || { [[ $status != 0 ]] || status=1; }
+    if [[ $status == 0 ]]; then
+        git -C "$repository" worktree remove --force "$work_root/candidate" || candidate_status=$?
+        git -C "$repository" worktree remove --force "$work_root/old-drop" || old_status=$?
+        if [[ $candidate_status == 0 && $old_status == 0 ]]; then
+            rm -rf -- "$work_root" || remove_status=$?
+        fi
+        printf '{"candidate_worktree_exit":%s,"old_drop_worktree_exit":%s,"scratch_remove_exit":%s}\n' \
+            "$candidate_status" "$old_status" "$remove_status" > "$output/cleanup-proof.json"
+        if [[ $candidate_status != 0 || $old_status != 0 || $remove_status != 0 ]]; then status=1; fi
+    fi
+    [[ $status == 0 ]] || printf '%s\n' "$work_root" > "$output/scratch-retained.txt"
+    printf '%s\n' "$status" > "$output/driver.exit"
+    if [[ $status == 0 ]]; then
+        python3 "$checker" summarize-retirement "$output" || status=$?
+        printf '%s\n' "$status" > "$output/driver.exit"
+    fi
+    exit "$status"
+}
 trap finish EXIT
 printf '%s\n' "$baseline" > "$output/baseline.sha"
 printf '%s\n' "$intermediate" > "$output/intermediate.sha"
@@ -112,8 +137,10 @@ record_command() { printf '%q ' "$@" >> "$output/commands.txt"; printf '\n' >> "
 launch_scope() {
     local unit=$1
     shift
-    record_command sudo systemd-run --scope --quiet --unit="$unit" -p MemorySwapMax=0 -- "$@"
-    sudo systemd-run --scope --quiet --unit="$unit" -p MemorySwapMax=0 -- "$@"
+    local limits=(-p MemorySwapMax=0)
+    [[ $receipt_mode != retirement ]] || limits+=(-p MemoryMax=12884901888)
+    record_command sudo systemd-run --scope --quiet --unit="$unit" "${limits[@]}" -- "$@"
+    sudo systemd-run --scope --quiet --unit="$unit" "${limits[@]}" -- "$@"
 }
 # Probe actual scope capabilities before paying for either build.
 mkdir "$output/probe"
@@ -126,6 +153,10 @@ inputs=(bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_mem
     bench/scale/rrharness/Cargo.toml bench/scale/compare-recovery-memory.sh
     bench/scale/recovery_memory.py bench/scale/cgroup-memory.sh bench/scale/provenance.sh)
 [[ $receipt_mode != scan ]] || inputs+=(bench/scale/rrharness/src/recovery_scan.rs)
+[[ $receipt_mode != retirement ]] || inputs+=(
+    bench/scale/rrharness/src/recovery_retirement.rs
+    crates/rib/src/manager/bench_support.rs crates/rib/src/manager/distribution/vpn.rs
+    crates/rib/src/manager/peer_lifecycle.rs)
 mkdir "$output/frozen-instrumentation"
 for path in "${inputs[@]}"; do
     mkdir -p -- "$output/frozen-instrumentation/$(dirname -- "$path")"
@@ -138,6 +169,80 @@ for path in "${inputs[@]}"; do
     printf '%s  %s\n' "$(provenance_sha256_file "$output/frozen-instrumentation/$path")" "$path" >> "$output/instrumentation.sha256"
 done
 instrumentation=$(provenance_sha256_file "$output/instrumentation.sha256")
+if [[ $receipt_mode == retirement ]]; then
+    # Timing uses the same current runtime in both arms, never historical controls.
+    trap finish_retirement EXIT
+    python3 - <<'PYCODE' > "$output/retirement-preflight.json"
+import json
+from pathlib import Path
+available = int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines()
+                     if line.startswith("MemAvailable:"))) * 1024
+required = 12 * 1024**3
+print(json.dumps({"available_bytes": available, "minimum_bytes": required,
+                  "memory_max": required, "swap_max": 0}))
+if available < required:
+    raise SystemExit("retirement shape requires at least 12 GiB available; refusing to resize")
+PYCODE
+    python3 "$checker" snapshot-build-inputs "$repository" "$output/committed-inputs.json"
+    python3 - "$output/manifest.json" "$head" "$instrumentation" "$profile" <<'PYCODE'
+import json
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text(json.dumps({
+    "schema": "rustbgpd.retirement-timing.campaign.v1", "candidate": sys.argv[2],
+    "instrumentation_manifest_sha256": sys.argv[3], "profile": sys.argv[4],
+    "cells": ["retirement-empty", "retirement-full"],
+    "order": ["old-drop", "candidate", "candidate", "old-drop"],
+    "memory_max": 12 * 1024**3, "build_jobs": 4,
+    "scope": "component attribution only; no daemon/fleet/readiness qualification or timing pass bar",
+}, indent=2, sort_keys=True) + "\n")
+PYCODE
+    mkdir "$output/bin"
+    for role in candidate old-drop; do
+        tree=$work_root/$role
+        git -C "$repository" worktree add --detach "$tree" "$head" > "$output/$role-worktree.log" 2>&1
+        if [[ $role == old-drop ]]; then
+            python3 "$checker" derive-retirement-control "$tree/crates/rib/src/manager/distribution/vpn.rs"
+            cp -- "$tree/crates/rib/src/manager/distribution/vpn.rs" "$output/old-drop-source.rs"
+        fi
+        git -C "$tree" diff --binary > "$output/$role-source.patch"
+        python3 "$checker" snapshot-build-inputs "$tree" "$output/$role-inputs.json"
+        record_command env CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-$role" \
+            RRHARNESS_RECOVERY_SOURCE_SHA="$head" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" \
+            cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4
+        status=0
+        (cd -- "$tree" && CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-$role" \
+            RRHARNESS_RECOVERY_SOURCE_SHA="$head" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" \
+            cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4) \
+            > "$output/$role-build.log" 2>&1 || status=$?
+        printf '%s\n' "$status" > "$output/$role-build.exit"
+        [[ $status == 0 ]] || fail "$role retirement build failed"
+        python3 "$checker" snapshot-build-inputs "$tree" "$output/$role-inputs-after.json"
+        cmp "$output/$role-inputs.json" "$output/$role-inputs-after.json" || fail 'retirement build inputs changed'
+        cp -- "$work_root/target-$role/scale/rrharness" "$output/bin/$role"
+        provenance_sha256_file "$output/bin/$role" > "$output/$role-binary.sha256"
+    done
+    ordinal=0
+    for cell in retirement-empty retirement-full; do
+        leg=0
+        for role in old-drop candidate candidate old-drop; do
+            directory=$output/$cell-$leg-$role
+            mkdir "$directory"
+            status=0
+            launch_scope "recovery-retirement-$$-$ordinal.scope" env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+                RECOVERY_MEMORY_RUNNER_ENVIRONMENT="${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}}" \
+                bash "$driver" --scope-retirement "$output/bin/$role" "$directory" "$cell" \
+                "$(cat "$output/$role-binary.sha256")" "$profile" 1 \
+                > "$directory/launcher.log" 2>&1 || status=$?
+            printf '%s\n' "$status" > "$directory/launcher.exit"
+            python3 "$checker" seal-retirement-raw "$directory"
+            [[ $status == 0 ]] || fail 'retirement actor cell failed'
+            leg=$((leg + 1))
+            ordinal=$((ordinal + 1))
+        done
+    done
+    exit 0
+fi
 if [[ $receipt_mode == scan ]]; then
     python3 - "$output/manifest.json" "$head" "$instrumentation" "$profile" "$old_order" <<'PYCODE'
 import json

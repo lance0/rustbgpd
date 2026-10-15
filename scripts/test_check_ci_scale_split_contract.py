@@ -101,7 +101,7 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_component_scan_mode_is_explicit_and_preserves_memory_matrix(self) -> None:
         for old, new in (
             ("        default: memory\n", "        default: scan\n"),
-            ("        options: [memory, scan]\n", "        options: [scan]\n"),
+            ("        options: [memory, scan, retirement]\n", "        options: [scan]\n"),
             ("        type: choice\n", "        type: boolean\n"),
             ("      recovery_receipt_mode:\n", "      ignored_mode:\n"),
             ("inputs.recovery_receipt_mode == 'scan'", "github.event_name == 'workflow_dispatch'"),
@@ -111,6 +111,15 @@ class ScaleSplitContractTests(unittest.TestCase):
             ('--mode "$RECOVERY_RECEIPT_MODE"', '--mode memory'),
         ):
             with self.subTest(old=old, replacement=new):
+                self.mutate(old, new)
+
+    def test_retirement_mode_is_explicit_and_keeps_both_full_table_profiles(self) -> None:
+        for old, new in (
+            ("inputs.recovery_receipt_mode == 'retirement'", "inputs.recovery_receipt_mode == 'memory'"),
+            ('{"profile":"full-vpn","cell":"retirement"}', '{"profile":"full-uc","cell":"retirement"}'),
+            ("[memory, scan, retirement]", "[memory, scan]"),
+        ):
+            with self.subTest(old=old):
                 self.mutate(old, new)
 
     def test_recovery_memory_receipt_requires_an_actual_toolchain_input(self) -> None:
