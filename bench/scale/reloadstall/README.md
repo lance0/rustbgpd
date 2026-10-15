@@ -4,6 +4,146 @@ Deliberate manual performance harness: CI compiles, lints, and unit-tests it, bu
 
 Route-server-scale policy-reload UPDATE-stall driver.
 
+## Full-table mass-dirty recovery qualification
+
+`run-recovery-mass-dirty.sh` compares the exact candidate daemon against a
+control derived from that same source by changing only the full-OLD capture
+sharing argument from `!group.stages_vpn()` to `false`. Grouping, projection,
+empty/incremental admission, eligibility and the 64 MiB peer / 512 MiB daemon
+recovery limits stay identical. A candidate that already captures full VPN OLD
+flat is identified explicitly: its VPN arm compares the same selected strategy,
+and is no evidence of a shared-VPN speedup. Source-anchor drift fails the run.
+
+The instrument opens one real iBGP source and 12 receiver clients for a
+no-refusal cell, or 24 for a separate cap-pressure cell. Each receiver gets
+1,000,000 IPv4 and 230,000 IPv6 keys, either unicast or VPN. VPN identity includes
+two raw RDs with identical display text, path ID zero, the exact label, prefix
+and next hop. Three dense bitmaps retain each receiver's actual fold, generation
+coverage and withdrawal coverage; Python never retains a table-sized route set.
+Their logical storage is about 5.5 MB for 12 receivers or 11.1 MB for 24.
+
+Policy, config and the static origin-AS dataset remain byte-identical within
+both arms. The source changes existing routes A→B→A over BGP; no SIGHUP or
+runtime dataset acknowledgement is involved. Each 80-key chunk has one paired
+private four-byte origin: A is 4200100000 + 2×chunk, B is A+1. All 15,375 B
+origins are preloaded in the dataset. Exact wire validation derives the AS_PATH
+from the family, key, chunk and marker, including permitted prior-value replay.
+No-refusal cells preserve every key and require zero withdrawals. Cap-pressure
+cells additionally reject four known keys in each family in B; A restores them.
+
+Receivers use SO_RCVBUF=4096 before connect (Linux reports 8192). This fixed
+pressure fixture does not establish normal-buffer throughput. After every
+churn chunk, one matching-family EoR settles the preceding distribution window
+through the existing O(1) non-route actor boundary, with no GR/LLGR active:
+15,375 EoRs per operation, 30,750 per leg, plus two baseline EoRs. There is no
+per-chunk API roundtrip or route-refresh table sweep. The final source-writer
+receipt follows actual TCP write_all/flush; it is not a RIB acknowledgement.
+
+After every receiver acknowledges pause, the controller starts the whole window
+before sending the churn command. While all remain paused, it requires two
+complete detail-query sweeps with every receiver pending in the unchanged group
+and the source clean. A CURRENT dirty episode with floored age d and query bounds
+[b,e] guarantees the interval [e−d,b]. All intervals from both sweeps must have
+a common instant. Raw bounds, ages and the intersection are retained; correctness
+mode publishes null clocks and the proof boolean. This establishes actual
+overlapping dirty episodes rather than treating sequential queries as atomic.
+An ordinary neighbor snapshot that returns the specific RIB snapshot
+`DeadlineExceeded` error retries the complete witness, discarding any partial
+sweeps. Each CLI process remains capped at 30 seconds and the remaining original
+whole-leg budget. `ordinary-snapshot-failures.jsonl` retains every failed CLI or
+JSON parsing attempt's phase, peer, failure sequence, exit status and exact stdout/stderr; leg
+results disclose the derived counts. Replay checks these records independently
+under the complete raw-evidence hash roster, including an empty failure file.
+Successful calls alone supply the dirty-query bounds. Public readiness retains
+its 250 ms deadline, and any watcher failure remains fatal.
+Dirty retained recovery entries/capacity are sampled before release. After resume,
+every target needs a real JSON `outbound routes resynced` receipt with dirty=true
+and force=false, exact final wire fold, unchanged identity/group and clean state.
+Missing receipts fail the cell; backpressure or a trigger alone is insufficient. Every named
+withdrawal must have an actual prior route, and every final family fold must be
+exact. Session replacement, slow-peer isolation, bystander/duplicate withdrawals,
+unexpected families, labels, attributes or next hops fail the run.
+Announcement checks cover the complete semantic attribute set, including the
+expected reflector additions; UPDATE packing and attribute order may differ.
+During recovery, an already-present value may be replayed before that key's
+first target event. It supplies no target coverage, and returning to the old
+value after a target announcement or withdrawal fails. The final controller
+boundary rechecks receiver errors, inventory and source/session continuity.
+
+The manifest fixes these bars before any result:
+
+- Candidate and flat daemons use isolated Cargo targets with identical locked
+  build commands and default features. Their actual binary hashes must differ
+  before any cell starts; the consumer checks this again, independently of the
+  recorded source patch and binary roster.
+- All sampled public `/readyz` requests return HTTP 200 within the existing
+  250 ms client deadline at a one-second cadence. Contiguous probe sequences
+  retain actual start/end `CLOCK_MONOTONIC` timestamps, matching the controller's
+  trigger, source-drain, resume and observed-fold clock. Successful probes must
+  bracket each complete trigger-to-fold interval; consecutive probe starts,
+  including both brackets, must be at most 1.25 seconds apart. Each B/A receipt
+  reports its bracketed sample count and maximum gap. This is sampled
+  availability, not a claim about every instant. The harness writes directly
+  to the evidence file, so controller waits cannot fill an undrained stdout
+  pipe and stop probing. A watcher failure interrupts pending protocol waits
+  and retains its original error; it cannot wait for another controller command
+  before failing. Correctness-only timing fields remain null.
+- No-refusal cells enter no recovery fallback. Across matched operations and
+  legs, both median and worst **source-churn command → observed exact final fleet fold**
+  must be at most flat × 1.10 + 30 ms. This includes all ingress filling, cold capture
+  and the mandatory paused dirty-witness work. Post-resume receiver quantiles
+  are diagnostic and cannot replace the whole-operation bar.
+- Cap-pressure cells must recover correctly within the fixed 1,800-second
+  whole-leg deadline and disclose every fallback cause. They are resource and
+  correctness controls, not pure storage performance comparisons. Flat payload
+  alone is 472.32 MB for 12 full proofs or 944.64 MB for 24, before headers and
+  overlap; the latter exceeds the unchanged 512 MiB recovery budget.
+  Measured flat and already-flat VPN arms must exercise `daemon_limit` during
+  the operations. The indexed UC candidate must have zero fallback deltas in
+  that same window; startup values are disclosed separately.
+- Recovery entries, retained capacity charge and peak reservation charge are
+  mandatory at the clean baseline and both operation boundaries. Settled entries
+  and current charge must return to the actual empty baseline. Peak includes
+  attempted overlapping reservations, including refusals; it is not RSS or an
+  admitted high-water measurement and can exceed the admission limit.
+- The runner must have at least 12 GiB available before each measured leg.
+  Daemon/harness scopes have fixed 10 GiB/2 GiB limits and zero swap; ownership
+  drift, missing samples, OOM, swap or inadequate capacity fails qualification.
+  Profiles, cohorts, deadlines and resource limits never shrink automatically.
+
+Published manager-direct actor receipts around 1.3 GiB UC / 2.5 GiB VPN at 100
+receivers support feasibility only. They do not predict this daemon's transport,
+policy or allocator peak. The retained daemon-only cgroup samples and whole-scope
+peak establish the actual measured memory boundary.
+
+Run on a fresh GitHub-hosted Linux VM, with a committed instrument and candidate:
+
+```sh
+bash bench/scale/reloadstall/run-recovery-mass-dirty.sh \
+  --head FULL_SOURCE_SHA --output-dir NEW_DIRECTORY \
+  --profile full-uc --cohort no-refusal
+python3 bench/scale/reloadstall/recovery_mass_dirty.py finalize NEW_DIRECTORY
+```
+
+Repeat independently for `full-vpn` and `cap-pressure`. Three repetitions alternate
+arm order. Builds finish before cells start; daemon and harness CPUs are disjoint
+and frozen in `campaign.json`. The output retains exact source/binary hashes,
+the one-expression control patch, instrument sources, raw wire receipts, neighbor
+witnesses, all fallback counters, daemon ownership, memory samples and verdict.
+The finalizer rejects missing/failed legs, altered evidence and changed bars.
+Each generated config must pass the actual daemon's `--check --strict` before
+launch; its output is retained. A TOML parse alone does not qualify the config.
+
+`--correctness-only` uses the same full 1,000,000/230,000-key, 80-key-chunk
+stimulus with two receivers. It emits proof counts and null durations, omits
+memory measurement, and requires the same actual overlapping dirty episodes and
+exact wire folds. A smaller local trial did not create backpressure and was
+retained as INVALID; correctness mode does not substitute that smaller workload.
+It can validate the pipeline after an authorized local build, never release
+performance. A separate soak on the actual release candidate
+remains required and is owned by the soak operator; this driver does not touch
+the soak host.
+
 ## Unsent-data threshold experiment
 
 The experimental Linux socket hook is compiled only with
@@ -812,3 +952,34 @@ the focused checks with:
 ```bash
 python3 -m unittest -v bench/scale/reloadstall/test_converged_rejoin.py
 ```
+
+
+### Research-only HTTP phase trace
+
+The phase-trace research branch must never merge. It runs one full-VPN,
+no-refusal diagnostic cell with two daemon workers on CPUs 0–1 and native
+harness CPUs 2–3. The full route shape, twelve receivers, six-leg schedule,
+resource caps, readiness deadlines and original acceptance/finalization
+checks remain unchanged. It provides no cost or release qualification.
+
+Bounded stderr records identify permit/accept waits and each accepted
+connection's endpoint pair, ordinal, first handler poll, completed request
+line, probe entry/return and write entry/return. A guard created before the
+spawn records the last phase when its future is dropped, including a task
+that never reached its first poll. Native stderr identifies each readiness
+attempt's actual client/server TCP endpoints immediately after connect.
+Join those endpoints within the same leg; no cross-process clock mapping
+is required and strict JSON receipts are unchanged.
+
+These writes bypass the daemon's stdout subscriber lock, but can still
+block or perturb scheduling. They do not flush or synchronize the log to
+durable storage, cannot guarantee a final record after SIGKILL, and do not
+turn missing records into proof that a phase never ran. Drop records require
+actual future destruction; last-phase markers do not identify an actor or
+scheduler cause.
+
+The workflow and runtime commits are pinned and recorded separately. The
+actual workflow, daemon trace source and source diff are archived beside
+the campaign; the existing closed 29-file build-evidence seal is unchanged.
+Whole daemon and native stderr logs are retained through normal teardown,
+including failures. Historical campaigns remain immutable.
