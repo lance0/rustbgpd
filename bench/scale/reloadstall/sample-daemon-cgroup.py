@@ -81,8 +81,11 @@ def container_owner(cid, image, exe):
 def owned_process_state(proc, owner):
     # Identity and state must come from the same comm-safe snapshot.
     text = (proc / "stat").read_text()
-    if proc_stat(text)[0] != owner["starttime"]:
-        raise ValueError("container daemon PID/start/cgroup ownership changed")
+    identity, _ = proc_stat(text)
+    if identity != owner["starttime"]:
+        error = ValueError("container daemon PID/start/cgroup ownership changed")
+        error.add_note(f"kind={owner.get('kind')!r} expected_starttime={owner['starttime']!r} actual_starttime={identity!r} stat={text!r}")
+        raise error
     return text[text.rindex(")") + 2 :].split()[0]
 
 
@@ -90,9 +93,21 @@ def verify_container_membership(proc, cgroup, pid, owner):
     # True: live sole member; False: proved exit; None: owned empty group,
     # still nonterminal. Pending exit must never authorize a sample or success.
     state = owned_process_state(proc, owner)
-    if (str(cgroup) != owner["cgroup"]
-            or (proc / "cgroup").read_text().strip() != "0::" + str(cgroup).removeprefix("/sys/fs/cgroup")):
-        raise ValueError("container daemon PID/start/cgroup ownership changed")
+    expected = "0::" + str(cgroup).removeprefix("/sys/fs/cgroup")
+    actual = (proc / "cgroup").read_text() if str(cgroup) == owner["cgroup"] else None
+    if actual is None or actual.strip() != expected:
+        rechecked_state = None
+        if owner.get("kind") == "native-daemon-only" and state == "Z" and actual == expected + " (deleted)\n":
+            # A collected native scope leaves its unreaped zombie's old path marked deleted.
+            try:
+                cgroup.stat()
+            except FileNotFoundError:
+                rechecked_state = owned_process_state(proc, owner)
+                if rechecked_state == "Z":
+                    return False
+        error = ValueError("container daemon PID/start/cgroup ownership changed")
+        error.add_note(f"kind={owner.get('kind')!r} starttime={owner['starttime']!r} state={state!r} rechecked_state={rechecked_state!r} owner_cgroup={owner['cgroup']!r} checked_cgroup={str(cgroup)!r} expected_proc_cgroup={expected!r} actual_proc_cgroup={actual!r}")
+        raise error
     if (cgroup / "memory.swap.max").read_text().strip() != "0":
         raise ValueError("container daemon must be swap fenced")
     members = {int(p) for p in (cgroup / "cgroup.procs").read_text().split()}
@@ -140,7 +155,7 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
             raise ValueError("container daemon exited before sampling started")
     elif not cgroup.name.endswith(".scope") or (cgroup / "memory.swap.max").read_text().strip() != "0":
         raise ValueError("daemon must run in its own swap-fenced systemd scope")
-    process_owner = owner if owner is not None else {"starttime": identity, "cgroup": str(cgroup)}
+    process_owner = owner if owner is not None else {"kind": "native-daemon-only", "starttime": identity, "cgroup": str(cgroup)}
     if {int(member) for member in (cgroup / "cgroup.procs").read_text().split()} != {pid}:
         raise ValueError("daemon must be the sole process in its measurement scope")
     pgid = os.getpgid(pid)
