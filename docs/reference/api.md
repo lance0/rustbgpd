@@ -2341,9 +2341,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 For the deprecated `ListEvpnRoutes`, `route_type_filter` accepts 0 (no filter)
 or `1..=6` matching the EVPN route type numbers (RFC 7432, RFC 9136, and RFC 9251 Type 6). `peer_filter`
 is an optional typed IP-address match (for example, expanded and compressed IPv6 spellings are equivalent); `rd_filter`
-is an optional typed route-distinguisher match (for example, `"65000:100"`,
-`"10.0.0.1:100"`, or `"4200000000:100"` per RFC 4364 RD types 0/1/2, plus
-the displayed `0x`/16-hex-digit fallback for unknown types). Empty strings
+is an optional typed route-distinguisher match using the shared
+[RD input grammar](#route-distinguisher-identity), including raw hexadecimal
+for every RD type. Empty strings
 disable each filter. Invalid filters fail with `INVALID_ARGUMENT` before the
 RIB actor is queried.
 
@@ -3126,6 +3126,12 @@ with those checks, covering 980 paths and their matching detailed rows without
 changing the original receipt or driver identity.
 
 ### Inject an EVPN Type 2 (MAC/IP) route
+
+`AddEvpnRoute` and `DeleteEvpnRoute` accept the required `rd` in the shared
+[RD input grammar](#route-distinguisher-identity). The raw form, `0x`/`0X`
+plus 16 hex digits, preserves all eight bytes, including RD types 3 and
+above. The RD type is independent of the EVPN `route_type`, which accepts
+2, 3, and 5.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

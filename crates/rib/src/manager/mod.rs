@@ -1553,7 +1553,7 @@ struct PeerSelectionDeferralContext {
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
 /// Server-side hard cap on a paged route-query page — bounds per-page
 /// allocation regardless of the client-requested size.
-pub(crate) const ROUTE_QUERY_MAX_PAGE_SIZE: usize = 1000;
+pub const ROUTE_QUERY_MAX_PAGE_SIZE: usize = 1000;
 
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
 /// Production stride of probed routes between wall-clock checks inside one

@@ -721,7 +721,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s a -l family -d 'Address family filter' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l rd -d 'Route Distinguisher ("asn:nn" or "ip:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l rd -d 'Route Distinguisher ("asn:nn", "ip:nn", or 0x/0X plus 16 hex digits) - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l source-peer -d 'Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l source-path-id -d 'Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
@@ -757,7 +757,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s a -l family -d 'Address family filter' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l rd -d 'Route Distinguisher ("asn:nn" or "ip:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l rd -d 'Route Distinguisher ("asn:nn", "ip:nn", or 0x/0X plus 16 hex digits) - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l source-peer -d 'Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l source-path-id -d 'Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
@@ -1219,7 +1219,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -f -a "ead-per-es" -d 'Type 1 per-ES: the Ethernet Tag is always MAX_ET'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -f -a "ead-per-evi" -d 'Type 1 per-EVI: MAX_ET is not a per-EVI key'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from explain" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l rd -d 'Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l ethernet-tag -d 'Ethernet-tag identifying the EVI (default 0)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l mac -d 'MAC address "aa:bb:cc:dd:ee:ff"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l ip -d 'Host IP (optional — MAC-only route if omitted)' -r
@@ -1238,7 +1238,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rd -d 'Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l ethernet-tag -d 'Ethernet-tag identifying the EVI (default 0)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l ip -l originator-ip -d 'Originator IP (required for Type 3)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l next-hop -d 'VTEP loopback IP (next-hop)' -r
@@ -1254,7 +1254,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l rd -d 'Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l ethernet-tag -d 'Ethernet Tag ID. Must be 0 for supported Type 5 injection' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l prefix -d 'IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l label -d 'L3VNI for this IP-VRF' -r
@@ -1273,7 +1273,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l rd -d 'Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l ethernet-tag -d 'Ethernet-tag identifying the EVI (default 0)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l mac -d 'MAC address "aa:bb:cc:dd:ee:ff"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l ip -d 'Host IP (omit for the MAC-only route)' -r
@@ -1287,7 +1287,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l rd -d 'Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ethernet-tag -d 'Ethernet-tag identifying the EVI (default 0)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ip -l originator-ip -d 'Originator IP' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1300,7 +1300,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l rd -d 'Route Distinguisher, "asn:value" / "ip:value"' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l rd -d 'Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l ethernet-tag -d 'Ethernet Tag ID. Must be 0 for Type 5 withdrawal' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l prefix -d 'IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r

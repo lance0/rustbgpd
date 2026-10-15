@@ -1700,7 +1700,7 @@ enum RibAction {
         /// Explain whether this exact prefix would be advertised to the peer
         #[arg(long, conflicts_with = "count")]
         explain: bool,
-        /// Route Distinguisher ("asn:nn" or "ip:nn") - explain the
+        /// Route Distinguisher ("asn:nn", "ip:nn", or 0x/0X plus 16 hex digits) - explain the
         /// VPNv4/VPNv6 export ladder for the (RD, prefix) identity,
         /// including the RFC 4684 RT-Constrain membership gate
         #[arg(long, requires = "explain")]
@@ -2227,7 +2227,7 @@ enum EvpnAction {
     },
     /// Inject a Type 2 MAC/IP route.
     AddMacIp {
-        /// Route Distinguisher, "asn:value" / "ip:value".
+        /// Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits.
         #[arg(long)]
         rd: String,
         /// Ethernet-tag identifying the EVI (default 0).
@@ -2257,7 +2257,7 @@ enum EvpnAction {
     },
     /// Inject a Type 3 IMET route.
     AddImet {
-        /// Route Distinguisher, "asn:value" / "ip:value".
+        /// Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits.
         #[arg(long)]
         rd: String,
         /// Ethernet-tag identifying the EVI (default 0).
@@ -2278,7 +2278,7 @@ enum EvpnAction {
     },
     /// Inject a Type 5 IP Prefix route.
     AddIpPrefix {
-        /// Route Distinguisher, "asn:value" / "ip:value".
+        /// Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits.
         #[arg(long)]
         rd: String,
         /// Ethernet Tag ID. Must be 0 for supported Type 5 injection.
@@ -2308,7 +2308,7 @@ enum EvpnAction {
     },
     /// Withdraw a Type 2 MAC/IP route by its key fields.
     DeleteMacIp {
-        /// Route Distinguisher, "asn:value" / "ip:value".
+        /// Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits.
         #[arg(long)]
         rd: String,
         /// Ethernet-tag identifying the EVI (default 0).
@@ -2323,7 +2323,7 @@ enum EvpnAction {
     },
     /// Withdraw a Type 3 IMET route by its key fields.
     DeleteImet {
-        /// Route Distinguisher, "asn:value" / "ip:value".
+        /// Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits.
         #[arg(long)]
         rd: String,
         /// Ethernet-tag identifying the EVI (default 0).
@@ -2335,7 +2335,7 @@ enum EvpnAction {
     },
     /// Withdraw a Type 5 IP Prefix route by its key fields.
     DeleteIpPrefix {
-        /// Route Distinguisher, "asn:value" / "ip:value".
+        /// Route Distinguisher: "asn:value", "ip:value", or 0x/0X plus 16 hex digits.
         #[arg(long)]
         rd: String,
         /// Ethernet Tag ID. Must be 0 for Type 5 withdrawal.

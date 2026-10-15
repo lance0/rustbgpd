@@ -162,6 +162,35 @@ async fn rd_output_round_trips_evpn_explain_exact_selector() {
 }
 
 #[tokio::test]
+async fn rd_export_explain_rejects_invalid_rd_without_filter_diagnostics() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let service = RibService::new(tx);
+    for (rd, expected_prefix) in [
+        ("not-an-rd", "invalid RD: "),
+        ("0X0002", "raw RD requires "),
+    ] {
+        let error = service
+            .explain_advertised_route(Request::new(proto::ExplainAdvertisedRouteRequest {
+                peer_address: "192.0.2.2".into(),
+                prefix: "203.0.113.0".into(),
+                prefix_length: 24,
+                rd: rd.into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().starts_with(expected_prefix));
+        assert_eq!(error.message().matches(expected_prefix).count(), 1);
+        assert!(!error.message().contains("rd_filter"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn rd_output_round_trips_vpn_explain_and_filter() {
     let (tx, mut rx) = mpsc::channel(8);
     let service = RibService::new(tx);
