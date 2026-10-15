@@ -694,11 +694,11 @@ impl AdmittedRecovery {
             .map(|index| self.snapshots[index].keys.as_slice());
         let mut cursor = None;
         let mut previous = None;
+        let (count, upper) = keys.size_hint();
         let mut unordered = universe.is_some_and(|universe| {
-            keys.size_hint().1.is_none_or(|count| {
-                universe.len()
+            upper != Some(count)
+                || universe.len()
                     > count.saturating_mul((usize::BITS - universe.len().leading_zeros()) as usize)
-            })
         });
         keys.fold((0, 0), |(count, additions), key| {
             checkpoint(false);
@@ -841,11 +841,11 @@ impl AdmittedRecovery {
             .and_then(|handle| self.snapshot_index(handle));
         let mut cursor = None;
         let mut previous = None;
+        let (count, upper) = keys.size_hint();
         let mut unordered = universe.is_some_and(|index| {
             let length = self.snapshots[index].keys.len();
-            keys.size_hint().1.is_none_or(|count| {
-                length > count.saturating_mul((usize::BITS - length.leading_zeros()) as usize)
-            })
+            upper != Some(count)
+                || length > count.saturating_mul((usize::BITS - length.leading_zeros()) as usize)
         });
         for key in keys {
             checkpoint(false);
@@ -2971,5 +2971,68 @@ mod tests {
             ledger.remove(&peer(1));
             assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
         }
+    }
+    #[test]
+    fn loose_hint_shape_does_not_scan_the_universe_for_two_old_keys() {
+        let mut ledger = AdmittedRecovery::new();
+        let raw: Vec<_> = (0..100_000_u32)
+            .map(|n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
+            .collect();
+        let hint = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let actual = raw
+            .iter()
+            .copied()
+            .filter(|key| *key == raw[0] || *key == raw[99_999]);
+        assert_eq!(actual.size_hint(), (0, Some(100_000)));
+        let mut visits = 0;
+        assert_eq!(
+            ledger.capture_shape_with_checkpoint(Some(hint), actual, &mut |_| visits += 1),
+            (2, 0)
+        );
+        assert!(
+            visits < 100,
+            "loose upper bound must not enable a whole-universe shape scan"
+        );
+    }
+
+    #[test]
+    fn loose_hint_population_keeps_sparse_subset_lookup_bounded() {
+        let mut ledger = AdmittedRecovery::new();
+        let raw: Vec<_> = (0..100_000_u32)
+            .map(|n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
+            .collect();
+        let hint = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        ledger.begin_capture(peer(2)).unwrap();
+        assert_eq!(
+            ledger
+                .share_capture_with_checkpoint(
+                    peer(2),
+                    Some(hint),
+                    raw.len(),
+                    raw.iter().copied(),
+                    (500, 0),
+                    &mut |_| {}
+                )
+                .unwrap(),
+            Some(hint)
+        );
+        let actual = raw
+            .iter()
+            .copied()
+            .filter(|key| *key <= raw[498] || *key == raw[99_999]);
+        assert_eq!(actual.size_hint(), (0, Some(100_000)));
+        let mut visits = 0;
+        ledger
+            .push_capture_batch_with_checkpoint(peer(2), actual, &mut |_| visits += 1)
+            .unwrap();
+        ledger.seal_capture(peer(2)).unwrap();
+        let proof = ledger.get(&peer(2)).unwrap();
+        assert_eq!(proof.len(), 500);
+        assert!(proof.contains(&raw[99_999].into()));
+        assert!(!proof.contains(&raw[499].into()));
+        assert!(
+            visits < 11_000,
+            "loose upper bound must not enable a whole-universe population scan"
+        );
     }
 }
