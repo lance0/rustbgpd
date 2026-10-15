@@ -3043,6 +3043,14 @@ impl RibManager {
     /// state and the dirty flag are committed/cleared only after a successful
     /// send, and withheld peers are not touched at all.
     fn resync_dirty_peers_bounded(&mut self) -> bool {
+        // A whole member replay can outlive the tick's peer-stride budget.
+        // Activate its existing interior checkpoints on every timer arm.
+        with_executor_handoff(|| {
+            self.with_replacement_readiness(Self::resync_dirty_peers_with_readiness)
+        })
+    }
+
+    fn resync_dirty_peers_with_readiness(&mut self) -> bool {
         // Resync diffs against advertised state, and a due timer can fire
         // between the chunks of an open distribution window: settle it
         // (flush and exact-export retirement) before any recovery runs.

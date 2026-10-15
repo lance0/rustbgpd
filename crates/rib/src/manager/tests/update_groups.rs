@@ -9203,6 +9203,275 @@ fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
     }
 }
 
+struct DirtyResyncProbeHold {
+    calls: AtomicUsize,
+    entered: mpsc::UnboundedSender<usize>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[derive(Clone)]
+struct HeldDirtyResyncEncoder(Arc<DirtyResyncProbeHold>);
+
+impl crate::update::ExactExportEncoder for HeldDirtyResyncEncoder {
+    fn owner_id(&self) -> u64 {
+        2227
+    }
+
+    fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+        Arc::new(self.clone())
+    }
+}
+
+impl crate::update::ExactExportSnapshot for HeldDirtyResyncEncoder {
+    fn owner_id(&self) -> u64 {
+        2227
+    }
+
+    fn generation(&self) -> u64 {
+        1
+    }
+
+    fn probe_announcement(
+        &self,
+        _candidate: crate::update::ExactExportCandidate<'_>,
+    ) -> Result<crate::update::ExactExportResult, crate::update::ExactExportError> {
+        let call = self.0.calls.fetch_add(1, Ordering::Relaxed);
+        if call < 2 {
+            self.0.entered.send(call).unwrap();
+            self.0
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the test releases each held resync probe");
+        }
+        Ok(crate::update::ExactExportResult {
+            encoded_len: 64,
+            max_len: 4096,
+            generation: 1,
+        })
+    }
+
+    fn probe_announcements_with_checkpoint(
+        &self,
+        candidates: &[crate::update::ExactExportCandidate<'_>],
+        checkpoint: &mut dyn FnMut(),
+    ) -> Vec<Result<crate::update::ExactExportResult, crate::update::ExactExportError>> {
+        candidates
+            .iter()
+            .copied()
+            .map(|candidate| {
+                checkpoint();
+                let result = self.probe_announcement(candidate);
+                checkpoint();
+                result
+            })
+            .collect()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grouped_dirty_resync_timer_services_interior_readiness() {
+    dirty_resync_timer_services_interior_readiness(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn private_dirty_resync_timer_services_interior_readiness() {
+    dirty_resync_timer_services_interior_readiness(true).await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actual-timer fixture keeps admission, held probes, fenced lanes and exact recovery cleanup together"
+)]
+async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
+    let (mut manager, stuck, live, mut outbound, mut live_outbound) =
+        full_channel_manager(ungrouped);
+    full_channel_pass(&mut manager, &[20, 21], &[]);
+    assert!(manager.dirty_peers.contains(&stuck));
+    assert_eq!(
+        manager.pending_group_admitted.contains_key(&stuck),
+        !ungrouped
+    );
+    if ungrouped {
+        assert!(
+            manager.adj_ribs_out[&stuck]
+                .get(&full_channel_prefix(0), 0)
+                .is_some()
+        );
+    } else {
+        assert!(
+            manager
+                .pending_group_admitted
+                .get(&stuck)
+                .unwrap()
+                .contains(&crate::update::ExactExportKey::Unicast(
+                    full_channel_prefix(0),
+                    0
+                ))
+        );
+    }
+    assert!(manager.outbound_channel_full(stuck));
+    let metrics = manager.metrics.clone();
+    let empty_credit = f64::from(
+        u32::try_from(
+            super::super::update_groups::admitted_recovery::AdmittedRecovery::new().bytes(),
+        )
+        .unwrap(),
+    );
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let hold = Arc::new(DirtyResyncProbeHold {
+        calls: AtomicUsize::new(0),
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    });
+    // Replace only the fixture encoder of this already registered session;
+    // SetPeerExportEncoder stages a future PeerUp rather than a live update.
+    manager
+        .peer_export_encoders
+        .insert(stuck, Arc::new(HeldDirtyResyncEncoder(hold)));
+    // Capacity-gated retries must not have built anything while the queue was
+    // full. Only the real run-loop timer can start recovery after this drain.
+    manager.adj_rib_out_commit_stats.resync_builds = 0;
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 0);
+    for _ in 0..FULL_CHANNEL_CAPACITY {
+        outbound.try_recv().unwrap();
+    }
+    while live_outbound.try_recv().is_ok() {}
+    let actor = tokio::spawn(manager.run());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    let mut readiness = queue_replacement_readiness(&readiness_tx);
+    let (reply, mut ordinary) = oneshot::channel();
+    query_tx
+        .send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: live,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let interior_reply = readiness.try_recv();
+    let ordinary_held = matches!(
+        ordinary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    let mutation_held = tx.capacity() == 7;
+    // Release before assertions so the negative control also reaps its actor.
+    release_tx.send(()).unwrap();
+    let recovered = outbound.recv().await.unwrap();
+    let announced: HashSet<_> = recovered
+        .announce
+        .iter()
+        .map(|route| route.prefix)
+        .collect();
+    let expected: HashSet<_> = if ungrouped {
+        vec![20, 21]
+    } else {
+        vec![1, 2, 10, 11, 12, 13, 20, 21]
+    }
+    .into_iter()
+    .map(full_channel_prefix)
+    .collect();
+    assert_eq!(announced, expected);
+    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    assert_eq!(ordinary.await.unwrap(), 8);
+    let (reply, health) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryOutboundHealth { reply })
+        .await
+        .unwrap();
+    assert_eq!(health.await.unwrap(), (0, 0, 0, 0, 0, 0));
+    let gauge = |name| {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)
+            .unwrap()
+            .get_metric()[0]
+            .get_gauge()
+            .get_value()
+    };
+    assert_eq!(
+        gauge("bgp_update_group_recovery_entries").to_bits(),
+        0_f64.to_bits()
+    );
+    assert_eq!(
+        gauge("bgp_update_group_recovery_bytes").to_bits(),
+        empty_credit.to_bits()
+    );
+    drop(tx);
+    actor.await.unwrap();
+    assert!(
+        matches!(interior_reply, Ok(Ok(8))),
+        "dedicated readiness must complete between actual timer replay probes: {interior_reply:?}"
+    );
+    assert!(ordinary_held, "ordinary reads stay queued during recovery");
+    assert!(
+        mutation_held,
+        "ordinary mutations stay queued during recovery"
+    );
+}
+
+#[test]
+fn dirty_resync_nested_readiness_keeps_owner_age_and_exact_count() {
+    let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
+    let peer = fleet.members[0];
+    fleet.manager.mark_outbound_dirty(peer);
+    let (tx, rx) = mpsc::channel(8);
+    fleet.manager.readiness_rx = Some(rx);
+    fleet.manager.with_replacement_readiness_age(
+        super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE,
+        |manager| {
+            let original = manager.replacement_readiness.clone().unwrap();
+            let mut response = queue_replacement_readiness(&tx);
+            manager.resync_dirty_peers_bounded();
+            assert!(Arc::ptr_eq(
+                &original,
+                manager.replacement_readiness.as_ref().unwrap()
+            ));
+            assert_eq!(
+                response.try_recv().unwrap(),
+                Err(crate::update::RibReadinessError::PolicyTransitionStalled)
+            );
+            assert!(manager.replacement_readiness_receipts.is_empty());
+        },
+    );
+    assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+    assert_eq!(fleet.manager.replacement_readiness_receipts[0].count, 4);
+    assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
+    assert!(fleet.manager.dirty_peers.is_empty());
+    assert!(fleet.manager.pending_group_admitted.is_empty());
+    assert_eq!(fleet.receivers[0].try_recv().unwrap().announce.len(), 4);
+    assert!(fleet.manager.readiness_rx.is_some());
+    assert!(fleet.manager.replacement_readiness.is_none());
+}
+
 #[test]
 fn initial_export_nested_readiness_keeps_owner_age_and_exact_count() {
     let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
