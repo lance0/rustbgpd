@@ -1268,6 +1268,8 @@ def summarize_scan(root: Path) -> None:
         len(result["samples"]) == 24 and len(result["comparisons"]) == 6
         and refused_legs == 0 and all(cell["eligible"] for cell in result["comparisons"])
     )
+    if not result["qualification_passed"]:
+        write_json(root / "unqualified-comparison.json", result)
     write_json(root / "comparison.json", result)
     require(result["qualification_passed"],
             "all 6 scan cells must have complete, proof-checked non-refused comparisons")

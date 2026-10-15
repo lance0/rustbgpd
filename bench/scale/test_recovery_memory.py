@@ -1377,6 +1377,22 @@ class RecoveryScanTests(unittest.TestCase):
                 self.assertEqual(len(summary["comparisons"]), 6)
                 self.assertTrue(any(not cell["eligible"] for cell in summary["comparisons"]))
                 self.assertEqual((root / "scan/harness.log").read_bytes(), raw)
+                finalized = subprocess.run(
+                    ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan",
+                     str(root), "--failed-driver-exit", str(result.returncode)],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(finalized.returncode, 1, finalized.stdout + finalized.stderr)
+                envelope = json.loads((root / "comparison.json").read_text())
+                self.assertFalse(envelope["qualification_passed"])
+                self.assertEqual(envelope["driver_invocation_exit"], result.returncode)
+                self.assertEqual(envelope["samples"], [])
+                self.assertEqual(envelope["comparisons"], [])
+                self.assertNotIn("ratio", json.dumps(envelope))
+                diagnostic = root / "unqualified-comparison.json"
+                self.assertTrue(diagnostic.exists(), "completed refusal diagnostics missing after finalization")
+                self.assertEqual(json.loads(diagnostic.read_text()), summary)
+                self.assertEqual((root / "scan/harness.log").read_bytes(), raw)
 
     def test_scan_summary_rejects_incomplete_matrix_or_proof(self):
         for failure in ("missing-leg", "wrong-proof"):
