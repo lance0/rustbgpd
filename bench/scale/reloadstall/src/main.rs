@@ -200,6 +200,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, watch};
 
+mod recovery_mass_dirty;
+
 /// Receivers on every runtime worker reallocate their frame buffers and NLRI
 /// vectors in the same instant when the daemon delivers a coalesced
 /// post-reload burst. Under glibc malloc that contended on the arena lock, so
@@ -3923,6 +3925,10 @@ fn convergence_integrity_valid(
 )]
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
+    if a.get(1).is_some_and(|arg| arg == "--recovery-mass-dirty") {
+        recovery_mass_dirty::main(&a[2..]);
+        return;
+    }
     let convergence_only = take_single_flag(&mut a, "--convergence-only");
     let no_churn = take_single_flag(&mut a, "--no-churn");
     let converged_rejoin = take_single_flag(&mut a, "--converged-rejoin");
