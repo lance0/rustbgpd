@@ -278,12 +278,44 @@ pub(in crate::manager) struct AlignedUnicastPayload {
     next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
 }
 
+/// Consume this owner without racing a concurrent final owner. Only the
+/// owner that obtains the vector retires its elements; other owners keep
+/// their immutable payload intact.
+fn retire_arc_vec<T>(values: Arc<Vec<T>>, checkpoint: &mut impl FnMut()) {
+    if let Some(mut values) = Arc::into_inner(values) {
+        super::retire_vec(&mut values, checkpoint);
+    } else {
+        checkpoint();
+    }
+}
+
 impl OutboundCommitBatch {
-    fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+    fn retire_with(
+        &mut self,
+        checkpoint: &mut impl FnMut(),
+        #[cfg(test)] observer: Option<&(dyn Fn(&'static str) + Send + Sync)>,
+    ) {
         checkpoint();
-        drop(std::mem::take(&mut self.unicast.announce));
+        #[cfg(test)]
+        if let Some(observer) = observer {
+            observer("batch_announce_retirement_before");
+        }
+        retire_arc_vec(std::mem::take(&mut self.unicast.announce), &mut || {
+            #[cfg(test)]
+            if let Some(observer) = observer {
+                observer("batch_announce_retirement");
+            }
+            checkpoint();
+        });
+        #[cfg(test)]
+        if let Some(observer) = observer {
+            observer("batch_announce_retirement_after");
+        }
         checkpoint();
-        drop(std::mem::take(&mut self.unicast.next_hop_override));
+        retire_arc_vec(
+            std::mem::take(&mut self.unicast.next_hop_override),
+            checkpoint,
+        );
         checkpoint();
         super::retire_vec(&mut self.withdraw, checkpoint);
         super::retire_vec(&mut self.end_of_rib, checkpoint);
@@ -2916,7 +2948,11 @@ impl RibManager {
             .as_ref()
             .is_some_and(|seal| !self.evpn_feed_seal_is_current(peer, seal))
         {
-            batch.retire_with(&mut || checkpoint());
+            batch.retire_with(
+                &mut || checkpoint(),
+                #[cfg(test)]
+                retirement_observer.as_deref(),
+            );
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             return self.outbound_commit_failed(
                 peer,
@@ -3001,7 +3037,11 @@ impl RibManager {
                     && self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi())));
         if gated {
             warn!(%peer, "outbound transaction intersected an active RFC 4724 selection gate; failing closed");
-            batch.retire_with(&mut || checkpoint());
+            batch.retire_with(
+                &mut || checkpoint(),
+                #[cfg(test)]
+                retirement_observer.as_deref(),
+            );
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             self.replacement_checkpoint(true);
             return self.outbound_commit_failed(
@@ -3010,7 +3050,11 @@ impl RibManager {
             );
         }
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
-            batch.retire_with(&mut || checkpoint());
+            batch.retire_with(
+                &mut || checkpoint(),
+                #[cfg(test)]
+                retirement_observer.as_deref(),
+            );
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             self.replacement_checkpoint(true);
             return self.outbound_commit_failed(peer, OutboundCommitFailure::WriterUnavailable);
@@ -3050,7 +3094,11 @@ impl RibManager {
         let exact_export_snapshot = if has_candidate_route_payload {
             let Some(encoder) = self.peer_export_encoders.get(&peer) else {
                 warn!(%peer, "route-bearing outbound update has no exact export encoder — refusing Adj-RIB-Out commit");
-                batch.retire_with(&mut || checkpoint());
+                batch.retire_with(
+                    &mut || checkpoint(),
+                    #[cfg(test)]
+                    retirement_observer.as_deref(),
+                );
                 super::retire_hash_set(&mut group_prior, &mut || checkpoint());
                 self.replacement_checkpoint(true);
                 return self.outbound_commit_failed(
@@ -3125,7 +3173,11 @@ impl RibManager {
                 self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
             }
 
-            batch.retire_with(&mut || checkpoint());
+            batch.retire_with(
+                &mut || checkpoint(),
+                #[cfg(test)]
+                retirement_observer.as_deref(),
+            );
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             return if completed {
                 Ok(())
@@ -3137,7 +3189,11 @@ impl RibManager {
             };
         }
         let Ok(permit) = tx.try_reserve() else {
-            batch.retire_with(&mut || checkpoint());
+            batch.retire_with(
+                &mut || checkpoint(),
+                #[cfg(test)]
+                retirement_observer.as_deref(),
+            );
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             self.replacement_checkpoint(true);
             return self.outbound_commit_failed(peer, OutboundCommitFailure::WriterUnavailable);
@@ -3147,7 +3203,11 @@ impl RibManager {
             &mut batch.evpn_announce,
             &mut batch.evpn_withdraw,
         ) {
-            batch.retire_with(&mut || checkpoint());
+            batch.retire_with(
+                &mut || checkpoint(),
+                #[cfg(test)]
+                retirement_observer.as_deref(),
+            );
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             return self.outbound_commit_failed(
                 peer,
@@ -3691,9 +3751,22 @@ impl RibManager {
                 }
 
                 if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                    #[cfg(test)]
+                    if let Some(observer) = &retirement_observer {
+                        observer("admitted_prior_retain_before");
+                    }
                     previously_advertised.retain(|key| {
+                        super::replacement_readiness_checkpoint_at(
+                            &readiness,
+                            "admitted_prior_retain",
+                            false,
+                        );
                         !matches!(key, ExactExportKey::Unicast(..) | ExactExportKey::Vpn(_))
                     });
+                    #[cfg(test)]
+                    if let Some(observer) = &retirement_observer {
+                        observer("admitted_prior_retain_after");
+                    }
                     previously_advertised.extend(admitted.iter_with_checkpoint(|_| checkpoint()));
                 }
                 let decision = reconcile_exact_export_overlay(
@@ -3903,6 +3976,37 @@ impl RibManager {
                 if let Some(observer) = &retirement_observer {
                     observer("evpn_count_refusal_prior_retirement_after");
                 }
+                #[cfg(test)]
+                if let Some(observer) = &retirement_observer {
+                    observer("evpn_count_filtered_retirement_before");
+                }
+                retire_arc_vec(announce, &mut || {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "evpn_count_filtered_retirement",
+                        false,
+                    );
+                });
+                #[cfg(test)]
+                if let Some(observer) = &retirement_observer {
+                    observer("evpn_count_filtered_retirement_after");
+                }
+                retire_arc_vec(next_hop_override, &mut || checkpoint());
+                #[cfg(test)]
+                if let Some(observer) = &retirement_observer {
+                    observer("evpn_count_candidate_retirement_before");
+                }
+                retire_arc_vec(common_unicast_candidates, &mut || {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "evpn_count_candidate_retirement",
+                        false,
+                    );
+                });
+                #[cfg(test)]
+                if let Some(observer) = &retirement_observer {
+                    observer("evpn_count_candidate_retirement_after");
+                }
                 return self.outbound_commit_failed(
                     peer,
                     OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
@@ -3929,6 +4033,37 @@ impl RibManager {
             #[cfg(test)]
             if let Some(observer) = &retirement_observer {
                 observer("evpn_admission_refusal_prior_retirement_after");
+            }
+            #[cfg(test)]
+            if let Some(observer) = &retirement_observer {
+                observer("evpn_admission_filtered_retirement_before");
+            }
+            retire_arc_vec(announce, &mut || {
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "evpn_admission_filtered_retirement",
+                    false,
+                );
+            });
+            #[cfg(test)]
+            if let Some(observer) = &retirement_observer {
+                observer("evpn_admission_filtered_retirement_after");
+            }
+            retire_arc_vec(next_hop_override, &mut || checkpoint());
+            #[cfg(test)]
+            if let Some(observer) = &retirement_observer {
+                observer("evpn_admission_candidate_retirement_before");
+            }
+            retire_arc_vec(common_unicast_candidates, &mut || {
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "evpn_admission_candidate_retirement",
+                    false,
+                );
+            });
+            #[cfg(test)]
+            if let Some(observer) = &retirement_observer {
+                observer("evpn_admission_candidate_retirement_after");
             }
             return self.outbound_commit_failed(
                 peer,
@@ -4166,6 +4301,21 @@ impl RibManager {
             &mut next_hop_override,
             &withdraw,
         );
+        #[cfg(test)]
+        if let Some(observer) = &retirement_observer {
+            observer("common_candidate_retirement_before");
+        }
+        retire_arc_vec(common_unicast_candidates, &mut || {
+            super::replacement_readiness_checkpoint_at(
+                &readiness,
+                "common_candidate_retirement",
+                false,
+            );
+        });
+        #[cfg(test)]
+        if let Some(observer) = &retirement_observer {
+            observer("common_candidate_retirement_after");
+        }
         if capacity_filtered {
             shared_group_encode = None;
         }
