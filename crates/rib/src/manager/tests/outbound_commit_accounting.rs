@@ -214,7 +214,11 @@ fn evpn_recovery_admission_is_a_refusal_not_a_drop() {
     });
     while outbound_rx.try_recv().is_ok() {}
     let gid = manager.grouped_member_of(PEER).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(manager.evpn_recovery_handle(PEER).is_none());
 
     assert_eq!(

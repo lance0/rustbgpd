@@ -36,13 +36,21 @@ pub(super) fn fixture_with_rtc(
     register_with_rtc(&mut manager, member, sender, rtc);
     while output.try_recv().is_ok() {}
     let gid = manager.grouped_member_of(member).unwrap();
-    assert!(!manager.group_ribs[&gid].owns_evpn);
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    assert!(!manager.group_ribs[&gid].owns_evpn_routes());
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(manager.register_evpn_recovery(member, false));
     (manager, member, gid, output)
 }
 
-fn register(manager: &mut RibManager, peer: IpAddr, sender: mpsc::Sender<OutboundRouteUpdate>) {
+pub(super) fn register(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    sender: mpsc::Sender<OutboundRouteUpdate>,
+) {
     register_with_rtc(manager, peer, sender, false);
 }
 
@@ -455,7 +463,7 @@ fn negotiated_rtc_excludes_shared_ownership_and_keeps_private_missing_membership
     assert!(manager.peer_sendable_families[&member].contains(&(Afi::Ipv4, Safi::RtConstrain)));
     assert_eq!(manager.grouped_member_of(member), Some(gid));
     assert_eq!(manager.vpn_grouped_member_of(member), Some(gid));
-    assert!(manager.group_ribs[&gid].owns_evpn);
+    assert!(!manager.group_ribs[&gid].owns_evpn_routes());
     assert!(manager.evpn_grouped_member_of(member).is_none());
     assert!(manager.evpn_recovery_handle(member).is_none());
     manager.peer_rt_membership.remove(&member);
@@ -497,7 +505,7 @@ fn negotiated_rtc_excludes_shared_ownership_and_keeps_private_missing_membership
 
 fn assert_negotiated_rtc_evpn_stays_private(manager: &mut RibManager, member: IpAddr, gid: usize) {
     assert!(manager.group_ribs[&gid].rtc_negotiated());
-    assert!(manager.group_ribs[&gid].owns_evpn);
+    assert!(!manager.group_ribs[&gid].owns_evpn_routes());
     assert_eq!(manager.grouped_member_of(member), Some(gid));
     assert_eq!(manager.vpn_grouped_member_of(member), Some(gid));
     assert!(manager.evpn_grouped_member_of(member).is_none());
@@ -543,8 +551,12 @@ fn negotiated_rtc_exclusion_survives_registration_replay_and_regroup() {
     manager.recompute_update_group(member);
     let moved = manager.grouped_member_of(member).unwrap();
     assert_ne!(moved, gid);
-    assert!(!manager.group_ribs[&moved].owns_evpn);
-    manager.group_ribs.get_mut(&moved).unwrap().owns_evpn = true;
+    assert!(!manager.group_ribs[&moved].owns_evpn_routes());
+    manager
+        .group_ribs
+        .get_mut(&moved)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert_negotiated_rtc_evpn_stays_private(&mut manager, member, moved);
     manager.peer_interpret_rfc1997.insert(member);
     manager.recompute_update_group(member);
@@ -567,12 +579,23 @@ fn shared_capture_without_negotiated_rtc_ignores_empty_and_stale_membership() {
         // The existing private tail also remains unfiltered for a peer that
         // did not negotiate RTC, regardless of a stale membership map row.
         let keys = HashSet::from([old.key()]);
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .set_evpn_ownership_for_test(false);
         manager.distribute_evpn_keys_to_peer(member, &keys, &mut || {});
         let delivered = output
             .try_recv()
             .expect("non-RTC private tail stays unfiltered");
         assert_eq!(delivered.evpn_announce.len(), 1);
         assert!(evpn_routes_equal(&delivered.evpn_announce[0], &old));
+        // Transfer this actual private admission into the synthetic owner.
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .set_evpn_ownership_for_test(true);
         manager
             .adj_ribs_out
             .get_mut(&member)
@@ -711,6 +734,7 @@ fn same_token_replay_captures_old_shared_projection_without_guessing_an_empty_he
         .loc_rib
         .recompute_evpn(old.key(), std::iter::empty());
     let sender = manager.outbound_peers[&member].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
     register(&mut manager, member, sender);
     assert_eq!(manager.evpn_recovery_handle(member), Some(owner));
     assert_eq!(
@@ -911,7 +935,10 @@ fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exa
         while output.try_recv().is_ok() {}
         assert_eq!(manager.evpn_grouped_member_of(peer), Some(gid));
         let handle = manager.evpn_recovery_handle(peer).unwrap();
-        assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
+        assert!(
+            manager.evpn_recovery.is_dormant(handle)
+                || manager.evpn_recovery.finish_recovery(handle).unwrap()
+        );
         // The synthetic owned registration had an empty table; this storage
         // control begins from that known empty clean projection.
         manager.dirty_peers.remove(&peer);
@@ -1040,11 +1067,11 @@ fn disjoint_peer_budget() -> usize {
         + 1024
 }
 
-fn transfer_test_evpn_bodies(manager: &mut RibManager, peer: IpAddr, routes: &[EvpnRibRoute]) {
+fn assert_owned_test_evpn_bodies(manager: &RibManager, peer: IpAddr, routes: &[EvpnRibRoute]) {
     let gid = manager.evpn_grouped_member_of(peer).unwrap();
     assert!(manager.group_ribs[&gid].evpn_projection_complete());
-    // Central admission still maintains the private mirror while grouping is
-    // dormant. Complete this synthetic ownership transfer only after delivery.
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert_eq!(manager.evpn_admitted_count(peer), routes.len());
     for route in routes {
         assert!(evpn_routes_equal(
             manager.group_ribs[&gid]
@@ -1053,12 +1080,6 @@ fn transfer_test_evpn_bodies(manager: &mut RibManager, peer: IpAddr, routes: &[E
                 .unwrap(),
             route,
         ));
-        let private = manager.adj_ribs_out.get_mut(&peer).unwrap();
-        assert!(evpn_routes_equal(
-            private.get_evpn(&route.key()).unwrap(),
-            route
-        ));
-        assert!(private.remove_evpn(&route.key()));
     }
 }
 
@@ -1083,17 +1104,19 @@ fn older_universe_fixture() -> (
     while second_output.try_recv().is_ok() {}
     assert_eq!(manager.evpn_grouped_member_of(second), Some(gid));
     let second_handle = manager.evpn_recovery_handle(second).unwrap();
-    assert!(
-        manager
-            .evpn_recovery
-            .proof(second_handle)
-            .unwrap()
-            .unwrap()
-            .is_empty()
-    );
-    // Both registrations had a known empty table. This storage control sets
-    // that initial clean state without claiming a production feed settlement.
+    assert!(manager.evpn_recovery.is_dormant(second_handle));
+    // The live empty registration has already settled. Capture that actual
+    // empty OLD before this storage control stages its synthetic admissions.
     for peer in [first, second] {
+        assert!(manager.capture_evpn_recovery_before_projection(peer, [].into_iter()));
+        assert!(
+            manager
+                .evpn_recovery
+                .proof(manager.evpn_recovery_handle(peer).unwrap())
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
         manager.dirty_peers.remove(&peer);
         manager
             .group_ribs
@@ -1127,7 +1150,7 @@ fn older_universe_fixture() -> (
             .collect::<Vec<_>>(),
         old.iter().map(EvpnRibRoute::key).collect::<Vec<_>>()
     );
-    transfer_test_evpn_bodies(&mut manager, first, &old);
+    assert_owned_test_evpn_bodies(&manager, first, &old);
     assert!(manager.capture_shared_evpn_admitted(first));
     for route in old {
         manager.loc_rib.recompute_evpn(route.key(), [].into_iter());
@@ -1181,7 +1204,6 @@ fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
     let fresh = disjoint_routes(1000);
     assert_disjoint_flat_fits(&fresh);
     let handle = manager.evpn_recovery_handle(second).unwrap();
-    assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
     assert!(
         manager
             .try_send_and_commit_outbound_update(
@@ -1203,7 +1225,8 @@ fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
             .collect::<Vec<_>>(),
         fresh.iter().map(EvpnRibRoute::key).collect::<Vec<_>>()
     );
-    transfer_test_evpn_bodies(&mut manager, second, &fresh);
+    assert_owned_test_evpn_bodies(&manager, second, &fresh);
+    assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
     let first_handle = manager.evpn_recovery_handle(first).unwrap();
     let old = manager.evpn_recovery.proof_keys(first_handle).unwrap();
     let hint = manager.group_ribs[&gid].evpn_recovery_universe;

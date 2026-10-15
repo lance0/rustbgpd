@@ -461,6 +461,11 @@ impl AdjRibOut {
         release_hash_map(&mut self.vpn_key_path_ids, checkpoint);
     }
 
+    /// Release actual private EVPN state after complete group admission.
+    pub(crate) fn release_evpn_with(&mut self, checkpoint: &mut impl FnMut()) {
+        release_hash_map(&mut self.evpn_routes, checkpoint);
+    }
+
     /// Reserve both VPN advertised-route indexes for a known outbound batch.
     pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
         reserve_hash_map(&mut self.vpn_routes, additional, checkpoint);

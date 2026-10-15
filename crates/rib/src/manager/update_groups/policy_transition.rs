@@ -512,7 +512,7 @@ impl RibManager {
                 &prestaged.next_hop_override,
                 probe,
                 &changed_positions,
-                &mut || checkpoint(),
+                &mut &checkpoint,
             )
         }) {
             probe.retire_with(&mut || checkpoint());
@@ -684,6 +684,14 @@ impl RibManager {
         };
         source_key.is_unicast_only()
             && destination_key.is_unicast_only()
+            && !self
+                .group_ribs
+                .get(&source)
+                .is_some_and(GroupRibOut::owns_evpn_routes)
+            && !self
+                .group_ribs
+                .get(&destination)
+                .is_some_and(GroupRibOut::owns_evpn_routes)
             && source_key.same_staging_profile_except_chain(destination_key)
     }
 
@@ -820,6 +828,14 @@ impl RibManager {
         (source != destination
             && source_key.is_unicast_only()
             && destination_key.is_unicast_only()
+            && !self
+                .group_ribs
+                .get(&source)
+                .is_some_and(GroupRibOut::owns_evpn_routes)
+            && !self
+                .group_ribs
+                .get(&destination)
+                .is_some_and(GroupRibOut::owns_evpn_routes)
             && source_key.same_staging_profile_except_chain(destination_key))
         .then_some((source, destination))
     }
@@ -837,7 +853,7 @@ impl RibManager {
             return PolicyTransitionGroupStart::Maintained;
         }
         self.replacement_checkpoint(true);
-        let group = GroupRibOut::new(
+        let mut group = GroupRibOut::new(
             export_policy.map(PolicyChain::share),
             self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
             self.peer_interpret_rfc1997.contains(&peer),
@@ -862,6 +878,7 @@ impl RibManager {
             self.loc_rib.len(),
         );
         self.replacement_checkpoint(true);
+        group.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
         self.group_ribs.insert(gid, group);
         // Loc-RIB keys are unique per prefix (Add-Path paths collapse to
         // one best before they get here), so the snapshot needs no dedup.
