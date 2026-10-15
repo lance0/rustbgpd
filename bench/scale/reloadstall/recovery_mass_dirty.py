@@ -271,7 +271,9 @@ def neighbor_witness(rbgp, addr, receivers, expected=None, pending=None):
     rows = []
     for index in range(1, receivers + 1):
         row = json.loads(command([rbgp, "--addr", addr, "--json", "neighbor", peer(index)]))
-        require(row["state"] == "Established" and not row["slow_peer"], "receiver state/isolation changed")
+        require(row["address"] == peer(index), "receiver identity changed")
+        # The CLI contract omits this boolean while false; true is explicit.
+        require(row["state"] == "Established" and row.get("slow_peer", False) is False, "receiver state/isolation changed")
         require(row.get("outbound_resync_pending") is pending, "actual dirty overlap/settlement missing")
         group = row.get("update_group")
         require(isinstance(group, str) and group.startswith("group:"), "receiver is not grouped")

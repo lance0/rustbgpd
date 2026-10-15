@@ -123,6 +123,14 @@ class MassDirtyTests(unittest.TestCase):
         with mock.patch.object(receipt, "command", side_effect=[json.dumps(row(1)), json.dumps(row(2))]):
             actual = receipt.neighbor_witness("rbgp", "unix:///owned.sock", 2, pending=True)
             self.assertEqual(len(actual), 2)
+        omitted = row(1)
+        omitted.pop("slow_peer")
+        with mock.patch.object(receipt, "command", side_effect=[json.dumps(omitted), json.dumps(row(2))]):
+            receipt.neighbor_witness("rbgp", "unix:///owned.sock", 2, pending=True)
+        for invalid in ({**row(1), "slow_peer": True}, {**row(1), "slow_peer": 0},
+                        {**row(1), "address": receipt.peer(2)}):
+            with mock.patch.object(receipt, "command", return_value=json.dumps(invalid)), self.assertRaises(ValueError):
+                receipt.neighbor_witness("rbgp", "unix:///owned.sock", 2, pending=True)
         bad = row(2)
         bad["outbound_resync_pending"] = False
         with mock.patch.object(receipt, "command", side_effect=[json.dumps(row(1)), json.dumps(bad)]):
