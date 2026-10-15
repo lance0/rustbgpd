@@ -13,6 +13,7 @@ use tonic::{Request, Response, Status};
 use crate::actor_read::{KnownPeerQueries, rib_manager_read};
 use crate::proto;
 use crate::route_distinguisher::{format_rd, parse_family_rd, parse_rd};
+use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
 use rustbgpd_rib::update::ordered_route_query_filter;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, EvpnRouteQueryKey, ExplainAdvertisedRoute,
@@ -318,7 +319,7 @@ impl RibService {
         let page_size = if req.page_size == 0 {
             DEFAULT_ROUTE_PAGE_SIZE
         } else {
-            req.page_size.min(1000) as usize
+            (req.page_size as usize).min(ROUTE_QUERY_MAX_PAGE_SIZE)
         };
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutesPage {
             scope,
@@ -1327,7 +1328,7 @@ fn family_page_params<K>(
     let size = if size == 0 {
         DEFAULT_ROUTE_PAGE_SIZE
     } else {
-        size.min(1000) as usize
+        (size as usize).min(ROUTE_QUERY_MAX_PAGE_SIZE)
     };
     if token.is_empty() {
         return Ok((size, None, None));
@@ -2450,7 +2451,11 @@ impl proto::rib_service_server::RibService for RibService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
         let prefix = parse_prefix_request(&req.prefix, req.prefix_length)?;
-        let rd = parse_family_rd(&req.rd)?;
+        let rd = if req.rd.is_empty() {
+            None
+        } else {
+            Some(parse_rd(&req.rd)?)
+        };
         if req.labeled && rd.is_some() {
             return Err(Status::invalid_argument(
                 "rd and labeled are mutually exclusive: a route is VPN or labeled-unicast, not both",
@@ -3216,7 +3221,7 @@ impl proto::rib_service_server::RibService for RibService {
         let page_size = if req.page_size == 0 {
             DEFAULT_ROUTE_PAGE_SIZE
         } else {
-            req.page_size.min(1000) as usize
+            (req.page_size as usize).min(ROUTE_QUERY_MAX_PAGE_SIZE)
         };
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutesPage {
             scope,
