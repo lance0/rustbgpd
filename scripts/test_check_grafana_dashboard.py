@@ -103,6 +103,15 @@ registry.register(Box::new(ready.clone())).unwrap();
         self.assertEqual(CHECK.rust_lex("left// one\n// two\nright"), ("left\n\nright", []))
         self.assertEqual(CHECK.rust_lex("left// eof"), ("left", []))
 
+    def test_string_literals_keep_exact_values(self):
+        self.assertEqual(
+            CHECK.rust_lex('a r#"x"y"# br"w" b"z\\"" "q" c'),
+            (
+                "a __RUST_STRING_0__ __RUST_STRING_1__ __RUST_STRING_2__ __RUST_STRING_3__ c",
+                ['x"y', "w", 'z\\"', "q"],
+            ),
+        )
+
     def test_registration_rename_ignores_old_comment_and_test_literal(self):
         rust = self.rust(name="bgp_new").replace(
             "#[cfg(test)]", "// bgp_ready remains documented here\n#[cfg(test)]"

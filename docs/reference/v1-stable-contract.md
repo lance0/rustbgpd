@@ -130,9 +130,9 @@ preparation advances that chain normally.
 
 ### Bounded reflected-family queries
 
-The scoped L3VPN, labeled-unicast and RT-Constrain roles use
-`RibService.ListVpnRibRoutes`, `ListLabeledRibRoutes` and `ListRtcRibRoutes`,
-respectively. Their explicit `FamilyRouteView` selects `BEST`, `RECEIVED` or
+The scoped L3VPN, labeled-unicast, RT-Constrain and BGP-LS roles use
+`RibService.ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes` and
+`ListBgpLsRibRoutes`, respectively. Their explicit `FamilyRouteView` selects `BEST`, `RECEIVED` or
 `ADVERTISED`; `UNSPECIFIED` and unknown values return `INVALID_ARGUMENT`.
 Received and advertised require `neighbor_address`, identifying the source or
 destination. Best permits only `source_peer_filter`, selecting the winner's
@@ -147,16 +147,21 @@ Their process-local tokens bind scope, filters and table version. A mutation
 returns `ABORTED`; restart with an empty token. Advertised rows retain their
 source `peer_address` and prove outbound admission, not remote receipt.
 Group-owned advertised views may return `FAILED_PRECONDITION` until resync
-completes. The [API reference](api.md#bounded-vpn-labeled-rtc-and-evpn-best-pages)
+completes. The [API reference](api.md#bounded-vpn-labeled-rtc-bgp-ls-and-evpn-best-pages)
 defines the typed family selectors, filters and continuation behavior.
 
 Before the v1 freeze, the inventory replaces the unbounded `ListVpnRoutes`,
-`ListLabeledRoutes` and `ListRtcRoutes` calls with those bounded methods.
-The older calls are deprecated and outside v1, as is `ListEvpnRoutes`;
-`ListBestEvpnRoutes` is its bounded replacement. Every older method retains
-its signature and behavior. This change removes no RPC and sets no removal
-schedule. Existing plain CLI listings retain their whole-table behavior and
-JSON arrays; promoting the RPCs does not promote additional CLI dimensions.
+`ListLabeledRoutes`, `ListRtcRoutes` and `ListBgpLsRoutes` calls with those
+bounded methods, and the whole-graph `ListTopologyNodes` and
+`ListTopologyLinks` with the bounded `ListOrrTopologyNodes` and
+`ListOrrTopologyLinks`. The older calls are deprecated and outside v1, as is
+`ListEvpnRoutes`; `ListBestEvpnRoutes` is its bounded replacement. Every older
+method retains its signature and behavior. This change removes no RPC and sets
+no removal schedule. Existing plain CLI listings retain their JSON arrays;
+`rbgp rib bgpls`, `rbgp topology nodes` and `rbgp topology links` build their
+arrays by walking every bounded page, and the other plain listings keep their
+whole-table calls. Promoting the RPCs
+does not promote additional CLI dimensions.
 
 ### EVPN route-reflector boundary
 

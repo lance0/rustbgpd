@@ -842,6 +842,45 @@ async fn wait_for(
     .map_err(|_| "fixed cell deadline expired")?
 }
 
+fn readiness_failure_record(
+    sequence: u64,
+    metrics: SocketAddr,
+    trace: &HttpFetchTrace,
+    error: &str,
+    started: Instant,
+    finished: Option<Instant>,
+    clocks: (Option<f64>, Option<f64>),
+) -> String {
+    let elapsed = finished.map(|end| end.saturating_duration_since(started));
+    let after_start = |at: Option<Instant>| {
+        json_seconds(at.map(|at| at.saturating_duration_since(started).as_secs_f64()))
+    };
+    let elapsed_seconds = json_seconds(elapsed.map(|value| value.as_secs_f64()));
+    let overshoot =
+        json_seconds(elapsed.map(|value| value.saturating_sub(READINESS_DEADLINE).as_secs_f64()));
+    let connected = matches!(
+        trace.phase,
+        "request_write" | "response_read_to_eof" | "response_validation"
+    );
+    let written = matches!(trace.phase, "response_read_to_eof" | "response_validation");
+    format!(
+        "mass_dirty_readiness_failure {{\"attempt_sequence\":{sequence},\"endpoint\":\"{metrics}\",\"path\":\"/readyz\",\"deadline_ms\":250,\"phase\":\"{}\",\"tcp_connected\":{connected},\"request_written\":{written},\"response_read_completed\":{},\"response_bytes\":{},\"response_prefix_hex\":\"{}\",\"response_prefix_truncated\":{},\"prefix_limit_bytes\":{HTTP_TRACE_PREFIX_BYTES},\"error_bytes\":{},\"error_prefix_hex\":\"{}\",\"error_prefix_truncated\":{},\"started_monotonic_seconds\":{},\"finished_monotonic_seconds\":{},\"observed_elapsed_seconds\":{elapsed_seconds},\"deadline_overshoot_seconds\":{overshoot},\"connected_after_seconds\":{},\"request_written_after_seconds\":{},\"read_completed_after_seconds\":{}}}",
+        trace.phase,
+        trace.phase == "response_validation",
+        trace.response.len(),
+        diagnostic_hex(&trace.response),
+        trace.response.len() > HTTP_TRACE_PREFIX_BYTES,
+        error.len(),
+        diagnostic_hex(error.as_bytes()),
+        error.len() > HTTP_TRACE_PREFIX_BYTES,
+        json_seconds(clocks.0),
+        json_seconds(clocks.1),
+        after_start(trace.connected_at),
+        after_start(trace.request_written_at),
+        after_start(trace.read_completed_at),
+    )
+}
+
 async fn readiness_watch(
     metrics: SocketAddr,
     mut stop: oneshot::Receiver<()>,
@@ -857,10 +896,21 @@ async fn readiness_watch(
                 let started = Instant::now();
                 let probe_start = monotonic_seconds(correctness)?;
                 // Reuse the HTTP validation and retain the existing client deadline.
-                fetch_http(metrics, "/readyz", started + READINESS_DEADLINE).await?;
+                let mut trace = HttpFetchTrace { record_clocks: !correctness, ..HttpFetchTrace::default() };
+                if let Err(error) = fetch_http_traced(metrics, "/readyz", started + READINESS_DEADLINE, Some(&mut trace)).await {
+                    let finished = (!correctness).then(Instant::now);
+                    // A diagnostic clock failure must not replace the original HTTP error.
+                    let probe_end = monotonic_seconds(correctness).ok().flatten();
+                    eprintln!("{}", readiness_failure_record(samples + 1, metrics, &trace, &error, started, finished, (probe_start, probe_end)));
+                    return Err(error);
+                }
                 let probe_end = monotonic_seconds(correctness)?;
                 let elapsed = started.elapsed();
-                if elapsed > READINESS_DEADLINE { return Err("late readiness success".into()); }
+                if elapsed > READINESS_DEADLINE {
+                    let error = "late readiness success";
+                    eprintln!("{}", readiness_failure_record(samples + 1, metrics, &trace, error, started, (!correctness).then(Instant::now), (probe_start, probe_end)));
+                    return Err(error.into());
+                }
                 let seconds = if correctness { "null".into() } else { elapsed.as_secs_f64().to_string() };
                 samples += 1;
                 let probe_start = json_seconds(probe_start);
@@ -1378,6 +1428,81 @@ mod tests {
         assert!(checked_clock_seconds(libc::time_t::MAX, 999_999_999)
             .unwrap()
             .is_finite());
+    }
+
+    #[test]
+    fn recovery_mass_dirty_readiness_failure_keeps_clocks_null_and_prefix_bounded() {
+        let trace = HttpFetchTrace {
+            phase: "response_read_to_eof",
+            response: vec![b'x'; HTTP_TRACE_PREFIX_BYTES + 7],
+            ..HttpFetchTrace::default()
+        };
+        let record = readiness_failure_record(
+            210,
+            "127.0.0.1:19186".parse().unwrap(),
+            &trace,
+            "deadline \"\n",
+            Instant::now(),
+            None,
+            (None, None),
+        );
+        assert!(record.contains("\"attempt_sequence\":210"));
+        assert!(record.contains("\"response_bytes\":519"));
+        assert!(record.contains("\"response_prefix_truncated\":true"));
+        assert!(record.contains(&format!(
+            "\"response_prefix_hex\":\"{}\"",
+            "78".repeat(HTTP_TRACE_PREFIX_BYTES)
+        )));
+        assert!(record.contains("\"error_prefix_hex\":\"646561646c696e6520220a\""));
+        assert!(record.contains(
+            "\"tcp_connected\":true,\"request_written\":true,\"response_read_completed\":false"
+        ));
+        for field in [
+            "started_monotonic_seconds",
+            "finished_monotonic_seconds",
+            "observed_elapsed_seconds",
+            "deadline_overshoot_seconds",
+            "connected_after_seconds",
+            "request_written_after_seconds",
+            "read_completed_after_seconds",
+        ] {
+            assert!(record.contains(&format!("\"{field}\":null")));
+        }
+        assert_eq!(record.lines().count(), 1);
+    }
+
+    #[test]
+    fn recovery_mass_dirty_readiness_failure_records_measured_boundaries_and_overshoot() {
+        let started = Instant::now();
+        let trace = HttpFetchTrace {
+            record_clocks: true,
+            phase: "response_validation",
+            connected_at: Some(started + Duration::from_millis(1)),
+            request_written_at: Some(started + Duration::from_millis(2)),
+            read_completed_at: Some(started + Duration::from_millis(300)),
+            ..HttpFetchTrace::default()
+        };
+        let record = readiness_failure_record(
+            2,
+            "127.0.0.1:19186".parse().unwrap(),
+            &trace,
+            "late readiness success",
+            started,
+            Some(started + Duration::from_millis(325)),
+            (Some(10.0), Some(10.325)),
+        );
+        for field in [
+            "\"started_monotonic_seconds\":10",
+            "\"finished_monotonic_seconds\":10.325",
+            "\"observed_elapsed_seconds\":0.325",
+            "\"deadline_overshoot_seconds\":0.075",
+            "\"connected_after_seconds\":0.001",
+            "\"request_written_after_seconds\":0.002",
+            "\"read_completed_after_seconds\":0.3",
+            "\"response_read_completed\":true",
+        ] {
+            assert!(record.contains(field), "missing {field}: {record}");
+        }
     }
 
     fn reflected(shape: Shape, family: usize, extras: Vec<PathAttribute>) -> Message {

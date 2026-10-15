@@ -168,7 +168,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (28 RPCs)
+### RibService (31 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -189,16 +189,19 @@ shape itself does not raise the tier.
 | `ListReceivedEvpnRoutes` | `sensitive_read` | Bounded accepted post-policy EVPN routes from one source neighbor. |
 | `ListAdvertisedEvpnRoutes` | `sensitive_read` | Bounded committed EVPN routes to one destination neighbor, retaining route source identity. |
 | `ExplainEvpnRoute` | `sensitive_read` | Exact EVPN candidate selection and export diagnostics, including policy gates and committed outbound topology. |
-| `ListBgpLsRoutes` | `sensitive_read` | RFC 9552 BGP-LS / BGP-LS VPN routes — controller-facing topology graph objects exposed as opaque NLRI/TLV bytes. |
+| `ListBgpLsRoutes` | `sensitive_read` | Deprecated whole-table selected BGP-LS / BGP-LS VPN view, outside v1; use `ListBgpLsRibRoutes` with `view = BEST`. |
 | `ListVpnRoutes` | `sensitive_read` | Deprecated whole-table selected VPNv4/VPNv6 view, outside v1; use `ListVpnRibRoutes` with `view = BEST`. |
 | `ListLabeledRoutes` | `sensitive_read` | Deprecated whole-table selected labeled-unicast view, outside v1; use `ListLabeledRibRoutes` with `view = BEST`. |
 | `ListRtcRoutes` | `sensitive_read` | Deprecated whole-table selected RT-Constrain view, outside v1; use `ListRtcRibRoutes` with `view = BEST`. |
 | `ListVpnRibRoutes` | `sensitive_read` | Scoped RR-only L3VPN: bounded, filtered, mutation-fenced best/received/advertised pages; exposes RD-scoped route topology. |
 | `ListLabeledRibRoutes` | `sensitive_read` | Scoped RR-only labeled-unicast: bounded, filtered, mutation-fenced best/received/advertised pages; exposes label stacks and reachability. |
 | `ListRtcRibRoutes` | `sensitive_read` | Scoped RR-only RT-Constrain: bounded, filtered, mutation-fenced best/received/advertised pages; exposes membership topology. |
+| `ListBgpLsRibRoutes` | `sensitive_read` | Scoped RR-only RFC 9552 BGP-LS / BGP-LS VPN: bounded, filtered, mutation-fenced best/received/advertised pages; exposes controller-facing topology as opaque NLRI/TLV bytes. |
 | `ListBestEvpnRoutes` | `sensitive_read` | Scoped RR-only EVPN Types 1–5: bounded, filtered, mutation-fenced selected best pages. All-types and Type 6 calls remain outside v1. |
-| `ListTopologyNodes` | `sensitive_read` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union — discloses IGP node identity (AS, router-IDs). |
-| `ListTopologyLinks` | `sensitive_read` | RFC 9107 ORR topology links — discloses IGP adjacencies, link addresses, and metrics (the SPF input). |
+| `ListTopologyNodes` | `sensitive_read` | Deprecated whole-graph RFC 9107 ORR node view, outside v1; use `ListOrrTopologyNodes`. |
+| `ListTopologyLinks` | `sensitive_read` | Deprecated whole-graph RFC 9107 ORR link view, outside v1; use `ListOrrTopologyLinks`. |
+| `ListOrrTopologyNodes` | `sensitive_read` | Scoped RR-only RFC 9107 ORR topology nodes from the BGP-LS Adj-RIB-In union: bounded, mutation-fenced pages; discloses IGP node identity (AS, router-IDs). |
+| `ListOrrTopologyLinks` | `sensitive_read` | Scoped RR-only RFC 9107 ORR topology links: bounded, mutation-fenced pages; discloses IGP adjacencies, link addresses, and metrics (the SPF input). |
 | `ListOrrStatus` | `sensitive_read` | RFC 9107 ORR per-vantage status — discloses configured vantage IPs (IGP locations), their resolved topology nodes, and the peers bound to them. |
 
 ### BfdService (1 RPC)
@@ -277,10 +280,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.8% |
-| `sensitive_read` | 75 | 61.5% |
-| `mutating` | 22 | 18.0% |
-| `operator_only` | 24 | 19.7% |
-| **Total** | **122** | **100%** |
+| `sensitive_read` | 78 | 62.4% |
+| `mutating` | 22 | 17.6% |
+| `operator_only` | 24 | 19.2% |
+| **Total** | **125** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`

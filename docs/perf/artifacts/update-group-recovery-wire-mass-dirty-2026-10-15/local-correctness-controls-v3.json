@@ -1,0 +1,741 @@
+{
+  "aggregate": {
+    "actual_causal_red_exit": 1,
+    "all_owned_processes_reaped": true,
+    "attempted_legs_with_required_failure_journal": 7,
+    "healthy_B_A_folds": 12,
+    "healthy_legs": 6,
+    "healthy_withdrawals": 0,
+    "ordinary_snapshot_failure_journal_entries": 0,
+    "owned_processes": 14
+  },
+  "build": {
+    "all_actual_compile_inputs_match_clean_exact_head": true,
+    "all_build_processes_reaped": true,
+    "all_five_locked_default_builds_verified": true,
+    "all_sources_restored": true,
+    "all_three_daemon_hashes_distinct": true,
+    "binaries_sha256": {
+      "rbgp": "d1b406923ef1084b2643c10145c6cd2de0a22f3d95b053049e27f7e35b488999",
+      "reloadstall": "5648ccf6b83b5a22d84f3c2701aba61e75320edab75c7bee099fd98baa22eccd",
+      "rustbgpd-candidate": "cfc8d02905b7417e260bc0a24a788a3a27647e197f8d296f1b83c0a2a711162c",
+      "rustbgpd-flat": "9c4e85e1add160c9fb5cdab8dcad94e2898280d67d90fa948ad987f7efed8be9",
+      "rustbgpd-mutant": "9b6c504cfe5ad0ea6e459525f09c580a25397704c211aceaeb467d384ba4c99f"
+    },
+    "build_complete_sha256": "f94848f4cb185718b150d601676333d224cca721dc450848107c92df28b2ce46",
+    "builds": [
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "0-63",
+          "cargo",
+          "build",
+          "--release",
+          "--locked",
+          "--bin",
+          "rustbgpd"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "daemon-candidate",
+        "role": "candidate"
+      },
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "0-63",
+          "cargo",
+          "build",
+          "--release",
+          "--locked",
+          "--bin",
+          "rustbgpd"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "daemon-flat",
+        "role": "flat"
+      },
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "0-63",
+          "cargo",
+          "build",
+          "--release",
+          "--locked",
+          "--bin",
+          "rustbgpd"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "daemon-mutant",
+        "role": "mutant"
+      },
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "0-63",
+          "cargo",
+          "build",
+          "--profile",
+          "scale",
+          "--locked",
+          "-p",
+          "reloadstall"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "harness",
+        "role": "candidate"
+      },
+      {
+        "command": [
+          "taskset",
+          "-c",
+          "0-63",
+          "cargo",
+          "build",
+          "--release",
+          "--locked",
+          "--bin",
+          "rbgp"
+        ],
+        "exit": 0,
+        "features": "default",
+        "jobs": 2,
+        "name": "rbgp",
+        "role": "candidate"
+      }
+    ],
+    "capture_source_hash_scope": "update_groups.rs capture helper only; the complete runtime source is bound by the 9,015-file input roster",
+    "cargo_version": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "controller_sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9",
+    "full_inputs_sha256": "24489ab42d05a70e4bd490ca4c5b9ac5d532ef79a4bebcda03dc4b18f3eafa38",
+    "full_tracked_input_count": 9015,
+    "genuine_rib_compilation_all_roles": true,
+    "probe_sha256": "e900baaae3707695d9fded4bd98252cefb5ff39946853eef01bcd2bbb6bcb92d",
+    "roles": {
+      "candidate": {
+        "capture_source_sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277",
+        "head": "baf7082560d2b8318cbe99e9fed8c1104b06f1bb",
+        "inputs_before_sha256": "24489ab42d05a70e4bd490ca4c5b9ac5d532ef79a4bebcda03dc4b18f3eafa38",
+        "inputs_built_sha256": "24489ab42d05a70e4bd490ca4c5b9ac5d532ef79a4bebcda03dc4b18f3eafa38",
+        "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "flat": {
+        "capture_source_sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c",
+        "head": "baf7082560d2b8318cbe99e9fed8c1104b06f1bb",
+        "inputs_before_sha256": "24489ab42d05a70e4bd490ca4c5b9ac5d532ef79a4bebcda03dc4b18f3eafa38",
+        "inputs_built_sha256": "20f7d1350e29cc5240da3e54b87248dea9f8d43a05d62be0ab34981675da4ede",
+        "patch_sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+      },
+      "mutant": {
+        "capture_source_sha256": "868289c8f5c83c8bd67a6bc0cec5b757d8379df603f8196c296d9527a0fbdfed",
+        "head": "baf7082560d2b8318cbe99e9fed8c1104b06f1bb",
+        "inputs_before_sha256": "24489ab42d05a70e4bd490ca4c5b9ac5d532ef79a4bebcda03dc4b18f3eafa38",
+        "inputs_built_sha256": "10905f03ab68a92f062bc52278ef5061fd6995a9fb0f5c1ec7b6eb7f36834567",
+        "patch_sha256": "66f0390b80a540eb1742d684277c48004905737d3cd437625a024f1de0073c49"
+      }
+    },
+    "rustc_verbose": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+    "sources_sha256": "569260545a84d416cc840fb9409d02dec3cc61663380adc28fc70a5b4d7c2b53"
+  },
+  "document_class": "derived v3 local correctness-control summary",
+  "historical_files_unchanged": {
+    "invalid-hosted-attempt.json": "1880df8ed7068b665dfd4311966641992edf492634e242ab158a34c62a549266",
+    "local-correctness-controls.json": "0c067652ed81b7093bd051a5aca863d81610ee6c65a18fe761dc4117667413d7"
+  },
+  "limits": [
+    "not a hosted all-member readiness/convergence or resource pass",
+    "ordinary snapshot retries are not exercised by these zero-failure local journals",
+    "no new isolated-native result",
+    "online native route validation does not persist a full ordered packet stream",
+    "compact summary cannot replay raw slices, paths or process ownership",
+    "old 23fe8425 controls and all-four INVALID history remain separate",
+    "actual release-candidate soak pending",
+    "dataset acknowledgement defect separate",
+    "EVPN ownership disabled"
+  ],
+  "logical_credit_scope": "proof entries/bytes/peak_bytes are correctness diagnostics, not RSS or a performance comparison; VPN full-OLD remains flat on both arms",
+  "new_source_behavior": {
+    "eager_row_validation": "identity/group/state/current dirty age validated immediately after each successful row before any later peer query; semantic failures cannot be hidden by a subsequent timeout",
+    "mandatory_failure_journal": "ordinary-snapshot-failures.jsonl exists even empty; sequence/phase/peer/attempt/class/stdout/stderr and derived counts validated",
+    "ordinary_snapshot_retry": "only CalledProcessError return code 1 with empty stdout and the exact stripped RIB snapshot timeout message; query failures are journaled and only this vocabulary is retryable in a completed leg",
+    "runtime_peer_budget": "one dirty peer per distribution replay transaction; check existing poll budget after that complete replay; withheld dirty force flags remain withheld; individual replay/enclosing transition stall deadline unchanged"
+  },
+  "null_measurement_fields": {
+    "CPU_cost": null,
+    "cost_ratio": null,
+    "reason": "correctness-only; published operation/native clocks null and no memory.csv or measurement result fields",
+    "rss_bytes": null,
+    "timing_seconds": null
+  },
+  "ordered_campaigns": [
+    {
+      "all_owned_pids_reaped": true,
+      "control_result_sha256": "69b23042fe68fd50ff2f7ac86198f396770871c25e7033870fd28c8e018f49ed",
+      "driver_exit": 0,
+      "id": "unicast-initial",
+      "independent_review": "CLEAR",
+      "independent_review_sha256": "976bc3335b0df411ffddb831007914f287cba46eb45af373db76e409cea3462e",
+      "legs": [
+        {
+          "arm": "flat",
+          "binary_sha256": "9c4e85e1add160c9fb5cdab8dcad94e2898280d67d90fa948ad987f7efed8be9",
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "harness_exit": 0,
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "recovery_initial": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "result_sha256": "59b3d28a1911c44eb98bcb5aebfc933f523ff7c8f29df74b93db92500ae9e625",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "snapshot_failure_file_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timing_rss_cost": null
+        },
+        {
+          "arm": "candidate",
+          "binary_sha256": "cfc8d02905b7417e260bc0a24a788a3a27647e197f8d296f1b83c0a2a711162c",
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "harness_exit": 0,
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 44587944,
+                "entries": 2460000,
+                "peak_bytes": 44587968
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 44587968
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 44587944,
+                "entries": 2460000,
+                "peak_bytes": 44587968
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 44587968
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "recovery_initial": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "result_sha256": "b26559303a33b46cca158d588c3f852d96748f79bacb18f047a5bf9ce5080648",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "snapshot_failure_file_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timing_rss_cost": null
+        }
+      ],
+      "outcome": "CORRECTNESS_ONLY"
+    },
+    {
+      "all_owned_pids_reaped": true,
+      "causal": {
+        "both_targets_established_same_group_pending_with_current_age_absent": true,
+        "evidence_sha256": "964969ad93f52f1d8dd8abaeaf39a58be0265060e379cdb8a5a40b83a14c66de",
+        "healthy_full_baseline_and_B_writer_drain": true,
+        "mutant_patch_sha256": "66f0390b80a540eb1742d684277c48004905737d3cd437625a024f1de0073c49",
+        "mutation": "B-episode dirty_since removal after fresh dirty insertion; dirty/proof/resync machinery preserved",
+        "no_readiness_wire_session_or_confirmation_RPC_error_misclassified_as_RED": true,
+        "ordinary_snapshot_failure_counts": {
+          "by_phase": {},
+          "total": 0
+        },
+        "ordinary_snapshot_failure_file_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_established_clean": true,
+        "timing_rss_cost": null,
+        "validator_error": "invalid current dirty episode"
+      },
+      "control_result_sha256": "13fdf25a1cd2ecd2d78c10425f94cb22283c78a4c87ffa4957d8ccabbc9bb1b1",
+      "driver_exit": 1,
+      "id": "unicast-timestamp-mutant",
+      "independent_review": "CLEAR",
+      "independent_review_sha256": "ab004da8c98a47a0bad2c971feaf829130e4807fe313e260682635e29bf553ca",
+      "legs": [],
+      "outcome": "CAUSAL_RED"
+    },
+    {
+      "all_owned_pids_reaped": true,
+      "control_result_sha256": "bedd210f3698d1e9cc80831dd7ce6f6552e9621c1fef8e2a59fc825df5cff7de",
+      "driver_exit": 0,
+      "id": "unicast-restored",
+      "independent_review": "CLEAR",
+      "independent_review_sha256": "b3646aa846635a8ee8106610db62400b848f3c2f1c7a6a2a2339ff124d8bd082",
+      "legs": [
+        {
+          "arm": "flat",
+          "binary_sha256": "9c4e85e1add160c9fb5cdab8dcad94e2898280d67d90fa948ad987f7efed8be9",
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "harness_exit": 0,
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "recovery_initial": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "result_sha256": "48b79e439c788a71c472d2e06602b924c790cba67be56fc941fc0daf1c820ed3",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "snapshot_failure_file_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timing_rss_cost": null
+        },
+        {
+          "arm": "candidate",
+          "binary_sha256": "cfc8d02905b7417e260bc0a24a788a3a27647e197f8d296f1b83c0a2a711162c",
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "harness_exit": 0,
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 44587944,
+                "entries": 2460000,
+                "peak_bytes": 44587968
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 44587968
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 44587944,
+                "entries": 2460000,
+                "peak_bytes": 44587968
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 44587968
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "recovery_initial": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "result_sha256": "d7f70a80664530a5c8333123a804efa729b5e31d7b42f2fb9add6e692ebf01f0",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "snapshot_failure_file_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timing_rss_cost": null
+        }
+      ],
+      "outcome": "CORRECTNESS_ONLY"
+    },
+    {
+      "all_owned_pids_reaped": true,
+      "control_result_sha256": "c6526b208677b46ceeb2b57a750933e8733e21f19d885cb092b8aff104b826c7",
+      "driver_exit": 0,
+      "id": "vpn",
+      "independent_review": "CLEAR",
+      "independent_review_sha256": "9eae42d51c593782e8d0ca48eb7aad5547221167e725cff99dd78d1b1eddd90b",
+      "legs": [
+        {
+          "arm": "flat",
+          "binary_sha256": "9c4e85e1add160c9fb5cdab8dcad94e2898280d67d90fa948ad987f7efed8be9",
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "harness_exit": 0,
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "recovery_initial": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "result_sha256": "130208b9700c8e9608e67682414e9a5ef7ab6e22758dbd588b0f22b7db96ea15",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "snapshot_failure_file_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timing_rss_cost": null
+        },
+        {
+          "arm": "candidate",
+          "binary_sha256": "cfc8d02905b7417e260bc0a24a788a3a27647e197f8d296f1b83c0a2a711162c",
+          "config_check_exit": 0,
+          "daemon_exit": 0,
+          "harness_exit": 0,
+          "operations": [
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "recovery_paused": {
+                "bytes": 78720368,
+                "entries": 2460000,
+                "peak_bytes": 78720392
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 78720392
+              },
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "recovery_initial": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "result_sha256": "e9b3fcdf8a19b6dc67355e4a4468fc430054ce2d26bb4bc58e9507a9d30fb4e8",
+          "snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "snapshot_failure_file_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "timing_rss_cost": null
+        }
+      ],
+      "outcome": "CORRECTNESS_ONLY"
+    }
+  ],
+  "provenance": {
+    "combined_source_summary_sha256": "c5cfa93f5d0e65333d7aa2dca1461cd045d3ab5e58a87bfb4515d2cd37f7af49",
+    "compact_can_replay_raw_checks": false,
+    "independent_closure_sha256": "554fc031023172ae15c642730fb96721f0692c73fdee28eb6380d982e838553f",
+    "raw_archives_retained_separately": true,
+    "source_reference_manifest_sha256": "98864a479871fbb0232e1ff664b48b57cf304d85f0b3e4da70e5a8f32ef822f2",
+    "verified_build_terminal_summary_sha256": "4644f4bcd5dc1609439a2cad26eacf5ee1657b0fc4f4ceed0f4688423f138c75",
+    "wrapper_sha256": "e900baaae3707695d9fded4bd98252cefb5ff39946853eef01bcd2bbb6bcb92d"
+  },
+  "runtime_integration": {
+    "equal_blobs": {
+      "changelog.d/fixed-dirty-resync-peer-budget.md": "45228e28e9f5546fab4795494efdc2ddf3a9fae0",
+      "crates/rib/src/manager/mod.rs": "015bb5f60bfe1cf0b04c13a2886c3f0f03d4c9a8",
+      "crates/rib/src/manager/tests/update_groups.rs": "82a1ab68bb998bcc6f663e87d47a1cf579cb6d7d"
+    },
+    "evidence_sha256": "f4add64410ad1c464b08dc40e6d148f4d38eb97e8a21440203bafc34ad989e2f",
+    "merged_sha": "535f4059a22f1adf5a4bbff40b0fd5ea17e18ccf",
+    "qualification_head": "baf7082560d2b8318cbe99e9fed8c1104b06f1bb",
+    "reviewed_head": "d1525826bc2f8032bb7a84527608ca7c2b60b712",
+    "scope": "only three runtime-fix files match; no whole-tree main equivalence or main measurement claim"
+  },
+  "scope": "two receivers, each with 1,000,000 IPv4 and 230,000 IPv6 keys; correctness and timestamp-only causal rejection, no timing/RSS/CPU/cap-pressure or hosted 12/24-member qualification",
+  "shape": {
+    "affinity": "32-63 split into daemon32-47/native48-63",
+    "batch_size": 80,
+    "cohort": "no-refusal",
+    "family_keys": [
+      1000000,
+      230000
+    ],
+    "origin_cardinality": 15375,
+    "receivers": 2
+  },
+  "source": "baf7082560d2b8318cbe99e9fed8c1104b06f1bb",
+  "source_remote_verified": true,
+  "withdrawal_counter_semantics": "Native mass_dirty_complete.withdrawals is cumulative within each B/A leg; these no-refusal controls remain zero; no hosted pressure counts are included."
+}

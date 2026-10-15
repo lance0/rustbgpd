@@ -9913,6 +9913,1068 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the selection-release regression keeps actual VPN staging, retirement holds and wire/fence assertions together"
+)]
+async fn vpn_group_stage_retirement_services_readiness() {
+    use crate::manager::selection_deferral::{
+        SelectionDeferralReleaseReason, SelectionDeferralTransition,
+    };
+
+    let family = (Afi::Ipv4, Safi::MplsVpn);
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let peer: IpAddr = Ipv4Addr::new(10, 223, 4, 1).into();
+    let (tx, rx) = mpsc::channel(8);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        query_rx,
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        BgpMetrics::new(),
+    )
+    .with_readiness_queries(readiness_rx)
+    .with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: source.into(),
+            families: vec![family],
+        }],
+    });
+    manager.flush_poll_budget = Duration::ZERO;
+    let (sender, mut output) = mpsc::channel(8);
+    let mut registration = super::update_groups_recovery::peer_up(peer, sender, None);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        route_reflector_client,
+        ..
+    } = &mut registration
+    {
+        sendable_families.push(family);
+        *route_reflector_client = true;
+    }
+    manager.handle_update(registration);
+    manager.peer_export_encoders.insert(
+        peer,
+        super::exportability::MockExactExportEncoder::accepting(1),
+    );
+    while output.try_recv().is_ok() {}
+    let empty_credit = manager.pending_group_admitted.bytes();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: source.into(),
+        session_id: 0,
+        announced: (0..128)
+            .map(|n| make_vpn_rib_route(source, n, 100, 100))
+            .collect(),
+        withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    let never_admitted = make_vpn_rib_route(source, 0, 100, 100).key();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: source.into(),
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![never_admitted],
+    });
+    while manager.process_next_route_chunk() {}
+    assert!(manager.selection_deferred(family));
+    assert_eq!(manager.loc_rib.vpn_len(), 0);
+    assert!(output.try_recv().is_err());
+    let gid = manager.vpn_grouped_member_of(peer).unwrap();
+    assert_eq!(manager.group_ribs[&gid].table.vpn_len(), 0);
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let visits = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |site| {
+            if site == "vpn_group_stage_retirement" {
+                visits.fetch_add(1, Ordering::Relaxed);
+            }
+            if matches!(
+                site,
+                "vpn_group_stage_retirement_before" | "vpn_group_stage_retirement_after"
+            ) {
+                entered_tx.send(site).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+    }));
+    let actor = tokio::spawn(async move {
+        manager.apply_selection_deferral_transitions(
+            [SelectionDeferralTransition::Release {
+                family,
+                already_staged: false,
+                release_reason: SelectionDeferralReleaseReason::TimerExpired,
+            }],
+            "controlled VPN release",
+        );
+        manager
+    });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "vpn_group_stage_retirement_before"
+    );
+    let mut readiness = queue_replacement_readiness(&readiness_tx);
+    let (reply, mut ordinary) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "vpn_group_stage_retirement_after"
+    );
+    let interior_reply = readiness.try_recv();
+    let ordinary_held = matches!(
+        ordinary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    let mutation_held = tx.capacity() == 7;
+    let retirement_visits = visits.load(Ordering::Relaxed);
+    release_tx.send(()).unwrap();
+    let mut manager = actor.await.unwrap();
+    let update = output.try_recv().unwrap();
+    let expected: HashSet<_> = (1..128)
+        .map(|n| make_vpn_rib_route(source, n, 100, 100).key())
+        .collect();
+    assert_eq!(update.vpn_announce.len(), 127);
+    assert_eq!(
+        update
+            .vpn_announce
+            .iter()
+            .map(VpnRibRoute::key)
+            .collect::<HashSet<_>>(),
+        expected
+    );
+    assert_eq!(update.vpn_withdraw, []);
+    assert_eq!(update.end_of_rib, []);
+    let marker = output.try_recv().unwrap();
+    assert_eq!(marker.end_of_rib, vec![family]);
+    assert!(marker.vpn_announce.is_empty() && marker.vpn_withdraw.is_empty());
+    assert!(output.try_recv().is_err());
+    assert_eq!(manager.group_ribs[&gid].table.vpn_len(), 127);
+    assert!(!manager.selection_deferred(family));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.pending_eor.contains_key(&peer));
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    assert!(manager.replacement_readiness.is_none());
+    assert!(ordinary_held && mutation_held);
+    assert!(matches!(
+        manager.rx.try_recv().unwrap(),
+        RibUpdate::PeerDown { .. }
+    ));
+    let query = manager.query_rx.try_recv().unwrap();
+    manager.handle_update(query);
+    assert_eq!(ordinary.await.unwrap(), 0);
+    assert!(
+        matches!(interior_reply, Ok(Ok(0))),
+        "dedicated readiness must complete inside VPN stage retirement: {interior_reply:?}"
+    );
+    assert!(
+        retirement_visits >= 127,
+        "every staged route must checkpoint before release"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_count_refusal_prior_retirement_services_readiness() {
+    Box::pin(evpn_refusal_prior_retirement_readiness(None)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_final_refusal_prior_retirement_services_readiness() {
+    use crate::manager::update_groups::recovery_provenance::FinalAdmissionFault;
+    for fault in [FinalAdmissionFault::Preflight, FinalAdmissionFault::Apply] {
+        Box::pin(evpn_refusal_prior_retirement_readiness(Some(fault))).await;
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the controlled mixed-family refusal keeps actual OLD, held cleanup, reset fencing and retained-credit cleanup together"
+)]
+async fn evpn_refusal_prior_retirement_readiness(
+    fault: Option<crate::manager::update_groups::recovery_provenance::FinalAdmissionFault>,
+) {
+    let (mut manager, peer, gid, mut output) = super::evpn_group_storage::fixture();
+    manager.flush_poll_budget = Duration::ZERO;
+    manager.peer_export_encoders.insert(
+        peer,
+        super::exportability::MockExactExportEncoder::accepting(1),
+    );
+    let source = Ipv4Addr::new(192, 0, 2, 10);
+    let routes: Vec<_> = (0..128)
+        .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
+        .collect();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source.into(),
+        session_id: 0,
+        announced: routes.clone(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+    let initial = output.try_recv().unwrap();
+    assert_eq!(initial.announce.len(), routes.len());
+    assert_eq!(initial.withdraw, []);
+    assert_eq!(manager.group_ribs[&gid].table.len(), routes.len());
+    assert!(!manager.dirty_peers.contains(&peer));
+    let empty_credit = manager.pending_group_admitted.bytes();
+    assert!(manager.capture_group_admitted_keys(peer));
+    let prior: HashSet<_> = manager
+        .pending_group_admitted
+        .get(&peer)
+        .unwrap()
+        .iter()
+        .collect();
+    assert_eq!(prior.len(), 128);
+    let proof_credit = manager.pending_group_admitted.bytes();
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    let stage = if let Some(fault) = fault {
+        assert!(manager.capture_evpn_recovery_before_projection(peer, std::iter::empty()));
+        manager.evpn_recovery.fail_final_admission_for_test(fault);
+        "evpn_admission_refusal_prior_retirement"
+    } else {
+        // A clean, settled owner cannot claim prior EVPN delivery without
+        // the current operation's OLD staging metadata. Keep that guard real.
+        assert!(manager.evpn_recovery.is_dormant(handle));
+        "evpn_count_refusal_prior_retirement"
+    };
+    let resets = Arc::new(Mutex::new(Vec::new()));
+    manager.evpn_recovery_reset = Some(Arc::new({
+        let resets = Arc::clone(&resets);
+        move |request, reply| {
+            resets.lock().unwrap().push((request, reply));
+            true
+        }
+    }));
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let visits = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |site| {
+            if site == stage {
+                visits.fetch_add(1, Ordering::Relaxed);
+            }
+            if site.strip_suffix("_before") == Some(stage)
+                || site.strip_suffix("_after") == Some(stage)
+            {
+                entered_tx.send(site).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+    }));
+    let key = (routes[0].prefix, routes[0].path_id);
+    let actor = tokio::spawn(async move {
+        let result = super::super::with_executor_handoff(|| {
+            manager.with_replacement_readiness(|manager| {
+                manager.try_send_and_commit_outbound_update_with_group_prior(
+                    peer,
+                    OutboundCommitBatch {
+                        withdraw: vec![key],
+                        evpn_announce: vec![make_evpn_imet(source, 1)],
+                        end_of_rib: vec![(Afi::L2Vpn, Safi::Evpn)],
+                        ..OutboundCommitBatch::default()
+                    },
+                    prior,
+                    None,
+                )
+            })
+        });
+        (manager, result)
+    });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        format!("{stage}_before")
+    );
+    let mut readiness = queue_replacement_readiness(&readiness_tx);
+    let (reply, mut ordinary) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(RibUpdate::PeerDown {
+        peer,
+        session_id: 7,
+    })
+    .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        format!("{stage}_after")
+    );
+    let interior_reply = readiness.try_recv();
+    let ordinary_held = matches!(
+        ordinary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    let mutation_held = tx.capacity() == 7;
+    let retirement_visits = visits.load(Ordering::Relaxed);
+    release_tx.send(()).unwrap();
+    let (mut manager, result) = actor.await.unwrap();
+    assert_eq!(
+        result,
+        Err(
+            crate::manager::distribution::OutboundCommitFailure::Refused(
+                rustbgpd_telemetry::reason_labels::OutboundCommitRefusal::EvpnRecovery
+            )
+        )
+    );
+    assert!(
+        output.try_recv().is_err(),
+        "no ANN, WD or EoR may escape refusal"
+    );
+    assert_eq!(manager.group_ribs[&gid].table.len(), routes.len());
+    assert_eq!(
+        manager.pending_group_admitted.get(&peer).unwrap().len(),
+        128
+    );
+    assert_eq!(manager.pending_group_admitted.bytes(), proof_credit);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(manager.replacement_readiness.is_none());
+    assert!(!manager.evpn_recovery.final_admission_fault_pending());
+    assert_eq!(
+        manager.evpn_recovery.exhaustion(handle).unwrap().cause,
+        crate::update::EvpnRecoveryExhaustionCause::AdmissionInvariant
+    );
+    {
+        let requests = resets.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!((requests[0].0.peer, requests[0].0.session_id), (peer, 7));
+        assert!(
+            requests[0]
+                .0
+                .outbound
+                .same_channel(&manager.outbound_peers[&peer])
+        );
+        assert!(!requests[0].1.is_closed());
+    }
+    assert!(ordinary_held && mutation_held);
+    let query = manager.query_rx.try_recv().unwrap();
+    manager.handle_update(query);
+    assert_eq!(ordinary.await.unwrap(), 128);
+    let mutation = manager.rx.try_recv().unwrap();
+    assert!(matches!(
+        mutation,
+        RibUpdate::PeerDown { session_id: 7, .. }
+    ));
+    manager.handle_update(mutation);
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    assert!(manager.evpn_recovery_handle(peer).is_none());
+    assert_eq!(
+        manager.evpn_recovery.daemon_usage().retained,
+        crate::manager::update_groups::recovery_provenance::EvpnRecoveryProvenance::new()
+            .daemon_usage()
+            .retained
+    );
+    assert!(
+        matches!(interior_reply, Ok(Ok(128))),
+        "dedicated readiness must complete inside {stage}: {interior_reply:?}"
+    );
+    assert_eq!(
+        retirement_visits, 130,
+        "all 128 prior keys and both boundaries checkpoint"
+    );
+}
+
+struct UnicastCleanupFixture {
+    manager: RibManager,
+    peer: IpAddr,
+    output: mpsc::Receiver<OutboundRouteUpdate>,
+    routes: Vec<Route>,
+    encoder: Arc<super::exportability::MockExactExportEncoder>,
+}
+
+fn unicast_cleanup_fixture(grouped: bool) -> UnicastCleanupFixture {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        BgpMetrics::new(),
+    );
+    manager.test_force_ungrouped = !grouped;
+    manager.flush_poll_budget = Duration::ZERO;
+    let peer: IpAddr = Ipv4Addr::new(10, 223, 4, 2).into();
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let (sender, mut output) = mpsc::channel(8);
+    let mut registration = super::update_groups_recovery::peer_up(peer, sender, None);
+    if let RibUpdate::PeerUp {
+        route_reflector_client,
+        sendable_families,
+        ..
+    } = &mut registration
+    {
+        *route_reflector_client = true;
+        sendable_families.push((Afi::Ipv4, Safi::FlowSpec));
+    }
+    manager.handle_update(registration);
+    let encoder = super::exportability::MockExactExportEncoder::accepting(1);
+    manager.peer_export_encoders.insert(peer, encoder.clone());
+    while output.try_recv().is_ok() {}
+    let routes: Vec<_> = (0..128)
+        .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
+        .collect();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source.into(),
+        session_id: 0,
+        announced: routes.clone(),
+        withdrawn: vec![],
+        flowspec_announced: vec![make_flowspec_route(source)],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+    let mut delivered = Vec::new();
+    let mut flowspec = Vec::new();
+    while let Ok(initial) = output.try_recv() {
+        assert_eq!(initial.withdraw, []);
+        assert_eq!(initial.flowspec_withdraw, []);
+        delivered.extend(
+            initial
+                .announce
+                .iter()
+                .map(|route| (route.prefix, route.path_id)),
+        );
+        flowspec.extend(initial.flowspec_announce);
+    }
+    assert_eq!(delivered.len(), 128);
+    assert_eq!(
+        delivered.into_iter().collect::<HashSet<_>>(),
+        routes
+            .iter()
+            .map(|route| (route.prefix, route.path_id))
+            .collect()
+    );
+    assert_eq!(flowspec.len(), 1);
+    assert_eq!(
+        flowspec[0].selection_key(),
+        make_flowspec_route(source).selection_key()
+    );
+    assert_eq!(manager.grouped_member_of(peer).is_some(), grouped);
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(output.try_recv().is_err());
+    UnicastCleanupFixture {
+        manager,
+        peer,
+        output,
+        routes,
+        encoder,
+    }
+}
+
+struct ExportCleanupHold {
+    readiness:
+        Result<Result<usize, crate::update::RibReadinessError>, oneshot::error::TryRecvError>,
+    ordinary_held: bool,
+    mutation_held: bool,
+    visits: usize,
+    live_values: usize,
+    interior_site: &'static str,
+    mutation: Option<RibUpdate>,
+}
+
+impl ExportCleanupHold {
+    fn assert_serviced(&self, stage: &str) {
+        assert!(self.ordinary_held && self.mutation_held);
+        assert!(
+            matches!(self.readiness, Ok(Ok(128))),
+            "dedicated readiness must complete during {stage}: {:?}",
+            self.readiness
+        );
+        assert_eq!(self.interior_site, stage);
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the controlled retirement keeps both holds, element progress, actor reap and ordinary-lane fences in one ordered path"
+)]
+async fn hold_export_cleanup<T: Send + 'static>(
+    mut manager: RibManager,
+    peer: IpAddr,
+    stage: &'static str,
+    tracked: Vec<std::sync::Weak<AttrSet>>,
+    operation: impl FnOnce(&mut RibManager) -> T + Send + 'static,
+) -> (RibManager, T, ExportCleanupHold) {
+    let session_id = manager.outbound_session_ids[&peer];
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let visits = Arc::new(AtomicUsize::new(0));
+    let phase = AtomicUsize::new(0);
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |site| {
+            let count = if site == stage {
+                visits.fetch_add(1, Ordering::Relaxed) + 1
+            } else {
+                0
+            };
+            let entry = site.strip_suffix("_before") == Some(stage);
+            let exit = site.strip_suffix("_after") == Some(stage);
+            let hold = if entry {
+                phase
+                    .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            } else if count == 2 || exit {
+                phase
+                    .compare_exchange(1, 2, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            } else {
+                false
+            };
+            if hold {
+                entered_tx.send(site).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+    }));
+    let actor = tokio::spawn(async move {
+        let result = super::super::with_executor_handoff(|| {
+            manager.with_replacement_readiness_age(Duration::from_secs(5), |manager| {
+                let owner = manager.replacement_readiness.as_ref().unwrap().clone();
+                let started = owner.state.lock().unwrap().started;
+                let result = operation(manager);
+                assert!(Arc::ptr_eq(
+                    manager.replacement_readiness.as_ref().unwrap(),
+                    &owner
+                ));
+                assert_eq!(owner.state.lock().unwrap().started, started);
+                result
+            })
+        });
+        (manager, result)
+    });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        format!("{stage}_before")
+    );
+    let mut readiness = queue_replacement_readiness(&readiness_tx);
+    let (reply, mut ordinary) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(RibUpdate::PeerDown { peer, session_id })
+        .unwrap();
+    release_tx.send(()).unwrap();
+    let interior_site = tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut held = ExportCleanupHold {
+        readiness: readiness.try_recv(),
+        ordinary_held: matches!(
+            ordinary.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        mutation_held: tx.capacity() == 7,
+        visits: visits.load(Ordering::Relaxed),
+        live_values: tracked
+            .iter()
+            .filter(|value| value.upgrade().is_some())
+            .count(),
+        interior_site,
+        mutation: None,
+    };
+    release_tx.send(()).unwrap();
+    let (mut manager, result) = actor.await.unwrap();
+    assert!(manager.replacement_readiness.is_none());
+    let query = manager.query_rx.try_recv().unwrap();
+    manager.handle_update(query);
+    assert_eq!(ordinary.await.unwrap(), 128);
+    let mutation = manager.rx.try_recv().unwrap();
+    assert!(matches!(mutation, RibUpdate::PeerDown { .. }));
+    held.mutation = Some(mutation);
+    (manager, result, held)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_prior_retain_services_readiness() {
+    use crate::update::ExactExportKey;
+    let UnicastCleanupFixture {
+        mut manager,
+        peer,
+        mut output,
+        routes,
+        encoder,
+    } = unicast_cleanup_fixture(true);
+    let empty_credit = manager.pending_group_admitted.bytes();
+    manager.mark_outbound_dirty(peer);
+    assert_eq!(
+        manager.pending_group_admitted.get(&peer).unwrap().len(),
+        128
+    );
+    let flowspec = make_flowspec_route(Ipv4Addr::new(192, 0, 2, 1)).selection_key();
+    encoder.set_profile(
+        2,
+        [
+            ExactExportKey::Unicast(routes[0].prefix, 0),
+            ExactExportKey::FlowSpec(flowspec.clone()),
+        ],
+    );
+    let (manager, _, held) = Box::pin(hold_export_cleanup(
+        manager,
+        peer,
+        "admitted_prior_retain",
+        vec![],
+        RibManager::resync_dirty_peers_bounded,
+    ))
+    .await;
+    let recovered = output.try_recv().unwrap();
+    assert_eq!(recovered.announce.len(), 127);
+    assert_eq!(recovered.withdraw, vec![(routes[0].prefix, 0)]);
+    assert_eq!(recovered.flowspec_withdraw, vec![flowspec]);
+    assert!(recovered.flowspec_announce.is_empty());
+    assert_eq!(recovered.end_of_rib, []);
+    assert!(output.try_recv().is_err());
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    assert_eq!(manager.grouped_advertised_count(peer), Some(127));
+    held.assert_serviced("admitted_prior_retain");
+    assert_eq!(held.visits, 2);
+}
+
+fn isolated_cleanup_routes(
+    routes: &[Route],
+    otc: bool,
+) -> (Arc<Vec<Route>>, Vec<std::sync::Weak<AttrSet>>) {
+    let mut tracked = Vec::new();
+    let routes = routes
+        .iter()
+        .cloned()
+        .map(|mut route| {
+            let mut attrs = route.attributes.to_vec();
+            if otc {
+                attrs.push(PathAttribute::OnlyToCustomer(65_001));
+            }
+            route.attributes = AttrSet::new(attrs);
+            tracked.push(Arc::downgrade(&route.attributes));
+            route
+        })
+        .collect();
+    (Arc::new(routes), tracked)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn common_candidate_retirement_services_readiness() {
+    use crate::update::ExactExportKey;
+    for otc in [false, true] {
+        let UnicastCleanupFixture {
+            mut manager,
+            peer,
+            mut output,
+            routes,
+            encoder,
+        } = unicast_cleanup_fixture(false);
+        if otc {
+            manager
+                .peer_local_roles
+                .insert(peer, Some(rustbgpd_wire::BgpRole::Customer));
+        } else {
+            encoder.set_profile(
+                2,
+                routes
+                    .iter()
+                    .map(|route| ExactExportKey::Unicast(route.prefix, 0)),
+            );
+        }
+        let empty_credit = manager.pending_group_admitted.bytes();
+        let (announce, tracked) = isolated_cleanup_routes(&routes, otc);
+        let (manager, result, held) = Box::pin(hold_export_cleanup(
+            manager,
+            peer,
+            "common_candidate_retirement",
+            tracked,
+            move |manager| {
+                manager.try_send_and_commit_outbound_update(
+                    peer,
+                    OutboundCommitBatch::with_unicast(announce, vec![None; 128].into()),
+                )
+            },
+        ))
+        .await;
+        assert_eq!(result, Ok(()));
+        let recovered = output.try_recv().unwrap();
+        assert!(recovered.announce.is_empty());
+        assert_eq!(
+            recovered.withdraw.iter().copied().collect::<HashSet<_>>(),
+            routes.iter().map(|route| (route.prefix, 0)).collect()
+        );
+        assert_eq!(recovered.withdraw.len(), 128);
+        assert_eq!(recovered.end_of_rib, []);
+        assert!(output.try_recv().is_err());
+        assert_eq!(manager.adj_ribs_out[&peer].len(), 0);
+        assert!(manager.pending_group_admitted.is_empty());
+        assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+        held.assert_serviced("common_candidate_retirement");
+        assert_eq!(held.visits, 2);
+        assert_eq!(
+            held.live_values, 127,
+            "readiness must precede retirement of the remaining 127 actual route values"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capacity_filtered_candidate_retirement_services_readiness() {
+    let UnicastCleanupFixture {
+        mut manager,
+        peer,
+        mut output,
+        mut routes,
+        ..
+    } = unicast_cleanup_fixture(false);
+    manager
+        .outbound_prefix_limits
+        .entry(peer)
+        .or_default()
+        .family_mut(Afi::Ipv4)
+        .unwrap()
+        .limit = std::num::NonZeroU32::new(128);
+    let empty_credit = manager.pending_group_admitted.bytes();
+    for (n, route) in routes.iter_mut().enumerate() {
+        route.prefix = Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::new(203, 0, 114, u8::try_from(n).unwrap()),
+            32,
+        ));
+    }
+    let (announce, tracked) = isolated_cleanup_routes(&routes, false);
+    let (manager, result, held) = Box::pin(hold_export_cleanup(
+        manager,
+        peer,
+        "common_candidate_retirement",
+        tracked,
+        move |manager| {
+            manager.try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+                    ..OutboundCommitBatch::with_unicast(announce, vec![None; 128].into())
+                },
+            )
+        },
+    ))
+    .await;
+    assert_eq!(result, Ok(()));
+    let update = output.try_recv().unwrap();
+    assert!(update.announce.is_empty());
+    assert_eq!(update.withdraw, []);
+    assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert!(output.try_recv().is_err());
+    assert_eq!(manager.adj_ribs_out[&peer].len(), 128);
+    assert!(
+        routes
+            .iter()
+            .all(|route| manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_none())
+    );
+    let limits = &manager.outbound_prefix_limits[&peer];
+    assert!(limits.family(Afi::Ipv4).unwrap().blocking);
+    assert_eq!(limits.grouped_len(Afi::Ipv4), 0);
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    assert_eq!(
+        held.live_values, 127,
+        "the original Arc must survive prefix-limit filtering and retire its first value before the interior hold"
+    );
+    held.assert_serviced("common_candidate_retirement");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_announce_retirement_services_readiness() {
+    let UnicastCleanupFixture {
+        mut manager,
+        peer,
+        mut output,
+        routes,
+        ..
+    } = unicast_cleanup_fixture(false);
+    manager.peer_export_encoders.remove(&peer).unwrap();
+    let empty_credit = manager.pending_group_admitted.bytes();
+    let (announce, tracked) = isolated_cleanup_routes(&routes, false);
+    let (manager, result, held) = Box::pin(hold_export_cleanup(
+        manager,
+        peer,
+        "batch_announce_retirement",
+        tracked,
+        move |manager| {
+            manager.try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch::with_unicast(announce, vec![None; 128].into()),
+            )
+        },
+    ))
+    .await;
+    assert_eq!(
+        result,
+        Err(
+            crate::manager::distribution::OutboundCommitFailure::Refused(
+                rustbgpd_telemetry::reason_labels::OutboundCommitRefusal::MissingEncoder
+            )
+        )
+    );
+    assert!(output.try_recv().is_err());
+    assert_eq!(manager.adj_ribs_out[&peer].len(), 128);
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    held.assert_serviced("batch_announce_retirement");
+    assert_eq!(held.visits, 2);
+    assert_eq!(
+        held.live_values, 127,
+        "last-owning batch retirement must service readiness before dropping the entire route Vec"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_count_candidate_retirement_services_readiness() {
+    Box::pin(evpn_refused_arc_retirement(None, false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_count_filtered_retirement_services_readiness() {
+    Box::pin(evpn_refused_arc_retirement(None, true)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_final_candidate_retirement_services_readiness() {
+    use crate::manager::update_groups::recovery_provenance::FinalAdmissionFault;
+    for fault in [FinalAdmissionFault::Preflight, FinalAdmissionFault::Apply] {
+        Box::pin(evpn_refused_arc_retirement(Some(fault), false)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_final_filtered_retirement_services_readiness() {
+    use crate::manager::update_groups::recovery_provenance::FinalAdmissionFault;
+    for fault in [FinalAdmissionFault::Preflight, FinalAdmissionFault::Apply] {
+        Box::pin(evpn_refused_arc_retirement(Some(fault), true)).await;
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the real mixed-family refusal keeps actual OLD delivery, both Arc inventories, reset fencing and final teardown together"
+)]
+async fn evpn_refused_arc_retirement(
+    fault: Option<crate::manager::update_groups::recovery_provenance::FinalAdmissionFault>,
+    filtered: bool,
+) {
+    use crate::update::ExactExportKey;
+    let (mut manager, peer, gid, mut output) = super::evpn_group_storage::fixture();
+    manager.flush_poll_budget = Duration::ZERO;
+    let source = Ipv4Addr::new(192, 0, 2, 10);
+    let routes: Vec<_> = (0..128)
+        .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
+        .collect();
+    let encoder = super::exportability::MockExactExportEncoder::accepting(1);
+    manager.peer_export_encoders.insert(peer, encoder.clone());
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source.into(),
+        session_id: 0,
+        announced: routes.clone(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+    let initial = output.try_recv().unwrap();
+    assert_eq!(initial.announce.len(), 128);
+    assert_eq!(initial.withdraw, []);
+    assert!(!manager.dirty_peers.contains(&peer));
+    let empty_credit = manager.pending_group_admitted.bytes();
+    assert!(manager.capture_group_admitted_keys(peer));
+    let prior = manager
+        .pending_group_admitted
+        .get(&peer)
+        .unwrap()
+        .iter()
+        .collect();
+    let proof_credit = manager.pending_group_admitted.bytes();
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    if let Some(fault) = fault {
+        assert!(manager.capture_evpn_recovery_before_projection(peer, std::iter::empty()));
+        manager.evpn_recovery.fail_final_admission_for_test(fault);
+    } else {
+        assert!(manager.evpn_recovery.is_dormant(handle));
+    }
+    encoder.set_profile(2, [ExactExportKey::Unicast(routes[0].prefix, 0)]);
+    let resets = Arc::new(Mutex::new(Vec::new()));
+    manager.evpn_recovery_reset = Some(Arc::new({
+        let resets = Arc::clone(&resets);
+        move |request, reply| {
+            resets.lock().unwrap().push((request, reply));
+            true
+        }
+    }));
+    let stage = match (fault.is_some(), filtered) {
+        (false, false) => "evpn_count_candidate_retirement",
+        (false, true) => "evpn_count_filtered_retirement",
+        (true, false) => "evpn_admission_candidate_retirement",
+        (true, true) => "evpn_admission_filtered_retirement",
+    };
+    let (announce, tracked) = isolated_cleanup_routes(&routes, false);
+    let (mut manager, result, mut held) = Box::pin(hold_export_cleanup(
+        manager,
+        peer,
+        stage,
+        tracked,
+        move |manager| {
+            manager.try_send_and_commit_outbound_update_with_group_prior(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: vec![make_evpn_imet(source, 1)],
+                    end_of_rib: vec![(Afi::L2Vpn, Safi::Evpn)],
+                    ..OutboundCommitBatch::with_unicast(announce, vec![None; 128].into())
+                },
+                prior,
+                None,
+            )
+        },
+    ))
+    .await;
+    assert_eq!(
+        result,
+        Err(
+            crate::manager::distribution::OutboundCommitFailure::Refused(
+                rustbgpd_telemetry::reason_labels::OutboundCommitRefusal::EvpnRecovery
+            )
+        )
+    );
+    assert!(
+        output.try_recv().is_err(),
+        "no ANN, WD or EoR may escape refusal"
+    );
+    assert_eq!(manager.group_ribs[&gid].table.len(), 128);
+    assert_eq!(
+        manager.pending_group_admitted.get(&peer).unwrap().len(),
+        128
+    );
+    assert_eq!(manager.pending_group_admitted.bytes(), proof_credit);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(!manager.evpn_recovery.final_admission_fault_pending());
+    assert_eq!(
+        manager.evpn_recovery.exhaustion(handle).unwrap().cause,
+        crate::update::EvpnRecoveryExhaustionCause::AdmissionInvariant
+    );
+    {
+        let requests = resets.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!((requests[0].0.peer, requests[0].0.session_id), (peer, 7));
+        assert!(
+            requests[0]
+                .0
+                .outbound
+                .same_channel(&manager.outbound_peers[&peer])
+        );
+        assert!(!requests[0].1.is_closed());
+    }
+    manager.handle_update(held.mutation.take().unwrap());
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    assert!(manager.evpn_recovery_handle(peer).is_none());
+    assert_eq!(
+        manager.evpn_recovery.daemon_usage().retained,
+        crate::manager::update_groups::recovery_provenance::EvpnRecoveryProvenance::new()
+            .daemon_usage()
+            .retained
+    );
+    held.assert_serviced(stage);
+    assert_eq!(held.visits, 2);
+    if !filtered {
+        assert_eq!(
+            held.live_values, 127,
+            "the original last-owning inventory must retire one actual value before the interior hold"
+        );
+    }
+}
+
+#[test]
+fn batch_retirement_preserves_another_route_vector_owner() {
+    let UnicastCleanupFixture {
+        mut manager,
+        peer,
+        mut output,
+        routes,
+        ..
+    } = unicast_cleanup_fixture(false);
+    manager.peer_export_encoders.remove(&peer).unwrap();
+    let (announce, tracked) = isolated_cleanup_routes(&routes, false);
+    let retained = Arc::clone(&announce);
+    let result = manager.try_send_and_commit_outbound_update(
+        peer,
+        OutboundCommitBatch::with_unicast(announce, vec![None; 128].into()),
+    );
+    assert!(result.is_err());
+    assert!(output.try_recv().is_err());
+    assert_eq!(retained.len(), 128);
+    assert!(retained.iter().zip(&routes).all(|(left, right)| left.prefix == right.prefix && left.attributes == right.attributes));
+    assert!(tracked.iter().all(|value| value.upgrade().is_some()));
+    drop(retained);
+    assert!(tracked.iter().all(|value| value.upgrade().is_none()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ingest_private_dirty_replay_services_interior_readiness() {
     Box::pin(ingest_dirty_replay_readiness(true)).await;
 }

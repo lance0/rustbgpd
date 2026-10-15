@@ -362,6 +362,71 @@ class MassDirtyTests(unittest.TestCase):
         self.assertAlmostEqual(clock[0], 31)
         self.assertEqual(receipt.snapshot_failure_counts(failures, 1)["total"], 2)
 
+    def test_source_witness_diagnostic_persists_fatal_row_and_query_bracket(self):
+        source = Path(receipt.__file__).read_text()
+        begin = source.index("    except BaseException as error:\n", source.index("def run_cell("))
+        end = source.index("    finally:\n", begin)
+        # Exercise the existing run-cell failure writer, including its bare
+        # re-raise, without launching a daemon or changing failure persistence.
+        handler = "\n".join(line[4:] for line in source[begin:end].splitlines()) + "\n"
+        groups = [(receipt.peer(1), "group:7")]
+        for phase in ("initial-source", "held-b", "settled-b-source"):
+            for field, value in (("state", "Idle"), ("slow_peer", True), ("outbound_resync_pending", True)):
+                with self.subTest(phase=phase, field=field):
+                    failures = self.root / "failures.jsonl"
+                    failures.write_text("")
+                    (self.root / "failure.json").unlink(missing_ok=True)
+                    row = self.snapshot_row(receipt.peer(0), False, diagnostic_extra={"raw": [1, "kept"]})
+                    row[field] = value
+                    clock = [12.5]
+                    def run(args, row=row, clock=clock, **kwargs):
+                        if args[-1] == receipt.peer(0):
+                            clock[0] = 34.75
+                            actual = row
+                        else:
+                            actual = self.snapshot_row(args[-1], True)
+                        return subprocess.CompletedProcess(args, 0, json.dumps(actual), "")
+                    read = receipt.source_witness if phase != "held-b" else \
+                        lambda query, groups=groups: receipt.held_dirty_witness(query, 1, groups, False)
+                    def invoke(read=read, phase=phase, failures=failures):
+                        try:
+                            receipt.poll_snapshot_witness(read, "rbgp", "unix:///owned.sock", 1800, failures, phase)
+                        except ValueError as error:
+                            if phase == "held-b":
+                                # Preserve the held loop's existing fatal
+                                # classification and chained exception context.
+                                receipt.require(str(error) in ("actual dirty overlap/settlement missing",
+                                                               "no common current dirty instant"), str(error))
+                            raise
+                    with mock.patch.object(receipt.subprocess, "run", side_effect=run) as cli, \
+                         mock.patch.object(receipt.time, "monotonic", side_effect=lambda clock=clock: clock[0]), \
+                         mock.patch.object(receipt.time, "sleep") as pause:
+                        with self.assertRaises(ValueError) as caught:
+                            exec("try:\n    invoke()\n" + handler,
+                                 {"invoke": invoke, "leg": self.root, "write_json": receipt.write_json,
+                                  "traceback": receipt.traceback})
+                    self.assertIs(type(caught.exception), ValueError)
+                    self.assertEqual(caught.exception.args, ("source session/pending state changed",))
+                    self.assertEqual(str(caught.exception), "source session/pending state changed")
+                    self.assertEqual(cli.call_count, 3 if phase == "held-b" else 1)
+                    pause.assert_not_called()
+                    self.assertEqual(failures.read_text(), "")
+                    persisted = json.loads((self.root / "failure.json").read_text())
+                    self.assertEqual((persisted["type"], persisted["error"]),
+                                     ("ValueError", "source session/pending state changed"))
+                    notes = [line.removeprefix("rejected source witness: ") for line in persisted["traceback"].splitlines()
+                             if line.startswith("rejected source witness: ")]
+                    self.assertEqual(len(notes), 1)
+                    self.assertEqual(json.loads(notes[0]), {"row": row, "query_begin_monotonic_seconds": 12.5,
+                                                          "query_end_monotonic_seconds": 34.75})
+
+    def test_source_witness_diagnostic_keeps_success_path_unchanged(self):
+        row = self.snapshot_row(receipt.peer(0), False)
+        snapshot = mock.Mock(return_value=(row, 12.5, 34.75))
+        self.assertIs(receipt.source_witness(snapshot), row)
+        snapshot.assert_called_once_with(receipt.peer(0))
+        self.assertEqual(list(self.root.iterdir()), [])
+
     def test_snapshot_nonmatching_errors_and_malformed_json_are_fatal(self):
         errors = [subprocess.CalledProcessError(code, ["rbgp"], output=stdout, stderr=stderr) for code, stdout, stderr in (
             (1, "", "Error: permission denied: unauthorized\n"),

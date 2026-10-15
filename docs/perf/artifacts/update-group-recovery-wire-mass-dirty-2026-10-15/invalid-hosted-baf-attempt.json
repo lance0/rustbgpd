@@ -1,0 +1,2715 @@
+{
+  "all_four_frozen_finalizers_INVALID": true,
+  "all_four_jobs_failed": true,
+  "audited_at_utc": "2026-10-15T12:17:57.142736+00:00",
+  "candidate_arms_started": 2,
+  "cells": [
+    {
+      "archive_verification_sha256": "1048be59366e48db9cc5cafea8ceb24d1a0171a3fbcba2f894680adeaae760df",
+      "artifact_id": 11970691222,
+      "artifact_metadata": {
+        "created_at": "2026-10-15T12:02:22Z",
+        "digest": "sha256:613e4874aefe686f18887bc26626f41fca6e1055892fc8d7aa4262df26f9c28c",
+        "expired": false,
+        "expires_at": "2026-11-14T12:02:17Z",
+        "name": "update-group-recovery-mass-dirty-full-uc-no-refusal-baf7082560d2b8318cbe99e9fed8c1104b06f1bb"
+      },
+      "artifact_metadata_scope": "observed at audit; hosted availability can expire",
+      "artifact_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056/artifacts/11970691222",
+      "attempted_leg_failure_counts": [
+        {
+          "counts": {
+            "by_phase": {
+              "held-b": {
+                "127.1.0.2": 1
+              }
+            },
+            "total": 1
+          },
+          "leg": "leg-0-flat"
+        },
+        {
+          "counts": {
+            "by_phase": {
+              "held-b": {
+                "127.1.0.2": 1
+              }
+            },
+            "total": 1
+          },
+          "leg": "leg-1-candidate"
+        }
+      ],
+      "attempted_legs": 2,
+      "binary_hashes": {
+        "rbgp": "2833708f8da7b2d55da1e3b910c8349cb0fe51adc4e977012b93a38c9b68f0f7",
+        "reloadstall": "55f8cd004e636a084e5bd156e2ffef526a2c56733eebf8b571d84bcc0dc1cb59",
+        "rustbgpd-candidate": "53386e4f8d27155ff142b9372c0975ae527a7bcda315dc71ad6750b2c58b7843",
+        "rustbgpd-flat": "94324f078ff29bd93dba9fe3af41d5f5934a64d8fc4c3d700ad764c302858a1c"
+      },
+      "candidate_arms_started": 1,
+      "cell": "full-uc-no-refusal",
+      "complete_flat_leg_diagnostics": [
+        {
+          "leg": "leg-0-flat",
+          "operations": [
+            {
+              "daemon_log_bytes": {
+                "end": 8785095,
+                "resume": 8775562,
+                "start": 75062
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "held_proof": {
+                "bytes": 472322272,
+                "entries": 14760000,
+                "peak_bytes": 472322296
+              },
+              "retired_proof": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 472322296
+              },
+              "withdrawals_cumulative": 0,
+              "withdrawals_new_this_operation": 0
+            },
+            {
+              "daemon_log_bytes": {
+                "end": 17492528,
+                "resume": 17482995,
+                "start": 8785095
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "held_proof": {
+                "bytes": 472322272,
+                "entries": 14760000,
+                "peak_bytes": 472322296
+              },
+              "retired_proof": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 472322296
+              },
+              "withdrawals_cumulative": 0,
+              "withdrawals_new_this_operation": 0
+            }
+          ],
+          "ordinary_snapshot_failure_counts": {
+            "by_phase": {
+              "held-b": {
+                "127.1.0.2": 1
+              }
+            },
+            "total": 1
+          },
+          "readiness_samples": 83,
+          "resource_boundary": "complete frozen validation PASS; no comparative campaign qualification"
+        }
+      ],
+      "complete_flat_leg_scope": "Frozen validation passed only these complete flat legs; no candidate comparison or cell pass",
+      "complete_legs": 1,
+      "completed_operations": 2,
+      "detailed_audit_sha256": "74ce0f63ee30fef88cb00b80982aee67176a55da2a6ec2076015bd8fa5a68efa",
+      "first_failure": {
+        "controller_failure": "harness exited before mass_dirty_complete: 1",
+        "current_held_overlap": {
+          "begin_monotonic_seconds": 1686.801472439,
+          "end_monotonic_seconds": 1687.601613342,
+          "proved": true
+        },
+        "daemon_readiness_diagnostic": "RIB manager probe timed out (200ms deadline)",
+        "failed_leg_process_scope": "PID/starttime/binary hashes retained. No normal exit-code/final cgroup boundary result; remote reaping/OOM/reset zeros not inferred.",
+        "fallback_monotone_prefix": {
+          "metrics-before-b.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "metrics-initial.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "metrics-paused-b.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          }
+        },
+        "first_cause": "mass-dirty qualification failed: /readyz HTTP status is not 200: HTTP/1.1 503 Service Unavailable",
+        "held_proof": {
+          "bytes": 46127368,
+          "entries": 14760000,
+          "peak_bytes": 46127392
+        },
+        "incomplete_phase_bounds": "drain lower bound independently checked; no saved resume/fold clocks or final operation record, so full operation replay/continuity/resource boundary unavailable",
+        "leg": "leg-1-candidate",
+        "log_scope": "Whole-daemon diagnostic receipts only for failed operations; no completed saved per-operation/post-resume byte-cursor slices to qualify the failed B operation",
+        "native_complete_folds": 0,
+        "native_recorded_successful_probes": 14,
+        "ordinary_snapshot_failure_counts": {
+          "by_phase": {
+            "held-b": {
+              "127.1.0.2": 1
+            }
+          },
+          "total": 1
+        },
+        "phase": "B after full baseline, source TCP-write/flush drain, saved complete held witness and resume command; before B fold",
+        "secondary_cleanup_error": null,
+        "source_and_targets_at_held_queries": "source Established/clean; every target Established in its original group and pending; two fresh sweeps preserve one current-episode overlap after drain",
+        "unavailable_final_boundaries": {
+          "final_cgroup_oom_swap_boundary": null,
+          "final_proof_retirement": null,
+          "final_session_continuity": null,
+          "general_session_reset_total": null,
+          "normal_exit_codes": null,
+          "process_reaping": null,
+          "reason": "incomplete failed leg has no final result; partial metrics/held snapshots do not prove these boundaries"
+        }
+      },
+      "job_conclusion": "failure",
+      "job_id": 116400157637,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056/job/116400157637",
+      "keys_per_receiver": 1230000,
+      "ordinary_snapshot_failures": 2,
+      "original_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "partial_native_samples_scope": "successful probes before fatal readiness error; no complete fold brackets for failed operation",
+      "receivers": 12,
+      "replay_exit": 1,
+      "zip_bytes": 50240999,
+      "zip_sha256": "613e4874aefe686f18887bc26626f41fca6e1055892fc8d7aa4262df26f9c28c"
+    },
+    {
+      "archive_verification_sha256": "2471bb9facf5b86cad10f6901fa2642ab0daf6b24440a0fd5ec13db5604312f6",
+      "artifact_id": 11970276892,
+      "artifact_metadata": {
+        "created_at": "2026-10-15T12:06:46Z",
+        "digest": "sha256:4fe5903499389c05a3ac60f53cff159a4e4ade68d903e5a1a2a130d9b95f3915",
+        "expired": false,
+        "expires_at": "2026-11-14T12:06:41Z",
+        "name": "update-group-recovery-mass-dirty-full-uc-cap-pressure-baf7082560d2b8318cbe99e9fed8c1104b06f1bb"
+      },
+      "artifact_metadata_scope": "observed at audit; hosted availability can expire",
+      "artifact_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056/artifacts/11970276892",
+      "attempted_leg_failure_counts": [
+        {
+          "counts": {
+            "by_phase": {
+              "held-a": {
+                "127.1.0.2": 2
+              },
+              "held-b": {
+                "127.1.0.2": 3
+              }
+            },
+            "total": 5
+          },
+          "leg": "leg-0-flat"
+        },
+        {
+          "counts": {
+            "by_phase": {
+              "held-b": {
+                "127.1.0.2": 3
+              }
+            },
+            "total": 3
+          },
+          "leg": "leg-1-candidate"
+        }
+      ],
+      "attempted_legs": 2,
+      "binary_hashes": {
+        "rbgp": "4d7d210ef26fd133b4f33860c82c4320c21bdfb455777c0271d4801450cb086e",
+        "reloadstall": "bdd6c396f12b76fb6115f0dc34595dda8e3729a6be2c1b55cdeae4c862d01fc4",
+        "rustbgpd-candidate": "546b3d3e9ce68b0b8339f669b83fd552092be582fe747b3ae46886e168c5ebc0",
+        "rustbgpd-flat": "b91e99dd19e71c183c454745560b286f0ec12e89c54bc3530fcf9136a7567d28"
+      },
+      "candidate_arms_started": 1,
+      "cell": "full-uc-cap-pressure",
+      "complete_flat_leg_diagnostics": [
+        {
+          "leg": "leg-0-flat",
+          "operations": [
+            {
+              "daemon_log_bytes": {
+                "end": 8890558,
+                "resume": 8872001,
+                "start": 141266
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 11,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "b",
+              "held_proof": {
+                "bytes": 511681120,
+                "entries": 15989896,
+                "peak_bytes": 511683456
+              },
+              "retired_proof": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 511683456
+              },
+              "withdrawals_cumulative": 192,
+              "withdrawals_new_this_operation": 192
+            },
+            {
+              "daemon_log_bytes": {
+                "end": 17639319,
+                "resume": 17620762,
+                "start": 8890558
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 11,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "generation": "a",
+              "held_proof": {
+                "bytes": 511684448,
+                "entries": 15990000,
+                "peak_bytes": 511686784
+              },
+              "retired_proof": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 511686784
+              },
+              "withdrawals_cumulative": 192,
+              "withdrawals_new_this_operation": 0
+            }
+          ],
+          "ordinary_snapshot_failure_counts": {
+            "by_phase": {
+              "held-a": {
+                "127.1.0.2": 2
+              },
+              "held-b": {
+                "127.1.0.2": 3
+              }
+            },
+            "total": 5
+          },
+          "readiness_samples": 119,
+          "resource_boundary": "complete frozen validation PASS; no comparative campaign qualification"
+        }
+      ],
+      "complete_flat_leg_scope": "Frozen validation passed only these complete flat legs; no candidate comparison or cell pass",
+      "complete_legs": 1,
+      "completed_operations": 2,
+      "detailed_audit_sha256": "0440f80c1f5bb29f9846c350f2a8f992efb41add46439e3aef213bfe164f379f",
+      "first_failure": {
+        "controller_failure": "harness exited before mass_dirty_complete: 1",
+        "current_held_overlap": {
+          "begin_monotonic_seconds": 2147.461266902,
+          "end_monotonic_seconds": 2148.123134798,
+          "proved": true
+        },
+        "daemon_readiness_diagnostic": "daemon is shutting down during teardown; not established initiating cause",
+        "failed_leg_process_scope": "PID/starttime/binary hashes retained. No normal exit-code/final cgroup boundary result; remote reaping/OOM/reset zeros not inferred.",
+        "fallback_monotone_prefix": {
+          "metrics-before-b.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "metrics-initial.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "metrics-paused-b.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          }
+        },
+        "first_cause": "mass-dirty qualification failed: /readyz checkpoint exceeded deadline",
+        "held_proof": {
+          "bytes": 47974312,
+          "entries": 29519808,
+          "peak_bytes": 47974336
+        },
+        "incomplete_phase_bounds": "drain lower bound independently checked; no saved resume/fold clocks or final operation record, so full operation replay/continuity/resource boundary unavailable",
+        "leg": "leg-1-candidate",
+        "log_scope": "Whole-daemon diagnostic receipts only for failed operations; no completed saved per-operation/post-resume byte-cursor slices to qualify the failed B operation",
+        "native_complete_folds": 0,
+        "native_recorded_successful_probes": 22,
+        "ordinary_snapshot_failure_counts": {
+          "by_phase": {
+            "held-b": {
+              "127.1.0.2": 3
+            }
+          },
+          "total": 3
+        },
+        "phase": "B after full baseline, source TCP-write/flush drain, saved complete held witness and resume command; before B fold",
+        "secondary_cleanup_error": null,
+        "source_and_targets_at_held_queries": "source Established/clean; every target Established in its original group and pending; two fresh sweeps preserve one current-episode overlap after drain",
+        "unavailable_final_boundaries": {
+          "final_cgroup_oom_swap_boundary": null,
+          "final_proof_retirement": null,
+          "final_session_continuity": null,
+          "general_session_reset_total": null,
+          "normal_exit_codes": null,
+          "process_reaping": null,
+          "reason": "incomplete failed leg has no final result; partial metrics/held snapshots do not prove these boundaries"
+        }
+      },
+      "job_conclusion": "failure",
+      "job_id": 116400157910,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056/job/116400157910",
+      "keys_per_receiver": 1230000,
+      "ordinary_snapshot_failures": 8,
+      "original_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "partial_native_samples_scope": "successful probes before fatal readiness error; no complete fold brackets for failed operation",
+      "receivers": 24,
+      "replay_exit": 1,
+      "zip_bytes": 50392373,
+      "zip_sha256": "4fe5903499389c05a3ac60f53cff159a4e4ade68d903e5a1a2a130d9b95f3915"
+    },
+    {
+      "archive_verification_sha256": "7dcc5d214584e32723c4f8cf91f1efaa9283bf73c08b1509cbde3e5b480f6703",
+      "artifact_id": 11970836836,
+      "artifact_metadata": {
+        "created_at": "2026-10-15T12:06:09Z",
+        "digest": "sha256:60624e71a1fd8913aef2fea329c5320a29aacdf68b2d7dbabd89cf630dfd1de6",
+        "expired": false,
+        "expires_at": "2026-11-14T12:06:04Z",
+        "name": "update-group-recovery-mass-dirty-full-vpn-no-refusal-baf7082560d2b8318cbe99e9fed8c1104b06f1bb"
+      },
+      "artifact_metadata_scope": "observed at audit; hosted availability can expire",
+      "artifact_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056/artifacts/11970836836",
+      "attempted_leg_failure_counts": [
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-0-flat"
+        }
+      ],
+      "attempted_legs": 1,
+      "binary_hashes": {
+        "rbgp": "75dfd4dd73d9a3ef7c512d5aea333a06e8e4593016d65c57f4384cc2832b36d6",
+        "reloadstall": "59859740e20ca5ac415f7c4c60b6a407b82fb828c508b61da6e70ecd65765b34",
+        "rustbgpd-candidate": "d3d1e238b7ba14a210e0004e535b99442f23f27dfb25446a1ce314641b789e42",
+        "rustbgpd-flat": "aaad03001df1ad430ca017fefaeb7d49bfa84f3ded26beb97a7aec3644c69bcb"
+      },
+      "candidate_arms_started": 0,
+      "cell": "full-vpn-no-refusal",
+      "complete_flat_leg_diagnostics": [],
+      "complete_flat_leg_scope": "Frozen validation passed only these complete flat legs; no candidate comparison or cell pass",
+      "complete_legs": 0,
+      "completed_operations": 0,
+      "detailed_audit_sha256": "525e4318de7b5b1085550711b9db156b153b85484abf3217f0b7cf6965127c2d",
+      "first_failure": {
+        "controller_failure": "harness exited before mass_dirty_complete: 1",
+        "current_held_overlap": {
+          "begin_monotonic_seconds": 1709.223447826,
+          "end_monotonic_seconds": 1709.947915665,
+          "proved": true
+        },
+        "daemon_readiness_diagnostic": "no readiness/stalled/fail-stop daemon warning retained",
+        "failed_leg_process_scope": "PID/starttime/binary hashes retained. No normal exit-code/final cgroup boundary result; remote reaping/OOM/reset zeros not inferred.",
+        "fallback_monotone_prefix": {
+          "metrics-before-b.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "metrics-initial.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "metrics-paused-b.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          }
+        },
+        "first_cause": "mass-dirty qualification failed: /readyz checkpoint exceeded deadline",
+        "held_proof": {
+          "bytes": 472322272,
+          "entries": 14760000,
+          "peak_bytes": 472322296
+        },
+        "incomplete_phase_bounds": "drain lower bound independently checked; no saved resume/fold clocks or final operation record, so full operation replay/continuity/resource boundary unavailable",
+        "leg": "leg-0-flat",
+        "log_scope": "Whole-daemon diagnostic receipts only for failed operations; no completed saved per-operation/post-resume byte-cursor slices to qualify the failed B operation",
+        "native_complete_folds": 0,
+        "native_recorded_successful_probes": 65,
+        "ordinary_snapshot_failure_counts": {
+          "by_phase": {},
+          "total": 0
+        },
+        "phase": "B after full baseline, source TCP-write/flush drain, saved complete held witness and resume command; before B fold",
+        "secondary_cleanup_error": {
+          "errors": [
+            "sampler exit: 1"
+          ],
+          "fixture_retained": true
+        },
+        "source_and_targets_at_held_queries": "source Established/clean; every target Established in its original group and pending; two fresh sweeps preserve one current-episode overlap after drain",
+        "unavailable_final_boundaries": {
+          "final_cgroup_oom_swap_boundary": null,
+          "final_proof_retirement": null,
+          "final_session_continuity": null,
+          "general_session_reset_total": null,
+          "normal_exit_codes": null,
+          "process_reaping": null,
+          "reason": "incomplete failed leg has no final result; partial metrics/held snapshots do not prove these boundaries"
+        }
+      },
+      "job_conclusion": "failure",
+      "job_id": 116400157831,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056/job/116400157831",
+      "keys_per_receiver": 1230000,
+      "ordinary_snapshot_failures": 0,
+      "original_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "partial_native_samples_scope": "successful probes before fatal readiness error; no complete fold brackets for failed operation",
+      "receivers": 12,
+      "replay_exit": 1,
+      "zip_bytes": 49447456,
+      "zip_sha256": "60624e71a1fd8913aef2fea329c5320a29aacdf68b2d7dbabd89cf630dfd1de6"
+    },
+    {
+      "archive_verification_sha256": "4a10407af059c5e8fc99c9ce348a59dc59fe4ef6265939199a43d9dab9060516",
+      "artifact_id": 11971026595,
+      "artifact_metadata": {
+        "created_at": "2026-10-15T12:05:32Z",
+        "digest": "sha256:fb285b675b9122ffd7952742ac7a8fb74f479adf46a739197541ec64e3458bd0",
+        "expired": false,
+        "expires_at": "2026-11-14T12:05:27Z",
+        "name": "update-group-recovery-mass-dirty-full-vpn-cap-pressure-baf7082560d2b8318cbe99e9fed8c1104b06f1bb"
+      },
+      "artifact_metadata_scope": "observed at audit; hosted availability can expire",
+      "artifact_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056/artifacts/11971026595",
+      "attempted_leg_failure_counts": [
+        {
+          "counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "leg": "leg-0-flat"
+        }
+      ],
+      "attempted_legs": 1,
+      "binary_hashes": {
+        "rbgp": "7d72944ee6c03a8b51b9d049f697a420a3b33ab14c7090b7cbff560386c8b9ea",
+        "reloadstall": "44952d9f9097a29f462e1c5fbe83987aff74cb91abd1f64d3678316170ed1133",
+        "rustbgpd-candidate": "a68fa906379a9e2f253c4e182d497b9ecb33d7a094deef34e0588a6f6864bce9",
+        "rustbgpd-flat": "c0e0059f0c8e755ed0e06b62929f77030e3c15bf966db02c679bc26f09e7aff2"
+      },
+      "candidate_arms_started": 0,
+      "cell": "full-vpn-cap-pressure",
+      "complete_flat_leg_diagnostics": [],
+      "complete_flat_leg_scope": "Frozen validation passed only these complete flat legs; no candidate comparison or cell pass",
+      "complete_legs": 0,
+      "completed_operations": 0,
+      "detailed_audit_sha256": "df7262cd9bc1eec831b2373f187b429a76b67f679317984a7dfec71c0c24a41c",
+      "first_failure": {
+        "controller_failure": "harness exited before mass_dirty_complete: 1",
+        "current_held_overlap": {
+          "begin_monotonic_seconds": 1731.93169703,
+          "end_monotonic_seconds": 1732.652562632,
+          "proved": true
+        },
+        "daemon_readiness_diagnostic": "no readiness/stalled/fail-stop daemon warning retained",
+        "failed_leg_process_scope": "PID/starttime/binary hashes retained. No normal exit-code/final cgroup boundary result; remote reaping/OOM/reset zeros not inferred.",
+        "fallback_monotone_prefix": {
+          "metrics-before-b.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "metrics-initial.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "metrics-paused-b.prom": {
+            "allocation_failure": 0,
+            "daemon_limit": 11,
+            "missing_proof": 0,
+            "peer_limit": 0
+          }
+        },
+        "first_cause": "mass-dirty qualification failed: /readyz checkpoint exceeded deadline",
+        "held_proof": {
+          "bytes": 511682784,
+          "entries": 15989948,
+          "peak_bytes": 511685120
+        },
+        "incomplete_phase_bounds": "drain lower bound independently checked; no saved resume/fold clocks or final operation record, so full operation replay/continuity/resource boundary unavailable",
+        "leg": "leg-0-flat",
+        "log_scope": "Whole-daemon diagnostic receipts only for failed operations; no completed saved per-operation/post-resume byte-cursor slices to qualify the failed B operation",
+        "native_complete_folds": 0,
+        "native_recorded_successful_probes": 65,
+        "ordinary_snapshot_failure_counts": {
+          "by_phase": {},
+          "total": 0
+        },
+        "phase": "B after full baseline, source TCP-write/flush drain, saved complete held witness and resume command; before B fold",
+        "secondary_cleanup_error": null,
+        "source_and_targets_at_held_queries": "source Established/clean; every target Established in its original group and pending; two fresh sweeps preserve one current-episode overlap after drain",
+        "unavailable_final_boundaries": {
+          "final_cgroup_oom_swap_boundary": null,
+          "final_proof_retirement": null,
+          "final_session_continuity": null,
+          "general_session_reset_total": null,
+          "normal_exit_codes": null,
+          "process_reaping": null,
+          "reason": "incomplete failed leg has no final result; partial metrics/held snapshots do not prove these boundaries"
+        }
+      },
+      "job_conclusion": "failure",
+      "job_id": 116400157576,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056/job/116400157576",
+      "keys_per_receiver": 1230000,
+      "ordinary_snapshot_failures": 0,
+      "original_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "partial_native_samples_scope": "successful probes before fatal readiness error; no complete fold brackets for failed operation",
+      "receivers": 24,
+      "replay_exit": 1,
+      "zip_bytes": 49742243,
+      "zip_sha256": "fb285b675b9122ffd7952742ac7a8fb74f479adf46a739197541ec64e3458bd0"
+    }
+  ],
+  "completed_candidate_operations": 0,
+  "completed_scope": {
+    "attempted_legs": 6,
+    "completed_candidate_legs": 0,
+    "completed_legs": 2,
+    "completed_operations": 4,
+    "eligible_timing_or_memory_comparison": false,
+    "planned_legs": 24,
+    "planned_operations": 48
+  },
+  "current_followup": {
+    "source": null,
+    "status": "test-first runtime preparation; no frozen qualification head, new hosted results or acceptance claim"
+  },
+  "document_class": "sanitized derived failed-hosted-attempt summary",
+  "evpn_ownership": "OFF / unqualified",
+  "frozen_consumer_sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9",
+  "ordinary_snapshot_retries": {
+    "by_attempted_leg": {
+      "full-uc-cap-pressure/leg-0-flat": {
+        "by_phase": {
+          "held-a": {
+            "127.1.0.2": 2
+          },
+          "held-b": {
+            "127.1.0.2": 3
+          }
+        },
+        "total": 5
+      },
+      "full-uc-cap-pressure/leg-1-candidate": {
+        "by_phase": {
+          "held-b": {
+            "127.1.0.2": 3
+          }
+        },
+        "total": 3
+      },
+      "full-uc-no-refusal/leg-0-flat": {
+        "by_phase": {
+          "held-b": {
+            "127.1.0.2": 1
+          }
+        },
+        "total": 1
+      },
+      "full-uc-no-refusal/leg-1-candidate": {
+        "by_phase": {
+          "held-b": {
+            "127.1.0.2": 1
+          }
+        },
+        "total": 1
+      },
+      "full-vpn-cap-pressure/leg-0-flat": {
+        "by_phase": {},
+        "total": 0
+      },
+      "full-vpn-no-refusal/leg-0-flat": {
+        "by_phase": {},
+        "total": 0
+      }
+    },
+    "outcome": "All10 retained ordinary snapshot errors reclassify under exact closed whitelist; both complete UC flat legs pass current eager frozen consumer. Subsequent readiness errors remain fatal.",
+    "retained_exact_closed_whitelist_errors": 10
+  },
+  "provenance": {
+    "compact_can_replay_raw_checks": false,
+    "factual_review": "CLEAR; qualification remains UNQUALIFIED",
+    "first_pass_audit_sha256": "024118d093571a701458c93d938e26b645218056b29bfd0824bbf8a23ad9e770",
+    "independent_failure_closure_sha256": "4c0504d6f97b765eb27fbbdf5be5b299da7521ad4042ea4efbff185c70919a1a",
+    "independent_failure_summary_sha256": "46bec814b265ef0769bfb7be3b66b5c0a94aeb0112a092ea433ff37ef36ef9bd",
+    "independent_integrity_complete_legs_sha256": "46de73ab2206f74991a040af43861d1becb12d0331070109a21683f0103c2a4b",
+    "raw_archives_retained_separately": true
+  },
+  "qualification_source": "baf7082560d2b8318cbe99e9fed8c1104b06f1bb",
+  "qualified_cost_or_memory_comparison_available": false,
+  "raw_file_count": 317,
+  "raw_file_digests": [
+    {
+      "bytes": 12889536,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rbgp",
+      "sha256": "2833708f8da7b2d55da1e3b910c8349cb0fe51adc4e977012b93a38c9b68f0f7"
+    },
+    {
+      "bytes": 30388376,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "55f8cd004e636a084e5bd156e2ffef526a2c56733eebf8b571d84bcc0dc1cb59"
+    },
+    {
+      "bytes": 42255992,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "53386e4f8d27155ff142b9372c0975ae527a7bcda315dc71ad6750b2c58b7843"
+    },
+    {
+      "bytes": 42255928,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "94324f078ff29bd93dba9fe3af41d5f5934a64d8fc4c3d700ad764c302858a1c"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/binaries.sha256",
+      "sha256": "7cb622320637175fda5cd6ab1aac21c405e5fdf061d8ef058c26438949223d78"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/binary-validation.json",
+      "sha256": "e22e566cb290e7de9f625cffb0a06e7f2bfd14dd79016a58aa76d65f17be48ba"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-candidate.log",
+      "sha256": "52e0828f1c4efbe4a40225f9d53ff23940b24bf4bfcae9060e83a94388b02412"
+    },
+    {
+      "bytes": 13153,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-flat.log",
+      "sha256": "2033de2151b1d8394073e6ddb63e8bc5e979b1ccec3f5a837583fc0c6e33beef"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-harness.log",
+      "sha256": "54abe9a164894ac71d996f45b50694ebad40c7388b3175faee2594a474882db9"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "a3ccea5483da44fbe6546beed394209bb7c3c8e9401a57c4856b2e0966271337"
+    },
+    {
+      "bytes": 2627,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/campaign.json",
+      "sha256": "492c80eff7867c52c3247524c24c1c05f9f2300ee96b65fd0139728f4e465674"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/campaign.sha256",
+      "sha256": "687740773247d516ab9a53e20e2f346994f5cae28f65e498726f2a5d81298b17"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/candidate.sha",
+      "sha256": "218a837066a22cf98ebe00af84ec67569a17f91cdc994f25fddcb52bb11b36d0"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-0.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 71,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-1.log",
+      "sha256": "e929e0330bc648eaecfe511c610016b3c942770d1f8f41f2ab3251145bf313c7"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 7462,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 62182,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 10983,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "c7be9925af65a9e523004545db5a60bc3f3831a48bf4cc14561026d596c46edf"
+    },
+    {
+      "bytes": 8707433,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-operation-a.jsonl",
+      "sha256": "6660d581b1a65167770f0134265bc4172cb6a21ac1c4af55eadffd3c1f902197"
+    },
+    {
+      "bytes": 8710033,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-operation-b.jsonl",
+      "sha256": "e4460573cf3db54418f0a63e6256156e9f09e5519272d64549db5dcdcb9f0aab"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "b0525ab9bfe60945651a98ea8dba8d16687d0f5aa148fd6319ce60eedd8a550b"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-window-a.jsonl",
+      "sha256": "e35b6dd571594d9931e12eb3049ecb5dd8501edb5dd42d8689138aacad8eefc4"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-window-b.jsonl",
+      "sha256": "0b499f84657025cc29e71884165912e63a493b5cd193fe5ece4b6e04e25d5dee"
+    },
+    {
+      "bytes": 17509533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "6b855bd193937b8b9bbb973eb8a18f296dd6de0af84b65ee7540922afb696d89"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/dirty-receipts-a.json",
+      "sha256": "1428182e06acd7dff504acb2e3e694928cd2b0e87ccbd915a2d34c3f0c3c35b5"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/dirty-receipts-b.json",
+      "sha256": "1428182e06acd7dff504acb2e3e694928cd2b0e87ccbd915a2d34c3f0c3c35b5"
+    },
+    {
+      "bytes": 6158,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/config-history/v2-00000000000000000001-1792065631-37baaa9b38cbf5de91e146726ab19263f38c19cbb71b84762ba30fa911782cd8.json",
+      "sha256": "11c279f6018dfa4242de77cb7ec7fe1ba02b813f4b59344f40cae7fa6572f6c5"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/config-last-persist",
+      "sha256": "6792de9319e4b3a0fc1b420ac8c19b3abfacbdc13fb4febec89934b6fd3141cb"
+    },
+    {
+      "bytes": 2345,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/config.toml",
+      "sha256": "e550ea0aef36de84bc040a0ff75b2effc6201c848228c3e2c0f2e17ff2255a92"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/gr-restart.toml",
+      "sha256": "442703271074363f4631a18de1c2b77d8dd7490965d9e79c508a4f740a4edeec"
+    },
+    {
+      "bytes": 198,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/member.rpol",
+      "sha256": "51f29a6d4585fdbd2cafe9457b45b94f9917d3bc5458ddf1f93021e7bcd038ab"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "8c99c3afa73dbf12cc0c9cae63ce5c7c7e4304b9e4f1589717031224363fe3e2"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "9119f5231e1f7e2446f999b83b3a20263123d8761a4641e82bf540b6ce4f360b"
+    },
+    {
+      "bytes": 16543,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "c65cf8f565db5265945d389029b74bc59b5755b2abaafdd51943662a41e72a54"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 526492,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "e256994bd0688d7cded65596688a3c9322f14610724351f37a6f007d4746d215"
+    },
+    {
+      "bytes": 122802,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-a.prom",
+      "sha256": "afb89f65c601052a6c426a428bbe04e194b648d71fa01b76fad3c2e5f87adfdf"
+    },
+    {
+      "bytes": 121723,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "7eaa5fea40595b96119fdca04793d905b4aaf6c2832c1e8bb70cbcb692110967"
+    },
+    {
+      "bytes": 121723,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "40857473fc727ee923764eeb181df764c478cb4d9698c47f7e4ddfd9061c0ede"
+    },
+    {
+      "bytes": 122873,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-a.prom",
+      "sha256": "e9b2fd29dda293b660c43c62a38b8d5211b6a386a57c1ddbe0805f38c6ddeec8"
+    },
+    {
+      "bytes": 122851,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "2ccabab46b3f1da5fbd88c9fb30db816d083f11e529aba523a116f0c5972407b"
+    },
+    {
+      "bytes": 122827,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-settled-a.prom",
+      "sha256": "784c1422094505759a81963b1b4c06a3aec9497ce4f225674c92744ad692c51f"
+    },
+    {
+      "bytes": 122802,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-settled-b.prom",
+      "sha256": "85331b0a1dd9595a60b15383f3869a0892510de67887b6866039bd268ba61084"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76058,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-a.json",
+      "sha256": "72bdbd735d6c2ea5ccda9f0d17c22ea2f0671314d796f30fa5d10a3c28d35af1"
+    },
+    {
+      "bytes": 76067,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "a82d782fe3f4884fa99add543e0618f719c0b72e44980b6aaa10315f6b619b8e"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-settled-a.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-settled-b.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 202,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "4fd1766d1147e1d2eb42fceb4010198874c1d6c938469d9a849fb32cae88b896"
+    },
+    {
+      "bytes": 8485,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/result.json",
+      "sha256": "42a2afe6ba043de89c87123ab0b51fe717fa640fe3550d997fad0ae8f973acd4"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "732248072e289396534e6d08add5a5c3f0363b6f078b01bea020bd3498c36579"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "cc698a19b3e8e39295a97f3069fdccea36a7266d8a0b7c6075c5348941af3d7d"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-settled-a.json",
+      "sha256": "d8f3d9ce720ca9771138bd465277f09c163b64dcd63152418c317a2348446887"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-settled-b.json",
+      "sha256": "f1b6477599105569a0d66ac2dca569212b30585919792a6efc43109a8af72e52"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/config-check.log",
+      "sha256": "f1eb9a97c3c246600bcb741e9c4c680b07a980be487335136972104a2d217ef9"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/daemon-owner.json",
+      "sha256": "640b9ccad64efac8940dec03a1fc10f024cc08a765c009655e8f64da82825cc6"
+    },
+    {
+      "bytes": 8734391,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/daemon.log",
+      "sha256": "dd6a5d60c5457ee3dbf53003f13ad5d7023932524a9dd1b418e6a310ce1bc83a"
+    },
+    {
+      "bytes": 837,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/failure.json",
+      "sha256": "92b5ee45b98b769b65dc168cd2f1f053a0dd486ef46cd52d3cd1dda11489ebfe"
+    },
+    {
+      "bytes": 6158,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/config-history/v2-00000000000000000001-1792065718-e62fdc2b944a97dc02a1b0dd0a26023fb45d931b5a044b16e1d0c1e71b730c16.json",
+      "sha256": "0a914bee90e5dbdb02789449eb18b559865ee6617af38f992e57955ae3c4e823"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/config-last-persist",
+      "sha256": "6ab68cb3ed5276ae798c928db4940393fe10cc225ba8cc174494b5dc1e30e2c9"
+    },
+    {
+      "bytes": 2345,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/config.toml",
+      "sha256": "4516655413df6414c00151f2e29db0c664e1e60d81e01a9bf0c062a15070a5aa"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/gr-restart.toml",
+      "sha256": "3278b7eddb55583915e3f0e0f664badb6f8cfcb28c1ac70045c07766e91842cd"
+    },
+    {
+      "bytes": 198,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/member.rpol",
+      "sha256": "51f29a6d4585fdbd2cafe9457b45b94f9917d3bc5458ddf1f93021e7bcd038ab"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture.sha256.json",
+      "sha256": "55d067ae30d173de85476ea802b7c7a7733c478a07167596984fea283f02dd79"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/harness-owner.json",
+      "sha256": "8a7f0bc5c499b1847d4c2671ff1465856388962ecd93c3f370280822f1ea5556"
+    },
+    {
+      "bytes": 3058,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/harness.log",
+      "sha256": "d2b1e991f53129496fe7630757ac971e277a72ba0e8ca5b8812698fe77c50e36"
+    },
+    {
+      "bytes": 98,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/harness.stderr",
+      "sha256": "39e93141eadbd96319bce3dd46600541879a4fd37940eea2dcd3644f0f99f14c"
+    },
+    {
+      "bytes": 111827,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/memory.csv",
+      "sha256": "08355bb109c52f6dfea3376cec5958f8fb0fb0915d3d9c80fb9f3021a12bfd8f"
+    },
+    {
+      "bytes": 121713,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-before-b.prom",
+      "sha256": "4a86497a7c5b7092960f0d3c25af719c3b29e10b51fa20421c8056aec714bf35"
+    },
+    {
+      "bytes": 121713,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-initial.prom",
+      "sha256": "d98243445dc8c980de4568f00048d8f7a972feacc835cad94647c8a928bcea4e"
+    },
+    {
+      "bytes": 122840,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-paused-b.prom",
+      "sha256": "36c07fc3a1568eae6474cccbca973f36e7a2a806835890804fe4239dcf4f32f7"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76064,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/neighbors-paused-b.json",
+      "sha256": "c7479a0076bb19482c7e86e0564417f7840dc57d36a4f358a84a94350db7046c"
+    },
+    {
+      "bytes": 202,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/ordinary-snapshot-failures.jsonl",
+      "sha256": "4fd1766d1147e1d2eb42fceb4010198874c1d6c938469d9a849fb32cae88b896"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/sampler.log",
+      "sha256": "047b56ed535f77be5e36a23830cae8d4fcfa5772083d050ea25ec9e46fca6ba6"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/source-initial.json",
+      "sha256": "cc698a19b3e8e39295a97f3069fdccea36a7266d8a0b7c6075c5348941af3d7d"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "b3fa7c8ca97cf6fb3884108d279d777472133f733b6f12e84e3cbb4273706168"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 295,
+      "cell": "full-uc-no-refusal",
+      "path": "driver.log",
+      "sha256": "b6a22d184f9ffd297f1262f0949353b8d7af8ebd76a68ec43c79e68817b264ec"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-uc-no-refusal",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-uc-no-refusal",
+      "path": "preflight.log",
+      "sha256": "06d2022c0539d3551b2895a2cd2f074f4754391605276eff484af7ad0c1bfc8a"
+    },
+    {
+      "bytes": 12889536,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rbgp",
+      "sha256": "4d7d210ef26fd133b4f33860c82c4320c21bdfb455777c0271d4801450cb086e"
+    },
+    {
+      "bytes": 30388264,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "bdd6c396f12b76fb6115f0dc34595dda8e3729a6be2c1b55cdeae4c862d01fc4"
+    },
+    {
+      "bytes": 42255992,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "546b3d3e9ce68b0b8339f669b83fd552092be582fe747b3ae46886e168c5ebc0"
+    },
+    {
+      "bytes": 42255928,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "b91e99dd19e71c183c454745560b286f0ec12e89c54bc3530fcf9136a7567d28"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/binaries.sha256",
+      "sha256": "78e1ce4d7d60cca8f87e3d8afa9c820bc961acedad00b9ad3d99df2abba28aed"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/binary-validation.json",
+      "sha256": "8d25470049e6a24a5c799792c646735b9b98be3b191c57cb286e0262be0036ac"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-candidate.log",
+      "sha256": "4120ed5b13623abc1c870ac91430f453e3df174a08d3f5b36a25d05c8611f45e"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-flat.log",
+      "sha256": "62d2e7f9142422b1571eac590a8e19b910c096c5aeacd79bab3120684fd7121f"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-harness.log",
+      "sha256": "fedc4fb5105837588df409f8f1562624931c41a38919ee1c3f62f2fd28abdd56"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "3c7fd8c03c6d357dee37e9fedde5c038a41afb91060fa7c1fecbf4c36b94ad12"
+    },
+    {
+      "bytes": 2629,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/campaign.json",
+      "sha256": "65d5c419521f66e346bb8fa47adc10849adb6d1f540bb7613e4b40de0b7e6d0c"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/campaign.sha256",
+      "sha256": "7816a971c8492f6bd8fe1d295a34927cc6bd64d86772ae1bab17756beb50d9d9"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/candidate.sha",
+      "sha256": "218a837066a22cf98ebe00af84ec67569a17f91cdc994f25fddcb52bb11b36d0"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/controller-0.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 71,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/controller-1.log",
+      "sha256": "e929e0330bc648eaecfe511c610016b3c942770d1f8f41f2ab3251145bf313c7"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 7462,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 62182,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 10983,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "3922d7300b05aae80d766e6d93742f0a742030a51a549ff7c3237c6b8df6c3c1"
+    },
+    {
+      "bytes": 8748761,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-operation-a.jsonl",
+      "sha256": "ccd9d20f756eadbe566dd0f1eca982fd77ea0a78ca0b552ad4cad6737475fd3c"
+    },
+    {
+      "bytes": 8749292,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-operation-b.jsonl",
+      "sha256": "24318f618acb9e285a95a87a5d22f7d683d1c44c537be2447659795f2bcbc301"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "f1061adca216924db29312b643767ed97534d86c32a30a2a017becfada48defa"
+    },
+    {
+      "bytes": 18557,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-window-a.jsonl",
+      "sha256": "1e95b519967a411f76e92755e1a1650f6353b3041ae5d5323c8cce80f2e3faa7"
+    },
+    {
+      "bytes": 18557,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-window-b.jsonl",
+      "sha256": "eb51f0c4cb3b4abce5cbd3964044552ffc2381247ba0ee6f42b0886c8b227f6d"
+    },
+    {
+      "bytes": 17666280,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "4abfbb45cf28a361ba5272d0c1b664f17d5fe82d15a153482a809b0e2698731d"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/dirty-receipts-a.json",
+      "sha256": "cc35560490b101cace0d286c5cb26d18dc929d3326852e1444094955714677c3"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/dirty-receipts-b.json",
+      "sha256": "055eb03dbd2c0afe6fb3c67f7e00eaa94e1d0aa66d5dac293b62d652c86815b9"
+    },
+    {
+      "bytes": 9638,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-history/v2-00000000000000000001-1792065844-275ea306ecfd639fc9a4b468e244fb6370a11ef156e259967647102dfbff875c.json",
+      "sha256": "8ce65c23d4dc17673d75c5075966408505ea29af296bf2fc85c4232f4d028e89"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-last-persist",
+      "sha256": "c49790b44ad334acbba26a49649d474def2da325cf15731901d050d7ed3f76e5"
+    },
+    {
+      "bytes": 4109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config.toml",
+      "sha256": "80c96fb671d2962701eca4d1bc1d77e14d7e98e7536fd0069e6d1f8077c4ed0b"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/gr-restart.toml",
+      "sha256": "d5013d5ffd15f426ffb9c23f423d4f9c657090d1082006a74a85646934834483"
+    },
+    {
+      "bytes": 423,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/member.rpol",
+      "sha256": "124eaeb9ca95baf5ea8bbb7681cf28f69160b35ce1a16707948dd2d0f3b7d758"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "60735ada62843e5edcc4eae6caa1dc398c49a672290df677f65023461b07301f"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "74f96fed109394563cbc966da1200cc22ca637f116184ec5fd8a92a2422c6e8d"
+    },
+    {
+      "bytes": 23214,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "792fe43710bb79005036251825635cff1736eac018241a4e60775e54cf75248c"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 759814,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "dd9298a694640784b78f9146f42811d8cc100819e62a07eba5da3cbfdcf70ed3"
+    },
+    {
+      "bytes": 182670,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-a.prom",
+      "sha256": "9443fca781a6f9191fe99679dfc27e0aff1945a755620e1175dd0480509f5901"
+    },
+    {
+      "bytes": 179156,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "35344a9d72e7214ba35290bf9cf4d3a866ba144f80023a9813b0045be951bca3"
+    },
+    {
+      "bytes": 179156,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "bd0663cc254163960d5fdf5b05e0477ddb4ace1421bf03b6f92d09b811a9fc68"
+    },
+    {
+      "bytes": 183085,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-paused-a.prom",
+      "sha256": "3d46cd9e6ed3f04d1a3e03fa89cfc7dcb9d4f55eaab585eba27e66bb4c5c1c2b"
+    },
+    {
+      "bytes": 182712,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "97a9617da5501feafebb6f34e23e79e0b0628b211621bbc82e5ab05d938d9de2"
+    },
+    {
+      "bytes": 183005,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-settled-a.prom",
+      "sha256": "3a4607894ce26848b77c0f59ce4fd0951991ae2321fe30095d3c62fa302d7e83"
+    },
+    {
+      "bytes": 182670,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-settled-b.prom",
+      "sha256": "794654bfcef4313fe2d04d053ddabf8744ef535bc2aa5d89c01ef5f822457eb6"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 153191,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-paused-a.json",
+      "sha256": "71aba71b9d0661b185c38c00850b99a09afde77a3056d0708753d69fa2a134c9"
+    },
+    {
+      "bytes": 153102,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "0f958a9917b574c99a09aa76dc1c08de9ba93b91444280bbe3e0b50d62ea0e0a"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-settled-a.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-settled-b.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 1010,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "2d275631bc59c2f45c3b15873e2924b7cd102d33a1d69b4e43d1c6d6e6163dd3"
+    },
+    {
+      "bytes": 8547,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/result.json",
+      "sha256": "a93915d996ed7db98687938cb82ca7fb7ab7e7ffc0a1eef980216e1b5f1d0747"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "ddfb7b2e06ec23c6da4004b5b369b7dbf9b79442c67ad27d3502fbd0143df2e3"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 2109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-settled-a.json",
+      "sha256": "488de874508cf6c521cf6df725dc1ee03ab5f88daf0062d3a98dd00e78156d96"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-settled-b.json",
+      "sha256": "f144f09b80c9e7fd47726df5f5d520bace9ffe73bec7a939e18befa41204b0a5"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/config-check.log",
+      "sha256": "365e78f87f70e63f7ee4897c12ba0afdc35dfda38eb02ae17a06921a47befe02"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-owner.json",
+      "sha256": "b395d3b60a360b32b2d1f57e610c436de371b59b0286699f8fb13a842138d0f4"
+    },
+    {
+      "bytes": 8764540,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon.log",
+      "sha256": "e4fe71e69b92f7a294afa00b75b7d30057f3a31578cceb356e8ce6d368091be1"
+    },
+    {
+      "bytes": 837,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/failure.json",
+      "sha256": "92b5ee45b98b769b65dc168cd2f1f053a0dd486ef46cd52d3cd1dda11489ebfe"
+    },
+    {
+      "bytes": 9638,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture/config-history/v2-00000000000000000001-1792065968-7dedda34546b068d30acf96593e1de55d9ea26fdee98417365cbb376b9e1c30b.json",
+      "sha256": "09e2124732a2a631db8e17250593ecda0a07d6e76897d785b73585602114e03d"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture/config-last-persist",
+      "sha256": "eaef22a84a19c0d4fa94a4088964620b74cf3442289efa62de632d9adeb64750"
+    },
+    {
+      "bytes": 4109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture/config.toml",
+      "sha256": "935a6c2a5264e2da17cb1c8a9d8da72339e424d4bfa0a27b1a65a0cb6b285915"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture/gr-restart.toml",
+      "sha256": "d679c809793b32a0b15aa2764a54a81fdf6f25ea0639202f7c3c3a429ecbb1b6"
+    },
+    {
+      "bytes": 423,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture/member.rpol",
+      "sha256": "124eaeb9ca95baf5ea8bbb7681cf28f69160b35ce1a16707948dd2d0f3b7d758"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture.sha256.json",
+      "sha256": "18db3a92228a898c0680736a791b90d39949095be43dce668308628979c650d1"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness-owner.json",
+      "sha256": "edf0d2d24d3e080b27d9cacb5b74b7457dcdf94b840c1a1c1f5e5c7e5b2095b7"
+    },
+    {
+      "bytes": 4535,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness.log",
+      "sha256": "655edd7e707cd89aac49022f131955dfeca4767d7cc0acff405fac4c472a8ae3"
+    },
+    {
+      "bytes": 70,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness.stderr",
+      "sha256": "8d1ab919391b9f4409d602497133a6fe6af4c3d497efa6c00b7008615944a49f"
+    },
+    {
+      "bytes": 202044,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/memory.csv",
+      "sha256": "5d75ce8c03fdcc6b3f937caffe9112662fb0ef31c8deab3a9f96aa669fba6b4e"
+    },
+    {
+      "bytes": 179142,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-before-b.prom",
+      "sha256": "29aef3c07491fd66395ece7b6e399688aca9094867570217816dea42a9914d64"
+    },
+    {
+      "bytes": 179142,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-initial.prom",
+      "sha256": "cc524b3b92fd0bc54ba71fd6bf91b1aad37f2e4cefbc8b3c2029a86e17564939"
+    },
+    {
+      "bytes": 183290,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-paused-b.prom",
+      "sha256": "31d3b45c031ab4109aa896ba30be3e796384f59e5e6650c7a8fee57a9c14de81"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 151520,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-paused-b.json",
+      "sha256": "15ad2c71c8a3650644567a8b5e84744205b18c26a9b5db4d320db15533d78052"
+    },
+    {
+      "bytes": 606,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/ordinary-snapshot-failures.jsonl",
+      "sha256": "3ac09e84e3850821df0dbd1443f3dc22e495c918ad8ac36da7f930f540888af0"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/sampler.log",
+      "sha256": "1e6dcd15dd512d32ce1b849e4d80d91623871757bc164c503428ae513ca479a4"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "62b645b8525479917b96d16919653fd032765703138090fe21d2f36bd21a7e50"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 1563,
+      "cell": "full-uc-cap-pressure",
+      "path": "driver.log",
+      "sha256": "dc400a33ac51571bffbedc815442735c3915cb1f7cdea268e832fa6f20577dbe"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-uc-cap-pressure",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-uc-cap-pressure",
+      "path": "preflight.log",
+      "sha256": "93dbe40d962cd6dd28a2eff95eea0cce0151e0935f8d7939207c74ec8e660919"
+    },
+    {
+      "bytes": 12889536,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rbgp",
+      "sha256": "75dfd4dd73d9a3ef7c512d5aea333a06e8e4593016d65c57f4384cc2832b36d6"
+    },
+    {
+      "bytes": 30388272,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "59859740e20ca5ac415f7c4c60b6a407b82fb828c508b61da6e70ecd65765b34"
+    },
+    {
+      "bytes": 42255992,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "d3d1e238b7ba14a210e0004e535b99442f23f27dfb25446a1ce314641b789e42"
+    },
+    {
+      "bytes": 42255928,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "aaad03001df1ad430ca017fefaeb7d49bfa84f3ded26beb97a7aec3644c69bcb"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/binaries.sha256",
+      "sha256": "6fb4dbab3eabe9fb7a9430c2c1c13ba7826f3ba22ba455fb361c4c033521f1fc"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/binary-validation.json",
+      "sha256": "f65c64cce039c7c5d4949ab4d5a5528bdd06611693576bcece99f1474b8eff60"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-candidate.log",
+      "sha256": "1fd3353dacffb698742ef94b143d8496397d71fd1da4f2102d4553d065ccf6a1"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-flat.log",
+      "sha256": "c0c4e6bb2407d47880f04135cb657c86f8225fe16b3bcacd06987e4d7c213c7a"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-harness.log",
+      "sha256": "4c6fc5704e8012d18ba1b3d616aeeffe2443932e6c5a0f40347a97c2a185d0d9"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "3349c22a78a35ef317de0a1e74ecd85bdaef7724119b60335d9ab247f9814832"
+    },
+    {
+      "bytes": 2628,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/campaign.json",
+      "sha256": "66cdf871cbd61035a9ba8c74836b0faa9e703f2f73faf587491c385fdaca1a75"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/campaign.sha256",
+      "sha256": "2f0147d300c387e00cff347ec8b874fed0cd7d6691db02166bea8674e8842c15"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/candidate.sha",
+      "sha256": "218a837066a22cf98ebe00af84ec67569a17f91cdc994f25fddcb52bb11b36d0"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 1365,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/controller-0.log",
+      "sha256": "b8b66e43810ca1549f6d9606cffdeebb8ef92ed225771a4ed7c47e64f3f33511"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 7462,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 62182,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 10983,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 87,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/cleanup-error.json",
+      "sha256": "41c71bf8edae33c5b4ea709453a37228af227a166a3c335a69a0e5d730eb08ba"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "7a81ff03adee887b7b2d396555909c498f71da9558f12278c5b8eb390f2afa66"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "3cf930659c698b5744800f9af3d0aee15109c26543576c4b4c285b09430ef7e8"
+    },
+    {
+      "bytes": 13084355,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "de67961d7d99c0c4f79219cd6fb880925ceeba463377f7d7ad85cfe478c336f9"
+    },
+    {
+      "bytes": 837,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/failure.json",
+      "sha256": "92b5ee45b98b769b65dc168cd2f1f053a0dd486ef46cd52d3cd1dda11489ebfe"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "4ff3891b203114edd2820817500806ebd0c85eae166786b3500ba3e062eacf97"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "2f869977bc8e726163381e14215cd0f1f4383d62a1608ac7a057359699e7eda1"
+    },
+    {
+      "bytes": 12477,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "3ebc9b5cc7f2d1b59972756d08ce6bfc2f6aa0ca05178c88ba154fa404e22091"
+    },
+    {
+      "bytes": 70,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "8d1ab919391b9f4409d602497133a6fe6af4c3d497efa6c00b7008615944a49f"
+    },
+    {
+      "bytes": 590196,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "2b4be03c5a039f18dd828f06bc153f31bb54a78d1ad49e44df57e4763a4513e9"
+    },
+    {
+      "bytes": 125111,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "130a3a8264e86539b9d30d28c0086fd7d8ed6e41a3b02c4247eebfa1c945a4b6"
+    },
+    {
+      "bytes": 125111,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "e5b0aa1a5bfc7bd84c581424709d6da3212f4047d42b7dd46405c11e982f2beb"
+    },
+    {
+      "bytes": 126105,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "642a51a541cbc30de9dab3c7f96f01f507e531d83b90905c0ddebe59e3355eec"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76246,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "9e774fed3d6b2cf6685987fec436821affdecf7a04f8e8d66ababe240ea144aa"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 719,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "dbddad107dd5fd40a6953a4d6a90ac372bab640618602c35c0ec1632dd596c63"
+    },
+    {
+      "bytes": 2121,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "cd0fec75c9165e9510c2136df2a40c2bc45d18a3142967f0323322885b253d22"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "9c7352b19b522f89da63eb7852633267abb91006d12854a6ef9720875f97e803"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 1629,
+      "cell": "full-vpn-no-refusal",
+      "path": "driver.log",
+      "sha256": "9fac0f7c311b8e458307567f01bccb768014efd2d55342c3118c338dea7d1588"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-vpn-no-refusal",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-vpn-no-refusal",
+      "path": "preflight.log",
+      "sha256": "87235ff38b880c7c77360ceddcf46a875e0b156f6969b88c8de4c751a0982686"
+    },
+    {
+      "bytes": 12889536,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rbgp",
+      "sha256": "7d72944ee6c03a8b51b9d049f697a420a3b33ab14c7090b7cbff560386c8b9ea"
+    },
+    {
+      "bytes": 30388480,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "44952d9f9097a29f462e1c5fbe83987aff74cb91abd1f64d3678316170ed1133"
+    },
+    {
+      "bytes": 42255992,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "a68fa906379a9e2f253c4e182d497b9ecb33d7a094deef34e0588a6f6864bce9"
+    },
+    {
+      "bytes": 42255928,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "c0e0059f0c8e755ed0e06b62929f77030e3c15bf966db02c679bc26f09e7aff2"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/binaries.sha256",
+      "sha256": "d8620aedc183c9eb7504127252dabd4ca97d08c8a5a79a59c9cc221f2cec51e3"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/binary-validation.json",
+      "sha256": "26c6c82bcf6fd59c07f003dc6f6764cc2bb17595920e2d0175b53f4bedd9fdb0"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-candidate.log",
+      "sha256": "48e61d8889b0bce1702f82da2e1d4b885c586f7d00acdd09d425a366c9ce4748"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-flat.log",
+      "sha256": "e399bbe5c56e4bb9d9ab91f7540efc38c1e34380fbf8158be28ca735b431754c"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-harness.log",
+      "sha256": "56421739de03e51bbd2427e4dc1405250203dbd9f5182d2046d23890bf4b0433"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "da9fcb4efb6b2b5a375bace2592c21b3ad3f395e938803c93899141299bb913b"
+    },
+    {
+      "bytes": 2630,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/campaign.json",
+      "sha256": "2d65e881ff5dd39fad9878ff24c22fc24a351459f2e52d63a5509d4cc4910354"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/campaign.sha256",
+      "sha256": "e3aaa89ae3528e8fbe0a2fe6cb9b64b5379af766a096fd3e0da29480efcf0877"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/candidate.sha",
+      "sha256": "218a837066a22cf98ebe00af84ec67569a17f91cdc994f25fddcb52bb11b36d0"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 71,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/controller-0.log",
+      "sha256": "e929e0330bc648eaecfe511c610016b3c942770d1f8f41f2ab3251145bf313c7"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 7462,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 62182,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 10983,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "10434652432342895795c9eafe40d9233d036704b5f92a34eddfd1f2fbff4d76"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "d491660aa467f5feb0f5eec6d5f0c60ea226ebd2564adff49c511810979e8c47"
+    },
+    {
+      "bytes": 20513947,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "6a678beeb39e05c671fa60c40412843eec659348286751a5c8a2dcf93d95c435"
+    },
+    {
+      "bytes": 837,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/failure.json",
+      "sha256": "92b5ee45b98b769b65dc168cd2f1f053a0dd486ef46cd52d3cd1dda11489ebfe"
+    },
+    {
+      "bytes": 9938,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-history/v2-00000000000000000001-1792065807-19044f8bb55a4630725b9920e34e8607fa415f2a92ad539934530792909c6af3.json",
+      "sha256": "87f0e7aef7026308fe714948e06c36e9aa67cd2bb037f9cee099369ed410daed"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-last-persist",
+      "sha256": "bfd6b4d8c1b2e04161d6546bc378cac93bc32f25757390058ad4368240d54380"
+    },
+    {
+      "bytes": 4409,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config.toml",
+      "sha256": "ee78ec60a275353dd541b98056a1d6d9f6b906eceee50547d92cd02c2ab0f40e"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/gr-restart.toml",
+      "sha256": "4028d5c596b27bcbb36b38cbc32e50441e6f095c47f833524ba6264d3b609eed"
+    },
+    {
+      "bytes": 367,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/member.rpol",
+      "sha256": "79ddcdd2d0e3b9cc1387e3b4bc7171f916d29aad08e1ea718e3360452f8dbb9a"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "3a9d0b8eda25217a11f3770c14ec5bce6521d2f6d1db0eeb699395c218273f07"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "a2fdbe1ef6a7794b54e440a84ab7139e89b7ad7d63aced2738a181d74a861875"
+    },
+    {
+      "bytes": 12478,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "ccf285128357718040543464addb22f48998fe8d798c8fa7ae46e7f3a48c74c5"
+    },
+    {
+      "bytes": 70,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "8d1ab919391b9f4409d602497133a6fe6af4c3d497efa6c00b7008615944a49f"
+    },
+    {
+      "bytes": 746372,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "b7c546f41ecd30b49778ef34a87c3071d8633fe9a85df2c38ebf9a3b5c220555"
+    },
+    {
+      "bytes": 185941,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "db2f63f23830cf462a94f07287bc56f233e94e31c4edecb7dde8f865df6389e6"
+    },
+    {
+      "bytes": 185941,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "ea9e1f5efdbde55aeacb0adcebb0756e58acd489248b66aa7164877ed83db1ff"
+    },
+    {
+      "bytes": 189967,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "31857ae9a7bbf249befca10ca0bdd586d3c199a2018e5cb7b2b9fcd92f4652ef"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 153487,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "7cf154ef58bc7ed309ba9c9b3bce568371fb4b9288a6c62241f5ff4e675923de"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "56647dc202db6acb763268cbae3982a665da5ca086ba4d1030b60f886081ad46"
+    },
+    {
+      "bytes": 2121,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "2a1e38eb299262e45c123a04855e0ac70e4f30314312a3f660df18e1cf7fdce1"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "1cafbd7e776c779d11a59c9a91f11e1943bb3c44a28d1b2235569e50d8b1a616"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 1629,
+      "cell": "full-vpn-cap-pressure",
+      "path": "driver.log",
+      "sha256": "74152de4ecfd97d216c99ee4e2f1a024cd97f1993151726b5294b62d057716ae"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-vpn-cap-pressure",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-vpn-cap-pressure",
+      "path": "preflight.log",
+      "sha256": "f028c9b8683aad5b195ae9e7396570ba96879d0b8375cd20f9d42ac5a6143ac0"
+    }
+  ],
+  "raw_roster_sha256": "d57087d1985002265462453b992859f633afba5bfcbd1a9e2754e891665145a3",
+  "release_candidate_soak_qualified": false,
+  "retained_zip_bytes": 199823071,
+  "run": {
+    "conclusion": "failure",
+    "event": "workflow_dispatch",
+    "head_branch": "test/recovery-mass-dirty-qualification",
+    "head_sha": "baf7082560d2b8318cbe99e9fed8c1104b06f1bb",
+    "html_url": "https://github.com/lance0/rustbgpd/actions/runs/38728500056",
+    "id": 38728500056,
+    "run_attempt": 1,
+    "status": "completed"
+  },
+  "schema": "rustbgpd.invalid-hosted-mass-dirty-attempt.v3",
+  "scope": {
+    "cause_scope": "One serverHTTP503 with logged200msRIBprobe timeout; three native250msclient checkpoint deadlines. No blocked-stack or per-peer-loop diagnosis is claimed from logs. VPNnoRef sampler exit1 is secondary teardown evidence, not initiating cause.",
+    "packet_scope": "Frozen native validated route keys/attributes/events online; only compact fold/withdrawal receipts are archived. No full packet or ordered-per-key stream replay is available.",
+    "prior_evidence": "All prior hosted failures and valid localv3 correctness/causal controls preserved separately, unpooled.",
+    "resource_scope": "Only the two completed UC flat legs have complete validated10GiBdaemon/2GiBharness boundaries and no-swap/OOM observations. Failed-leg samples, held proofs and preceding200probes are partial diagnostics, not final boundaries or a qualified candidate comparison.",
+    "session_and_counter_scope": "Completed flat fold records establish continuity for those four operations. Held peer snapshots establish only sampled state for failed B. Raw malformed/session_reset and inactiveEVPNexhaustion counters are not a general all-family reset total; no missing final reset/OOM zeros inferred.",
+    "withdrawal_counter_contract": "Native completion withdrawal counters are cumulative across B/A. UCpressure flat192atB+192atA means192newB/0newA,192total; never384."
+  },
+  "source_inputs": [
+    {
+      "bytes": 317080,
+      "path": "bench/scale/reloadstall/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "path": "bench/scale/reloadstall/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 70699,
+      "path": "bench/scale/reloadstall/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 62182,
+      "path": "bench/scale/reloadstall/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 7462,
+      "path": "bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 58772,
+      "path": "bench/scale/reloadstall/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 10983,
+      "path": "bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 561,
+      "path": "bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 3129,
+      "path": "bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 3078,
+      "path": "tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 140854,
+      "path": "crates/rib/src/manager/update_groups.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 10441,
+      "path": "Cargo.toml",
+      "sha256": "72538a3a0a9cfb9c4478f2aec137a13fa7b1c8066a590788d6204f9e5e35ad32"
+    },
+    {
+      "bytes": 130742,
+      "path": "Cargo.lock",
+      "sha256": "52fb663be2f6640ba4ba5e7575fdae03e7fc6d9168e926563a267181c8b2d255"
+    },
+    {
+      "bytes": 362,
+      "path": "bench/scale/reloadstall/Cargo.toml",
+      "sha256": "7a9a15af44b6f073ef3007ebef24bbc2e7da30627c2fd4b2ab41a001980bb498"
+    },
+    {
+      "bytes": 50502,
+      "path": ".github/workflows/ci.yml",
+      "sha256": "9977c6b595c89e35a4a2ef8b445397a19ed7004d2ed9a492e939a91719fea577"
+    }
+  ],
+  "source_manifest_sha256": "e1073f082a081d430bd942c35dddce27737342a11236b86dfd205a12fdb415a9",
+  "status": "UNQUALIFIED",
+  "whole_campaign_comparison": {
+    "cost_ratio": null,
+    "median": null,
+    "memory_ratio": null,
+    "reason": "only two UC flat legs complete; zero candidate legs or operations complete",
+    "worst": null
+  }
+}

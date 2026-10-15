@@ -688,10 +688,11 @@ impl RibManager {
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
+        // Any family's removed committed rows end an advertised-view walk.
         if self
             .adj_ribs_out
             .remove(&peer)
-            .is_some_and(|rib| rib.evpn_len() != 0)
+            .is_some_and(|rib| !rib.is_empty_all_families())
         {
             self.advance_advertised_pages();
         }

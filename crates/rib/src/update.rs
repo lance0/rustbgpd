@@ -1776,6 +1776,23 @@ pub type VpnRouteQueryKey = (rustbgpd_wire::VpnRouteKey, IpAddr, u32);
 pub type LabeledRouteQueryKey = (Prefix, IpAddr, u32);
 /// RTC page identity, including partial membership prefixes.
 pub type RtcRouteQueryKey = (rustbgpd_wire::RtcNlri, IpAddr, u32);
+/// BGP-LS page identity: family, raw NLRI type, optional RD and opaque
+/// payload, then source and path.
+pub type BgpLsRouteQueryKey = (
+    crate::route::BgpLsFamily,
+    u16,
+    Option<[u8; 8]>,
+    bytes::Bytes,
+    IpAddr,
+    u32,
+);
+
+/// ORR topology node page identity: the canonical node key bytes.
+pub type OrrNodeQueryKey = Vec<u8>;
+/// ORR topology link page identity: local and remote canonical node keys,
+/// then the Link NLRI Route Distinguisher and bytes that separate parallel
+/// links.
+pub type OrrLinkQueryKey = (Vec<u8>, Vec<u8>, Option<[u8; 8]>, bytes::Bytes);
 
 /// Identity ordering for EVPN pages, including the source peer for all-peer queries.
 pub type EvpnRouteQueryKey = (EvpnRouteKey, IpAddr);
@@ -3388,6 +3405,21 @@ pub enum RibUpdate {
         /// Dropped receivers skip queued work.
         reply: oneshot::Sender<Result<RibRowsPage<LabeledRibRoute>, RoutePageError>>,
     },
+    /// Query one bounded, version-fenced BGP-LS table page.
+    QueryBgpLsRoutesPage {
+        /// Accepted input, selected best, or local export table.
+        scope: RouteQueryScope,
+        /// Predicate applied before cloning.
+        filter: Option<RibRowFilter<BgpLsRibRoute>>,
+        /// Last NLRI/source/path identity returned.
+        after: Option<BgpLsRouteQueryKey>,
+        /// Required for continuation; absent for the first page.
+        expected_version: Option<RoutePageVersion>,
+        /// Clamped to 1..=1000.
+        page_size: usize,
+        /// Dropped receivers skip queued work.
+        reply: oneshot::Sender<Result<RibRowsPage<BgpLsRibRoute>, RoutePageError>>,
+    },
     /// Query one bounded, version-fenced Rtc table page.
     QueryRtcRoutesPage {
         /// Accepted input, selected best, or local export table.
@@ -3409,6 +3441,30 @@ pub enum RibUpdate {
     QueryOrrTopology {
         /// Response channel.
         reply: oneshot::Sender<crate::orr::OrrTopologySnapshot>,
+    },
+    /// Query one bounded, version-fenced page of ORR topology nodes,
+    /// ordered by canonical node key.
+    QueryOrrTopologyNodesPage {
+        /// Last node key returned.
+        after: Option<OrrNodeQueryKey>,
+        /// Required for continuation; absent for the first page.
+        expected_version: Option<RoutePageVersion>,
+        /// Clamped to 1..=1000.
+        page_size: usize,
+        /// Dropped receivers skip queued work.
+        reply: oneshot::Sender<Result<RibRowsPage<crate::orr::OrrNodeSnapshot>, RoutePageError>>,
+    },
+    /// Query one bounded, version-fenced page of usable ORR topology links,
+    /// ordered by endpoint keys and Link NLRI identity.
+    QueryOrrTopologyLinksPage {
+        /// Last link identity returned.
+        after: Option<OrrLinkQueryKey>,
+        /// Required for continuation; absent for the first page.
+        expected_version: Option<RoutePageVersion>,
+        /// Clamped to 1..=1000.
+        page_size: usize,
+        /// Dropped receivers skip queued work.
+        reply: oneshot::Sender<Result<RibRowsPage<crate::orr::OrrLinkSnapshot>, RoutePageError>>,
     },
     /// Query per-vantage RFC 9107 ORR status: resolution state, SPF
     /// reach, bound peers, and topology totals — served from the cached

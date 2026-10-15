@@ -592,6 +592,12 @@ def all_panels(panels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return flattened
 
 
+# Matched at a position instead of on `source[index:]`: slicing per character
+# copied the remaining source each step, which made lexing metrics.rs quadratic.
+RUST_RAW_STRING_START = re.compile(r'(?:br|r)(?P<hashes>#{0,255})"')
+RUST_STRING_START = re.compile(r'(?:b)?"')
+
+
 def rust_lex(source: str) -> tuple[str, list[str]]:
     """Mask Rust comments and literals, retaining string values as opaque tokens."""
     output: list[str] = []
@@ -615,17 +621,17 @@ def rust_lex(source: str) -> tuple[str, list[str]]:
             output.append(" ")
             index = end
         else:
-            raw = re.match(r'(?:br|r)(?P<hashes>#{0,255})"', source[index:])
-            normal = re.match(r'(?:b)?"', source[index:])
+            raw = RUST_RAW_STRING_START.match(source, index)
+            normal = RUST_STRING_START.match(source, index)
             if raw:
                 marker = '"' + raw.group("hashes")
-                start = index + raw.end()
+                start = raw.end()
                 end = source.find(marker, start)
                 if end < 0:
                     raise ValueError("unterminated Rust raw string")
                 value, index = source[start:end], end + len(marker)
             elif normal:
-                start, end = index + normal.end(), index + normal.end()
+                start = end = normal.end()
                 while end < len(source):
                     if source[end] == '"':
                         slashes = 0

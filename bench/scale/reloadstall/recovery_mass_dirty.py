@@ -413,8 +413,13 @@ def dirty_overlap(rows):
 
 
 def source_witness(snapshot):
-    row, _, _ = snapshot(peer(0))
-    validate_source_witness(row)
+    row, begin, end = snapshot(peer(0))
+    try:
+        validate_source_witness(row)
+    except ValueError as error:
+        error.add_note("rejected source witness: " + json.dumps({"row": row,
+            "query_begin_monotonic_seconds": begin, "query_end_monotonic_seconds": end}, sort_keys=True))
+        raise
     return row
 
 

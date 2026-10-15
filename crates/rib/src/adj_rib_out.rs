@@ -561,6 +561,18 @@ impl AdjRibOut {
         self.routes.is_empty()
     }
 
+    /// Return `true` if no route of any family is advertised.
+    #[must_use]
+    pub fn is_empty_all_families(&self) -> bool {
+        self.is_empty()
+            && self.flowspec_routes.is_empty()
+            && self.evpn_routes.is_empty()
+            && self.bgpls_routes.is_empty()
+            && self.vpn_len() == 0
+            && self.labeled_len() == 0
+            && self.rtc_len() == 0
+    }
+
     // --- FlowSpec methods ---
 
     /// Reserve the `FlowSpec` advertised-route map for a known outbound batch.

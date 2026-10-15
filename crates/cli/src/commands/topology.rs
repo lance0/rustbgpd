@@ -1,35 +1,62 @@
 //! `rbgp topology nodes|links` — RFC 9107 ORR topology derived from the
 //! BGP-LS Adj-RIB-In union across peers.
 
+use crate::commands::rib::ROUTE_PAGE_SIZE;
 use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::{
-    ListTopologyLinksRequest, ListTopologyNodesRequest, TopologyLinkEntry, TopologyNodeEntry,
+    ListOrrTopologyLinksRequest, ListOrrTopologyNodesRequest, TopologyLinkEntry, TopologyNodeEntry,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 
+/// Walk every node page; a failed page stops the walk without retrying its token.
 pub async fn nodes(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = read_rpc(
-        "ListTopologyNodes",
-        client.list_topology_nodes(ListTopologyNodesRequest {}),
-    )
-    .await?
-    .into_inner();
-    print_topology_nodes(&resp.nodes, json)
+    let mut request = ListOrrTopologyNodesRequest {
+        page_size: ROUTE_PAGE_SIZE,
+        ..Default::default()
+    };
+    let mut nodes = Vec::new();
+    loop {
+        let page = read_rpc(
+            "ListOrrTopologyNodes",
+            client.list_orr_topology_nodes(request.clone()),
+        )
+        .await?
+        .into_inner();
+        nodes.extend(page.nodes);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    print_topology_nodes(&nodes, json)
 }
 
+/// Walk every link page; a failed page stops the walk without retrying its token.
 pub async fn links(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = read_rpc(
-        "ListTopologyLinks",
-        client.list_topology_links(ListTopologyLinksRequest {}),
-    )
-    .await?
-    .into_inner();
-    print_topology_links(&resp.links, json)
+    let mut request = ListOrrTopologyLinksRequest {
+        page_size: ROUTE_PAGE_SIZE,
+        ..Default::default()
+    };
+    let mut links = Vec::new();
+    loop {
+        let page = read_rpc(
+            "ListOrrTopologyLinks",
+            client.list_orr_topology_links(request.clone()),
+        )
+        .await?
+        .into_inner();
+        links.extend(page.links);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    print_topology_links(&links, json)
 }
 
 /// Shorten a full node-key hex string for table display.
@@ -182,10 +209,12 @@ mod tests {
         let connection = connect(&server.addr, None).await.unwrap();
 
         nodes(connection, true).await.unwrap();
-        assert!(
-            server.state.last_list_topology_nodes.lock().await.is_some(),
-            "topology nodes request captured"
-        );
+        let requests = server.state.orr_node_page_requests.lock().await.clone();
+        let [request] = requests.as_slice() else {
+            panic!("one topology node page expected, got {requests:?}");
+        };
+        assert_eq!(request.page_size, ROUTE_PAGE_SIZE);
+        assert!(server.state.last_list_topology_nodes.lock().await.is_none());
 
         // Table rendering: 0/empty descriptor fields render as `-`, long
         // keys are shortened.
@@ -231,10 +260,12 @@ mod tests {
         let connection = connect(&server.addr, None).await.unwrap();
 
         links(connection, true).await.unwrap();
-        assert!(
-            server.state.last_list_topology_links.lock().await.is_some(),
-            "topology links request captured"
-        );
+        let requests = server.state.orr_link_page_requests.lock().await.clone();
+        let [request] = requests.as_slice() else {
+            panic!("one topology link page expected, got {requests:?}");
+        };
+        assert_eq!(request.page_size, ROUTE_PAGE_SIZE);
+        assert!(server.state.last_list_topology_links.lock().await.is_none());
 
         // Endpoint label prefers the router-ID, falls back to the key.
         let row = TopologyLinkEntry {
