@@ -841,7 +841,7 @@ jobs:
           if [[ $status != 0 ]]; then
             summary_status=0
             summary=(summarize "$evidence/campaign" --failed-driver-exit "$status")
-            [[ $RECOVERY_RECEIPT_MODE != scan ]] || summary=(summarize-scan "$evidence/campaign")
+            [[ $RECOVERY_RECEIPT_MODE != scan ]] || summary=(summarize-scan "$evidence/campaign" --failed-driver-exit "$status")
             timeout --signal=TERM --kill-after=5s 30s \
               python3 bench/scale/recovery_memory.py "${summary[@]}" \
               > "$evidence/failure-summary.log" 2>&1 || summary_status=$?

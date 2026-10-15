@@ -1057,27 +1057,35 @@ def summarize(root: Path) -> None:
     )
 
 
-def summarize_failed(root: Path, driver_exit: int) -> None:
+def summarize_failed(root: Path, driver_exit: int, *, scan: bool = False) -> None:
     """Retain an explicitly unqualified envelope after an aborted invocation."""
     require(1 <= driver_exit <= 255, "failure finalization requires a nonzero driver exit")
     root.mkdir(parents=True, exist_ok=True)
     error = f"driver invocation failed with exit {driver_exit}; raw evidence is unqualified"
     # Do not validate partial legs or preserve ratios from an earlier summary.
     # Failure finalization is evidence retention, never a qualification fallback.
-    write_json(
-        root / "comparison.json",
-        {
-            "schema": "rustbgpd.recovery-memory.comparison.v2",
-            "phase": None,
-            "primary": "scope memory.peak bytes",
-            "scope": "manager-direct RIB, production exact-export preflight, harness consumers; no final wire/TCP",
-            "rows": [],
-            "summaries": [],
+    comparison = {
+        "schema": "rustbgpd.recovery-memory.comparison.v2",
+        "phase": None,
+        "primary": "scope memory.peak bytes",
+        "scope": "manager-direct RIB, production exact-export preflight, harness consumers; no final wire/TCP",
+        "rows": [],
+        "summaries": [],
+        "candidate_failures": [error],
+        "qualification_passed": False,
+        "driver_invocation_exit": driver_exit,
+    }
+    if scan:
+        comparison = {
+            "schema": SCAN_SCHEMA,
+            "scope": "component scans/capture only; no daemon, fleet, readiness or wire qualification",
+            "samples": [],
+            "comparisons": [],
             "candidate_failures": [error],
             "qualification_passed": False,
             "driver_invocation_exit": driver_exit,
-        },
-    )
+        }
+    write_json(root / "comparison.json", comparison)
     raise InvalidReceipt(error)
 
 
@@ -1285,6 +1293,7 @@ def main() -> None:
     run.add_argument("--scan", action="store_true")
     scan = sub.add_parser("summarize-scan")
     scan.add_argument("root", type=Path)
+    scan.add_argument("--failed-driver-exit", type=int)
     compare = sub.add_parser("summarize")
     compare.add_argument("root", type=Path)
     compare.add_argument("--failed-driver-exit", type=int)
@@ -1310,7 +1319,10 @@ def main() -> None:
                 scan=args.scan,
             )
         elif args.command == "summarize-scan":
-            summarize_scan(args.root)
+            if args.failed_driver_exit is not None:
+                summarize_failed(args.root, args.failed_driver_exit, scan=True)
+            else:
+                summarize_scan(args.root)
         else:
             if args.failed_driver_exit is not None:
                 summarize_failed(args.root, args.failed_driver_exit)

@@ -756,12 +756,13 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(len(result["rows"]), 16)
         self.assertEqual(len(result["candidate_failures"]), 1)
 
-    def assert_failure_envelope(self, root: Path, status: int) -> None:
+    def assert_failure_envelope(self, root: Path, status: int, *, scan: bool = False) -> None:
+        self.assertTrue((root / "comparison.json").exists(), "structured failure envelope missing")
         result = json.loads((root / "comparison.json").read_text(encoding="utf-8"))
         self.assertFalse(result["qualification_passed"])
         self.assertEqual(result["driver_invocation_exit"], status)
-        self.assertEqual(result["rows"], [])
-        self.assertEqual(result["summaries"], [])
+        for field in (("samples", "comparisons") if scan else ("rows", "summaries")):
+            self.assertEqual(result[field], [])
         self.assertTrue(result["candidate_failures"])
         self.assertNotIn("ratio", json.dumps(result))
 
@@ -837,7 +838,7 @@ class RecoveryReceiptTests(unittest.TestCase):
         script = step.split("        run: |\n", 1)[1].split("\n      - ", 1)[0]
         return textwrap.dedent(script)
 
-    def run_workflow_failure(self, status: int, *, expired: bool = False) -> Path:
+    def run_workflow_failure(self, status: int, *, expired: bool = False, mode: str = "memory") -> Path:
         commands = self.root / f"commands-{status}-{expired}"
         commands.mkdir()
         timeout_command = commands / "timeout"
@@ -865,9 +866,9 @@ class RecoveryReceiptTests(unittest.TestCase):
             GITHUB_SHA="a" * 40,
             RECOVERY_MEMORY_DRIVER_DEADLINE=str(time.monotonic() + (-1 if expired else 6600)),
             RECOVERY_MEMORY_PHASE="qualified",
-            RECOVERY_RECEIPT_MODE="memory",
+            RECOVERY_RECEIPT_MODE=mode,
             RECOVERY_MEMORY_PROFILE="full-vpn",
-            RECOVERY_MEMORY_CELL="widen",
+            RECOVERY_MEMORY_CELL="capture-scan" if mode == "scan" else "widen",
         )
         result = subprocess.run(
             [
@@ -894,7 +895,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             (evidence / "driver-invocation.exit").read_text().strip(), str(expected_status)
         )
         self.assertEqual((evidence / "failure-summary.exit").read_text().strip(), "1")
-        self.assert_failure_envelope(evidence / "campaign", expected_status)
+        self.assert_failure_envelope(evidence / "campaign", expected_status, scan=mode == "scan")
         if expired:
             self.assertFalse(arguments.exists())
         else:
@@ -911,6 +912,11 @@ class RecoveryReceiptTests(unittest.TestCase):
 
     def test_workflow_expired_setup_budget_does_not_start_driver(self) -> None:
         self.run_workflow_failure(124, expired=True)
+
+    def test_scan_workflow_finalizes_failure_preserving_original_exit(self) -> None:
+        for status, expired in ((124, False), (137, False), (124, True)):
+            with self.subTest(status=status, expired=expired):
+                self.run_workflow_failure(status, expired=expired, mode="scan")
 
     def test_historical_route_failure_does_not_excuse_phase_swap(self) -> None:
         root = self.campaign()
@@ -1325,6 +1331,39 @@ class RecoveryScanTests(unittest.TestCase):
         self.assertEqual("peer_limit", result["samples"][1]["refusal"])
         self.assertFalse(result["comparisons"][0]["eligible"])
         self.assertIsNone(result["comparisons"][0]["shared_over_flat"])
+
+    def test_failed_scan_invocation_erases_complete_ratios_or_missing_manifest(self):
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                root = self.root / str(completed)
+                raw = None
+                if completed:
+                    root.mkdir()
+                    log = self.log(self.rows())
+                    raw = log.read_bytes()
+                    shutil.copyfile(log, root / "harness.log")
+                    result = receipt.validate_scan_log(log, "evpn-soak")
+                    self.assertTrue(all(c["eligible"] for c in result["comparisons"]))
+                    self.assertTrue(all(c["shared_over_flat"] for c in result["comparisons"]))
+                    receipt.write_json(root / "comparison.json", result)
+                result = subprocess.run(
+                    ["python3", str(Path(receipt.__file__).resolve()), "summarize-scan",
+                     str(root), "--failed-driver-exit", "137"],
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue((root / "comparison.json").exists(), "structured failure envelope missing")
+                envelope = json.loads((root / "comparison.json").read_text())
+                self.assertFalse(envelope.get("qualification_passed", True))
+                self.assertEqual(envelope["schema"], receipt.SCAN_SCHEMA)
+                self.assertEqual(envelope["driver_invocation_exit"], 137)
+                self.assertEqual(envelope["samples"], [])
+                self.assertEqual(envelope["comparisons"], [])
+                self.assertTrue(envelope["candidate_failures"])
+                self.assertNotIn("ratio", json.dumps(envelope))
+                self.assertEqual(result.returncode, 1)
+                if raw is not None:
+                    self.assertEqual((root / "harness.log").read_bytes(), raw)
 
     def test_scan_zero_tick_denominator_has_no_cpu_ratio(self):
         rows = self.rows()

@@ -38,6 +38,23 @@ fn capture(
     (receipt, phases)
 }
 
+fn checked_refusal(
+    measured: bool,
+    receipt: &RecoveryScanReceipt,
+    counted: &RecoveryScanReceipt,
+    shape_refusal: Option<&'static str>,
+) -> Option<&'static str> {
+    let refusal = receipt.refusal.or(shape_refusal).or(counted.refusal);
+    assert!(
+        measured || refusal.is_none(),
+        "correctness-only capture must complete its proof: {refusal:?}"
+    );
+    if refusal.is_none() {
+        assert_eq!(receipt.proof_keys, counted.proof_keys);
+    }
+    refusal
+}
+
 fn sample(profile: &'static str, keys: usize, records: usize, sparse: bool, measured: bool) {
     // Count instrumentation never shares a pass with timing. Each timed arm
     // creates fresh ledgers, with identical setup outside the measured phases.
@@ -64,10 +81,7 @@ fn sample(profile: &'static str, keys: usize, records: usize, sparse: bool, meas
             None
         };
         let counted = &counted[usize::from(shared)];
-        let refusal = receipt.refusal.or(shape_refusal).or(counted.refusal);
-        if refusal.is_none() {
-            assert_eq!(receipt.proof_keys, counted.proof_keys);
-        }
+        let refusal = checked_refusal(measured, &receipt, counted, shape_refusal);
         let callbacks = counted.shape_callbacks;
         let comparisons = callbacks
             .checked_sub(counted.old_keys)
@@ -140,6 +154,36 @@ pub(super) fn main(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn correctness_rejects_each_refusal_while_measured_retains_it() {
+        for source in 0..3 {
+            let mut receipt = RecoveryScanReceipt {
+                proof_keys: 64,
+                ..RecoveryScanReceipt::default()
+            };
+            let mut counted = receipt.clone();
+            let shape_refusal = match source {
+                0 => {
+                    receipt.refusal = Some("allocation_failure");
+                    None
+                }
+                1 => {
+                    counted.refusal = Some("allocation_failure");
+                    None
+                }
+                _ => Some("allocation_failure"),
+            };
+            assert!(std::panic::catch_unwind(|| {
+                checked_refusal(false, &receipt, &counted, shape_refusal)
+            })
+            .is_err());
+            assert_eq!(
+                checked_refusal(true, &receipt, &counted, shape_refusal),
+                Some("allocation_failure")
+            );
+        }
+    }
 
     #[test]
     fn component_capture_correctness_has_no_measurement_and_checks_actual_old() {
