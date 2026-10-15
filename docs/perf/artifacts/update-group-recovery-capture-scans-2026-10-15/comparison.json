@@ -1,0 +1,2792 @@
+{
+  "schema": "rustbgpd.recovery-scan.public-comparison.v1",
+  "status": "PASS — component qualification at recorded source",
+  "final_head_qualified": true,
+  "qualification_scope": "component harness head only; not containing main, actor, fleet or production activation",
+  "measured_commit": "5b905336750ee5a8fb9a4e411f2d8d94249a7d7f",
+  "run_id": 38659117804,
+  "run_url": "https://github.com/lance0/rustbgpd/actions/runs/38659117804",
+  "run_started_at_utc": "2026-10-15T00:16:52Z",
+  "component_evidence": "all 18 cells and 72 legs independently verified at the final reviewed measured harness source",
+  "scope": "component count/shape and complete target capture only; one anchor proof plus one capturing target; remaining records empty, no concurrent fleet/regroup/daemon/readiness/wire/activation qualification",
+  "component_cells": 18,
+  "timed_legs": 72,
+  "refused_legs": 0,
+  "rows_file": "rows.jsonl",
+  "rows_sha256": "1ec0d8579021cdaaf7503b1557d14c4a2058b3e5255c578a6d6b3caa490e9396",
+  "timed_order": [
+    "flat",
+    "shared",
+    "shared",
+    "flat"
+  ],
+  "samples_per_arm_per_cell": 2,
+  "cpu_clock": "hosted per-thread /proc ticks, 100 Hz (10 ms resolution); zero ticks retained and zero flat denominator ratios null",
+  "phase_passes": "shape and complete capture use independent invocations; only shape callbacks/comparisons are counted in a separate untimed pass; complete-capture timing includes reserve, population and sealing with no-op callbacks",
+  "comparison_count_scope": "capture_shape only; excludes full-capture comparison totals and record-lookup work",
+  "interpretation_limits": [
+    "Flat shape with a no-op checkpoint can optimize the known materialized cardinality fold; sub-microsecond common wall values are not a useful operational ratio baseline. Logical counted flat visits remain one per OLD key; shared comparisons are counted separately.",
+    "CPU has 10ms tick granularity; EVPN and flat shape samples often resolve to zero ticks. Nonzero one-tick ratios are likewise imprecise. Only two samples per arm per cell, not robust statistical distributions.",
+    "Logical daemon retained/peak credit includes anchor universe and all record metadata; excludes OLD input Vec, allocator overhead and RSS.",
+    "All target proofs have exactly requested OLD keys; sparse layouts exclude removed universe keys; zero refusals; retirement restores common96B/EVPN104B empty headers."
+  ],
+  "profiles": {
+    "full-uc": {
+      "keys": 1230000,
+      "cpu_ticks_per_second": 100,
+      "credit_scope": "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS",
+      "cells": [
+        {
+          "records": 2,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 11.833333333333334,
+              "wall_ns": 13.023139722082425
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 258003.19969040249
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      821,
+                      471
+                    ],
+                    "median": 646.0,
+                    "min": 471,
+                    "max": 821
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      27343689,
+                      27481775
+                    ],
+                    "median": 27412732.0,
+                    "min": 27343689,
+                    "max": 27481775
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      4,
+                      2
+                    ],
+                    "median": 3.0,
+                    "min": 2,
+                    "max": 4
+                  }
+                }
+              },
+              "retained_bytes": [
+                78874160
+              ],
+              "peak_bytes": [
+                78874184
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      166757482,
+                      166582652
+                    ],
+                    "median": 166670067.0,
+                    "min": 166582652,
+                    "max": 166757482
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      16,
+                      17
+                    ],
+                    "median": 16.5,
+                    "min": 16,
+                    "max": 17
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      356519573,
+                      357480105
+                    ],
+                    "median": 356999839.0,
+                    "min": 356519573,
+                    "max": 357480105
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      35,
+                      36
+                    ],
+                    "median": 35.5,
+                    "min": 35,
+                    "max": 36
+                  }
+                }
+              },
+              "retained_bytes": [
+                39667912
+              ],
+              "peak_bytes": [
+                39667936
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 2,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 14.2,
+              "wall_ns": 12.953194790808013
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 279575.24244966445
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      501,
+                      691
+                    ],
+                    "median": 596.0,
+                    "min": 501,
+                    "max": 691
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      27661481,
+                      27468451
+                    ],
+                    "median": 27564966.0,
+                    "min": 27468451,
+                    "max": 27661481
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      2,
+                      3
+                    ],
+                    "median": 2.5,
+                    "min": 2,
+                    "max": 3
+                  }
+                }
+              },
+              "retained_bytes": [
+                78874160
+              ],
+              "peak_bytes": [
+                78874184
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      166836626,
+                      166417063
+                    ],
+                    "median": 166626844.5,
+                    "min": 166417063,
+                    "max": 166836626
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      16,
+                      17
+                    ],
+                    "median": 16.5,
+                    "min": 16,
+                    "max": 17
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      356131465,
+                      357977283
+                    ],
+                    "median": 357054374.0,
+                    "min": 356131465,
+                    "max": 357977283
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      35,
+                      36
+                    ],
+                    "median": 35.5,
+                    "min": 35,
+                    "max": 36
+                  }
+                }
+              },
+              "retained_bytes": [
+                39667976
+              ],
+              "peak_bytes": [
+                39668000
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                2
+              ]
+            }
+          }
+        },
+        {
+          "records": 64,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 10.571428571428571,
+              "wall_ns": 9.962706719923254
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 273988.2374278648
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      752,
+                      461
+                    ],
+                    "median": 606.5,
+                    "min": 461,
+                    "max": 752
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      37691601,
+                      37537904
+                    ],
+                    "median": 37614752.5,
+                    "min": 37537904,
+                    "max": 37691601
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      3,
+                      4
+                    ],
+                    "median": 3.5,
+                    "min": 3,
+                    "max": 4
+                  }
+                }
+              },
+              "retained_bytes": [
+                78882592
+              ],
+              "peak_bytes": [
+                78882616
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      165706434,
+                      166641298
+                    ],
+                    "median": 166173866.0,
+                    "min": 165706434,
+                    "max": 166641298
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      17,
+                      17
+                    ],
+                    "median": 17.0,
+                    "min": 17,
+                    "max": 17
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      372524971,
+                      376964524
+                    ],
+                    "median": 374744747.5,
+                    "min": 372524971,
+                    "max": 376964524
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      37,
+                      37
+                    ],
+                    "median": 37.0,
+                    "min": 37,
+                    "max": 37
+                  }
+                }
+              },
+              "retained_bytes": [
+                39676344
+              ],
+              "peak_bytes": [
+                39676368
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 64,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 9.25,
+              "wall_ns": 9.803939639544009
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 268355.30112721416
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      661,
+                      581
+                    ],
+                    "median": 621.0,
+                    "min": 581,
+                    "max": 661
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      37627200,
+                      37821733
+                    ],
+                    "median": 37724466.5,
+                    "min": 37627200,
+                    "max": 37821733
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      4,
+                      4
+                    ],
+                    "median": 4.0,
+                    "min": 4,
+                    "max": 4
+                  }
+                }
+              },
+              "retained_bytes": [
+                78882592
+              ],
+              "peak_bytes": [
+                78882616
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      166785973,
+                      166511311
+                    ],
+                    "median": 166648642.0,
+                    "min": 166511311,
+                    "max": 166785973
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      17,
+                      17
+                    ],
+                    "median": 17.0,
+                    "min": 17,
+                    "max": 17
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      369321308,
+                      370375477
+                    ],
+                    "median": 369848392.5,
+                    "min": 369321308,
+                    "max": 370375477
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      37,
+                      37
+                    ],
+                    "median": 37.0,
+                    "min": 37,
+                    "max": 37
+                  }
+                }
+              },
+              "retained_bytes": [
+                39678392
+              ],
+              "peak_bytes": [
+                39678416
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                64
+              ]
+            }
+          }
+        },
+        {
+          "records": 480,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 9.5,
+              "wall_ns": 8.377624848693321
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 263586.33176100627
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      701,
+                      571
+                    ],
+                    "median": 636.0,
+                    "min": 571,
+                    "max": 701
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      45254405,
+                      44913459
+                    ],
+                    "median": 45083932.0,
+                    "min": 44913459,
+                    "max": 45254405
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      4,
+                      4
+                    ],
+                    "median": 4.0,
+                    "min": 4,
+                    "max": 4
+                  }
+                }
+              },
+              "retained_bytes": [
+                78943520
+              ],
+              "peak_bytes": [
+                78943544
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      167201561,
+                      168080253
+                    ],
+                    "median": 167640907.0,
+                    "min": 167201561,
+                    "max": 168080253
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      17,
+                      17
+                    ],
+                    "median": 17.0,
+                    "min": 17,
+                    "max": 17
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      377239763,
+                      378152775
+                    ],
+                    "median": 377696269.0,
+                    "min": 377239763,
+                    "max": 378152775
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      38,
+                      38
+                    ],
+                    "median": 38.0,
+                    "min": 38,
+                    "max": 38
+                  }
+                }
+              },
+              "retained_bytes": [
+                39737272
+              ],
+              "peak_bytes": [
+                39737296
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 480,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 9.5,
+              "wall_ns": 8.43059561681614
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 339150.2739307536
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      471,
+                      511
+                    ],
+                    "median": 491.0,
+                    "min": 471,
+                    "max": 511
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      44842897,
+                      44867280
+                    ],
+                    "median": 44855088.5,
+                    "min": 44842897,
+                    "max": 44867280
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      4,
+                      4
+                    ],
+                    "median": 4.0,
+                    "min": 4,
+                    "max": 4
+                  }
+                }
+              },
+              "retained_bytes": [
+                78943520
+              ],
+              "peak_bytes": [
+                78943544
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      166404591,
+                      166640978
+                    ],
+                    "median": 166522784.5,
+                    "min": 166404591,
+                    "max": 166640978
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      17,
+                      17
+                    ],
+                    "median": 17.0,
+                    "min": 17,
+                    "max": 17
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      378763647,
+                      377546578
+                    ],
+                    "median": 378155112.5,
+                    "min": 377546578,
+                    "max": 378763647
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      38,
+                      38
+                    ],
+                    "median": 38.0,
+                    "min": 38,
+                    "max": 38
+                  }
+                }
+              },
+              "retained_bytes": [
+                39752632
+              ],
+              "peak_bytes": [
+                39752656
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                480
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "full-vpn": {
+      "keys": 1230000,
+      "cpu_ticks_per_second": 100,
+      "credit_scope": "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS",
+      "cells": [
+        {
+          "records": 2,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 16.75,
+              "wall_ns": 16.32983489901256
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 273119.0551663748
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      601,
+                      541
+                    ],
+                    "median": 571.0,
+                    "min": 541,
+                    "max": 601
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      20395339,
+                      20492666
+                    ],
+                    "median": 20444002.5,
+                    "min": 20395339,
+                    "max": 20492666
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      2,
+                      2
+                    ],
+                    "median": 2.0,
+                    "min": 2,
+                    "max": 2
+                  }
+                }
+              },
+              "retained_bytes": [
+                78874160
+              ],
+              "peak_bytes": [
+                78874184
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      155909024,
+                      155992937
+                    ],
+                    "median": 155950980.5,
+                    "min": 155909024,
+                    "max": 155992937
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      16,
+                      16
+                    ],
+                    "median": 16.0,
+                    "min": 16,
+                    "max": 16
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      333534408,
+                      334159963
+                    ],
+                    "median": 333847185.5,
+                    "min": 333534408,
+                    "max": 334159963
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      33,
+                      34
+                    ],
+                    "median": 33.5,
+                    "min": 33,
+                    "max": 34
+                  }
+                }
+              },
+              "retained_bytes": [
+                39667912
+              ],
+              "peak_bytes": [
+                39667936
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 2,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 16.5,
+              "wall_ns": 16.21839914103761
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 226999.17638483964
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      611,
+                      761
+                    ],
+                    "median": 686.0,
+                    "min": 611,
+                    "max": 761
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      20561280,
+                      20628882
+                    ],
+                    "median": 20595081.0,
+                    "min": 20561280,
+                    "max": 20628882
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      2,
+                      2
+                    ],
+                    "median": 2.0,
+                    "min": 2,
+                    "max": 2
+                  }
+                }
+              },
+              "retained_bytes": [
+                78874160
+              ],
+              "peak_bytes": [
+                78874184
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      155729249,
+                      155713621
+                    ],
+                    "median": 155721435.0,
+                    "min": 155713621,
+                    "max": 155729249
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      15,
+                      16
+                    ],
+                    "median": 15.5,
+                    "min": 15,
+                    "max": 16
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      333947045,
+                      334091443
+                    ],
+                    "median": 334019244.0,
+                    "min": 333947045,
+                    "max": 334091443
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      33,
+                      33
+                    ],
+                    "median": 33.0,
+                    "min": 33,
+                    "max": 33
+                  }
+                }
+              },
+              "retained_bytes": [
+                39667976
+              ],
+              "peak_bytes": [
+                39668000
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                2
+              ]
+            }
+          }
+        },
+        {
+          "records": 64,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 8.625,
+              "wall_ns": 11.348400403073732
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 271439.8654513889
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      611,
+                      541
+                    ],
+                    "median": 576.0,
+                    "min": 541,
+                    "max": 611
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      30400740,
+                      30289893
+                    ],
+                    "median": 30345316.5,
+                    "min": 30289893,
+                    "max": 30400740
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      4,
+                      4
+                    ],
+                    "median": 4.0,
+                    "min": 4,
+                    "max": 4
+                  }
+                }
+              },
+              "retained_bytes": [
+                78882592
+              ],
+              "peak_bytes": [
+                78882616
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      155793815,
+                      156904910
+                    ],
+                    "median": 156349362.5,
+                    "min": 155793815,
+                    "max": 156904910
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      15,
+                      15
+                    ],
+                    "median": 15.0,
+                    "min": 15,
+                    "max": 15
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      344382169,
+                      344359435
+                    ],
+                    "median": 344370802.0,
+                    "min": 344359435,
+                    "max": 344382169
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      34,
+                      35
+                    ],
+                    "median": 34.5,
+                    "min": 34,
+                    "max": 35
+                  }
+                }
+              },
+              "retained_bytes": [
+                39676344
+              ],
+              "peak_bytes": [
+                39676368
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 64,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 11.5,
+              "wall_ns": 11.379334848635342
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 342359.5718990121
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      641,
+                      270
+                    ],
+                    "median": 455.5,
+                    "min": 270,
+                    "max": 641
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      30244294,
+                      30334609
+                    ],
+                    "median": 30289451.5,
+                    "min": 30244294,
+                    "max": 30334609
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      3,
+                      3
+                    ],
+                    "median": 3.0,
+                    "min": 3,
+                    "max": 3
+                  }
+                }
+              },
+              "retained_bytes": [
+                78882592
+              ],
+              "peak_bytes": [
+                78882616
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      155987890,
+                      155901680
+                    ],
+                    "median": 155944785.0,
+                    "min": 155901680,
+                    "max": 155987890
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      15,
+                      15
+                    ],
+                    "median": 15.0,
+                    "min": 15,
+                    "max": 15
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      344913631,
+                      344433991
+                    ],
+                    "median": 344673811.0,
+                    "min": 344433991,
+                    "max": 344913631
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      34,
+                      35
+                    ],
+                    "median": 34.5,
+                    "min": 34,
+                    "max": 35
+                  }
+                }
+              },
+              "retained_bytes": [
+                39678392
+              ],
+              "peak_bytes": [
+                39678416
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                64
+              ]
+            }
+          }
+        },
+        {
+          "records": 480,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 11.666666666666666,
+              "wall_ns": 9.826019350102587
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 312360.73026973027
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      651,
+                      350
+                    ],
+                    "median": 500.5,
+                    "min": 350,
+                    "max": 651
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      35854961,
+                      35741662
+                    ],
+                    "median": 35798311.5,
+                    "min": 35741662,
+                    "max": 35854961
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      3,
+                      3
+                    ],
+                    "median": 3.0,
+                    "min": 3,
+                    "max": 3
+                  }
+                }
+              },
+              "retained_bytes": [
+                78943520
+              ],
+              "peak_bytes": [
+                78943544
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      156533382,
+                      156139709
+                    ],
+                    "median": 156336545.5,
+                    "min": 156139709,
+                    "max": 156533382
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      15,
+                      15
+                    ],
+                    "median": 15.0,
+                    "min": 15,
+                    "max": 15
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      351225268,
+                      352284535
+                    ],
+                    "median": 351754901.5,
+                    "min": 351225268,
+                    "max": 352284535
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      35,
+                      35
+                    ],
+                    "median": 35.0,
+                    "min": 35,
+                    "max": 35
+                  }
+                }
+              },
+              "retained_bytes": [
+                39737272
+              ],
+              "peak_bytes": [
+                39737296
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 480,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 8.75,
+              "wall_ns": 9.761598752274908
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 259427.54326123127
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      691,
+                      511
+                    ],
+                    "median": 601.0,
+                    "min": 511,
+                    "max": 691
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      36168896,
+                      35982895
+                    ],
+                    "median": 36075895.5,
+                    "min": 35982895,
+                    "max": 36168896
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      4,
+                      4
+                    ],
+                    "median": 4.0,
+                    "min": 4,
+                    "max": 4
+                  }
+                }
+              },
+              "retained_bytes": [
+                78943520
+              ],
+              "peak_bytes": [
+                78943544
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                22.0
+              ],
+              "shape_callbacks_per_key": [
+                23.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      155859133,
+                      155972774
+                    ],
+                    "median": 155915953.5,
+                    "min": 155859133,
+                    "max": 155972774
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      15,
+                      16
+                    ],
+                    "median": 15.5,
+                    "min": 15,
+                    "max": 16
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      350528294,
+                      353788539
+                    ],
+                    "median": 352158416.5,
+                    "min": 350528294,
+                    "max": 353788539
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      35,
+                      35
+                    ],
+                    "median": 35.0,
+                    "min": 35,
+                    "max": 35
+                  }
+                }
+              },
+              "retained_bytes": [
+                39752632
+              ],
+              "peak_bytes": [
+                39752656
+              ],
+              "empty_bytes": [
+                96
+              ],
+              "settled_bytes": [
+                96
+              ],
+              "proof_keys": [
+                1230000
+              ],
+              "additions": [
+                480
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "evpn-soak": {
+      "keys": 37500,
+      "cpu_ticks_per_second": 100,
+      "credit_scope": "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS",
+      "cells": [
+        {
+          "records": 2,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": null,
+              "wall_ns": 9.284005250078284
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 410.9255386699403
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      11891,
+                      11732
+                    ],
+                    "median": 11811.5,
+                    "min": 11732,
+                    "max": 11891
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      1125352,
+                      1126043
+                    ],
+                    "median": 1125697.5,
+                    "min": 1125352,
+                    "max": 1126043
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                }
+              },
+              "retained_bytes": [
+                4805216
+              ],
+              "peak_bytes": [
+                4805240
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                17.0
+              ],
+              "shape_callbacks_per_key": [
+                18.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      4870023,
+                      4837271
+                    ],
+                    "median": 4853647.0,
+                    "min": 4837271,
+                    "max": 4870023
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      1
+                    ],
+                    "median": 0.5,
+                    "min": 0,
+                    "max": 1
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      10462959,
+                      10439004
+                    ],
+                    "median": 10450981.5,
+                    "min": 10439004,
+                    "max": 10462959
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      1
+                    ],
+                    "median": 1.0,
+                    "min": 1,
+                    "max": 1
+                  }
+                }
+              },
+              "retained_bytes": [
+                2409904
+              ],
+              "peak_bytes": [
+                2409928
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 2,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": null,
+              "wall_ns": 9.492719350244707
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 411.4492636417809
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      11762,
+                      11732
+                    ],
+                    "median": 11747.0,
+                    "min": 11732,
+                    "max": 11762
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      1087822,
+                      1125442
+                    ],
+                    "median": 1106632.0,
+                    "min": 1087822,
+                    "max": 1125442
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                }
+              },
+              "retained_bytes": [
+                4805216
+              ],
+              "peak_bytes": [
+                4805240
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                17.0
+              ],
+              "shape_callbacks_per_key": [
+                18.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      4824398,
+                      4842191
+                    ],
+                    "median": 4833294.5,
+                    "min": 4824398,
+                    "max": 4842191
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      10565339,
+                      10444555
+                    ],
+                    "median": 10504947.0,
+                    "min": 10444555,
+                    "max": 10565339
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      1
+                    ],
+                    "median": 1.0,
+                    "min": 1,
+                    "max": 1
+                  }
+                }
+              },
+              "retained_bytes": [
+                2410032
+              ],
+              "peak_bytes": [
+                2410056
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                2
+              ]
+            }
+          }
+        },
+        {
+          "records": 64,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": null,
+              "wall_ns": 5.298047915021233
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 413.83234680407105
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      11751,
+                      11732
+                    ],
+                    "median": 11741.5,
+                    "min": 11732,
+                    "max": 11751
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      2214657,
+                      2153493
+                    ],
+                    "median": 2184075.0,
+                    "min": 2153493,
+                    "max": 2214657
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                }
+              },
+              "retained_bytes": [
+                4817120
+              ],
+              "peak_bytes": [
+                4817144
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                17.0
+              ],
+              "shape_callbacks_per_key": [
+                18.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      4881855,
+                      4836170
+                    ],
+                    "median": 4859012.5,
+                    "min": 4836170,
+                    "max": 4881855
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      0
+                    ],
+                    "median": 0.5,
+                    "min": 0,
+                    "max": 1
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      11570186,
+                      11572482
+                    ],
+                    "median": 11571334.0,
+                    "min": 11570186,
+                    "max": 11572482
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      2
+                    ],
+                    "median": 1.5,
+                    "min": 1,
+                    "max": 2
+                  }
+                }
+              },
+              "retained_bytes": [
+                2421808
+              ],
+              "peak_bytes": [
+                2421832
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 64,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": 1.0,
+              "wall_ns": 5.260048820474544
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 281.5249323990347
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      22622,
+                      11771
+                    ],
+                    "median": 17196.5,
+                    "min": 11771,
+                    "max": 22622
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      2204288,
+                      2200831
+                    ],
+                    "median": 2202559.5,
+                    "min": 2200831,
+                    "max": 2204288
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      1
+                    ],
+                    "median": 1.0,
+                    "min": 1,
+                    "max": 1
+                  }
+                }
+              },
+              "retained_bytes": [
+                4817120
+              ],
+              "peak_bytes": [
+                4817144
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                17.0
+              ],
+              "shape_callbacks_per_key": [
+                18.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      4831630,
+                      4850857
+                    ],
+                    "median": 4841243.5,
+                    "min": 4831630,
+                    "max": 4850857
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      1
+                    ],
+                    "median": 0.5,
+                    "min": 0,
+                    "max": 1
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      11609961,
+                      11561180
+                    ],
+                    "median": 11585570.5,
+                    "min": 11561180,
+                    "max": 11609961
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      1
+                    ],
+                    "median": 1.0,
+                    "min": 1,
+                    "max": 1
+                  }
+                }
+              },
+              "retained_bytes": [
+                2425904
+              ],
+              "peak_bytes": [
+                2425928
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                64
+              ]
+            }
+          }
+        },
+        {
+          "records": 480,
+          "layout": "dense",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": null,
+              "wall_ns": 4.257532026955642
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 410.34755427895584
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      11942,
+                      11732
+                    ],
+                    "median": 11837.0,
+                    "min": 11732,
+                    "max": 11942
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      2874884,
+                      2889401
+                    ],
+                    "median": 2882142.5,
+                    "min": 2874884,
+                    "max": 2889401
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                }
+              },
+              "retained_bytes": [
+                4903136
+              ],
+              "peak_bytes": [
+                4903160
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                17.0
+              ],
+              "shape_callbacks_per_key": [
+                18.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      4881704,
+                      4832864
+                    ],
+                    "median": 4857284.0,
+                    "min": 4832864,
+                    "max": 4881704
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      1
+                    ],
+                    "median": 0.5,
+                    "min": 0,
+                    "max": 1
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      12279595,
+                      12262033
+                    ],
+                    "median": 12270814.0,
+                    "min": 12262033,
+                    "max": 12279595
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      1
+                    ],
+                    "median": 1.0,
+                    "min": 1,
+                    "max": 1
+                  }
+                }
+              },
+              "retained_bytes": [
+                2507824
+              ],
+              "peak_bytes": [
+                2507848
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            }
+          }
+        },
+        {
+          "records": 480,
+          "layout": "older-sparse",
+          "shared_over_flat": {
+            "capture": {
+              "cpu_ticks": null,
+              "wall_ns": 4.129888882283527
+            },
+            "shape": {
+              "cpu_ticks": null,
+              "wall_ns": 411.24729810228916
+            }
+          },
+          "arms": {
+            "flat": {
+              "comparisons_per_key": [
+                0.0
+              ],
+              "shape_callbacks_per_key": [
+                1.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      11751,
+                      11751
+                    ],
+                    "median": 11751.0,
+                    "min": 11751,
+                    "max": 11751
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      2887898,
+                      3050039
+                    ],
+                    "median": 2968968.5,
+                    "min": 2887898,
+                    "max": 3050039
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      0,
+                      0
+                    ],
+                    "median": 0.0,
+                    "min": 0,
+                    "max": 0
+                  }
+                }
+              },
+              "retained_bytes": [
+                4903136
+              ],
+              "peak_bytes": [
+                4903160
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                0
+              ]
+            },
+            "shared": {
+              "comparisons_per_key": [
+                17.0
+              ],
+              "shape_callbacks_per_key": [
+                18.0
+              ],
+              "phases": {
+                "shape": {
+                  "wall_ns": {
+                    "values": [
+                      4836920,
+                      4828214
+                    ],
+                    "median": 4832567.0,
+                    "min": 4828214,
+                    "max": 4836920
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      0
+                    ],
+                    "median": 0.5,
+                    "min": 0,
+                    "max": 1
+                  }
+                },
+                "capture": {
+                  "wall_ns": {
+                    "values": [
+                      12275646,
+                      12247374
+                    ],
+                    "median": 12261510.0,
+                    "min": 12247374,
+                    "max": 12275646
+                  },
+                  "cpu_ticks": {
+                    "values": [
+                      1,
+                      2
+                    ],
+                    "median": 1.5,
+                    "min": 1,
+                    "max": 2
+                  }
+                }
+              },
+              "retained_bytes": [
+                2538544
+              ],
+              "peak_bytes": [
+                2538568
+              ],
+              "empty_bytes": [
+                104
+              ],
+              "settled_bytes": [
+                104
+              ],
+              "proof_keys": [
+                37500
+              ],
+              "additions": [
+                480
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
