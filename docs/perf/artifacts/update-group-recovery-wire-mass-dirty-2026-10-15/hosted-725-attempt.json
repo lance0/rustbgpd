@@ -1,0 +1,3293 @@
+{
+  "all_four_frozen_finalizers_INVALID": true,
+  "all_four_jobs_failed": true,
+  "audited_at_utc": "2026-10-15T16:17:06.020454+00:00",
+  "cancellation_scope": {
+    "cancel_or_delivered_signal_annotation_observed_in_retained_receipt_job_logs": false,
+    "independent_timeline_receipt": {
+      "path": "independent-cancellation-timeline-review.json",
+      "sha256": "4cde68f20f81b8b0a6527b22f7f38603116b3e47f3b607fbcd8437b3a397336f"
+    },
+    "limit": "No cancellation/signal annotation was found before native failures in these retained logs. This does not independently exclude unlogged external influence or establish the workflow cancellation event time, initiator or cause. No failure attribution to or exclusion of cancellation is asserted.",
+    "observation_receipt": {
+      "path": "cancellation-timeline-observation.json",
+      "sha256": "e9b8db1ab10615746c6f97c4602c2140499579679685ff39d3a54aa18474ad39"
+    },
+    "overall_workflow_conclusion": "cancelled",
+    "receipt_comparison_finalizer_steps": "ordinary exit1 for all4; uploadstepssuccess",
+    "receipt_job_conclusions": [
+      "failure",
+      "failure",
+      "failure",
+      "failure"
+    ]
+  },
+  "cause_scope": {
+    "cancellation": "No cancellation/signal annotations in four job logs, ordinary comparison/finalizerexit1 and successful uploads. Overall cancellation reason/exact event instant unavailable; unlogged influence not disproved and no person/cause attribution.",
+    "timeline_receipt": {
+      "path": "independent-cancellation-timeline-review.json",
+      "sha256": "4cde68f20f81b8b0a6527b22f7f38603116b3e47f3b607fbcd8437b3a397336f"
+    },
+    "uc_cells": "Both nativeB/A folds complete before sampler Z-exit ownership guard fails. Error operands absent; no actual PID reuse/cgroup movement inferred.",
+    "vpn_no_refusal": "Actual native250ms readiness checkpoint failure before first Bfold. No initiating daemon readiness diagnosis or blocked stack retained; later sampler ownership error is secondary.",
+    "vpn_pressure": "Held source compound guard fails before witness persistence/resume. Failed successful-query raw source row and interval absent; exact address/state/slow_peer/pending predicateUNKNOWN. No readiness error observed in retained prefix."
+  },
+  "cells": [
+    {
+      "actual_completion_statuses": {
+        "actual_outer_invocation": "1",
+        "campaign_marker": "1",
+        "finalizer": "1",
+        "job": "failure"
+      },
+      "artifact": {
+        "api_digest": "sha256:f6135149a86609f540de926b7c1194ed69c491477f2ded532280b8acf1a5ac42",
+        "api_url": "https://api.github.com/repos/lance0/rustbgpd/actions/artifacts/11989636190",
+        "archive_download_url": "https://api.github.com/repos/lance0/rustbgpd/actions/artifacts/11989636190/zip",
+        "created_at_utc": "2026-10-15T16:08:10Z",
+        "expires_at_utc": "2026-11-14T16:08:04Z",
+        "html_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909/artifacts/11989636190",
+        "id": 11989636190,
+        "raw_file_count": 71,
+        "zip_bytes": 49897884,
+        "zip_sha256": "f6135149a86609f540de926b7c1194ed69c491477f2ded532280b8acf1a5ac42"
+      },
+      "attempted_legs": 1,
+      "binary_hashes": {
+        "rbgp": "a52a168304ba656b95c645e6545ebc536aa08a326771c35400a6f97d63b61fbd",
+        "reloadstall": "02f9e738c968de13f5cf256c8b31de727d5e5f4ff0018d65df00adc706cdb501",
+        "rustbgpd-candidate": "4cfff7e2d9c7952cc995f651cb399687dadff65e72993e68f39a5df7d13c4c54",
+        "rustbgpd-flat": "b4a2ba01f2a00c525d21add56417b06e8b95da24823fccf464b56c0b40c2a941"
+      },
+      "candidate_arms_started": 0,
+      "capture_source_sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277",
+      "cargo_version": "cargo 1.99.0 (5f94df478 2026-08-27)\n",
+      "cell": "full-uc-no-refusal",
+      "detailed_audit_sha256": "924c3b070a348e046c331e34d0c2404f6f7173e6d6b867187bf92b4503e01f04",
+      "driver_exit": 1,
+      "driver_log_sha256": "f9370c31619aa460b1ff04a222b30882e3ca94038c5c72aa3620396ff4c82712",
+      "eligible_complete_legs": 0,
+      "eligible_complete_operations": 0,
+      "finalizer_exit": 1,
+      "flat_patch_sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc",
+      "frozen_instrumentation_and_support_paths": [
+        "bench/scale/reloadstall/src/main.rs",
+        "bench/scale/reloadstall/src/recovery_mass_dirty.rs",
+        "bench/scale/reloadstall/recovery_mass_dirty.py",
+        "bench/scale/reloadstall/test_recovery_mass_dirty.py",
+        "bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+        "bench/scale/reloadstall/README.md",
+        "bench/scale/reloadstall/sample-daemon-cgroup.py",
+        "bench/scale/provenance.sh",
+        "bench/scale/cgroup-memory.sh",
+        "tests/soak/host-lock.sh"
+      ],
+      "independent_review_sha256": "10b9115a56a7e6809b643e7a38e30ff8ea77a60d01bf1d2eec0c7665b4b61656",
+      "job_conclusion": "failure",
+      "job_id": 116515378393,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909/job/116515378393",
+      "keys_per_receiver": 1230000,
+      "legs": [
+        {
+          "arm": "flat",
+          "eligible_complete_leg": false,
+          "fallback_initial": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "fallback_monotone": true,
+          "final_normal_exits": {
+            "daemon": null,
+            "harness": null
+          },
+          "frozen_complete_leg_validation_error": "'daemon_exit'",
+          "id": "leg-0-flat",
+          "initial_proof": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "missing_final_boundaries_are_not_zero": true,
+          "native_complete_folds": [
+            {
+              "exact_fold": true,
+              "generation": "b",
+              "receivers": 12,
+              "resume_to_fold_max_seconds": 31.358181816,
+              "resume_to_fold_p50_seconds": 31.328825894,
+              "sessions_continuous": true,
+              "withdrawals": 0
+            },
+            {
+              "exact_fold": true,
+              "generation": "a",
+              "receivers": 12,
+              "resume_to_fold_max_seconds": 30.718106907,
+              "resume_to_fold_p50_seconds": 18.361445498,
+              "sessions_continuous": true,
+              "withdrawals": 0
+            }
+          ],
+          "native_parser_scope": "descriptive raw records; full completion requires frozen validate_leg",
+          "operations_qualified": false,
+          "ordinary_snapshot_failure_counts": {
+            "by_phase": {
+              "held-b": {
+                "127.1.0.2": 1
+              }
+            },
+            "total": 1
+          },
+          "ordinary_snapshot_failure_replay_error": null,
+          "ordinary_snapshot_failure_rows": [
+            {
+              "attempt": 1,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.2",
+              "phase": "held-b",
+              "returncode": 1,
+              "sequence": 1,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            }
+          ],
+          "readiness_scope": "Recorded operation coverage only; whole leg remains ineligible unless marked eligible_complete_leg.",
+          "record_counts": {
+            "_partial_parse_errors": 0,
+            "mass_dirty_complete": 2,
+            "mass_dirty_exit": 1,
+            "mass_dirty_paused": 2,
+            "mass_dirty_readiness": 86,
+            "mass_dirty_ready": 1,
+            "mass_dirty_sent": 2
+          },
+          "saved_operations": [
+            {
+              "daemon_log_bytes": {
+                "end": 8786129,
+                "resume": 8538731,
+                "start": 75062
+              },
+              "drain_monotonic_seconds": 1801.958512958,
+              "drain_to_resume_seconds": 8.317424028000005,
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fold_monotonic_seconds": 1841.649114588,
+              "generation": "b",
+              "readiness_coverage": {
+                "max_start_gap_seconds": 1.0012262169998394,
+                "sample_count": 44
+              },
+              "receivers": 12,
+              "recovery_paused": {
+                "bytes": 472322272,
+                "entries": 14760000,
+                "peak_bytes": 472322296
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 472322296
+              },
+              "resume_monotonic_seconds": 1810.275936986,
+              "resume_to_fold_max_seconds": 31.358181816,
+              "resume_to_fold_p50_seconds": 31.328825894,
+              "resume_to_observed_fold_seconds": 31.37317760199994,
+              "sessions_continuous": true,
+              "trigger_monotonic_seconds": 1799.591338093,
+              "trigger_to_drain_seconds": 2.3671748649999245,
+              "trigger_to_fold_seconds": 42.05777649499987,
+              "withdrawals": 0
+            },
+            {
+              "daemon_log_bytes": {
+                "end": 17487358,
+                "resume": 17477825,
+                "start": 8786129
+              },
+              "drain_monotonic_seconds": 1844.248278898,
+              "drain_to_resume_seconds": 9.27863636699999,
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fold_monotonic_seconds": 1884.251472045,
+              "generation": "a",
+              "readiness_coverage": {
+                "max_start_gap_seconds": 1.0008434070000476,
+                "sample_count": 44
+              },
+              "receivers": 12,
+              "recovery_paused": {
+                "bytes": 472322272,
+                "entries": 14760000,
+                "peak_bytes": 472322296
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 472322296
+              },
+              "resume_monotonic_seconds": 1853.526915265,
+              "resume_to_fold_max_seconds": 30.718106907,
+              "resume_to_fold_p50_seconds": 18.361445498,
+              "resume_to_observed_fold_seconds": 30.72455677999983,
+              "sessions_continuous": true,
+              "trigger_monotonic_seconds": 1841.821343766,
+              "trigger_to_drain_seconds": 2.4269351320001533,
+              "trigger_to_fold_seconds": 42.43012827899997,
+              "withdrawals": 0
+            }
+          ]
+        }
+      ],
+      "online_native_complete_folds": 2,
+      "original_frozen_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "outer_driver_exit": 1,
+      "primary_failure": {
+        "body_failure_json_exists": false,
+        "cleanup_errors": [
+          "sampler exit: 1"
+        ],
+        "error": "container daemon PID/start/cgroup ownership changed",
+        "final_row_roster_omissions": [
+          "cleanup-error.json",
+          "memory.csv",
+          "sampler.log"
+        ],
+        "missing_final_footer": [
+          "daemon_exit",
+          "harness_exit"
+        ],
+        "missing_fixture": true,
+        "native_stderr_empty": true,
+        "predicate_scope": "Mismatch operands are not retained; no actual PID reuse/cgroup move or runtime cause inferred.",
+        "stack": "sample-daemon-cgroup.py179 Zbranch -> owned_process_exited116 -> verify_container_membership95",
+        "stage": "post-native B/A exact folds and final PASS during sampler cleanup"
+      },
+      "qualified_paired_comparison": null,
+      "qualified_resources": {
+        "candidate": {
+          "attempted_reservation_peak_bytes_max": null,
+          "complete_legs": 0,
+          "daemon_cgroup_peak_bytes_max": null,
+          "harness_cgroup_peak_bytes_max": null,
+          "held_logical_recovery_bytes_max": null,
+          "held_recovery_entries_max": null
+        },
+        "flat": {
+          "attempted_reservation_peak_bytes_max": null,
+          "complete_legs": 0,
+          "daemon_cgroup_peak_bytes_max": null,
+          "harness_cgroup_peak_bytes_max": null,
+          "held_logical_recovery_bytes_max": null,
+          "held_recovery_entries_max": null
+        }
+      },
+      "receivers": 12,
+      "replay_exit": 1,
+      "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+      "status": "INVALID"
+    },
+    {
+      "actual_completion_statuses": {
+        "actual_outer_invocation": "1",
+        "campaign_marker": "1",
+        "finalizer": "1",
+        "job": "failure"
+      },
+      "artifact": {
+        "api_digest": "sha256:46806e7b115df64241c777b3a1d8532996aa35c00964c99b269041f99bc7d0b7",
+        "api_url": "https://api.github.com/repos/lance0/rustbgpd/actions/artifacts/11990186190",
+        "archive_download_url": "https://api.github.com/repos/lance0/rustbgpd/actions/artifacts/11990186190/zip",
+        "created_at_utc": "2026-10-15T16:09:27Z",
+        "expires_at_utc": "2026-11-14T16:09:21Z",
+        "html_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909/artifacts/11990186190",
+        "id": 11990186190,
+        "raw_file_count": 110,
+        "zip_bytes": 51169536,
+        "zip_sha256": "46806e7b115df64241c777b3a1d8532996aa35c00964c99b269041f99bc7d0b7"
+      },
+      "attempted_legs": 2,
+      "binary_hashes": {
+        "rbgp": "baacc80a99aab6feaa7c0f587062fa7d7dfad77bbfe066e8739284db634ec964",
+        "reloadstall": "bdbc775cd445ee53061e081bf3013e46045f1452a0fbfec62a91198f55e489c1",
+        "rustbgpd-candidate": "5779d5da113b532a8f34a3da6a8d4632f06395ede4dcca9456e40c094f61f216",
+        "rustbgpd-flat": "6c0e8f8f857c54daf864f6e92ba6caff851c6b4a30e1c18a4a3ca67d0c389fae"
+      },
+      "candidate_arms_started": 1,
+      "capture_source_sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277",
+      "cargo_version": "cargo 1.99.0 (5f94df478 2026-08-27)\n",
+      "cell": "full-uc-cap-pressure",
+      "detailed_audit_sha256": "a0259868743dfecfca0be4b5961ee9df35587d96c3218b32949d82373af5e8b0",
+      "driver_exit": 1,
+      "driver_log_sha256": "f1a3355b7db67d07838acf2c61f700161c046928b8255c04a660a108b94899ac",
+      "eligible_complete_legs": 1,
+      "eligible_complete_operations": 2,
+      "finalizer_exit": 1,
+      "flat_patch_sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc",
+      "frozen_instrumentation_and_support_paths": [
+        "bench/scale/reloadstall/src/main.rs",
+        "bench/scale/reloadstall/src/recovery_mass_dirty.rs",
+        "bench/scale/reloadstall/recovery_mass_dirty.py",
+        "bench/scale/reloadstall/test_recovery_mass_dirty.py",
+        "bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+        "bench/scale/reloadstall/README.md",
+        "bench/scale/reloadstall/sample-daemon-cgroup.py",
+        "bench/scale/provenance.sh",
+        "bench/scale/cgroup-memory.sh",
+        "tests/soak/host-lock.sh"
+      ],
+      "independent_review_sha256": "e6cb7b3894645221261866bcc18bb6fb006e0b4585309c2728d0392b60507d4b",
+      "job_conclusion": "failure",
+      "job_id": 116515378169,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909/job/116515378169",
+      "keys_per_receiver": 1230000,
+      "legs": [
+        {
+          "arm": "flat",
+          "completed_result": {
+            "config_check_exit": 0,
+            "daemon_exit": 0,
+            "harness_exit": 0,
+            "harness_memory_after": {
+              "boundary_monotonic_ns": 1781894252015,
+              "events": {
+                "high": "0",
+                "low": "0",
+                "max": "0",
+                "oom": "0",
+                "oom_group_kill": "0",
+                "oom_kill": "0"
+              },
+              "memory.current": 40280064,
+              "memory.max": 2147483648,
+              "memory.peak": 44904448,
+              "memory.swap.current": 0,
+              "memory.swap.max": 0,
+              "memory.swap.peak": 0,
+              "private_scope_locator_omitted": true
+            },
+            "memory_after": {
+              "boundary_monotonic_ns": 1781869678796,
+              "events": {
+                "high": "0",
+                "low": "0",
+                "max": "0",
+                "oom": "0",
+                "oom_group_kill": "0",
+                "oom_kill": "0"
+              },
+              "memory.current": 1059602432,
+              "memory.max": 10737418240,
+              "memory.peak": 2431262720,
+              "memory.swap.current": 0,
+              "memory.swap.max": 0,
+              "memory.swap.peak": 0,
+              "private_scope_locator_omitted": true
+            },
+            "memory_before": {
+              "boundary_monotonic_ns": 1654552146373,
+              "events": {
+                "high": "0",
+                "low": "0",
+                "max": "0",
+                "oom": "0",
+                "oom_group_kill": "0",
+                "oom_kill": "0"
+              },
+              "memory.current": 32088064,
+              "memory.max": 10737418240,
+              "memory.peak": 32088064,
+              "memory.swap.current": 0,
+              "memory.swap.max": 0,
+              "memory.swap.peak": 0,
+              "private_scope_locator_omitted": true
+            },
+            "source": "72549e20deb639cb75cd10cf28b46010dbd8bed8",
+            "status": "PASS"
+          },
+          "eligible_complete_leg": true,
+          "fallback_initial": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "fallback_monotone": true,
+          "final_normal_exits": {
+            "daemon": 0,
+            "harness": 0
+          },
+          "frozen_complete_leg_validation_error": null,
+          "id": "leg-0-flat",
+          "initial_proof": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "missing_final_boundaries_are_not_zero": false,
+          "native_complete_folds": [
+            {
+              "exact_fold": true,
+              "generation": "b",
+              "receivers": 24,
+              "resume_to_fold_max_seconds": 42.575667183,
+              "resume_to_fold_p50_seconds": 23.510871694,
+              "sessions_continuous": true,
+              "withdrawals": 192
+            },
+            {
+              "exact_fold": true,
+              "generation": "a",
+              "receivers": 24,
+              "resume_to_fold_max_seconds": 42.115148431,
+              "resume_to_fold_p50_seconds": 42.114872535,
+              "sessions_continuous": true,
+              "withdrawals": 192
+            }
+          ],
+          "native_parser_scope": "descriptive raw records; full completion requires frozen validate_leg",
+          "operations_qualified": true,
+          "ordinary_snapshot_failure_counts": {
+            "by_phase": {
+              "held-a": {
+                "127.1.0.2": 1
+              },
+              "held-b": {
+                "127.1.0.2": 3
+              }
+            },
+            "total": 4
+          },
+          "ordinary_snapshot_failure_replay_error": null,
+          "ordinary_snapshot_failure_rows": [
+            {
+              "attempt": 1,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.2",
+              "phase": "held-b",
+              "returncode": 1,
+              "sequence": 1,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            },
+            {
+              "attempt": 2,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.2",
+              "phase": "held-b",
+              "returncode": 1,
+              "sequence": 2,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            },
+            {
+              "attempt": 3,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.2",
+              "phase": "held-b",
+              "returncode": 1,
+              "sequence": 3,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            },
+            {
+              "attempt": 1,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.2",
+              "phase": "held-a",
+              "returncode": 1,
+              "sequence": 4,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            }
+          ],
+          "readiness_scope": "Recorded operation coverage only; whole leg remains ineligible unless marked eligible_complete_leg.",
+          "record_counts": {
+            "_partial_parse_errors": 0,
+            "mass_dirty_complete": 2,
+            "mass_dirty_exit": 1,
+            "mass_dirty_paused": 2,
+            "mass_dirty_readiness": 123,
+            "mass_dirty_ready": 1,
+            "mass_dirty_sent": 2
+          },
+          "saved_operations": [
+            {
+              "daemon_log_bytes": {
+                "end": 8893141,
+                "resume": 8874584,
+                "start": 141266
+              },
+              "drain_monotonic_seconds": 1663.551778752,
+              "drain_to_resume_seconds": 16.28954670799999,
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 11,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fold_monotonic_seconds": 1722.430896678,
+              "generation": "b",
+              "readiness_coverage": {
+                "max_start_gap_seconds": 1.000930421000021,
+                "sample_count": 64
+              },
+              "receivers": 24,
+              "recovery_paused": {
+                "bytes": 511681120,
+                "entries": 15989896,
+                "peak_bytes": 511683456
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 511683456
+              },
+              "resume_monotonic_seconds": 1679.84132546,
+              "resume_to_fold_max_seconds": 42.575667183,
+              "resume_to_fold_p50_seconds": 23.510871694,
+              "resume_to_observed_fold_seconds": 42.589571217999946,
+              "sessions_continuous": true,
+              "trigger_monotonic_seconds": 1660.430514036,
+              "trigger_to_drain_seconds": 3.1212647160000415,
+              "trigger_to_fold_seconds": 62.00038264199998,
+              "withdrawals": 192
+            },
+            {
+              "daemon_log_bytes": {
+                "end": 17641368,
+                "resume": 17427886,
+                "start": 8893141
+              },
+              "drain_monotonic_seconds": 1726.186946973,
+              "drain_to_resume_seconds": 13.273270869000044,
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 11,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 11,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fold_monotonic_seconds": 1781.591498276,
+              "generation": "a",
+              "readiness_coverage": {
+                "max_start_gap_seconds": 1.000778672000024,
+                "sample_count": 61
+              },
+              "receivers": 24,
+              "recovery_paused": {
+                "bytes": 511684448,
+                "entries": 15990000,
+                "peak_bytes": 511686784
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 511686784
+              },
+              "resume_monotonic_seconds": 1739.460217842,
+              "resume_to_fold_max_seconds": 42.115148431,
+              "resume_to_fold_p50_seconds": 42.114872535,
+              "resume_to_observed_fold_seconds": 42.13128043400002,
+              "sessions_continuous": true,
+              "trigger_monotonic_seconds": 1722.711272672,
+              "trigger_to_drain_seconds": 3.4756743010000264,
+              "trigger_to_fold_seconds": 58.88022560400009,
+              "withdrawals": 192
+            }
+          ]
+        },
+        {
+          "arm": "candidate",
+          "eligible_complete_leg": false,
+          "fallback_initial": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "fallback_monotone": true,
+          "final_normal_exits": {
+            "daemon": null,
+            "harness": null
+          },
+          "frozen_complete_leg_validation_error": "'daemon_exit'",
+          "id": "leg-1-candidate",
+          "initial_proof": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 40912
+          },
+          "missing_final_boundaries_are_not_zero": true,
+          "native_complete_folds": [
+            {
+              "exact_fold": true,
+              "generation": "b",
+              "receivers": 24,
+              "resume_to_fold_max_seconds": 59.143755604,
+              "resume_to_fold_p50_seconds": 32.704197383,
+              "sessions_continuous": true,
+              "withdrawals": 192
+            },
+            {
+              "exact_fold": true,
+              "generation": "a",
+              "receivers": 24,
+              "resume_to_fold_max_seconds": 59.106864663,
+              "resume_to_fold_p50_seconds": 32.692210412,
+              "sessions_continuous": true,
+              "withdrawals": 192
+            }
+          ],
+          "native_parser_scope": "descriptive raw records; full completion requires frozen validate_leg",
+          "operations_qualified": false,
+          "ordinary_snapshot_failure_counts": {
+            "by_phase": {
+              "held-a": {
+                "127.1.0.2": 3
+              },
+              "held-b": {
+                "127.1.0.3": 1
+              }
+            },
+            "total": 4
+          },
+          "ordinary_snapshot_failure_replay_error": null,
+          "ordinary_snapshot_failure_rows": [
+            {
+              "attempt": 1,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.3",
+              "phase": "held-b",
+              "returncode": 1,
+              "sequence": 1,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            },
+            {
+              "attempt": 1,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.2",
+              "phase": "held-a",
+              "returncode": 1,
+              "sequence": 2,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            },
+            {
+              "attempt": 2,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.2",
+              "phase": "held-a",
+              "returncode": 1,
+              "sequence": 3,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            },
+            {
+              "attempt": 3,
+              "error": "CalledProcessError",
+              "peer": "127.1.0.2",
+              "phase": "held-a",
+              "returncode": 1,
+              "sequence": 4,
+              "stderr": "Error: deadline exceeded: RIB snapshot query timed out\n",
+              "stdout": ""
+            }
+          ],
+          "readiness_scope": "Recorded operation coverage only; whole leg remains ineligible unless marked eligible_complete_leg.",
+          "record_counts": {
+            "_partial_parse_errors": 0,
+            "mass_dirty_complete": 2,
+            "mass_dirty_exit": 1,
+            "mass_dirty_paused": 2,
+            "mass_dirty_readiness": 165,
+            "mass_dirty_ready": 1,
+            "mass_dirty_sent": 2
+          },
+          "saved_operations": [
+            {
+              "daemon_log_bytes": {
+                "end": 8890003,
+                "resume": 8871446,
+                "start": 141266
+              },
+              "drain_monotonic_seconds": 1791.724898948,
+              "drain_to_resume_seconds": 17.983952327999987,
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fold_monotonic_seconds": 1868.865792652,
+              "generation": "b",
+              "readiness_coverage": {
+                "max_start_gap_seconds": 1.0008693659999608,
+                "sample_count": 82
+              },
+              "receivers": 24,
+              "recovery_paused": {
+                "bytes": 47974312,
+                "entries": 29519808,
+                "peak_bytes": 47974336
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 47974336
+              },
+              "resume_monotonic_seconds": 1809.708851276,
+              "resume_to_fold_max_seconds": 59.143755604,
+              "resume_to_fold_p50_seconds": 32.704197383,
+              "resume_to_observed_fold_seconds": 59.15694137600008,
+              "sessions_continuous": true,
+              "trigger_monotonic_seconds": 1788.426330697,
+              "trigger_to_drain_seconds": 3.298568251000006,
+              "trigger_to_fold_seconds": 80.43946195500007,
+              "withdrawals": 192
+            },
+            {
+              "daemon_log_bytes": {
+                "end": 17641355,
+                "resume": 17622798,
+                "start": 8890003
+              },
+              "drain_monotonic_seconds": 1872.370273603,
+              "drain_to_resume_seconds": 20.289638419000084,
+              "exact_fold": true,
+              "fallback_before": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fallback_deltas": {
+                "allocation_failure": 0,
+                "daemon_limit": 0,
+                "missing_proof": 0,
+                "peer_limit": 0
+              },
+              "fold_monotonic_seconds": 1951.781005697,
+              "generation": "a",
+              "readiness_coverage": {
+                "max_start_gap_seconds": 1.000888441999905,
+                "sample_count": 85
+              },
+              "receivers": 24,
+              "recovery_paused": {
+                "bytes": 47974568,
+                "entries": 29520000,
+                "peak_bytes": 47974592
+              },
+              "recovery_settled": {
+                "bytes": 96,
+                "entries": 0,
+                "peak_bytes": 47974592
+              },
+              "resume_monotonic_seconds": 1892.659912022,
+              "resume_to_fold_max_seconds": 59.106864663,
+              "resume_to_fold_p50_seconds": 32.692210412,
+              "resume_to_observed_fold_seconds": 59.121093674999884,
+              "sessions_continuous": true,
+              "trigger_monotonic_seconds": 1869.149061465,
+              "trigger_to_drain_seconds": 3.2212121380000553,
+              "trigger_to_fold_seconds": 82.63194423200002,
+              "withdrawals": 192
+            }
+          ]
+        }
+      ],
+      "online_native_complete_folds": 4,
+      "original_frozen_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "outer_driver_exit": 1,
+      "primary_failure": {
+        "body_failure_json_exists": false,
+        "cleanup_errors": [
+          "sampler exit: 1"
+        ],
+        "error": "container daemon PID/start/cgroup ownership changed",
+        "final_row_roster_omissions": [
+          "cleanup-error.json",
+          "memory.csv",
+          "sampler.log"
+        ],
+        "missing_final_footer": [
+          "daemon_exit",
+          "harness_exit"
+        ],
+        "missing_fixture": true,
+        "native_stderr_empty": true,
+        "predicate_scope": "Mismatch operands are not retained; no actual PID reuse/cgroup move or runtime cause inferred.",
+        "stack": "sample-daemon-cgroup.py179 Zbranch -> owned_process_exited116 -> verify_container_membership95",
+        "stage": "post-native B/A exact folds and final PASS during sampler cleanup"
+      },
+      "qualified_paired_comparison": null,
+      "qualified_resources": {
+        "candidate": {
+          "attempted_reservation_peak_bytes_max": null,
+          "complete_legs": 0,
+          "daemon_cgroup_peak_bytes_max": null,
+          "harness_cgroup_peak_bytes_max": null,
+          "held_logical_recovery_bytes_max": null,
+          "held_recovery_entries_max": null
+        },
+        "flat": {
+          "attempted_reservation_peak_bytes_max": 511686784,
+          "complete_legs": 1,
+          "daemon_cgroup_peak_bytes_max": 2431262720,
+          "harness_cgroup_peak_bytes_max": 44904448,
+          "held_logical_recovery_bytes_max": 511684448,
+          "held_recovery_entries_max": 15990000
+        }
+      },
+      "receivers": 24,
+      "replay_exit": 1,
+      "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+      "status": "INVALID"
+    },
+    {
+      "actual_completion_statuses": {
+        "finalizer": "1",
+        "job": "failure",
+        "marker": "1",
+        "outer": "1"
+      },
+      "artifact": {
+        "api_digest": "sha256:c501ca8f31103e40d837991daa54f5f8a50d50f1fe355eaaa8711c0cebc277f0",
+        "api_url": "https://api.github.com/repos/lance0/rustbgpd/actions/artifacts/11990076718",
+        "archive_download_url": "https://api.github.com/repos/lance0/rustbgpd/actions/artifacts/11990076718/zip",
+        "created_at_utc": "2026-10-15T16:11:18Z",
+        "expires_at_utc": "2026-11-14T16:11:12Z",
+        "html_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909/artifacts/11990076718",
+        "id": 11990076718,
+        "raw_file_count": 56,
+        "zip_bytes": 49646316,
+        "zip_sha256": "c501ca8f31103e40d837991daa54f5f8a50d50f1fe355eaaa8711c0cebc277f0"
+      },
+      "attempted_legs": 1,
+      "binary_hashes": {
+        "rbgp": "829ad8735d722372e79dafdd9c9248ab854c7bf7f3454cb9a926775160a3f7be",
+        "reloadstall": "325da54d08306936caff8f38a51733b55540eb3c03b5924b68de3f48f4da8253",
+        "rustbgpd-candidate": "a0d3ecf20ab46fe716d1536a969ba47cac612728110c2436944a5a74908484e7",
+        "rustbgpd-flat": "bd1a3783765663d56381ed296b9d8791fad7d25b89edc9bdb77a45f4d1446619"
+      },
+      "candidate_arms_started": 0,
+      "capture_source_sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277",
+      "cargo_version": "cargo 1.99.0 (5f94df478 2026-08-27)\n",
+      "cell": "full-vpn-no-refusal",
+      "detailed_audit_sha256": "d9a29aa88ed12cc40b7ffa2bbd2ce3adbb6507f272b6046f64b96e639968a514",
+      "driver_exit": 1,
+      "driver_log_sha256": "ef68b3ba9160f60dbb8d58fa92e11d5bd7050bbfa366a5ff1f432f9d40194049",
+      "eligible_complete_legs": 0,
+      "eligible_complete_operations": 0,
+      "finalizer_exit": 1,
+      "flat_patch_sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc",
+      "frozen_instrumentation_and_support_paths": [
+        "bench/scale/reloadstall/src/main.rs",
+        "bench/scale/reloadstall/src/recovery_mass_dirty.rs",
+        "bench/scale/reloadstall/recovery_mass_dirty.py",
+        "bench/scale/reloadstall/test_recovery_mass_dirty.py",
+        "bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+        "bench/scale/reloadstall/README.md",
+        "bench/scale/reloadstall/sample-daemon-cgroup.py",
+        "bench/scale/provenance.sh",
+        "bench/scale/cgroup-memory.sh",
+        "tests/soak/host-lock.sh"
+      ],
+      "independent_review_sha256": "f61dcf0f7ee54686974e7b37bf5f93e42565a7f440c2e1a1bc2adc45de03ad81",
+      "job_conclusion": "failure",
+      "job_id": 116515378556,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909/job/116515378556",
+      "keys_per_receiver": 1230000,
+      "legs": [
+        {
+          "arm": "flat",
+          "eligible_complete_leg": false,
+          "fallback_monotone": true,
+          "final_normal_exits": {
+            "daemon": null,
+            "harness": null
+          },
+          "frozen_complete_leg_validation_error": null,
+          "id": "leg-0-flat",
+          "missing_final_boundaries_are_not_zero": true,
+          "native_complete_folds": [],
+          "native_parser_scope": "descriptive raw records; full completion requires frozen validate_leg",
+          "ordinary_snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "ordinary_snapshot_failure_replay_error": null,
+          "ordinary_snapshot_failure_rows": [],
+          "record_counts": {
+            "_partial_parse_errors": 0,
+            "mass_dirty_complete": 0,
+            "mass_dirty_exit": 0,
+            "mass_dirty_paused": 1,
+            "mass_dirty_readiness": 209,
+            "mass_dirty_ready": 1,
+            "mass_dirty_sent": 1
+          }
+        }
+      ],
+      "online_native_complete_folds": 0,
+      "original_frozen_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "outer_driver_exit": 1,
+      "primary_failure": {
+        "arm": "flat",
+        "controller_error": "harness exited before mass_dirty_complete: 1",
+        "leg": 0,
+        "native_error": "/readyz checkpoint exceeded deadline",
+        "operation": "b",
+        "readiness_surface": "Native client public-readiness checkpoint250ms deadline, not ordinary CLI snapshot deadline",
+        "runtime_stack_attribution": "No initiating daemon readiness error retained; no blocked stack or cause inferred from client deadline.",
+        "secondary_cleanup_error": "sampler VmRSS KeyError182 -> recheck186/127 -> owned116 -> cgroupguard95 generic ownership ValueError; secondary cleanup masks initial readiness failure, failure.json retained",
+        "stage": "after full baseline/B writer drain/held current dirty witness, awaiting first fold"
+      },
+      "qualified_paired_comparison": null,
+      "qualified_resources": {
+        "candidate": {
+          "attempted_reservation_peak_bytes_max": null,
+          "complete_legs": 0,
+          "daemon_cgroup_peak_bytes_max": null,
+          "harness_cgroup_peak_bytes_max": null,
+          "held_logical_recovery_bytes_max": null,
+          "held_recovery_entries_max": null
+        },
+        "flat": {
+          "attempted_reservation_peak_bytes_max": null,
+          "complete_legs": 0,
+          "daemon_cgroup_peak_bytes_max": null,
+          "harness_cgroup_peak_bytes_max": null,
+          "held_logical_recovery_bytes_max": null,
+          "held_recovery_entries_max": null
+        }
+      },
+      "receivers": 12,
+      "replay_exit": 1,
+      "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+      "status": "INVALID"
+    },
+    {
+      "actual_completion_statuses": {
+        "finalizer": "1",
+        "job": "failure",
+        "marker": "1",
+        "outer": "1"
+      },
+      "artifact": {
+        "api_digest": "sha256:fc0adead97399f01029eb01d465ee93d02c882ddc0b805ecf0e90de0fe234d5b",
+        "api_url": "https://api.github.com/repos/lance0/rustbgpd/actions/artifacts/11989476009",
+        "archive_download_url": "https://api.github.com/repos/lance0/rustbgpd/actions/artifacts/11989476009/zip",
+        "created_at_utc": "2026-10-15T16:06:49Z",
+        "expires_at_utc": "2026-11-14T16:06:44Z",
+        "html_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909/artifacts/11989476009",
+        "id": 11989476009,
+        "raw_file_count": 59,
+        "zip_bytes": 49744505,
+        "zip_sha256": "fc0adead97399f01029eb01d465ee93d02c882ddc0b805ecf0e90de0fe234d5b"
+      },
+      "attempted_legs": 1,
+      "binary_hashes": {
+        "rbgp": "fc322b3a82f4cf983708ba60c2844c2adc64413c4093982e70afd59175d2b01f",
+        "reloadstall": "df70f7eb8120328cd4dede17ac5b3f3677c924373731d1aa4dd8e09a6a6c1f56",
+        "rustbgpd-candidate": "aa24cefba18d2b05b967a861b70e6e818a48dde50617011b7575facfa123f1a0",
+        "rustbgpd-flat": "6d5b927f07dbb12aa553c38c783afb66e20f61a07cda17a13657fcb6bc237463"
+      },
+      "candidate_arms_started": 0,
+      "capture_source_sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277",
+      "cargo_version": "cargo 1.99.0 (5f94df478 2026-08-27)\n",
+      "cell": "full-vpn-cap-pressure",
+      "detailed_audit_sha256": "c9f3f2d69c5f58205d1bb5145fde2d154706030a49c7b8ae3c7d3fc471af0e37",
+      "driver_exit": 1,
+      "driver_log_sha256": "23ad428e966d71401ae0cd01c514f42e8889b08d907ccf815c6526c0c652d535",
+      "eligible_complete_legs": 0,
+      "eligible_complete_operations": 0,
+      "finalizer_exit": 1,
+      "flat_patch_sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc",
+      "frozen_instrumentation_and_support_paths": [
+        "bench/scale/reloadstall/src/main.rs",
+        "bench/scale/reloadstall/src/recovery_mass_dirty.rs",
+        "bench/scale/reloadstall/recovery_mass_dirty.py",
+        "bench/scale/reloadstall/test_recovery_mass_dirty.py",
+        "bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+        "bench/scale/reloadstall/README.md",
+        "bench/scale/reloadstall/sample-daemon-cgroup.py",
+        "bench/scale/provenance.sh",
+        "bench/scale/cgroup-memory.sh",
+        "tests/soak/host-lock.sh"
+      ],
+      "independent_review_sha256": "326803ec2f0310b7708ff3610a4c5fe33f661901e1e56bfb2cdd4f2f519df95b",
+      "job_conclusion": "failure",
+      "job_id": 116515378161,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909/job/116515378161",
+      "keys_per_receiver": 1230000,
+      "legs": [
+        {
+          "arm": "flat",
+          "eligible_complete_leg": false,
+          "fallback_monotone": true,
+          "final_normal_exits": {
+            "daemon": null,
+            "harness": null
+          },
+          "frozen_complete_leg_validation_error": null,
+          "id": "leg-0-flat",
+          "missing_final_boundaries_are_not_zero": true,
+          "native_complete_folds": [],
+          "native_parser_scope": "descriptive raw records; full completion requires frozen validate_leg",
+          "ordinary_snapshot_failure_counts": {
+            "by_phase": {},
+            "total": 0
+          },
+          "ordinary_snapshot_failure_replay_error": null,
+          "ordinary_snapshot_failure_rows": [],
+          "record_counts": {
+            "_partial_parse_errors": 0,
+            "mass_dirty_complete": 0,
+            "mass_dirty_exit": 0,
+            "mass_dirty_paused": 1,
+            "mass_dirty_readiness": 38,
+            "mass_dirty_ready": 1,
+            "mass_dirty_sent": 1
+          }
+        }
+      ],
+      "online_native_complete_folds": 0,
+      "original_frozen_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "outer_driver_exit": 1,
+      "primary_failure": {
+        "arm": "flat",
+        "error": "source session/pending state changed",
+        "failed_source_raw_row_retained": false,
+        "generation": "b",
+        "leg": 0,
+        "native_stderr_empty": true,
+        "no_timeout_cause_attribution": true,
+        "phase": "held witness source validation after baseline/B writer drain, before witness persistence/resume/first fold",
+        "predicate_scope": "validate_source_witness combines address==source,stateEstablished,slow_peerFalse,pendingFalse. The failing successful-RPC raw row is not retained; exact failing predicate is UNKNOWN. Initial source was valid; later teardown/session-down logs cannot establish initiating cause.",
+        "readiness_failure_observed": false,
+        "traceback_lines": [
+          698,
+          428,
+          417,
+          439,
+          702
+        ]
+      },
+      "qualified_paired_comparison": null,
+      "qualified_resources": {
+        "candidate": {
+          "attempted_reservation_peak_bytes_max": null,
+          "complete_legs": 0,
+          "daemon_cgroup_peak_bytes_max": null,
+          "harness_cgroup_peak_bytes_max": null,
+          "held_logical_recovery_bytes_max": null,
+          "held_recovery_entries_max": null
+        },
+        "flat": {
+          "attempted_reservation_peak_bytes_max": null,
+          "complete_legs": 0,
+          "daemon_cgroup_peak_bytes_max": null,
+          "harness_cgroup_peak_bytes_max": null,
+          "held_logical_recovery_bytes_max": null,
+          "held_recovery_entries_max": null
+        }
+      },
+      "receivers": 24,
+      "replay_exit": 1,
+      "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+      "status": "INVALID"
+    }
+  ],
+  "counter_scope": {
+    "eligible_leg": "Initial/beforeB/pausedB/settledB/beforeA/pausedA/settledA four-cause chains and own-operation delta baselines validated.",
+    "incomplete_legs": "Prefix/component evidence only; missing settlement/resource/cleanup/reset boundaries unavailable, not zero.",
+    "reset_limit": "Only explicitly observed malformed/session_reset and EVPN exhausted capture_unavailable/admission_invariant series; not a general all-family reset total.",
+    "specific_observed_metric_maxima": {
+      "full-uc-cap-pressure": {
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"admission_invariant\"}": 0.0,
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"capture_unavailable\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.1\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.10\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.11\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.12\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.13\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.14\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.15\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.16\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.17\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.18\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.19\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.2\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.20\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.21\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.22\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.23\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.24\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.25\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.3\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.4\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.5\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.6\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.7\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.8\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.9\"}": 0.0
+      },
+      "full-uc-no-refusal": {
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"admission_invariant\"}": 0.0,
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"capture_unavailable\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.1\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.10\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.11\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.12\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.13\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.2\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.3\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.4\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.5\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.6\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.7\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.8\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.9\"}": 0.0
+      },
+      "full-vpn-cap-pressure": {
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"admission_invariant\"}": 0.0,
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"capture_unavailable\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.1\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.10\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.11\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.12\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.13\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.14\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.15\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.16\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.17\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.18\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.19\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.2\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.20\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.21\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.22\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.23\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.24\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.25\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.3\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.4\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.5\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.6\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.7\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.8\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.9\"}": 0.0
+      },
+      "full-vpn-no-refusal": {
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"admission_invariant\"}": 0.0,
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"capture_unavailable\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.1\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.10\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.11\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.12\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.13\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.2\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.3\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.4\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.5\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.6\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.7\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.8\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.9\"}": 0.0
+      }
+    }
+  },
+  "coverage": {
+    "all_cost_median_max_ratios": null,
+    "attempted_legs": 5,
+    "candidate_arms_started": 1,
+    "eligible_complete_candidate_legs": 0,
+    "eligible_complete_candidate_operations": 0,
+    "eligible_complete_legs": 1,
+    "eligible_complete_operations": 2,
+    "eligible_shared_comparisons": 0,
+    "expected_cells": 4,
+    "expected_legs": 24,
+    "expected_operations": 48,
+    "ineligible_native_complete_folds": 4,
+    "online_native_complete_folds": 6,
+    "ordinary_snapshot_retry_rows": 9,
+    "prior_data_pooled": false,
+    "retry_scope": "All five required journals retained, nine raw failures strictly replay exactclosedcause+phasepeer+sequence/ordinal. No retry converts native deadline/source semantic failure to success."
+  },
+  "document_class": "sanitized derived failed-hosted-attempt summary",
+  "evpn_ownership": "OFF / unqualified",
+  "frozen_consumer_sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9",
+  "historical_files_unchanged": {
+    "hosted-a185-attempt.json": "b9e433098160c44a3310803c0edd7e60efb77d7d3f39682c145b681de100434f",
+    "invalid-hosted-attempt.json": "1880df8ed7068b665dfd4311966641992edf492634e242ab158a34c62a549266",
+    "invalid-hosted-baf-attempt.json": "30ca70b81f21a82f632469d80ab0f633f7ffdcca1bf5b68a9c0201c4195fd55e",
+    "local-correctness-controls-v3.json": "c24dbbee312f607ffd425ecad580bf088601465f6bce522e231e834a9f49a531",
+    "local-correctness-controls-v4.json": "1db94629ed57ab47e95ec3a9324575c4e36dca3407f5386ce443a52b8e4c8d5d",
+    "local-correctness-controls-v5.json": "b668c44d7c66a47326f4059498af3d60e0826e652ae0bb488fe16658c358f75a",
+    "local-correctness-controls.json": "0c067652ed81b7093bd051a5aca863d81610ee6c65a18fe761dc4117667413d7"
+  },
+  "local_v5_correctness": {
+    "artifact": "local-correctness-controls-v5.json",
+    "causal_red": true,
+    "exact_folds": 12,
+    "healthy_legs": 6,
+    "not_pooled_into_hosted": true,
+    "root_and_independent_clear": true,
+    "sha256": "b668c44d7c66a47326f4059498af3d60e0826e652ae0bb488fe16658c358f75a",
+    "timing_RSS_cost_qualified": false
+  },
+  "ordinary_main_checks": {
+    "failed": 0,
+    "head": "a04497026215ff6ee79543f2ba84e285bd92bb25",
+    "m122": {
+      "artifact": 11990451776,
+      "artifact_sha256": "31652e43a3bffe4aa280a0f8e3927c51fc067c80cd37defee5e9255438e93cf7",
+      "job": 116526745597,
+      "run": 38763504109,
+      "scope": "bounded uploaded phase and wire witnesses; not an independent raw-capture replay",
+      "witness_receipt_sha256": "f0a7fb372f4fe57f339a344c8d6c07219caa1ad25c8781b962816bfea78a43ec"
+    },
+    "passed": 105,
+    "pending": 0,
+    "receipt_sha256": "40f24f2f7a00913c6c4b3ba99b06dae5dccbac5953d713ffaae701bb44a59ab7",
+    "scope": "ordinary main validation and bounded M122 witness only; not the manual recovery campaign or actual RC soak",
+    "skipped": 2,
+    "workflow_count": 5
+  },
+  "overall_workflow_cancelled": true,
+  "provenance": {
+    "all_four_API_archive_digests_source_and_binaries_verified": true,
+    "compact_can_replay_raw_packet_path_ownership_checks": false,
+    "final_API_metadata_sha256": "0125eaee3db39e8760e9731cc76e7953bd1486490f3a8c7528cf31a6bfe61489",
+    "first_pass_audit_sha256": "cce388af38306a8e515f1c44be4b724170e4639dadd4333331b237ee2f93aaee",
+    "four_original_finalizers_replayed_with_frozen_consumer": true,
+    "independent_final_review_sha256": "2d3903b2fec89b6c01f9983801c1ff583e51bf5ac31977c6e852292a26c016a9",
+    "private_scope_locators_omitted": "Numeric memory boundaries retained; raw archive hashes bind omitted private cgroup locators.",
+    "raw_archives_retained_separately": true
+  },
+  "qualification_blockers": [
+    "Three post-fold/secondary sampler exit ownership failures prevent normal footer/resource cleanup eligibility where applicable",
+    "VPN no-refusal native readiness deadline fails before first fold",
+    "VPN pressure compound source-state guard fails with insufficient raw predicate attribution",
+    "All four cellsINVALID; only1of24 planned legs/2of48 operations eligible; no shared comparison",
+    "Actual release-candidate soak remains separate and required"
+  ],
+  "qualification_source": "72549e20deb639cb75cd10cf28b46010dbd8bed8",
+  "qualified_complete_flat_boundary": {
+    "daemon_cgroup_peak_bytes": 2431262720,
+    "harness_cgroup_peak_bytes": 44904448,
+    "no_swap_oom_and_normal_owned_exit_footer": true,
+    "only_eligible_leg": "full-uc-cap-pressure leg0flat",
+    "pressure_withdrawals_cumulative_B_A": [
+      192,
+      192
+    ],
+    "pressure_withdrawals_new_B_A": [
+      192,
+      0
+    ],
+    "proof_retired_both_ops_to": {
+      "bytes": 96,
+      "entries": 0
+    },
+    "resource_caps_bytes": {
+      "daemon": 10737418240,
+      "harness": 2147483648
+    }
+  },
+  "qualified_cost_or_memory_comparison_available": false,
+  "raw_file_count": 296,
+  "raw_file_digests": [
+    {
+      "bytes": 12891712,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rbgp",
+      "sha256": "a52a168304ba656b95c645e6545ebc536aa08a326771c35400a6f97d63b61fbd"
+    },
+    {
+      "bytes": 30353800,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "02f9e738c968de13f5cf256c8b31de727d5e5f4ff0018d65df00adc706cdb501"
+    },
+    {
+      "bytes": 42230616,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "4cfff7e2d9c7952cc995f651cb399687dadff65e72993e68f39a5df7d13c4c54"
+    },
+    {
+      "bytes": 42230552,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "b4a2ba01f2a00c525d21add56417b06e8b95da24823fccf464b56c0b40c2a941"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/binaries.sha256",
+      "sha256": "52a2f9ce9d11f824dfe83dc321e39f864ca5fbead595d539b7e02133cacca850"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/binary-validation.json",
+      "sha256": "3649c8efba7d8d10fbd4e22d50043b96ea95f5494fb3ab5fc7a2399191c85007"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-candidate.log",
+      "sha256": "0b6ba3286b3b46574d8e34a7d64b21767556565bdddcfb052a3f71f3ff4d54d1"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-flat.log",
+      "sha256": "06d2b8d3424e831c1c7df09824fc051a5910a633c09fc84f6b2ee7ad58cd38ee"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-harness.log",
+      "sha256": "f1f467cce84e425b16be943bc7f12dde16a25584baef8be8d176a1b89ecb5c99"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "ab5e96c29f7fc04cb9ea9eb66daf0766d465202e4f4d9f5dccd491daf2fb8923"
+    },
+    {
+      "bytes": 2627,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/campaign.json",
+      "sha256": "3b9be2e63d76ee5c9fe275216a3a112ae51d8cdabf942f9f69bf8e3095224bd4"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/campaign.sha256",
+      "sha256": "7da81208161b2686a992f97c6ec0d6d7dbb7168173d82e51739111fcde1431b3"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/candidate.sha",
+      "sha256": "6aeb2cbdfb44b617e438af4090353cbbe4b3f948990763d01389f6e006f62020"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 582,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-0.log",
+      "sha256": "526d20e13b09369ec159521f31cc314d41d4f85eddab0718a3a4ac71a4e7ede1"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 8079,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "17042ba0d4aafc61b5decee4e60795b6b9e839ebeaf42f81de973794c0a92878"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 68225,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "0a690a58a5244448162658288bc828c784f9ba8d4784af2a55b5e1cc3fbc55d4"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 11922,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "95c7faa5d38fb93a61e29272c77e9b57b70504098cbd21d52ba37b9dade81884"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 87,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/cleanup-error.json",
+      "sha256": "89eb21372e2d108402b4b3ff7b29ef5b534171c6fa218d518bee6c561b627e0d"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "452642d1ec4aa605911963cb9a85fe6c5e20beed7c3ac30a296a7bc4a752c45c"
+    },
+    {
+      "bytes": 8701229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-operation-a.jsonl",
+      "sha256": "c950cc86887b7f5ab27c75f94aafb64b07c21eec65197e5851920bf5e4e63efd"
+    },
+    {
+      "bytes": 8711067,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-operation-b.jsonl",
+      "sha256": "a9c08aa04ca6f4931382953039f31346b8156b91d1cf37bf92a6267eaa8efd84"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "e7df670f20949865d973ea0a1dbe075e72b417f742f845a93f86035de959b854"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-window-a.jsonl",
+      "sha256": "773eab4dc3bdff50fc9e317fd6cdb52c7687972674cd379c5632e200855c8cce"
+    },
+    {
+      "bytes": 247398,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-window-b.jsonl",
+      "sha256": "8ca5295d054759529048d05fd4711022e0fd8ab13e2f5281b59da6fe151de5df"
+    },
+    {
+      "bytes": 17501875,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "5b33fb8e9b58e2e8bac9f5ff4f500efc28ab4cb5739c209171167b32b5c4fc12"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/dirty-receipts-a.json",
+      "sha256": "32ececbdaaeb018f1db42bcc6fd24f3e26e902a6016f2fde78b4031d01e805f1"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/dirty-receipts-b.json",
+      "sha256": "4d9282aff180987058f412ea3c0b967b0994aab0f2fd47df3187972708f8feec"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "286976a3e18f5789a025f9b21eeea616be23e7f43078df2eb14d662252b198eb"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "7dbe74614dfef2d1876520b8c329f5217bfcdb39ad5dc35fca7f7c99730719f6"
+    },
+    {
+      "bytes": 17094,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "6ce214959c2b40e0a45a561be1f495e0102af3bd5e974f62243b368285523db2"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 559460,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "7dc0afa602ce9e8c5248da722f218d938c0a498739adcf061ace06fd29206b07"
+    },
+    {
+      "bytes": 123739,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-a.prom",
+      "sha256": "a12c3a0985fef0cc49f427ab69f032c761ef21abd61673ec10a4ca2762fe61c1"
+    },
+    {
+      "bytes": 122652,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "10359741106571a2b57eacd27c9f86b59a1273d57ca2f5f077c599952f9d0237"
+    },
+    {
+      "bytes": 122652,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "9714dd5ee9795115d6b5fd84d0823f8f3e1b6381220c1ff589b54cde577a1ec1"
+    },
+    {
+      "bytes": 123818,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-a.prom",
+      "sha256": "4b31f9425056c616e6c1332457fa15b58028b62ea69ea3d82224272a159eb554"
+    },
+    {
+      "bytes": 123780,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "3cb6b1a38d186bd815e4cbb627eaf4c7a7214969c61288eb0ddc199c33fc8178"
+    },
+    {
+      "bytes": 123772,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-settled-a.prom",
+      "sha256": "0eeef39fb2b23fc66bd1268aea61e085fbeef6a4606cf6b5b9765ea006db4cc8"
+    },
+    {
+      "bytes": 123739,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-settled-b.prom",
+      "sha256": "f52289ab9b17a171860b8db4f62658aeb005fa1dfe602588aee48fffac3957c4"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76064,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-a.json",
+      "sha256": "6a2c687d766bc4f6fbad1adb5722b59b7d0c1b67359a7a90ebbd37d4f6adcc35"
+    },
+    {
+      "bytes": 76061,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "fcf8d6005ee12ad4891fe8813f9dc01b63d4dab5951701f538e3b7d4f7a04a22"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-settled-a.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-settled-b.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 202,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "4fd1766d1147e1d2eb42fceb4010198874c1d6c938469d9a849fb32cae88b896"
+    },
+    {
+      "bytes": 8275,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/result.json",
+      "sha256": "b855697c638357d0089339a0d4d2ce5530333e9c47e1f1be5a48a43094016887"
+    },
+    {
+      "bytes": 1332,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "04414fcda4cef90d55d89f41a34e3cff933297908269685fab3ecb0a1165577a"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "29df56bdd89575eb00118f84a714a0e739319a5c1bd4a75682c19bdeb7737482"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-settled-a.json",
+      "sha256": "519e686715f4f8a752d61f2366592f491b371fedddd9782ff9b5aca4585a7e9f"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-settled-b.json",
+      "sha256": "e838efa4668a22d9b5f15f9670576855b28cf32396806395f0b3136ae8406f8d"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "c509b50eac37c81029eda07956201d62396122ef3e73a23d6dcd52634c2e6b1b"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 653,
+      "cell": "full-uc-no-refusal",
+      "path": "driver.log",
+      "sha256": "f9370c31619aa460b1ff04a222b30882e3ca94038c5c72aa3620396ff4c82712"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-uc-no-refusal",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-uc-no-refusal",
+      "path": "preflight.log",
+      "sha256": "ebb29a84e12651944cefb638a158d9b9aca5f6b803f9580f5813dfa18d117213"
+    },
+    {
+      "bytes": 12891712,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rbgp",
+      "sha256": "baacc80a99aab6feaa7c0f587062fa7d7dfad77bbfe066e8739284db634ec964"
+    },
+    {
+      "bytes": 30388280,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "bdbc775cd445ee53061e081bf3013e46045f1452a0fbfec62a91198f55e489c1"
+    },
+    {
+      "bytes": 42230328,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "5779d5da113b532a8f34a3da6a8d4632f06395ede4dcca9456e40c094f61f216"
+    },
+    {
+      "bytes": 42230264,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "6c0e8f8f857c54daf864f6e92ba6caff851c6b4a30e1c18a4a3ca67d0c389fae"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/binaries.sha256",
+      "sha256": "1ef58b90eeae58ad0a45776bf66813781b757b5d92d6140ff9c10fbfbcf5dacf"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/binary-validation.json",
+      "sha256": "d0d0863ddec65b27a83b71cd25476370d35cd92a2aa9df7c16d3781c096fd1df"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-candidate.log",
+      "sha256": "d6f38a33b996fdfc626e22338b568734f915e6f09e72aefa9d3e5580e68bd69d"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-flat.log",
+      "sha256": "85e049c2439538b15a026ee41550acf58410fd91820925e4f80eaa3b32eb35e6"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-harness.log",
+      "sha256": "0bd7feb28bfd7ff691955aee156aca4ea83877c475eab0c58ed014cfa10cfab5"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "57154103f643c00e662af5d8a5ef1ac7e4daded4d29a21cc96baf36627e6e308"
+    },
+    {
+      "bytes": 2629,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/campaign.json",
+      "sha256": "5859bb34b084b33d5c42d06c9eb26e89d95a13168a0f5d33721e1045472d3fb3"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/campaign.sha256",
+      "sha256": "b2aacd9bd9a452e073d608b6055aeb480aeea7928eaed6328e8d2acc6f586342"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/candidate.sha",
+      "sha256": "6aeb2cbdfb44b617e438af4090353cbbe4b3f948990763d01389f6e006f62020"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/controller-0.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 582,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/controller-1.log",
+      "sha256": "526d20e13b09369ec159521f31cc314d41d4f85eddab0718a3a4ac71a4e7ede1"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 8079,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "17042ba0d4aafc61b5decee4e60795b6b9e839ebeaf42f81de973794c0a92878"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 68225,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "0a690a58a5244448162658288bc828c784f9ba8d4784af2a55b5e1cc3fbc55d4"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 11922,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "95c7faa5d38fb93a61e29272c77e9b57b70504098cbd21d52ba37b9dade81884"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "b5d0e7a74c5d516a288503aebd232be11945c6ce9e17677a607d5b49c076cd0d"
+    },
+    {
+      "bytes": 8748227,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-operation-a.jsonl",
+      "sha256": "6f2fdcc5819677c9c7aff1c65fb41d7999464895a2282ab6014e4e47e6fd89b7"
+    },
+    {
+      "bytes": 8751875,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-operation-b.jsonl",
+      "sha256": "dd04b5c096e82b674c8d9b86706617176c3d716ecd4a844d28ea5280e8ad1bbb"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "c93741f5a2a7f02fd1813e388d3a8c8968d127daa6b27268427ae4accd386835"
+    },
+    {
+      "bytes": 213482,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-window-a.jsonl",
+      "sha256": "69e055f0ed9caf006a1105ab11325877c1c32f5c28524a29078c76aefee7ee0b"
+    },
+    {
+      "bytes": 18557,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-window-b.jsonl",
+      "sha256": "1728c9025cc3b44bbc85dc3c5eaf15d84ec8a28b7b37188a71e135e42cbeb84c"
+    },
+    {
+      "bytes": 17668536,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "8661ce3c47cb63381c371a0d28f24822942b3ffedfa4f258861433ea5200f74d"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/dirty-receipts-a.json",
+      "sha256": "cf6201e69cc3a0aa0dfd1fdb48d1389214bdf2c7ec564d25fc3ab75cc5b7b924"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/dirty-receipts-b.json",
+      "sha256": "8ad01ac9eb2958f236710a2184108e0b1ffaa314cdac437c0452a559fecbfa46"
+    },
+    {
+      "bytes": 9638,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-history/v2-00000000000000000001-1792080263-4a9b561eefc3cfa0bf9d823255c2d621e71159cf0e50d1769f7920ada5a904fb.json",
+      "sha256": "cc5b14926d536020f43b8d913b1cb75c76254555286f36014ff6c50e638a98f4"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-last-persist",
+      "sha256": "de8ef75d8cfc735250f1e410440f4c6e05a0d5cf7bb20fd29f7b23d366b1150d"
+    },
+    {
+      "bytes": 4109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config.toml",
+      "sha256": "885aa3066fe3d1ccdc1495095903bdf1f490cf1c04c142f6ec45db7f5f19df66"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/gr-restart.toml",
+      "sha256": "c8772e0f7ccd1733000ad0ab1e7d2f500db9ad3a9aecec23d3540bccdc637e0d"
+    },
+    {
+      "bytes": 423,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/member.rpol",
+      "sha256": "124eaeb9ca95baf5ea8bbb7681cf28f69160b35ce1a16707948dd2d0f3b7d758"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "8acff82dc64dc834dde52d06f38ad8e3870feeb881bf516097bc9532fc1e9b87"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "62f2d99693d39154f8d8da59b085d4a6f32d9a603f25cf94b027c158ce8693a7"
+    },
+    {
+      "bytes": 23954,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "53038fe411692cc0227fca3b1658fc17cd9b77b776f6c422990324631963a132"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 788606,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "f41913b09d5e348c26b078c3003e07524464ff4385fbe1cfc9e09bf624e895d2"
+    },
+    {
+      "bytes": 183590,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-a.prom",
+      "sha256": "c6301141da8e0e9eaaff4791239919a29c0a8c21c8b3ab47e8e8ad491636660e"
+    },
+    {
+      "bytes": 180065,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "84f0e1c429b74469eb8acdba145935f9c2aba1404f27b7acb91fc3d5a6b65219"
+    },
+    {
+      "bytes": 180065,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "10f8c2fc87df5b9bb10dd024948a19561a78858905f2f9d5a7caed6c3b1e2700"
+    },
+    {
+      "bytes": 183954,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-paused-a.prom",
+      "sha256": "c200fa0b17cddab04ead41f5036f08af0a17d7d46a15649cc9a27fdc89f451a1"
+    },
+    {
+      "bytes": 183640,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "702a2d5fac89028acb5f0ab74d1ffe7b5eb6ed87f9ac7f9ed0b1dd04fae4da43"
+    },
+    {
+      "bytes": 183890,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-settled-a.prom",
+      "sha256": "a845f3ad853dddcd8493f73a4817981affdaa6069e57c2b0eafe5e8a6e90a799"
+    },
+    {
+      "bytes": 183590,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-settled-b.prom",
+      "sha256": "592208389b40752e1443e35905f4a331a7e175c5a864c74c7e60f6aa6c5b23c0"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 153191,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-paused-a.json",
+      "sha256": "741067348f9d9e5479fb0dbd7ca97274c1f8bad1402046222a9a8007699c69b4"
+    },
+    {
+      "bytes": 153101,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "c468c0cdfa95901be725a1563b6a4c4cf95b4e780b9c23213c937718fd1b12c4"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-settled-a.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-settled-b.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 808,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "74ae920b0880d7dd81847c7cef667dfdece22d6c43a374372158887ef250e72d"
+    },
+    {
+      "bytes": 8547,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/result.json",
+      "sha256": "4f46a7ae0385522b68444ffe60af3652643b9c9b0fa032f5be8577662fbf702e"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "f9513c894dc564630c78b28c2aae19f5f88554dcfde5a5712952ca634d1bc682"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 2109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-settled-a.json",
+      "sha256": "1ed40106cb9df7efebed8464799e1f314f8eb9a720f639ea9ba60d6211bc7ce6"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-settled-b.json",
+      "sha256": "cdbb3e2c81294eb45c1909bb23813dde12e8f9891be68fe4a4ecfc42cd3af549"
+    },
+    {
+      "bytes": 87,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/cleanup-error.json",
+      "sha256": "92b2ce7db6d2bf43044a4c7095992127bec1c9705d27a2d18239037a20a653aa"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/config-check.log",
+      "sha256": "29990d96f7046640c554818d707ac514baf47a9d6e7468c59590a15896d1ee35"
+    },
+    {
+      "bytes": 8751352,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-operation-a.jsonl",
+      "sha256": "4d87180fbd42cc73388811d19d42227c49e25af13bb23808236ea3db8df71a41"
+    },
+    {
+      "bytes": 8748737,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-operation-b.jsonl",
+      "sha256": "b1b57e1701569268014ac33f021009eccf2fe5199ae2e36661cbdfbda3af16e8"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-owner.json",
+      "sha256": "6668a400330dacf10d785e500ca2d9455ce897244bcaf89b7c674cbca80ed798"
+    },
+    {
+      "bytes": 18557,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-window-a.jsonl",
+      "sha256": "e2a5b4bb1d75da9367d52804cc501e623df4582ccd642df375234d034f252327"
+    },
+    {
+      "bytes": 18557,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-window-b.jsonl",
+      "sha256": "0b68bcbf3ade1c093602422e6c7f11ea9139ddd9ee19e425fba2d0ce268a345b"
+    },
+    {
+      "bytes": 17669977,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon.log",
+      "sha256": "db792eb0880c7b71ef934e85acc02f27dbeac23f76aea62ac580037473a067e5"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/dirty-receipts-a.json",
+      "sha256": "28a14bb71a2d53d54db3f1c7280ce10e6469ffb4fb07ff701c7e0d239d18ec35"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/dirty-receipts-b.json",
+      "sha256": "508415a0ef425d502c20c9454e97e50e5c830867547a34bd237d681908313b04"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture.sha256.json",
+      "sha256": "580e17c6a0d28c7a34419ba4e6305caa99ddb105cd48bd4045bf010cd402da4d"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness-owner.json",
+      "sha256": "7bc1ea062d05fda060f89c1a37e4b28b262010cb4b68c2de3f888fa824e163ce"
+    },
+    {
+      "bytes": 31758,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness.log",
+      "sha256": "a766812534800cba28649bc9f8544cfd906ee2c690d566fd715a64a235a06d54"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1045226,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/memory.csv",
+      "sha256": "246b12b683b721b1f488de74c9e9fbbce723ed5309d5d063f0ca7c5d596a166f"
+    },
+    {
+      "bytes": 184172,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-before-a.prom",
+      "sha256": "ccaf7517abe2dc14894bdd18c7df0156df0428379bf6ad966865ff7b9888df83"
+    },
+    {
+      "bytes": 180083,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-before-b.prom",
+      "sha256": "ddbdad1c3cf6f2737527a5a436b779008967424e37156e96a1297580c488be74"
+    },
+    {
+      "bytes": 180083,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-initial.prom",
+      "sha256": "7fe4ff6b69523573e378f4bce9bbdf0ec4fe1ed0291fb0e175e59c7972e3ee7b"
+    },
+    {
+      "bytes": 184293,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-paused-a.prom",
+      "sha256": "09c00dcec7816a769d5e745e6a745f72dc7e54e7a5d0fe4441731684148c0560"
+    },
+    {
+      "bytes": 184217,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-paused-b.prom",
+      "sha256": "3381d3a9c901f40f9d92ad3441d7e8f4572fdf23b6cba8ea37ac2253d106dda2"
+    },
+    {
+      "bytes": 184206,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-settled-a.prom",
+      "sha256": "38453fa1868977ee42c7f37b40b3ce8743cbb83f00709722e99d4f071f3010ed"
+    },
+    {
+      "bytes": 184173,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-settled-b.prom",
+      "sha256": "62b5f4e875a9f57602f9fc977e126d466a3c58f684eaeb45b87c28239c4c0928"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 151695,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-paused-a.json",
+      "sha256": "da0fd13e1a0022f837133ede3bf891c6b340a6bba8e26047bb31d1fee3f87738"
+    },
+    {
+      "bytes": 151522,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-paused-b.json",
+      "sha256": "2c64c787a8c73fc71194431afb474961496097e726b98597e2aa621377c0382f"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-settled-a.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-settled-b.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 808,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/ordinary-snapshot-failures.jsonl",
+      "sha256": "d7ddd5629adaad57e5d06a7af17ae6e159e846c2e3c440b988c1d2e68fcacd94"
+    },
+    {
+      "bytes": 8333,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/result.json",
+      "sha256": "ae60494803bf64baf4d5bfe5cac211c3505703a52f406f26f242c4bf9734ad9d"
+    },
+    {
+      "bytes": 1332,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/sampler.log",
+      "sha256": "adc8524e6835967e8f345c9d1209e6f79a27a3ec08e5acf29d74ddb5c997bafe"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 2109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/source-settled-a.json",
+      "sha256": "a51b4acc18600724169f62b3f16203d28a74c6955d30b32fbb75f4e5bb1ba970"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/source-settled-b.json",
+      "sha256": "721f9eefffb5058738ce75035313a4ea5fb7a988b65a03954d38a23f4b95597b"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "2e8d5e54af9a3a02f5f6fa160f3202306aa8ff6f9e3b76510bfc08a39de088b6"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 1610,
+      "cell": "full-uc-cap-pressure",
+      "path": "driver.log",
+      "sha256": "f1a3355b7db67d07838acf2c61f700161c046928b8255c04a660a108b94899ac"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-uc-cap-pressure",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-uc-cap-pressure",
+      "path": "preflight.log",
+      "sha256": "4e46d036e4147bb0ea6e5902236a05ab091b3953c18f50cfb669d7e30c91baf6"
+    },
+    {
+      "bytes": 12891712,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rbgp",
+      "sha256": "829ad8735d722372e79dafdd9c9248ab854c7bf7f3454cb9a926775160a3f7be"
+    },
+    {
+      "bytes": 30388408,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "325da54d08306936caff8f38a51733b55540eb3c03b5924b68de3f48f4da8253"
+    },
+    {
+      "bytes": 42230328,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "a0d3ecf20ab46fe716d1536a969ba47cac612728110c2436944a5a74908484e7"
+    },
+    {
+      "bytes": 42230264,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "bd1a3783765663d56381ed296b9d8791fad7d25b89edc9bdb77a45f4d1446619"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/binaries.sha256",
+      "sha256": "319293983a6baf251c3e82cc8fa9ad23076e73995ea3e0ae96884d68c5c8a557"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/binary-validation.json",
+      "sha256": "1578948f9c619101c5e12e658cea620911369dddde6e1318bf15445a55999763"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-candidate.log",
+      "sha256": "d15cc8ca5996519939e58a6ba051864b8498c94d10f655a2f1ead9636849b852"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-flat.log",
+      "sha256": "eaced24ab750be6c8950796048e80ce024926459e7d89933ea86aefcfc6f37d2"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-harness.log",
+      "sha256": "9cdd7e65ece3ffda3493fa62da70b6976b4deb1396f0de57955a4310cea0de1a"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "0cff76b8d01a3e703fc17a528cd28446d57e6c5377e10d78f571d0e4d77ec914"
+    },
+    {
+      "bytes": 2628,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/campaign.json",
+      "sha256": "665151b31982c66cb407f5d6d9329d3cd2751b77c3ebc94dfefb4a08225c3d56"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/campaign.sha256",
+      "sha256": "21fbde0240a4a88ebdaae4afefef6777fd490160b73aaa904d9de8fe6aafdee2"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/candidate.sha",
+      "sha256": "6aeb2cbdfb44b617e438af4090353cbbe4b3f948990763d01389f6e006f62020"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 1365,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/controller-0.log",
+      "sha256": "b8b66e43810ca1549f6d9606cffdeebb8ef92ed225771a4ed7c47e64f3f33511"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 8079,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "17042ba0d4aafc61b5decee4e60795b6b9e839ebeaf42f81de973794c0a92878"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 68225,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "0a690a58a5244448162658288bc828c784f9ba8d4784af2a55b5e1cc3fbc55d4"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 11922,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "95c7faa5d38fb93a61e29272c77e9b57b70504098cbd21d52ba37b9dade81884"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 87,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/cleanup-error.json",
+      "sha256": "7404143a7498eeb02329893f17e54675ae79ae795f0883571c614911e349c5c9"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "9138beb68e1498f6eb3e4753b74adc8962c035b8eea37f370efc5bc312af1bbe"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "1d0c5da0181d9306eae33b6ef02855ec1491b564179dd7fa54cce6cc4d03d35d"
+    },
+    {
+      "bytes": 15369701,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "87980cc8c3079960fc69a233ba3b8ef0413e55087fa29d1402508a9f54702fbe"
+    },
+    {
+      "bytes": 837,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/failure.json",
+      "sha256": "92b5ee45b98b769b65dc168cd2f1f053a0dd486ef46cd52d3cd1dda11489ebfe"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "e60aeaa22df1e099b14939e78b7bfea2d1e183d992b0e29e823b04c2629fee2a"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "deefb518bb8e31d1de978c1876b2b2e836d40701045029be012620b728d6deae"
+    },
+    {
+      "bytes": 39176,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "0c13154594253966ba2fbe5dc81d726c14cd664134a9f95c84fb0b28e900e957"
+    },
+    {
+      "bytes": 70,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "8d1ab919391b9f4409d602497133a6fe6af4c3d497efa6c00b7008615944a49f"
+    },
+    {
+      "bytes": 1511401,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "90e370d7a19ebd2ef0b3e484724f9c151f662503cfb7bc9af8819f35d24ca2c9"
+    },
+    {
+      "bytes": 126039,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "8c64a437fa6b84323fe4fa88f2158bea3e65f993721a450c8543225debae090f"
+    },
+    {
+      "bytes": 126039,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "72365d0b8abefd5de8ac85c28353510c2f1585e0885a997fe03928e40e2ca93b"
+    },
+    {
+      "bytes": 127044,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "523f449a9552c566f6fd4cc6ad031bc7b6c75152317be460addef2f591465d86"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76248,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "3e980b27030d225749cd270e417af89ed90437b21fbf24fd5391abb7cd4da120"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1862,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "c659bc6504e210ba763ff21a4e7dff96a5b54441b697dfd06dda590e6881aef6"
+    },
+    {
+      "bytes": 2121,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "0da5a8e5c7d735f49afaf67c9411e33b11f9478bebed089fee375a21bf04bce1"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "4909eb30ce0050700fd53671e436cc7c5ad19aa84d9645b397698cb22999818b"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 1874,
+      "cell": "full-vpn-no-refusal",
+      "path": "driver.log",
+      "sha256": "ef68b3ba9160f60dbb8d58fa92e11d5bd7050bbfa366a5ff1f432f9d40194049"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-vpn-no-refusal",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-vpn-no-refusal",
+      "path": "preflight.log",
+      "sha256": "bd6fbbdc9d2ce9ac74d99509acb2dff6a42f9a3155adb6253d7071bc7314d096"
+    },
+    {
+      "bytes": 12891712,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rbgp",
+      "sha256": "fc322b3a82f4cf983708ba60c2844c2adc64413c4093982e70afd59175d2b01f"
+    },
+    {
+      "bytes": 30388456,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "df70f7eb8120328cd4dede17ac5b3f3677c924373731d1aa4dd8e09a6a6c1f56"
+    },
+    {
+      "bytes": 42230328,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "aa24cefba18d2b05b967a861b70e6e818a48dde50617011b7575facfa123f1a0"
+    },
+    {
+      "bytes": 42230264,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "6d5b927f07dbb12aa553c38c783afb66e20f61a07cda17a13657fcb6bc237463"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/binaries.sha256",
+      "sha256": "c59933fc1a76653a23ed8e67eb87a52530a40331c6cd528994936a6d1fd76173"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/binary-validation.json",
+      "sha256": "845486ab0d72943c956b7ea39d047f5bd0c3e232047721dbfbd1b76bfe9b3f1e"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-candidate.log",
+      "sha256": "5bb43be666dbe5e4a798f6ef2236d821d4f61c42100bc8fe0e934e7d6b359417"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-flat.log",
+      "sha256": "2df25f646c502c8b00718f953c99fcf01cf32f4e66187e3fb4ea137a0b461ef9"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-harness.log",
+      "sha256": "25ebff1b878178a65d4e1154e9e14ee632cf32115daab8db6399a48dc1d0a755"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "107b87b91fda5d24e580063129ad3dd6d5fb56316150c69bee5e0ff9f1eb4445"
+    },
+    {
+      "bytes": 2630,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/campaign.json",
+      "sha256": "20422b3266b7d11ba831db2192eb0205d9be5836afc3b87902d71cb865ce575d"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/campaign.sha256",
+      "sha256": "2ea587accd3d1f77a2b7edd01a9a0bc4b1f9cfc4bfb9ac55c345aecf2ec760d6"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/candidate.sha",
+      "sha256": "6aeb2cbdfb44b617e438af4090353cbbe4b3f948990763d01389f6e006f62020"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 63,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/controller-0.log",
+      "sha256": "cd3d8dbf141a157e4d1c9a6755f1bb28fa98575c170659447db08539cb141f83"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 8079,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "17042ba0d4aafc61b5decee4e60795b6b9e839ebeaf42f81de973794c0a92878"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 68225,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "0a690a58a5244448162658288bc828c784f9ba8d4784af2a55b5e1cc3fbc55d4"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 11922,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "95c7faa5d38fb93a61e29272c77e9b57b70504098cbd21d52ba37b9dade81884"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "9fef2230e66d627a02c127c0145d4262a89cc385d83d06d880bb4d9c44bbe121"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "6a7545c6d3754f361fcc6e3e29688b53d3d1ec9bc91e85307489a899c2886743"
+    },
+    {
+      "bytes": 23147084,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "3153872164ec86df19e9c694ae7d9df6973908d660de4317b35b603138a202a7"
+    },
+    {
+      "bytes": 2615,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/failure.json",
+      "sha256": "cb73f13fc5136bbc876f3005de0e575f98a54f4c4b90e8527c1c86c58b6e79b9"
+    },
+    {
+      "bytes": 9938,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-history/v2-00000000000000000001-1792080313-9e7df3f6bf0ae41ba2cc4e22eb19d0e3d91b19b3c28f4c0d5119a04a479e8006.json",
+      "sha256": "4dc0e0141ae5d17956f94c96220a81df8f0794f6c83f117197431f663562cbd7"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-last-persist",
+      "sha256": "14df80d851806780c045d74be5d033c68e12a85ac7209292c28aab5d624fd0e2"
+    },
+    {
+      "bytes": 4409,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config.toml",
+      "sha256": "bfe78b6cee177c28c9746e59e9a3776d4aa1e4677e2acf2c27ea27f64fe9dfdb"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/gr-restart.toml",
+      "sha256": "f397b0761051aa8b05adf02d1472ee55148bcee00f9c7d6ed131028c412d876e"
+    },
+    {
+      "bytes": 367,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/member.rpol",
+      "sha256": "79ddcdd2d0e3b9cc1387e3b4bc7171f916d29aad08e1ea718e3360452f8dbb9a"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "71cb16f41cf154003cfe1f579e0ca1c212f0d434adf196b28f8cc625cba9699b"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "c9bb33ae118e63acf49a8b2cefaab601de5cc94e886ef3e250d6bde76c7bbd08"
+    },
+    {
+      "bytes": 7486,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "626245bf4af0ccde14924a290caade32a94073cbf2c1e3696a48ddf0f01e9bb0"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 560373,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "146ec3cd53720e5a2311883e778f0991f21306452b796553ea06e3c7330276c2"
+    },
+    {
+      "bytes": 186879,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "3fe010f2969ef14b4234ce5ba94a7042f97faa2a068c44a1263ba947548dd240"
+    },
+    {
+      "bytes": 186879,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "b346a07e53161ab1463b6e713f036c78ca8115c19b9ebb9b5e89a35d129919cc"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "d5d4d8acb9a071a55115f56d2b2b460ecf6ce9d8abbb018c9cf6d4b0553508e7"
+    },
+    {
+      "bytes": 2121,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "92baeca8e5ca0f8d6f9cae8a5a0adb5019f6c79c08d5abf9e3ea4bf91435a871"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "57e90cad0dac1094fa44e86dda10e1e80e8b737320a2875b8a948401bcc09c69"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 1610,
+      "cell": "full-vpn-cap-pressure",
+      "path": "driver.log",
+      "sha256": "23ad428e966d71401ae0cd01c514f42e8889b08d907ccf815c6526c0c652d535"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-vpn-cap-pressure",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-vpn-cap-pressure",
+      "path": "preflight.log",
+      "sha256": "7b0a33567111cd73b0edc97491e4444d783c89c7e1134bae102c5e2e5773fbd5"
+    }
+  ],
+  "raw_roster_sha256": "9be1c03d099d3483f78e5a4090f950305b44a6e04e9c0a87cc74a42557754143",
+  "release_candidate_soak_qualified": false,
+  "retained_zip_bytes": 200458241,
+  "run": {
+    "conclusion": "cancelled",
+    "event": "workflow_dispatch",
+    "head_branch": "test/recovery-mass-dirty-qualification",
+    "head_sha": "72549e20deb639cb75cd10cf28b46010dbd8bed8",
+    "html_url": "https://github.com/lance0/rustbgpd/actions/runs/38761990909",
+    "id": 38761990909,
+    "run_attempt": 1,
+    "status": "completed"
+  },
+  "schema": "rustbgpd.invalid-hosted-mass-dirty-attempt.v5",
+  "scope_limits": [
+    "Full archived ordered per-key packet/UPDATE stream replay",
+    "Per-member allocations/attempted-key counts or allocator CPU attribution",
+    "Validated final failed-leg memory/exit or remote PID-reap boundaries",
+    "No missing final resource, reset, normal exit or reaping boundary becomes zero.",
+    "No inference of actual PID reuse/cgroup movement, sampler suffix explanation, underlying runtime stall, workflow cancellation initiator or exact cancellation instant.",
+    "No old local/hosted source is relabeled; all prior data remain separate and unpooled."
+  ],
+  "source_guard_review": {
+    "failing_successful_rpc_row_and_query_interval_retained": false,
+    "path": "full-vpn-cap-pressure-source-evidence-summary.json",
+    "sha256": "5f786c7c9a4982fc68143f6f876eed53bb93041a6b69a969807fbb49c050470f",
+    "violated_guard_field": "UNKNOWN"
+  },
+  "source_inputs": [
+    {
+      "bytes": 317080,
+      "path": "bench/scale/reloadstall/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "path": "bench/scale/reloadstall/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 70699,
+      "path": "bench/scale/reloadstall/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 68225,
+      "path": "bench/scale/reloadstall/test_recovery_mass_dirty.py",
+      "sha256": "0a690a58a5244448162658288bc828c784f9ba8d4784af2a55b5e1cc3fbc55d4"
+    },
+    {
+      "bytes": 8079,
+      "path": "bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+      "sha256": "17042ba0d4aafc61b5decee4e60795b6b9e839ebeaf42f81de973794c0a92878"
+    },
+    {
+      "bytes": 58772,
+      "path": "bench/scale/reloadstall/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 11922,
+      "path": "bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "95c7faa5d38fb93a61e29272c77e9b57b70504098cbd21d52ba37b9dade81884"
+    },
+    {
+      "bytes": 561,
+      "path": "bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 3129,
+      "path": "bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 3078,
+      "path": "tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 140854,
+      "path": "crates/rib/src/manager/update_groups.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 10441,
+      "path": "Cargo.toml",
+      "sha256": "72538a3a0a9cfb9c4478f2aec137a13fa7b1c8066a590788d6204f9e5e35ad32"
+    },
+    {
+      "bytes": 130742,
+      "path": "Cargo.lock",
+      "sha256": "52fb663be2f6640ba4ba5e7575fdae03e7fc6d9168e926563a267181c8b2d255"
+    },
+    {
+      "bytes": 362,
+      "path": "bench/scale/reloadstall/Cargo.toml",
+      "sha256": "7a9a15af44b6f073ef3007ebef24bbc2e7da30627c2fd4b2ab41a001980bb498"
+    },
+    {
+      "bytes": 50502,
+      "path": ".github/workflows/ci.yml",
+      "sha256": "9977c6b595c89e35a4a2ef8b445397a19ed7004d2ed9a492e939a91719fea577"
+    }
+  ],
+  "source_roster_sha256": "45f04d556ab07caebce9abbf248d0c33234da63e8707b0432902a462f4cb0155",
+  "source_scope": {
+    "all_Cargo_manifests_lock_inputs_equal": 35,
+    "exact_normalized_delta_sha256": "c0bb259f3df51239575bcd8a3882212695e88430256dc2ffb2699b762a00aa09",
+    "measured_source": "72549e20deb639cb75cd10cf28b46010dbd8bed8",
+    "no_literal_tree_performance_or_RC_equivalence": true,
+    "production_delta_commit": "3cfeb0c9b85cb609855c967e2c43c82ce5adb298",
+    "production_delta_from_measured_source": "BGP-LS/ORR paging, topology/cache, table and advertised-page invalidation changes",
+    "production_delta_paths": [
+      "crates/api/src/authz.rs",
+      "crates/api/src/rib_service.rs",
+      "crates/api/src/rib_service/tests/family_pages_tests.rs",
+      "crates/cli/README.md",
+      "crates/cli/src/commands/rib.rs",
+      "crates/cli/src/commands/topology.rs",
+      "crates/cli/src/connection.rs",
+      "crates/cli/src/test_support.rs",
+      "crates/cli/tests/family_rib_pages.rs",
+      "crates/rib/src/adj_rib_out.rs",
+      "crates/rib/src/lib.rs",
+      "crates/rib/src/manager/distribution/bgpls.rs",
+      "crates/rib/src/manager/distribution/mod.rs",
+      "crates/rib/src/manager/mod.rs",
+      "crates/rib/src/manager/peer_lifecycle.rs",
+      "crates/rib/src/manager/queries.rs",
+      "crates/rib/src/manager/tests/family_pages.rs",
+      "crates/rib/src/orr.rs",
+      "crates/rib/src/route.rs",
+      "crates/rib/src/update.rs",
+      "proto/rustbgpd.proto"
+    ],
+    "qualification_harness_not_all_on_main": true,
+    "qualified_as_latest_main": false,
+    "qualified_as_release_candidate": false,
+    "reviewed_runtime_source": "f63d8c37e65a3910dc2e60b97ce41db6dc83c3b0",
+    "reviewed_sampler_source": "4c6630882fe1363d6c222cdbec8917b3a0cca7a4",
+    "separately_checked_main": "a04497026215ff6ee79543f2ba84e285bd92bb25"
+  },
+  "status": "UNQUALIFIED",
+  "whole_campaign_comparison": {
+    "cost_ratio": null,
+    "median": null,
+    "memory_ratio": null,
+    "reason": "All four cells INVALID, no eligible candidate/flat pair.",
+    "worst": null
+  }
+}

@@ -1,0 +1,4926 @@
+{
+  "cell_verdicts": {
+    "full-uc-cap-pressure": "INVALID",
+    "full-uc-no-refusal": "PASS",
+    "full-vpn-cap-pressure": "INVALID",
+    "full-vpn-no-refusal": "INVALID"
+  },
+  "cells": [
+    {
+      "actual_completion_statuses": {
+        "finalizer": "0",
+        "job": "success",
+        "marker": "0",
+        "outer": "0"
+      },
+      "archive_verification_sha256": "c938e1ab3f1177fed624026b6e8932ff35fbe7f4350c93dd139a27854852ce03",
+      "artifact_id": 11979189206,
+      "artifact_metadata": {
+        "created_at": "2026-10-15T14:16:21Z",
+        "digest": "sha256:74e842ab1c6eb08f266de135c1fbf19db6bfcecd2e16c9ec11c2312b6f309ade",
+        "expired": false,
+        "expires_at": "2026-11-14T14:16:14Z",
+        "name": "update-group-recovery-mass-dirty-full-uc-no-refusal-a1854eee2f5b67d4a6198999f7e497e9ff9924fe"
+      },
+      "artifact_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988/artifacts/11979189206",
+      "attempted_legs": 6,
+      "binary_hashes": {
+        "rbgp": "32534af274ed4ecd5d399f8a3d9abe97c84a9db115a3240a76cc4bf920ff3eb3",
+        "reloadstall": "dd9fff0f2cbeb73b8f3265bfd2fdbe3938b66767a26aa6714fe9a9823aabd2d9",
+        "rustbgpd-candidate": "8815bb507a865e4f6629b53fb76e0a80711e0cf339f294e1f0b1a085dc1e10b2",
+        "rustbgpd-flat": "c333524444ee0335460ed4cdce2770d8bc0eff9d35533a0f5b440c157f38b3fa"
+      },
+      "cell": "full-uc-no-refusal",
+      "cell_status": "PASS",
+      "cleanup": {
+        "actual_finalizer_exit": 0,
+        "actual_outer_exit": 0,
+        "cleanup_independently_clear": true,
+        "driver_log_sha256": "d8cfb1af307348deb5c3d9b7946b326d528c46671171e67330b1d34f428d888d",
+        "early_marker_alone_used": false,
+        "job_success": true,
+        "source": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe"
+      },
+      "comparison_eligible": true,
+      "eligible_complete_legs": 6,
+      "eligible_complete_operations": 12,
+      "eligible_legs": [
+        "leg-0-flat",
+        "leg-1-candidate",
+        "leg-2-candidate",
+        "leg-3-flat",
+        "leg-4-flat",
+        "leg-5-candidate"
+      ],
+      "first_pass_cell_audit_sha256": "eb8db7c882d5cf1191f66f4b95ede2bf47d350edf3216eff9954be0277a37fbb",
+      "independent_review_sha256": "c13a7735e3690c6d36f1ffb8847b400ede60d8116d9a870981a2f55e47468175",
+      "job_conclusion": "success",
+      "job_id": 116454514657,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988/job/116454514657",
+      "keys_per_receiver": 1230000,
+      "metadata_scope": "observed at artifact audit; hosted links can expire",
+      "online_native_folds": 12,
+      "ordinary_snapshot_failures": 5,
+      "original_verdict": {
+        "cohort": "no-refusal",
+        "release_soak_qualified": false,
+        "status": "PASS",
+        "trigger_to_fold_seconds": {
+          "candidate": [
+            42.38836286499986,
+            43.213969573999975,
+            44.42856227900006,
+            43.396075567000025,
+            43.07675147400005,
+            43.43151726699989
+          ],
+          "flat": [
+            45.79673366399993,
+            44.345500982999965,
+            45.670239135999964,
+            46.8364144520001,
+            43.890784116000304,
+            45.33800684000016
+          ]
+        }
+      },
+      "primary_failure": null,
+      "raw_files_verified": 270,
+      "receivers": 12,
+      "replay_exit": 0,
+      "zip_bytes": 55118432,
+      "zip_sha256": "74e842ab1c6eb08f266de135c1fbf19db6bfcecd2e16c9ec11c2312b6f309ade"
+    },
+    {
+      "actual_completion_statuses": {
+        "actual_outer_invocation": "1",
+        "campaign_marker": "1",
+        "finalizer": "1",
+        "job": "failure"
+      },
+      "archive_verification_sha256": "ddfb0c017d480ab041ef8e25d20a1699331e612a7a17de458cd7c41f80a98c4e",
+      "artifact_id": 11980053040,
+      "artifact_metadata": {
+        "created_at": "2026-10-15T14:06:01Z",
+        "digest": "sha256:8dded519b3c90c6526947a46f0f420421ad507f0c735f6fe736bafa3ef47b772",
+        "expired": false,
+        "expires_at": "2026-11-14T14:05:56Z",
+        "name": "update-group-recovery-mass-dirty-full-uc-cap-pressure-a1854eee2f5b67d4a6198999f7e497e9ff9924fe"
+      },
+      "artifact_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988/artifacts/11980053040",
+      "attempted_legs": 2,
+      "binary_hashes": {
+        "rbgp": "e9ab92f2f35379c0da572238ef51a611d4584716823736a27ad522d748ffdba3",
+        "reloadstall": "c6505d344e8aa04d10e78ea60ab961c8d2d8f063e41130e32747903ca3378d84",
+        "rustbgpd-candidate": "433d1e2f245eab3ff1c7ec2d623d96c46f23aea4a948cc10800adaf5a60b337d",
+        "rustbgpd-flat": "9c6da4b9195f763f07e1586ee9975a867deeeb81ba82ff924b583f794a79ff61"
+      },
+      "cell": "full-uc-cap-pressure",
+      "cell_status": "INVALID",
+      "comparison_eligible": false,
+      "eligible_complete_legs": 1,
+      "eligible_complete_operations": 2,
+      "eligible_flat_leg_diagnostics": {
+        "arm": "flat",
+        "eligible_completed_leg": true,
+        "frozen_leg_validation": "PASS full frozen validate_leg",
+        "max_recorded_elapsed_seconds": 0.024410845,
+        "native_final_status": "PASS",
+        "operations": [
+          {
+            "fallback_delta": {
+              "allocation_failure": 0,
+              "daemon_limit": 11,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "b",
+            "held_proof": {
+              "bytes": 511681120,
+              "entries": 15989896,
+              "peak_bytes": 511683456
+            },
+            "native_continuity": true,
+            "native_exact_fold": true,
+            "new_withdrawals": 192,
+            "own_log_bytes": {
+              "end": 8881224,
+              "resume": 8862667,
+              "start": 141266
+            },
+            "retired_proof": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 511683456
+            },
+            "withdrawals_cumulative": 192
+          },
+          {
+            "fallback_delta": {
+              "allocation_failure": 0,
+              "daemon_limit": 11,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "a",
+            "held_proof": {
+              "bytes": 511684448,
+              "entries": 15990000,
+              "peak_bytes": 511686784
+            },
+            "native_continuity": true,
+            "native_exact_fold": true,
+            "new_withdrawals": 0,
+            "own_log_bytes": {
+              "end": 17646513,
+              "resume": 17352236,
+              "start": 8881224
+            },
+            "retired_proof": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 511686784
+            },
+            "withdrawals_cumulative": 192
+          }
+        ],
+        "recorded_successful_probes": 89,
+        "snapshot_failure_counts": {
+          "by_phase": {
+            "held-a": {
+              "127.1.0.2": 1
+            },
+            "held-b": {
+              "127.1.0.2": 1
+            }
+          },
+          "total": 2
+        }
+      },
+      "eligible_legs": [
+        "leg-0-flat"
+      ],
+      "first_pass_cell_audit_sha256": "93b1824a1f50d4a6b5e16c9168303e8012ee60b7a2377e665ea313b02769c3f4",
+      "independent_review_sha256": "5aca8d273306c519b43c71612c26c08c38b759926358240cda6dc4e16d1c8a1c",
+      "ineligible_candidate_diagnostics": {
+        "arm": "candidate",
+        "eligible_completed_leg": false,
+        "frozen_leg_validation": "REJECTED missing daemon_exit; footer incomplete",
+        "max_recorded_elapsed_seconds": 0.02699474,
+        "missing_final_values": {
+          "daemon_exit": null,
+          "harness_exit": null,
+          "reason": "sampler KeyError VmRSS; footer/fixture/final row roster incomplete",
+          "remote_reaping": null,
+          "validated_final_resource_boundary": null
+        },
+        "native_final_status": "PASS",
+        "operations": [
+          {
+            "fallback_delta": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "b",
+            "held_proof": {
+              "bytes": 47974312,
+              "entries": 29519808,
+              "peak_bytes": 47974336
+            },
+            "native_continuity": true,
+            "native_exact_fold": true,
+            "new_withdrawals": 192,
+            "own_log_bytes": {
+              "end": 8903430,
+              "resume": 8713113,
+              "start": 141266
+            },
+            "retired_proof": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 47974336
+            },
+            "withdrawals_cumulative": 192
+          },
+          {
+            "fallback_delta": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "a",
+            "held_proof": {
+              "bytes": 47974568,
+              "entries": 29520000,
+              "peak_bytes": 47974592
+            },
+            "native_continuity": true,
+            "native_exact_fold": true,
+            "new_withdrawals": 0,
+            "own_log_bytes": {
+              "end": 17663009,
+              "resume": 17644452,
+              "start": 8903430
+            },
+            "retired_proof": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 47974592
+            },
+            "withdrawals_cumulative": 192
+          }
+        ],
+        "recorded_successful_probes": 116,
+        "snapshot_failure_counts": {
+          "by_phase": {},
+          "total": 0
+        }
+      },
+      "job_conclusion": "failure",
+      "job_id": 116454514855,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988/job/116454514855",
+      "keys_per_receiver": 1230000,
+      "metadata_scope": "observed at artifact audit; hosted links can expire",
+      "online_native_folds": 4,
+      "ordinary_snapshot_failures": 2,
+      "original_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "primary_failure": {
+        "cleanup_error": [
+          "sampler exit: 1"
+        ],
+        "controller_stack": "run_cell:831 RuntimeError owned cleanup incomplete; fixture/evidence retained",
+        "missing_final_artifact_scope": [
+          "candidate fixture absent",
+          "candidate final row hash roster omits cleanup-error.json,memory.csv,sampler.log"
+        ],
+        "prior_native_or_readiness_failure_observed": false,
+        "process_exit_scope": "Candidate daemon_exit/harness_exit footer missing; no exit codes or remote reaping inferred.",
+        "retained_scratch": true,
+        "sampler_stack": "sample-daemon-cgroup.py:173 status[\"VmRSS\"] -> KeyError:VmRSS",
+        "stage": "leg-1 candidate after both B/A native folds and native final PASS, during owned sampler cleanup"
+      },
+      "raw_files_verified": 110,
+      "receivers": 24,
+      "replay_exit": 1,
+      "zip_bytes": 51019830,
+      "zip_sha256": "8dded519b3c90c6526947a46f0f420421ad507f0c735f6fe736bafa3ef47b772"
+    },
+    {
+      "actual_completion_statuses": {
+        "finalizer": "1",
+        "job": "failure",
+        "marker": "1",
+        "outer": "1"
+      },
+      "archive_verification_sha256": "fe7573a3b89d167463f07966136ddd2c99dddcbb1585a1f06eaffc93464e6d5c",
+      "artifact_id": 11979454043,
+      "artifact_metadata": {
+        "created_at": "2026-10-15T14:10:30Z",
+        "digest": "sha256:31fc23a0bc3d68fc12090c1d0b298f34cb95ea030bd179a5c741ac92e2b23145",
+        "expired": false,
+        "expires_at": "2026-11-14T14:10:24Z",
+        "name": "update-group-recovery-mass-dirty-full-vpn-no-refusal-a1854eee2f5b67d4a6198999f7e497e9ff9924fe"
+      },
+      "artifact_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988/artifacts/11979454043",
+      "attempted_legs": 1,
+      "binary_hashes": {
+        "rbgp": "70bd494d303685a3371cbaa6b00bd2b9d7a5b296eb7de235cbc112c9a9610c50",
+        "reloadstall": "417d66f89044a6716ded248a240acef15aff6ec95230b7c9ed7d0108c2cc386e",
+        "rustbgpd-candidate": "5b39a916b79cdce9eb474a466af6e8ad1c1c5feab729967de5a1ff9fcc9add08",
+        "rustbgpd-flat": "ae1b11047e29bbb74e162200c7963d13f885f1e41c0923d06d076beda0f35917"
+      },
+      "cell": "full-vpn-no-refusal",
+      "cell_status": "INVALID",
+      "cleanup_scope": "Actual driver marker/outer/finalizer/job all fail; no result/normal exit footer or completed resource boundary. Remote PID reaping/OOM/reset zeros not inferred.",
+      "comparison_eligible": false,
+      "eligible_complete_legs": 0,
+      "eligible_complete_operations": 0,
+      "eligible_legs": [],
+      "first_pass_cell_audit_sha256": "0586d5f8dbec34ce1cfaf192cde81e91ad560ba6ff2d88c1d37a9e04b582d0c5",
+      "independent_review_sha256": "49fb0b354d175bda7ad6dde1d3f0d6184e4e233f8b9158afe836c4e9ba00b471",
+      "job_conclusion": "failure",
+      "job_id": 116454514891,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988/job/116454514891",
+      "keys_per_receiver": 1230000,
+      "metadata_scope": "observed at artifact audit; hosted links can expire",
+      "observed_counter_prefix": [
+        {
+          "charge": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "fallback_cumulative": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "phase": "initial"
+        },
+        {
+          "charge": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "fallback_cumulative": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "phase": "before-b"
+        },
+        {
+          "charge": {
+            "bytes": 472322272,
+            "entries": 14760000,
+            "peak_bytes": 472322296
+          },
+          "fallback_cumulative": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "phase": "paused-b"
+        }
+      ],
+      "online_native_folds": 0,
+      "ordinary_snapshot_failures": 0,
+      "original_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "partial_dirty_witness": {
+        "all_current_pending_true": true,
+        "current_age_raw_derivation_checked": true,
+        "identities": [
+          [
+            "127.1.0.2",
+            "group:0"
+          ],
+          [
+            "127.1.0.3",
+            "group:0"
+          ],
+          [
+            "127.1.0.4",
+            "group:0"
+          ],
+          [
+            "127.1.0.5",
+            "group:0"
+          ],
+          [
+            "127.1.0.6",
+            "group:0"
+          ],
+          [
+            "127.1.0.7",
+            "group:0"
+          ],
+          [
+            "127.1.0.8",
+            "group:0"
+          ],
+          [
+            "127.1.0.9",
+            "group:0"
+          ],
+          [
+            "127.1.0.10",
+            "group:0"
+          ],
+          [
+            "127.1.0.11",
+            "group:0"
+          ],
+          [
+            "127.1.0.12",
+            "group:0"
+          ],
+          [
+            "127.1.0.13",
+            "group:0"
+          ]
+        ],
+        "operation_end_scope": "No complete result: exact trigger/resume/fold clocks or post-resume byte windows unavailable. No complete operation or retirement claimed.",
+        "overlap": [
+          {
+            "begin_monotonic_seconds": 1760.595083253,
+            "end_monotonic_seconds": 1761.439590456,
+            "proved": true
+          },
+          {
+            "begin_monotonic_seconds": 1760.745463898,
+            "end_monotonic_seconds": 1761.595119336,
+            "proved": true
+          }
+        ],
+        "queries_ordered_after_drain": true,
+        "stable_overlap": {
+          "begin_monotonic_seconds": 1760.745463898,
+          "end_monotonic_seconds": 1761.439590456,
+          "proved": true
+        },
+        "sweeps": 2
+      },
+      "partial_wire_evidence": {
+        "baseline_ready": {
+          "baseline_eor_messages": 2,
+          "batch_size": 80,
+          "bitmap_bytes": 5535072,
+          "correctness_only": false,
+          "family_keys": [
+            1000000,
+            230000
+          ],
+          "origin_cardinality": 15375,
+          "receiver_receive_buffer_bytes": 8192,
+          "receivers": 12
+        },
+        "completed_folds": 0,
+        "session_scope": "Initial and two held sweeps Established, same group, source clean. No completed native continuity/final-fold receipt.",
+        "withdrawal_count": "Unavailable: no complete fold counter retained.",
+        "writer_drain": {
+          "announcement_messages": 15375,
+          "drained_monotonic_seconds": 1761.067057985,
+          "eor_messages": 15375,
+          "family_keys": [
+            1000000,
+            230000
+          ],
+          "generation": "b",
+          "origin_cardinality": 15375,
+          "writer_drained": true
+        }
+      },
+      "primary_failure": {
+        "arm": "flat",
+        "controller_error": "harness exited before mass_dirty_complete: 1",
+        "leg": 0,
+        "native_error": "/readyz checkpoint exceeded deadline",
+        "operation": "b",
+        "readiness_surface": "Native client public-readiness checkpoint250ms deadline, not ordinary CLI snapshot deadline",
+        "runtime_stack_attribution": "No initiating daemon readiness error retained; no blocked stack or cause inferred from client deadline.",
+        "secondary_cleanup_error": "sampler exit1: KeyError VmRSS; secondary cleanup exception masks initial ValueError in outer traceback, original failure.json retained",
+        "stage": "after full baseline/B writer drain/held current dirty witness, awaiting first fold"
+      },
+      "raw_files_verified": 56,
+      "receivers": 12,
+      "recorded_successful_probe_prefix": {
+        "count": 175,
+        "max_elapsed_seconds": 0.215426194,
+        "max_start_gap_seconds": 1.0010417189998861,
+        "scope": "Successful prefix only; fatal following deadline has no elapsed sample and full-operation bracket/completion is unavailable."
+      },
+      "replay_exit": 1,
+      "secondary_cleanup_error_recorded": true,
+      "unavailable_final_values": {
+        "general_reset_total": null,
+        "reason": "no completed operation/result footer; partial counters are not final zeros",
+        "remote_reaping": null,
+        "validated_final_resource_boundary": null,
+        "wire_fold": null,
+        "withdrawals": null
+      },
+      "zip_bytes": 49568138,
+      "zip_sha256": "31fc23a0bc3d68fc12090c1d0b298f34cb95ea030bd179a5c741ac92e2b23145"
+    },
+    {
+      "actual_completion_statuses": {
+        "finalizer": "1",
+        "job": "failure",
+        "marker": "1",
+        "outer": "1"
+      },
+      "archive_verification_sha256": "cce5126d0084cdd9451e47e3602ac8cd9dca7a2c5ef750bf3b1ba5bc2185fba7",
+      "artifact_id": 11980232989,
+      "artifact_metadata": {
+        "created_at": "2026-10-15T14:09:39Z",
+        "digest": "sha256:8e865e2e5ed2bf3d87dbe44beeb7cc0dc56541ec2e542c87cf77620637c10fd4",
+        "expired": false,
+        "expires_at": "2026-11-14T14:09:33Z",
+        "name": "update-group-recovery-mass-dirty-full-vpn-cap-pressure-a1854eee2f5b67d4a6198999f7e497e9ff9924fe"
+      },
+      "artifact_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988/artifacts/11980232989",
+      "attempted_legs": 1,
+      "binary_hashes": {
+        "rbgp": "802646b5fbefd68986699378383d8accc82c4acb13915800e89dc0bb9cf0723e",
+        "reloadstall": "6f1fe5d7846e75ea8c3d578ba813eb812da2f773552ce06171a14c84871a8143",
+        "rustbgpd-candidate": "41f0f1dd7949ea98be2617508b4f59e1bc3bbc55d432d45f5beb11f1bd4c1797",
+        "rustbgpd-flat": "1fb0a5efa6156921d4b27ea7454f897c9b5ae528a416c36771e7b2e3a55e2008"
+      },
+      "cell": "full-vpn-cap-pressure",
+      "cell_status": "INVALID",
+      "cleanup_scope": "Actual driver marker/outer/finalizer/job all fail; no result/normal exit footer or completed resource boundary. Remote PID reaping/OOM/reset zeros not inferred.",
+      "comparison_eligible": false,
+      "eligible_complete_legs": 0,
+      "eligible_complete_operations": 0,
+      "eligible_legs": [],
+      "first_pass_cell_audit_sha256": "0eeef1eb94509b8c649c8a583dd8e4ef97cc75671dfebd0b19ed87e6e2f2a5b5",
+      "independent_review_sha256": "9259369e7c03202af60993675d425e0461ba6820d48122353e61ae925936ef22",
+      "job_conclusion": "failure",
+      "job_id": 116454514422,
+      "job_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988/job/116454514422",
+      "keys_per_receiver": 1230000,
+      "metadata_scope": "observed at artifact audit; hosted links can expire",
+      "observed_counter_prefix": [
+        {
+          "charge": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "fallback_cumulative": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "phase": "initial"
+        },
+        {
+          "charge": {
+            "bytes": 96,
+            "entries": 0,
+            "peak_bytes": 392
+          },
+          "fallback_cumulative": {
+            "allocation_failure": 0,
+            "daemon_limit": 0,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "phase": "before-b"
+        },
+        {
+          "charge": {
+            "bytes": 511682784,
+            "entries": 15989948,
+            "peak_bytes": 511685120
+          },
+          "fallback_cumulative": {
+            "allocation_failure": 0,
+            "daemon_limit": 11,
+            "missing_proof": 0,
+            "peer_limit": 0
+          },
+          "phase": "paused-b"
+        }
+      ],
+      "online_native_folds": 0,
+      "ordinary_snapshot_failures": 0,
+      "original_verdict": {
+        "reason": "driver failed or was interrupted",
+        "release_soak_qualified": false,
+        "status": "INVALID"
+      },
+      "partial_dirty_witness": {
+        "all_current_pending_true": true,
+        "current_age_raw_derivation_checked": true,
+        "identities": [
+          [
+            "127.1.0.2",
+            "group:0"
+          ],
+          [
+            "127.1.0.3",
+            "group:0"
+          ],
+          [
+            "127.1.0.4",
+            "group:0"
+          ],
+          [
+            "127.1.0.5",
+            "group:0"
+          ],
+          [
+            "127.1.0.6",
+            "group:0"
+          ],
+          [
+            "127.1.0.7",
+            "group:0"
+          ],
+          [
+            "127.1.0.8",
+            "group:0"
+          ],
+          [
+            "127.1.0.9",
+            "group:0"
+          ],
+          [
+            "127.1.0.10",
+            "group:0"
+          ],
+          [
+            "127.1.0.11",
+            "group:0"
+          ],
+          [
+            "127.1.0.12",
+            "group:0"
+          ],
+          [
+            "127.1.0.13",
+            "group:0"
+          ],
+          [
+            "127.1.0.14",
+            "group:0"
+          ],
+          [
+            "127.1.0.15",
+            "group:0"
+          ],
+          [
+            "127.1.0.16",
+            "group:0"
+          ],
+          [
+            "127.1.0.17",
+            "group:0"
+          ],
+          [
+            "127.1.0.18",
+            "group:0"
+          ],
+          [
+            "127.1.0.19",
+            "group:0"
+          ],
+          [
+            "127.1.0.20",
+            "group:0"
+          ],
+          [
+            "127.1.0.21",
+            "group:0"
+          ],
+          [
+            "127.1.0.22",
+            "group:0"
+          ],
+          [
+            "127.1.0.23",
+            "group:0"
+          ],
+          [
+            "127.1.0.24",
+            "group:0"
+          ],
+          [
+            "127.1.0.25",
+            "group:0"
+          ]
+        ],
+        "operation_end_scope": "No complete result: exact trigger/resume/fold clocks or post-resume byte windows unavailable. No complete operation or retirement claimed.",
+        "overlap": [
+          {
+            "begin_monotonic_seconds": 1786.279821785,
+            "end_monotonic_seconds": 1787.014176457,
+            "proved": true
+          },
+          {
+            "begin_monotonic_seconds": 1786.567066913,
+            "end_monotonic_seconds": 1787.316470455,
+            "proved": true
+          }
+        ],
+        "queries_ordered_after_drain": true,
+        "stable_overlap": {
+          "begin_monotonic_seconds": 1786.567066913,
+          "end_monotonic_seconds": 1787.014176457,
+          "proved": true
+        },
+        "sweeps": 2
+      },
+      "partial_wire_evidence": {
+        "baseline_ready": {
+          "baseline_eor_messages": 2,
+          "batch_size": 80,
+          "bitmap_bytes": 11070144,
+          "correctness_only": false,
+          "family_keys": [
+            1000000,
+            230000
+          ],
+          "origin_cardinality": 15375,
+          "receiver_receive_buffer_bytes": 8192,
+          "receivers": 24
+        },
+        "completed_folds": 0,
+        "session_scope": "Initial and two held sweeps Established, same group, source clean. No completed native continuity/final-fold receipt.",
+        "withdrawal_count": "Unavailable: no complete fold counter retained.",
+        "writer_drain": {
+          "announcement_messages": 15375,
+          "drained_monotonic_seconds": 1787.005605254,
+          "eor_messages": 15375,
+          "family_keys": [
+            1000000,
+            230000
+          ],
+          "generation": "b",
+          "origin_cardinality": 15375,
+          "writer_drained": true
+        }
+      },
+      "primary_failure": {
+        "arm": "flat",
+        "controller_error": "harness exited before mass_dirty_complete: 1",
+        "leg": 0,
+        "native_error": "/readyz checkpoint exceeded deadline",
+        "operation": "b",
+        "readiness_surface": "Native client public-readiness checkpoint250ms deadline, not ordinary CLI snapshot deadline",
+        "runtime_stack_attribution": "No initiating daemon readiness error retained; no blocked stack or cause inferred from client deadline.",
+        "secondary_cleanup_error": null,
+        "stage": "after full baseline/B writer drain/held current dirty witness, awaiting first fold"
+      },
+      "raw_files_verified": 61,
+      "receivers": 24,
+      "recorded_successful_probe_prefix": {
+        "count": 101,
+        "max_elapsed_seconds": 0.248570883,
+        "max_start_gap_seconds": 1.0013711489998514,
+        "scope": "Successful prefix only; fatal following deadline has no elapsed sample and full-operation bracket/completion is unavailable."
+      },
+      "replay_exit": 1,
+      "secondary_cleanup_error_recorded": false,
+      "unavailable_final_values": {
+        "general_reset_total": null,
+        "reason": "no completed operation/result footer; partial counters are not final zeros",
+        "remote_reaping": null,
+        "validated_final_resource_boundary": null,
+        "wire_fold": null,
+        "withdrawals": null
+      },
+      "zip_bytes": 49714837,
+      "zip_sha256": "8e865e2e5ed2bf3d87dbe44beeb7cc0dc56541ec2e542c87cf77620637c10fd4"
+    }
+  ],
+  "counter_scope": {
+    "full_cause_chain": "For each eligible leg, initial/beforeB/pausedB/settledB/beforeA/pausedA/settledA four-cause monotonic chain and per-operation baseline checked by frozen replay. Incomplete VPN cells retain only initial/beforeB/pausedB prefixes.",
+    "no_missing_zero_inference": true,
+    "pressure_withdrawals": "Each arm records cumulative192 atB and192 atA: new192/0, not384. Candidate pressure is diagnostic only.",
+    "specific_metric_scope": "These explicit EVPN exhausted(capture_unavailable/admission_invariant) and malformed session_reset series do not establish a general all-family session-reset total. Final/session continuity qualification applies only to completed valid folds.",
+    "specific_observed_metric_maxima": {
+      "full-uc-cap-pressure": {
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"admission_invariant\"}": 0.0,
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"capture_unavailable\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.1\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.10\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.11\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.12\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.13\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.14\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.15\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.16\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.17\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.18\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.19\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.2\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.20\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.21\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.22\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.23\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.24\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.25\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.3\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.4\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.5\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.6\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.7\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.8\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.9\"}": 0.0
+      },
+      "full-uc-no-refusal": {
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"admission_invariant\"}": 0.0,
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"capture_unavailable\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.1\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.10\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.11\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.12\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.13\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.2\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.3\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.4\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.5\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.6\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.7\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.8\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.9\"}": 0.0
+      },
+      "full-vpn-cap-pressure": {
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"admission_invariant\"}": 0.0,
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"capture_unavailable\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.1\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.10\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.11\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.12\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.13\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.14\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.15\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.16\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.17\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.18\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.19\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.2\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.20\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.21\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.22\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.23\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.24\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.25\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.3\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.4\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.5\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.6\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.7\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.8\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.9\"}": 0.0
+      },
+      "full-vpn-no-refusal": {
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"admission_invariant\"}": 0.0,
+        "bgp_evpn_recovery_provenance_exhausted_total{cause=\"capture_unavailable\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.1\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.10\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.11\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.12\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.13\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.2\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.3\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.4\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.5\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.6\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.7\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.8\"}": 0.0,
+        "bgp_update_malformed_total{disposition=\"session_reset\",peer=\"127.1.0.9\"}": 0.0
+      }
+    }
+  },
+  "coverage": {
+    "attempted_legs": 10,
+    "eligible_complete_legs": 7,
+    "eligible_complete_operations": 14,
+    "expected_cells": 4,
+    "expected_legs": 24,
+    "expected_operations": 48,
+    "ineligible_native_folds": 2,
+    "online_native_complete_folds": 16,
+    "pooling_cells_for_comparison": false,
+    "pooling_old_runs_or_local_controls": false
+  },
+  "created_at_utc": "2026-10-15T14:21:47.726455+00:00",
+  "document_class": "sanitized derived mixed-outcome hosted-attempt summary",
+  "eligible_resource_extrema_by_cell_arm": {
+    "full-uc-cap-pressure": {
+      "flat": {
+        "attempted_reservation_peak_bytes_max": 511686784,
+        "complete_legs": 1,
+        "daemon_cgroup_peak_bytes_max": 2452373504,
+        "harness_cgroup_peak_bytes_max": 42717184,
+        "held_logical_recovery_bytes_max": 511684448,
+        "held_recovery_entries_max": 15990000
+      }
+    },
+    "full-uc-no-refusal": {
+      "candidate": {
+        "attempted_reservation_peak_bytes_max": 46127392,
+        "complete_legs": 3,
+        "daemon_cgroup_peak_bytes_max": 1972015104,
+        "harness_cgroup_peak_bytes_max": 39006208,
+        "held_logical_recovery_bytes_max": 46127368,
+        "held_recovery_entries_max": 14760000
+      },
+      "flat": {
+        "attempted_reservation_peak_bytes_max": 472322296,
+        "complete_legs": 3,
+        "daemon_cgroup_peak_bytes_max": 2345836544,
+        "harness_cgroup_peak_bytes_max": 40964096,
+        "held_logical_recovery_bytes_max": 472322272,
+        "held_recovery_entries_max": 14760000
+      }
+    },
+    "full-vpn-cap-pressure": {},
+    "full-vpn-no-refusal": {}
+  },
+  "evpn_ownership": "OFF / unqualified",
+  "followup_scope": "sampler and VPN readiness work remain open; no blocked stack or causal runtime attribution, fixed source or later qualification is established here",
+  "frozen_consumer_sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9",
+  "historical_files_unchanged": {
+    "invalid-hosted-attempt.json": "1880df8ed7068b665dfd4311966641992edf492634e242ab158a34c62a549266",
+    "invalid-hosted-baf-attempt.json": "30ca70b81f21a82f632469d80ab0f633f7ffdcca1bf5b68a9c0201c4195fd55e",
+    "local-correctness-controls-v3.json": "c24dbbee312f607ffd425ecad580bf088601465f6bce522e231e834a9f49a531",
+    "local-correctness-controls-v4.json": "1db94629ed57ab47e95ec3a9324575c4e36dca3407f5386ce443a52b8e4c8d5d",
+    "local-correctness-controls.json": "0c067652ed81b7093bd051a5aca863d81610ee6c65a18fe761dc4117667413d7"
+  },
+  "provenance": {
+    "compact_can_replay_raw_packet_path_ownership_checks": false,
+    "first_pass_audit_sha256": "9183f94e55a46407abd80f960e97e9991cf5674fe5fbd2a884069e66226b8e9e",
+    "four_finalizers_replayed_with_original_frozen_consumer": true,
+    "independent_final_review_sha256": "6a2023f9e389d9bf7050250790b45dfd69f66b58bd5a122b92fd391ea729a717",
+    "raw_archives_retained_separately": true,
+    "uc_no_refusal_independent_review_sha256": "c13a7735e3690c6d36f1ffb8847b400ede60d8116d9a870981a2f55e47468175"
+  },
+  "qualification_blockers": [
+    "UC cap-pressure candidate sampler VmRSS cleanup failure; incomplete final result footer, raw roster and fixture",
+    "VPN no-refusal FLAT/B native250ms readiness failure; secondary sampler cleanup failure",
+    "VPN cap-pressure FLAT/B native250ms readiness failure",
+    "Remaining17 planned legs/34 operations are not qualified; cannot compare all four cells",
+    "Release-candidate soak is separate and still required"
+  ],
+  "qualification_status": "UNQUALIFIED full matrix; scoped UC no-refusal cell PASS",
+  "raw_file_count": 497,
+  "raw_file_digests": [
+    {
+      "bytes": 12889536,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rbgp",
+      "sha256": "32534af274ed4ecd5d399f8a3d9abe97c84a9db115a3240a76cc4bf920ff3eb3"
+    },
+    {
+      "bytes": 30388448,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "dd9fff0f2cbeb73b8f3265bfd2fdbe3938b66767a26aa6714fe9a9823aabd2d9"
+    },
+    {
+      "bytes": 42225208,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "8815bb507a865e4f6629b53fb76e0a80711e0cf339f294e1f0b1a085dc1e10b2"
+    },
+    {
+      "bytes": 42225144,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "c333524444ee0335460ed4cdce2770d8bc0eff9d35533a0f5b440c157f38b3fa"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/binaries.sha256",
+      "sha256": "a0f4d7a73b82c438feae3e25578206eeefa3eca143989bccc5a1be7646c3ac5e"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/binary-validation.json",
+      "sha256": "5a1a9a74f3ee1d40c55e36cdafaf41217dbfb4a54a53bb315e07437d2a8d6886"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-candidate.log",
+      "sha256": "926ee7fea5e36f82032545a81f683d2083720f1d50c243ebc8d331758e01c14f"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-flat.log",
+      "sha256": "215fe6cf6d0a0aa4ddae39913a99a4fc4db1916a16a1a243aaed4e636f715806"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-harness.log",
+      "sha256": "6c5afd3973e030a3328072790daffe9f4621df632971eb7f330dd7f6efa86a38"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "08215183f74728f6cab341912474c554a335b2ad22f639116a8fb81fc7117eb5"
+    },
+    {
+      "bytes": 2627,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/campaign.json",
+      "sha256": "2d8cc62081d41afd8e36472255a6fa740d7da88aebbefb64bf844ab9d3ce806c"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/campaign.sha256",
+      "sha256": "c315d88efea74d585fe4f8a55acbe338fc3d48d50bf55e94f12687b5cc5cebb7"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/candidate.sha",
+      "sha256": "23e4ef9a2528a3320e98a877255a362363805ce4a009c2d42eac5857be0d5d90"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-0.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-1.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-2.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-3.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-4.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/controller-5.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/driver.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 7462,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 62182,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 10983,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "9ea45184b9d0fbd1ec31993ea2035a91e4dc9fadb5bd08d5c35aa613a2cb926e"
+    },
+    {
+      "bytes": 8710535,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-operation-a.jsonl",
+      "sha256": "35386afca04cb10f5f70648474ca685ace52414cbc67ec5f45dc31cbd79ce66d"
+    },
+    {
+      "bytes": 8714686,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-operation-b.jsonl",
+      "sha256": "cda1733fe4afd0dd90fb2082772e89ab1cce3c411a4cf249da84212ad12db9f0"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "d413e5ab63e0a6a0fa654e2d7e0aa5fa44b6febe8ed847c601f5acc9abef285e"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-window-a.jsonl",
+      "sha256": "d7cad50b603e37d75f94e69b2769bc9513a9ffae6698f8f83fb9306c9340267c"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-window-b.jsonl",
+      "sha256": "bb079632ff47e263db891d482570d768e0ebcd93717023ddc6a06fb564c095a3"
+    },
+    {
+      "bytes": 17517081,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "8a00e055d7000b72bf00fdb0087894521d84f7c4ca1fcf8f01340bb5dcfabef2"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/dirty-receipts-a.json",
+      "sha256": "32ececbdaaeb018f1db42bcc6fd24f3e26e902a6016f2fde78b4031d01e805f1"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/dirty-receipts-b.json",
+      "sha256": "ab236b965517f195b96f66cf5ccb991001d74c3d46b8baf931bd79a15f5802d6"
+    },
+    {
+      "bytes": 6158,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/config-history/v2-00000000000000000001-1792073201-6162a556c17f672338f28362246fe9fe11521872766c85d80165c958fdd80f9c.json",
+      "sha256": "f3dc6f84232dfe2d7d774ff1c45f52e1b421a95debae92f748cac3228efa3c69"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/config-last-persist",
+      "sha256": "5b0181ebb40dab4941c7792139e2df9986336996bd04a199bc56db31c69e8a16"
+    },
+    {
+      "bytes": 2345,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/config.toml",
+      "sha256": "c0945b860633ba72fb68b3807138c9138dc7a7636db8781c855a764c7ee276f0"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/gr-restart.toml",
+      "sha256": "ae1e979ccd22a308786cf22955deeb41fcf376ec238f5c9fd56e33e935b0a165"
+    },
+    {
+      "bytes": 198,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture/member.rpol",
+      "sha256": "51f29a6d4585fdbd2cafe9457b45b94f9917d3bc5458ddf1f93021e7bcd038ab"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "3fe68f3f2de403fd35e1bb65f1040202f9dc8936bab9879dfeabee6cf4f28a4d"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "0681d673a24397863e7e89888358229279b8b7e04b45318c9b4245ef129aa833"
+    },
+    {
+      "bytes": 18205,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "50be939bf4a0f40b8b966cf2b88486859b88fcb68c290e29f4f7ba5f4577ed47"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 588895,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "ce5d3225fabc4eba5508dbf144d7ca7ee86a1c90809e3571ca641547a8d2059c"
+    },
+    {
+      "bytes": 122821,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-a.prom",
+      "sha256": "b66bb5638ed35b1b6d7eac2ff1b2926c39428aa1ccc2aa10f158a9354b5e64d6"
+    },
+    {
+      "bytes": 121724,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "0782c5dcdee4464e1188c848aa35e5fb3d16018a4891097a34167154bb1d7f46"
+    },
+    {
+      "bytes": 121724,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "344b761af1135d246894dd8d215819ba1799f9a548c7dcac4afc267e36eaa1fe"
+    },
+    {
+      "bytes": 122893,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-a.prom",
+      "sha256": "891e0b16a01b5efb68f3751779b0da2306d57fa199091baf88937128ef15126b"
+    },
+    {
+      "bytes": 122853,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "2f732d13f9f4e80f7757cb8d88eb8b846094b306d84dcd2ce07fc0c33c2a60aa"
+    },
+    {
+      "bytes": 122836,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-settled-a.prom",
+      "sha256": "37546fbf572d351f8ca673e8a1dd797c7520f9c592a008bc8dbc8ac9c8e6be94"
+    },
+    {
+      "bytes": 122821,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-settled-b.prom",
+      "sha256": "f9dee67cc468b8b9f14d2ce06a7b70c80f8d44c28a52a55694748b1afb3d6da9"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76065,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-a.json",
+      "sha256": "87ea7274260fb1e2ae7d5a693b2cd6730c14cb44bae7c0fc9c3a378539e51320"
+    },
+    {
+      "bytes": 76067,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "84c632202a01ff4f059488cb5e2a87fc11cb57e4a11a53e21517ead9521de4db"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-settled-a.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-settled-b.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 202,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "4fd1766d1147e1d2eb42fceb4010198874c1d6c938469d9a849fb32cae88b896"
+    },
+    {
+      "bytes": 8495,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/result.json",
+      "sha256": "69b984b8f6c76b066ba4c17bf8b9c28abac78650efa4b9edf86cfb8883cca5e9"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "9aae0f6a909d1c3cd1f001c9e0d8ffe1dd84e7aac37cdb92ec11db231fda3929"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "cc698a19b3e8e39295a97f3069fdccea36a7266d8a0b7c6075c5348941af3d7d"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-settled-a.json",
+      "sha256": "4a94d376fb17127cb03f28a559a9273792b1e445e55c82ee3a6a7de31e4f46e5"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-0-flat/source-settled-b.json",
+      "sha256": "4e26facdd7def105a99410554f133a0687c1179e07ececafbede0c33e61cc4e2"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/config-check.log",
+      "sha256": "101746f793947116b8e86a2aefc2073b98f1dc2c9ed8716247002f01a5135035"
+    },
+    {
+      "bytes": 8714671,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/daemon-operation-a.jsonl",
+      "sha256": "baceb9315a242a1a99e90f0513f173be6f5e8aa5b5ac5513fa59e6e322be4c63"
+    },
+    {
+      "bytes": 8713120,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/daemon-operation-b.jsonl",
+      "sha256": "11a35cd746a2abf691b0fa580a5b6ee94d912727a3b5903adccd0d323e9e4795"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/daemon-owner.json",
+      "sha256": "cbf0ad6b5462ba358fe4e8663ef62a9bfdcf7797a468a36a167de23a159930be"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/daemon-window-a.jsonl",
+      "sha256": "9478f8193dad0a90727075433887a96a4719b550453a622e9a75b636ad34c6fa"
+    },
+    {
+      "bytes": 218583,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/daemon-window-b.jsonl",
+      "sha256": "6ac88357475c9460a18687bf269e6be11396574124b512e9a1c4d2074a6eb1eb"
+    },
+    {
+      "bytes": 17517577,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/daemon.log",
+      "sha256": "105c15c85a053071197e5fdef3f17a3f5298bc24b4bb3167b3d85167d4f88795"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/dirty-receipts-a.json",
+      "sha256": "1b37d01396ff85ae2413a6a785a3645bb4ebe965f76abace5d3e571e6bbf1908"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/dirty-receipts-b.json",
+      "sha256": "6499736c86a815366ca89212caf304e7c053b3db46074d336ed3db010313bb48"
+    },
+    {
+      "bytes": 6158,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/config-history/v2-00000000000000000001-1792073297-c3ed99b6a03c1590d7e1b5048181fe5940348a3babd2d325c593a719f4042a78.json",
+      "sha256": "e2ba9637cd347309dc1ce46cb87d240fed5a9f77be66912e2e40e741191a2567"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/config-last-persist",
+      "sha256": "480179eae2be2a2315bdac446a497cd1012902164c23f618bf3d14623220caf1"
+    },
+    {
+      "bytes": 2345,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/config.toml",
+      "sha256": "5e0cd6ebf7077ace6531218b750fcaf99d67077b29816ee31cd5b2546009ecbf"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/gr-restart.toml",
+      "sha256": "001d42de4bf37bef4a0155efb713bede4866390e08e91d3e4ef347ca79a3d937"
+    },
+    {
+      "bytes": 198,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture/member.rpol",
+      "sha256": "51f29a6d4585fdbd2cafe9457b45b94f9917d3bc5458ddf1f93021e7bcd038ab"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/fixture.sha256.json",
+      "sha256": "840b6acaf55202216b934e646c22377a183944313b4817ff13aa46ac9883831d"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/harness-owner.json",
+      "sha256": "1aa0a64ec099962f44e9f2d498877f537dd5f895e7b48b02c1711a1fe56dd3db"
+    },
+    {
+      "bytes": 17276,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/harness.log",
+      "sha256": "98e3eef2cccc5ed5fcccb68331a63114dd4f91324afb7afa069df26a0e31dabf"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 557170,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/memory.csv",
+      "sha256": "458ce45edfe5ae58fb82af32442119c236d88576c6eca15d0f21c62c86ca8d1e"
+    },
+    {
+      "bytes": 122685,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-before-a.prom",
+      "sha256": "845dc5ca22b6ff4768a143e6edc9a3d994e11f7e6629c5994d5e2c429b985d5d"
+    },
+    {
+      "bytes": 121712,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-before-b.prom",
+      "sha256": "9e6ec58f24567473bb7ff00346c49fa1c2795016e5c443769faae3d05bd90708"
+    },
+    {
+      "bytes": 121712,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-initial.prom",
+      "sha256": "9bc7bc980ae288c9c1cf42b5dc83a2b587df0b534eb3755e678c13f004bf3f24"
+    },
+    {
+      "bytes": 122726,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-paused-a.prom",
+      "sha256": "af4388c3999728cfe3a3231d3cb39b7d9377ffd3ead5f43519809d5a7c0f9068"
+    },
+    {
+      "bytes": 122716,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-paused-b.prom",
+      "sha256": "4de07d883881d7ca091d6d308ee9af83c53769bf3946faabcbc488209e395868"
+    },
+    {
+      "bytes": 122683,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-settled-a.prom",
+      "sha256": "20ba3c4afde11ee94b89ebd61c485a20902f4b5e74abb38984975d935f22fbcd"
+    },
+    {
+      "bytes": 122685,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/metrics-settled-b.prom",
+      "sha256": "38efe1d7b6a43ab73459d7943626a1e8b766737db69c33e0320286ce12baf8ac"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76060,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/neighbors-paused-a.json",
+      "sha256": "a780bcc990009a93f0763a7a77b0f14991738e19ab0a25a5ff57d55f8c6c1697"
+    },
+    {
+      "bytes": 76062,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/neighbors-paused-b.json",
+      "sha256": "f64a1af1b7fd708c6b32ba7ba56cfcd1d1acb6987e9c8f8f33ca38f3b89bc6f3"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/neighbors-settled-a.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/neighbors-settled-b.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 8437,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/result.json",
+      "sha256": "e0c0729265515abfca56a44bf4cd9925c0799245e975d92381292f1219e1acab"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/sampler.log",
+      "sha256": "24aedc5e5041b0f1d9238bfba0fb48f703a35926de5cde88b8dfb44deff4a1c0"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/source-settled-a.json",
+      "sha256": "43a1c89d1f543d9acfbd79c5f6793655e14d6b2a44be78374693bfbd1e51a4f0"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-1-candidate/source-settled-b.json",
+      "sha256": "690a35d5d75287f248e12a8b164f23e30a78a1999d1fccdbf855a6c6c473631d"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/config-check.log",
+      "sha256": "7a9fdb3f72f8f42c5002aef4c47abd915cb046cf8a2f61fa8b230fe1ebc34576"
+    },
+    {
+      "bytes": 8715705,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/daemon-operation-a.jsonl",
+      "sha256": "2309ff02798f170309c86f777228783a3880abd2be7eeaf9fb33d46b1affefe6"
+    },
+    {
+      "bytes": 8717256,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/daemon-operation-b.jsonl",
+      "sha256": "fcee40c201801f15d60117e78a152b3c3e0dbe8d6af038f0a5008468921f49da"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/daemon-owner.json",
+      "sha256": "1f6e5c6485ef6e9a0167a68616eaa5b71752f22ab6d447afa6878d13a651de6d"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/daemon-window-a.jsonl",
+      "sha256": "36f8c1bcf5d053e4872c79c329887c2031091f9902387cf82333e26c7bcdf8e8"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/daemon-window-b.jsonl",
+      "sha256": "c1e4e986257d9b18daaec41970198e1d621fc8cad1025a2ddd1eee55126ab0a9"
+    },
+    {
+      "bytes": 17522540,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/daemon.log",
+      "sha256": "f9e6f61a76cff847f2e95ec018931161483d16135458499d039261f66e89f8d8"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/dirty-receipts-a.json",
+      "sha256": "f2a5dfdd48a4338eed0c8544f4c139c2cc1f99cf1441096474459bcc8d49d4df"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/dirty-receipts-b.json",
+      "sha256": "32ececbdaaeb018f1db42bcc6fd24f3e26e902a6016f2fde78b4031d01e805f1"
+    },
+    {
+      "bytes": 6158,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/fixture/config-history/v2-00000000000000000001-1792073389-97266aef1c21bc7f99f5698ca2cea6a4786fb7d2ba0062ddac3245544dfbe844.json",
+      "sha256": "720c6d337e1c13b1ac2f81980cd46b469796fbcd264a40b58f043bf13ade824a"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/fixture/config-last-persist",
+      "sha256": "bfd8eb7c007467f451906e0a3fb949b891adb3e326911a675a45eb06c0b3b31e"
+    },
+    {
+      "bytes": 2345,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/fixture/config.toml",
+      "sha256": "f4d26ffbbf11b1bd3311cc4354a409ab17155bcff615b50023109bb2058c41d3"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/fixture/gr-restart.toml",
+      "sha256": "a1ad46cbcac090eb79461a9ddf51b4cde0a802998f81aa128345e01bdbdb4ee7"
+    },
+    {
+      "bytes": 198,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/fixture/member.rpol",
+      "sha256": "51f29a6d4585fdbd2cafe9457b45b94f9917d3bc5458ddf1f93021e7bcd038ab"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/fixture.sha256.json",
+      "sha256": "bad6136049688b595b42e173ca65bdc49771ed21ccb43aa278c35b6263470493"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/harness-owner.json",
+      "sha256": "03c647393dad4a82001b25713461c86e76d057cd2741946ca8ebe08c8d216c93"
+    },
+    {
+      "bytes": 17837,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/harness.log",
+      "sha256": "a81c009f1967c25a87ab4ff39c853fa52ebb2e5929558effc71212c851df2b03"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 575625,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/memory.csv",
+      "sha256": "7c5ff800e6f8b1f46a094bdb59c277c4de034f7f442a59da3e7abdeac4472e7d"
+    },
+    {
+      "bytes": 122669,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/metrics-before-a.prom",
+      "sha256": "ea8101091d43118585750399dfeb4d3e788ccc49fc3a91371df4ce61f2651349"
+    },
+    {
+      "bytes": 121723,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/metrics-before-b.prom",
+      "sha256": "26654672fee1b884bf0cb78ee7ee6b7ff279fd54eeecbb39ba6ee055fe08d8c8"
+    },
+    {
+      "bytes": 121723,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/metrics-initial.prom",
+      "sha256": "6888bd1fe6a7e85acf877b7da023c5b5ff3e47a6a4867bed51eb43b93214e843"
+    },
+    {
+      "bytes": 122738,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/metrics-paused-a.prom",
+      "sha256": "f21b17733e5d5694356bc78f799a04281af7e6515801ee9e3ad9de6ad3360fc2"
+    },
+    {
+      "bytes": 122717,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/metrics-paused-b.prom",
+      "sha256": "69c73915c31fcc4eee430dc3b5dff2a5f2a728f085d1dc8e4b10134dd94e1329"
+    },
+    {
+      "bytes": 122694,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/metrics-settled-a.prom",
+      "sha256": "4489b50cd9a6836ca1f4835e522748d2e7f6ed39581f881f887a6fdec6d085ba"
+    },
+    {
+      "bytes": 122669,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/metrics-settled-b.prom",
+      "sha256": "694b64088ef4de2248861be6f7ea11bb2b4b6537febac17eef455ace59d189fd"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76067,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/neighbors-paused-a.json",
+      "sha256": "346c1bfe39bfeed429717834154cffe8ce078fb5ee3b32320bafa24d47bc10a8"
+    },
+    {
+      "bytes": 76059,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/neighbors-paused-b.json",
+      "sha256": "7e566ce6d8bf5fd92d1b2359c5911dc338ba66e5bb8f10c104a4af6cceee94b7"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/neighbors-settled-a.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/neighbors-settled-b.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 8437,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/result.json",
+      "sha256": "1dabb98981e9cc7ad09b6bcffa89aacf86b8320f0f5654b59f7178f3a35186b7"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/sampler.log",
+      "sha256": "5ede94e057762d77734706cdfd6f50a6b3a34287abee61ece4a95c3c995d4595"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/source-settled-a.json",
+      "sha256": "9e0c2e5d4e6499a1e9a002c1e37b8b22364362440569c08d72113f76948ecf73"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-2-candidate/source-settled-b.json",
+      "sha256": "e838efa4668a22d9b5f15f9670576855b28cf32396806395f0b3136ae8406f8d"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/config-check.log",
+      "sha256": "07dca04c519a6a53cb8da4ff4b88a94306346378250f3f390c55312e3ee20900"
+    },
+    {
+      "bytes": 8714671,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/daemon-operation-a.jsonl",
+      "sha256": "52f70b854a3fb195570cf506ff9d2bf3914544cd5f22289e80efa7a12cf25b29"
+    },
+    {
+      "bytes": 8715720,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/daemon-operation-b.jsonl",
+      "sha256": "fa5e7fb1cff4747342aa39f350c500ada36287e3b2025797f667ef51036df684"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/daemon-owner.json",
+      "sha256": "0132377325c9adb82cae4b12771230e7d2692add001c89382457167eaae0a6bf"
+    },
+    {
+      "bytes": 284123,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/daemon-window-a.jsonl",
+      "sha256": "ff8851f52e61f8d58a36676dce3348a2e8fa4458f9de792e86ec34b12edd1da5"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/daemon-window-b.jsonl",
+      "sha256": "9141bd107b0e76e25661e4f5f14c5858bb7bb506b5a85917e343161c2ef5b0fa"
+    },
+    {
+      "bytes": 17519970,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/daemon.log",
+      "sha256": "332f5ae9e79d451fbadebb0ae7038415618aae1b0dc8183b3f373a8665452fc1"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/dirty-receipts-a.json",
+      "sha256": "72f7462e9f7bf3109e03f8420f17e4e0ebb19ecea6b6399c04bcf91982d86270"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/dirty-receipts-b.json",
+      "sha256": "f2a5dfdd48a4338eed0c8544f4c139c2cc1f99cf1441096474459bcc8d49d4df"
+    },
+    {
+      "bytes": 6158,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/fixture/config-history/v2-00000000000000000001-1792073484-0a5b48aef21c5a3683c2542899e4b516a28e8ae8b13a0ae622d14af1b533681f.json",
+      "sha256": "37c8628cc22b7f3d081727e044185db13463ffc08f22432c9296b7067add513c"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/fixture/config-last-persist",
+      "sha256": "17352da8a8d985ef2e99de55802b218049860ac616707afdcf88c8bffb8962fe"
+    },
+    {
+      "bytes": 2345,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/fixture/config.toml",
+      "sha256": "8862aa45ce7e07a2931a472ce9d6034ab64b4a489cf1e414e84709e7c7f663ba"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/fixture/gr-restart.toml",
+      "sha256": "8dcdcf2d590f64edf3d8b31087081200855196d26bffb0954d90069ecbaa5a99"
+    },
+    {
+      "bytes": 198,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/fixture/member.rpol",
+      "sha256": "51f29a6d4585fdbd2cafe9457b45b94f9917d3bc5458ddf1f93021e7bcd038ab"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/fixture.sha256.json",
+      "sha256": "d1bcfaf39a08f0d3ffdd333ea9634184fbf88fd3d9364a91bd46b9342ee3e13d"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/harness-owner.json",
+      "sha256": "398b7acb370c70bd6c0a227832dc1022d57a8585fb359c20a5504e44dba24e4a"
+    },
+    {
+      "bytes": 18569,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/harness.log",
+      "sha256": "91d037465cdf226a54f8bcb89e9f2f2bc3f6f69fccf5f77b34d831159d41efad"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 601500,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/memory.csv",
+      "sha256": "abce4338499ff489f72b0ab87daf62efc2ddea93e94dbdb527e41aa720135afb"
+    },
+    {
+      "bytes": 122809,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/metrics-before-a.prom",
+      "sha256": "ecf95a34440d27e98f8c36ba84482dbe1a2e2c2e2982bff96bda338436ad6f3e"
+    },
+    {
+      "bytes": 121709,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/metrics-before-b.prom",
+      "sha256": "1f7268a39bd639e9909133773c19aefd13587826610f8ca0e8edaf32463c3d56"
+    },
+    {
+      "bytes": 121709,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/metrics-initial.prom",
+      "sha256": "97727e0963dd131b1aacfbd72d33e5e606d3904ed5d4951ed462dca83e438862"
+    },
+    {
+      "bytes": 122882,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/metrics-paused-a.prom",
+      "sha256": "247e002a20294019fdd50256fd5c6167bb60b753a895e340c83d7412e3b811fb"
+    },
+    {
+      "bytes": 122842,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/metrics-paused-b.prom",
+      "sha256": "ff96d6e3050c0063692740c05a339cf29c26a5ea390e40d825aaf037fd374f2b"
+    },
+    {
+      "bytes": 122825,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/metrics-settled-a.prom",
+      "sha256": "a44fa8d7e421c56b7e25f1cd2db16c3f97967da357278fbd7dd73ea12a0796be"
+    },
+    {
+      "bytes": 122810,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/metrics-settled-b.prom",
+      "sha256": "b3a609e216f53a57185cc0affd2c52b56cb0bbe9df2bf6dc08b4ee141cb49936"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76066,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/neighbors-paused-a.json",
+      "sha256": "583cd937c1fcf0537b2b394ae3773962105b20ce7f9ccd807a3fbcd4349a991f"
+    },
+    {
+      "bytes": 76060,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/neighbors-paused-b.json",
+      "sha256": "072c620b3f22d446ca719744437a5be072a943728c1e1325c76faa2f3b8d536d"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/neighbors-settled-a.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/neighbors-settled-b.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 202,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "cd0c971ed8228601bbc338cdd3e11f47637d1c4f3f19afb81a93422ea6d6018b"
+    },
+    {
+      "bytes": 8488,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/result.json",
+      "sha256": "26b2aa74242b51ea855e59a833fce7728af98ba20c9cc143be845f4cb4c5fb9f"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/sampler.log",
+      "sha256": "803d19229a3e0062b1688e2f3a7b621237b5c3caedbb9e5e45919e10ce8f6016"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/source-settled-a.json",
+      "sha256": "00f7680c711a54b7d0bdca489e809766dd4b49546b3d0e3579b0effc4285e704"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-3-flat/source-settled-b.json",
+      "sha256": "4e26facdd7def105a99410554f133a0687c1179e07ececafbede0c33e61cc4e2"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/config-check.log",
+      "sha256": "2cd66ffb64af1a82de3c8ed7a8162ee11411f4b0932265d88c613175b5a2a1e0"
+    },
+    {
+      "bytes": 8717788,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/daemon-operation-a.jsonl",
+      "sha256": "347ad11cd8b7341a732b080ec735640c7f2c7a198b78aa22489e2337f1282a71"
+    },
+    {
+      "bytes": 8715720,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/daemon-operation-b.jsonl",
+      "sha256": "19d7fa02fe52105d858d4f84b78f1ef2d175e1020b8d906c3c0646a25167ff9b"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/daemon-owner.json",
+      "sha256": "3f8fe713ceec010fb4e7b0520135148942e6c12d27896fb969071a1926fbfd93"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/daemon-window-a.jsonl",
+      "sha256": "8621c1a633bf436cdcf7c36f90840c99e0e88f0094a0c010f29d3f48086191e0"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/daemon-window-b.jsonl",
+      "sha256": "85a8cf66ed01972fbaaadd23f8c519c8a378841bff0b02ee4b9bf8951ac6b830"
+    },
+    {
+      "bytes": 17523087,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/daemon.log",
+      "sha256": "ad63cce04bb96202da62e443e5e13e380861ba1235612351a891877ccbdb60bd"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/dirty-receipts-a.json",
+      "sha256": "f2a5dfdd48a4338eed0c8544f4c139c2cc1f99cf1441096474459bcc8d49d4df"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/dirty-receipts-b.json",
+      "sha256": "1428182e06acd7dff504acb2e3e694928cd2b0e87ccbd915a2d34c3f0c3c35b5"
+    },
+    {
+      "bytes": 6158,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/fixture/config-history/v2-00000000000000000001-1792073582-732f99d5a8a69ca1cc31e5ed06ace9a4d5ad1908023d54705c3a206f8f73dfa9.json",
+      "sha256": "ce63dbf4e933f9e7b3530686533cb4d28ca6bbb1770d4e241bad4e98e355bdfb"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/fixture/config-last-persist",
+      "sha256": "a3d0e824d1c50447166c51e1354ef6043d5c29a7b4d9c35b65e7b655ea5260ce"
+    },
+    {
+      "bytes": 2345,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/fixture/config.toml",
+      "sha256": "7e2c2faa3c0e866d4de17daa859f9d858dc127557261f487981b75e4422bc4af"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/fixture/gr-restart.toml",
+      "sha256": "e1a10cc6e8794760845103532d6b71b15bd0565ebe355961d733fdea47b2fc82"
+    },
+    {
+      "bytes": 198,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/fixture/member.rpol",
+      "sha256": "51f29a6d4585fdbd2cafe9457b45b94f9917d3bc5458ddf1f93021e7bcd038ab"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/fixture.sha256.json",
+      "sha256": "27780909f92a876544f648b3562e3b8116698ec3ce28de9e45ec7d21402a7762"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/harness-owner.json",
+      "sha256": "3207097e2dfc1cb6a79aac1e200c9bf7edb4a3be8efb0948176ad241c53e33a5"
+    },
+    {
+      "bytes": 18017,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/harness.log",
+      "sha256": "97309a1988cea34e4db2a29ffe9f1eff87efdd1e29dd8f95c9e0a98ab7b56778"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 582446,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/memory.csv",
+      "sha256": "ca76e10c19afd15e87a412467ad1daa0c15bc405d815f5d758a93354c26260d3"
+    },
+    {
+      "bytes": 122814,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/metrics-before-a.prom",
+      "sha256": "616e6cbe89fc3e09be5aaf045f08cca14ca646bc71241336e29ff05226254d72"
+    },
+    {
+      "bytes": 121710,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/metrics-before-b.prom",
+      "sha256": "d2433f85ac7dc77dab3c7a5e43b4801cc1cee406c924959f45cf43836fdfe40b"
+    },
+    {
+      "bytes": 121710,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/metrics-initial.prom",
+      "sha256": "e61681686838af12b9703652b2c7dc95be89d73c99989feeacbaec0e139c2e15"
+    },
+    {
+      "bytes": 122873,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/metrics-paused-a.prom",
+      "sha256": "3ac31f3a1e61be0375ee0053f697bd1acb1f9c52ddc0d103b598406e5bff402c"
+    },
+    {
+      "bytes": 122863,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/metrics-paused-b.prom",
+      "sha256": "7e57fc69f7f16a3703fa7002e931fc0febb30a349ed958198791ac013bdd6f76"
+    },
+    {
+      "bytes": 122820,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/metrics-settled-a.prom",
+      "sha256": "cf4c5b9554d8c6ef4b16f43c68b20aeebed5d2f621dbe1dddad23a5059618a80"
+    },
+    {
+      "bytes": 122814,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/metrics-settled-b.prom",
+      "sha256": "cf609c0f23a6237422fdf8f691fdcf5802f838c1abd1fa0b8c2c3a455a60e8db"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76061,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/neighbors-paused-a.json",
+      "sha256": "053c44a52c409d85d272a659159ed0d3bc0628e8628936a0d5679e9e9258340e"
+    },
+    {
+      "bytes": 76060,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/neighbors-paused-b.json",
+      "sha256": "97c1bbcf24e9b677f3f880045ac203d768365a6fc7d1a1e7442138ff8719b1a8"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/neighbors-settled-a.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/neighbors-settled-b.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 404,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "909adcb92f40f28e4a608f2880d5257558adcd1a3d8a5c743950d26519b2578e"
+    },
+    {
+      "bytes": 8544,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/result.json",
+      "sha256": "755d4588d1625d1919bb748d177bd37b11cfe941de81cce5a7188d3fd6fcf212"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/sampler.log",
+      "sha256": "67666fa11516c25083940fc29b8d37cd96fcc7bac24bf9005cf11038384b5866"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/source-settled-a.json",
+      "sha256": "5db15d6c08003cf80f89620dfd347e5b13494292b2e603c4fe3aca96ab006943"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-4-flat/source-settled-b.json",
+      "sha256": "e838efa4668a22d9b5f15f9670576855b28cf32396806395f0b3136ae8406f8d"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/config-check.log",
+      "sha256": "ccb4e3093a660144342b6213408abb7f9627d554c3cb5ba253d6f6750e61df4b"
+    },
+    {
+      "bytes": 8715705,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/daemon-operation-a.jsonl",
+      "sha256": "7d0d5b694e6d6461c47b9be355bf43a85a435ba2765c0a23140eb7ffe4797e1c"
+    },
+    {
+      "bytes": 8714686,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/daemon-operation-b.jsonl",
+      "sha256": "43b3a2d76c3d717d65341cdf424745fe0f8789a326f1c68d7424b7d35d1effa2"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/daemon-owner.json",
+      "sha256": "955d39fd4d91c9962dbf48d52eb08ff10b04f772020140c33e5dc7c725ec21dc"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/daemon-window-a.jsonl",
+      "sha256": "9241f4b4cff3fdfb6bd43bf6e0f6fcf4d5b562113d1d48e1972884ff606b58a8"
+    },
+    {
+      "bytes": 9533,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/daemon-window-b.jsonl",
+      "sha256": "98b15fe4d0dc2c7e69f4d7ef2db68af116c34f75397119aaf7fdd2383cdd482e"
+    },
+    {
+      "bytes": 17521836,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/daemon.log",
+      "sha256": "d8d2613667bfc05a3b22d2d572d229d785f0c6a637ba5e21e78f5373a6db225f"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/dirty-receipts-a.json",
+      "sha256": "ab236b965517f195b96f66cf5ccb991001d74c3d46b8baf931bd79a15f5802d6"
+    },
+    {
+      "bytes": 1939,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/dirty-receipts-b.json",
+      "sha256": "1428182e06acd7dff504acb2e3e694928cd2b0e87ccbd915a2d34c3f0c3c35b5"
+    },
+    {
+      "bytes": 6158,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/fixture/config-history/v2-00000000000000000001-1792073678-ea0cab279b1d2c88a209f446932be72176fe45e6a763cdf5b1d6c5952576ecc2.json",
+      "sha256": "1d71a325cb858a23bea7b42530b407460f66652279ae9506e2bd2f6353b2596e"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/fixture/config-last-persist",
+      "sha256": "3ca7043d339e7bd6eac3cea045a91ac1499ef687db6a4fd9b8d8c7b77de1f455"
+    },
+    {
+      "bytes": 2345,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/fixture/config.toml",
+      "sha256": "786e0fb48092955256fe99db6dfba0a2c78636eedccd8eb08a90f7ab6b35391d"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/fixture/gr-restart.toml",
+      "sha256": "553f34ae5c1c59c158308cf45510e3fd6a10c8c14192a8202fbb6095131fc684"
+    },
+    {
+      "bytes": 198,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/fixture/member.rpol",
+      "sha256": "51f29a6d4585fdbd2cafe9457b45b94f9917d3bc5458ddf1f93021e7bcd038ab"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/fixture.sha256.json",
+      "sha256": "2dbaa32d17be007c2fcd765c1d2d53aef145d726b54d2e59238be0f7cb0c16c5"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/harness-owner.json",
+      "sha256": "f8676091257d689bd17f5b82620a7a3d08dc63b5c939eeee640e2c2dfd20f9ae"
+    },
+    {
+      "bytes": 17473,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/harness.log",
+      "sha256": "38dd99b163500b7c36b76c92d7b6282aa57d1d7bebd79d225842e5e8e48524c3"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 563261,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/memory.csv",
+      "sha256": "fc9d96a49d6ca9cf05388aaa2af385a314d8f94cfd1826f6249635b06f19df47"
+    },
+    {
+      "bytes": 122823,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/metrics-before-a.prom",
+      "sha256": "cb85186dc15c2d73f5aa1feb7bc2e71db47763951ebce6fbb8df8112a4557b89"
+    },
+    {
+      "bytes": 121723,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/metrics-before-b.prom",
+      "sha256": "cfd818c00ca48869b4fbcd90ed52648ca9940aa1e5445d35ddd5c098d881ffc7"
+    },
+    {
+      "bytes": 121723,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/metrics-initial.prom",
+      "sha256": "4187ec8f33fbc1c7316b98f4132a0bb68ced0ef4529acb7faf4e5ca5d198d77e"
+    },
+    {
+      "bytes": 122881,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/metrics-paused-a.prom",
+      "sha256": "09e63005cfe8c3e9946c8c0f22994458aa4a0a6568b17b83325e67b47fe604a9"
+    },
+    {
+      "bytes": 122843,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/metrics-paused-b.prom",
+      "sha256": "efa3230cd0910ca1a6d826723150893d3023a82b6087428c2ae67ec9ae2f7343"
+    },
+    {
+      "bytes": 122829,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/metrics-settled-a.prom",
+      "sha256": "9f0881625186dc0d5087128db1698210fc08ca40b9600ae84cf23a5aa38c5fcc"
+    },
+    {
+      "bytes": 122824,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/metrics-settled-b.prom",
+      "sha256": "08fd947a2cd24bab38751195a8174242afbeffd4208d920913606338eb4cbf28"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76068,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/neighbors-paused-a.json",
+      "sha256": "cfabc223cbb0e405ffbe1939c4729f510a8baf8fb2e5083a49367bb54444e012"
+    },
+    {
+      "bytes": 76065,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/neighbors-paused-b.json",
+      "sha256": "ffdb765bc4e03d056a204c0b11d1ad3cf61edbc6ce3e2c6c7d6c74f0227002d2"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/neighbors-settled-a.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/neighbors-settled-b.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 202,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/ordinary-snapshot-failures.jsonl",
+      "sha256": "4fd1766d1147e1d2eb42fceb4010198874c1d6c938469d9a849fb32cae88b896"
+    },
+    {
+      "bytes": 8489,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/result.json",
+      "sha256": "a97df5c6cbe3de39246bfb85fc94e188a490e3675b1aa718589e61c61efef919"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/sampler.log",
+      "sha256": "75ea49a7cc258da5e726da3bc3e0056a106d0b5e0d45e55dedab205b26aa95aa"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/source-initial.json",
+      "sha256": "5e38af9571c2e2b3d7ad40f045049ca5cd2cb345b2a5e12ffe0c437027366acd"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/source-settled-a.json",
+      "sha256": "519e686715f4f8a752d61f2366592f491b371fedddd9782ff9b5aca4585a7e9f"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/leg-5-candidate/source-settled-b.json",
+      "sha256": "c6e4414e1d9aae1c1653c1bae016d736abeb4964fd3ec1e96e216c5ebe708005"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 468,
+      "cell": "full-uc-no-refusal",
+      "path": "campaign/verdict.json",
+      "sha256": "1d872c81f9817d99ee9c8eb343ba70bce2499133e1c801ccdb469468b03ecef7"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "driver-invocation.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "bytes": 1898,
+      "cell": "full-uc-no-refusal",
+      "path": "driver.log",
+      "sha256": "d8cfb1af307348deb5c3d9b7946b326d528c46671171e67330b1d34f428d888d"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-no-refusal",
+      "path": "finalizer.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "bytes": 362,
+      "cell": "full-uc-no-refusal",
+      "path": "finalizer.log",
+      "sha256": "f73a51d2be9d2bd6bc454c58f2b85bb3a31b75db9cc9c439812b6a9dd968a998"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-uc-no-refusal",
+      "path": "preflight.log",
+      "sha256": "c3f3dcd5295a3e054dec9aa497e34a2bde666758fc3bf47b9b6ce69d8a42959c"
+    },
+    {
+      "bytes": 12889536,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rbgp",
+      "sha256": "e9ab92f2f35379c0da572238ef51a611d4584716823736a27ad522d748ffdba3"
+    },
+    {
+      "bytes": 30353664,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "c6505d344e8aa04d10e78ea60ab961c8d2d8f063e41130e32747903ca3378d84"
+    },
+    {
+      "bytes": 42225496,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "433d1e2f245eab3ff1c7ec2d623d96c46f23aea4a948cc10800adaf5a60b337d"
+    },
+    {
+      "bytes": 42225432,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "9c6da4b9195f763f07e1586ee9975a867deeeb81ba82ff924b583f794a79ff61"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/binaries.sha256",
+      "sha256": "370172bd73efe6ab157feb77fa37588348ae6a3c20e0959a7fb097053964fb0b"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/binary-validation.json",
+      "sha256": "7da9a3c03bd39f68b080c8a8adff18df7bdb52c731dc3e7de2ba645b6c22d4d8"
+    },
+    {
+      "bytes": 30001,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-candidate.log",
+      "sha256": "af74e8428fff69e8f40fdd17161f43944f2cc9e36be37c79beee8857d366d912"
+    },
+    {
+      "bytes": 13153,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-flat.log",
+      "sha256": "f16552eaf1798c741db0379fd54e2bfba64010f22649a33aa2a6f40822365ab0"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-harness.log",
+      "sha256": "7b394d01363881b87ef47d616f95e9ea0b8261954b53b697a8d08358fa776d34"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "cbab1538687b3d78f846d3fdbc77d62680551cc806af0c613d27705af0bfe775"
+    },
+    {
+      "bytes": 2629,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/campaign.json",
+      "sha256": "4c46dc12d9b64e2ad32da16dcf3c3ebdc08a9aa1f01f46c0a60ce3e8e7cd6169"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/campaign.sha256",
+      "sha256": "3cee67ae960dfcd88c6bee13ab3e74e2f8b4eb5c1667427197f218c9f9dba47c"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/candidate.sha",
+      "sha256": "23e4ef9a2528a3320e98a877255a362363805ce4a009c2d42eac5857be0d5d90"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/controller-0.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 582,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/controller-1.log",
+      "sha256": "526d20e13b09369ec159521f31cc314d41d4f85eddab0718a3a4ac71a4e7ede1"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 7462,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 62182,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 10983,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "be2e425d7841a67c75c5054fe37a68fe37f63fe7d2b061c6f0b28d287b6a1620"
+    },
+    {
+      "bytes": 8765289,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-operation-a.jsonl",
+      "sha256": "2b0d23fd53b37ac0fe8e967acc5fadba521d3e1299286972d042dbfc70ad66e9"
+    },
+    {
+      "bytes": 8739958,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-operation-b.jsonl",
+      "sha256": "26ee208d5252c2923a0b2b9e4eb7377d9e72f16c8e936b924651b2867b200eaa"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "6566c3cba841c7fbf20305f19c6fab3ffd797ff4e8c23c2eced86c75eb4e9164"
+    },
+    {
+      "bytes": 294277,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-window-a.jsonl",
+      "sha256": "17b4a46e9ee4e7d786457252e86121391bf9cab991f2c71125c1abc7fcb6e829"
+    },
+    {
+      "bytes": 18557,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-window-b.jsonl",
+      "sha256": "0a4382e7e778295b39a438f09380d2d87c5d7c0c6f51ec48d125195f7488ec08"
+    },
+    {
+      "bytes": 17675758,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "b1adb1885167448c7b8b5bc1aef673dc0e9b4b7c84e646fadf8483de4ae13aa4"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/dirty-receipts-a.json",
+      "sha256": "3570ab40e9d76e6cdbf636ebb75fef1186e6c9fa2d9f347318e272fa2cd7fd5a"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/dirty-receipts-b.json",
+      "sha256": "6d9316c835927e080124b69029d1c928ba39567d3d065b2cd921e1c24479e4c5"
+    },
+    {
+      "bytes": 9638,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-history/v2-00000000000000000001-1792072943-289fdb57e0bd8a1edb8e452652714e6deabcc306eafa4626963793a55379e16d.json",
+      "sha256": "f4a11d9953f3e52ae30c2de9ca9e3c02cf4854a3c9c485f0fc8bb0773ba28dec"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-last-persist",
+      "sha256": "017d3935a6c1888482a6e4845e41424783008d3e03746c2856e14bb49e279202"
+    },
+    {
+      "bytes": 4109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config.toml",
+      "sha256": "9ea31e46bef8cb5ace1407dd4e99fbbbf022d0031940a362e2e6665d626fa8dd"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/gr-restart.toml",
+      "sha256": "0712ebb6e6f63267e9b0119eddaadbc4e3db4aeede38f9fd46da857314c03d2c"
+    },
+    {
+      "bytes": 423,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/member.rpol",
+      "sha256": "124eaeb9ca95baf5ea8bbb7681cf28f69160b35ce1a16707948dd2d0f3b7d758"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "7b09b27a07db617fde20ec907a8e01f39d2f3b0363b06931d1337b0019df7638"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "4b6f22fc5ceef61c7e49ebccff7d760d66fc6dab0f3e89cefa660556a5bbab4b"
+    },
+    {
+      "bytes": 17648,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "ada39f8ff657ab2fbb2e91fe2700b64ce49911a435a13cadb38ca9313a8b1bce"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 567862,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "dabe43c5a71d54c2286a96486823ba7e4df365b9a58560b0c4182f0d18ccdfee"
+    },
+    {
+      "bytes": 182664,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-a.prom",
+      "sha256": "3b17a26634b3c5a5a8f0df7cbd4944128f80c1d352ac3bdaf37034207843dd83"
+    },
+    {
+      "bytes": 179155,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "d5b1697d24b2ed48d64d5917299c118bfce8de9b33736205cf17b4ad259a09d5"
+    },
+    {
+      "bytes": 179155,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "f9d5a1cfefe96f608ec28f6996bd599c81cbf8e446ee860152cf7eba89598f2f"
+    },
+    {
+      "bytes": 182929,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-paused-a.prom",
+      "sha256": "d993e7404ef672341c0bce746fe1c6d1a7ebd229570670c45dca34caea578e68"
+    },
+    {
+      "bytes": 182705,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "47b4e728ae6355cbf11ccec39b9777ef14fbdab5f28ebd2c256334be6821c9ed"
+    },
+    {
+      "bytes": 182845,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-settled-a.prom",
+      "sha256": "8fe647b5525e443bb4cdaa2cfb7b0de5995a82fbf70dcd92a88d9e0ca28a6e8a"
+    },
+    {
+      "bytes": 182664,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-settled-b.prom",
+      "sha256": "5a55d3731fe12fb1e710d8a6b06a42d4197d7e5b9c686b031cb4c7ea26fd7167"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 153194,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-paused-a.json",
+      "sha256": "0df6d213a0132f2e5622b5e48924d5b9a44d6cd29d719d6a9830ed5c2f89eddf"
+    },
+    {
+      "bytes": 153099,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "2479642b580ab0cac24a5ab6d8bc2bef0a7c1118eabc33a7d2717f5369cae0f5"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-settled-a.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-settled-b.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 404,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "28f3a6edff283234677230931f3e030d6d84c124d349398e3095514504319cdf"
+    },
+    {
+      "bytes": 8547,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/result.json",
+      "sha256": "e27c4a859913c87657cac5d227c74bc8b04e05a34c66116be390a8a9bff31a09"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "34ba06afdff0ae7e63514b854a1b2b48a10211a0f4ced3d348771583b64762f9"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "cc698a19b3e8e39295a97f3069fdccea36a7266d8a0b7c6075c5348941af3d7d"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-settled-a.json",
+      "sha256": "f844165dea9bb1620ead3509d73c2194dd9abd01b52ade9f0d89cbbff2a9eaf3"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-0-flat/source-settled-b.json",
+      "sha256": "c6e4414e1d9aae1c1653c1bae016d736abeb4964fd3ec1e96e216c5ebe708005"
+    },
+    {
+      "bytes": 87,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/cleanup-error.json",
+      "sha256": "2b290101c952f2cd074b5ea0d350152f62cb9347fdff149ce13b04584757ad62"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/config-check.log",
+      "sha256": "a64866b065f4cedd2c162a5ef65de45abd56e9633b5a7e3b5dabf39bd126f89f"
+    },
+    {
+      "bytes": 8759579,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-operation-a.jsonl",
+      "sha256": "0966146e33aa916628bd59108512f2a6d2696c637df25a3f995a6e013865ab72"
+    },
+    {
+      "bytes": 8762164,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-operation-b.jsonl",
+      "sha256": "239c380ebd4d7fa49bbd57447bb36152da0d7a851848a134d9c64890f31fba0e"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-owner.json",
+      "sha256": "aaa0aad191ccd1328578b54e1cc7c49d0abba068ad736deddbba92fd74e43628"
+    },
+    {
+      "bytes": 18557,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-window-a.jsonl",
+      "sha256": "79701cb035157f57158ec21ce3182b179a337003d6c5b2368927d043b8f2b496"
+    },
+    {
+      "bytes": 190317,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon-window-b.jsonl",
+      "sha256": "c128e47b42d00cb0de608b2eeb733d7b6930a91260950d5e00049b98643120a2"
+    },
+    {
+      "bytes": 17694123,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/daemon.log",
+      "sha256": "e6163c44f2ab526e5b273e014db9c246bbe440e1fe6d727c8f9a25f261c88946"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/dirty-receipts-a.json",
+      "sha256": "feb12b16d8e8b93d432823107d1cbd1bfc53379ce8d9f0506c53ceb4dada72e1"
+    },
+    {
+      "bytes": 3883,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/dirty-receipts-b.json",
+      "sha256": "8aca6fbda1cb7793dab29b52a9f16d2e4c3e59e88da093302ac83be9364a23d7"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/fixture.sha256.json",
+      "sha256": "c41d5b562e6f98d02af7f58ce607168973d3fc83d6799ae83e93d9356d749253"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness-owner.json",
+      "sha256": "45ae037f3cdefb2c643c4236ba5f15f5664294626b01e38e8bfe30ee17153c13"
+    },
+    {
+      "bytes": 22655,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness.log",
+      "sha256": "a84b4cb4f6475178946b6eb597bfc384b398d500da2d12a680b23ac766a75d66"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/harness.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 729555,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/memory.csv",
+      "sha256": "cd811bd83c7f5f300ea6ea3c308990d9c68a462250df4deeed77704a44db0590"
+    },
+    {
+      "bytes": 183076,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-before-a.prom",
+      "sha256": "daa2745abcd1db8f8c11b475e59ebda55c592300cfdd59ea99281f958951b84a"
+    },
+    {
+      "bytes": 179145,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-before-b.prom",
+      "sha256": "a00825210c067661080cc9e304eb7db79c3f13cdec2045d02d476aa22659c284"
+    },
+    {
+      "bytes": 179145,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-initial.prom",
+      "sha256": "a5cf77cea36a78c0c020d3e47a247a677ac456a7f7eaa94bc69084d727974c73"
+    },
+    {
+      "bytes": 183215,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-paused-a.prom",
+      "sha256": "a1bcdb3f959744ed6075c83d575de71295ad951ae262ac282b471e43518d9e2d"
+    },
+    {
+      "bytes": 183139,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-paused-b.prom",
+      "sha256": "ada543932bb4ed6f5f9460f5184dc5792de60edc6c44c1585ef1cb7ac2c6ad71"
+    },
+    {
+      "bytes": 183139,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-settled-a.prom",
+      "sha256": "c7533aeb5a9b5eba6873c1ac8f2abe0a0336d7eaccbb8550b5cac2690b30c303"
+    },
+    {
+      "bytes": 183076,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/metrics-settled-b.prom",
+      "sha256": "6fcaf790dbae8d615469da6b002f9e589c84306df574572cee5f3e3ecd319927"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 151615,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-paused-a.json",
+      "sha256": "3a520989902cdf5944a547ea358d1443001c14a1ba0ba96133e518895fa1acc8"
+    },
+    {
+      "bytes": 151511,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-paused-b.json",
+      "sha256": "7afc1cb9da4949c4469d8becb26828f12592581ac13d082abc1056cc5cc8057e"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-settled-a.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/neighbors-settled-b.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 8223,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/result.json",
+      "sha256": "96fd23e6ec3b618072583243ae84bb821170b55f8f13ef6a26ce3396cb1cbb65"
+    },
+    {
+      "bytes": 719,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/sampler.log",
+      "sha256": "a1a965f495dc4d3875f1837daf145b78cc5888288927c98ee03f9275f3a45715"
+    },
+    {
+      "bytes": 2107,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/source-initial.json",
+      "sha256": "cc698a19b3e8e39295a97f3069fdccea36a7266d8a0b7c6075c5348941af3d7d"
+    },
+    {
+      "bytes": 2109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/source-settled-a.json",
+      "sha256": "6d1e516a240056b043be7ed69372839f1ac307b82f04b258d652a35d1d3d803e"
+    },
+    {
+      "bytes": 2108,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/leg-1-candidate/source-settled-b.json",
+      "sha256": "29ae072619624d93378d3c59e77e62eb9fa03199da4c8a539856c9ca52aca08e"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "80fd2361a6aac7ed4c56b921de0860da7a0ab19a383786a8f5584cefa7b22f61"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-uc-cap-pressure",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 301,
+      "cell": "full-uc-cap-pressure",
+      "path": "driver.log",
+      "sha256": "43092f0a9e0ac21869fdee4b81208a5b5624271c80f8a87ce135f2dab359d3ff"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-uc-cap-pressure",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-uc-cap-pressure",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-uc-cap-pressure",
+      "path": "preflight.log",
+      "sha256": "89f36b2fd193690cf71039ce2423398c91e48808a64fde9bb6b0a74dbacf6fed"
+    },
+    {
+      "bytes": 12889536,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rbgp",
+      "sha256": "70bd494d303685a3371cbaa6b00bd2b9d7a5b296eb7de235cbc112c9a9610c50"
+    },
+    {
+      "bytes": 30388352,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "417d66f89044a6716ded248a240acef15aff6ec95230b7c9ed7d0108c2cc386e"
+    },
+    {
+      "bytes": 42225208,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "5b39a916b79cdce9eb474a466af6e8ad1c1c5feab729967de5a1ff9fcc9add08"
+    },
+    {
+      "bytes": 42225144,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "ae1b11047e29bbb74e162200c7963d13f885f1e41c0923d06d076beda0f35917"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/binaries.sha256",
+      "sha256": "ae806ee827d3dabe6211a0b3a2d7031fc7d28b16287fe2c76ea24d158002767c"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/binary-validation.json",
+      "sha256": "7c52682e31458d29d8405a8c17d237cc43b485b72e6e83e41f351e76a0188ee6"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-candidate.log",
+      "sha256": "490670ea35295a9899b1f07d17bf6a440a3c8155c78374be2021da7f37dfd552"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-flat.log",
+      "sha256": "1f76d8348a2861f746264e52b8bd1d892bdb839d5eaf1b90ebf1beaf366dd803"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-harness.log",
+      "sha256": "8506ec01cb47b42ac9451da717abff9d4f25f6a616323a10298f8345ae54602c"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "4ffa04c608b8960c163081c0d81b274974c5047c3d69cfb435e62fc54c86ab78"
+    },
+    {
+      "bytes": 2628,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/campaign.json",
+      "sha256": "fd420ddff9534d2b33f777ddba859ab811794f913542e00113a5ddaa4035e362"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/campaign.sha256",
+      "sha256": "ec7647ccda54e85b6b60959c89f8c54065d14a9947335aa4f9bebdc5e6f2dc84"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/candidate.sha",
+      "sha256": "23e4ef9a2528a3320e98a877255a362363805ce4a009c2d42eac5857be0d5d90"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 1365,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/controller-0.log",
+      "sha256": "b8b66e43810ca1549f6d9606cffdeebb8ef92ed225771a4ed7c47e64f3f33511"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 7462,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 62182,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 10983,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 87,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/cleanup-error.json",
+      "sha256": "e2f5543d1d07c50776118cd41eb9aa75f282871b72354747aecb165b98bdd12a"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "bc8ac408c23c684bee7e700ca5089a2d8977f50095b6b46e14a48c04de534508"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "f1ed715d69b695de0b9dde1c9c09dbc0ce03d48c4aaf675ad979e0fb542487a7"
+    },
+    {
+      "bytes": 13691657,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "f0be25c782af35e4f50b0fc86856b0f7b9a8938d0109df2ccbde7cc9ab59abea"
+    },
+    {
+      "bytes": 837,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/failure.json",
+      "sha256": "92b5ee45b98b769b65dc168cd2f1f053a0dd486ef46cd52d3cd1dda11489ebfe"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "a99cb0f57109c1b38790ce21337f866dbc8b5d64ca0fff439c576ea7b1e23c5b"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "a2a749eda33bf81abe1f8cef06d27c671fce376e4d0f7fca170f1971d330d7e1"
+    },
+    {
+      "bytes": 32853,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "648a33d4f3d08b0c5c0e6c111b53bdf07a9118265492f2c02906cabdba842603"
+    },
+    {
+      "bytes": 70,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "8d1ab919391b9f4409d602497133a6fe6af4c3d497efa6c00b7008615944a49f"
+    },
+    {
+      "bytes": 1269097,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "ccd5b4bf7b7cd29bc5f7e918bb5c85c4e3bbaf80a7a9e4cfecddd58f5e6016cb"
+    },
+    {
+      "bytes": 125123,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "88ad873166efbd5e54beb665f217017cb3473e9a21cfa49f42560ac8f0d2788d"
+    },
+    {
+      "bytes": 125123,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "0ddf9ee548038c8e72558c0868c7b6308a5ad11d530a0aacc4d77a2a52e8112c"
+    },
+    {
+      "bytes": 126117,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "50ea850a686fb5d6ec0b867344cf498af5a1f30d2ae779b1d4cd3eb1948909c3"
+    },
+    {
+      "bytes": 1195,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "7c63513b14630b91a1279f3b4461c93fedad636e88d29ec382039d517146d498"
+    },
+    {
+      "bytes": 76241,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "1598c6920d8eba759cd57b4effa3f3e7e0a6e4979f7bacac488ad30e45be1fe7"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 719,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "7d2400c2aa1ea5a110bb84a9cf98229d9a8feb7970ee5fc8741276e93491edbb"
+    },
+    {
+      "bytes": 2121,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "7a9b8cea5b2a24b9d02520b1450865073b2f3505bd9c56a22d2002874238ba5d"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "2c8d9b29333ce9b8a3a596988db78496ebee29f260c8d7a05363063a3aaf02cd"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-vpn-no-refusal",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 1998,
+      "cell": "full-vpn-no-refusal",
+      "path": "driver.log",
+      "sha256": "c01edb9ff1c03f68d4b52d76255d0ae040e5042c20098471bc662ad360741445"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-no-refusal",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-vpn-no-refusal",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-vpn-no-refusal",
+      "path": "preflight.log",
+      "sha256": "374bb22328c79abf959ffcd933cbd583c7b1875d6b9b93d7442b6c8a7ebe4ee0"
+    },
+    {
+      "bytes": 12889536,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rbgp",
+      "sha256": "802646b5fbefd68986699378383d8accc82c4acb13915800e89dc0bb9cf0723e"
+    },
+    {
+      "bytes": 30388368,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/reloadstall",
+      "sha256": "6f1fe5d7846e75ea8c3d578ba813eb812da2f773552ce06171a14c84871a8143"
+    },
+    {
+      "bytes": 42225208,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rustbgpd-candidate",
+      "sha256": "41f0f1dd7949ea98be2617508b4f59e1bc3bbc55d432d45f5beb11f1bd4c1797"
+    },
+    {
+      "bytes": 42225144,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/bin/rustbgpd-flat",
+      "sha256": "1fb0a5efa6156921d4b27ea7454f897c9b5ae528a416c36771e7b2e3a55e2008"
+    },
+    {
+      "bytes": 594,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/binaries.sha256",
+      "sha256": "60b81962dc0c89da99dc1567762b8221ba4c62e95a68ce4531241e634fb6e933"
+    },
+    {
+      "bytes": 335,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/binary-validation.json",
+      "sha256": "5678c5c2c508ed45f1c69ad165db3d43241f0207e3a24d20dd55267d3fa2138f"
+    },
+    {
+      "bytes": 30002,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-candidate.log",
+      "sha256": "5b7026f362918f9f6cd21e824acd532f192a20140b48e0fda9ccca1592cc65ee"
+    },
+    {
+      "bytes": 13154,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-flat.log",
+      "sha256": "5ff7a759b0c235ff137eb18de19420e30c8016d38d0e7fdfca5704c9260d3286"
+    },
+    {
+      "bytes": 1555,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-harness.log",
+      "sha256": "f095a6b6ec79cc55c2334116d3599a5f3575b8b9086c12b151b6fab128a174cb"
+    },
+    {
+      "bytes": 2462,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/build-rbgp.log",
+      "sha256": "5b0ae773d5173210543c5c06f7b2db61c1373b6da0acee75de62357160136894"
+    },
+    {
+      "bytes": 2630,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/campaign.json",
+      "sha256": "d852d9708b4e2c7e5e73f23a4ba3a4e9e27b59012aacf57caf826c3e2916a8b6"
+    },
+    {
+      "bytes": 65,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/campaign.sha256",
+      "sha256": "934f463bbacf3a9e0c753cce392eec2dc9d929508b0900029e738787a1aa63c0"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/candidate.sha",
+      "sha256": "23e4ef9a2528a3320e98a877255a362363805ce4a009c2d42eac5857be0d5d90"
+    },
+    {
+      "bytes": 140854,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/capture-source.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 36,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/cargo-version.txt",
+      "sha256": "1f88eaf7fe1aaec83184752cf4c944cd22f00184136ff36a3e4c318cc60ef566"
+    },
+    {
+      "bytes": 71,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/controller-0.log",
+      "sha256": "e929e0330bc648eaecfe511c610016b3c942770d1f8f41f2ab3251145bf313c7"
+    },
+    {
+      "bytes": 534,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/derivation.json",
+      "sha256": "85dc6391be5c98afa798b3200e97de259514dd54ade0a88fd53d30d83cfdfaa9"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/driver.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 140840,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/flat-control-source.rs",
+      "sha256": "4f8411ddbddac7025006e26247baf62b7bd3b8b992242b1e9f95827749287c0c"
+    },
+    {
+      "bytes": 544,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/flat-control.patch",
+      "sha256": "61350361bd1386c916dc2895dddf34ef9db687197bebdbe092fbf6c4c6ec56fc"
+    },
+    {
+      "bytes": 58772,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 70699,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 7462,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 317080,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 62182,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-instrumentation/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 3129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 561,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 10983,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 3078,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/frozen-support/tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 41,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/config-check.log",
+      "sha256": "ddf43b72b6fbb8d3f611be23927ef216f5f00fd65a29af48f1e9ffa1ea3f7fa3"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon-owner.json",
+      "sha256": "c6e67749e8f3905394aaa295e5f98ab6e8b8f0574bcae1f1aecc32bbc73afe11"
+    },
+    {
+      "bytes": 18869707,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/daemon.log",
+      "sha256": "00b7fc35170e40424697c0d5280bba3733e754d7a6c8db95009c9e319bbe5ad2"
+    },
+    {
+      "bytes": 837,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/failure.json",
+      "sha256": "92b5ee45b98b769b65dc168cd2f1f053a0dd486ef46cd52d3cd1dda11489ebfe"
+    },
+    {
+      "bytes": 9938,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-history/v2-00000000000000000001-1792073226-85a2198f2c857c5a53dcf26b585fe99ad2a428ed86dd7a4ad7b55f68a9ad61c5.json",
+      "sha256": "e9c39d9dc35c0fe8366395ac809f8a450b4ae2ed4dabc8af3fa098bdfa192862"
+    },
+    {
+      "bytes": 11,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config-last-persist",
+      "sha256": "085fa11f7ad7d1eed93620ef5a42ab3630ddec56014a1534cde1a305eff890ba"
+    },
+    {
+      "bytes": 4409,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/config.toml",
+      "sha256": "703107a2a6cc8b71bc83daabbaaea41514a69eac89847b42d468f2a2c3859281"
+    },
+    {
+      "bytes": 169125,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/generation.list",
+      "sha256": "1b95bbc68f8ec1198ee6e0d0244630ad96c6fd10c480c83b3ad4675b1e346b8f"
+    },
+    {
+      "bytes": 229,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/gr-restart.toml",
+      "sha256": "17f54245e9b311ff051517d43380ad60b430ec6f89ffa4fb17297cb75350adce"
+    },
+    {
+      "bytes": 367,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture/member.rpol",
+      "sha256": "79ddcdd2d0e3b9cc1387e3b4bc7171f916d29aad08e1ea718e3360452f8dbb9a"
+    },
+    {
+      "bytes": 262,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/fixture.sha256.json",
+      "sha256": "0f4ba032fa97849eaed7964db67599a51f765619f73bd3e2f9a08c2be35ceafd"
+    },
+    {
+      "bytes": 129,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness-owner.json",
+      "sha256": "6f42032662f011b979ebc7f70bb63493d43052652b70af30fb499d1e45cd1bbc"
+    },
+    {
+      "bytes": 19135,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.log",
+      "sha256": "9113e8a7dc0eacf4d4422b350dcfd5afc5b0fcd865e262e71fc900712d6bc092"
+    },
+    {
+      "bytes": 70,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/harness.stderr",
+      "sha256": "8d1ab919391b9f4409d602497133a6fe6af4c3d497efa6c00b7008615944a49f"
+    },
+    {
+      "bytes": 928804,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/memory.csv",
+      "sha256": "1b67bdb9b4533f634bbe80c5f7c0f07cf72f8e3c62509a30bafc9d4b269d0571"
+    },
+    {
+      "bytes": 185951,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-before-b.prom",
+      "sha256": "87af5a5f35ac243bf0ccf1442ed5bad24e84d5ebe260244eb833367198c6c573"
+    },
+    {
+      "bytes": 185951,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-initial.prom",
+      "sha256": "06f60193a6cb5afddd96541027a51a69d7b19bb80f2238471013bc2f7b457ab9"
+    },
+    {
+      "bytes": 189976,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/metrics-paused-b.prom",
+      "sha256": "091978960e1d793ca1a736eb0bcfffbea37ee74b2f84991bdb5fe46757da9132"
+    },
+    {
+      "bytes": 2395,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-initial.json",
+      "sha256": "ccd3cf2bd7bad03703ce806fbcd541059081e3fc8148c6dda2ef8d0deb16e805"
+    },
+    {
+      "bytes": 153494,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/neighbors-paused-b.json",
+      "sha256": "b3a37f7ce6435e2e28b57cf520dee219b4c5c8bf6578b09cf29b1e023a0c464e"
+    },
+    {
+      "bytes": 0,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/ordinary-snapshot-failures.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 159,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/sampler.log",
+      "sha256": "0f6f328aa7f7683eed5efdb5fac142b4d5bc93e877a853d174271182a9d75e61"
+    },
+    {
+      "bytes": 2121,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/leg-0-flat/source-initial.json",
+      "sha256": "f3cb95470ffb768347fdfa713e1642e145940cc5e6464a410c47f836bc221782"
+    },
+    {
+      "bytes": 196,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/rustc-version.txt",
+      "sha256": "b569b0c98ea3133c7252b4b8ea6b39b7b353813df0dd5f5c412c355691424112"
+    },
+    {
+      "bytes": 59,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/scratch-retained.txt",
+      "sha256": "b46b4baf607fe7ebfbd0c7510b4ea0432005c3ee0d6dfd0424a14e2ab584c97c"
+    },
+    {
+      "bytes": 109,
+      "cell": "full-vpn-cap-pressure",
+      "path": "campaign/verdict.json",
+      "sha256": "ca2aa591d43fc54cd21e04859e647089129dbce83918c993bbeefd1ccf6a99e4"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "driver-invocation.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 2559,
+      "cell": "full-vpn-cap-pressure",
+      "path": "driver.log",
+      "sha256": "c3b4cbc76e2c60bfed48844f17cc098dd6e881cd7084cb274357593d9f0af51c"
+    },
+    {
+      "bytes": 2,
+      "cell": "full-vpn-cap-pressure",
+      "path": "finalizer.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "bytes": 101,
+      "cell": "full-vpn-cap-pressure",
+      "path": "finalizer.log",
+      "sha256": "2146e3d1643b11ba6324fe41d1b143ab32c5b52622270b10f2da1c090073a1b9"
+    },
+    {
+      "bytes": 89,
+      "cell": "full-vpn-cap-pressure",
+      "path": "preflight.log",
+      "sha256": "00b3a166564aadeff4317a33b2405341e010c622412ba424bfee3bb2ae07c6df"
+    }
+  ],
+  "raw_roster_sha256": "6f83d2b79ab9c48ba7366a1142f847e16356c9df8d4eed5c13963dd0b91187ce",
+  "release_candidate_soak_qualified": false,
+  "resource_scope": "Only seven completed validated legs contribute extrema. No qualifying candidate pressure/VPN resource boundary. Logical admitted/retained charge and attempted overlapping reservation peak are not allocated bytes, per-receiver RSS or whole-daemon RSS attribution.",
+  "retained_zip_bytes": 205421237,
+  "run": {
+    "conclusion": "failure",
+    "event": "workflow_dispatch",
+    "head_branch": "test/recovery-mass-dirty-qualification",
+    "head_sha": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe",
+    "html_url": "https://github.com/lance0/rustbgpd/actions/runs/38744510988",
+    "id": 38744510988,
+    "run_attempt": 1,
+    "status": "completed"
+  },
+  "schema": "rustbgpd.hosted-mass-dirty-attempt.v4",
+  "scoped_uc_no_refusal": {
+    "actual_completion_statuses": {
+      "finalizer": "0",
+      "job": "success",
+      "marker": "0",
+      "outer": "0"
+    },
+    "bar": "median and worst candidate trigger-to-fleet-fold <= flat*1.10 +0.030 seconds",
+    "cell_shape": {
+      "cohort": "no-refusal",
+      "complete_legs": 6,
+      "complete_operations": 12,
+      "ipv4_keys": 1000000,
+      "ipv6_keys": 230000,
+      "receivers": 12,
+      "repetitions": 3
+    },
+    "convergence_scope": "includes ingress, cold capture, held-witness collection, actual snapshot retries and remote fold; not attributed CPU/allocator speed",
+    "convergence_values_seconds": {
+      "candidate": [
+        42.38836286499986,
+        43.213969573999975,
+        44.42856227900006,
+        43.396075567000025,
+        43.07675147400005,
+        43.43151726699989
+      ],
+      "flat": [
+        45.79673366399993,
+        44.345500982999965,
+        45.670239135999964,
+        46.8364144520001,
+        43.890784116000304,
+        45.33800684000016
+      ]
+    },
+    "eligible_leg_details": [
+      {
+        "arm": "flat",
+        "daemon_cgroup_peak_bytes": 2319245312,
+        "daemon_exit": 0,
+        "daemon_sample_peak_bytes": 2319245312,
+        "daemon_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "eligible": true,
+        "harness_cgroup_peak_bytes": 38989824,
+        "harness_exit": 0,
+        "harness_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "index": 0,
+        "max_probe_start_gap_seconds": 1.0009094819999973,
+        "max_readiness_elapsed_seconds": 0.024632991,
+        "operations": [
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "b",
+            "held_charge": {
+              "bytes": 472322272,
+              "entries": 14760000,
+              "peak_bytes": 472322296
+            },
+            "own_log_byte_range": {
+              "end": 8789748,
+              "resume": 8780215,
+              "start": 75062
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0009094819999973,
+              "sample_count": 47
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 472322296
+            },
+            "trigger_to_fold_seconds": 45.79673366399993,
+            "withdrawals_cumulative": 0
+          },
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "a",
+            "held_charge": {
+              "bytes": 472322272,
+              "entries": 14760000,
+              "peak_bytes": 472322296
+            },
+            "own_log_byte_range": {
+              "end": 17500283,
+              "resume": 17490750,
+              "start": 8789748
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0007571950000056,
+              "sample_count": 46
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 472322296
+            },
+            "trigger_to_fold_seconds": 44.345500982999965,
+            "withdrawals_cumulative": 0
+          }
+        ],
+        "owner_binary_sha256": {
+          "daemon": "c333524444ee0335460ed4cdce2770d8bc0eff9d35533a0f5b440c157f38b3fa",
+          "harness": "dd9fff0f2cbeb73b8f3265bfd2fdbe3938b66767a26aa6714fe9a9823aabd2d9"
+        },
+        "readiness_samples": 92,
+        "snapshot_failure_counts": {
+          "by_phase": {
+            "held-b": {
+              "127.1.0.2": 1
+            }
+          },
+          "total": 1
+        }
+      },
+      {
+        "arm": "candidate",
+        "daemon_cgroup_peak_bytes": 1972015104,
+        "daemon_exit": 0,
+        "daemon_sample_peak_bytes": 1972015104,
+        "daemon_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "eligible": true,
+        "harness_cgroup_peak_bytes": 38739968,
+        "harness_exit": 0,
+        "harness_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "index": 1,
+        "max_probe_start_gap_seconds": 1.0010055900002044,
+        "max_readiness_elapsed_seconds": 0.02192178,
+        "operations": [
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "b",
+            "held_charge": {
+              "bytes": 46127368,
+              "entries": 14760000,
+              "peak_bytes": 46127392
+            },
+            "own_log_byte_range": {
+              "end": 8788182,
+              "resume": 8569599,
+              "start": 75062
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0010055900002044,
+              "sample_count": 44
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 46127392
+            },
+            "trigger_to_fold_seconds": 42.38836286499986,
+            "withdrawals_cumulative": 0
+          },
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "a",
+            "held_charge": {
+              "bytes": 46127368,
+              "entries": 14760000,
+              "peak_bytes": 46127392
+            },
+            "own_log_byte_range": {
+              "end": 17502853,
+              "resume": 17493320,
+              "start": 8788182
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0009929430000284,
+              "sample_count": 45
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 46127392
+            },
+            "trigger_to_fold_seconds": 43.213969573999975,
+            "withdrawals_cumulative": 0
+          }
+        ],
+        "owner_binary_sha256": {
+          "daemon": "8815bb507a865e4f6629b53fb76e0a80711e0cf339f294e1f0b1a085dc1e10b2",
+          "harness": "dd9fff0f2cbeb73b8f3265bfd2fdbe3938b66767a26aa6714fe9a9823aabd2d9"
+        },
+        "readiness_samples": 87,
+        "snapshot_failure_counts": {
+          "by_phase": {},
+          "total": 0
+        }
+      },
+      {
+        "arm": "candidate",
+        "daemon_cgroup_peak_bytes": 1952243712,
+        "daemon_exit": 0,
+        "daemon_sample_peak_bytes": 1952243712,
+        "daemon_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "eligible": true,
+        "harness_cgroup_peak_bytes": 38629376,
+        "harness_exit": 0,
+        "harness_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "index": 2,
+        "max_probe_start_gap_seconds": 1.0010711669997363,
+        "max_readiness_elapsed_seconds": 0.02064067,
+        "operations": [
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "b",
+            "held_charge": {
+              "bytes": 46127368,
+              "entries": 14760000,
+              "peak_bytes": 46127392
+            },
+            "own_log_byte_range": {
+              "end": 8792318,
+              "resume": 8782785,
+              "start": 75062
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.000861420000092,
+              "sample_count": 46
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 46127392
+            },
+            "trigger_to_fold_seconds": 44.42856227900006,
+            "withdrawals_cumulative": 0
+          },
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "a",
+            "held_charge": {
+              "bytes": 46127368,
+              "entries": 14760000,
+              "peak_bytes": 46127392
+            },
+            "own_log_byte_range": {
+              "end": 17508023,
+              "resume": 17498490,
+              "start": 8792318
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0010711669997363,
+              "sample_count": 46
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 46127392
+            },
+            "trigger_to_fold_seconds": 43.396075567000025,
+            "withdrawals_cumulative": 0
+          }
+        ],
+        "owner_binary_sha256": {
+          "daemon": "8815bb507a865e4f6629b53fb76e0a80711e0cf339f294e1f0b1a085dc1e10b2",
+          "harness": "dd9fff0f2cbeb73b8f3265bfd2fdbe3938b66767a26aa6714fe9a9823aabd2d9"
+        },
+        "readiness_samples": 90,
+        "snapshot_failure_counts": {
+          "by_phase": {},
+          "total": 0
+        }
+      },
+      {
+        "arm": "flat",
+        "daemon_cgroup_peak_bytes": 2309500928,
+        "daemon_exit": 0,
+        "daemon_sample_peak_bytes": 2309500928,
+        "daemon_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "eligible": true,
+        "harness_cgroup_peak_bytes": 40964096,
+        "harness_exit": 0,
+        "harness_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "index": 3,
+        "max_probe_start_gap_seconds": 1.0008830299998408,
+        "max_readiness_elapsed_seconds": 0.045264656,
+        "operations": [
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "b",
+            "held_charge": {
+              "bytes": 472322272,
+              "entries": 14760000,
+              "peak_bytes": 472322296
+            },
+            "own_log_byte_range": {
+              "end": 8790782,
+              "resume": 8781249,
+              "start": 75062
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0008830299998408,
+              "sample_count": 47
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 472322296
+            },
+            "trigger_to_fold_seconds": 45.670239135999964,
+            "withdrawals_cumulative": 0
+          },
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "a",
+            "held_charge": {
+              "bytes": 472322272,
+              "entries": 14760000,
+              "peak_bytes": 472322296
+            },
+            "own_log_byte_range": {
+              "end": 17505453,
+              "resume": 17221330,
+              "start": 8790782
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.00081191199979,
+              "sample_count": 49
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 472322296
+            },
+            "trigger_to_fold_seconds": 46.8364144520001,
+            "withdrawals_cumulative": 0
+          }
+        ],
+        "owner_binary_sha256": {
+          "daemon": "c333524444ee0335460ed4cdce2770d8bc0eff9d35533a0f5b440c157f38b3fa",
+          "harness": "dd9fff0f2cbeb73b8f3265bfd2fdbe3938b66767a26aa6714fe9a9823aabd2d9"
+        },
+        "readiness_samples": 94,
+        "snapshot_failure_counts": {
+          "by_phase": {
+            "held-b": {
+              "127.1.0.3": 1
+            }
+          },
+          "total": 1
+        }
+      },
+      {
+        "arm": "flat",
+        "daemon_cgroup_peak_bytes": 2345836544,
+        "daemon_exit": 0,
+        "daemon_sample_peak_bytes": 2345836544,
+        "daemon_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "eligible": true,
+        "harness_cgroup_peak_bytes": 38760448,
+        "harness_exit": 0,
+        "harness_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "index": 4,
+        "max_probe_start_gap_seconds": 1.0009438259999115,
+        "max_readiness_elapsed_seconds": 0.029737712,
+        "operations": [
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "b",
+            "held_charge": {
+              "bytes": 472322272,
+              "entries": 14760000,
+              "peak_bytes": 472322296
+            },
+            "own_log_byte_range": {
+              "end": 8790782,
+              "resume": 8781249,
+              "start": 75062
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0009438259999115,
+              "sample_count": 46
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 472322296
+            },
+            "trigger_to_fold_seconds": 43.890784116000304,
+            "withdrawals_cumulative": 0
+          },
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "a",
+            "held_charge": {
+              "bytes": 472322272,
+              "entries": 14760000,
+              "peak_bytes": 472322296
+            },
+            "own_log_byte_range": {
+              "end": 17508570,
+              "resume": 17499037,
+              "start": 8790782
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0009438259999115,
+              "sample_count": 47
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 472322296
+            },
+            "trigger_to_fold_seconds": 45.33800684000016,
+            "withdrawals_cumulative": 0
+          }
+        ],
+        "owner_binary_sha256": {
+          "daemon": "c333524444ee0335460ed4cdce2770d8bc0eff9d35533a0f5b440c157f38b3fa",
+          "harness": "dd9fff0f2cbeb73b8f3265bfd2fdbe3938b66767a26aa6714fe9a9823aabd2d9"
+        },
+        "readiness_samples": 91,
+        "snapshot_failure_counts": {
+          "by_phase": {
+            "held-a": {
+              "127.1.0.3": 1
+            },
+            "held-b": {
+              "127.1.0.2": 1
+            }
+          },
+          "total": 2
+        }
+      },
+      {
+        "arm": "candidate",
+        "daemon_cgroup_peak_bytes": 1954738176,
+        "daemon_exit": 0,
+        "daemon_sample_peak_bytes": 1954738176,
+        "daemon_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "eligible": true,
+        "harness_cgroup_peak_bytes": 39006208,
+        "harness_exit": 0,
+        "harness_swap_oom": {
+          "events": {
+            "high": "0",
+            "low": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_group_kill": "0",
+            "oom_kill": "0"
+          },
+          "swap_current": 0,
+          "swap_peak": 0
+        },
+        "index": 5,
+        "max_probe_start_gap_seconds": 1.0010197810001955,
+        "max_readiness_elapsed_seconds": 0.037129888,
+        "operations": [
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "b",
+            "held_charge": {
+              "bytes": 46127368,
+              "entries": 14760000,
+              "peak_bytes": 46127392
+            },
+            "own_log_byte_range": {
+              "end": 8789748,
+              "resume": 8780215,
+              "start": 75062
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.000707207999767,
+              "sample_count": 45
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 46127392
+            },
+            "trigger_to_fold_seconds": 43.07675147400005,
+            "withdrawals_cumulative": 0
+          },
+          {
+            "fallback_before": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "fallback_deltas": {
+              "allocation_failure": 0,
+              "daemon_limit": 0,
+              "missing_proof": 0,
+              "peer_limit": 0
+            },
+            "generation": "a",
+            "held_charge": {
+              "bytes": 46127368,
+              "entries": 14760000,
+              "peak_bytes": 46127392
+            },
+            "own_log_byte_range": {
+              "end": 17505453,
+              "resume": 17495920,
+              "start": 8789748
+            },
+            "readiness_coverage": {
+              "max_start_gap_seconds": 1.0010197810001955,
+              "sample_count": 45
+            },
+            "settled_charge": {
+              "bytes": 96,
+              "entries": 0,
+              "peak_bytes": 46127392
+            },
+            "trigger_to_fold_seconds": 43.43151726699989,
+            "withdrawals_cumulative": 0
+          }
+        ],
+        "owner_binary_sha256": {
+          "daemon": "8815bb507a865e4f6629b53fb76e0a80711e0cf339f294e1f0b1a085dc1e10b2",
+          "harness": "dd9fff0f2cbeb73b8f3265bfd2fdbe3938b66767a26aa6714fe9a9823aabd2d9"
+        },
+        "readiness_samples": 88,
+        "snapshot_failure_counts": {
+          "by_phase": {
+            "held-b": {
+              "127.1.0.2": 1
+            }
+          },
+          "total": 1
+        }
+      }
+    ],
+    "leg_order": [
+      "flat",
+      "candidate",
+      "candidate",
+      "flat",
+      "flat",
+      "candidate"
+    ],
+    "ordinary_snapshot_retries": {
+      "candidate": 1,
+      "flat": 4
+    },
+    "readiness": {
+      "HTTP_status": 200,
+      "complete_operation_brackets": 12,
+      "max_recorded_elapsed_seconds": 0.045264656,
+      "max_recorded_start_gap_seconds": 1.0010711669997363,
+      "samples": 542
+    },
+    "resource_extrema_by_arm": {
+      "candidate": {
+        "attempted_reservation_peak_bytes_max": 46127392,
+        "complete_legs": 3,
+        "daemon_cgroup_peak_bytes_max": 1972015104,
+        "harness_cgroup_peak_bytes_max": 39006208,
+        "held_logical_recovery_bytes_max": 46127368,
+        "held_recovery_entries_max": 14760000
+      },
+      "flat": {
+        "attempted_reservation_peak_bytes_max": 472322296,
+        "complete_legs": 3,
+        "daemon_cgroup_peak_bytes_max": 2345836544,
+        "harness_cgroup_peak_bytes_max": 40964096,
+        "held_logical_recovery_bytes_max": 472322272,
+        "held_recovery_entries_max": 14760000
+      }
+    },
+    "source": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe",
+    "statistics": {
+      "max": {
+        "absolute_bar_seconds": 51.55005589720012,
+        "candidate_seconds": 44.42856227900006,
+        "flat_seconds": 46.8364144520001,
+        "passes": true,
+        "ratio": 0.9485901685435869
+      },
+      "median": {
+        "absolute_bar_seconds": 50.084535286800076,
+        "candidate_seconds": 43.3050225705,
+        "flat_seconds": 45.50412298800006,
+        "passes": true,
+        "ratio": 0.951672501894389
+      }
+    },
+    "status": "PASS for this cell only",
+    "unavailable_scope": [
+      "No independent replay of raw packet/per-key streams; only native online validation and compact complete receipts are retained.",
+      "No per-receiver allocated bytes, attempted-key counts, or allocator CPU attribution collected."
+    ],
+    "validation_scope": "All six frozen validate_leg checks pass, including exact raw rosters/fixtures, actual wire key+attribute/fold/session online receipts, ordered per-op log byte windows, own post-resume dirty receipts, two-current-sweep shared overlap in drain/resume boundary, seven-edge four-cause monotonic chain, complete proof retirement, full trigger/fold readiness brackets and 10/2 GiB no-swap/OOM/cleanup footers."
+  },
+  "source_inputs": [
+    {
+      "bytes": 317080,
+      "path": "bench/scale/reloadstall/src/main.rs",
+      "sha256": "02521100aa2bde6f025f750c88740869aff9a5f0b4f0e6e178d9c25747d70dcc"
+    },
+    {
+      "bytes": 64272,
+      "path": "bench/scale/reloadstall/src/recovery_mass_dirty.rs",
+      "sha256": "b9033f35732cd499644c1b45723eebc6c266abe41d55c7d2a68a6fcb439b5a3f"
+    },
+    {
+      "bytes": 70699,
+      "path": "bench/scale/reloadstall/recovery_mass_dirty.py",
+      "sha256": "4f4fb5707c70386b4b996ba2fb5c2f9bb4f2c720c8ebde275a029fee62b424f9"
+    },
+    {
+      "bytes": 62182,
+      "path": "bench/scale/reloadstall/test_recovery_mass_dirty.py",
+      "sha256": "432967a11ae1707b8ef4f431f795be5de36e3d650585e04214c6c5bc8905f10a"
+    },
+    {
+      "bytes": 7462,
+      "path": "bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+      "sha256": "5ef16f2150fadedd892c14d003048cc9002e80a96d204a85f7d99881cc8aefae"
+    },
+    {
+      "bytes": 58772,
+      "path": "bench/scale/reloadstall/README.md",
+      "sha256": "04987fa73480e21ee856425f2b5042ab256183f0260dc739600223de6b2cb2d3"
+    },
+    {
+      "bytes": 10983,
+      "path": "bench/scale/reloadstall/sample-daemon-cgroup.py",
+      "sha256": "99a9f5eed7511c621b3447de394c2cf070509bc46824ad0de1ee4a33f119be9f"
+    },
+    {
+      "bytes": 561,
+      "path": "bench/scale/provenance.sh",
+      "sha256": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991"
+    },
+    {
+      "bytes": 3129,
+      "path": "bench/scale/cgroup-memory.sh",
+      "sha256": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a"
+    },
+    {
+      "bytes": 3078,
+      "path": "tests/soak/host-lock.sh",
+      "sha256": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    {
+      "bytes": 140854,
+      "path": "crates/rib/src/manager/update_groups.rs",
+      "sha256": "b27ab2532d59de81e76e6617fb5efb2a130a2c13ce375b8c497d796c68b6a277"
+    },
+    {
+      "bytes": 10441,
+      "path": "Cargo.toml",
+      "sha256": "72538a3a0a9cfb9c4478f2aec137a13fa7b1c8066a590788d6204f9e5e35ad32"
+    },
+    {
+      "bytes": 130742,
+      "path": "Cargo.lock",
+      "sha256": "52fb663be2f6640ba4ba5e7575fdae03e7fc6d9168e926563a267181c8b2d255"
+    },
+    {
+      "bytes": 362,
+      "path": "bench/scale/reloadstall/Cargo.toml",
+      "sha256": "7a9a15af44b6f073ef3007ebef24bbc2e7da30627c2fd4b2ab41a001980bb498"
+    },
+    {
+      "bytes": 50502,
+      "path": ".github/workflows/ci.yml",
+      "sha256": "9977c6b595c89e35a4a2ef8b445397a19ed7004d2ed9a492e939a91719fea577"
+    }
+  ],
+  "source_roster_sha256": "3d7f29256ced828ec3b3ac8d7514d794c77cab2fda97915f0e795c18e3211304",
+  "source_scope": {
+    "exact_latest_main_receipt": false,
+    "historical_equivalence_reference": "594b0ceb30896c7a864b1a0d730df4051ef080d7",
+    "latest_main_not_assumed_equal": true,
+    "measured_source": "a1854eee2f5b67d4a6198999f7e497e9ff9924fe",
+    "proof_sha256": "29cb018f8bc1d1a21fd34f347617c597651dce925fe014d675167a6d8e9a4fc5"
+  },
+  "unqualified_cells_comparisons": {
+    "full-uc-cap-pressure": {
+      "cost_ratio": null,
+      "max": null,
+      "median": null,
+      "memory_ratio": null,
+      "reason": "cell INVALID; observed native folds or partial samples do not supply a completed qualifying campaign"
+    },
+    "full-vpn-cap-pressure": {
+      "cost_ratio": null,
+      "max": null,
+      "median": null,
+      "memory_ratio": null,
+      "reason": "cell INVALID; observed native folds or partial samples do not supply a completed qualifying campaign"
+    },
+    "full-vpn-no-refusal": {
+      "cost_ratio": null,
+      "max": null,
+      "median": null,
+      "memory_ratio": null,
+      "reason": "cell INVALID; observed native folds or partial samples do not supply a completed qualifying campaign"
+    }
+  }
+}

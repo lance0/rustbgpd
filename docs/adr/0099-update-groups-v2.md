@@ -471,10 +471,13 @@ mass-dirty readiness/convergence plus an actual-release-candidate soak as open
 qualification requirements. The earlier failed capture-cost amendments remain
 historical evidence; the component pass does not waive those release gates.
 
-The [wire-driven mass-dirty method](../perf/update-group-recovery-wire-mass-dirty-2026-10-15.md)
-records the fixed whole-system protocol and pending evidence separately from
-those component results. Its [qualification amendment](#amendment-2026-10-15-wire-driven-mass-dirty-qualification)
-does not yet report a whole-system verdict.
+The [wire-driven mass-dirty receipt](../perf/update-group-recovery-wire-mass-dirty-2026-10-15.md)
+records the fixed protocol and four hosted attempts separately from those
+component results. Its
+[qualification amendment](#amendment-2026-10-15-wire-driven-mass-dirty-qualification)
+preserves the scoped historical `a1854eee` UC no-refusal pass. All four later
+`72549e20` cells are INVALID; full-matrix qualification and the actual
+release-candidate soak remain open.
 
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
@@ -782,20 +785,27 @@ pooled samples for this different method. EVPN ownership remains disabled.
 
 ## Amendment (2026-10-15): wire-driven mass-dirty qualification
 
-**PENDING — no whole-system result is accepted by this amendment.** The
+**`a1854eee`: UC no-refusal PASS; other three INVALID. Full matrix UNQUALIFIED.** The
 [method draft](../perf/update-group-recovery-wire-mass-dirty-2026-10-15.md)
-pins remotely verified source `23fe8425b3b3b7783a44b180b37ec3af91974275`.
+records failed source `23fe8425b3b3b7783a44b180b37ec3af91974275`.
 It includes the common-capture dedicated-readiness repair, exact operation-log
 byte-range binding and complete top-level raw-file digest roster. Remote
 publication verification and same-source local correctness/causal prerequisites
 are complete. The full-unicast/full-VPN × 12-member no-refusal/24-member
-cap-pressure campaign is dispatched as hosted run 38717584948; all four results
-remain pending. Candidate and explicit-flat builds require
+cap-pressure campaign finished in failure as hosted run 38717584948. All four
+original INVALID finalizers were reproduced by the frozen consumer. Each cell
+stopped in flat leg 0/B: unicast on ordinary held-state snapshot deadlines, VPN
+on actual readiness HTTP 503 after held proof/resume. No operation or leg
+completed, and no candidate arm started. Partial samples provide no qualified
+median, worst, cost, RSS or cgroup-memory comparison. The later `baf70825`
+attempt is recorded separately below; old results cannot be relabeled as
+new-source measurements.
+Candidate and explicit-flat builds require
 identical locked/default-feature commands in isolated targets and different
 actual executable hashes. Measured cells fix three alternating-arm repetitions,
-six legs per cell, with B then A in each. Hosted results and frozen artifact
-replay remain pending. The derived local control evidence records six healthy
-legs / twelve B/A folds around a genuine timestamp-only missing-age RED, exact
+six legs per cell, with B then A in each. These are planned requirements, not
+completed work in the invalid attempt. The derived local control evidence
+records six healthy legs / twelve B/A folds around a genuine timestamp-only missing-age RED, exact
 restoration and distinct actual daemon hashes. All local cost/RSS/clocks are
 null; those controls do not qualify the 12/24-member matrix.
 
@@ -812,8 +822,8 @@ and no start gap above 1.25 s. Only measured no-refusal cells apply the median
 and worst trigger-to-fleet-fold bar: candidate ≤ explicit-flat × 1.10 + 30 ms.
 Pressure cells assess correctness/resources with the same absolute readiness
 bar within a fixed 1,800-second leg deadline. No-refusal forbids all fallback,
-including startup. Operational daemon_limit fallback is required in explicit-flat and already-flat VPN pressure
-arms; indexed unicast pressure requires zero operation fallback deltas. Retain
+including startup. Operational daemon_limit fallback is required in explicit-flat
+and already-flat VPN pressure arms; indexed unicast pressure requires zero operation fallback deltas. Retain
 all four fallback causes across all six monotonic sampling edges and compute
 each operation delta from its own pre-operation baseline.
 
@@ -824,11 +834,164 @@ and restored normal-candidate HTTP 503 failures qualify neither the intended
 causal control nor a normal run; logs do not prove the exact blocked frame.
 The source-level cold-capture regression supports the dedicated-readiness repair,
 not a new whole-system result. Keep the independent dataset acknowledgement
-failure separate. The final full-shape correctness-only controls are complete;
-hosted qualification and its replay remain pending. Preserve the external
-naive-bind EADDRINUSE caveat without inferring TIME_WAIT or counting it as RED.
+failure separate. The recorded `23fe8425` correctness-only controls completed;
+the old hosted qualification and replay are INVALID. Next-source controls,
+all four fresh cells and their replay are addressed separately below. Preserve
+the external naive-bind EADDRINUSE caveat without inferring TIME_WAIT or counting it as RED.
 No prior component sample, correctness-only control or invalid attempt supplies
-a whole-system ratio. The existing provenance caps, bounded flat-memory trade
-and conservative
-no-proof contract remain unchanged. Actual release-candidate soak and EVPN
+a whole-system ratio. The existing admitted-key recovery proof caps, bounded
+flat-memory trade and conservative no-proof contract remain unchanged. Actual release-candidate soak and EVPN
 activation are not established; EVPN group ownership remains disabled.
+
+### Recorded `baf70825` follow-up: qualification failed
+
+Published source `baf7082560d2b8318cbe99e9fed8c1104b06f1bb` integrates the
+[peer-budget repair](https://github.com/lance0/rustbgpd/pull/3169): check the
+existing work budget after each complete dirty-peer distribution transaction,
+withholding dirty-force flags with the same selected-peer boundary. Unrelated
+force-only scheduling remains unchanged. A single peer replay and any enclosing
+transition retain the existing stalled-operation detector.
+
+The consumer retries only the exact exit-1, empty-stdout ordinary RIB snapshot
+timeout. It retains a mandatory per-leg failure journal with closed vocabulary,
+phase/peer/sequence/attempt counts, and validates row identity/group/state/dirty
+age before later queries. The original query, leg and absolute readiness bars
+remain unchanged; HTTP 503 and semantic failures cannot be retried into success.
+
+New full-shape two-receiver controls complete six healthy legs / twelve B/A
+folds around the timestamp-only causal RED and exact restored UC/VPN controls.
+All four local review receipts are CLEAR, all fourteen owned processes reaped,
+and all seven attempted-leg snapshot journals are empty. Zero local failures
+do not exercise retry at the larger workload. All local timing/RSS/CPU-cost
+fields are null; the separate v3 compact cannot replay raw packets or ownership.
+Preserve the older control and invalid-attempt JSON bytes as history.
+
+[Run 38728500056](https://github.com/lance0/rustbgpd/actions/runs/38728500056)
+was dispatched at 2026-10-15T11:36:09Z with that exact head. All four jobs failed;
+independent frozen replay reproduces all four INVALID finalizers. Only two of
+24 required legs and four of 48 operations complete, all in UC flat arms.
+Both UC candidate arms start but neither completes B; neither VPN leg completes.
+There is no eligible median, worst, cost or memory comparison.
+
+UC no-refusal fails on actual HTTP 503 with a logged 200 ms RIB probe timeout.
+UC pressure and both VPN cells first fail on the native 250 ms readiness
+checkpoint deadline. All ten ordinary snapshot errors match the closed retry
+whitelist; later native failures still stop the run. VPN no-refusal's sampler
+exit 1 and retained fixture are secondary cleanup evidence. Failed-leg final
+resource/reaping/reset boundaries remain unavailable, not zero. The two completed
+flat legs pass full frozen validation; UC pressure's cumulative withdrawals are
+192 at B and 192 at A, meaning 192 new B and zero new A.
+
+The [failure summary](../perf/artifacts/update-group-recovery-wire-mass-dirty-2026-10-15/invalid-hosted-baf-attempt.json)
+retains four archive/source/binary pins and all 317 file digests. The earlier
+controls and failed attempt stay byte-preserved and unpooled. The later
+`a1854eee` repair and controls are recorded below without reassigning the failed
+result. Whole-system release qualification remains held. Actual
+release-candidate soak remains pending, the dataset acknowledgement defect is
+separate, and EVPN ownership remains disabled.
+
+
+### `a1854eee` local controls and recorded hosted source
+
+Published source `a1854eee2f5b67d4a6198999f7e497e9ff9924fe` includes the
+[primary-peer replay readiness repair](https://github.com/lance0/rustbgpd/pull/3171).
+Its separate v4 controls complete six healthy two-receiver legs / twelve exact
+B/A folds around a genuine timestamp-only causal RED and byte-identical restored
+UC/VPN success. All fourteen local processes are reaped; all seven snapshot
+journals are empty. The new [compact control summary](../perf/artifacts/update-group-recovery-wire-mass-dirty-2026-10-15/local-correctness-controls-v4.json)
+binds default builds, distinct binaries and the 9,016-entry tracked input roster.
+That roster is not an exhaustive list of compiler-opened/generated inputs.
+The independent closure is CLEAR_LOCAL_CORRECTNESS_ONLY; local timing/RSS/cost
+remain null. Earlier compact evidence stays immutable and unpooled.
+
+At recorded main `594b0ceb30896c7a864b1a0d730df4051ef080d7`, the production,
+protobuf, Cargo and inventory path scopes match `a1854eee`; harness/workflow
+inputs differ. This is source evidence, not whole-tree or exact-main measurement.
+The equality check refers only to that historical `594b` reference, not later
+main such as `ed1d70d3a7363058ca73f300feff1af88d920dd8`.
+[Run 38744510988](https://github.com/lance0/rustbgpd/actions/runs/38744510988)
+completed at `a1854eee` with one valid cell and three INVALID cells, recorded below.
+
+The later cleanup-only `987ed07828df2227f6ffd48ef9f4230cd689b2b3` changes only
+the late wrapper EXIT handler and its tests. All other tracked files and wrapper
+commands outside that handler match `a1854eee`; runtime, controller, native
+stimulus and fixed bars are unchanged. Any accepted data keeps its actual
+`a1854eee` source pin. The valid UC cell independently clears actual outer
+invocation, frozen finalizer, job and cleanup/ownership checks; an early
+`driver.exit=0` marker alone is never accepted. Other failed/incomplete boundaries
+remain unavailable. The whole-system decision stays open, with actual
+release-candidate soak pending and EVPN ownership disabled.
+
+
+### Third hosted attempt: scoped UC pass, full matrix unqualified
+
+The `a1854eee` run attempts ten of 24 required legs. Seven legs / fourteen
+operations qualify; sixteen native folds are observed, with two belonging to
+an ineligible UC-pressure candidate leg. Only UC no-refusal supplies its complete
+six-leg / twelve-operation candidate/flat comparison at twelve receivers, each
+with 1,000,000 IPv4 plus 230,000 IPv6 keys.
+
+| UC no-refusal trigger-to-fleet-fold | Flat (s) | Candidate (s) | Ratio | Original limit (s) |
+| --- | ---: | ---: | ---: | ---: |
+| Median | 45.504123 | 43.305023 | 0.951673 | 50.084535 |
+| Worst | 46.836414 | 44.428562 | 0.948590 | 51.550056 |
+
+Both satisfy `candidate ≤ flat × 1.10 + 0.030 seconds`. Daemon-cgroup peaks
+(maximum of three complete legs per arm) are 2,345,836,544 flat versus
+1,972,015,104 candidate bytes. Held logical proof charge is 472,322,272 versus
+46,127,368 bytes at the same 14,760,000 entries; logical credit is not allocated
+bytes or attribution of the total cgroup peak. All 542 UC probes return 200,
+maximum 45.264656 ms and gap 1.001071167 s, with complete operation brackets.
+All four fallback causes remain zero including startup; validated complete-leg
+caps/OOM/swap/cleanup pass. Five ordinary snapshot retries (four flat, one
+candidate) are part of this observed protocol, not attributed CPU improvement.
+Only the explicitly captured reset-disposition/inactive-EVPN metrics are zero;
+no general all-family reset total is inferred.
+
+UC pressure reaches candidate B/A native folds and readiness PASS, but its
+sampler then raises `KeyError: VmRSS` and leaves exit/footer/fixture/raw-roster
+requirements incomplete. The leg and cell remain INVALID; only its flat leg
+qualifies. Both VPN cells fail initial flat/B on the native 250 ms readiness
+deadline before the first fold. VPN no-refusal also has a secondary sampler
+cleanup failure; pressure records no secondary cleanup error. No blocked stack
+or proven runtime cause follows from those deadlines. Other three cell cost
+and memory comparisons are unavailable.
+
+The [third-attempt compact evidence](../perf/artifacts/update-group-recovery-wire-mass-dirty-2026-10-15/hosted-a185-attempt.json)
+retains four API-linked archives, source/binary pins and all 497 raw-file hashes,
+including valid per-leg data and failed/incomplete evidence. Earlier JSONs and
+runs remain immutable and unpooled. Sampler/readiness follow-ups and fresh full
+qualification remain open; no later fix is claimed here. Neither latest main,
+actual release-candidate soak, dataset acknowledgement recovery nor EVPN
+activation is qualified by the single-cell pass. Release qualification remains held.
+
+
+### `72549e20`: four INVALID cells after reviewed fixes
+
+The separate [recorded attempt](../perf/update-group-recovery-wire-mass-dirty-2026-10-15.md#recorded-72549e20-four-invalid-cells)
+at `72549e20deb639cb75cd10cf28b46010dbd8bed8` leaves all four frozen cells INVALID.
+Five legs were attempted; only one UC-pressure flat leg / two operations is
+eligible. Six native folds exist, four in incomplete legs; no paired convergence,
+cost or memory ratio qualifies. The compact preserves 296 raw-file hashes,
+source/binary pins and actual failed completion statuses. The overall workflow
+is CANCELLED while all four receipt jobs are FAILURE; logs do not establish a
+cancellation initiator, delivered signal or exact instant.
+
+UC post-fold sampler ownership guards lack mismatch operands; VPN no-refusal
+has a native deadline followed by secondary sampler failure; VPN pressure's
+compound source guard lacks the failing row. No underlying runtime cause or
+precise failed source predicate is inferred. Nine strict ordinary snapshot
+retries do not waive those failures or supply missing final boundaries.
+
+The same-source V5 local controls separately clear six healthy two-receiver
+legs / twelve folds, genuine timestamp-only causal rejection and restoration,
+seven empty journals and fourteen reaped processes. Their timing/RSS/cost remain
+null. Main `a04497026215ff6ee79543f2ba84e285bd92bb25` includes the reviewed
+retirement/reservation and sampler fixes, but differs through later BGP-LS/ORR
+production changes and qualification wiring. Its ordinary CI and bounded M122
+witnesses are separate validation, not literal-tree, performance or RC equivalence.
+
+All earlier data remain source-pinned and unpooled, including the historical
+`a1854eee` single-cell pass. Full-matrix qualification and an actual identified
+release-candidate soak remain required; the separate dataset acknowledgement
+path and EVPN ownership-off boundary are not qualified here.
