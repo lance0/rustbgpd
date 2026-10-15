@@ -280,7 +280,7 @@ async fn barrier(tx: &mpsc::Sender<RibUpdate>) {
 }
 
 /// A message handler that drains armed resync work (here `PeerDown`) records
-/// one `cleared` outcome, so `BgpOutboundResyncStalled` sees the recovery.
+/// one `cleared` outcome when the loop reaches its end-of-iteration disarm.
 #[tokio::test(start_paused = true)]
 async fn handler_drained_resync_records_one_cleared_outcome() {
     let metrics = BgpMetrics::new();

@@ -1641,10 +1641,10 @@ impl BgpMetrics {
         let rib_dirty_resync = IntCounterVec::new(
             Opts::new(
                 "bgp_rib_dirty_resync_total",
-                "Dirty-peer resync timer outcomes: 'cleared' (the armed timer's \
-                 work drained, on a tick or through a message handler) or \
-                 'still_dirty' (a tick left at least one peer dirty and the 1s \
-                 timer re-arms).",
+                "Dirty-peer resync timer outcomes: 'still_dirty' (a tick left \
+                 at least one peer dirty and the 1s timer re-arms) or 'cleared' \
+                 (a tick drained the work, or the loop saw a message handler drain \
+                 it; drains on early-continue loop paths may go uncounted).",
             ),
             &["outcome"],
         )
@@ -9800,8 +9800,8 @@ mod tests {
         assert_eq!(m.0.rib_ingest_channel_depth.get(), 17);
     }
 
-    /// `BgpOutboundResyncStalled` uses `increase()` on both outcomes; a series
-    /// created by its first increment would hide the first drain.
+    /// `increase()` cannot see the first increment of a series created by that
+    /// increment, so both outcomes must exist at 0 from startup.
     #[test]
     fn dirty_resync_outcomes_are_exported_at_zero_before_any_tick() {
         let text = gather_text(&BgpMetrics::new());

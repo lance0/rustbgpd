@@ -11,12 +11,11 @@
   longer report a refusal as a full channel.
   **Operator-visible:** `BgpOutboundRouteDrops` is now warning severity and
   describes the automatic dirty-peer resync instead of asking for a manual
-  outbound refresh. The new critical `BgpOutboundResyncStalled` alert fires
-  when the resync timer has not drained for 15 minutes; both
-  `bgp_rib_dirty_resync_total` outcomes are now exported at 0 from startup so
-  the first drain is visible to `increase()`, and a message handler that
-  drains armed resync work, such as session teardown, now records `cleared`
-  like a draining timer tick. The new warning
-  `BgpOutboundCommitRefused` alert fires on `missing_encoder` refusals. The
+  outbound refresh. The new warning `BgpOutboundCommitRefused` alert fires
+  on `missing_encoder` refusals. Both `bgp_rib_dirty_resync_total` outcomes
+  are now exported at 0 from startup, and the RIB loop records `cleared` when
+  it sees that a message handler, such as session teardown, drained armed
+  resync work. A drain on a loop path that continues before that check is
+  still not counted. The
   Grafana "RIB ingest pressure" panel plots refusals by reason. See the
   [alert notes](../docs/how-to/grafana.md).

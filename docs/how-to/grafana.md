@@ -105,7 +105,7 @@ authoritative partial SIGHUP reloads and failed retained reload tasks,
 dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, outbound writer deferral,
-stalled outbound resync, refused outbound commits, RFC 9687
+refused outbound commits, RFC 9687
 send-hold teardown, session event source loss, live event-stream
 lag/desynchronization, BMP feed loss and stream divergence, BMP
 control-event and Loc-RIB source drops, policy evaluation errors, BLACKHOLE
@@ -148,20 +148,12 @@ the last increment ages out:
   refresh is needed. Look for a slow receiver with `bgp_peer_slow` and
   `bgp_peer_outbound_queue_depth`. Temporary collision-failback ROUTE-REFRESH
   saturation is retained and retried, so it does not increment this counter.
-- `BgpOutboundResyncStalled` is critical and, unlike the loss alerts, holds a
-  5-minute condition for 15 minutes: the process-wide resync timer has kept
-  recording `still_dirty` ticks with no `cleared` tick, so automatic recovery
-  is not converging and a peer may hold a stale advertised view. The counter
-  has no `peer` label. Find the peer through `BgpPeerSlow`,
-  `BgpOutboundCommitRefused`, an RFC 4724 selection deferral that has not
-  released, and the daemon's outbound deferred and not-sent warnings.
 - `BgpOutboundCommitRefused` is warning severity and fires only for
   `reason="missing_encoder"`: the peer registered without an exact export
   encoder, so route-bearing updates fail closed until a new session registers.
   `selection_gate` refusals are expected while RFC 4724 selection is deferred
   and `evpn_recovery` refusals are bounded EVPN recovery decisions; both resync
-  when the condition clears, and the stalled-resync alert covers one that does
-  not.
+  when the condition clears.
 - `BgpSendHoldExpired` is critical because RFC 9687 expiry has already torn
   down the session without a NOTIFICATION after the remote endpoint stopped
   draining TCP. Inspect the writer and peer before allowing the session to
