@@ -4378,6 +4378,21 @@ impl RibManager {
                 page_size,
                 reply,
             ),
+            RibUpdate::QueryBgpLsRoutesPage {
+                scope,
+                filter,
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_bgpls_routes_page(
+                scope,
+                filter.as_ref(),
+                after,
+                expected_version,
+                page_size,
+                reply,
+            ),
             RibUpdate::QueryRtcRoutesPage {
                 scope,
                 filter,

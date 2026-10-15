@@ -273,7 +273,7 @@ rbgp rib --prefix <prefix> --explain --explain-peer <peer>   # scope the explain
 rbgp rib blackholes
 rbgp rib fib
 rbgp rib fib --limit 500 [--page-token <token>]   # one bounded page; the older --page-size spelling still parses
-rbgp rib bgpls    # BGP-LS routes learned from peers (RFC 9552)
+rbgp rib bgpls    # selected BGP-LS routes (RFC 9552), walking every bounded page
 rbgp rib vpn      # VPNv4/VPNv6 routes (RFC 4364/4659, SAFI 128)
 rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
 rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
@@ -483,7 +483,7 @@ with configured and ready sources, the same value is a real uncovered-route
 verdict. Use `rbgp rpki caches` or `rbgp doctor` for validator readiness—the
 route field alone cannot prove it.
 
-The full unary listings (`rib bgpls|vpn|labeled|rtc|blackholes`, `rib fib`
+The full unary listings (`rib vpn|labeled|rtc|blackholes`, `rib fib`
 without `--limit`, `flowspec`, `evpn|evpn diagnose`, `topology nodes|links`, `orr`) return the
 whole table in one response and decode up to a finite 64 MiB ceiling (roughly
 0.7-1.3 million rows). A response above the ceiling still fails closed,
@@ -525,7 +525,7 @@ default, and include more specific routes with `--longer`. On best views,
 `--neighbor` filters the winning route's source; received and advertised views
 take their source or destination neighbor as a positional argument.
 These additions stay outside the current v1 inventory. See the
-[API reference](../../docs/reference/api.md#bounded-vpn-labeled-rtc-and-evpn-best-pages)
+[API reference](../../docs/reference/api.md#bounded-vpn-labeled-rtc-bgp-ls-and-evpn-best-pages)
 for filter semantics and errors.
 
 ### EVPN

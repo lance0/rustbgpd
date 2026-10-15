@@ -12,11 +12,11 @@ use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddPathRequest, AddressFamily, BgpLsRouteEntry, BlackholeDiscardState, DeletePathRequest,
     ExplainAdvertisedRouteRequest, ExplainBestPathRequest, ExplainBestPathResponse,
-    ExplainDecision, ExportGateVerdict, FibRouteState, LabeledRouteEntry, ListBgpLsRequest,
-    ListBlackholeDiscardsRequest, ListFibRoutesRequest, ListFibRoutesResponse,
-    ListLabeledRoutesRequest, ListRejectedRoutesRequest, ListRejectedRoutesResponse,
-    ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest, LookupBestPathRequest, Route,
-    RtcRouteEntry, VpnRouteEntry,
+    ExplainDecision, ExportGateVerdict, FibRouteState, LabeledRouteEntry,
+    ListBgpLsRibRoutesRequest, ListBlackholeDiscardsRequest, ListFibRoutesRequest,
+    ListFibRoutesResponse, ListLabeledRoutesRequest, ListRejectedRoutesRequest,
+    ListRejectedRoutesResponse, ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest,
+    LookupBestPathRequest, Route, RtcRouteEntry, VpnRouteEntry,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
@@ -523,15 +523,18 @@ fn make_bgpls_request(
     family: Option<&str>,
     peer: Option<String>,
     nlri_type: Option<u32>,
-) -> Result<ListBgpLsRequest, CliError> {
-    Ok(ListBgpLsRequest {
+) -> Result<ListBgpLsRibRoutesRequest, CliError> {
+    Ok(ListBgpLsRibRoutesRequest {
+        view: crate::proto::FamilyRouteView::Best as i32,
         afi_safi: parse_bgpls_family(family)?,
-        peer_filter: peer
+        source_peer_filter: peer
             .as_deref()
             .map(bare_ip_rpc_address)
             .unwrap_or_default()
             .to_string(),
         nlri_type_filter: nlri_type.unwrap_or(0),
+        page_size: ROUTE_PAGE_SIZE,
+        ..Default::default()
     })
 }
 
@@ -2159,17 +2162,27 @@ pub async fn bgpls(
     json: bool,
 ) -> Result<(), CliError> {
     let requested_peer = peer.clone();
+    let mut request = make_bgpls_request(family, peer, nlri_type)?;
     let mut client = connection.rib_listing_client();
-    let mut resp = read_rpc(
-        "ListBgpLsRoutes",
-        client.list_bgp_ls_routes(make_bgpls_request(family, peer, nlri_type)?),
-    )
-    .await?
-    .into_inner();
-    for route in &mut resp.routes {
+    let mut routes = Vec::new();
+    // Walk every page; a failed page stops the walk without retrying its token.
+    loop {
+        let page = read_rpc(
+            "ListBgpLsRibRoutes",
+            client.list_bgp_ls_rib_routes(request.clone()),
+        )
+        .await?
+        .into_inner();
+        routes.extend(page.routes);
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        request.page_token = page.next_page_token;
+    }
+    for route in &mut routes {
         restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
     }
-    print_bgpls_routes(&resp.routes, json)
+    print_bgpls_routes(&routes, json)
 }
 
 fn family_page_json<T: serde::Serialize>(
@@ -3695,16 +3708,16 @@ mod tests {
         .await
         .unwrap();
 
-        let req = server
-            .state
-            .last_list_bgpls
-            .lock()
-            .await
-            .clone()
-            .expect("BGP-LS request captured");
+        let requests = server.state.bgpls_page_requests.lock().await.clone();
+        let [req] = requests.as_slice() else {
+            panic!("one BGP-LS page request expected, got {requests:?}");
+        };
+        assert_eq!(req.view, crate::proto::FamilyRouteView::Best as i32);
         assert_eq!(req.afi_safi, AddressFamily::BgpLs as i32);
-        assert_eq!(req.peer_filter, "fe80::1");
+        assert_eq!(req.source_peer_filter, "fe80::1");
         assert_eq!(req.nlri_type_filter, 1);
+        assert_eq!(req.page_size, ROUTE_PAGE_SIZE);
+        assert!(server.state.last_list_bgpls.lock().await.is_none());
     }
 
     #[tokio::test]

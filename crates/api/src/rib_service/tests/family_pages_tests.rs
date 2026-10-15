@@ -1,12 +1,16 @@
 use super::*;
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table sends every page size through all seven bounded family paths"
+)]
 async fn family_and_evpn_page_sizes_default_and_clamp_before_actor_dispatch() {
     let (tx, mut rx) = mpsc::channel(1);
     let service = RibService::new(tx);
     let actor = tokio::spawn(async move {
         for expected in [100, 1, 1000, 1000, 1000] {
-            for _ in 0..6 {
+            for _ in 0..7 {
                 match rx.recv().await.unwrap() {
                     RibUpdate::QueryVpnRoutesPage {
                         page_size, reply, ..
@@ -32,13 +36,19 @@ async fn family_and_evpn_page_sizes_default_and_clamp_before_actor_dispatch() {
                         assert_eq!(page_size, expected);
                         reply.send(Err(RoutePageError::Invalidated)).unwrap();
                     }
+                    RibUpdate::QueryBgpLsRoutesPage {
+                        page_size, reply, ..
+                    } => {
+                        assert_eq!(page_size, expected);
+                        reply.send(Err(RoutePageError::Invalidated)).unwrap();
+                    }
                     _ => panic!("expected bounded family page"),
                 }
             }
         }
     });
     for page_size in [0, 1, 1000, 1001, u32::MAX] {
-        for method in 0..6 {
+        for method in 0..7 {
             let view = proto::FamilyRouteView::Best as i32;
             let result = match method {
                 0 => service
@@ -67,6 +77,14 @@ async fn family_and_evpn_page_sizes_default_and_clamp_before_actor_dispatch() {
                     .map(|_| ()),
                 3 => service
                     .list_best_evpn_routes(Request::new(proto::ListBestEvpnRoutesRequest {
+                        page_size,
+                        ..Default::default()
+                    }))
+                    .await
+                    .map(|_| ()),
+                6 => service
+                    .list_bgp_ls_rib_routes(Request::new(proto::ListBgpLsRibRoutesRequest {
+                        view,
                         page_size,
                         ..Default::default()
                     }))
@@ -134,8 +152,8 @@ fn family_page_tokens_bind_family_scope_filters_and_version() {
         );
     }
     let altered = token.replacen("~7", "~8", 1);
-    assert!(decode_family_page_token(&altered).is_err());
-    assert!(decode_family_page_token(&"x".repeat(1025)).is_err());
+    assert!(decode_family_page_token(&altered, FAMILY_PAGE_TOKEN_MAX_LEN).is_err());
+    assert!(decode_family_page_token(&"x".repeat(1025), FAMILY_PAGE_TOKEN_MAX_LEN).is_err());
     assert!(parse_family_prefix("10.0.0.1/24", 24).is_err());
     assert!(parse_family_prefix("2001:db8::1/64", 64).is_err());
     assert!(parse_vpn_page_key("0000fde800000001~10.0.0.1/24~192.0.2.1~7").is_err());
@@ -1387,4 +1405,224 @@ async fn grouped_vpn_resync_refusal_is_failed_precondition() {
         "advertised VPN state is resynchronizing; retry after export settles"
     );
     actor.await.unwrap();
+}
+
+fn bgpls_route_with_payload(peer: IpAddr, nlri_type: u16, payload: Vec<u8>) -> BgpLsRibRoute {
+    let mut route = bgpls_test_routes(peer).remove(0);
+    route.nlri = rustbgpd_wire::bgpls::BgpLsNlri {
+        nlri_type: rustbgpd_wire::bgpls::BgpLsNlriType::from_u16(nlri_type),
+        route_distinguisher: None,
+        payload: payload.into(),
+    };
+    route
+}
+
+/// A real actor walk returns every selected BGP-LS row exactly once, in
+/// identity order, through continuation tokens; a cursor carrying a
+/// maximum-length opaque NLRI still continues.
+#[tokio::test]
+async fn bgpls_pages_walk_every_route_once_through_the_real_rib() {
+    let first: IpAddr = "192.0.2.1".parse().unwrap();
+    let second: IpAddr = "192.0.2.2".parse().unwrap();
+    let mut routes = bgpls_test_routes(first);
+    // Seven short rows put the maximum-length NLRI at the third page tail.
+    for index in 0..7u8 {
+        routes.push(bgpls_route_with_payload(first, 0xfde9, vec![index; 3]));
+    }
+    routes.push(bgpls_route_with_payload(
+        first,
+        0xfdea,
+        vec![0x5a; usize::from(u16::MAX)],
+    ));
+    routes.push(bgpls_route_with_payload(first, 0xfdeb, vec![1]));
+    let foreign = bgpls_route_with_payload(second, 0xfdec, vec![2]);
+    let (tx, rx) = mpsc::channel(8);
+    let (_query_tx, query_rx) = mpsc::channel(1);
+    let manager = rustbgpd_rib::RibManager::new(
+        rx,
+        query_rx,
+        None,
+        None,
+        rustbgpd_telemetry::BgpMetrics::new(),
+    );
+    let actor = tokio::spawn(manager.run());
+    for (peer, announced) in [(first, routes), (second, vec![foreign])] {
+        tx.send(RibUpdate::BgpLsRoutesReceived {
+            peer,
+            session_id: 0,
+            announced,
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    let service = RibService::new(tx.clone());
+    let request = proto::ListBgpLsRibRoutesRequest {
+        view: proto::FamilyRouteView::Best as i32,
+        source_peer_filter: first.to_string(),
+        page_size: 3,
+        ..Default::default()
+    };
+    let mut walked = Vec::new();
+    let mut next = request.clone();
+    loop {
+        let page = service
+            .list_bgp_ls_rib_routes(Request::new(next.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(page.total_count, 11);
+        assert!(page.routes.len() <= 3);
+        walked.extend(page.routes.into_iter().map(|route| {
+            assert_eq!(route.peer_address, first.to_string());
+            (
+                route.afi_safi,
+                route.nlri_type,
+                route.route_distinguisher,
+                route.payload,
+            )
+        }));
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        next.page_token = page.next_page_token;
+    }
+    assert_eq!(walked.len(), 11);
+    let mut sorted = walked.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(walked, sorted, "rows must be unique and in identity order");
+    assert_eq!(walked[10].0, proto::AddressFamily::BgpLsVpn as i32);
+    assert_eq!(walked[8].3.len(), usize::from(u16::MAX));
+
+    let vpn_only = service
+        .list_bgp_ls_rib_routes(Request::new(proto::ListBgpLsRibRoutesRequest {
+            afi_safi: proto::AddressFamily::BgpLsVpn as i32,
+            nlri_type_filter: 0xfde8,
+            ..request.clone()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(vpn_only.total_count, 1);
+    assert_eq!(vpn_only.next_page_token, "");
+    let received = service
+        .list_bgp_ls_rib_routes(Request::new(proto::ListBgpLsRibRoutesRequest {
+            view: proto::FamilyRouteView::Received as i32,
+            neighbor_address: second.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(received.total_count, 1);
+    assert_eq!(received.routes[0].peer_address, second.to_string());
+    drop((service, tx));
+    actor.await.unwrap();
+}
+
+/// Altered, foreign, oversized and malformed BGP-LS tokens are rejected
+/// before they reach the RIB actor.
+#[tokio::test]
+async fn bgpls_page_tokens_reject_forgery_and_foreign_queries() {
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let route = bgpls_test_routes(peer).remove(1);
+    let scope = RouteQueryScope::Best;
+    let identity = family_query_identity("bgpls", "None:None:0");
+    let key = encode_bgpls_page_key(&route);
+    let token = encode_family_page_token(
+        scope,
+        &identity,
+        &key,
+        RoutePageVersion {
+            epoch: 1,
+            generation: 2,
+        },
+    );
+    let (size, after, version) = family_page_params_within(
+        u32::MAX,
+        &token,
+        scope,
+        &identity,
+        BGPLS_PAGE_TOKEN_MAX_LEN,
+        parse_bgpls_page_key,
+    )
+    .unwrap();
+    assert_eq!(size, 1000);
+    assert_eq!(version.unwrap().generation, 2);
+    let after = after.unwrap();
+    assert_eq!(after.0, BgpLsFamily::LinkStateVpn);
+    assert_eq!(after.2, route.nlri.route_distinguisher);
+    assert_eq!(after.3, route.nlri.payload);
+    for bad in [
+        "linkstate~fde8~-~aabbcc~192.0.2.1",
+        "linkstate~fde8~0000fde800000064~aabbcc~192.0.2.1~0",
+        "linkstate_vpn~fde8~-~aabbcc~192.0.2.1~0",
+        "linkstate~fde8~-~aabbc~192.0.2.1~0",
+        "linkstate~fde~-~aabbcc~192.0.2.1~0",
+        "other~fde8~-~aabbcc~192.0.2.1~0",
+    ] {
+        assert!(parse_bgpls_page_key(bad).is_err(), "{bad}");
+    }
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let service = RibService::new(tx);
+    let request = proto::ListBgpLsRibRoutesRequest {
+        view: proto::FamilyRouteView::Best as i32,
+        page_token: token.clone(),
+        ..Default::default()
+    };
+    let foreign = encode_family_page_token(
+        scope,
+        &family_query_identity("vpn", "None:None:0"),
+        &key,
+        RoutePageVersion::default(),
+    );
+    for bad in [
+        token.replacen("aabbcc", "aabbcd", 1),
+        format!("{token}0"),
+        "garbage".to_string(),
+        "x".repeat(BGPLS_PAGE_TOKEN_MAX_LEN + 1),
+        foreign,
+    ] {
+        assert_eq!(
+            service
+                .list_bgp_ls_rib_routes(Request::new(proto::ListBgpLsRibRoutesRequest {
+                    page_token: bad,
+                    ..request.clone()
+                }))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+    for bad in [
+        proto::ListBgpLsRibRoutesRequest {
+            nlri_type_filter: 1,
+            ..request.clone()
+        },
+        proto::ListBgpLsRibRoutesRequest {
+            afi_safi: proto::AddressFamily::BgpLs as i32,
+            ..request.clone()
+        },
+        proto::ListBgpLsRibRoutesRequest {
+            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+            page_token: String::new(),
+            ..request.clone()
+        },
+    ] {
+        assert_eq!(
+            service
+                .list_bgp_ls_rib_routes(Request::new(bad))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "rejections must not reach the actor"
+    );
 }

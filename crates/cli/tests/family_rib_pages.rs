@@ -655,3 +655,74 @@ async fn family_page_rpc_errors_do_not_fall_back_to_best_or_print_rows() {
         assert!(server.state.last_list_evpn.lock().await.is_none());
     }
 }
+
+/// `rib bgpls` follows every continuation with unchanged filters and prints
+/// all pages as one listing; a failed continuation fails the command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bgpls_listing_walks_every_page_with_unchanged_filters() {
+    let server = test_support::spawn_mock_server(None).await;
+    let row = |nlri_type: u32| proto::BgpLsRouteEntry {
+        afi_safi: proto::AddressFamily::BgpLs as i32,
+        nlri_type,
+        peer_address: "192.0.2.1".to_string(),
+        ..Default::default()
+    };
+    *server.state.bgpls_pages.lock().await = vec![
+        proto::ListBgpLsRibRoutesResponse {
+            routes: vec![row(1), row(2)],
+            next_page_token: "first".to_string(),
+            total_count: 3,
+            ..Default::default()
+        },
+        proto::ListBgpLsRibRoutesResponse {
+            routes: vec![row(3)],
+            total_count: 3,
+            ..Default::default()
+        },
+    ];
+    let addr = server.addr.clone();
+    let args = [
+        "rib",
+        "bgpls",
+        "-a",
+        "linkstate",
+        "--neighbor",
+        "192.0.2.1",
+        "--nlri-type",
+        "2",
+        "--json",
+    ];
+    let output = run(&addr, &args);
+    assert!(output.status.success(), "{output:?}");
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let types: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["nlri_type"].as_u64().unwrap())
+        .collect();
+    assert_eq!(types, [1, 2, 3]);
+    let requests = server.state.bgpls_page_requests.lock().await.clone();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].page_token, "");
+    assert_eq!(requests[1].page_token, "first");
+    assert_eq!(requests[0].nlri_type_filter, 2);
+    assert_eq!(requests[0].source_peer_filter, "192.0.2.1");
+    assert_eq!(
+        proto::ListBgpLsRibRoutesRequest {
+            page_token: String::new(),
+            ..requests[1].clone()
+        },
+        requests[0]
+    );
+
+    server.state.bgpls_pages.lock().await.truncate(1);
+    server.state.bgpls_page_requests.lock().await.clear();
+    let output = run(&addr, &args);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "a partial walk must not print rows"
+    );
+    assert_eq!(server.state.bgpls_page_requests.lock().await.len(), 2);
+}

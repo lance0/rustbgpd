@@ -673,3 +673,144 @@ fn vpn_grouped_page_rejects_closed_receiver_until_fresh_session() {
     assert_eq!(page.total, 1);
     assert_eq!(page.routes[0].key(), new.key());
 }
+
+fn bgpls_page(
+    manager: &mut RibManager,
+    scope: RouteQueryScope,
+    after: Option<crate::update::BgpLsRouteQueryKey>,
+    version: Option<RoutePageVersion>,
+    size: usize,
+) -> Result<RibRowsPage<BgpLsRibRoute>, RoutePageError> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryBgpLsRoutesPage {
+        scope,
+        filter: None,
+        after,
+        expected_version: version,
+        page_size: size,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+fn bgpls_query_key(route: &BgpLsRibRoute) -> crate::update::BgpLsRouteQueryKey {
+    (
+        route.family,
+        route.nlri.nlri_type.as_u16(),
+        route.nlri.route_distinguisher,
+        route.nlri.payload.clone(),
+        route.peer,
+        route.path_id,
+    )
+}
+
+/// A continuation walk over the selected BGP-LS table returns every row
+/// exactly once in identity order, across both SAFIs and the clamp.
+#[test]
+fn bgpls_family_pages_walk_every_route_once_in_identity_order() {
+    let (mut manager, peer) = fixture();
+    let other = Ipv4Addr::new(192, 0, 2, 2);
+    for suffix in (0..25).rev() {
+        let advertiser = if suffix % 2 == 0 { peer } else { other };
+        manager.handle_bgpls_routes_received(
+            advertiser.into(),
+            vec![make_bgpls_route(advertiser, suffix, 100)],
+            vec![],
+        );
+    }
+    let mut vpn = make_bgpls_route(peer, 0, 100);
+    vpn.family = BgpLsFamily::LinkStateVpn;
+    vpn.nlri.route_distinguisher = Some([0, 0, 0xfd, 0xe8, 0, 0, 0, 1]);
+    manager.handle_bgpls_routes_received(peer.into(), vec![vpn], vec![]);
+
+    let all = bgpls_page(&mut manager, RouteQueryScope::Best, None, None, usize::MAX).unwrap();
+    assert_eq!(all.routes.len(), 26);
+    assert!(!all.has_more);
+    let expected: Vec<_> = all.routes.iter().map(bgpls_query_key).collect();
+    assert!(expected.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(all.routes[25].family, BgpLsFamily::LinkStateVpn);
+
+    let mut walked = Vec::new();
+    let mut after = None;
+    let mut version = None;
+    loop {
+        let page = bgpls_page(&mut manager, RouteQueryScope::Best, after, version, 4).unwrap();
+        assert_eq!(page.total, 26);
+        assert!(page.routes.len() <= 4);
+        walked.extend(page.routes.iter().map(bgpls_query_key));
+        if !page.has_more {
+            break;
+        }
+        after = walked.last().cloned();
+        version = Some(page.version);
+    }
+    assert_eq!(walked, expected);
+
+    let received = bgpls_page(
+        &mut manager,
+        RouteQueryScope::Received {
+            peer: Some(other.into()),
+        },
+        None,
+        None,
+        100,
+    )
+    .unwrap();
+    assert_eq!(received.total, 12);
+    assert!(received.routes.iter().all(|r| r.peer == IpAddr::V4(other)));
+}
+
+/// Receive, withdraw and advertised commits each fence an open BGP-LS walk.
+#[test]
+fn bgpls_family_pages_invalidate_on_receive_withdraw_and_export() {
+    let (mut manager, peer) = fixture();
+    let destination = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: destination,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: bgpls_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    let routes: Vec<_> = (1..=2).map(|s| make_bgpls_route(peer, s, 100)).collect();
+    manager.handle_bgpls_routes_received(peer.into(), routes.clone(), vec![]);
+    while out_rx.try_recv().is_ok() {}
+
+    let best = RouteQueryScope::Best;
+    let first = bgpls_page(&mut manager, best, None, None, 1).unwrap();
+    assert!(first.has_more);
+    let after = Some(bgpls_query_key(&first.routes[0]));
+    manager.handle_bgpls_routes_received(peer.into(), vec![make_bgpls_route(peer, 3, 100)], vec![]);
+    assert_eq!(
+        bgpls_page(&mut manager, best, after.clone(), Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+    let fresh = bgpls_page(&mut manager, best, None, None, 1).unwrap();
+    manager.handle_bgpls_routes_received(peer.into(), vec![], vec![routes[1].key()]);
+    assert_eq!(
+        bgpls_page(&mut manager, best, after, Some(fresh.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+
+    let advertised = RouteQueryScope::Advertised { peer: destination };
+    let first = bgpls_page(&mut manager, advertised, None, None, 1).unwrap();
+    assert_eq!(first.total, 2, "routes 1 and 3 remain exported");
+    let after = Some(bgpls_query_key(&first.routes[0]));
+    manager.handle_bgpls_routes_received(peer.into(), vec![make_bgpls_route(peer, 4, 100)], vec![]);
+    assert_eq!(
+        bgpls_page(&mut manager, advertised, after, Some(first.version), 1).unwrap_err(),
+        RoutePageError::Invalidated
+    );
+}

@@ -303,7 +303,11 @@ pub(super) fn page_routes<'a>(
 }
 /// Full unordered scope scan, O(page) retained references and clones.
 // shortcut: each page scans its scope; add an ordered index when these families need large-table reads.
-fn page_family_rows<'a, T: Clone + 'a, K: Ord + Copy>(
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "every family dispatch hands over its owned decoded cursor"
+)]
+fn page_family_rows<'a, T: Clone + 'a, K: Ord>(
     routes: impl Iterator<Item = &'a T>,
     filter: Option<&RibRowFilter<T>>,
     after: Option<K>,
@@ -337,7 +341,7 @@ fn page_family_rows<'a, T: Clone + 'a, K: Ord + Copy>(
         }
         total += 1;
         let key = key(route);
-        if after.is_some_and(|after| key <= after) {
+        if after.as_ref().is_some_and(|after| &key <= after) {
             continue;
         }
         remaining += 1;
@@ -837,6 +841,74 @@ impl RibManager {
                         .get(&peer)
                         .into_iter()
                         .flat_map(AdjRibOut::iter_labeled),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+            };
+            page.version = version;
+            Ok(page)
+        });
+        let _ = reply.send(result);
+    }
+
+    pub(super) fn handle_query_bgpls_routes_page(
+        &self,
+        scope: RouteQueryScope,
+        filter: Option<&RibRowFilter<crate::route::BgpLsRibRoute>>,
+        after: Option<crate::update::BgpLsRouteQueryKey>,
+        expected_version: Option<RoutePageVersion>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::RibRowsPage<crate::route::BgpLsRibRoute>, RoutePageError>,
+        >,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let result = self.route_page_version(scope).and_then(|version| {
+            if after.is_some() != expected_version.is_some()
+                || expected_version.is_some_and(|expected| expected != version)
+            {
+                return Err(RoutePageError::Invalidated);
+            }
+            let key = |r: &crate::route::BgpLsRibRoute| {
+                (
+                    r.family,
+                    r.nlri.nlri_type.as_u16(),
+                    r.nlri.route_distinguisher,
+                    r.nlri.payload.clone(),
+                    r.peer,
+                    r.path_id,
+                )
+            };
+            let mut page = match scope {
+                RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
+                    self.ribs
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibIn::iter_bgpls),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+                RouteQueryScope::Received { peer: None } => page_family_rows(
+                    self.ribs.values().flat_map(AdjRibIn::iter_bgpls),
+                    filter,
+                    after,
+                    page_size,
+                    key,
+                ),
+                RouteQueryScope::Best => {
+                    page_family_rows(self.loc_rib.iter_bgpls(), filter, after, page_size, key)
+                }
+                RouteQueryScope::Advertised { peer } => page_family_rows(
+                    self.adj_ribs_out
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_bgpls),
                     filter,
                     after,
                     page_size,

@@ -1287,9 +1287,14 @@ fn encode_family_page_token(
     format!("{payload}|{}", route_page_token_signature(&payload))
 }
 
-fn decode_family_page_token(token: &str) -> Result<FamilyPageCursor, Status> {
+const FAMILY_PAGE_TOKEN_MAX_LEN: usize = 1024;
+/// BGP-LS cursors carry the opaque NLRI bytes in hex, up to the 16-bit
+/// Total NLRI Length.
+const BGPLS_PAGE_TOKEN_MAX_LEN: usize = FAMILY_PAGE_TOKEN_MAX_LEN + 2 * u16::MAX as usize;
+
+fn decode_family_page_token(token: &str, max_len: usize) -> Result<FamilyPageCursor, Status> {
     let invalid = || Status::invalid_argument("invalid family page_token");
-    if token.len() > 1024 {
+    if token.len() > max_len {
         return Err(invalid());
     }
     let (payload, signature) = token.rsplit_once('|').ok_or_else(invalid)?;
@@ -1325,6 +1330,24 @@ fn family_page_params<K>(
     identity: &str,
     parse: impl FnOnce(&str) -> Result<K, Status>,
 ) -> Result<(usize, Option<K>, Option<RoutePageVersion>), Status> {
+    family_page_params_within(
+        size,
+        token,
+        scope,
+        identity,
+        FAMILY_PAGE_TOKEN_MAX_LEN,
+        parse,
+    )
+}
+
+fn family_page_params_within<K>(
+    size: u32,
+    token: &str,
+    scope: RouteQueryScope,
+    identity: &str,
+    max_token_len: usize,
+    parse: impl FnOnce(&str) -> Result<K, Status>,
+) -> Result<(usize, Option<K>, Option<RoutePageVersion>), Status> {
     let size = if size == 0 {
         DEFAULT_ROUTE_PAGE_SIZE
     } else {
@@ -1333,7 +1356,7 @@ fn family_page_params<K>(
     if token.is_empty() {
         return Ok((size, None, None));
     }
-    let cursor = decode_family_page_token(token)?;
+    let cursor = decode_family_page_token(token, max_token_len)?;
     if cursor.scope != scope || cursor.identity != identity {
         return Err(Status::invalid_argument(
             "page_token belongs to a different family, scope or filters",
@@ -1385,6 +1408,86 @@ fn parse_rtc_page_key(value: &str) -> Result<rustbgpd_rib::RtcRouteQueryKey, Sta
             route_target_bits: rt.parse().map_err(|_| invalid())?,
             prefix_len: length.parse().map_err(|_| invalid())?,
         },
+        peer.parse().map_err(|_| invalid())?,
+        path.parse().map_err(|_| invalid())?,
+    ))
+}
+
+fn parse_bgpls_page_family(value: i32) -> Result<Option<BgpLsFamily>, Status> {
+    if value == proto::AddressFamily::Unspecified as i32 {
+        Ok(None)
+    } else if value == proto::AddressFamily::BgpLs as i32 {
+        Ok(Some(BgpLsFamily::LinkState))
+    } else if value == proto::AddressFamily::BgpLsVpn as i32 {
+        Ok(Some(BgpLsFamily::LinkStateVpn))
+    } else {
+        Err(Status::invalid_argument(format!(
+            "invalid afi_safi {value}: expected BGP-LS, BGP-LS VPN, or unspecified"
+        )))
+    }
+}
+
+fn hex_octets(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn parse_hex_octets(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).ok())
+        .collect()
+}
+
+fn encode_bgpls_page_key(route: &BgpLsRibRoute) -> String {
+    format!(
+        "{}~{:04x}~{}~{}~{}~{}",
+        bgpls_family_label(route.family),
+        route.nlri.nlri_type.as_u16(),
+        route
+            .nlri
+            .route_distinguisher
+            .map_or_else(|| "-".to_string(), |rd| hex_octets(&rd)),
+        hex_octets(&route.nlri.payload),
+        route.peer,
+        route.path_id
+    )
+}
+
+fn parse_bgpls_page_key(value: &str) -> Result<rustbgpd_rib::BgpLsRouteQueryKey, Status> {
+    let invalid = || Status::invalid_argument("invalid BGP-LS page cursor");
+    let parts: Vec<_> = value.split('~').collect();
+    let [family, nlri_type, rd, payload, peer, path] = parts.as_slice() else {
+        return Err(invalid());
+    };
+    let family = match *family {
+        "linkstate" => BgpLsFamily::LinkState,
+        "linkstate_vpn" => BgpLsFamily::LinkStateVpn,
+        _ => return Err(invalid()),
+    };
+    let rd = match *rd {
+        "-" => None,
+        rd => Some(
+            parse_hex_octets(rd)
+                .and_then(|rd| <[u8; 8]>::try_from(rd).ok())
+                .ok_or_else(invalid)?,
+        ),
+    };
+    if rd.is_some() != family.requires_route_distinguisher() || nlri_type.len() != 4 {
+        return Err(invalid());
+    }
+    Ok((
+        family,
+        u16::from_str_radix(nlri_type, 16).map_err(|_| invalid())?,
+        rd,
+        bytes::Bytes::from(parse_hex_octets(payload).ok_or_else(invalid)?),
         peer.parse().map_err(|_| invalid())?,
         path.parse().map_err(|_| invalid())?,
     ))
@@ -3200,6 +3303,71 @@ impl proto::rib_service_server::RibService for RibService {
         }))
     }
 
+    async fn list_bgp_ls_rib_routes(
+        &self,
+        request: Request<proto::ListBgpLsRibRoutesRequest>,
+    ) -> Result<Response<proto::ListBgpLsRibRoutesResponse>, Status> {
+        let req = request.into_inner();
+        let (scope, peer) =
+            family_page_scope(req.view, &req.neighbor_address, &req.source_peer_filter)?;
+        let family = parse_bgpls_page_family(req.afi_safi)?;
+        let nlri_type = req.nlri_type_filter;
+        let identity = family_query_identity("bgpls", &format!("{family:?}:{peer:?}:{nlri_type}"));
+        let (page_size, after, expected_version) = family_page_params_within(
+            req.page_size,
+            &req.page_token,
+            scope,
+            &identity,
+            BGPLS_PAGE_TOKEN_MAX_LEN,
+            parse_bgpls_page_key,
+        )?;
+        let filter = Some(Box::new(move |route: &BgpLsRibRoute| {
+            family.is_none_or(|family| route.family == family)
+                && (nlri_type == 0 || u32::from(route.nlri.nlri_type.as_u16()) == nlri_type)
+                && (scope != RouteQueryScope::Best || peer.is_none_or(|peer| route.peer == peer))
+        }) as RibRowFilter<BgpLsRibRoute>);
+        let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryBgpLsRoutesPage {
+            scope,
+            filter,
+            after,
+            expected_version,
+            page_size,
+            reply,
+        })
+        .await?
+        .map_err(family_page_error)?;
+        if scope != RouteQueryScope::Best
+            && let Some(peer) = peer
+        {
+            self.require_known_peer_if_empty(peer, page.routes.is_empty())
+                .await?;
+        }
+        let next_page_token = if page.has_more {
+            page.routes
+                .last()
+                .map(|r| {
+                    encode_family_page_token(
+                        scope,
+                        &identity,
+                        &encode_bgpls_page_key(r),
+                        page.version,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(proto::ListBgpLsRibRoutesResponse {
+            routes: page.routes.iter().map(bgpls_route_to_proto).collect(),
+            next_page_token,
+            total_count: page.total,
+            page_version: Some(proto::RoutePageVersion {
+                epoch: page.version.epoch,
+                generation: page.version.generation,
+            }),
+        }))
+    }
+
     async fn list_best_evpn_routes(
         &self,
         request: Request<proto::ListBestEvpnRoutesRequest>,
@@ -4226,13 +4394,14 @@ mod tests {
         ListVpnRibRoutes,
         ListLabeledRibRoutes,
         ListRtcRibRoutes,
+        ListBgpLsRibRoutes,
         ListBestEvpnRoutes,
         ListTopologyNodes,
         ListTopologyLinks,
         ListOrrStatus,
     }
 
-    const UNARY_RIB_READS: [UnaryRibRead; 25] = [
+    const UNARY_RIB_READS: [UnaryRibRead; 26] = [
         UnaryRibRead::ListReceivedRoutes,
         UnaryRibRead::ListBestRoutes,
         UnaryRibRead::ListAdvertisedRoutes,
@@ -4254,6 +4423,7 @@ mod tests {
         UnaryRibRead::ListVpnRibRoutes,
         UnaryRibRead::ListLabeledRibRoutes,
         UnaryRibRead::ListRtcRibRoutes,
+        UnaryRibRead::ListBgpLsRibRoutes,
         UnaryRibRead::ListBestEvpnRoutes,
         UnaryRibRead::ListTopologyNodes,
         UnaryRibRead::ListTopologyLinks,
@@ -4381,6 +4551,13 @@ mod tests {
                 }))
                 .await
                 .map(|_| ()),
+            UnaryRibRead::ListBgpLsRibRoutes => svc
+                .list_bgp_ls_rib_routes(Request::new(proto::ListBgpLsRibRoutesRequest {
+                    view: proto::FamilyRouteView::Best as i32,
+                    ..Default::default()
+                }))
+                .await
+                .map(|_| ()),
             UnaryRibRead::ListBestEvpnRoutes => svc
                 .list_best_evpn_routes(Request::new(proto::ListBestEvpnRoutesRequest::default()))
                 .await
@@ -4414,6 +4591,8 @@ mod tests {
         LabeledPageAdvertised,
         RtcPageReceived,
         RtcPageAdvertised,
+        BgpLsPageReceived,
+        BgpLsPageAdvertised,
         ExplainEvpnReceivedFrom,
         ExplainEvpnAdvertisedTo,
     }
@@ -4517,6 +4696,22 @@ mod tests {
                 }))
                 .await
                 .map(|_| ()),
+            PeerScopedRead::BgpLsPageReceived => svc
+                .list_bgp_ls_rib_routes(Request::new(proto::ListBgpLsRibRoutesRequest {
+                    view: proto::FamilyRouteView::Received as i32,
+                    neighbor_address: peer,
+                    ..Default::default()
+                }))
+                .await
+                .map(|_| ()),
+            PeerScopedRead::BgpLsPageAdvertised => svc
+                .list_bgp_ls_rib_routes(Request::new(proto::ListBgpLsRibRoutesRequest {
+                    view: proto::FamilyRouteView::Advertised as i32,
+                    neighbor_address: peer,
+                    ..Default::default()
+                }))
+                .await
+                .map(|_| ()),
             PeerScopedRead::ExplainEvpnReceivedFrom => svc
                 .explain_evpn_route(Request::new(proto::ExplainEvpnRouteRequest {
                     received_from: peer,
@@ -4563,6 +4758,14 @@ mod tests {
                         }));
                     }
                     RibUpdate::QueryRtcRoutesPage { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::RibRowsPage {
+                            routes: Vec::new(),
+                            total: 0,
+                            has_more: false,
+                            version: RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryBgpLsRoutesPage { reply, .. } => {
                         let _ = reply.send(Ok(rustbgpd_rib::RibRowsPage {
                             routes: Vec::new(),
                             total: 0,
@@ -4627,6 +4830,8 @@ mod tests {
             PeerScopedRead::LabeledPageAdvertised,
             PeerScopedRead::RtcPageReceived,
             PeerScopedRead::RtcPageAdvertised,
+            PeerScopedRead::BgpLsPageReceived,
+            PeerScopedRead::BgpLsPageAdvertised,
             PeerScopedRead::ExplainEvpnReceivedFrom,
             PeerScopedRead::ExplainEvpnAdvertisedTo,
         ] {

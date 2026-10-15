@@ -4144,7 +4144,7 @@ impl RibManager {
         let vpn_changed = !vpn_announce.is_empty() || !vpn_withdraw.is_empty();
         let labeled_changed = !labeled_announce.is_empty() || !labeled_withdraw.is_empty();
         let rtc_changed = !rtc_announce.is_empty() || !rtc_withdraw.is_empty();
-        if evpn_changed || vpn_changed || labeled_changed || rtc_changed {
+        if evpn_changed || vpn_changed || labeled_changed || rtc_changed || bgpls_changed {
             self.advance_advertised_pages();
         }
         let has_committed_route_payload = unicast_changed

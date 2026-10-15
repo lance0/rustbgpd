@@ -230,6 +230,9 @@ impl RibManager {
             super::super::replacement_readiness_checkpoint_at(&readiness, "selection_bgpls", false);
         };
         checkpoint();
+        if !affected.is_empty() {
+            self.advance_table_pages();
+        }
         self.record_deferred_bgpls(affected);
         let mut affected: HashSet<_> = affected
             .iter()

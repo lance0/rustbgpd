@@ -36,6 +36,31 @@ pub(crate) enum MockSubscribeFromEventPlan {
     },
 }
 
+fn sample_bgpls_route(peer_filter: &str) -> server_proto::BgpLsRouteEntry {
+    server_proto::BgpLsRouteEntry {
+        afi_safi: server_proto::AddressFamily::BgpLs as i32,
+        family: "bgp_ls".to_string(),
+        nlri_type: 1,
+        nlri_type_name: "node".to_string(),
+        route_distinguisher: vec![],
+        payload: vec![0x01, 0x02, 0x03],
+        descriptor: vec![0x04, 0x05],
+        next_hop: "192.0.2.1".to_string(),
+        peer_address: if peer_filter.is_empty() {
+            "198.51.100.1".to_string()
+        } else {
+            canonical_ip_or_original(peer_filter)
+        },
+        as_path: vec![64512],
+        communities: vec![],
+        extended_communities: vec![],
+        stale: false,
+        llgr_stale: false,
+        path_id: 0,
+        bgp_ls_attribute: vec![0xaa, 0xbb],
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct MockState {
     pub(crate) bfd_calls: AtomicUsize,
@@ -192,6 +217,10 @@ pub(crate) struct MockState {
     // Canned ListBgpLsRoutes response — when set, served verbatim so the
     // decode-ceiling tests can push multi-MiB listings through loopback.
     pub(crate) list_bgpls_response: Mutex<Option<server_proto::ListBgpLsResponse>>,
+    // Every ListBgpLsRibRoutes request, in order; canned pages are served by
+    // request index, and an empty list serves one sample row.
+    pub(crate) bgpls_page_requests: Mutex<Vec<server_proto::ListBgpLsRibRoutesRequest>>,
+    pub(crate) bgpls_pages: Mutex<Vec<server_proto::ListBgpLsRibRoutesResponse>>,
     pub(crate) list_conditional_response:
         Mutex<Option<server_proto::ListConditionalAdvertisementsResponse>>,
     pub(crate) family_page_error: Mutex<Option<(Code, String)>>,
@@ -2225,29 +2254,30 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             return Ok(Response::new(canned));
         }
         Ok(Response::new(server_proto::ListBgpLsResponse {
-            routes: vec![server_proto::BgpLsRouteEntry {
-                afi_safi: server_proto::AddressFamily::BgpLs as i32,
-                family: "bgp_ls".to_string(),
-                nlri_type: 1,
-                nlri_type_name: "node".to_string(),
-                route_distinguisher: vec![],
-                payload: vec![0x01, 0x02, 0x03],
-                descriptor: vec![0x04, 0x05],
-                next_hop: "192.0.2.1".to_string(),
-                peer_address: if request.peer_filter.is_empty() {
-                    "198.51.100.1".to_string()
-                } else {
-                    canonical_ip_or_original(&request.peer_filter)
-                },
-                as_path: vec![64512],
-                communities: vec![],
-                extended_communities: vec![],
-                stale: false,
-                llgr_stale: false,
-                path_id: 0,
-                bgp_ls_attribute: vec![0xaa, 0xbb],
-            }],
+            routes: vec![sample_bgpls_route(&request.peer_filter)],
         }))
+    }
+
+    async fn list_bgp_ls_rib_routes(
+        &self,
+        request: Request<server_proto::ListBgpLsRibRoutesRequest>,
+    ) -> Result<Response<server_proto::ListBgpLsRibRoutesResponse>, Status> {
+        let request = request.into_inner();
+        let mut requests = self.state.bgpls_page_requests.lock().await;
+        requests.push(request.clone());
+        let pages = self.state.bgpls_pages.lock().await;
+        if pages.is_empty() {
+            return Ok(Response::new(server_proto::ListBgpLsRibRoutesResponse {
+                routes: vec![sample_bgpls_route(&request.source_peer_filter)],
+                total_count: 1,
+                ..Default::default()
+            }));
+        }
+        pages
+            .get(requests.len() - 1)
+            .cloned()
+            .map(Response::new)
+            .ok_or_else(|| Status::invalid_argument("unexpected BGP-LS page request"))
     }
 
     async fn list_vpn_routes(

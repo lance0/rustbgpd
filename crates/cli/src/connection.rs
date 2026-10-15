@@ -1048,6 +1048,10 @@ mod tests {
     // response larger than tonic's 4 MiB client default, end to end over
     // a real TCP loopback server.
     #[tokio::test]
+    #[expect(
+        deprecated,
+        reason = "the whole-table BGP-LS listing is the simplest oversized unary response"
+    )]
     async fn listing_client_decodes_response_over_default_ceiling() {
         let handle = crate::test_support::spawn_mock_server(None).await;
         let resp = bgpls_listing_fixture(2200, 2048);
@@ -1074,6 +1078,10 @@ mod tests {
     // and that non-listing clients (which all use this constructor) stay
     // at the default.
     #[tokio::test]
+    #[expect(
+        deprecated,
+        reason = "the whole-table BGP-LS listing is the simplest oversized unary response"
+    )]
     async fn default_generated_client_fails_out_of_range_over_default_ceiling() {
         let handle = crate::test_support::spawn_mock_server(None).await;
         *handle.state.list_bgpls_response.lock().await = Some(bgpls_listing_fixture(2200, 2048));
@@ -1094,6 +1102,10 @@ mod tests {
     // with a 1 KiB cap must reject a response just over 1 KiB with
     // OutOfRange.
     #[tokio::test]
+    #[expect(
+        deprecated,
+        reason = "the whole-table BGP-LS listing is the simplest oversized unary response"
+    )]
     async fn listing_client_ceiling_is_enforced() {
         let handle = crate::test_support::spawn_mock_server(None).await;
         let resp = bgpls_listing_fixture(2, 1024);
@@ -1113,6 +1125,10 @@ mod tests {
     // bearer token still reaches a server that enforces it, and a
     // connection without the token is still rejected.
     #[tokio::test]
+    #[expect(
+        deprecated,
+        reason = "the whole-table BGP-LS listing is the simplest oversized unary response"
+    )]
     async fn listing_client_carries_bearer_token() {
         let handle = crate::test_support::spawn_mock_server(Some("listing-secret")).await;
         let dir = tempfile::tempdir().unwrap();
@@ -1381,6 +1397,7 @@ mod tests {
             ".list_vpn_rib_routes(",
             ".list_labeled_rib_routes(",
             ".list_rtc_rib_routes(",
+            ".list_bgp_ls_rib_routes(",
             ".list_best_evpn_routes(",
             ".list_evpn_routes(",
             ".list_received_evpn_routes(",
