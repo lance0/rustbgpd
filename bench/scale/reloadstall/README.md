@@ -22,22 +22,34 @@ and next hop. Three dense bitmaps retain each receiver's actual fold, generation
 coverage and withdrawal coverage; Python never retains a table-sized route set.
 Their logical storage is about 5.5 MB for 12 receivers or 11.1 MB for 24.
 
-The policy source and config remain byte-identical within each matched cell.
-Alternating only an origin-AS dataset changes the output generation marker.
-No-refusal cells preserve all keys and require exactly zero withdrawals.
-Cap-pressure cells additionally reject four known keys in each family in B;
-A restores them. This deliberately exercises flat replacement-overlap refusal
-without confusing it with a no-refusal performance comparison. Receiver pause acknowledgements
-precede staging. After native SIGHUP reports one successful terminal outcome,
-every receiver must have an actual JSON `outbound routes resynced` receipt
-with `dirty=true` and `force=false` in that operation's daemon-log window.
-The frozen source must establish that all targets are marked dirty before
-any staging or resync. The exact target set, initially clean API state,
-unchanged group IDs and clean post-settlement API state are required before
-readers resume. This proves same-operation mass-dirty capture through source
-order and actual receipts. It does not claim a sampled instant when every peer
-was pending or forced queue deferral: a whole resync is one outbound envelope,
-and later transport slicing does not keep the RIB dirty after queue admission.
+Policy, config and the static origin-AS dataset remain byte-identical within
+both arms. The source changes existing routes A→B→A over BGP; no SIGHUP or
+runtime dataset acknowledgement is involved. Each 80-key chunk has one paired
+private four-byte origin: A is 4200100000 + 2×chunk, B is A+1. All 15,375 B
+origins are preloaded in the dataset. Exact wire validation derives the AS_PATH
+from the family, key, chunk and marker, including permitted prior-value replay.
+No-refusal cells preserve every key and require zero withdrawals. Cap-pressure
+cells additionally reject four known keys in each family in B; A restores them.
+
+Receivers use SO_RCVBUF=4096 before connect (Linux reports 8192). This fixed
+pressure fixture does not establish normal-buffer throughput. After every
+churn chunk, one matching-family EoR settles the preceding distribution window
+through the existing O(1) non-route actor boundary, with no GR/LLGR active:
+15,375 EoRs per operation, 30,750 per leg, plus two baseline EoRs. There is no
+per-chunk API roundtrip or route-refresh table sweep. The final source-writer
+receipt follows actual TCP write_all/flush; it is not a RIB acknowledgement.
+
+After every receiver acknowledges pause, the controller starts the whole window
+before sending the churn command. While all remain paused, it requires two
+complete detail-query sweeps with every receiver pending in the unchanged group
+and the source clean. A CURRENT dirty episode with floored age d and query bounds
+[b,e] guarantees the interval [e−d,b]. All intervals from both sweeps must have
+a common instant. Raw bounds, ages and the intersection are retained; correctness
+mode publishes null clocks and the proof boolean. This establishes actual
+overlapping dirty episodes rather than treating sequential queries as atomic.
+Dirty retained recovery entries/capacity are sampled before release. After resume,
+every target needs a real JSON `outbound routes resynced` receipt with dirty=true
+and force=false, exact final wire fold, unchanged identity/group and clean state.
 Missing receipts fail the cell; backpressure or a trigger alone is insufficient. Every named
 withdrawal must have an actual prior route, and every final family fold must be
 exact. Session replacement, slow-peer isolation, bystander/duplicate withdrawals,
@@ -51,12 +63,25 @@ boundary rechecks receiver errors, inventory and source/session continuity.
 
 The manifest fixes these bars before any result:
 
+- Candidate and flat daemons use isolated Cargo targets with identical locked
+  build commands and default features. Their actual binary hashes must differ
+  before any cell starts; the consumer checks this again, independently of the
+  recorded source patch and binary roster.
 - All sampled public `/readyz` requests return HTTP 200 within the existing
-  250 ms client deadline, with nonzero samples. Sampling runs throughout the
-  operation; it is sampled availability, not a claim about every instant.
+  250 ms client deadline at a one-second cadence. Contiguous probe sequences
+  retain actual start/end `CLOCK_MONOTONIC` timestamps, matching the controller's
+  trigger, source-drain, resume and observed-fold clock. Successful probes must
+  bracket each complete trigger-to-fold interval; consecutive probe starts,
+  including both brackets, must be at most 1.25 seconds apart. Each B/A receipt
+  reports its bracketed sample count and maximum gap. This is sampled
+  availability, not a claim about every instant. The harness writes directly
+  to the evidence file, so controller waits cannot fill an undrained stdout
+  pipe and stop probing. A watcher failure interrupts pending protocol waits
+  and retains its original error; it cannot wait for another controller command
+  before failing. Correctness-only timing fields remain null.
 - No-refusal cells enter no recovery fallback. Across matched operations and
-  legs, both median and worst **SIGHUP send → observed exact final fleet fold**
-  must be at most flat × 1.10 + 30 ms. This includes capture, reload settlement
+  legs, both median and worst **source-churn command → observed exact final fleet fold**
+  must be at most flat × 1.10 + 30 ms. This includes all ingress filling, cold capture
   and the mandatory paused dirty-witness work. Post-resume receiver quantiles
   are diagnostic and cannot replace the whole-operation bar.
 - Cap-pressure cells must recover correctly within the fixed 1,800-second
@@ -100,10 +125,13 @@ The finalizer rejects missing/failed legs, altered evidence and changed bars.
 Each generated config must pass the actual daemon's `--check --strict` before
 launch; its output is retained. A TOML parse alone does not qualify the config.
 
-`--correctness-only` explicitly selects two receivers and 160/40 keys. It emits
-proof counts and null durations, omits memory measurement, and can qualify only
-the instrument's small pipeline after an authorized local build. It is never a
-release performance receipt. A separate soak on the actual release candidate
+`--correctness-only` uses the same full 1,000,000/230,000-key, 80-key-chunk
+stimulus with two receivers. It emits proof counts and null durations, omits
+memory measurement, and requires the same actual overlapping dirty episodes and
+exact wire folds. A smaller local trial did not create backpressure and was
+retained as INVALID; correctness mode does not substitute that smaller workload.
+It can validate the pipeline after an authorized local build, never release
+performance. A separate soak on the actual release candidate
 remains required and is owned by the soak operator; this driver does not touch
 the soak host.
 

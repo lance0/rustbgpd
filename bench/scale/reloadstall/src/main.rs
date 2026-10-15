@@ -1862,8 +1862,14 @@ async fn open_stub_stream(
     open: &[u8],
     keepalive: &[u8],
     required: &[(Afi, Safi)],
+    receive_buffer: Option<usize>,
 ) -> Result<(TcpStream, Instant), StubOpenError> {
     let sock = TcpSocket::new_v4().map_err(|e| StubOpenError::Fatal(format!("socket: {e}")))?;
+    if let Some(bytes) = receive_buffer {
+        socket2::SockRef::from(&sock)
+            .set_recv_buffer_size(bytes)
+            .map_err(|e| StubOpenError::Fatal(format!("receive buffer: {e}")))?;
+    }
     if std::env::var("RELOADSTALL_GTSM").as_deref() == Ok("1") {
         socket2::SockRef::from(&sock)
             .set_ttl_v4(255)
@@ -1946,6 +1952,21 @@ async fn establish_stream_with_retry(
     window: Duration,
     required: &[(Afi, Safi)],
 ) -> Result<(TcpStream, Instant, u32), String> {
+    establish_stream_with_retry_and_receive_buffer(
+        daemon, local, open, keepalive, window, required, None,
+    )
+    .await
+}
+
+async fn establish_stream_with_retry_and_receive_buffer(
+    daemon: SocketAddr,
+    local: Ipv4Addr,
+    open: &[u8],
+    keepalive: &[u8],
+    window: Duration,
+    required: &[(Afi, Safi)],
+    receive_buffer: Option<usize>,
+) -> Result<(TcpStream, Instant, u32), String> {
     let deadline = Instant::now() + window;
     let mut retries = 0;
     loop {
@@ -1958,7 +1979,7 @@ async fn establish_stream_with_retry(
         }
         match tokio::time::timeout(
             remaining,
-            open_stub_stream(daemon, local, open, keepalive, required),
+            open_stub_stream(daemon, local, open, keepalive, required, receive_buffer),
         )
         .await
         {

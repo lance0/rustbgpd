@@ -111,18 +111,26 @@ cp -- "$scratch/flat/crates/rib/src/manager/update_groups.rs" "$output/flat-cont
 git -C "$scratch/flat" diff --binary >"$output/flat-control.patch"
 rustc -Vv >"$output/rustc-version.txt"
 cargo --version >"$output/cargo-version.txt"
-target=$scratch/target
 jobs=${CARGO_BUILD_JOBS:-2}
 [[ $jobs =~ ^[1-4]$ ]] || { echo 'build jobs must be 1..=4' >&2; exit 1; }
 for role in candidate flat; do
-    (cd "$scratch/$role" && CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --release --locked --bin rustbgpd) >"$output/build-$role.log" 2>&1
+    # Source worktrees must not reuse a role's cached RIB fingerprint. The
+    # off-source mutation predates both builds, so one shared target is unsafe.
+    target=$scratch/target-$role
+    (
+        cd "$scratch/$role"
+        printf 'CARGO_BUILD_JOBS=%s CARGO_TARGET_DIR=%q cargo build --release --locked --bin rustbgpd\n' "$jobs" "$target"
+        CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --release --locked --bin rustbgpd
+    ) >"$output/build-$role.log" 2>&1
     cp -- "$target/release/rustbgpd" "$output/bin/rustbgpd-$role"
 done
+target=$scratch/target-candidate
 (cd "$scratch/candidate" && CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --profile scale --locked -p reloadstall) >"$output/build-harness.log" 2>&1
 cp -- "$target/scale/reloadstall" "$output/bin/reloadstall"
 (cd "$scratch/candidate" && CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --release --locked --bin rbgp) >"$output/build-rbgp.log" 2>&1
 cp -- "$target/release/rbgp" "$output/bin/rbgp"
 sha256sum "$output"/bin/* >"$output/binaries.sha256"
+python3 "$checker" check-binaries "$output" >"$output/binary-validation.json"
 mapfile -t schedule < <(python3 - "$output/campaign.json" <<'PY'
 import json, sys
 for arm in json.load(open(sys.argv[1]))['schedule']:

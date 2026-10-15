@@ -6,7 +6,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::oneshot;
 
 const LOCAL_AS: u32 = 64512;
-const SOURCE_AS: u32 = 64500;
+const ORIGIN_BASE: u32 = 4_200_100_000;
+const RECEIVER_BUFFER: usize = 4096;
 const DENIED: usize = 4;
 const RDS: [RouteDistinguisher; 2] = [
     RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
@@ -19,22 +20,20 @@ struct Shape {
     vpn: bool,
     counts: [usize; 2],
     denied: usize,
+    batch_size: usize,
 }
 
 impl Shape {
-    fn new(profile: &str, correctness: bool, pressure: bool) -> Result<Self, String> {
+    fn new(profile: &str, pressure: bool) -> Result<Self, String> {
         Ok(Self {
             vpn: match profile {
                 "full-uc" => false,
                 "full-vpn" => true,
                 _ => return Err("profile must be full-uc or full-vpn".into()),
             },
-            counts: if correctness {
-                [160, 40]
-            } else {
-                [1_000_000, 230_000]
-            },
+            counts: [1_000_000, 230_000],
             denied: if pressure { DENIED } else { 0 },
+            batch_size: 80,
         })
     }
 
@@ -45,6 +44,22 @@ impl Shape {
             Safi::Unicast
         };
         [(Afi::Ipv4, safi), (Afi::Ipv6, safi)]
+    }
+
+    fn chunks(self) -> usize {
+        self.counts
+            .map(|count| count.div_ceil(self.batch_size))
+            .iter()
+            .sum()
+    }
+
+    fn origin(self, family: usize, index: usize, generation_b: bool) -> u32 {
+        let chunk = if family == 0 {
+            0
+        } else {
+            self.counts[0].div_ceil(self.batch_size)
+        } + index / self.batch_size;
+        ORIGIN_BASE + 2 * u32::try_from(chunk).unwrap() + u32::from(generation_b)
     }
 
     fn prefix(self, family: usize, index: usize) -> Prefix {
@@ -119,18 +134,30 @@ fn next_hop(family: usize) -> IpAddr {
     }
 }
 
-fn attributes() -> Vec<PathAttribute> {
+fn attributes(origin: u32) -> Vec<PathAttribute> {
     vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![SOURCE_AS])],
+            segments: vec![AsPathSegment::AsSequence(vec![origin])],
         }),
         PathAttribute::LocalPref(100),
     ]
 }
 
-fn announce(shape: Shape, family: usize, start: usize, end: usize) -> Result<Message, String> {
-    let mut attrs = attributes();
+fn announce(
+    shape: Shape,
+    family: usize,
+    start: usize,
+    end: usize,
+    generation_b: bool,
+) -> Result<Message, String> {
+    if start >= end
+        || end > shape.counts[family]
+        || start / shape.batch_size != (end - 1) / shape.batch_size
+    {
+        return Err("announcement crosses its finite origin chunk".into());
+    }
+    let mut attrs = attributes(shape.origin(family, start, generation_b));
     if !shape.vpn && family == 0 {
         attrs.push(PathAttribute::NextHop(Ipv4Addr::new(10, 9, 0, 1)));
         let entries = (start..end)
@@ -182,6 +209,73 @@ fn announce(shape: Shape, family: usize, start: usize, end: usize) -> Result<Mes
     UpdateMessage::try_build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body)
         .map(Message::Update)
         .map_err(|error| error.to_string())
+}
+
+fn end_of_rib(shape: Shape, family: usize) -> Result<Message, String> {
+    let attributes = if !shape.vpn && family == 0 {
+        Vec::new()
+    } else {
+        let (afi, safi) = shape.families()[family];
+        vec![PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
+            afi,
+            safi,
+            withdrawn: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+            bgpls_withdrawn: Vec::new(),
+            vpn_withdrawn: Vec::new(),
+            labeled_withdrawn: Vec::new(),
+            rtc_withdrawn: Vec::new(),
+        }))]
+    };
+    UpdateMessage::try_build(&[], &[], &attributes, true, false, Ipv4UnicastMode::Body)
+        .map(Message::Update)
+        .map_err(|error| error.to_string())
+}
+
+type SourceWrite = (Message, Option<oneshot::Sender<Result<(), String>>>);
+
+async fn feed_generation(
+    sender: &mpsc::Sender<SourceWrite>,
+    shape: Shape,
+    generation_b: bool,
+    churn: bool,
+) -> Result<(), String> {
+    let (drained, receipt) = oneshot::channel();
+    let mut drained = Some(drained);
+    for family in 0..2 {
+        for start in (0..shape.counts[family]).step_by(shape.batch_size) {
+            let end = (start + shape.batch_size).min(shape.counts[family]);
+            sender
+                .send((announce(shape, family, start, end, generation_b)?, None))
+                .await
+                .map_err(|_| "source writer ended")?;
+            if churn {
+                let last = family == 1 && end == shape.counts[family];
+                sender
+                    .send((
+                        end_of_rib(shape, family)?,
+                        if last { drained.take() } else { None },
+                    ))
+                    .await
+                    .map_err(|_| "source writer ended")?;
+            }
+        }
+        if !churn {
+            sender
+                .send((
+                    end_of_rib(shape, family)?,
+                    if family == 1 { drained.take() } else { None },
+                ))
+                .await
+                .map_err(|_| "source writer ended")?;
+        }
+    }
+    tokio::time::timeout(CELL_DEADLINE, receipt)
+        .await
+        .map_err(|_| "fixed source-drain deadline expired")?
+        .map_err(|_| "source writer ended before drain")??;
+    Ok(())
 }
 
 struct Inventory {
@@ -315,8 +409,18 @@ impl Inventory {
             } else {
                 COMMUNITY_GEN_A
             });
+        let origin = parsed
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::AsPath(path) => match path.segments.as_slice() {
+                    [AsPathSegment::AsSequence(values)] if values.len() == 1 => Some(values[0]),
+                    _ => None,
+                },
+                _ => None,
+            });
         let mut expected = if has_announcements {
-            attributes()
+            attributes(origin.unwrap_or(ORIGIN_BASE))
         } else {
             Vec::new()
         };
@@ -360,6 +464,7 @@ impl Inventory {
                 return Err("duplicate or unexpected family carrier".into());
             }
         }
+        reject_update_overlap(parsed)?;
         for entry in &parsed.announced {
             if self.shape.vpn || entry.path_id != 0 {
                 return Err("wrong body family/path ID".into());
@@ -371,7 +476,7 @@ impl Inventory {
                 return Err("wrong IPv4 next hop".into());
             }
             let (family, index) = self.shape.index(Prefix::V4(entry.prefix), None)?;
-            self.event(family, index, Some(marker))?;
+            self.announcement(family, index, marker, origin)?;
         }
         for entry in &parsed.withdrawn {
             if self.shape.vpn || entry.path_id != 0 {
@@ -405,7 +510,7 @@ impl Inventory {
                             if f != family || entry.nlri != self.shape.vpn(f, index) {
                                 return Err("wrong VPN label or AFI".into());
                             }
-                            self.event(f, index, Some(marker))?;
+                            self.announcement(f, index, marker, origin)?;
                         }
                     } else {
                         if !mp.vpn_announced.is_empty() {
@@ -419,7 +524,7 @@ impl Inventory {
                             if f != family {
                                 return Err("wrong MP AFI".into());
                             }
-                            self.event(f, index, Some(marker))?;
+                            self.announcement(f, index, marker, origin)?;
                         }
                     }
                 }
@@ -473,6 +578,19 @@ impl Inventory {
             .ok_or("unnegotiated MP family".into())
     }
 
+    fn announcement(
+        &mut self,
+        family: usize,
+        index: usize,
+        marker: u32,
+        origin: Option<u32>,
+    ) -> Result<(), String> {
+        if origin != Some(self.shape.origin(family, index, marker == COMMUNITY_GEN_B)) {
+            return Err("wrong chunk/generation origin AS".into());
+        }
+        self.event(family, index, Some(marker))
+    }
+
     fn vpn_index(&self, entry: &VpnNlriEntry) -> Result<(usize, usize), String> {
         if entry.path_id != 0 {
             return Err("unexpected VPN Add-Path".into());
@@ -484,6 +602,72 @@ impl Inventory {
         self.shape
             .index(prefix, Some(entry.nlri.route_distinguisher))
     }
+}
+
+fn reject_update_overlap(parsed: &ParsedUpdate) -> Result<(), String> {
+    let withdrawn_mp = parsed
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        });
+    if parsed.withdrawn.is_empty()
+        && withdrawn_mp.is_none_or(|mp| mp.withdrawn.is_empty() && mp.vpn_withdrawn.is_empty())
+    {
+        return Ok(());
+    }
+    // This fixture never requires a same-key withdraw/announce within an
+    // UPDATE. Reject it before folding either event: carrier order cannot
+    // conceal a prior-value replay after withdrawal or a spurious transient.
+    for entry in &parsed.announced {
+        if parsed.withdrawn.contains(entry)
+            || withdrawn_mp.is_some_and(|mp| {
+                mp.afi == Afi::Ipv4
+                    && mp.safi == Safi::Unicast
+                    && mp.withdrawn.contains(&NlriEntry {
+                        path_id: entry.path_id,
+                        prefix: Prefix::V4(entry.prefix),
+                    })
+            })
+        {
+            return Err("same-key announcement and withdrawal in one UPDATE".into());
+        }
+    }
+    for attribute in &parsed.attributes {
+        let PathAttribute::MpReachNlri(mp) = attribute else {
+            continue;
+        };
+        for entry in &mp.announced {
+            let body_overlap = mp.afi == Afi::Ipv4
+                && mp.safi == Safi::Unicast
+                && parsed.withdrawn.iter().any(|withdrawn| {
+                    entry.path_id == withdrawn.path_id
+                        && entry.prefix == Prefix::V4(withdrawn.prefix)
+                });
+            if body_overlap
+                || withdrawn_mp.is_some_and(|withdrawn| {
+                    withdrawn.afi == mp.afi
+                        && withdrawn.safi == mp.safi
+                        && withdrawn.withdrawn.contains(entry)
+                })
+            {
+                return Err("same-key announcement and withdrawal in one UPDATE".into());
+            }
+        }
+        for entry in &mp.vpn_announced {
+            if withdrawn_mp.is_some_and(|withdrawn| {
+                withdrawn.afi == mp.afi
+                    && withdrawn.safi == mp.safi
+                    && withdrawn.vpn_withdrawn.iter().any(|old| {
+                        old.path_id == entry.path_id && old.nlri.key() == entry.nlri.key()
+                    })
+            }) {
+                return Err("same-key announcement and withdrawal in one UPDATE".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Default)]
@@ -613,15 +797,24 @@ async fn connect(shape: Shape, port: u16, index: u32) -> Result<TcpStream, Strin
         .push(Capability::FourOctetAs { asn: LOCAL_AS });
     let bytes = encode_message(&Message::Open(open)).map_err(|error| error.to_string())?;
     let keepalive = encode_message(&Message::Keepalive).unwrap();
-    let (stream, _, _) = establish_stream_with_retry(
+    let (stream, _, _) = establish_stream_with_retry_and_receive_buffer(
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
         stub_addr(index),
         &bytes,
         &keepalive,
         CONNECT_WINDOW,
         &shape.families(),
+        (index != 0).then_some(RECEIVER_BUFFER),
     )
     .await?;
+    if index != 0
+        && socket2::SockRef::from(&stream)
+            .recv_buffer_size()
+            .map_err(|error| error.to_string())?
+            != 2 * RECEIVER_BUFFER
+    {
+        return Err("receiver buffer differs from fixed Linux fixture".into());
+    }
     Ok(stream)
 }
 
@@ -662,16 +855,54 @@ async fn readiness_watch(
             _ = &mut stop => return Ok(samples),
             _ = tick.tick() => {
                 let started = Instant::now();
+                let probe_start = monotonic_seconds(correctness)?;
                 // Reuse the HTTP validation and retain the existing client deadline.
                 fetch_http(metrics, "/readyz", started + READINESS_DEADLINE).await?;
+                let probe_end = monotonic_seconds(correctness)?;
                 let elapsed = started.elapsed();
                 if elapsed > READINESS_DEADLINE { return Err("late readiness success".into()); }
                 let seconds = if correctness { "null".into() } else { elapsed.as_secs_f64().to_string() };
-                println!("mass_dirty_readiness {{\"status\":200,\"deadline_ms\":250,\"elapsed_seconds\":{seconds}}}");
                 samples += 1;
+                let probe_start = json_seconds(probe_start);
+                let probe_end = json_seconds(probe_end);
+                println!("mass_dirty_readiness {{\"sequence\":{samples},\"status\":200,\"deadline_ms\":250,\"elapsed_seconds\":{seconds},\"started_monotonic_seconds\":{probe_start},\"finished_monotonic_seconds\":{probe_end}}}");
             }
         }
     }
+}
+
+fn checked_clock_seconds(seconds: libc::time_t, nanoseconds: libc::c_long) -> Result<f64, String> {
+    let seconds = u64::try_from(seconds).map_err(|_| "negative monotonic seconds")?;
+    let nanoseconds = u32::try_from(nanoseconds).map_err(|_| "invalid monotonic nanoseconds")?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err("invalid monotonic nanoseconds".into());
+    }
+    Ok(Duration::new(seconds, nanoseconds).as_secs_f64())
+}
+
+fn monotonic_seconds(correctness: bool) -> Result<Option<f64>, String> {
+    if correctness {
+        return Ok(None);
+    }
+    let mut timestamp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: timestamp is writable and correctly aligned. The fixed Linux
+    // clock matches Python time.monotonic(), so raw probes and controller
+    // phases share an epoch without a wall-clock mapping or drift assumption.
+    // Check the syscall and both fields before converting through Duration.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut timestamp) } != 0 {
+        return Err(format!(
+            "monotonic clock failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    checked_clock_seconds(timestamp.tv_sec, timestamp.tv_nsec).map(Some)
+}
+
+fn json_seconds(seconds: Option<f64>) -> String {
+    seconds.map_or_else(|| "null".into(), |seconds| seconds.to_string())
 }
 
 async fn run(args: &[String]) -> Result<(), String> {
@@ -690,7 +921,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         "cap-pressure" => true,
         _ => return Err("cohort must be no-refusal or cap-pressure".into()),
     };
-    let shape = Shape::new(value("--profile")?, correctness, pressure)?;
+    let shape = Shape::new(value("--profile")?, pressure)?;
     let count: u32 = value("--receivers")?
         .parse()
         .map_err(|_| "bad receiver count")?;
@@ -731,7 +962,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     }
     let source = connect(shape, port, 0).await?;
     let (mut source_reader, mut source_writer) = source.into_split();
-    let (updates, mut outgoing) = mpsc::channel::<Message>(8);
+    let (updates, mut outgoing) = mpsc::channel::<SourceWrite>(8);
     let source_live = Arc::new(AtomicBool::new(true));
     let source_write_status = source_live.clone();
     tokio::spawn(async move {
@@ -741,11 +972,19 @@ async fn run(args: &[String]) -> Result<(), String> {
             let result = tokio::select! {
                 _ = tick.tick() => source_writer.write_all(&bytes).await,
                 message = outgoing.recv() => {
-                    let Some(message) = message else { return; };
-                    match encode_message(&message) {
+                    let Some((message, drained)) = message else { return; };
+                    let result = match encode_message(&message) {
                         Ok(bytes) => source_writer.write_all(&bytes).await,
                         Err(_) => { source_write_status.store(false, Ordering::Release); return; }
+                    };
+                    if let Some(drained) = drained {
+                        let flushed = if result.is_ok() { source_writer.flush().await } else { result };
+                        let failed = flushed.is_err();
+                        let _ = drained.send(flushed.map_err(|error| error.to_string()));
+                        if failed { source_write_status.store(false, Ordering::Release); return; }
+                        continue;
                     }
+                    result
                 }
             };
             if result.is_err() {
@@ -783,26 +1022,14 @@ async fn run(args: &[String]) -> Result<(), String> {
         }
         source_status.store(false, Ordering::Release);
     });
-    for family in 0..2 {
-        for start in (0..shape.counts[family]).step_by(80) {
-            updates
-                .send(announce(
-                    shape,
-                    family,
-                    start,
-                    (start + 80).min(shape.counts[family]),
-                )?)
-                .await
-                .map_err(|_| "source writer ended")?;
-        }
-    }
+    feed_generation(&updates, shape, false, false).await?;
     wait_for(&receivers, |receiver| {
         receiver.inventory.lock().unwrap().complete()
     })
     .await?;
     terminal_state(&receivers, &source_live)?;
     println!(
-        "mass_dirty_ready {{\"receivers\":{count},\"family_keys\":[{},{}],\"bitmap_bytes\":{},\"correctness_only\":{correctness}}}",
+        "mass_dirty_ready {{\"receivers\":{count},\"family_keys\":[{},{}],\"bitmap_bytes\":{},\"correctness_only\":{correctness},\"batch_size\":{},\"origin_cardinality\":{},\"baseline_eor_messages\":2,\"receiver_receive_buffer_bytes\":{}}}",
         shape.counts[0],
         shape.counts[1],
         count as usize
@@ -810,104 +1037,135 @@ async fn run(args: &[String]) -> Result<(), String> {
                 .counts
                 .map(|n| n.div_ceil(64) * 8 * 3)
                 .iter()
-                .sum::<usize>()
+                .sum::<usize>(),
+        shape.batch_size, shape.chunks(), RECEIVER_BUFFER * 2
     );
     let (stop, stopped) = oneshot::channel();
-    let readiness = tokio::spawn(readiness_watch(metrics, stopped, correctness));
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    for (epoch, generation) in [(1, "b"), (2, "a")] {
-        let pause = lines
-            .next_line()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or("controller ended")?;
-        if pause != format!("pause {generation}") {
-            return Err("unexpected controller pause".into());
-        }
-        for receiver in &receivers {
-            receiver.control.send_replace(Pause {
-                epoch,
-                paused: true,
-            });
-        }
-        wait_for(&receivers, |receiver| {
-            receiver.acknowledged.load(Ordering::Acquire) == epoch
-        })
-        .await?;
-        for receiver in &receivers {
-            receiver.inventory.lock().unwrap().arm(generation == "b");
-        }
-        println!("mass_dirty_paused {{\"generation\":\"{generation}\",\"receivers\":{count}}}");
-        let resume = lines
-            .next_line()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or("controller ended")?;
-        if resume != format!("resume {generation}") {
-            return Err("unexpected controller resume".into());
-        }
-        let started = (!correctness).then(Instant::now);
-        for receiver in &receivers {
-            receiver.inventory.lock().unwrap().started = started;
-            receiver.control.send_replace(Pause {
-                epoch: epoch + 2,
-                paused: false,
-            });
-        }
-        wait_for(&receivers, |receiver| {
-            receiver.inventory.lock().unwrap().complete()
-        })
-        .await?;
-        if !source_live.load(Ordering::Acquire) {
-            return Err("source session ended".into());
-        }
-        let mut durations = receivers
-            .iter()
-            .filter_map(|receiver| receiver.inventory.lock().unwrap().completion_seconds)
-            .collect::<Vec<_>>();
-        durations.sort_by(f64::total_cmp);
-        let p50 = if correctness {
-            "null".into()
-        } else {
-            durations
-                .get(durations.len() / 2)
-                .ok_or("missing receiver completion")?
-                .to_string()
-        };
-        let maximum = if correctness {
-            "null".into()
-        } else {
-            durations
-                .last()
-                .ok_or("missing receiver completion")?
-                .to_string()
-        };
-        let withdrawals: u64 = receivers
-            .iter()
-            .map(|receiver| {
-                receiver
-                    .inventory
-                    .lock()
-                    .unwrap()
-                    .withdraws
-                    .iter()
-                    .sum::<u64>()
+    let mut readiness = tokio::spawn(readiness_watch(metrics, stopped, correctness));
+    let protocol = async {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        for (epoch, generation) in [(1, "b"), (2, "a")] {
+            let pause = lines
+                .next_line()
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or("controller ended")?;
+            if pause != format!("pause {generation}") {
+                return Err("unexpected controller pause".into());
+            }
+            for receiver in &receivers {
+                receiver.control.send_replace(Pause {
+                    epoch,
+                    paused: true,
+                });
+            }
+            wait_for(&receivers, |receiver| {
+                receiver.acknowledged.load(Ordering::Acquire) == epoch
             })
-            .sum();
-        println!(
-            "mass_dirty_complete {{\"generation\":\"{generation}\",\"receivers\":{count},\"resume_to_fold_p50_seconds\":{p50},\"resume_to_fold_max_seconds\":{maximum},\"withdrawals\":{withdrawals},\"exact_fold\":true,\"sessions_continuous\":true}}"
-        );
+            .await?;
+            for receiver in &receivers {
+                receiver.inventory.lock().unwrap().arm(generation == "b");
+            }
+            println!("mass_dirty_paused {{\"generation\":\"{generation}\",\"receivers\":{count}}}");
+            if lines
+                .next_line()
+                .await
+                .map_err(|error| error.to_string())?
+                .as_deref()
+                != Some(&format!("churn {generation}"))
+            {
+                return Err("unexpected source churn command".into());
+            }
+            feed_generation(&updates, shape, generation == "b", true).await?;
+            if !source_live.load(Ordering::Acquire) {
+                return Err("source session ended during churn".into());
+            }
+            let drained = json_seconds(monotonic_seconds(correctness)?);
+            println!("mass_dirty_sent {{\"generation\":\"{generation}\",\"family_keys\":[{},{}],\"announcement_messages\":{},\"eor_messages\":{},\"origin_cardinality\":{},\"writer_drained\":true,\"drained_monotonic_seconds\":{drained}}}", shape.counts[0], shape.counts[1], shape.chunks(), shape.chunks(), shape.chunks());
+            let resume = lines
+                .next_line()
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or("controller ended")?;
+            if resume != format!("resume {generation}") {
+                return Err("unexpected controller resume".into());
+            }
+            let started = (!correctness).then(Instant::now);
+            for receiver in &receivers {
+                receiver.inventory.lock().unwrap().started = started;
+                receiver.control.send_replace(Pause {
+                    epoch: epoch + 2,
+                    paused: false,
+                });
+            }
+            wait_for(&receivers, |receiver| {
+                receiver.inventory.lock().unwrap().complete()
+            })
+            .await?;
+            if !source_live.load(Ordering::Acquire) {
+                return Err("source session ended".into());
+            }
+            let mut durations = receivers
+                .iter()
+                .filter_map(|receiver| receiver.inventory.lock().unwrap().completion_seconds)
+                .collect::<Vec<_>>();
+            durations.sort_by(f64::total_cmp);
+            let p50 = if correctness {
+                "null".into()
+            } else {
+                durations
+                    .get(durations.len() / 2)
+                    .ok_or("missing receiver completion")?
+                    .to_string()
+            };
+            let maximum = if correctness {
+                "null".into()
+            } else {
+                durations
+                    .last()
+                    .ok_or("missing receiver completion")?
+                    .to_string()
+            };
+            let withdrawals: u64 = receivers
+                .iter()
+                .map(|receiver| {
+                    receiver
+                        .inventory
+                        .lock()
+                        .unwrap()
+                        .withdraws
+                        .iter()
+                        .sum::<u64>()
+                })
+                .sum();
+            println!(
+                "mass_dirty_complete {{\"generation\":\"{generation}\",\"receivers\":{count},\"resume_to_fold_p50_seconds\":{p50},\"resume_to_fold_max_seconds\":{maximum},\"withdrawals\":{withdrawals},\"exact_fold\":true,\"sessions_continuous\":true}}"
+            );
+        }
+        if lines
+            .next_line()
+            .await
+            .map_err(|error| error.to_string())?
+            .as_deref()
+            != Some("finish")
+        {
+            return Err("missing controller finish boundary".into());
+        }
+        Ok::<(), String>(())
+    };
+    // Observe watcher failure while any controller command/source/wire wait is
+    // pending. Waiting until finish can strand the controller waiting for a
+    // post-fold sample that an already-failed watcher will never produce.
+    tokio::select! {
+        result = protocol => result?,
+        result = &mut readiness => {
+            result.map_err(|error| error.to_string())??;
+            return Err("readiness stopped before controller finish".into());
+        }
     }
-    if lines
-        .next_line()
-        .await
-        .map_err(|error| error.to_string())?
-        .as_deref()
-        != Some("finish")
-    {
-        return Err("missing controller finish boundary".into());
-    }
-    stop.send(()).map_err(|()| "readiness stopped early")?;
+    // A watcher that failed exactly at the finish boundary has dropped its
+    // receiver. Join it anyway so its original error is never replaced.
+    let _ = stop.send(());
     let samples = readiness.await.map_err(|error| error.to_string())??;
     if samples == 0 {
         return Err("no readiness samples".into());
@@ -937,8 +1195,194 @@ pub(super) fn main(args: &[String]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn recovery_mass_dirty_same_update_overlap_cannot_hide_a_per_key_transient() {
+        for vpn in [false, true] {
+            let shape = Shape {
+                vpn,
+                counts: [2, 2],
+                denied: 1,
+                batch_size: 80,
+            };
+            for family in 0..2 {
+                for reverse in [false, true] {
+                    for disjoint in [false, true] {
+                        let mut parsed = parsed_wire(&reflected(shape, family, Vec::new()));
+                        if !vpn && family == 0 {
+                            if disjoint {
+                                parsed.announced.remove(0);
+                            }
+                            parsed.withdrawn.push(Ipv4NlriEntry {
+                                path_id: 0,
+                                prefix: match shape.prefix(0, 0) {
+                                    Prefix::V4(prefix) => prefix,
+                                    Prefix::V6(_) => unreachable!(),
+                                },
+                            });
+                        } else {
+                            if disjoint {
+                                for attribute in &mut parsed.attributes {
+                                    if let PathAttribute::MpReachNlri(mp) = attribute {
+                                        if vpn {
+                                            mp.vpn_announced.remove(0);
+                                        } else {
+                                            mp.announced.remove(0);
+                                        }
+                                    }
+                                }
+                            }
+                            let mut withdrawal = parsed_wire(&end_of_rib(shape, family).unwrap())
+                                .attributes
+                                .remove(0);
+                            let PathAttribute::MpUnreachNlri(mp) = &mut withdrawal else {
+                                unreachable!()
+                            };
+                            if vpn {
+                                mp.vpn_withdrawn.push(VpnNlriEntry {
+                                    path_id: 0,
+                                    nlri: shape.vpn(family, 0),
+                                });
+                            } else {
+                                mp.withdrawn.push(NlriEntry {
+                                    path_id: 0,
+                                    prefix: shape.prefix(family, 0),
+                                });
+                            }
+                            parsed.attributes.push(withdrawal);
+                        }
+                        if reverse {
+                            parsed.attributes.reverse();
+                        }
+                        let message = Message::Update(
+                            UpdateMessage::try_build(
+                                &parsed.announced,
+                                &parsed.withdrawn,
+                                &parsed.attributes,
+                                true,
+                                false,
+                                Ipv4UnicastMode::Body,
+                            )
+                            .unwrap(),
+                        );
+                        let parsed = parsed_wire(&message);
+                        let mut inventory = Inventory::new(shape);
+                        for baseline_family in 0..2 {
+                            inventory
+                                .apply(&parsed_wire(&reflected(shape, baseline_family, Vec::new())))
+                                .unwrap();
+                        }
+                        inventory.arm(true);
+                        if disjoint {
+                            // In VPN this is the same prefix in another raw RD.
+                            inventory.apply(&parsed).unwrap();
+                            assert_eq!(inventory.withdrawn_count[family], 1);
+                        } else {
+                            let old_present = inventory.present.clone();
+                            assert_eq!(
+                                inventory.apply(&parsed).unwrap_err(),
+                                "same-key announcement and withdrawal in one UPDATE"
+                            );
+                            assert_eq!(inventory.present, old_present);
+                            assert_eq!(inventory.withdrawn_count, [0, 0]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_mass_dirty_churn_fences_each_chunk_and_waits_for_final_writer_drain() {
+        for vpn in [false, true] {
+            let shape = Shape {
+                vpn,
+                counts: [2, 2],
+                denied: 0,
+                batch_size: 1,
+            };
+            let (sender, mut messages) = mpsc::channel(8);
+            let feed =
+                tokio::spawn(async move { feed_generation(&sender, shape, true, true).await });
+            let mut final_drain = None;
+            for family in 0..2 {
+                for index in 0..shape.counts[family] {
+                    let (message, drain) = messages.recv().await.unwrap();
+                    assert!(drain.is_none());
+                    let parsed = parsed_wire(&message);
+                    assert!(parsed.attributes.contains(&PathAttribute::AsPath(AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![
+                            shape.origin(family, index, true)
+                        ])],
+                    })));
+                    assert_eq!(
+                        shape.origin(family, index, true),
+                        ORIGIN_BASE + 2 * u32::try_from(family * 2 + index).unwrap() + 1
+                    );
+                    let (message, drain) = messages.recv().await.unwrap();
+                    source_message(message, shape).unwrap();
+                    if family == 1 && index == 1 {
+                        final_drain = drain;
+                    } else {
+                        assert!(drain.is_none());
+                    }
+                }
+            }
+            // Receiving the final message proves the producer ran through all
+            // enqueue operations, but completion still owes actual writer ACK.
+            assert!(!feed.is_finished());
+            final_drain.unwrap().send(Ok(())).unwrap();
+            feed.await.unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_mass_dirty_chunk_origin_is_part_of_exact_wire_identity() {
+        for vpn in [false, true] {
+            let shape = Shape {
+                vpn,
+                counts: [2, 2],
+                denied: 0,
+                batch_size: 80,
+            };
+            let valid = parsed_wire(&reflected(shape, 1, Vec::new()));
+            let mut wrong = valid.clone();
+            for attribute in &mut wrong.attributes {
+                if let PathAttribute::AsPath(path) = attribute {
+                    path.segments =
+                        vec![AsPathSegment::AsSequence(vec![shape.origin(0, 0, false)])];
+                }
+            }
+            Inventory::new(shape).apply(&valid).unwrap();
+            assert!(Inventory::new(shape).apply(&wrong).is_err());
+            assert!(announce(shape, 0, 0, 0, false).is_err());
+            let single = Shape {
+                batch_size: 1,
+                ..shape
+            };
+            assert!(announce(single, 0, 0, 2, false).is_err());
+        }
+        let shape = Shape::new("full-uc", false).unwrap();
+        assert_eq!(shape.chunks(), 15_375);
+        assert_eq!(shape.origin(1, 229_999, true), 4_200_130_749);
+        assert_ne!(shape.origin(0, 0, false), LOCAL_AS);
+    }
+
+    #[test]
+    fn recovery_mass_dirty_clock_checks_fields_and_keeps_correctness_timing_null() {
+        assert_eq!(monotonic_seconds(true).unwrap(), None);
+        assert_eq!(json_seconds(None), "null");
+        assert_eq!(checked_clock_seconds(2, 500_000_000).unwrap(), 2.5);
+        assert!(checked_clock_seconds(-1, 0).is_err());
+        assert!(checked_clock_seconds(0, -1).is_err());
+        assert!(checked_clock_seconds(0, 1_000_000_000).is_err());
+        assert!(checked_clock_seconds(libc::time_t::MAX, 999_999_999)
+            .unwrap()
+            .is_finite());
+    }
+
     fn reflected(shape: Shape, family: usize, extras: Vec<PathAttribute>) -> Message {
-        let Message::Update(update) = announce(shape, family, 0, shape.counts[family]).unwrap()
+        let Message::Update(update) =
+            announce(shape, family, 0, shape.counts[family], false).unwrap()
         else {
             unreachable!();
         };
@@ -977,6 +1421,7 @@ mod tests {
                 vpn,
                 counts: [2, 2],
                 denied: 0,
+                batch_size: 80,
             };
             for family in 0..2 {
                 let mut inventory = Inventory::new(shape);
@@ -1007,6 +1452,7 @@ mod tests {
                 vpn,
                 counts: [2, 2],
                 denied: 0,
+                batch_size: 80,
             };
             source_message(Message::Keepalive, shape).unwrap();
             for (afi, safi) in shape.families() {
@@ -1046,6 +1492,7 @@ mod tests {
             vpn: false,
             counts: [2, 2],
             denied: 0,
+            batch_size: 80,
         };
         for disconnect in [false, true] {
             let mut inventory = Inventory::new(shape);
@@ -1090,7 +1537,12 @@ mod tests {
 
     #[test]
     fn recovery_mass_dirty_raw_rd_label_and_path_identity() {
-        let shape = Shape::new("full-vpn", true, false).unwrap();
+        let shape = Shape {
+            vpn: true,
+            counts: [16, 16],
+            denied: 0,
+            batch_size: 80,
+        };
         let inventory = Inventory::new(shape);
         for family in 0..2 {
             for index in 0..shape.counts[family] {
@@ -1112,7 +1564,12 @@ mod tests {
 
     #[test]
     fn recovery_mass_dirty_bitmap_rejects_unknown_duplicate_and_bystander_withdrawal() {
-        let mut inventory = Inventory::new(Shape::new("full-uc", true, true).unwrap());
+        let mut inventory = Inventory::new(Shape {
+            vpn: false,
+            counts: [160, 40],
+            denied: DENIED,
+            batch_size: 80,
+        });
         inventory.arm(true);
         assert!(inventory.event(0, 0, None).is_err());
         inventory.present[0][0] = u64::MAX;
@@ -1126,7 +1583,12 @@ mod tests {
 
     #[test]
     fn recovery_mass_dirty_prior_replay_never_reverses_a_target_event_or_counts_as_coverage() {
-        let shape = Shape::new("full-uc", true, true).unwrap();
+        let shape = Shape {
+            vpn: false,
+            counts: [160, 40],
+            denied: DENIED,
+            batch_size: 80,
+        };
         let mut inventory = Inventory::new(shape);
         assert!(inventory.event(0, DENIED, Some(COMMUNITY_GEN_B)).is_err());
         inventory.event(0, DENIED, Some(COMMUNITY_GEN_A)).unwrap();
@@ -1148,9 +1610,14 @@ mod tests {
 
     #[test]
     fn recovery_mass_dirty_wire_round_trip_uses_existing_vpn_grammar() {
-        let shape = Shape::new("full-vpn", true, false).unwrap();
+        let shape = Shape {
+            vpn: true,
+            counts: [160, 40],
+            denied: 0,
+            batch_size: 80,
+        };
         for family in 0..2 {
-            let message = announce(shape, family, 0, 8).unwrap();
+            let message = announce(shape, family, 0, 8, false).unwrap();
             let mut bytes = bytes::Bytes::from(encode_message(&message).unwrap());
             let Message::Update(update) = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap()
             else {

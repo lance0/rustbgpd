@@ -3,13 +3,18 @@
 
 import argparse
 import copy
+import fcntl
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import socket
+import sys
 import tempfile
 import tomllib
+import time
 import unittest
 from unittest import mock
 
@@ -26,6 +31,124 @@ class MassDirtyTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_harness_evidence_does_not_wait_for_protocol_consumption(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            capacity = fcntl.fcntl(write_fd, fcntl.F_GETPIPE_SZ)
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+        line = 'mass_dirty_readiness {"status":200,"deadline_ms":250,"elapsed_seconds":null}\n'
+        count = max(1024 * 1024, capacity * 4) // len(line) + 1
+        script = (f"import sys; sys.stdout.write({line!r} * {count}); "
+                  "sys.stdout.flush(); print('mass_dirty_ready {\"complete\":true}', flush=True)")
+        path = self.root / "harness.log"
+        with path.open("w") as log, (self.root / "harness.stderr").open("w") as errors:
+            child = receipt.start_harness([sys.executable, "-c", script], log, errors)
+            try:
+                # No stdout consumer exists while the producer fills more than
+                # an actual pipe's capacity. This must finish independently.
+                self.assertEqual(child.wait(timeout=5), 0)
+                with path.open() as records:
+                    self.assertEqual(receipt.read_record(child, records, "mass_dirty_ready", time.monotonic() + 5),
+                                     {"complete": True})
+                self.assertEqual(path.read_text().splitlines(), [line.rstrip()] * count +
+                                 ['mass_dirty_ready {"complete":true}'])
+            finally:
+                receipt.stop_owned(child)
+                if child.stdin is not None:
+                    child.stdin.close()
+                if child.stdout is not None:
+                    child.stdout.close()
+
+    def test_harness_tail_waits_for_partial_records_and_fails_on_death_or_deadline(self):
+        child = mock.Mock(returncode=None)
+        child.poll.return_value = None
+        records = mock.Mock()
+        records.readline.side_effect = ['mass_dirty_ready {', '', '"complete":true}\n']
+        with mock.patch.object(receipt.time, "sleep") as wait:
+            self.assertEqual(receipt.read_record(child, records, "mass_dirty_ready", time.monotonic() + 5),
+                             {"complete": True})
+        wait.assert_called_once()
+        child.returncode = 7
+        child.poll.return_value = 7
+        with self.assertRaisesRegex(ValueError, "harness exited before"):
+            receipt.read_record(child, io.StringIO('mass_dirty_ready {'), "mass_dirty_ready", time.monotonic() + 5)
+        with self.assertRaisesRegex(TimeoutError, "fixed leg deadline"):
+            receipt.read_record(child, io.StringIO(''), "mass_dirty_ready", time.monotonic() - 1)
+
+    def test_fixture_snapshot_skips_socket_and_preserves_initiating_error(self):
+        source = self.root / "fixture-source"
+        source.mkdir()
+        (source / "config.toml").write_text("configuration")
+        (source / "data").mkdir()
+        (source / "data" / "generation.list").write_text("64500\n")
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(source / "grpc.sock"))
+            with self.assertRaisesRegex(RuntimeError, "initiating reload failure"):
+                try:
+                    raise RuntimeError("initiating reload failure")
+                finally:
+                    receipt.copy_fixture(source, self.root / "fixture-snapshot")
+        self.assertEqual((self.root / "fixture-snapshot/config.toml").read_text(), "configuration")
+        self.assertEqual((self.root / "fixture-snapshot/data/generation.list").read_text(), "64500\n")
+        self.assertFalse((self.root / "fixture-snapshot/grpc.sock").exists())
+
+    def test_readiness_covers_each_full_operation_with_bracket_probes_and_no_gaps(self):
+        def fixture():
+            probes = [{"sequence": index + 1, "status": 200, "deadline_ms": 250,
+                       "elapsed_seconds": .01, "started_monotonic_seconds": float(100 + index),
+                       "finished_monotonic_seconds": 100.01 + index} for index in range(7)]
+            records = {"mass_dirty_exit": [{"status": "PASS", "readiness_samples": 7, "readiness_deadline_ms": 250}],
+                       "mass_dirty_readiness": probes}
+            operations = [{"trigger_monotonic_seconds": start, "drain_monotonic_seconds": start + .1,
+                           "resume_monotonic_seconds": start + .2, "fold_monotonic_seconds": start + 2,
+                           "trigger_to_drain_seconds": .1, "drain_to_resume_seconds": .1,
+                           "resume_to_observed_fold_seconds": 1.8, "trigger_to_fold_seconds": 2}
+                          for start in (100.5, 103.5)]
+            return records, operations
+
+        records, operations = fixture()
+        self.assertEqual(receipt.readiness_coverage(records, operations, False),
+                         [{"sample_count": 4, "max_start_gap_seconds": 1.0}] * 2)
+        for mutation in ("before-b", "after-a", "gap", "sequence", "backward", "nonfinite", "late", "phase", "duration"):
+            with self.subTest(mutation=mutation):
+                records, operations = fixture()
+                probes = records["mass_dirty_readiness"]
+                if mutation in ("before-b", "after-a"):
+                    probes.pop(0 if mutation == "before-b" else -1)
+                    for index, probe in enumerate(probes):
+                        probe["sequence"] = index + 1
+                    records["mass_dirty_exit"][0]["readiness_samples"] = len(probes)
+                elif mutation == "gap":
+                    probes[1]["started_monotonic_seconds"] += .3
+                    probes[1]["finished_monotonic_seconds"] += .3
+                elif mutation == "sequence":
+                    probes[1]["sequence"] = 1
+                elif mutation == "backward":
+                    probes[1]["started_monotonic_seconds"] = 99
+                elif mutation == "nonfinite":
+                    probes[1]["finished_monotonic_seconds"] = float("nan")
+                elif mutation == "late":
+                    probes[1]["finished_monotonic_seconds"] += .251
+                elif mutation == "phase":
+                    operations[0]["resume_monotonic_seconds"] = 99
+                else:
+                    operations[0]["trigger_to_fold_seconds"] = 1
+                with self.assertRaises(ValueError):
+                    receipt.readiness_coverage(records, operations, False)
+
+    def test_identical_daemons_fail_even_with_matching_binary_roster(self):
+        binaries = self.root / "bin"
+        binaries.mkdir()
+        for name, contents in (("rustbgpd-candidate", "same daemon"), ("rustbgpd-flat", "same daemon"),
+                               ("reloadstall", "observer"), ("rbgp", "client")):
+            (binaries / name).write_text(contents)
+        (self.root / "binaries.sha256").write_text("".join(
+            f"{receipt.digest(path)}  {path}\n" for path in sorted(binaries.iterdir())))
+        with self.assertRaisesRegex(ValueError, "candidate and flat daemon binaries are identical"):
+            receipt.verified_binaries(self.root)
 
     def manifest(self, correctness=True, cohort="no-refusal"):
         cpus = sorted(os.sched_getaffinity(0))
@@ -54,7 +177,13 @@ class MassDirtyTests(unittest.TestCase):
             self.assertNotIn("peer.asn", policy)
             self.assertEqual("route.prefix in denied" in policy, pressure)
             before = receipt.digest(scenario / "member.rpol")
-            (scenario / "generation.list").write_text((scenario / "generation-b.list").read_text())
+            stimulus = receipt.wire_stimulus()
+            origins = [int(value) for value in (scenario / "generation.list").read_text().splitlines()]
+            self.assertEqual(origins, [stimulus["origin_base"] + 2 * chunk + 1
+                                       for chunk in range(stimulus["origin_cardinality"])])
+            self.assertEqual(len(origins), 15375)
+            self.assertNotIn(64512, origins)
+            self.assertEqual(set(hashes), {"config.toml", "member.rpol", "generation.list"})
             self.assertEqual(receipt.digest(scenario / "member.rpol"), before)
             self.assertEqual(hashes["member.rpol"], before)
             self.assertEqual(receipt.profile_shape(profile), [1_000_000, 230_000])
@@ -89,7 +218,7 @@ class MassDirtyTests(unittest.TestCase):
         self.assertEqual(manifest["limits"]["readiness_deadline_ms"], 250)
         self.assertEqual(manifest["limits"]["convergence_relative"], 1.10)
         self.assertEqual(manifest["limits"]["convergence_absolute_seconds"], .030)
-        self.assertIn("capture, settlement and dirty witness", manifest["primary_convergence"])
+        self.assertIn("ingress fill, cold capture and dirty witness", manifest["primary_convergence"])
         manifest["receivers"] = 12
         receipt.write_json(root / "campaign.json", manifest)
         with self.assertRaisesRegex(ValueError, "campaign changed"):
@@ -147,6 +276,78 @@ class MassDirtyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing/invalid metric"):
             receipt.fallback(text.replace('cause="missing_proof"', 'cause="other"'))
 
+    def test_held_episode_receipt_binds_raw_current_state_and_both_sweeps(self):
+        identities = [(receipt.peer(i), "group:7") for i in (1, 2)]
+
+        def row(index, begin):
+            return {"peer": receipt.peer(index), "group": "group:7", "pending": True, "dirty_seconds": 3,
+                    "query_begin_monotonic_seconds": begin, "query_end_monotonic_seconds": begin + .1,
+                    "raw": {"address": receipt.peer(index), "state": "Established", "update_group": "group:7",
+                            "outbound_resync_pending": True, "outbound_dirty_seconds": 3}}
+
+        sweeps = [[row(1, 10), row(2, 10.2)], [row(1, 10.5), row(2, 10.7)]]
+        witness = {"sweeps": sweeps, "overlap": [receipt.dirty_overlap(rows) for rows in sweeps],
+                   "stable_overlap": receipt.dirty_overlap([item for rows in sweeps for item in rows]),
+                   "source": {"address": receipt.peer(0), "state": "Established", "outbound_resync_pending": False}}
+        operation = {"trigger_monotonic_seconds": 8, "drain_monotonic_seconds": 9, "resume_monotonic_seconds": 12}
+        # The conservative interval begins before trigger; its intersection
+        # with this operation still supplies a valid common dirty instant.
+        receipt.validate_held_witness(witness, identities, False, operation)
+        for mutation in ("pending", "raw-age", "source", "overlap", "clock", "epoch-reset", "shifted", "reused-b", "sweep-order"):
+            altered = copy.deepcopy(witness)
+            bounds = operation
+            if mutation == "source":
+                altered["source"]["outbound_resync_pending"] = True
+            elif mutation == "overlap":
+                altered["stable_overlap"]["begin_monotonic_seconds"] += .1
+            elif mutation == "raw-age":
+                altered["sweeps"][0][0]["raw"]["outbound_dirty_seconds"] = 2
+            elif mutation == "clock":
+                altered["sweeps"][0][0]["query_begin_monotonic_seconds"] = None
+            elif mutation == "pending":
+                altered["sweeps"][0][0]["pending"] = False
+            elif mutation == "shifted":
+                for rows in altered["sweeps"]:
+                    for item in rows:
+                        item["query_begin_monotonic_seconds"] += 20
+                        item["query_end_monotonic_seconds"] += 20
+                altered["overlap"] = [receipt.dirty_overlap(rows) for rows in altered["sweeps"]]
+                altered["stable_overlap"] = receipt.dirty_overlap([item for rows in altered["sweeps"] for item in rows])
+            elif mutation == "reused-b":
+                bounds = {"trigger_monotonic_seconds": 18, "drain_monotonic_seconds": 19, "resume_monotonic_seconds": 22}
+            elif mutation == "sweep-order":
+                altered["sweeps"][0][0]["query_begin_monotonic_seconds"] = 10.4
+                altered["sweeps"][0][0]["query_end_monotonic_seconds"] = 10.5
+                altered["overlap"][0] = receipt.dirty_overlap(altered["sweeps"][0])
+                altered["stable_overlap"] = receipt.dirty_overlap([item for rows in altered["sweeps"] for item in rows])
+            else:
+                altered["sweeps"][1] = [row(1, 20), row(2, 20.2)]
+                altered["overlap"][1] = receipt.dirty_overlap(altered["sweeps"][1])
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                receipt.validate_held_witness(altered, identities, False, bounds)
+
+    def test_retained_fixture_files_are_verified_independently_of_top_level_raw_hashes(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        for mutation in ("config.toml", "member.rpol", "generation.list", "missing-roster", "extra-roster"):
+            with self.subTest(mutation=mutation):
+                leg, row = self.small_leg(manifest)
+                receipt.validate_leg(leg, manifest, row)
+                if mutation in receipt.FIXTURE_INPUTS:
+                    path = leg / "fixture" / mutation
+                    path.write_text(path.read_text() + "\nchanged retained input\n")
+                    expected = "retained fixture input changed"
+                else:
+                    path = leg / "fixture.sha256.json"
+                    hashes = json.loads(path.read_text())
+                    if mutation == "missing-roster":
+                        hashes.pop("generation.list")
+                    else:
+                        hashes["unrelated"] = "a" * 64
+                    receipt.write_json(path, hashes)
+                    expected = "fixture input roster differs"
+                with self.assertRaisesRegex(ValueError, expected):
+                    receipt.validate_leg(leg, manifest, row)
+
     def test_metric_duplicate_and_nonfinite_refused(self):
         for text in ("metric 1\nmetric 1", "metric NaN", "metric -1"):
             with self.subTest(text=text), self.assertRaises(ValueError):
@@ -196,7 +397,7 @@ class MassDirtyTests(unittest.TestCase):
         _, manifest = self.manifest(cohort="cap-pressure")
         leg, row = self.small_leg(manifest)
         receipt.validate_leg(leg, manifest, row)
-        for mutation in ("missing-withdraw", "dirty-cleared", "group-replaced", "no-readiness", "timing-in-correctness", "retained-proof", "retained-charge"):
+        for mutation in ("missing-withdraw", "dirty-cleared", "group-replaced", "no-readiness", "timing-in-correctness", "retained-proof", "retained-charge", "held-proof-empty", "source-dirty", "missing-churn-drain", "dirty-proof-missing"):
             with self.subTest(mutation=mutation):
                 # A failed subtest must not leak mutated raw evidence into the
                 # next control, including intentional predicate-removal runs.
@@ -216,6 +417,24 @@ class MassDirtyTests(unittest.TestCase):
                         values = json.loads((leg / "neighbors-settled-a.json").read_text())
                         values[0]["group"] = "group:8"
                         receipt.write_json(leg / "neighbors-settled-a.json", values)
+                    elif mutation == "held-proof-empty":
+                        path = leg / "metrics-paused-b.prom"
+                        path.write_text(path.read_text().replace(f"recovery_entries {altered['operations'][0]['recovery_paused']['entries']}", "recovery_entries 0"))
+                        altered["operations"][0]["recovery_paused"] = {
+                            **altered["operations"][0]["recovery_paused"], "entries": 0}
+                    elif mutation == "source-dirty":
+                        path = leg / "source-settled-a.json"
+                        values = json.loads(path.read_text())
+                        values["outbound_resync_pending"] = True
+                        receipt.write_json(path, values)
+                    elif mutation == "missing-churn-drain":
+                        path = leg / "harness.log"
+                        path.write_text(path.read_text().replace('"writer_drained": true', '"writer_drained": false', 1))
+                    elif mutation == "dirty-proof-missing":
+                        path = leg / "neighbors-paused-b.json"
+                        values = json.loads(path.read_text())
+                        values["stable_overlap"]["proved"] = False
+                        receipt.write_json(path, values)
                     elif mutation in ("retained-proof", "retained-charge"):
                         path = leg / "metrics-settled-a.prom"
                         field, old, new = ("entries", 0, 1) if mutation == "retained-proof" else ("bytes", 1024, 1025)
@@ -234,34 +453,64 @@ class MassDirtyTests(unittest.TestCase):
         leg.mkdir(exist_ok=True)
         row = {"daemon_exit": 0, "harness_exit": 0, "config_check_exit": 0, "raw_sha256": {}, "operations": []}
         charge = {"entries": 0, "bytes": 1024, "peak_bytes": 2048}
+        held_charge = {"entries": manifest["receivers"] * sum(manifest["family_keys"]),
+                       "bytes": manifest["receivers"] * sum(manifest["family_keys"]) * 32 + 1024}
+        held_charge["peak_bytes"] = held_charge["bytes"]
         row["recovery_initial"] = charge
         row["fallback_initial"] = dict.fromkeys(receipt.CAUSES, 0)
+        fixture = leg / "fixture"
+        fixture.mkdir(exist_ok=True)
+        for name in receipt.FIXTURE_INPUTS:
+            (fixture / name).write_text(f"original {name}\n")
+        receipt.write_json(leg / "fixture.sha256.json", {name: receipt.digest(fixture / name) for name in receipt.FIXTURE_INPUTS})
         (leg / "config-check.log").write_text("strict config validation passed\n")
-        ready = {"family_keys": [160, 40], "receivers": 2, "bitmap_bytes": 2 * (3 + 1) * 8 * 3, "correctness_only": True}
+        stimulus = manifest["wire_stimulus"]
+        ready = {"family_keys": manifest["family_keys"], "receivers": 2,
+                 "bitmap_bytes": 2 * sum((count + 63) // 64 * 8 * 3 for count in manifest["family_keys"]),
+                 "correctness_only": True, **{key: stimulus[key] for key in
+                    ("batch_size", "origin_cardinality", "baseline_eor_messages", "receiver_receive_buffer_bytes")}}
         lines = ["mass_dirty_ready " + json.dumps(ready)]
         peers = [{"peer": receipt.peer(i), "group": "group:7", "pending": False} for i in (1, 2)]
+        source = {"address": receipt.peer(0), "state": "Established", "outbound_resync_pending": False}
+        receipt.write_json(leg / "source-initial.json", source)
         receipt.write_json(leg / "neighbors-initial.json", peers)
-        metrics = ("bgp_update_group_regroups_total 0\n" +
-                   "\n".join(f'bgp_update_group_recovery_fallback_total{{cause="{cause}"}} 0' for cause in receipt.CAUSES) + "\n" +
-                   "\n".join(f"bgp_update_group_recovery_{key} {value}" for key, value in charge.items()))
-        (leg / "metrics-initial.prom").write_text(metrics)
+        def metrics(charge):
+            return ("bgp_update_group_regroups_total 0\n" +
+                    "\n".join(f'bgp_update_group_recovery_fallback_total{{cause="{cause}"}} 0' for cause in receipt.CAUSES) + "\n" +
+                    "\n".join(f"bgp_update_group_recovery_{key} {value}" for key, value in charge.items()))
+        (leg / "metrics-initial.prom").write_text(metrics(charge))
         for generation in ("b", "a"):
             lines.append("mass_dirty_paused " + json.dumps({"generation": generation, "receivers": 2}))
+            lines.append("mass_dirty_sent " + json.dumps({"generation": generation, "family_keys": manifest["family_keys"],
+                "announcement_messages": stimulus["origin_cardinality"], "eor_messages": stimulus["origin_cardinality"],
+                "origin_cardinality": stimulus["origin_cardinality"], "writer_drained": True, "drained_monotonic_seconds": None}))
             wire = {"generation": generation, "receivers": 2, "withdrawals": 16, "exact_fold": True,
                     "sessions_continuous": True, "resume_to_fold_p50_seconds": None, "resume_to_fold_max_seconds": None}
             lines.append("mass_dirty_complete " + json.dumps(wire))
             operation = {**wire, "fallback_deltas": dict.fromkeys(receipt.CAUSES, 0), "trigger_to_fold_seconds": None,
-                         "recovery_paused": charge, "recovery_settled": charge,
-                         "trigger_to_settlement_seconds": None, "settlement_to_resume_seconds": None, "resume_to_observed_fold_seconds": None}
+                         "recovery_paused": held_charge, "recovery_settled": {**charge, "peak_bytes": held_charge["peak_bytes"]},
+                         "trigger_to_drain_seconds": None, "drain_to_resume_seconds": None, "resume_to_observed_fold_seconds": None,
+                         "trigger_monotonic_seconds": None, "drain_monotonic_seconds": None,
+                         "resume_monotonic_seconds": None, "fold_monotonic_seconds": None,
+                         "readiness_coverage": {"sample_count": None, "max_start_gap_seconds": None}}
             row["operations"].append(operation)
             dirty = [{"message": "outbound routes resynced", "peer": item["peer"], "dirty": True, "force": False} for item in peers]
             (leg / f"daemon-window-{generation}.jsonl").write_text("\n".join(json.dumps({"fields": item}) for item in dirty) + "\n")
             receipt.write_json(leg / f"dirty-receipts-{generation}.json", dirty)
-            for phase, pending in (("paused", False), ("settled", False)):
-                receipt.write_json(leg / f"neighbors-{phase}-{generation}.json", [{**item, "pending": pending} for item in peers])
-                (leg / f"metrics-{phase}-{generation}.prom").write_text(metrics)
+            intervals = {"begin_monotonic_seconds": None, "end_monotonic_seconds": None, "proved": True}
+            sweep = [{**item, "pending": True, "dirty_seconds": 2, "query_begin_monotonic_seconds": None,
+                      "query_end_monotonic_seconds": None,
+                      "raw": {"address": item["peer"], "state": "Established", "update_group": item["group"],
+                              "outbound_resync_pending": True, "outbound_dirty_seconds": 2}} for item in peers]
+            receipt.write_json(leg / f"neighbors-paused-{generation}.json",
+                               {"sweeps": [sweep, sweep], "overlap": [intervals, intervals], "stable_overlap": intervals, "source": source})
+            receipt.write_json(leg / f"neighbors-settled-{generation}.json", peers)
+            receipt.write_json(leg / f"source-settled-{generation}.json", source)
+            (leg / f"metrics-paused-{generation}.prom").write_text(metrics(held_charge))
+            (leg / f"metrics-settled-{generation}.prom").write_text(metrics(operation["recovery_settled"]))
         lines.append("mass_dirty_exit " + json.dumps({"readiness_samples": 1, "readiness_deadline_ms": 250, "status": "PASS"}))
-        lines.append("mass_dirty_readiness " + json.dumps({"status": 200, "deadline_ms": 250, "elapsed_seconds": None}))
+        lines.append("mass_dirty_readiness " + json.dumps({"sequence": 1, "status": 200, "deadline_ms": 250, "elapsed_seconds": None,
+                                                          "started_monotonic_seconds": None, "finished_monotonic_seconds": None}))
         (leg / "harness.log").write_text("\n".join(lines) + "\n")
         return leg, row
 
@@ -274,20 +523,25 @@ class MassDirtyTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 receipt.dirty_receipts(text(bad), 2)
 
-    def test_source_order_requires_real_mark_loop_before_staging(self):
-        source = ("    fn reevaluate_peer_export_policies_synchronously(\n"
-                  "for peer in targets { self.mark_outbound_dirty(peer); }\n"
-                  "self.stage_group_prefixes(); self.distribute_changes();\n"
-                  "    /// Mark a peer's outbound channel dirty\n")
-        self.assertEqual(len(receipt.source_order_proof(source)), 64)
-        with self.assertRaises(ValueError):
-            receipt.source_order_proof(source.replace("self.mark_outbound_dirty(peer);", ""))
-        for body in ("self.mark_outbound_dirty(peer); self.stage_group_prefixes(); self.distribute_changes();",
-                     "if allowed { self.mark_outbound_dirty(peer); }",
-                     "self.mark_outbound_dirty(peer); break;",
-                     "if !allowed { continue; } self.mark_outbound_dirty(peer);"):
-            with self.subTest(body=body), self.assertRaises(ValueError):
-                receipt.source_order_proof(source.replace("self.mark_outbound_dirty(peer);", body))
+    def test_dirty_episode_intersection_rejects_sequential_or_recreated_debt(self):
+        def row(peer, begin, end, age):
+            return {"peer": peer, "pending": True, "dirty_seconds": age,
+                    "query_begin_monotonic_seconds": begin, "query_end_monotonic_seconds": end}
+        actual = [row("one", 10.0, 10.1, 2), row("two", 10.5, 10.6, 2)]
+        self.assertEqual(receipt.dirty_overlap(actual),
+                         {"begin_monotonic_seconds": 8.6, "end_monotonic_seconds": 10.0, "proved": True})
+        # Exact touching boundary is a real guaranteed common instant.
+        self.assertTrue(receipt.dirty_overlap([row("one", 10, 10, 0), row("two", 11, 11, 1)])["proved"])
+        for rows in ([row("one", 10, 10.1, 1), row("two", 12, 12.1, 1)],
+                     actual + [row("one", 20, 20.1, 1), row("two", 20.5, 20.6, 1)],
+                     [{**actual[0], "pending": False}, actual[1]],
+                     [{**actual[0], "dirty_seconds": -1}, actual[1]],
+                     [{**actual[0], "dirty_seconds": True}, actual[1]],
+                     [row("one", 10, 10.1, 0)],
+                     [row("one", float("nan"), 10.1, 1)]):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                receipt.dirty_overlap(rows)
+
 
 
 if __name__ == "__main__":

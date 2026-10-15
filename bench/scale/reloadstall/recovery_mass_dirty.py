@@ -12,13 +12,14 @@ import math
 import os
 from pathlib import Path
 import re
-import selectors
 import shutil
 import signal
 import statistics
+import stat
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 
 
@@ -28,11 +29,13 @@ CAUSES = ("peer_limit", "daemon_limit", "allocation_failure", "missing_proof")
 LIMITS = {"daemon_bytes": 10 * GIB, "harness_bytes": 2 * GIB,
           "minimum_available_bytes": 12 * GIB, "swap_bytes": 0,
           "leg_deadline_seconds": 1800, "readiness_deadline_ms": 250,
+          "readiness_interval_seconds": 1, "readiness_max_gap_seconds": 1.25,
           "convergence_relative": 1.10, "convergence_absolute_seconds": 0.030}
 OWNED_INPUTS = ("src/main.rs", "src/recovery_mass_dirty.rs", "recovery_mass_dirty.py",
                 "test_recovery_mass_dirty.py", "run-recovery-mass-dirty.sh", "README.md")
 SUPPORT_INPUTS = ("sample-daemon-cgroup.py", "../provenance.sh", "../cgroup-memory.sh",
                   "../../../tests/soak/host-lock.sh")
+FIXTURE_INPUTS = ("config.toml", "member.rpol", "generation.list")
 
 
 def require(condition, message):
@@ -43,6 +46,12 @@ def require(condition, message):
 def digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def validate_fixture(directory, hashes):
+    require(isinstance(hashes, dict) and set(hashes) == set(FIXTURE_INPUTS), "fixture input roster differs")
+    for name in FIXTURE_INPUTS:
+        require(digest(Path(directory) / name) == hashes[name], f"retained fixture input changed: {name}")
 
 
 def write_json(path, data):
@@ -64,9 +73,19 @@ def cpu_set(text):
     return result
 
 
-def profile_shape(profile, correctness=False):
+def profile_shape(profile):
     require(profile in ("full-uc", "full-vpn"), "unknown profile")
-    return [160, 40] if correctness else [1_000_000, 230_000]
+    return [1_000_000, 230_000]
+
+
+def wire_stimulus():
+    counts = profile_shape("full-uc")
+    batch = 80
+    chunks = sum((count + batch - 1) // batch for count in counts)
+    return {"kind": "bgp-attribute-churn", "batch_size": batch, "origin_base": 4_200_100_000,
+            "origin_cardinality": chunks, "eor_messages_per_operation": chunks,
+            "baseline_eor_messages": 2, "receiver_receive_buffer_requested_bytes": 4096,
+            "receiver_receive_buffer_bytes": 8192}
 
 
 def fixture_prefix(family, index):
@@ -95,9 +114,9 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
               "    term a { add community 65400:1000; accept }\n"
               "}\n")
     (directory / "member.rpol").write_text(policy)
-    for name, value in (("a", "64501\n"), ("b", "64500\n")):
-        (directory / f"generation-{name}.list").write_text(value)
-    shutil.copyfile(directory / "generation-a.list", directory / "generation.list")
+    stimulus = wire_stimulus()
+    (directory / "generation.list").write_text("".join(
+        f"{stimulus['origin_base'] + 2 * chunk + 1}\n" for chunk in range(stimulus["origin_cardinality"])))
     families = '["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"]' if vpn else '["ipv4_unicast", "ipv6_unicast"]'
     lines = ["config_epoch = 2", "", "[global]", "asn = 64512", 'router_id = "10.0.0.1"',
              "ebgp_requires_policy = true",
@@ -113,8 +132,7 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
                       f"families = {families}", "hold_time = 180",
                       f"route_reflector_client = {'true' if index else 'false'}", ""])
     (directory / "config.toml").write_text("\n".join(lines))
-    return {name: digest(directory / name) for name in
-            ("config.toml", "member.rpol", "generation-a.list", "generation-b.list")}
+    return {name: digest(directory / name) for name in FIXTURE_INPUTS}
 
 
 def derive_flat(source, output):
@@ -156,17 +174,21 @@ def init(args):
     root.mkdir(parents=True)
     correct = args.correctness_only
     receivers = 2 if correct else 12 if args.cohort == "no-refusal" else 24
-    manifest = {"schema": "rustbgpd.mass-dirty-campaign.v1", "head": args.head,
+    require(time.get_clock_info("monotonic").implementation == "clock_gettime(CLOCK_MONOTONIC)",
+            "qualification requires the native CLOCK_MONOTONIC clock")
+    manifest = {"schema": "rustbgpd.mass-dirty-campaign.v3", "head": args.head,
+                "readiness_clock": "CLOCK_MONOTONIC",
+                "wire_stimulus": wire_stimulus(),
                 "profile": args.profile, "cohort": args.cohort, "receivers": receivers,
-                "family_keys": profile_shape(args.profile, correct), "correctness_only": correct,
+                "family_keys": profile_shape(args.profile), "correctness_only": correct,
                 "withdrawals_per_receiver": 8 if args.cohort == "cap-pressure" else 0,
                 "repetitions": 1 if correct else 3, "limits": LIMITS,
                 "daemon_cpus": args.daemon_cpus, "harness_cpus": args.harness_cpus,
                 "schedule": [arm for repeat in range(1 if correct else 3)
                              for arm in (("flat", "candidate") if repeat % 2 == 0 else ("candidate", "flat"))],
                 "scope": "actual daemon, TCP, exact wire receivers and public readiness; no release-soak claim",
-                "primary_convergence": "native SIGHUP send to controller observation of exact final fleet fold; includes capture, settlement and dirty witness",
-                "mass_dirty_witness": "actual per-target dirty resync receipts plus frozen mark-all-before-staging source order; no physical simultaneous-pending or forced-deferral claim",
+                "primary_convergence": "source-churn command send to controller observation of exact final fleet fold; includes ingress fill, cold capture and dirty witness",
+                "mass_dirty_witness": "two current-episode interval intersections while every target is held pending; actual per-target dirty resync after resume; source stays clean",
                 "inputs": {name: digest(HERE / name) for name in OWNED_INPUTS}}
     manifest["support_inputs"] = {name: digest(HERE / name) for name in SUPPORT_INPUTS}
     write_json(root / "campaign.json", manifest)
@@ -178,8 +200,12 @@ def load_manifest(root):
     root = Path(root)
     require(digest(root / "campaign.json") == (root / "campaign.sha256").read_text().strip(), "campaign changed")
     manifest = json.loads((root / "campaign.json").read_text())
-    require(manifest["schema"] == "rustbgpd.mass-dirty-campaign.v1", "campaign schema changed")
+    require(manifest["schema"] == "rustbgpd.mass-dirty-campaign.v3", "campaign schema changed")
+    require(manifest["readiness_clock"] == "CLOCK_MONOTONIC" and
+            time.get_clock_info("monotonic").implementation == "clock_gettime(CLOCK_MONOTONIC)",
+            "readiness clock changed")
     require(type(manifest["correctness_only"]) is bool, "invalid campaign mode")
+    require(manifest["wire_stimulus"] == wire_stimulus(), "wire stimulus changed")
     require(re.fullmatch(r"[0-9a-f]{40}", manifest["head"]), "invalid campaign source")
     require(manifest["profile"] in ("full-uc", "full-vpn") and manifest["cohort"] in ("no-refusal", "cap-pressure"), "invalid campaign cell")
     repeats = 1 if manifest["correctness_only"] else 3
@@ -188,7 +214,7 @@ def load_manifest(root):
     require(type(manifest["repetitions"]) is int and manifest["repetitions"] == repeats, "campaign repetitions changed")
     require(manifest["schedule"] == schedule and len(schedule) > 0, "campaign schedule changed")
     require(manifest["limits"] == LIMITS, "acceptance/resource bounds changed")
-    require(manifest["family_keys"] == profile_shape(manifest["profile"], manifest["correctness_only"]), "shape changed")
+    require(manifest["family_keys"] == profile_shape(manifest["profile"]), "shape changed")
     require(manifest["receivers"] == (2 if manifest["correctness_only"] else 12 if manifest["cohort"] == "no-refusal" else 24), "cohort resized")
     require(manifest["withdrawals_per_receiver"] == (8 if manifest["cohort"] == "cap-pressure" else 0), "withdrawal workload changed")
     require(set(manifest["inputs"]) == set(OWNED_INPUTS), "instrument roster changed")
@@ -200,22 +226,6 @@ def load_manifest(root):
     for name, expected in manifest["support_inputs"].items():
         require(digest(HERE / name) == expected, f"support instrument changed: {name}")
     return manifest
-
-
-def source_order_proof(text):
-    begin = text.index("    fn reevaluate_peer_export_policies_synchronously(")
-    end = text.index("    /// Mark a peer's outbound channel dirty", begin)
-    section = text[begin:end]
-    # Deliberately recognize this small unconditional block, not arbitrary Rust:
-    # accepting a conditional/early exit or staging inside it breaks fleet coverage.
-    loop = re.search(r"for peer in targets \{\s*(?:checkpoint\(\);\s*)?self\.mark_outbound_dirty\(peer\);\s*\}", section)
-    stage = section.index("self.stage_group_prefixes(")
-    distribute = section.index("self.distribute_changes(")
-    require(loop is not None and loop.end() < stage < distribute
-            and section.count("for peer in targets {") == 1
-            and section.count("self.mark_outbound_dirty(peer);") == 1,
-            "source no longer proves mark-all before staging/distribution")
-    return hashlib.sha256(section.encode()).hexdigest()
 
 
 def dirty_receipts(text, receivers):
@@ -267,10 +277,12 @@ def recovery_charge(text):
     return charge
 
 
-def neighbor_witness(rbgp, addr, receivers, expected=None, pending=None):
+def neighbor_witness(rbgp, addr, receivers, expected=None, pending=None, observe_episode=False):
     rows = []
     for index in range(1, receivers + 1):
+        begin = time.monotonic()
         row = json.loads(command([rbgp, "--addr", addr, "--json", "neighbor", peer(index)]))
+        end = time.monotonic()
         require(row["address"] == peer(index), "receiver identity changed")
         # The CLI contract omits this boolean while false; true is explicit.
         require(row["state"] == "Established" and row.get("slow_peer", False) is False, "receiver state/isolation changed")
@@ -280,10 +292,99 @@ def neighbor_witness(rbgp, addr, receivers, expected=None, pending=None):
         rows.append({"peer": peer(index), "group": group,
                      "pending": row["outbound_resync_pending"],
                      "fallback": row.get("update_group_recovery_fallback", "")})
+        if observe_episode:
+            rows[-1].update({"dirty_seconds": row.get("outbound_dirty_seconds"), "raw": row,
+                             "query_begin_monotonic_seconds": begin, "query_end_monotonic_seconds": end})
     require(len({row["group"] for row in rows}) == 1, "receivers do not share one group")
     if expected is not None:
         require([(row["peer"], row["group"]) for row in rows] == expected, "group identity changed")
     return rows
+
+
+def dirty_overlap(rows):
+    require(rows, "empty dirty witness")
+    intervals = []
+    for row in rows:
+        age = row["dirty_seconds"]
+        begin, end = row["query_begin_monotonic_seconds"], row["query_end_monotonic_seconds"]
+        require(row["pending"] is True and type(age) is int and age >= 0, "invalid current dirty episode")
+        require(all(isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value)
+                    for value in (begin, end)) and 0 <= begin <= end, "invalid dirty query clock")
+        # The actor samples age inside this RPC. A floored CURRENT age proves
+        # that episode covers [query_end-age, query_begin], conservatively.
+        intervals.append((end - age, begin))
+    begin, end = max(pair[0] for pair in intervals), min(pair[1] for pair in intervals)
+    require(begin <= end, "no common current dirty instant")
+    return {"begin_monotonic_seconds": begin, "end_monotonic_seconds": end, "proved": True}
+
+
+def source_witness(rbgp, addr):
+    row = json.loads(command([rbgp, "--addr", addr, "--json", "neighbor", peer(0)]))
+    validate_source_witness(row)
+    return row
+
+
+def held_dirty_witness(rbgp, addr, receivers, groups, correctness):
+    sweeps = [neighbor_witness(rbgp, addr, receivers, expected=groups, pending=True, observe_episode=True)
+              for _ in range(2)]
+    individual = [dirty_overlap(rows) for rows in sweeps]
+    # Combining both sweeps proves the second CURRENT episodes still cover
+    # the first common instant; a cleared-and-recreated episode cannot pass.
+    stable = dirty_overlap([row for rows in sweeps for row in rows])
+    source = source_witness(rbgp, addr)
+    if correctness:
+        for rows in sweeps:
+            for row in rows:
+                row["query_begin_monotonic_seconds"] = row["query_end_monotonic_seconds"] = None
+        for interval in [*individual, stable]:
+            interval["begin_monotonic_seconds"] = interval["end_monotonic_seconds"] = None
+    return {"sweeps": sweeps, "overlap": individual, "stable_overlap": stable, "source": source}
+
+
+def validate_source_witness(row):
+    require(row["address"] == peer(0) and row["state"] == "Established" and
+            row.get("slow_peer", False) is False and row.get("outbound_resync_pending") is False,
+            "source session/pending state changed")
+
+
+def validate_held_witness(witness, identities, correctness, operation):
+    require(len(witness["sweeps"]) == 2 and len(witness["overlap"]) == 2, "dirty sweep count changed")
+    all_rows = []
+    previous_end = None if correctness else operation["drain_monotonic_seconds"]
+    for rows, interval in zip(witness["sweeps"], witness["overlap"], strict=True):
+        require([(row["peer"], row["group"]) for row in rows] == identities, "dirty/group witness differs")
+        for row in rows:
+            raw = row["raw"]
+            require(row["pending"] is True and type(row["dirty_seconds"]) is int and row["dirty_seconds"] >= 0 and
+                    raw["address"] == row["peer"] and raw["state"] == "Established" and
+                    raw.get("slow_peer", False) is False and raw["update_group"] == row["group"] and
+                    raw["outbound_resync_pending"] is True and raw["outbound_dirty_seconds"] == row["dirty_seconds"],
+                    "current dirty episode derivation differs")
+            if correctness:
+                require(row["query_begin_monotonic_seconds"] is row["query_end_monotonic_seconds"] is None,
+                        "correctness mode published dirty query timing")
+            else:
+                begin, end = row["query_begin_monotonic_seconds"], row["query_end_monotonic_seconds"]
+                require(all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+                            for value in (begin, end)) and previous_end <= begin <= end <= operation["resume_monotonic_seconds"],
+                        "dirty query outside operation or sweep order changed")
+                previous_end = end
+        if correctness:
+            require(interval == {"begin_monotonic_seconds": None, "end_monotonic_seconds": None, "proved": True},
+                    "correctness dirty proof missing")
+        else:
+            require(dirty_overlap(rows) == interval, "dirty interval derivation differs")
+        all_rows.extend(rows)
+    if correctness:
+        require(witness["stable_overlap"] == {"begin_monotonic_seconds": None, "end_monotonic_seconds": None, "proved": True},
+                "correctness stable dirty proof missing")
+    else:
+        require(dirty_overlap(all_rows) == witness["stable_overlap"], "stable dirty interval derivation differs")
+        interval = witness["stable_overlap"]
+        require(max(interval["begin_monotonic_seconds"], operation["trigger_monotonic_seconds"]) <=
+                min(interval["end_monotonic_seconds"], operation["resume_monotonic_seconds"]),
+                "common dirty instant outside operation")
+    validate_source_witness(witness["source"])
 
 
 def process_identity(pid, binary):
@@ -334,22 +435,25 @@ def snapshot_cgroup(pid, maximum):
     return {"path": str(group), **values, "events": events, "boundary_monotonic_ns": time.monotonic_ns()}
 
 
-def read_record(process, selector, log, prefix, deadline):
-    pending = getattr(process, "qualification_pending", "")
+def start_harness(args, log, errors):
+    # Readiness writes continue while the controller waits for churn/dirty receipts.
+    # A regular evidence file has no undrained-pipe dependency on those waits.
+    return own_child(subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log,
+                                     stderr=errors, text=True, bufsize=1, start_new_session=True))
+
+
+def read_record(process, records, prefix, deadline):
+    pending = ""
     while time.monotonic() < deadline:
-        if "\n" not in pending:
-            if not selector.select(timeout=min(1, max(0, deadline - time.monotonic()))):
-                require(process.poll() is None, f"harness exited before {prefix}: {process.returncode}")
-                continue
-            chunk = os.read(process.stdout.fileno(), 4096)
-            require(chunk, "harness output ended")
-            pending += chunk.decode()
+        chunk = records.readline()
+        if not chunk:
+            require(process.poll() is None, f"harness exited before {prefix}: {process.returncode}")
+            time.sleep(min(.01, max(0, deadline - time.monotonic())))
             continue
-        line, pending = pending.split("\n", 1)
-        line += "\n"
-        process.qualification_pending = pending
-        log.write(line)
-        log.flush()
+        pending += chunk
+        if not pending.endswith("\n"):
+            continue
+        line, pending = pending, ""
         if line.startswith(prefix + " "):
             return json.loads(line[len(prefix) + 1:])
     raise TimeoutError(f"fixed leg deadline expired waiting for {prefix}")
@@ -372,12 +476,25 @@ def stop_owned(process):
             process.wait(timeout=15)
 
 
+def copy_fixture(source, destination):
+    def skip_runtime_nodes(directory, names):
+        return [name for name in names if not
+                (stat.S_ISREG((Path(directory) / name).lstat().st_mode) or
+                 stat.S_ISDIR((Path(directory) / name).lstat().st_mode))]
+
+    shutil.copytree(source, destination, ignore=skip_runtime_nodes)
+
+
 def run_cell(args):
     root = Path(args.output).resolve()
     manifest = load_manifest(root)
     require(args.arm in ("candidate", "flat"), "unknown arm")
     require(0 <= args.index < len(manifest["schedule"]) and manifest["schedule"][args.index] == args.arm, "arm order changed")
     binary, harness_binary, rbgp = [Path(path).resolve(strict=True) for path in (args.daemon, args.harness, args.rbgp)]
+    binaries = verified_binaries(root)
+    require(digest(binary) == binaries[f"rustbgpd-{args.arm}"] and
+            digest(harness_binary) == binaries["reloadstall"] and digest(rbgp) == binaries["rbgp"],
+            "run-cell binary identity differs")
     leg = root / f"leg-{args.index}-{args.arm}"
     leg.mkdir()
     correct = manifest["correctness_only"]
@@ -389,16 +506,17 @@ def run_cell(args):
     import tempfile
     scenario = Path(tempfile.mkdtemp(prefix="rmd-", dir="/tmp"))
     scenario.rmdir()
-    hashes = generate(scenario, manifest["profile"], manifest["receivers"], 17986, 19186, manifest["cohort"] == "cap-pressure")
+    hashes = generate(scenario, manifest["profile"], manifest["receivers"], 17986, 19186,
+                      manifest["cohort"] == "cap-pressure")
     write_json(leg / "fixture.sha256.json", hashes)
     daemon = engine = sampler = None
     result = {"arm": args.arm, "index": args.index, "source": manifest["head"], "operations": [],
               "binary_sha256": digest(binary), "harness_sha256": digest(harness_binary), "rbgp_sha256": digest(rbgp),
               "correctness_only": correct}
     deadline = time.monotonic() + LIMITS["leg_deadline_seconds"]
-    result["source_order_sha256"] = source_order_proof((root / "capture-source.rs").read_text())
+    result["capture_source_sha256"] = digest(root / "capture-source.rs")
     try:
-        with (leg / "daemon.log").open("w") as daemon_log, (leg / "harness.stderr").open("w") as errors, (leg / "harness.log").open("w") as log:
+        with (leg / "daemon.log").open("w") as daemon_log, (leg / "harness.stderr").open("w") as errors, (leg / "harness.log").open("w") as log, (leg / "harness.log").open() as records:
             with (leg / "config-check.log").open("w") as check_log:
                 checked = subprocess.run([str(binary), "--check", "--strict", str(scenario / "config.toml")],
                                          stdout=check_log, stderr=subprocess.STDOUT, timeout=30, check=True)
@@ -427,18 +545,17 @@ def run_cell(args):
                 engine_command.append("--correctness-only")
             else:
                 engine_command = ["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={LIMITS['harness_bytes']}", "-p", "MemorySwapMax=0", "--", *engine_command]
-            engine = own_child(subprocess.Popen(engine_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, text=True, bufsize=1, start_new_session=True))
+            engine = start_harness(engine_command, log, errors)
             engine_pid = daemon_pid(harness_binary, min(deadline, time.monotonic() + 120))
             require(engine_pid == engine.pid, "harness scope launcher did not retain the owned PID")
             result["harness_owner"] = process_identity(engine_pid, harness_binary)
             write_json(leg / "harness-owner.json", result["harness_owner"])
-            selector = selectors.DefaultSelector()
-            selector.register(engine.stdout, selectors.EVENT_READ)
-            ready = read_record(engine, selector, log, "mass_dirty_ready", deadline)
+            ready = read_record(engine, records, "mass_dirty_ready", deadline)
             require(ready["family_keys"] == manifest["family_keys"] and ready["receivers"] == manifest["receivers"], "wire population shape changed")
             initial = neighbor_witness(rbgp, "unix://" + str(scenario / "grpc.sock"), manifest["receivers"], pending=False)
             groups = [(row["peer"], row["group"]) for row in initial]
             write_json(leg / "neighbors-initial.json", initial)
+            write_json(leg / "source-initial.json", source_witness(rbgp, "unix://" + str(scenario / "grpc.sock")))
             before = http_metrics(19186)
             (leg / "metrics-initial.prom").write_text(before)
             regroup = metric(before, "bgp_update_group_regroups_total")
@@ -449,34 +566,65 @@ def run_cell(args):
             initial_charge = recovery_charge(before)
             require(initial_charge["entries"] == 0, "initial recovery proof is not empty")
             result["recovery_initial"] = initial_charge
+            read_record(engine, records, "mass_dirty_readiness", deadline)
             for generation in ("b", "a"):
                 engine.stdin.write(f"pause {generation}\n")
                 engine.stdin.flush()
-                paused = read_record(engine, selector, log, "mass_dirty_paused", deadline)
+                paused = read_record(engine, records, "mass_dirty_paused", deadline)
                 require(paused == {"generation": generation, "receivers": manifest["receivers"]}, "pause handshake incomplete")
-                require(digest(scenario / "member.rpol") == hashes["member.rpol"] and digest(scenario / "config.toml") == hashes["config.toml"], "fixed policy/config changed")
-                shutil.copyfile(scenario / f"generation-{generation}.list", scenario / "generation.list")
-                outcomes_before = http_metrics(19186)
-                completed = metric(outcomes_before, "bgp_sighup_reload_outcomes_total", '{outcome="complete"}')
+                validate_fixture(scenario, hashes)
                 log_offset = (leg / "daemon.log").stat().st_size
                 triggered = None if correct else time.monotonic()
-                os.kill(pid, signal.SIGHUP)
+                engine.stdin.write(f"churn {generation}\n")
+                engine.stdin.flush()
+                sent = read_record(engine, records, "mass_dirty_sent", deadline)
+                require(sent["generation"] == generation and sent["family_keys"] == manifest["family_keys"] and
+                        sent["writer_drained"] is True and
+                        all(sent[name] == manifest["wire_stimulus"]["origin_cardinality"] for name in
+                            ("announcement_messages", "eor_messages", "origin_cardinality")), "source churn/drain receipt changed")
+                drained_at = sent["drained_monotonic_seconds"]
                 while True:
-                    require(time.monotonic() < deadline and daemon.poll() is None, "reload did not settle within fixed leg deadline")
-                    current = http_metrics(19186)
-                    for bad in ("known_partial", "rejected_no_effect", "ignored_in_flight", "task_failed"):
-                        label = f'{{outcome="{bad}"}}'
-                        require(metric(current, "bgp_sighup_reload_outcomes_total", label) == metric(outcomes_before, "bgp_sighup_reload_outcomes_total", label), f"reload {bad}")
-                    delta = metric(current, "bgp_sighup_reload_outcomes_total", '{outcome="complete"}') - completed
-                    require(delta in (0, 1), "reload completion count changed unexpectedly")
-                    if delta == 1:
+                    require(time.monotonic() < deadline and daemon.poll() is None and engine.poll() is None,
+                            "actual mass-dirty witness did not arrive within fixed leg deadline")
+                    try:
+                        witness = held_dirty_witness(rbgp, "unix://" + str(scenario / "grpc.sock"),
+                                                     manifest["receivers"], groups, correct)
                         break
-                    time.sleep(0.05)
-                settled_at = None if correct else time.monotonic()
-                witness = neighbor_witness(rbgp, "unix://" + str(scenario / "grpc.sock"), manifest["receivers"], expected=groups, pending=False)
+                    except ValueError as error:
+                        require(str(error) in ("actual dirty overlap/settlement missing", "no common current dirty instant"), str(error))
+                        time.sleep(0.05)
                 write_json(leg / f"neighbors-paused-{generation}.json", witness)
+                current = http_metrics(19186)
+                require(metric(current, "bgp_update_group_regroups_total") == regroup, "wire churn regrouped peers")
+                (leg / f"metrics-paused-{generation}.prom").write_text(current)
+                paused_charge = recovery_charge(current)
+                require(paused_charge["entries"] > 0 and paused_charge["bytes"] > initial_charge["bytes"],
+                        "held dirty recovery proof was not retained")
+                if manifest["cohort"] == "no-refusal":
+                    require(paused_charge["entries"] == manifest["receivers"] * sum(manifest["family_keys"]),
+                            "no-refusal held proof does not cover the full initial fleet")
+                # Offset after the held proof: these receipts must witness an
+                # actual dirty resync after reader release, not an earlier pass.
+                resume_log_offset = (leg / "daemon.log").stat().st_size
+                resumed_at = None if correct else time.monotonic()
+                engine.stdin.write(f"resume {generation}\n")
+                engine.stdin.flush()
+                receipt = read_record(engine, records, "mass_dirty_complete", deadline)
+                observed_at = None if correct else time.monotonic()
+                require(receipt["generation"] == generation and receipt["exact_fold"] and receipt["sessions_continuous"], "wire fold/continuity failed")
                 while True:
-                    window = (leg / "daemon.log").read_bytes()[log_offset:].decode()
+                    require(time.monotonic() < deadline and daemon.poll() is None and engine.poll() is None,
+                            "recovery did not settle within fixed leg deadline")
+                    try:
+                        settled = neighbor_witness(rbgp, "unix://" + str(scenario / "grpc.sock"), manifest["receivers"], expected=groups, pending=False)
+                        break
+                    except ValueError as error:
+                        require(str(error) == "actual dirty overlap/settlement missing", str(error))
+                        time.sleep(0.05)
+                write_json(leg / f"neighbors-settled-{generation}.json", settled)
+                write_json(leg / f"source-settled-{generation}.json", source_witness(rbgp, "unix://" + str(scenario / "grpc.sock")))
+                while True:
+                    window = (leg / "daemon.log").read_bytes()[resume_log_offset:].decode()
                     window = window[:window.rfind("\n") + 1]
                     try:
                         actual_dirty = dirty_receipts(window, manifest["receivers"])
@@ -485,30 +633,14 @@ def run_cell(args):
                         require(str(error) == "missing actual dirty resync receipt" and time.monotonic() < deadline, str(error))
                         time.sleep(0.05)
                 (leg / f"daemon-window-{generation}.jsonl").write_text(window)
+                (leg / f"daemon-operation-{generation}.jsonl").write_bytes((leg / "daemon.log").read_bytes()[log_offset:])
                 write_json(leg / f"dirty-receipts-{generation}.json", actual_dirty)
-                require(metric(current, "bgp_update_group_regroups_total") == regroup, "dataset trigger regrouped peers")
-                (leg / f"metrics-paused-{generation}.prom").write_text(current)
-                paused_charge = recovery_charge(current)
-                engine.stdin.write(f"resume {generation}\n")
-                engine.stdin.flush()
-                resumed_at = None if correct else time.monotonic()
-                receipt = read_record(engine, selector, log, "mass_dirty_complete", deadline)
-                observed_at = None if correct else time.monotonic()
-                require(receipt["generation"] == generation and receipt["exact_fold"] and receipt["sessions_continuous"], "wire fold/continuity failed")
-                while True:
-                    try:
-                        settled = neighbor_witness(rbgp, "unix://" + str(scenario / "grpc.sock"), manifest["receivers"], expected=groups, pending=False)
-                        break
-                    except ValueError as error:
-                        require(str(error) == "actual dirty overlap/settlement missing" and time.monotonic() < deadline, str(error))
-                        time.sleep(0.05)
-                write_json(leg / f"neighbors-settled-{generation}.json", settled)
                 after = http_metrics(19186)
                 require(metric(after, "bgp_update_group_regroups_total") == regroup, "group changed during recovery")
                 causes = fallback(after)
                 settled_charge = recovery_charge(after)
-                require(all(charge[key] == initial_charge[key] for charge in (paused_charge, settled_charge)
-                            for key in ("entries", "bytes")), "settled recovery charge did not return to empty baseline")
+                require(all(settled_charge[key] == initial_charge[key] for key in ("entries", "bytes")),
+                        "settled recovery charge did not return to empty baseline")
                 deltas = {cause: causes[cause] - initial_fallback[cause] for cause in CAUSES}
                 require(all(value >= 0 for value in deltas.values()), "fallback counters decreased")
                 if manifest["cohort"] == "no-refusal" or (not correct and args.arm == "candidate" and manifest["profile"] == "full-uc"):
@@ -516,10 +648,13 @@ def run_cell(args):
                 (leg / f"metrics-settled-{generation}.prom").write_text(after)
                 result["operations"].append({**receipt, "fallback_deltas": deltas,
                     "recovery_paused": paused_charge, "recovery_settled": settled_charge,
+                    "trigger_monotonic_seconds": triggered, "drain_monotonic_seconds": drained_at,
+                    "resume_monotonic_seconds": resumed_at, "fold_monotonic_seconds": observed_at,
                     "trigger_to_fold_seconds": None if correct else observed_at - triggered,
-                    "trigger_to_settlement_seconds": None if correct else settled_at - triggered,
-                    "settlement_to_resume_seconds": None if correct else resumed_at - settled_at,
+                    "trigger_to_drain_seconds": None if correct else drained_at - triggered,
+                    "drain_to_resume_seconds": None if correct else resumed_at - drained_at,
                     "resume_to_observed_fold_seconds": None if correct else observed_at - resumed_at})
+            validate_fixture(scenario, hashes)
             require(process_identity(pid, binary) == owner, "daemon identity changed")
             if not correct:
                 result["memory_after"] = snapshot_cgroup(pid, LIMITS["daemon_bytes"])
@@ -527,17 +662,33 @@ def run_cell(args):
                 result["harness_owner"] = process_identity(harness_pid, harness_binary)
                 result["harness_memory_after"] = snapshot_cgroup(harness_pid, LIMITS["harness_bytes"])
                 require(sampler.poll() is None, "memory sampler ended before measurement boundary")
+            # Retain a successful probe after the final controller-observed fold,
+            # rather than ending with only samples from before the recovery.
+            while True:
+                probe = read_record(engine, records, "mass_dirty_readiness", deadline)
+                if correct or probe["started_monotonic_seconds"] >= result["operations"][-1]["fold_monotonic_seconds"]:
+                    break
             engine.stdin.write("finish\n")
             engine.stdin.flush()
-            final = read_record(engine, selector, log, "mass_dirty_exit", deadline)
+            final = read_record(engine, records, "mass_dirty_exit", deadline)
             require(final["status"] == "PASS" and final["readiness_samples"] > 0 and final["readiness_deadline_ms"] == 250, "readiness evidence incomplete")
             engine.wait(timeout=max(0.1, deadline - time.monotonic()))
             require(engine.returncode == 0, "harness failed after final receipt")
+            raw_records = harness_records(leg / "harness.log")
+            coverage = readiness_coverage(raw_records, result["operations"], correct)
+            for operation, evidence in zip(result["operations"], coverage, strict=True):
+                operation["readiness_coverage"] = evidence
             if manifest["cohort"] == "cap-pressure" and not correct and (args.arm == "flat" or manifest["profile"] == "full-vpn"):
                 require(any(operation["fallback_deltas"]["daemon_limit"] for operation in result["operations"]), "pressure control did not exercise daemon cap")
             result["status"] = "CORRECTNESS_ONLY" if correct else "PASS"
             result["raw_sha256"] = {path.name: digest(path) for path in leg.iterdir() if path.is_file() and path.name not in ("memory.csv", "sampler.log")}
             write_json(leg / "result.json", result)
+    except BaseException as error:
+        # Record the initiating failure before any teardown/snapshot operation
+        # can fail as well. The driver retains this with its original traceback.
+        write_json(leg / "failure.json", {"type": type(error).__name__, "error": str(error),
+                                         "traceback": traceback.format_exc()})
+        raise
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -567,8 +718,21 @@ def run_cell(args):
             require(daemon.returncode == 0 and engine.returncode == 0, "owned process failed during normal teardown")
             finished["raw_sha256"] = {path.name: digest(path) for path in leg.iterdir() if path.is_file() and path.name != "result.json"}
             write_json(leg / "result.json", finished)
-        shutil.copytree(scenario, leg / "fixture")
+        copy_fixture(scenario, leg / "fixture")
         shutil.rmtree(scenario)
+
+
+def verified_binaries(root):
+    root = Path(root)
+    hashes = {}
+    for line in (root / "binaries.sha256").read_text().splitlines():
+        expected, name = line.split(maxsplit=1)
+        name = Path(name).name
+        require(name not in hashes and digest(root / "bin" / name) == expected, "binary hash changed")
+        hashes[name] = expected
+    require(set(hashes) == {"rustbgpd-flat", "rustbgpd-candidate", "reloadstall", "rbgp"}, "binary roster differs")
+    require(hashes["rustbgpd-candidate"] != hashes["rustbgpd-flat"], "candidate and flat daemon binaries are identical")
+    return hashes
 
 
 def analyze(root):
@@ -578,7 +742,7 @@ def analyze(root):
     expected_legs = {f"leg-{index}-{arm}" for index, arm in enumerate(manifest["schedule"])}
     require({path.name for path in root.glob("leg-*")} == expected_legs, "leg roster differs")
     source = (root / "capture-source.rs").read_text()
-    order_sha = source_order_proof(source)
+    source_sha = hashlib.sha256(source.encode()).hexdigest()
     derivation = json.loads((root / "derivation.json").read_text())
     capture_begin = source.index("    fn capture_group_admitted_keys_inner(")
     guard = source.index("!group.stages_vpn()", capture_begin)
@@ -589,20 +753,14 @@ def analyze(root):
             and derivation["expression_before"] == "!group.stages_vpn()"
             and derivation["expression_after"] == "false"
             and derivation["vpn_full_old_already_flat"] is True, "flat source derivation changed")
-    binary_hashes = {}
-    for line in (root / "binaries.sha256").read_text().splitlines():
-        expected, name = line.split(maxsplit=1)
-        name = Path(name).name
-        require(name not in binary_hashes and digest(root / "bin" / name) == expected, "binary hash changed")
-        binary_hashes[name] = expected
-    require(set(binary_hashes) == {"rustbgpd-flat", "rustbgpd-candidate", "reloadstall", "rbgp"}, "binary roster differs")
+    binary_hashes = verified_binaries(root)
     rows = []
     for index, arm in enumerate(manifest["schedule"]):
         path = root / f"leg-{index}-{arm}" / "result.json"
         require(path.is_file(), f"missing complete leg {index}")
         row = json.loads(path.read_text())
         require(row["arm"] == arm and row["index"] == index and row["source"] == manifest["head"], "leg identity mismatch")
-        require(row["source_order_sha256"] == order_sha and row["binary_sha256"] == binary_hashes[f"rustbgpd-{arm}"]
+        require(row["capture_source_sha256"] == source_sha and row["binary_sha256"] == binary_hashes[f"rustbgpd-{arm}"]
                 and row["harness_sha256"] == binary_hashes["reloadstall"] and row["rbgp_sha256"] == binary_hashes["rbgp"], "compiled leg identity differs")
         require(row["status"] == ("CORRECTNESS_ONLY" if manifest["correctness_only"] else "PASS"), "leg failed")
         require([operation["generation"] for operation in row["operations"]] == ["b", "a"], "operation coverage mismatch")
@@ -624,26 +782,87 @@ def analyze(root):
     return verdict
 
 
+def harness_records(path):
+    prefixes = ("mass_dirty_ready", "mass_dirty_paused", "mass_dirty_sent", "mass_dirty_complete", "mass_dirty_exit", "mass_dirty_readiness")
+    records = {prefix: [] for prefix in prefixes}
+    for line in Path(path).read_text().splitlines():
+        prefix, _, body = line.partition(" ")
+        require(prefix in records, "unexpected harness record")
+        records[prefix].append(json.loads(body))
+    require([len(records[prefix]) for prefix in prefixes[:5]] == [1, 2, 2, 2, 1], "incomplete/duplicate wire records")
+    return records
+
+
+def readiness_coverage(records, operations, correctness):
+    final = records["mass_dirty_exit"][0]
+    probes = records["mass_dirty_readiness"]
+    require(final["status"] == "PASS" and type(final["readiness_samples"]) is int and
+            final["readiness_samples"] > 0 and final["readiness_deadline_ms"] == 250, "readiness evidence missing")
+    require(len(probes) == final["readiness_samples"], "readiness observations missing")
+    fields = ("trigger_monotonic_seconds", "drain_monotonic_seconds", "resume_monotonic_seconds", "fold_monotonic_seconds")
+
+    def valid_seconds(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+
+    for index, probe in enumerate(probes):
+        require(type(probe["sequence"]) is int and probe["sequence"] == index + 1, "readiness sequence changed")
+        require(probe["status"] == 200 and probe["deadline_ms"] == 250, "readiness response/deadline changed")
+        elapsed, start, end = [probe[key] for key in ("elapsed_seconds", "started_monotonic_seconds", "finished_monotonic_seconds")]
+        if correctness:
+            require(elapsed is start is end is None, "correctness mode published readiness timing")
+        else:
+            require(all(valid_seconds(value) for value in (elapsed, start, end)) and
+                    0 <= elapsed <= .250 and 0 <= end - start <= .250, "readiness deadline/clock failed")
+            if index:
+                previous = probes[index - 1]
+                require(previous["finished_monotonic_seconds"] <= start, "readiness clock order changed")
+                require(start - previous["started_monotonic_seconds"] <= LIMITS["readiness_max_gap_seconds"],
+                        "readiness sampling gap exceeded frozen bound")
+    coverage = []
+    for operation in operations:
+        times = [operation[key] for key in fields]
+        if correctness:
+            require(all(value is None for value in times), "correctness mode published phase timing")
+            coverage.append({"sample_count": None, "max_start_gap_seconds": None})
+            continue
+        require(all(valid_seconds(value) for value in times) and times == sorted(times), "invalid readiness phase clocks")
+        trigger, drain, resume, fold = times
+        for name, duration in (("trigger_to_drain_seconds", drain - trigger),
+                               ("drain_to_resume_seconds", resume - drain),
+                               ("resume_to_observed_fold_seconds", fold - resume),
+                               ("trigger_to_fold_seconds", fold - trigger)):
+            require(math.isclose(operation[name], duration, abs_tol=1e-6), "phase clock/duration mismatch")
+        before = [index for index, probe in enumerate(probes) if probe["finished_monotonic_seconds"] <= trigger]
+        after = [index for index, probe in enumerate(probes) if probe["started_monotonic_seconds"] >= fold]
+        require(before and after, "readiness probes do not bracket the full trigger-to-fold interval")
+        selected = probes[before[-1]:after[0] + 1]
+        gaps = [right["started_monotonic_seconds"] - left["started_monotonic_seconds"]
+                for left, right in zip(selected, selected[1:])]
+        require(gaps and max(gaps) <= LIMITS["readiness_max_gap_seconds"], "readiness interval coverage incomplete")
+        coverage.append({"sample_count": len(selected), "max_start_gap_seconds": max(gaps)})
+    return coverage
+
+
 def validate_leg(leg, manifest, row):
     require(row["config_check_exit"] == 0 and (leg / "config-check.log").is_file(), "actual strict config validation missing")
     require(row["daemon_exit"] == row["harness_exit"] == 0, "process teardown did not succeed")
     for name, expected in row["raw_sha256"].items():
         require(Path(name).name == name and digest(leg / name) == expected, "raw evidence changed")
-    prefixes = ("mass_dirty_ready", "mass_dirty_paused", "mass_dirty_complete", "mass_dirty_exit", "mass_dirty_readiness")
-    records = {prefix: [] for prefix in prefixes}
-    for line in (leg / "harness.log").read_text().splitlines():
-        prefix, _, body = line.partition(" ")
-        require(prefix in records, "unexpected harness record")
-        records[prefix].append(json.loads(body))
-    require([len(records[prefix]) for prefix in prefixes[:4]] == [1, 2, 2, 1], "incomplete/duplicate wire records")
+    validate_fixture(leg / "fixture", json.loads((leg / "fixture.sha256.json").read_text()))
+    records = harness_records(leg / "harness.log")
+    coverage = readiness_coverage(records, row["operations"], manifest["correctness_only"])
     ready = records["mass_dirty_ready"][0]
     require(ready["family_keys"] == manifest["family_keys"] and ready["receivers"] == manifest["receivers"], "raw wire shape differs")
+    require(all(ready[name] == manifest["wire_stimulus"][name] for name in
+                ("batch_size", "origin_cardinality", "baseline_eor_messages", "receiver_receive_buffer_bytes")),
+            "native wire stimulus differs")
     expected_bitmap = manifest["receivers"] * sum((value + 63) // 64 * 8 * 3 for value in manifest["family_keys"])
     require(ready["bitmap_bytes"] == expected_bitmap and ready["correctness_only"] is manifest["correctness_only"], "bitmap/correctness boundary changed")
     initial = json.loads((leg / "neighbors-initial.json").read_text())
     identities = [(peer(index), initial[index - 1]["group"]) for index in range(1, manifest["receivers"] + 1)]
     require(len(initial) == manifest["receivers"] and len({group for _, group in identities}) == 1, "initial group cohort differs")
     require([(item["peer"], item["group"]) for item in initial] == identities and all(item["pending"] is False and item["group"].startswith("group:") for item in initial), "initial group/clean evidence differs")
+    validate_source_witness(json.loads((leg / "source-initial.json").read_text()))
     initial_metrics = (leg / "metrics-initial.prom").read_text()
     regroup = metric(initial_metrics, "bgp_update_group_regroups_total")
     initial_causes = fallback(initial_metrics)
@@ -654,23 +873,44 @@ def validate_leg(leg, manifest, row):
     require(initial_charge["entries"] == 0 and row["recovery_initial"] == initial_charge, "initial recovery charge differs")
     previous_peak = initial_charge["peak_bytes"]
     for index, generation in enumerate(("b", "a")):
+        require(row["operations"][index]["readiness_coverage"] == coverage[index], "readiness coverage derivation differs")
         wire = records["mass_dirty_complete"][index]
         require(wire["generation"] == generation and wire["receivers"] == manifest["receivers"] and wire["exact_fold"] is True and wire["sessions_continuous"] is True, "wire generation/fold changed")
         require(wire["withdrawals"] == manifest["receivers"] * manifest["withdrawals_per_receiver"], "exact withdrawal duties differ")
         require(all(row["operations"][index][key] == value for key, value in wire.items()), "derived convergence does not match wire record")
         receipts = dirty_receipts((leg / f"daemon-window-{generation}.jsonl").read_text(), manifest["receivers"])
         require(receipts == json.loads((leg / f"dirty-receipts-{generation}.json").read_text()), "dirty receipt derivation differs")
-        for phase, pending in (("paused", False), ("settled", False)):
-            peers = json.loads((leg / f"neighbors-{phase}-{generation}.json").read_text())
-            require([(item["peer"], item["group"]) for item in peers] == identities and all(item["pending"] is pending for item in peers), "dirty/group witness differs")
+        require(records["mass_dirty_paused"][index] == {"generation": generation, "receivers": manifest["receivers"]},
+                "pause receipt differs")
+        sent = records["mass_dirty_sent"][index]
+        require(sent["generation"] == generation and sent["family_keys"] == manifest["family_keys"] and
+                sent["writer_drained"] is True and
+                all(sent[name] == manifest["wire_stimulus"]["origin_cardinality"] for name in
+                    ("announcement_messages", "eor_messages", "origin_cardinality")) and
+                sent["drained_monotonic_seconds"] == row["operations"][index]["drain_monotonic_seconds"],
+                "source churn/drain receipt differs")
+        validate_held_witness(json.loads((leg / f"neighbors-paused-{generation}.json").read_text()),
+                              identities, manifest["correctness_only"], row["operations"][index])
+        peers = json.loads((leg / f"neighbors-settled-{generation}.json").read_text())
+        require([(item["peer"], item["group"]) for item in peers] == identities and
+                all(item["pending"] is False for item in peers), "settled group witness differs")
+        validate_source_witness(json.loads((leg / f"source-settled-{generation}.json").read_text()))
+        for phase in ("paused", "settled"):
             metrics = (leg / f"metrics-{phase}-{generation}.prom").read_text()
             require(metric(metrics, "bgp_update_group_regroups_total") == regroup, "group regrouped")
             causes = fallback(metrics)
             require(all(causes[cause] >= initial_causes[cause] for cause in CAUSES), "fallback counter regressed")
             charge = recovery_charge(metrics)
             require(row["operations"][index][f"recovery_{phase}"] == charge, "recovery charge derivation differs")
-            require(all(charge[key] == initial_charge[key] for key in ("entries", "bytes")),
-                    "settled recovery charge did not return to empty baseline")
+            if phase == "settled":
+                require(all(charge[key] == initial_charge[key] for key in ("entries", "bytes")),
+                        "settled recovery charge did not return to empty baseline")
+            else:
+                require(charge["entries"] > 0 and charge["bytes"] > initial_charge["bytes"],
+                        "held dirty recovery proof was not retained")
+                if manifest["cohort"] == "no-refusal":
+                    require(charge["entries"] == manifest["receivers"] * sum(manifest["family_keys"]),
+                            "no-refusal held proof does not cover the full initial fleet")
             require(charge["peak_bytes"] >= previous_peak, "recovery reservation peak regressed")
             previous_peak = charge["peak_bytes"]
         deltas = {cause: causes[cause] - initial_causes[cause] for cause in CAUSES}
@@ -678,23 +918,12 @@ def validate_leg(leg, manifest, row):
         if manifest["cohort"] == "no-refusal" or (not manifest["correctness_only"] and row["arm"] == "candidate" and manifest["profile"] == "full-uc"):
             require(not any(deltas.values()), "indexed/no-refusal cohort refused proof")
         if manifest["correctness_only"]:
-            require(all(row["operations"][index][name] is None for name in ("trigger_to_fold_seconds", "trigger_to_settlement_seconds", "settlement_to_resume_seconds", "resume_to_observed_fold_seconds", "resume_to_fold_p50_seconds", "resume_to_fold_max_seconds")), "correctness mode published timing")
+            require(all(row["operations"][index][name] is None for name in ("trigger_to_fold_seconds", "trigger_to_drain_seconds", "drain_to_resume_seconds", "resume_to_observed_fold_seconds", "resume_to_fold_p50_seconds", "resume_to_fold_max_seconds")), "correctness mode published timing")
         else:
             operation = row["operations"][index]
-            parts = [operation[name] for name in ("trigger_to_settlement_seconds", "settlement_to_resume_seconds", "resume_to_observed_fold_seconds")]
+            parts = [operation[name] for name in ("trigger_to_drain_seconds", "drain_to_resume_seconds", "resume_to_observed_fold_seconds")]
             require(all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 for value in parts), "invalid timing interval")
             require(math.isclose(sum(parts), operation["trigger_to_fold_seconds"], abs_tol=1e-6), "whole capture interval excludes work")
-    final = records["mass_dirty_exit"][0]
-    require(final["status"] == "PASS" and final["readiness_samples"] > 0 and final["readiness_deadline_ms"] == 250, "readiness evidence missing")
-    probes = records["mass_dirty_readiness"]
-    require(len(probes) == final["readiness_samples"], "readiness observations missing")
-    for probe in probes:
-        require(probe["status"] == 200 and probe["deadline_ms"] == 250, "readiness response/deadline changed")
-        if manifest["correctness_only"]:
-            require(probe["elapsed_seconds"] is None, "correctness mode published readiness timing")
-        else:
-            elapsed = probe["elapsed_seconds"]
-            require(isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and math.isfinite(elapsed) and 0 <= elapsed <= .250, "readiness deadline failed")
     if manifest["cohort"] == "cap-pressure" and not manifest["correctness_only"] and (row["arm"] == "flat" or manifest["profile"] == "full-vpn"):
         require(any(operation["fallback_deltas"]["daemon_limit"] > 0 for operation in row["operations"]), "pressure control never reached cap")
     if not manifest["correctness_only"]:
@@ -742,6 +971,8 @@ def main():
     cell.add_argument("--index", type=int, required=True)
     for name in ("daemon", "harness", "rbgp"):
         cell.add_argument("--" + name, required=True)
+    binaries = sub.add_parser("check-binaries")
+    binaries.add_argument("output")
     verdict = sub.add_parser("analyze")
     verdict.add_argument("output")
     final = sub.add_parser("finalize")
@@ -753,6 +984,8 @@ def main():
         derive_flat(args.source, args.metadata)
     elif args.command == "run-cell":
         run_cell(args)
+    elif args.command == "check-binaries":
+        print(json.dumps(verified_binaries(args.output)))
     else:
         result = finalize(args.output) if args.command == "finalize" else analyze(args.output)
         print(json.dumps(result))
