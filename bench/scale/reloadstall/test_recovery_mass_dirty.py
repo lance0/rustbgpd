@@ -661,6 +661,101 @@ class MassDirtyTests(unittest.TestCase):
         (root / "driver.exit").write_text("0\n")
         self.assertEqual(receipt.finalize(root)["status"], "INVALID")
 
+    def test_actual_driver_cleanup_failures_invalidate_a_complete_campaign(self):
+        root, manifest = self.manifest()
+        (root / "candidate.sha").write_text(manifest["head"] + "\n")
+        source = ("    fn capture_group_admitted_keys_inner(\n"
+                  "        let captured = ledger.capture_full_old_with_checkpoint(\n"
+                  "            peer, hint, &group.table, !group.stages_vpn(), uc, vpn, checkpoint,\n"
+                  "        );\n    }\n"
+                  "    pub(in crate::manager) fn prepare_empty_group_recovery_admission() {\n")
+        (root / "capture-source.rs").write_text(source)
+        (root / "flat-control-source.rs").write_text(source)
+        receipt.derive_flat(root / "flat-control-source.rs", root / "derivation.json")
+        binaries = root / "bin"
+        binaries.mkdir()
+        for name in ("rustbgpd-candidate", "rustbgpd-flat", "reloadstall", "rbgp"):
+            (binaries / name).write_text(name + "\n")
+        (root / "binaries.sha256").write_text("".join(
+            f"{receipt.digest(path)}  {path}\n" for path in sorted(binaries.iterdir())))
+        for index, arm in enumerate(manifest["schedule"]):
+            leg, row = self.small_leg(manifest)
+            row.update({"arm": arm, "index": index, "source": manifest["head"], "status": "CORRECTNESS_ONLY",
+                        "capture_source_sha256": receipt.digest(root / "capture-source.rs"),
+                        "binary_sha256": receipt.digest(binaries / f"rustbgpd-{arm}"),
+                        "harness_sha256": receipt.digest(binaries / "reloadstall"),
+                        "rbgp_sha256": receipt.digest(binaries / "rbgp")})
+            receipt.write_json(leg / "result.json", row)
+            leg.rename(root / f"leg-{index}-{arm}")
+        (root / "driver.exit").write_text("0\n")
+        self.assertEqual(receipt.finalize(root)["status"], "CORRECTNESS_ONLY")
+
+        source = Path(__file__).with_name("run-recovery-mass-dirty.sh").read_text()
+        handler = source[source.index("finish() {"):source.index('mkdir -p "$output/bin"')]
+        # Execute the actual EXIT trap with deterministic failures, confined to
+        # owned temporary directories. No worktrees, builds or daemons run.
+        setup = r'''
+set -euo pipefail
+output=$TEST_OUTPUT scratch=$TEST_SCRATCH repository=$TEST_REPOSITORY
+active_controller='' active_starttime=''
+if [[ $TEST_MISMATCH == 1 ]]; then active_controller=12345 active_starttime=original; fi
+controller_starttime() { printf 'changed\n'; }
+kill() { printf 'kill %s\n' "$*" >>"$TEST_CALLS"; }
+wait() { printf 'wait %s\n' "$*" >>"$TEST_CALLS"; }
+git() {
+    local role=${!#} status
+    role=${role##*/}
+    printf 'git %s\n' "$role" >>"$TEST_CALLS"
+    if [[ $role == candidate ]]; then status=$TEST_CANDIDATE; else status=$TEST_FLAT; fi
+    if [[ $status != 0 ]]; then return "$status"; fi
+    command rmdir -- "$scratch/$role"
+}
+rm() {
+    printf 'rm\n' >>"$TEST_CALLS"
+    if [[ $TEST_RM != 0 ]]; then return "$TEST_RM"; fi
+    command rm "$@"
+}
+'''
+        for initial, candidate, flat, removal, mismatch in ((0, 17, 0, 0, 0), (0, 0, 18, 0, 0),
+                                                           (0, 17, 18, 0, 0), (0, 0, 0, 19, 0),
+                                                           (23, 17, 18, 19, 0), (0, 0, 0, 0, 0),
+                                                           (0, 0, 0, 0, 1), (23, 0, 0, 0, 1)):
+            with self.subTest(initial=initial, candidate=candidate, flat=flat, removal=removal, mismatch=mismatch):
+                scratch = self.root / f"scratch-{initial}-{candidate}-{flat}-{removal}-{mismatch}"
+                (scratch / "candidate").mkdir(parents=True)
+                (scratch / "flat").mkdir()
+                for name in ("cleanup-error.txt", "scratch-retained.txt", "driver.exit"):
+                    (root / name).unlink(missing_ok=True)
+                calls = self.root / "cleanup-calls"
+                calls.write_text("")
+                completed = subprocess.run(["bash", "-c", setup + handler + '\nexit "$TEST_INITIAL"\n'],
+                    env=os.environ | {"TEST_OUTPUT": str(root), "TEST_SCRATCH": str(scratch),
+                        "TEST_REPOSITORY": str(self.root), "TEST_CALLS": str(calls),
+                        "TEST_INITIAL": str(initial), "TEST_CANDIDATE": str(candidate),
+                        "TEST_FLAT": str(flat), "TEST_RM": str(removal), "TEST_MISMATCH": str(mismatch)},
+                    text=True, capture_output=True, timeout=5)
+                expected = initial or mismatch or candidate or flat or removal
+                result = receipt.finalize(root)
+                self.assertEqual(result["status"], "INVALID" if expected else "CORRECTNESS_ONLY")
+                self.assertEqual(completed.returncode, expected, completed.stderr)
+                self.assertEqual((root / "driver.exit").read_text(), f"{expected}\n")
+                expected_calls = ["wait 12345"] if mismatch else [] if initial else ["git candidate", "git flat"]
+                if not (initial or mismatch or candidate or flat):
+                    expected_calls.append("rm")
+                self.assertEqual(calls.read_text().splitlines(), expected_calls)
+                if mismatch:
+                    self.assertEqual((root / "cleanup-error.txt").read_text(), "held controller PID identity changed\n")
+                if expected:
+                    self.assertTrue(scratch.is_dir())
+                    self.assertEqual((root / "scratch-retained.txt").read_text(), f"{scratch}\n")
+                    if not initial:
+                        errors = (root / "cleanup-error.txt").read_text()
+                        self.assertEqual(len(errors.splitlines()), bool(candidate) + bool(flat) + bool(removal) + mismatch)
+                    self.assertEqual(result["reason"], "driver failed or was interrupted")
+                else:
+                    self.assertFalse(scratch.exists())
+                    self.assertFalse((root / "scratch-retained.txt").exists())
+
     def test_actual_broken_fold_is_rejected_even_with_pass_status(self):
         _, manifest = self.manifest(cohort="cap-pressure")
         leg, row = self.small_leg(manifest)

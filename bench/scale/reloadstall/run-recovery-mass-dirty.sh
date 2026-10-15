@@ -61,7 +61,7 @@ print(Path(f'/proc/{int(sys.argv[1])}/stat').read_text().rsplit(')', 1)[1].split
 PY
 }
 finish() {
-    local status=$?
+    local status=$? cleanup_status
     trap - EXIT INT TERM
     if [[ -n $active_controller ]]; then
         local current
@@ -70,23 +70,37 @@ finish() {
             kill -TERM "$active_controller" 2>/dev/null || true
         elif [[ -n $current ]]; then
             printf 'held controller PID identity changed\n' >"$output/cleanup-error.txt"
-            status=1
+            [[ $status != 0 ]] || status=1
         fi
         wait "$active_controller" || true
     fi
-    printf '%s\n' "$status" >"$output/driver.exit"
+    if [[ $status == 0 ]]; then
+        for role in candidate flat; do
+            if [[ -d $scratch/$role ]]; then
+                if git -C "$repository" worktree remove --force "$scratch/$role"; then
+                    :
+                else
+                    cleanup_status=$?
+                    [[ $status != 0 ]] || status=$cleanup_status
+                    printf 'failed to remove %s worktree (exit %s)\n' "$role" "$cleanup_status" >>"$output/cleanup-error.txt"
+                fi
+            fi
+        done
+        if [[ $status == 0 ]]; then
+            if rm -rf -- "$scratch"; then
+                :
+            else
+                status=$?
+                printf 'failed to remove scratch directory (exit %s)\n' "$status" >>"$output/cleanup-error.txt"
+            fi
+        fi
+    fi
     if [[ $status != 0 ]]; then
         # A failed/aborted build or cleanup may still own work. Preserve its
         # exact scratch paths for inspection rather than removing live inputs.
         printf '%s\n' "$scratch" >"$output/scratch-retained.txt"
-        exit "$status"
     fi
-    for role in candidate flat; do
-        if [[ -d $scratch/$role ]]; then
-            git -C "$repository" worktree remove --force "$scratch/$role" || true
-        fi
-    done
-    rm -rf -- "$scratch"
+    printf '%s\n' "$status" >"$output/driver.exit"
     exit "$status"
 }
 trap finish EXIT
