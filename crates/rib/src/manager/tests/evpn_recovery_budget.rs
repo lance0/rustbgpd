@@ -76,7 +76,11 @@ fn register_session(
 
 fn own(manager: &mut RibManager, peer: IpAddr, fresh: bool) {
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(manager.register_evpn_recovery(peer, fresh));
 }
 
@@ -433,7 +437,11 @@ fn exact_replay_moves_the_pending_execution_receipt_without_a_second_attempt() {
     let (mut manager, peer, _output) = fixture(8);
     manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(0, 1024 * 1024);
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     let requests = capture_reset_requests(&mut manager);
     assert!(!manager.register_evpn_recovery(peer, true));
     let (_, reply) = requests.lock().unwrap().pop().unwrap();
@@ -458,7 +466,11 @@ fn replaced_connection_discards_old_execution_receipt_with_the_same_actor_id() {
     let (mut manager, peer, _output) = fixture(8);
     manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(0, 1024 * 1024);
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     let requests = capture_reset_requests(&mut manager);
     assert!(!manager.register_evpn_recovery(peer, true));
     let (old, old_reply) = requests.lock().unwrap().pop().unwrap();
@@ -470,7 +482,11 @@ fn replaced_connection_discards_old_execution_receipt_with_the_same_actor_id() {
         Err(EvpnRecoveryResetOutcome::Executed)
     );
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(!manager.register_evpn_recovery(peer, true));
     manager.retry_evpn_recovery_reset(peer);
     let record = manager.live_sessions[&peer].last().unwrap();
@@ -747,7 +763,11 @@ fn ownership_registration_refusal_has_bounded_session_reset_control() {
     let (mut manager, peer, _output) = fixture(8);
     manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(0, 1024 * 1024);
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
     manager.evpn_recovery_reset = Some(Arc::new(move |request, reply| {
@@ -783,7 +803,11 @@ fn ownership_registration_refusal_has_bounded_session_reset_control() {
     // The preparatory classifier stays off after a fresh registration;
     // explicitly commit the synthetic G2 owner for the replacement.
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(!manager.register_evpn_recovery(peer, true));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     manager.clear_outbound_peer_state(peer);

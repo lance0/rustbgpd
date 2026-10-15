@@ -36,8 +36,12 @@ pub(super) fn fixture_with_rtc(
     register_with_rtc(&mut manager, member, sender, rtc);
     while output.try_recv().is_ok() {}
     let gid = manager.grouped_member_of(member).unwrap();
-    assert!(!manager.group_ribs[&gid].owns_evpn);
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    assert!(!manager.group_ribs[&gid].owns_evpn_routes());
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(manager.register_evpn_recovery(member, false));
     (manager, member, gid, output)
 }
@@ -459,7 +463,7 @@ fn negotiated_rtc_excludes_shared_ownership_and_keeps_private_missing_membership
     assert!(manager.peer_sendable_families[&member].contains(&(Afi::Ipv4, Safi::RtConstrain)));
     assert_eq!(manager.grouped_member_of(member), Some(gid));
     assert_eq!(manager.vpn_grouped_member_of(member), Some(gid));
-    assert!(manager.group_ribs[&gid].owns_evpn);
+    assert!(!manager.group_ribs[&gid].owns_evpn_routes());
     assert!(manager.evpn_grouped_member_of(member).is_none());
     assert!(manager.evpn_recovery_handle(member).is_none());
     manager.peer_rt_membership.remove(&member);
@@ -501,7 +505,7 @@ fn negotiated_rtc_excludes_shared_ownership_and_keeps_private_missing_membership
 
 fn assert_negotiated_rtc_evpn_stays_private(manager: &mut RibManager, member: IpAddr, gid: usize) {
     assert!(manager.group_ribs[&gid].rtc_negotiated());
-    assert!(manager.group_ribs[&gid].owns_evpn);
+    assert!(!manager.group_ribs[&gid].owns_evpn_routes());
     assert_eq!(manager.grouped_member_of(member), Some(gid));
     assert_eq!(manager.vpn_grouped_member_of(member), Some(gid));
     assert!(manager.evpn_grouped_member_of(member).is_none());
@@ -547,8 +551,12 @@ fn negotiated_rtc_exclusion_survives_registration_replay_and_regroup() {
     manager.recompute_update_group(member);
     let moved = manager.grouped_member_of(member).unwrap();
     assert_ne!(moved, gid);
-    assert!(!manager.group_ribs[&moved].owns_evpn);
-    manager.group_ribs.get_mut(&moved).unwrap().owns_evpn = true;
+    assert!(!manager.group_ribs[&moved].owns_evpn_routes());
+    manager
+        .group_ribs
+        .get_mut(&moved)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert_negotiated_rtc_evpn_stays_private(&mut manager, member, moved);
     manager.peer_interpret_rfc1997.insert(member);
     manager.recompute_update_group(member);
@@ -571,7 +579,11 @@ fn shared_capture_without_negotiated_rtc_ignores_empty_and_stale_membership() {
         // The existing private tail also remains unfiltered for a peer that
         // did not negotiate RTC, regardless of a stale membership map row.
         let keys = HashSet::from([old.key()]);
-        manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = false;
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .set_evpn_ownership_for_test(false);
         manager.distribute_evpn_keys_to_peer(member, &keys, &mut || {});
         let delivered = output
             .try_recv()
@@ -579,7 +591,11 @@ fn shared_capture_without_negotiated_rtc_ignores_empty_and_stale_membership() {
         assert_eq!(delivered.evpn_announce.len(), 1);
         assert!(evpn_routes_equal(&delivered.evpn_announce[0], &old));
         // Transfer this actual private admission into the synthetic owner.
-        manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .set_evpn_ownership_for_test(true);
         manager
             .adj_ribs_out
             .get_mut(&member)

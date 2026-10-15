@@ -659,7 +659,7 @@ pub(in crate::manager) struct GroupRibOut {
     pub(in crate::manager) sendable: Vec<(Afi, Safi)>,
     /// G1 prepares recovery without activating EVPN grouping. G2 must enable
     /// this only with its authoritative group table and received-RT metadata.
-    pub(in crate::manager) owns_evpn: bool,
+    owns_evpn: bool,
     /// Manager-unique revision of the paired EVPN route and received-input table.
     pub(in crate::manager) evpn_table_stamp: u64,
     pub(in crate::manager) llgr: Vec<(Afi, Safi)>,
@@ -826,6 +826,11 @@ impl GroupRibOut {
     /// and separate RTC qualification are implemented.
     pub(in crate::manager) fn owns_evpn_routes(&self) -> bool {
         self.owns_evpn && !self.rtc_negotiated()
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn set_evpn_ownership_for_test(&mut self, enabled: bool) {
+        self.owns_evpn = enabled;
     }
 
     fn record_otc_blocked<S: std::hash::BuildHasher>(

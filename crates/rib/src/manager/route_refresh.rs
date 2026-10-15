@@ -2066,7 +2066,7 @@ impl RibManager {
             return;
         };
         let evpn_marker = ready.contains(&(Afi::L2Vpn, Safi::Evpn));
-        let marker_only = evpn_marker && self.evpn_feed_is_current(peer);
+        let marker_only = self.evpn_feed_is_current(peer);
         let eor = OutboundRouteUpdate {
             end_of_rib: ready.iter().copied().collect(),
             ..OutboundRouteUpdate::default()
