@@ -105,6 +105,15 @@ def verify_container_membership(proc, cgroup, pid, owner):
     raise ValueError("container daemon must be the sole process in its cgroup")
 
 
+def owned_process_exited(proc, cgroup, pid, owner):
+    try:
+        return not verify_container_membership(proc, cgroup, pid, owner)
+    except FileNotFoundError:
+        if not proc.exists():
+            return True
+        raise
+
+
 def sample(pid, out, interval, expected_pgid=None, owner=None):
     proc = Path(f"/proc/{pid}")
     identity, _ = proc_stat((proc / "stat").read_text())
@@ -118,6 +127,7 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
             raise ValueError("container daemon exited before sampling started")
     elif not cgroup.name.endswith(".scope") or (cgroup / "memory.swap.max").read_text().strip() != "0":
         raise ValueError("daemon must run in its own swap-fenced systemd scope")
+    process_owner = owner if owner is not None else {"starttime": identity, "cgroup": str(cgroup)}
     if {int(member) for member in (cgroup / "cgroup.procs").read_text().split()} != {pid}:
         raise ValueError("daemon must be the sole process in its measurement scope")
     pgid = os.getpgid(pid)
@@ -143,15 +153,24 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
             try:
                 current_identity, cpu_ticks = proc_stat((proc / "stat").read_text())
                 if current_identity != identity:
-                    if owner is not None:
-                        raise ValueError("container daemon PID was reused")
-                    break
+                    raise ValueError("daemon PID was reused")
                 status = key_values((proc / "status").read_text())
                 if owner is not None:
                     if not verify_container_membership(proc, cgroup, pid, owner):
                         break
-                elif status["State"] == "Z":
+                elif status["State"] == "Z" and owned_process_exited(proc, cgroup, pid, process_owner):
                     break
+                try:
+                    rss, hwm = int(status["VmRSS"]), int(status["VmHWM"])
+                except KeyError:
+                    # Memory fields can disappear while stat still reports R.
+                    # Discard this sample; only a fresh owned exit permits success.
+                    if owned_process_exited(proc, cgroup, pid, process_owner):
+                        break
+                    time.sleep(interval)
+                    if owned_process_exited(proc, cgroup, pid, process_owner):
+                        break
+                    raise
                 before = int((cgroup / "memory.current").read_text())
                 stat = key_values((cgroup / "memory.stat").read_text())
                 after = int((cgroup / "memory.current").read_text())
@@ -170,29 +189,14 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
                         threads_raced += 1
                 writer.writerow([
                     epoch_us, started, (time.monotonic_ns() - started) // 1000,
-                    int(status["VmRSS"]), int(status["VmHWM"]), before, after, peak,
+                    rss, hwm, before, after, peak,
                     *[int(stat[key]) for key in STAT_KEYS], cpu_ticks / clock_ticks,
                     sum(pair[0] for pair in switches.values()),
                     sum(pair[1] for pair in switches.values()), threads_read, threads_raced,
                 ])
                 stream.flush()
             except FileNotFoundError:
-                if not proc.exists():
-                    break
-                if owner is not None:
-                    try:
-                        if not verify_container_membership(proc, cgroup, pid, owner):
-                            break
-                    except FileNotFoundError:
-                        if not proc.exists():
-                            break
-                        raise
-                    raise
-                try:
-                    state = key_values((proc / "status").read_text())["State"]
-                except FileNotFoundError:
-                    break
-                if state == "Z":
+                if owned_process_exited(proc, cgroup, pid, process_owner):
                     break
                 raise
             deadline += interval
