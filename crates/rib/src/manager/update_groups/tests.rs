@@ -5894,10 +5894,13 @@ fn per_client_best_pending_diagnostic_does_not_invent_withdrawal() {
         .insert((prefix(1), 0), blocked.clone());
     let announce: Arc<Vec<Route>> = vec![blocked].into();
     let nh: Arc<Vec<Option<NextHopAction>>> = vec![None].into();
-    assert!(m.try_send_and_commit_outbound_update(
-        MEMBER,
-        OutboundCommitBatch::with_unicast(announce, nh),
-    ));
+    assert!(
+        m.try_send_and_commit_outbound_update(
+            MEMBER,
+            OutboundCommitBatch::with_unicast(announce, nh),
+        )
+        .is_ok()
+    );
     let update = outbound_rx.try_recv().unwrap();
     assert!(
         update.announce.is_empty(),
@@ -6541,7 +6544,11 @@ fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
     batch.vpn_announce.push(vpn_route(2, OTHER1));
     batch.withdraw.push((prefix(1), 0));
     batch.vpn_withdraw.push(vpn_route(1, OTHER1).key());
-    assert!(manager.try_send_and_commit_outbound_update(OTHER2, batch));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(OTHER2, batch)
+            .is_ok()
+    );
     let update = receiver.try_recv().unwrap();
     assert_eq!(update.announce.len(), 128);
     assert_eq!(update.vpn_announce.len(), 1);

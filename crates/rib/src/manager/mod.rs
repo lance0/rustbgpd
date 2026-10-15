@@ -5731,7 +5731,9 @@ impl RibManager {
             }
 
             // Disarm if a message handler cleared the work (e.g. PeerDown).
-            if !self.resync_tick_pending() {
+            // That drain is a `cleared` outcome like a draining timer tick.
+            if resync_armed && !self.resync_tick_pending() {
+                self.metrics.record_rib_dirty_resync("cleared");
                 resync_armed = false;
             }
         }

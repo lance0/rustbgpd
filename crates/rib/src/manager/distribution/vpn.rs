@@ -982,16 +982,19 @@ impl RibManager {
                         .then_some(crate::update::ExactExportKey::Vpn(key))
                     })
                     .collect();
-                if !self.try_send_and_commit_outbound_update_with_group_prior(
-                    peer,
-                    OutboundCommitBatch {
-                        vpn_announce,
-                        vpn_withdraw,
-                        ..OutboundCommitBatch::default()
-                    },
-                    group_prior,
-                    None,
-                ) {
+                if self
+                    .try_send_and_commit_outbound_update_with_group_prior(
+                        peer,
+                        OutboundCommitBatch {
+                            vpn_announce,
+                            vpn_withdraw,
+                            ..OutboundCommitBatch::default()
+                        },
+                        group_prior,
+                        None,
+                    )
+                    .is_err()
+                {
                     if !self.pending_group_admitted.contains_key(&peer) {
                         self.set_group_recovery_fallback(
                             peer,
@@ -1127,7 +1130,7 @@ impl RibManager {
             );
 
             if (!vpn_announce.is_empty() || !vpn_withdraw.is_empty())
-                && !self.try_send_and_commit_outbound_update(
+                && let Err(failure) = self.try_send_and_commit_outbound_update(
                     peer,
                     OutboundCommitBatch {
                         vpn_announce,
@@ -1136,6 +1139,7 @@ impl RibManager {
                     },
                 )
                 && self.mark_outbound_dirty(peer)
+                && failure == super::OutboundCommitFailure::WriterUnavailable
             {
                 warn!(%peer, "outbound channel full — VPN update deferred");
             }

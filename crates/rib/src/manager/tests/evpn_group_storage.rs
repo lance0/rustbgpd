@@ -323,13 +323,15 @@ fn exact_export_overlay_filters_admitted_views_but_changed_candidates_are_reprob
     let encoder = MockExactExportEncoder::accepting(1);
     encoder.set_profile(2, [ExactExportKey::Evpn(a.key())]);
     manager.peer_export_encoders.insert(member, encoder.clone());
-    assert!(manager.try_send_and_commit_outbound_update(
-        member,
-        OutboundCommitBatch {
-            evpn_announce: candidate.0,
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    manager
+        .try_send_and_commit_outbound_update(
+            member,
+            OutboundCommitBatch {
+                evpn_announce: candidate.0,
+                ..OutboundCommitBatch::default()
+            },
+        )
+        .unwrap();
     while let Ok(update) = output.try_recv() {
         assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
     }
@@ -364,14 +366,16 @@ fn exact_export_overlay_filters_admitted_views_but_changed_candidates_are_reprob
     assert_eq!(reprobed.0.len(), 1);
     assert_eq!(reprobed.1, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
     encoder.set_profile(3, []);
-    assert!(manager.try_send_and_commit_outbound_update(
-        member,
-        OutboundCommitBatch {
-            evpn_announce: reprobed.0,
-            evpn_withdraw: reprobed.1,
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    manager
+        .try_send_and_commit_outbound_update(
+            member,
+            OutboundCommitBatch {
+                evpn_announce: reprobed.0,
+                evpn_withdraw: reprobed.1,
+                ..OutboundCommitBatch::default()
+            },
+        )
+        .unwrap();
     let admitted = output.try_recv().unwrap();
     assert_eq!(admitted.evpn_announce.len(), 1);
     assert_eq!(admitted.evpn_announce[0].key(), replacement.key());
@@ -593,13 +597,17 @@ fn rejected_metadata_only_update_matches_private_reprobe_and_delivery() {
     let encoder = MockExactExportEncoder::accepting(1);
     encoder.set_profile(2, [ExactExportKey::Evpn(original.key())]);
     manager.peer_export_encoders.insert(member, encoder.clone());
-    assert!(manager.try_send_and_commit_outbound_update(
-        member,
-        OutboundCommitBatch {
-            evpn_announce: events(&manager, gid, &initial, member, None, None).0,
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                member,
+                OutboundCommitBatch {
+                    evpn_announce: events(&manager, gid, &initial, member, None, None).0,
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     while let Ok(update) = output.try_recv() {
         assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
     }
@@ -641,14 +649,18 @@ fn rejected_metadata_only_update_matches_private_reprobe_and_delivery() {
     assert_eq!(actual.1, expected.1);
 
     encoder.set_profile(3, []);
-    assert!(manager.try_send_and_commit_outbound_update(
-        member,
-        OutboundCommitBatch {
-            evpn_announce: actual.0,
-            evpn_withdraw: actual.1,
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                member,
+                OutboundCommitBatch {
+                    evpn_announce: actual.0,
+                    evpn_withdraw: actual.1,
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     let admitted = output.try_recv().unwrap();
     assert_eq!(admitted.evpn_announce.len(), 1);
     assert_eq!(
@@ -1094,13 +1106,17 @@ fn older_universe_fixture() -> (
     for route in &old {
         stage(&mut manager, gid, route);
     }
-    assert!(manager.try_send_and_commit_outbound_update(
-        first,
-        OutboundCommitBatch {
-            evpn_announce: old.clone(),
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                first,
+                OutboundCommitBatch {
+                    evpn_announce: old.clone(),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     assert_eq!(
         first_output
             .try_recv()
@@ -1166,13 +1182,17 @@ fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
     assert_disjoint_flat_fits(&fresh);
     let handle = manager.evpn_recovery_handle(second).unwrap();
     assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
-    assert!(manager.try_send_and_commit_outbound_update(
-        second,
-        OutboundCommitBatch {
-            evpn_announce: fresh.clone(),
-            ..OutboundCommitBatch::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                second,
+                OutboundCommitBatch {
+                    evpn_announce: fresh.clone(),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
     assert_eq!(
         output
             .try_recv()
@@ -1230,21 +1250,29 @@ fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_univers
         let retained = manager.evpn_recovery.daemon_usage().retained;
         let header = manager.evpn_recovery.peer_usage(second).retained;
         if existing {
-            assert!(manager.try_send_and_commit_outbound_update(
-                second,
-                OutboundCommitBatch {
-                    evpn_announce: vec![fresh[0].clone()],
-                    ..OutboundCommitBatch::default()
-                }
-            ));
+            assert!(
+                manager
+                    .try_send_and_commit_outbound_update(
+                        second,
+                        OutboundCommitBatch {
+                            evpn_announce: vec![fresh[0].clone()],
+                            ..OutboundCommitBatch::default()
+                        }
+                    )
+                    .is_ok()
+            );
             assert_eq!(output.try_recv().unwrap().evpn_announce.len(), 1);
-            assert!(manager.try_send_and_commit_outbound_update(
-                second,
-                OutboundCommitBatch {
-                    evpn_withdraw: vec![fresh[0].key()],
-                    ..OutboundCommitBatch::default()
-                }
-            ));
+            assert!(
+                manager
+                    .try_send_and_commit_outbound_update(
+                        second,
+                        OutboundCommitBatch {
+                            evpn_withdraw: vec![fresh[0].key()],
+                            ..OutboundCommitBatch::default()
+                        }
+                    )
+                    .is_ok()
+            );
             assert_eq!(output.try_recv().unwrap().evpn_withdraw, [fresh[0].key()]);
         }
         assert!(
@@ -1260,13 +1288,15 @@ fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_univers
         let hint = manager.group_ribs[&gid].evpn_recovery_universe;
         let resets = no_reset_counter(&mut manager);
         assert!(
-            manager.try_send_and_commit_outbound_update(
-                second,
-                OutboundCommitBatch {
-                    evpn_announce: fresh.clone(),
-                    ..OutboundCommitBatch::default()
-                }
-            ),
+            manager
+                .try_send_and_commit_outbound_update(
+                    second,
+                    OutboundCommitBatch {
+                        evpn_announce: fresh.clone(),
+                        ..OutboundCommitBatch::default()
+                    }
+                )
+                .is_ok(),
             "flat candidate union fits; existing empty universe: {existing}"
         );
         assert_eq!(output.try_recv().unwrap().evpn_announce.len(), fresh.len());

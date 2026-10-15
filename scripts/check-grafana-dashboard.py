@@ -357,6 +357,10 @@ TARGETS = {
         "sum by (peer) (rate(bgp_outbound_route_drops_total"
         '{instance=~"$instance",peer=~"$peer"}[$__rate_interval]))'
     ),
+    ("RIB ingest pressure", "D"): (
+        "sum by (peer, reason) (rate(bgp_outbound_commit_refusals_total"
+        '{instance=~"$instance",peer=~"$peer"}[$__rate_interval]))'
+    ),
     ("Slow peers", "A"): (
         'bgp_peer_slow{instance=~"$instance",peer=~"$peer"}'
     ),
@@ -516,7 +520,8 @@ REQUIRED_LEGENDS = {
     ("Dynamic-neighbor admission capacity", "C"): "{{instance}} headroom",
     ("Dynamic-neighbor admission rejections", "A"): "{{instance}} rejected",
     ("RIB ingest pressure", "B"): "inbound safely parked {{peer}}",
-    ("RIB ingest pressure", "C"): "outbound work lost {{peer}}",
+    ("RIB ingest pressure", "C"): "outbound deferred {{peer}}",
+    ("RIB ingest pressure", "D"): "outbound refused {{peer}} {{reason}}",
     ("ORR SPF activity and topology", "A"): "{{instance}} SPF runs/s",
     ("ORR SPF activity and topology", "B"): "{{instance}} nodes",
     ("ORR SPF activity and topology", "C"): "{{instance}} usable links",

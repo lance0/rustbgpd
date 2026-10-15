@@ -626,23 +626,47 @@ groups:
             dashboard p99 and transition state before retrying a reload.
 
       - alert: BgpOutboundRouteDrops
-        # This counter records terminal outbound work loss. Temporary
-        # collision-failback ROUTE-REFRESH saturation is retained and retried,
-        # so it does not increment this family.
+        # Every family counts here when the peer writer channel is full or
+        # closed. The RIB marks the peer dirty and resyncs it, so this is a
+        # warning. Fail-closed refusals use bgp_outbound_commit_refusals_total.
         expr: increase(bgp_outbound_route_drops_total[10m]) > 0
         for: 0m
         labels:
-          severity: critical
+          severity: warning
         annotations:
-          summary: "Outbound BGP work dropped for {{ $labels.peer }}"
+          summary: "Outbound BGP work deferred for {{ $labels.peer }}"
           description: >-
             bgp_outbound_route_drops_total for peer {{ $labels.peer }} on
             {{ $labels.instance }} increased by
-            {{ $value | printf "%.0f" }} in the last 10 minutes. Outbound BGP
-            work was terminally lost before reaching the peer writer; inspect
-            the writer, peer, daemon log, and last error to identify the failed
-            path. Once healthy, refresh outbound if the peer missed an
-            advertised view.
+            {{ $value | printf "%.0f" }} in the last 10 minutes. The peer
+            writer channel was full or closed, so outbound work was not
+            handed to it. The daemon marked the peer dirty and resyncs it
+            automatically; a closed channel means the session is going down,
+            and its next session receives a full initial advertisement. No
+            manual refresh is needed. Check bgp_peer_slow and
+            bgp_peer_outbound_queue_depth for a slow receiver.
+
+      - alert: BgpOutboundCommitRefused
+        # A selection_gate refusal is expected while RFC 4724 selection is
+        # deferred, and evpn_recovery refusals are bounded EVPN recovery
+        # admission decisions; both resync once the condition clears. A
+        # missing exact export encoder does not clear without a new session
+        # registration.
+        expr: increase(bgp_outbound_commit_refusals_total{reason="missing_encoder"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound updates refused for {{ $labels.peer }} ({{ $labels.reason }})"
+          description: >-
+            bgp_outbound_commit_refusals_total for peer {{ $labels.peer }} on
+            {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 10 minutes
+            (reason={{ $labels.reason }}). The peer is registered without an
+            exact export encoder, so route-bearing outbound updates fail
+            closed and the peer receives no announcements until its session
+            registers again. Check the daemon log for the registration
+            warning and reset the session.
 
       - alert: BgpSendHoldExpired
         # RFC 9687 expiry means the remote peer stopped draining TCP long

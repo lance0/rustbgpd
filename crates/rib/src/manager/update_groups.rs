@@ -2530,7 +2530,7 @@ impl RibManager {
             .inspect(|_| checkpoint())
             .map(|key| key.nlri_key)
             .collect();
-        if self.try_send_and_commit_outbound_update(
+        if let Err(failure) = self.try_send_and_commit_outbound_update(
             peer,
             OutboundCommitBatch {
                 vpn_announce,
@@ -2538,9 +2538,7 @@ impl RibManager {
                 ..OutboundCommitBatch::default()
             },
         ) {
-            self.bump_export_counters(peer, &permit_rows);
-        } else {
-            warn!(%peer, "outbound channel full — RTC membership delta deferred to resync");
+            warn!(%peer, reason = failure.as_str(), "RTC membership delta not sent — deferred to resync");
             // The v1 dirty machinery takes over: the member's resync
             // announces the Φ-passing table; the narrow's withdraws
             // ride the candidate withdrawal residue.
@@ -2555,6 +2553,8 @@ impl RibManager {
                     .extend(withdraw_keys.drain(..).inspect(|_| checkpoint()));
                 self.refresh_group_residue_gauge();
             }
+        } else {
+            self.bump_export_counters(peer, &permit_rows);
         }
         super::retire_vec(&mut withdraw_keys, &mut || checkpoint());
         super::retire_vec(&mut permit_rows, &mut || checkpoint());

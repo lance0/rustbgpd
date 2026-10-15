@@ -13,6 +13,7 @@ use rustbgpd_policy::{
     evaluate_chain_with_attribution,
 };
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::reason_labels::OutboundCommitRefusal;
 use rustbgpd_wire::{
     AddressPrefixOrf, Afi, BgpRole, OrfAction, OrfMatch, Prefix, RouteRefreshSubtype, Safi,
     WhenToRefresh,
@@ -202,6 +203,29 @@ pub(in crate::manager) struct SharedUnicastPrecommit<'a> {
     pub(in crate::manager) group_id: usize,
     pub(in crate::manager) probe_cache: &'a mut SharedUnicastProbeCache,
     pub(in crate::manager) lazy_group_prior: Option<LazyCleanGroupPrior<'a>>,
+}
+
+/// Why an outbound transaction did not reach the peer writer. The commit
+/// ladder records the matching metric before returning it; callers keep the
+/// peer dirty so the resync timer retries the transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::manager) enum OutboundCommitFailure {
+    /// The peer writer channel was full, closed, or not registered
+    /// (`bgp_outbound_route_drops_total`).
+    WriterUnavailable,
+    /// A fail-closed gate refused the transaction
+    /// (`bgp_outbound_commit_refusals_total`).
+    Refused(OutboundCommitRefusal),
+}
+
+impl OutboundCommitFailure {
+    /// Bounded log token naming the cause.
+    pub(in crate::manager) const fn as_str(self) -> &'static str {
+        match self {
+            Self::WriterUnavailable => "writer_unavailable",
+            Self::Refused(reason) => reason.as_str(),
+        }
+    }
 }
 
 /// One owned outbound payload at the RIB-to-session commit boundary.
@@ -2576,8 +2600,27 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         batch: OutboundCommitBatch,
-    ) -> bool {
+    ) -> Result<(), OutboundCommitFailure> {
         self.try_send_and_commit_outbound_update_with_group_prior(peer, batch, HashSet::new(), None)
+    }
+
+    /// Count one failed outbound transaction under its own metric and return
+    /// it, so no caller can attribute a refusal to a writer-channel drop.
+    fn outbound_commit_failed(
+        &self,
+        peer: IpAddr,
+        failure: OutboundCommitFailure,
+    ) -> Result<(), OutboundCommitFailure> {
+        let label = peer.to_string();
+        match failure {
+            OutboundCommitFailure::WriterUnavailable => {
+                self.metrics.record_outbound_route_drop(&label);
+            }
+            OutboundCommitFailure::Refused(reason) => {
+                self.metrics.record_outbound_commit_refusal(&label, reason);
+            }
+        }
+        Err(failure)
     }
 
     /// Reconcile the latest OTC disposition for exactly the prefixes evaluated
@@ -2829,7 +2872,7 @@ impl RibManager {
         batch: OutboundCommitBatch,
         group_prior: HashSet<crate::update::ExactExportKey>,
         shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
-    ) -> bool {
+    ) -> Result<(), OutboundCommitFailure> {
         self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
             peer,
             batch,
@@ -2852,7 +2895,7 @@ impl RibManager {
         mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
         otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
         group_stage: Option<&super::update_groups::GroupStageOutput>,
-    ) -> bool {
+    ) -> Result<(), OutboundCommitFailure> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -2939,13 +2982,16 @@ impl RibManager {
             batch.retire_with(&mut || checkpoint());
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             self.replacement_checkpoint(true);
-            return false;
+            return self.outbound_commit_failed(
+                peer,
+                OutboundCommitFailure::Refused(OutboundCommitRefusal::SelectionGate),
+            );
         }
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             batch.retire_with(&mut || checkpoint());
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             self.replacement_checkpoint(true);
-            return false;
+            return self.outbound_commit_failed(peer, OutboundCommitFailure::WriterUnavailable);
         };
 
         let local_role = self.peer_local_roles.get(&peer).copied().flatten();
@@ -2985,7 +3031,10 @@ impl RibManager {
                 batch.retire_with(&mut || checkpoint());
                 super::retire_hash_set(&mut group_prior, &mut || checkpoint());
                 self.replacement_checkpoint(true);
-                return false;
+                return self.outbound_commit_failed(
+                    peer,
+                    OutboundCommitFailure::Refused(OutboundCommitRefusal::MissingEncoder),
+                );
             };
             Some(encoder.snapshot())
         } else {
@@ -3048,13 +3097,13 @@ impl RibManager {
             }
             batch.retire_with(&mut || checkpoint());
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
-            return true;
+            return Ok(());
         }
         let Ok(permit) = tx.try_reserve() else {
             batch.retire_with(&mut || checkpoint());
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
             self.replacement_checkpoint(true);
-            return false;
+            return self.outbound_commit_failed(peer, OutboundCommitFailure::WriterUnavailable);
         };
         if !self.reserve_evpn_recovery_admission(
             peer,
@@ -3063,7 +3112,10 @@ impl RibManager {
         ) {
             batch.retire_with(&mut || checkpoint());
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
-            return false;
+            return self.outbound_commit_failed(
+                peer,
+                OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
+            );
         }
         // Retain the existing Arc and slow-path candidate-key vector for the
         // original reservation bound; no route body or OLD proof is copied.
@@ -3769,7 +3821,10 @@ impl RibManager {
         if !self.preflight_final_evpn_recovery(peer, &mut evpn_announce, &mut evpn_withdraw)
             || !self.admit_evpn_recovery_batch(peer, &evpn_announce, &evpn_withdraw)
         {
-            return false;
+            return self.outbound_commit_failed(
+                peer,
+                OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
+            );
         }
 
         if capture_refresh_prior {
@@ -4354,7 +4409,7 @@ impl RibManager {
                 .successful_enqueues
                 .saturating_add(1);
         }
-        true
+        Ok(())
     }
 
     pub(in crate::manager) fn replace_peer_export_policy_synchronously(
@@ -8328,38 +8383,40 @@ impl RibManager {
                 } else {
                     HashSet::new()
                 };
-                if self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
-                    peer,
-                    OutboundCommitBatch {
-                        force_unicast_replay: is_force,
-                        unicast_otc_prechecked,
-                        announce_source_exclusion,
-                        shared_group_encode,
-                        withdraw: unicast.withdraw,
-                        end_of_rib: pending_eor.clone(),
-                        flowspec_announce: fs_announce,
-                        flowspec_withdraw: fs_withdraw,
-                        evpn_announce,
-                        evpn_withdraw,
-                        bgpls_announce,
-                        bgpls_withdraw,
-                        vpn_announce,
-                        vpn_withdraw,
-                        labeled_announce,
-                        labeled_withdraw,
-                        rtc_announce,
-                        rtc_withdraw,
-                        ..OutboundCommitBatch::with_unicast(announce, nh_override_flags)
-                    },
-                    group_prior,
-                    shared_unicast_cache_group.map(|group_id| SharedUnicastPrecommit {
-                        group_id,
-                        probe_cache: &mut shared_unicast_probe_cache,
-                        lazy_group_prior,
-                    }),
-                    member_of.is_none().then_some(effective_prefixes.as_ref()),
-                    member_of.and_then(|gid| group_stage.get(&gid)),
-                ) {
+                let commit = self
+                    .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+                        peer,
+                        OutboundCommitBatch {
+                            force_unicast_replay: is_force,
+                            unicast_otc_prechecked,
+                            announce_source_exclusion,
+                            shared_group_encode,
+                            withdraw: unicast.withdraw,
+                            end_of_rib: pending_eor.clone(),
+                            flowspec_announce: fs_announce,
+                            flowspec_withdraw: fs_withdraw,
+                            evpn_announce,
+                            evpn_withdraw,
+                            bgpls_announce,
+                            bgpls_withdraw,
+                            vpn_announce,
+                            vpn_withdraw,
+                            labeled_announce,
+                            labeled_withdraw,
+                            rtc_announce,
+                            rtc_withdraw,
+                            ..OutboundCommitBatch::with_unicast(announce, nh_override_flags)
+                        },
+                        group_prior,
+                        shared_unicast_cache_group.map(|group_id| SharedUnicastPrecommit {
+                            group_id,
+                            probe_cache: &mut shared_unicast_probe_cache,
+                            lazy_group_prior,
+                        }),
+                        member_of.is_none().then_some(effective_prefixes.as_ref()),
+                        member_of.and_then(|gid| group_stage.get(&gid)),
+                    );
+                if commit.is_ok() {
                     self.update_policy_filtered_routes_for_prefixes(
                         peer,
                         &effective_prefixes,
@@ -8398,9 +8455,8 @@ impl RibManager {
                             self.force_outbound_peers.remove(&peer);
                         }
                     }
-                } else {
-                    warn!(%peer, "outbound channel full or closed — marking dirty for resync");
-                    self.metrics.record_outbound_route_drop(&peer.to_string());
+                } else if let Err(failure) = commit {
+                    warn!(%peer, reason = failure.as_str(), "outbound update not sent — marking dirty for resync");
                     self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
                 }
             } else {

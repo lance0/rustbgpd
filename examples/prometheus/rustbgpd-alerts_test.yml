@@ -1702,46 +1702,128 @@ tests:
         alertname: BgpOutboundRouteDrops
         exp_alerts:
           - exp_labels:
-              severity: critical
+              severity: warning
               peer: 192.0.2.40
               instance: edge1:9179
             exp_annotations:
-              summary: "Outbound BGP work dropped for 192.0.2.40"
+              summary: "Outbound BGP work deferred for 192.0.2.40"
               description: >-
                 bgp_outbound_route_drops_total for peer 192.0.2.40 on
-                edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
-                work was terminally lost before reaching the peer writer;
-                inspect the writer, peer, daemon log, and last error to
-                identify the failed path. Once healthy, refresh outbound if
-                the peer missed an advertised view.
+                edge1:9179 increased by 1 in the last 10 minutes. The peer
+                writer channel was full or closed, so outbound work was not
+                handed to it. The daemon marked the peer dirty and resyncs it
+                automatically; a closed channel means the session is going
+                down, and its next session receives a full initial
+                advertisement. No manual refresh is needed. Check
+                bgp_peer_slow and bgp_peer_outbound_queue_depth for a slow
+                receiver.
           - exp_labels:
-              severity: critical
+              severity: warning
               peer: 192.0.2.41
               instance: edge1:9179
             exp_annotations:
-              summary: "Outbound BGP work dropped for 192.0.2.41"
+              summary: "Outbound BGP work deferred for 192.0.2.41"
               description: >-
                 bgp_outbound_route_drops_total for peer 192.0.2.41 on
-                edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
-                work was terminally lost before reaching the peer writer;
-                inspect the writer, peer, daemon log, and last error to
-                identify the failed path. Once healthy, refresh outbound if
-                the peer missed an advertised view.
+                edge1:9179 increased by 1 in the last 10 minutes. The peer
+                writer channel was full or closed, so outbound work was not
+                handed to it. The daemon marked the peer dirty and resyncs it
+                automatically; a closed channel means the session is going
+                down, and its next session receives a full initial
+                advertisement. No manual refresh is needed. Check
+                bgp_peer_slow and bgp_peer_outbound_queue_depth for a slow
+                receiver.
           - exp_labels:
-              severity: critical
+              severity: warning
               peer: 192.0.2.42
               instance: edge1:9179
             exp_annotations:
-              summary: "Outbound BGP work dropped for 192.0.2.42"
+              summary: "Outbound BGP work deferred for 192.0.2.42"
               description: >-
                 bgp_outbound_route_drops_total for peer 192.0.2.42 on
-                edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
-                work was terminally lost before reaching the peer writer;
-                inspect the writer, peer, daemon log, and last error to
-                identify the failed path. Once healthy, refresh outbound if
-                the peer missed an advertised view.
+                edge1:9179 increased by 1 in the last 10 minutes. The peer
+                writer channel was full or closed, so outbound work was not
+                handed to it. The daemon marked the peer dirty and resyncs it
+                automatically; a closed channel means the session is going
+                down, and its next session receives a full initial
+                advertisement. No manual refresh is needed. Check
+                bgp_peer_slow and bgp_peer_outbound_queue_depth for a slow
+                receiver.
       - eval_time: 21m
         alertname: BgpOutboundRouteDrops
+        exp_alerts: []
+
+  # ── BgpOutboundCommitRefused ──────────────────────────────
+  # Same load-bearing shape as BgpOutboundRouteDrops for missing_encoder.
+  # Expected selection_gate and evpn_recovery refusals never fire.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_outbound_commit_refusals_total{peer="192.0.2.70", reason="missing_encoder", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_outbound_commit_refusals_total{peer="192.0.2.71", reason="missing_encoder", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_outbound_commit_refusals_total{peer="192.0.2.72", reason="missing_encoder", instance="edge1:9179"}'
+        values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_outbound_commit_refusals_total{peer="192.0.2.73", reason="missing_encoder", instance="edge1:9179"}'
+        values: "7x22"
+      - series: 'bgp_outbound_commit_refusals_total{peer="192.0.2.74", reason="selection_gate", instance="edge1:9179"}'
+        values: "0+1x21"
+      - series: 'bgp_outbound_commit_refusals_total{peer="192.0.2.75", reason="evpn_recovery", instance="edge1:9179"}'
+        values: "0+1x21"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpOutboundCommitRefused
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpOutboundCommitRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.70
+              reason: missing_encoder
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Outbound updates refused for 192.0.2.70 (missing_encoder)"
+              description: >-
+                bgp_outbound_commit_refusals_total for peer 192.0.2.70 on
+                edge1:9179 increased by 1 in the last 10 minutes
+                (reason=missing_encoder). The peer is registered without an
+                exact export encoder, so route-bearing outbound updates fail
+                closed and the peer receives no announcements until its
+                session registers again. Check the daemon log for the
+                registration warning and reset the session.
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.71
+              reason: missing_encoder
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Outbound updates refused for 192.0.2.71 (missing_encoder)"
+              description: >-
+                bgp_outbound_commit_refusals_total for peer 192.0.2.71 on
+                edge1:9179 increased by 1 in the last 10 minutes
+                (reason=missing_encoder). The peer is registered without an
+                exact export encoder, so route-bearing outbound updates fail
+                closed and the peer receives no announcements until its
+                session registers again. Check the daemon log for the
+                registration warning and reset the session.
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.72
+              reason: missing_encoder
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Outbound updates refused for 192.0.2.72 (missing_encoder)"
+              description: >-
+                bgp_outbound_commit_refusals_total for peer 192.0.2.72 on
+                edge1:9179 increased by 1 in the last 10 minutes
+                (reason=missing_encoder). The peer is registered without an
+                exact export encoder, so route-bearing outbound updates fail
+                closed and the peer receives no announcements until its
+                session registers again. Check the daemon log for the
+                registration warning and reset the session.
+      - eval_time: 21m
+        alertname: BgpOutboundCommitRefused
         exp_alerts: []
 
   # ── BgpSendHoldExpired ────────────────────────────────────

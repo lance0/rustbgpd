@@ -452,16 +452,20 @@ fn common_recovery_fallback_does_not_invent_private_flowspec_delivery() {
     let encoder = MockExactExportEncoder::accepting(1);
     encoder.set_profile(1, [key.clone()]);
     manager.peer_export_encoders.insert(member, encoder);
-    assert!(manager.try_send_and_commit_outbound_update(
-        member,
-        crate::manager::distribution::OutboundCommitBatch {
-            flowspec_announce: vec![flowspec],
-            ..crate::manager::distribution::OutboundCommitBatch::with_unicast(
-                vec![make_route(prefix(1), Ipv4Addr::new(192, 0, 2, 1))].into(),
-                vec![None].into(),
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                member,
+                crate::manager::distribution::OutboundCommitBatch {
+                    flowspec_announce: vec![flowspec],
+                    ..crate::manager::distribution::OutboundCommitBatch::with_unicast(
+                        vec![make_route(prefix(1), Ipv4Addr::new(192, 0, 2, 1))].into(),
+                        vec![None].into(),
+                    )
+                },
             )
-        },
-    ));
+            .is_ok()
+    );
     let update = receiver.try_recv().unwrap();
     assert_eq!(update.announce.len(), 1);
     assert!(update.flowspec_announce.is_empty());

@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::reason_labels::OutboundCommitRefusal;
 use rustbgpd_wire::{Afi, Ipv4Prefix, RouteRefreshSubtype, Safi};
 use tokio::sync::{mpsc, oneshot};
 
@@ -10,7 +11,7 @@ use super::{
     dummy_query_rx, make_bgpls_route, make_evpn_imet, make_flowspec_route, make_labeled_rib_route,
     make_route_with_lp, make_rtc_rib_route, make_vpn_rib_route, query_best_routes,
 };
-use crate::manager::distribution::OutboundCommitBatch;
+use crate::manager::distribution::{OutboundCommitBatch, OutboundCommitFailure};
 use crate::manager::selection_deferral::SelectionDeferralTransition;
 use crate::{
     PeerOutboundState, RibManager, RibUpdate, SelectionDeferralConfig,
@@ -239,14 +240,16 @@ fn commit_control_markers(
     end_of_rib: Vec<(Afi, Safi)>,
     refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
 ) -> bool {
-    manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            end_of_rib,
-            refresh_markers,
-            ..OutboundCommitBatch::default()
-        },
-    )
+    manager
+        .try_send_and_commit_outbound_update(
+            peer,
+            OutboundCommitBatch {
+                end_of_rib,
+                refresh_markers,
+                ..OutboundCommitBatch::default()
+            },
+        )
+        .is_ok()
 }
 
 #[tokio::test]
@@ -749,11 +752,22 @@ fn deferred_selection_rejects_route_commit_until_release() {
             ),
         )
     };
-    assert!(
-        !commit(&mut manager),
+    assert_eq!(
+        commit(&mut manager),
+        Err(OutboundCommitFailure::Refused(
+            OutboundCommitRefusal::SelectionGate
+        )),
         "active selection deferral must fail a route-bearing commit closed"
     );
     assert!(outbound_rx.try_recv().is_err());
+    // An expected RFC 4724 refusal is not writer-channel loss.
+    let selection_gate_refusals = super::counter_metric_value(
+        &metrics,
+        "bgp_outbound_commit_refusals_total",
+        &[("reason", OutboundCommitRefusal::SelectionGate.as_str())],
+    );
+    assert!((selection_gate_refusals - 1.0).abs() < f64::EPSILON);
+    assert_counter_value(&metrics, "bgp_outbound_route_drops_total", 0.0);
 
     let released = manager
         .selection_deferral
@@ -764,7 +778,7 @@ fn deferred_selection_rejects_route_commit_until_release() {
     assert!(manager.selection_deferral.is_some());
     assert!(!manager.selection_deferred(FAMILY));
     assert!(
-        commit(&mut manager),
+        commit(&mut manager).is_ok(),
         "a released deferral must let the same route commit through"
     );
     assert!(outbound_rx.try_recv().is_ok());
