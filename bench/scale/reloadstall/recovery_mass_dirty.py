@@ -878,6 +878,8 @@ def readiness_coverage(records, operations, correctness):
 def validate_leg(leg, manifest, row):
     require(row["config_check_exit"] == 0 and (leg / "config-check.log").is_file(), "actual strict config validation missing")
     require(row["daemon_exit"] == row["harness_exit"] == 0, "process teardown did not succeed")
+    raw_files = {path.name for path in leg.iterdir() if path.is_file() and path.name != "result.json"}
+    require(type(row.get("raw_sha256")) is dict and set(row["raw_sha256"]) == raw_files, "raw evidence hash roster differs")
     for name, expected in row["raw_sha256"].items():
         require(Path(name).name == name and digest(leg / name) == expected, "raw evidence changed")
     validate_fixture(leg / "fixture", json.loads((leg / "fixture.sha256.json").read_text()))

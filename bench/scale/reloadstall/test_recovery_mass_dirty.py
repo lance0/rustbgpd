@@ -345,6 +345,7 @@ class MassDirtyTests(unittest.TestCase):
                         hashes["unrelated"] = "a" * 64
                     receipt.write_json(path, hashes)
                     expected = "fixture input roster differs"
+                row["raw_sha256"] = self.raw_hashes(leg)
                 with self.assertRaisesRegex(ValueError, expected):
                     receipt.validate_leg(leg, manifest, row)
 
@@ -445,6 +446,7 @@ class MassDirtyTests(unittest.TestCase):
                         text = (leg / "harness.log").read_text().replace('"readiness_samples": 1', '"readiness_samples": 0')
                         (leg / "harness.log").write_text(text)
                 expected_error = "settled recovery charge did not return to empty baseline" if mutation in ("retained-proof", "retained-charge") else ".*"
+                altered["raw_sha256"] = self.raw_hashes(leg)
                 with self.assertRaisesRegex(ValueError, expected_error):
                     receipt.validate_leg(leg, manifest, altered)
 
@@ -494,7 +496,7 @@ class MassDirtyTests(unittest.TestCase):
         for prefix in ("daemon-window", "dirty-receipts"):
             suffix = "jsonl" if prefix == "daemon-window" else "json"
             (leg / f"{prefix}-a.{suffix}").write_bytes((leg / f"{prefix}-b.{suffix}").read_bytes())
-        row["raw_sha256"] = {path.name: receipt.digest(path) for path in leg.iterdir() if path.is_file()}
+        row["raw_sha256"] = self.raw_hashes(leg)
         with self.assertRaisesRegex(ValueError, "post-resume log slice differs"):
             receipt.validate_leg(leg, manifest, row)
 
@@ -527,9 +529,53 @@ class MassDirtyTests(unittest.TestCase):
                 else:
                     (leg / "daemon-operation-a.jsonl").write_bytes(b"different operation\n")
                     expected = "operation log slice differs"
-                row["raw_sha256"] = {path.name: receipt.digest(path) for path in leg.iterdir() if path.is_file()}
+                row["raw_sha256"] = self.raw_hashes(leg)
                 with self.assertRaisesRegex(ValueError, expected):
                     receipt.validate_leg(leg, manifest, row)
+
+    def test_raw_evidence_hash_roster_cannot_omit_any_file(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        leg, row = self.small_leg(manifest)
+        self.assertIn("daemon.log", row["raw_sha256"])
+        (leg / "result.json").write_text("{}\n")
+        receipt.validate_leg(leg, manifest, row)
+        for omitted in (None, *sorted(row["raw_sha256"])):
+            with self.subTest(omitted=omitted):
+                leg, row = self.small_leg(manifest)
+                if omitted is None:
+                    row["raw_sha256"].clear()
+                else:
+                    del row["raw_sha256"][omitted]
+                with self.assertRaisesRegex(ValueError, "raw evidence hash roster differs"):
+                    receipt.validate_leg(leg, manifest, row)
+
+    def test_omitted_daemon_digest_cannot_hide_unrelated_log_tampering(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        leg, row = self.small_leg(manifest)
+        path = leg / "daemon.log"
+        original = path.read_bytes()
+        changed = original.replace(b'"startup"', b'"changed"', 1)
+        self.assertNotEqual(original, changed)
+        self.assertEqual(len(original), len(changed))
+        path.write_bytes(changed)
+        del row["raw_sha256"]["daemon.log"]
+        with self.assertRaisesRegex(ValueError, "raw evidence hash roster differs"):
+            receipt.validate_leg(leg, manifest, row)
+
+    def test_complete_hash_roster_does_not_make_consumed_files_optional(self):
+        _, manifest = self.manifest(cohort="cap-pressure")
+        leg, row = self.small_leg(manifest)
+        for name in sorted(row["raw_sha256"]):
+            with self.subTest(missing=name):
+                leg, row = self.small_leg(manifest)
+                (leg / name).unlink()
+                row["raw_sha256"] = self.raw_hashes(leg)
+                expected = ValueError if name == "config-check.log" else FileNotFoundError
+                with self.assertRaises(expected):
+                    receipt.validate_leg(leg, manifest, row)
+
+    def raw_hashes(self, leg):
+        return {path.name: receipt.digest(path) for path in leg.iterdir() if path.is_file() and path.name != "result.json"}
 
     def set_fallback_chain(self, leg, row, cause, counts):
         self.assertEqual(len(counts), 7)
@@ -543,6 +589,7 @@ class MassDirtyTests(unittest.TestCase):
         for index, before in enumerate((1, 4)):
             row["operations"][index]["fallback_before"][cause] = counts[before]
             row["operations"][index]["fallback_deltas"][cause] = counts[before + 2] - counts[before]
+        row["raw_sha256"] = self.raw_hashes(leg)
 
     def small_leg(self, manifest):
         leg = self.root / "small-leg"
@@ -622,6 +669,7 @@ class MassDirtyTests(unittest.TestCase):
                                                           "started_monotonic_seconds": None, "finished_monotonic_seconds": None}))
         (leg / "harness.log").write_text("\n".join(lines) + "\n")
         (leg / "daemon.log").write_bytes(daemon_log)
+        row["raw_sha256"] = self.raw_hashes(leg)
         return leg, row
 
     def test_real_dirty_receipt_target_set_cannot_be_fabricated_from_trigger(self):
