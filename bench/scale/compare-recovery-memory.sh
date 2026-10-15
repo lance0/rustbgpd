@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Hosted-only memory receipt: fixed c862 baseline, exact candidate, A/B/B/A
-# in fresh swap-fenced cgroup v2 scopes. No RSS fallback or timing verdict.
+# Hosted memory receipt, or explicitly selected same-runtime component scans.
+# Memory uses fixed c862/bdb controls and has no RSS fallback/timing verdict;
+# component timing never qualifies daemon memory, delivery or activation.
 set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=/dev/null
@@ -15,7 +16,7 @@ intermediate=bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00
 fail() { echo "recovery-memory: $*" >&2; exit 1; }
 
 # These are scoped child commands, never a fallback to the caller's cgroup.
-if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe ]]; then
+if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-scan ]]; then
     mode=$1
     shift
     cgroup=$(daemon_scope_cgroup "$$") || fail 'scope membership or swap fence unavailable'
@@ -26,7 +27,9 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe ]]; then
     else
         [[ $# == 6 ]] || fail 'invalid scope worker arguments'
         status=0
-        python3 "$checker" run-scope "$1" "$2" "$3" "$cgroup" "$4" "$5" "$6" || status=$?
+        scan_option=()
+        [[ $mode != --scope-scan ]] || scan_option=(--scan)
+        python3 "$checker" run-scope "$1" "$2" "$3" "$cgroup" "$4" "$5" "$6" "${scan_option[@]}" || status=$?
         record_scope_peak "$cgroup" "$2/compatibility-peak.txt" || status=1
         exit "$status"
     fi
@@ -34,21 +37,27 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe ]]; then
 fi
 
 [[ $# -ge 4 && $1 == --head && $3 == --output-dir ]] ||
-    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--phase pilot|qualified] [--profile PROFILE] [--cell all|dataset-reevaluate|peer-down|widen|unsynchronized-dirty]'
+    fail 'usage: compare-recovery-memory.sh --head FULL_SHA --output-dir NEW_DIR [--mode memory|scan] [--phase pilot|qualified] [--profile PROFILE] [--cell all|dataset-reevaluate|peer-down|widen|unsynchronized-dirty]'
 head=$2
 output=$4
 shift 4
 phase=pilot
+receipt_mode=memory
 profile=all
 selected_cell=all
 while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || fail 'missing selector value'
-    case $1 in --phase) phase=$2 ;; --profile) profile=$2 ;; --cell) selected_cell=$2 ;; *) fail 'unknown selector' ;; esac
+    case $1 in --mode) receipt_mode=$2 ;; --phase) phase=$2 ;; --profile) profile=$2 ;; --cell) selected_cell=$2 ;; *) fail 'unknown selector' ;; esac
     shift 2
 done
 [[ $phase == pilot || $phase == qualified ]] || fail 'invalid campaign phase'
-[[ $profile == all || $profile == ipv4-100k || $profile == full-uc || $profile == full-vpn || $profile == mixed-widen ]] || fail 'invalid campaign profile'
-[[ $selected_cell == all || $selected_cell == dataset-reevaluate || $selected_cell == peer-down || $selected_cell == widen || $selected_cell == unsynchronized-dirty ]] || fail 'invalid campaign cell'
+[[ $receipt_mode == memory || $receipt_mode == scan ]] || fail 'invalid receipt mode'
+if [[ $receipt_mode == scan ]]; then
+    [[ $phase == qualified && ( $profile == full-uc || $profile == full-vpn || $profile == evpn-soak ) && $selected_cell == capture-scan ]] || fail 'invalid component scan selection'
+else
+    [[ $profile == all || $profile == ipv4-100k || $profile == full-uc || $profile == full-vpn || $profile == mixed-widen ]] || fail 'invalid campaign profile'
+    [[ $selected_cell == all || $selected_cell == dataset-reevaluate || $selected_cell == peer-down || $selected_cell == widen || $selected_cell == unsynchronized-dirty ]] || fail 'invalid campaign cell'
+fi
 [[ $head =~ ^[0-9a-f]{40}$ ]] || fail 'head must be an exact source SHA'
 [[ ${GITHUB_ACTIONS:-} == true && ${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}} == github-hosted && ${RUNNER_OS:-} == Linux ]] ||
     fail 'this receipt requires a fresh GitHub-hosted Linux VM; do not measure on the dev or soak host'
@@ -106,13 +115,58 @@ printf '%s\n' "$status" > "$output/probe/launcher.exit"
 inputs=(bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_memory.rs
     bench/scale/rrharness/Cargo.toml bench/scale/compare-recovery-memory.sh
     bench/scale/recovery_memory.py bench/scale/cgroup-memory.sh bench/scale/provenance.sh)
+[[ $receipt_mode != scan ]] || inputs+=(bench/scale/rrharness/src/recovery_scan.rs)
 mkdir "$output/frozen-instrumentation"
 for path in "${inputs[@]}"; do
     mkdir -p -- "$output/frozen-instrumentation/$(dirname -- "$path")"
     cp -- "$repository/$path" "$output/frozen-instrumentation/$path"
-    printf '%s  %s\n' "$(provenance_sha256_file "$repository/$path")" "$path" >> "$output/instrumentation.sha256"
+    if [[ $receipt_mode == memory && $path == bench/scale/rrharness/src/main.rs ]]; then
+        # Historical controls lack the component-only RIB API. Freeze the
+        # identical memory entrypoint for every role, without porting runtime.
+        python3 "$checker" normalize-memory-entrypoint "$output/frozen-instrumentation/$path" "$output/memory-entrypoint-derivation.json"
+    fi
+    printf '%s  %s\n' "$(provenance_sha256_file "$output/frozen-instrumentation/$path")" "$path" >> "$output/instrumentation.sha256"
 done
 instrumentation=$(provenance_sha256_file "$output/instrumentation.sha256")
+if [[ $receipt_mode == scan ]]; then
+    python3 - "$output/manifest.json" "$head" "$instrumentation" "$profile" <<'PYCODE'
+import json
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text(json.dumps({
+    "schema": "rustbgpd.recovery-scan.campaign.v1", "candidate": sys.argv[2],
+    "instrumentation_manifest_sha256": sys.argv[3], "profile": sys.argv[4],
+    "build_jobs": 4, "order_per_cell": ["flat", "shared", "shared", "flat"],
+    "scope": "component capture only; same runtime, no activation or daemon claim",
+}, indent=2, sort_keys=True) + "\n")
+PYCODE
+    tree=$work_root/candidate
+    git -C "$repository" worktree add --detach "$tree" "$head" > "$output/candidate-worktree.log" 2>&1
+    for path in Cargo.toml Cargo.lock bench/scale/rrharness/Cargo.toml; do
+        printf '%s  %s\n' "$(provenance_sha256_file "$tree/$path")" "$path" >> "$output/candidate-build-inputs.sha256"
+    done
+    record_command env CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-candidate" RRHARNESS_RECOVERY_SOURCE_SHA="$head" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4
+    status=0
+    (cd -- "$tree" && CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-candidate" \
+        RRHARNESS_RECOVERY_SOURCE_SHA="$head" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" \
+        cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4) \
+        > "$output/candidate-build.log" 2>&1 || status=$?
+    printf '%s\n' "$status" > "$output/candidate-build.exit"
+    [[ $status == 0 ]] || fail 'component scan build failed'
+    provenance_sha256_file "$work_root/target-candidate/scale/rrharness" > "$output/candidate-binary.sha256"
+    mkdir "$output/scan"
+    status=0
+    launch_scope "recovery-scan-$$.scope" env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+        RECOVERY_MEMORY_RUNNER_ENVIRONMENT="${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}}" \
+        bash "$driver" --scope-scan \
+        "$work_root/target-candidate/scale/rrharness" "$output/scan" capture-scan \
+        "$(cat "$output/candidate-binary.sha256")" "$profile" 1 \
+        > "$output/scan/launcher.log" 2>&1 || status=$?
+    printf '%s\n' "$status" > "$output/scan/launcher.exit"
+    awk '$1 == "oom_kill" { print $2 }' /proc/vmstat > "$output/host-oom.after"
+    python3 "$checker" summarize-scan "$output"
+    exit 0
+fi
 python3 - "$output/manifest.json" "$baseline" "$intermediate" "$head" "$instrumentation" "$phase" "$profile" "$checker" "$selected_cell" <<'PYCODE'
 import importlib.util
 import json
@@ -123,9 +177,11 @@ receipt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(receipt)
 profiles = None if sys.argv[7] == "all" else [sys.argv[7]]
 cases = receipt.campaign_cases(sys.argv[6], profiles, sys.argv[9])
+derivation = Path(sys.argv[1]).parent / "memory-entrypoint-derivation.json"
 profiles = list(dict.fromkeys(case["profile"] for case in cases))
 Path(sys.argv[1]).write_text(json.dumps({
     "schema": "rustbgpd.recovery-memory.campaign.v2",
+    "memory_entrypoint_derivation_sha256": receipt.hashlib.sha256(derivation.read_bytes()).hexdigest(),
     "baseline": sys.argv[2], "intermediate": sys.argv[3], "candidate": sys.argv[4],
     "instrumentation_manifest_sha256": sys.argv[5], "phase": sys.argv[6],
     "profiles": profiles, "selected_cell": sys.argv[9], "cases": cases, "build_jobs": 4,
@@ -147,7 +203,7 @@ for role in baseline intermediate candidate; do
         fail 'harness manifest drift would confound the frozen instrumentation'
     for path in bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_memory.rs; do
         cp -- "$output/frozen-instrumentation/$path" "$tree/$path"
-        provenance_require_sha256 "$tree/$path" "$(provenance_sha256_file "$repository/$path")"
+        provenance_require_sha256 "$tree/$path" "$(provenance_sha256_file "$output/frozen-instrumentation/$path")"
     done
     record_command python3 "$checker" instrument-observer "$tree"
     python3 "$checker" instrument-observer "$tree"

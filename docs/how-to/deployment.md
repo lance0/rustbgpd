@@ -1324,6 +1324,14 @@ therefore own the graceful stop and the verification that follows it.
 
 ### Upgrade
 
+RD-bearing API and CLI output now uses raw hexadecimal for a Type 2 RD
+whose ASN is at most 65535, so it cannot be confused with a different
+Type 0 RD. Clients can pass the returned spelling back to RD filters and
+selectors. Ordinary RD output is unchanged; persisted historical event
+labels and payloads are not migrated. See
+[Route Distinguisher identity](../reference/api.md#route-distinguisher-identity)
+for the accepted input grammar and optional versus required fields.
+
 1. Read the target release's CHANGELOG section and verify the downloaded
    package against its release checksum. Config compatibility is not assumed
    across minor releases.
@@ -1560,6 +1568,24 @@ replace routes, and therefore forwarding, until normal convergence.
 The config file itself is mutable across runs: neighbor add/delete
 operations via gRPC persist back to the config file (see
 [`CONFIGURATION.md`](../reference/configuration.md) → "Config Persistence").
+
+### Migrate whole-table family reads
+
+Before the v1 inventory freeze, the scoped RR-only read contract moves to
+bounded pages. Replace `ListVpnRoutes`, `ListLabeledRoutes` and `ListRtcRoutes`
+with `ListVpnRibRoutes`, `ListLabeledRibRoutes` and `ListRtcRibRoutes`, selecting
+`view = BEST` for the previous winner-only behavior. Replace `ListEvpnRoutes`
+with `ListBestEvpnRoutes`; select each of Types 1–5 separately for the scoped
+EVPN role. The four whole-table methods remain functional but are deprecated
+and outside v1. No RPC is removed and plain CLI JSON arrays are unchanged.
+
+Follow `next_page_token` until empty. A table mutation returns `ABORTED`;
+restart the walk with an empty token. Page size 0 defaults to 100; values above
+1000 clamp to 1000. Older daemons can return `UNIMPLEMENTED` for the bounded
+methods, so check server support before switching automation. See the
+[family page contract](../reference/api.md#bounded-vpn-labeled-rtc-and-evpn-best-pages)
+for view, filter and peer semantics. Clients using additive EVPN peer filters
+must also verify the documented response acknowledgement before using rows.
 
 ## Sample profiles
 

@@ -104,7 +104,8 @@ peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
 authoritative partial SIGHUP reloads and failed retained reload tasks,
 dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
-selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
+selection-deferral timeout and ledger overflow, outbound writer deferral,
+refused outbound commits, RFC 9687
 send-hold teardown, session event source loss, live event-stream
 lag/desynchronization, BMP feed loss and stream divergence, BMP
 control-event and Loc-RIB source drops, policy evaluation errors, BLACKHOLE
@@ -139,12 +140,20 @@ shutdown latch, which `BgpSessionNotEstablished` deliberately skips.
 The loss alerts use a 10-minute counter-increase window and clear after
 the last increment ages out:
 
-- `BgpOutboundRouteDrops` is critical because outbound BGP work was terminally
-  lost before reaching the peer writer. Temporary collision-failback
-  ROUTE-REFRESH saturation is retained and retried, so it does not increment
-  this counter. Inspect the peer writer, daemon log, and last error to identify
-  the failed path and correct the bottleneck, then refresh outbound if the peer
-  missed an advertised view.
+- `BgpOutboundRouteDrops` is warning severity because the daemon recovers
+  automatically. A full or closed peer writer channel kept outbound work of
+  some address family from reaching the writer; the RIB marked the peer dirty
+  and its resync timer resends the current advertised view, and a closed
+  channel's next session receives a full initial advertisement. No manual
+  refresh is needed. Look for a slow receiver with `bgp_peer_slow` and
+  `bgp_peer_outbound_queue_depth`. Temporary collision-failback ROUTE-REFRESH
+  saturation is retained and retried, so it does not increment this counter.
+- `BgpOutboundCommitRefused` is warning severity and fires only for
+  `reason="missing_encoder"`: the peer registered without an exact export
+  encoder, so route-bearing updates fail closed until a new session registers.
+  `selection_gate` refusals are expected while RFC 4724 selection is deferred
+  and `evpn_recovery` refusals are bounded EVPN recovery decisions; both resync
+  when the condition clears.
 - `BgpSendHoldExpired` is critical because RFC 9687 expiry has already torn
   down the session without a NOTIFICATION after the remote endpoint stopped
   draining TCP. Inspect the writer and peer before allowing the session to

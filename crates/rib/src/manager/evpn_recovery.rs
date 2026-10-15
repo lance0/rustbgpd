@@ -58,7 +58,7 @@ impl RibManager {
 
     pub(in crate::manager) fn evpn_grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
         let gid = self.grouped_member_of(peer)?;
-        self.group_ribs.get(&gid)?.owns_evpn.then_some(gid)
+        self.group_ribs.get(&gid)?.owns_evpn_routes().then_some(gid)
     }
 
     fn evpn_recovery_owner(&self, peer: IpAddr) -> Option<PeerSession> {
@@ -517,7 +517,7 @@ impl RibManager {
         }
         let Ok(Some(proof)) = self.evpn_recovery.proof(handle) else {
             self.evpn_recovery.fail_admission(handle);
-            self.mark_outbound_dirty(peer);
+            self.mark_outbound_dirty_inner(peer, false);
             self.retry_evpn_recovery_reset(peer);
             return false;
         };
@@ -537,7 +537,7 @@ impl RibManager {
             return true;
         }
         self.evpn_recovery.fail_admission(handle);
-        self.mark_outbound_dirty(peer);
+        self.mark_outbound_dirty_inner(peer, false);
         self.retry_evpn_recovery_reset(peer);
         false
     }
@@ -609,7 +609,10 @@ impl RibManager {
         }
         self.evpn_recovery.fail_admission(handle);
         self.retry_evpn_recovery_reset(peer);
-        self.mark_outbound_dirty(peer);
+        // The refused envelope admitted no common-family mutation. The
+        // generation-fenced reset owns recovery; do not allocate a new common
+        // proof merely to mark this failed EVPN precommit dirty.
+        self.mark_outbound_dirty_inner(peer, false);
         false
     }
 
@@ -640,7 +643,10 @@ impl RibManager {
             return true;
         }
         self.retry_evpn_recovery_reset(peer);
-        self.mark_outbound_dirty(peer);
+        // The refused envelope admitted no common-family mutation. The
+        // generation-fenced reset owns recovery; do not allocate a new common
+        // proof merely to mark this failed EVPN precommit dirty.
+        self.mark_outbound_dirty_inner(peer, false);
         false
     }
 

@@ -1,5 +1,101 @@
 use super::*;
 
+#[tokio::test]
+async fn family_and_evpn_page_sizes_default_and_clamp_before_actor_dispatch() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let service = RibService::new(tx);
+    let actor = tokio::spawn(async move {
+        for expected in [100, 1, 1000, 1000, 1000] {
+            for _ in 0..6 {
+                match rx.recv().await.unwrap() {
+                    RibUpdate::QueryVpnRoutesPage {
+                        page_size, reply, ..
+                    } => {
+                        assert_eq!(page_size, expected);
+                        reply.send(Err(RoutePageError::Invalidated)).unwrap();
+                    }
+                    RibUpdate::QueryLabeledRoutesPage {
+                        page_size, reply, ..
+                    } => {
+                        assert_eq!(page_size, expected);
+                        reply.send(Err(RoutePageError::Invalidated)).unwrap();
+                    }
+                    RibUpdate::QueryRtcRoutesPage {
+                        page_size, reply, ..
+                    } => {
+                        assert_eq!(page_size, expected);
+                        reply.send(Err(RoutePageError::Invalidated)).unwrap();
+                    }
+                    RibUpdate::QueryEvpnRoutesPage {
+                        page_size, reply, ..
+                    } => {
+                        assert_eq!(page_size, expected);
+                        reply.send(Err(RoutePageError::Invalidated)).unwrap();
+                    }
+                    _ => panic!("expected bounded family page"),
+                }
+            }
+        }
+    });
+    for page_size in [0, 1, 1000, 1001, u32::MAX] {
+        for method in 0..6 {
+            let view = proto::FamilyRouteView::Best as i32;
+            let result = match method {
+                0 => service
+                    .list_vpn_rib_routes(Request::new(proto::ListVpnRibRoutesRequest {
+                        view,
+                        page_size,
+                        ..Default::default()
+                    }))
+                    .await
+                    .map(|_| ()),
+                1 => service
+                    .list_labeled_rib_routes(Request::new(proto::ListLabeledRibRoutesRequest {
+                        view,
+                        page_size,
+                        ..Default::default()
+                    }))
+                    .await
+                    .map(|_| ()),
+                2 => service
+                    .list_rtc_rib_routes(Request::new(proto::ListRtcRibRoutesRequest {
+                        view,
+                        page_size,
+                        ..Default::default()
+                    }))
+                    .await
+                    .map(|_| ()),
+                3 => service
+                    .list_best_evpn_routes(Request::new(proto::ListBestEvpnRoutesRequest {
+                        page_size,
+                        ..Default::default()
+                    }))
+                    .await
+                    .map(|_| ()),
+                _ => {
+                    let request = Request::new(proto::ListPeerEvpnRoutesRequest {
+                        neighbor_address: "192.0.2.1".into(),
+                        page_size,
+                        ..Default::default()
+                    });
+                    if method == 4 {
+                        service.list_received_evpn_routes(request).await
+                    } else {
+                        service.list_advertised_evpn_routes(request).await
+                    }
+                    .map(|_| ())
+                }
+            };
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::Aborted,
+                "method {method}, page_size {page_size} must reach the actor"
+            );
+        }
+    }
+    actor.await.unwrap();
+}
+
 #[test]
 fn family_page_tokens_bind_family_scope_filters_and_version() {
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
@@ -17,6 +113,11 @@ fn family_page_tokens_bind_family_scope_filters_and_version() {
     );
     let (_, after, expected) =
         family_page_params(1, &token, scope, &identity, parse_vpn_page_key).unwrap();
+    assert_eq!(after.unwrap().2, 7);
+    assert_eq!(expected, Some(version));
+    let (size, after, expected) =
+        family_page_params(u32::MAX, &token, scope, &identity, parse_vpn_page_key).unwrap();
+    assert_eq!(size, 1000);
     assert_eq!(after.unwrap().2, 7);
     assert_eq!(expected, Some(version));
     for (scope, identity) in [
@@ -1013,10 +1114,6 @@ async fn vpn_family_page_response_filters_and_invalidation() {
             ..request.clone()
         },
         proto::ListVpnRibRoutesRequest {
-            page_size: 1001,
-            ..request.clone()
-        },
-        proto::ListVpnRibRoutesRequest {
             afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
             ..request.clone()
         },
@@ -1137,10 +1234,6 @@ async fn labeled_family_page_response_filters_and_invalidation() {
             ..request.clone()
         },
         proto::ListLabeledRibRoutesRequest {
-            page_size: 1001,
-            ..request.clone()
-        },
-        proto::ListLabeledRibRoutesRequest {
             afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
             ..request.clone()
         },
@@ -1256,10 +1349,6 @@ async fn rtc_family_page_response_filters_and_invalidation() {
         },
         proto::ListRtcRibRoutesRequest {
             neighbor_address: String::new(),
-            ..request.clone()
-        },
-        proto::ListRtcRibRoutesRequest {
-            page_size: 1001,
             ..request.clone()
         },
     ] {

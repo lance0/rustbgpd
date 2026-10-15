@@ -405,25 +405,27 @@ fn register_exact_target(
 
 fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bool {
     let next_hop_override = vec![None; batch.announce.len()].into();
-    manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            withdraw: batch.withdraw,
-            flowspec_announce: batch.flowspec_announce,
-            flowspec_withdraw: batch.flowspec_withdraw,
-            evpn_announce: batch.evpn_announce,
-            evpn_withdraw: batch.evpn_withdraw,
-            bgpls_announce: batch.bgpls_announce,
-            bgpls_withdraw: batch.bgpls_withdraw,
-            vpn_announce: batch.vpn_announce,
-            vpn_withdraw: batch.vpn_withdraw,
-            labeled_announce: batch.labeled_announce,
-            labeled_withdraw: batch.labeled_withdraw,
-            rtc_announce: batch.rtc_announce,
-            rtc_withdraw: batch.rtc_withdraw,
-            ..OutboundCommitBatch::with_unicast(batch.announce.into(), next_hop_override)
-        },
-    )
+    manager
+        .try_send_and_commit_outbound_update(
+            peer,
+            OutboundCommitBatch {
+                withdraw: batch.withdraw,
+                flowspec_announce: batch.flowspec_announce,
+                flowspec_withdraw: batch.flowspec_withdraw,
+                evpn_announce: batch.evpn_announce,
+                evpn_withdraw: batch.evpn_withdraw,
+                bgpls_announce: batch.bgpls_announce,
+                bgpls_withdraw: batch.bgpls_withdraw,
+                vpn_announce: batch.vpn_announce,
+                vpn_withdraw: batch.vpn_withdraw,
+                labeled_announce: batch.labeled_announce,
+                labeled_withdraw: batch.labeled_withdraw,
+                rtc_announce: batch.rtc_announce,
+                rtc_withdraw: batch.rtc_withdraw,
+                ..OutboundCommitBatch::with_unicast(batch.announce.into(), next_hop_override)
+            },
+        )
+        .is_ok()
 }
 
 fn commit_shared_unicast_with_cache(
@@ -454,16 +456,18 @@ fn commit_shared_unicast_with_precommit(
     cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
     lazy_group_prior: Option<crate::manager::distribution::LazyCleanGroupPrior<'_>>,
 ) -> bool {
-    manager.try_send_and_commit_outbound_update_with_group_prior(
-        peer,
-        OutboundCommitBatch::with_unicast(announce, next_hop_override),
-        group_prior,
-        Some(crate::manager::distribution::SharedUnicastPrecommit {
-            group_id: 7,
-            probe_cache: cache,
-            lazy_group_prior,
-        }),
-    )
+    manager
+        .try_send_and_commit_outbound_update_with_group_prior(
+            peer,
+            OutboundCommitBatch::with_unicast(announce, next_hop_override),
+            group_prior,
+            Some(crate::manager::distribution::SharedUnicastPrecommit {
+                group_id: 7,
+                probe_cache: cache,
+                lazy_group_prior,
+            }),
+        )
+        .is_ok()
 }
 
 #[test]
@@ -1389,25 +1393,27 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
     let prior_visits = observe_group_prior_materialization(&mut manager);
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
     assert!(manager.with_replacement_readiness(|manager| {
-        manager.try_send_and_commit_outbound_update_with_group_prior(
-            member,
-            OutboundCommitBatch {
-                withdraw: stage.shared_withdraw.clone(),
-                ..OutboundCommitBatch::with_unicast(
-                    Arc::clone(&stage.shared_announce),
-                    Arc::clone(&stage.shared_nh),
-                )
-            },
-            HashSet::new(),
-            Some(crate::manager::distribution::SharedUnicastPrecommit {
-                group_id: gid,
-                probe_cache: &mut cache,
-                lazy_group_prior: Some(crate::manager::distribution::LazyCleanGroupPrior {
-                    peer: member,
-                    deltas: &stage.deltas,
+        manager
+            .try_send_and_commit_outbound_update_with_group_prior(
+                member,
+                OutboundCommitBatch {
+                    withdraw: stage.shared_withdraw.clone(),
+                    ..OutboundCommitBatch::with_unicast(
+                        Arc::clone(&stage.shared_announce),
+                        Arc::clone(&stage.shared_nh),
+                    )
+                },
+                HashSet::new(),
+                Some(crate::manager::distribution::SharedUnicastPrecommit {
+                    group_id: gid,
+                    probe_cache: &mut cache,
+                    lazy_group_prior: Some(crate::manager::distribution::LazyCleanGroupPrior {
+                        peer: member,
+                        deltas: &stage.deltas,
+                    }),
                 }),
-            }),
-        )
+            )
+            .is_ok()
     }));
     let withdrawn = receiver.try_recv().unwrap();
     assert_eq!(withdrawn.withdraw, vec![key]);
@@ -2168,11 +2174,19 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
     let key = ExactExportKey::Unicast(route.prefix, route.path_id);
     let batch =
         |action| OutboundCommitBatch::with_unicast(vec![route.clone()].into(), vec![action].into());
-    assert!(manager.try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_))));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_)))
+            .is_ok()
+    );
     // The old announcement occupies the sole queue slot. Refusing the new
     // action, including an exact-refusal profile, cannot publish desired state.
     encoder.set_profile(2, [key]);
-    assert!(!manager.try_send_and_commit_outbound_update(target, batch(None)));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(target, batch(None))
+            .is_err()
+    );
     assert_eq!(
         manager.adj_ribs_out[&target].next_hop_override(&route.prefix, route.path_id),
         Some(&NextHopAction::Self_)
@@ -2181,7 +2195,11 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
         receiver.try_recv().unwrap().next_hop_override.as_ref(),
         &[Some(NextHopAction::Self_)]
     );
-    assert!(manager.try_send_and_commit_outbound_update(target, batch(None)));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(target, batch(None))
+            .is_ok()
+    );
     let rejected = receiver.try_recv().unwrap();
     assert!(rejected.announce.is_empty());
     assert_eq!(rejected.withdraw, vec![(route.prefix, route.path_id)]);
@@ -2195,12 +2213,20 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
             .is_none()
     );
     encoder.set_profile(3, []);
-    assert!(manager.try_send_and_commit_outbound_update(target, batch(None)));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(target, batch(None))
+            .is_ok()
+    );
     assert_eq!(
         receiver.try_recv().unwrap().next_hop_override.as_ref(),
         &[None]
     );
-    assert!(manager.try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_))));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_)))
+            .is_ok()
+    );
     assert_eq!(
         receiver.try_recv().unwrap().next_hop_override.as_ref(),
         &[Some(NextHopAction::Self_)]
@@ -2227,9 +2253,15 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
     );
     let batch =
         |action| OutboundCommitBatch::with_unicast(vec![route.clone()].into(), vec![action].into());
-    assert!(manager.try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_))));
     assert!(
-        manager.try_send_and_commit_outbound_update(target, batch(None)),
+        manager
+            .try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_)))
+            .is_ok()
+    );
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(target, batch(None))
+            .is_ok(),
         "byte-equivalent action needs no queue slot"
     );
     assert_eq!(
@@ -2247,7 +2279,9 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
     let mut replay = batch(None);
     replay.force_unicast_replay = true;
     assert!(
-        manager.try_send_and_commit_outbound_update(target, replay),
+        manager
+            .try_send_and_commit_outbound_update(target, replay)
+            .is_ok(),
         "explicit family replay must re-emit the current action even when its bytes are equal"
     );
     assert_eq!(
@@ -2261,7 +2295,11 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
     // The existing GShut/ORF force indicator also bypasses ordinary action
     // equivalence until the force pass has successfully emitted its routes.
     manager.force_outbound_peers.insert(target);
-    assert!(manager.try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_))));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(target, batch(Some(NextHopAction::Self_)))
+            .is_ok()
+    );
     assert_eq!(
         receiver.try_recv().unwrap().next_hop_override.as_ref(),
         &[Some(NextHopAction::Self_)]
@@ -2270,7 +2308,9 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
     encoder.set_profile(2, [ExactExportKey::Unicast(route.prefix, route.path_id)]);
     encoder.config.write().unwrap().equivalent_next_hop_actions = true;
     assert!(
-        manager.try_send_and_commit_outbound_update(target, batch(None)),
+        manager
+            .try_send_and_commit_outbound_update(target, batch(None))
+            .is_ok(),
         "failed comparison must still run final refusal probe"
     );
     let rejected = receiver.try_recv().unwrap();

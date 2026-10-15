@@ -4,6 +4,7 @@ use crate::peer_types::{
 };
 use crate::proto;
 use crate::rib_service::{evpn_route_to_proto, route_event_to_proto};
+use crate::route_distinguisher::format_rd;
 
 use super::filters::{
     route_event_type_to_bgp_event_type, route_event_type_to_evpn_bgp_event_type,
@@ -87,8 +88,7 @@ pub fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> proto::Bg
     let previous_peer_address = event
         .previous_peer
         .map_or_else(String::new, |peer| peer.to_string());
-    let rd =
-        rustbgpd_rib::event::evpn_key_rd(&event.key).map_or_else(String::new, |rd| rd.to_string());
+    let rd = rustbgpd_rib::event::evpn_key_rd(&event.key).map_or_else(String::new, format_rd);
     let route_type = u32::from(event.key.route_type());
     let route_key = format_evpn_route_key(&event.key);
     let action = match event_type {
@@ -131,19 +131,20 @@ pub fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> proto::Bg
 }
 
 fn format_evpn_route_key(key: &rustbgpd_wire::EvpnRouteKey) -> String {
+    let rd = rustbgpd_rib::event::evpn_key_rd(key).map_or_else(String::new, format_rd);
     match key {
         rustbgpd_wire::EvpnRouteKey::EadPerEs {
-            rd,
+            rd: _,
             esi,
             ethernet_tag,
         } => format!("ead-per-es rd={rd} esi={esi} ethernet_tag={ethernet_tag}"),
         rustbgpd_wire::EvpnRouteKey::EadPerEvi {
-            rd,
+            rd: _,
             esi,
             ethernet_tag,
         } => format!("ead-per-evi rd={rd} esi={esi} ethernet_tag={ethernet_tag}"),
         rustbgpd_wire::EvpnRouteKey::MacIp {
-            rd,
+            rd: _,
             ethernet_tag,
             mac,
             ip,
@@ -152,22 +153,22 @@ fn format_evpn_route_key(key: &rustbgpd_wire::EvpnRouteKey) -> String {
             ip.map_or_else(String::new, |ip| ip.to_string())
         ),
         rustbgpd_wire::EvpnRouteKey::Imet {
-            rd,
+            rd: _,
             ethernet_tag,
             originator_ip,
         } => format!("imet rd={rd} ethernet_tag={ethernet_tag} originator_ip={originator_ip}"),
         rustbgpd_wire::EvpnRouteKey::Es {
-            rd,
+            rd: _,
             esi,
             originator_ip,
         } => format!("es rd={rd} esi={esi} originator_ip={originator_ip}"),
         rustbgpd_wire::EvpnRouteKey::IpPrefix {
-            rd,
+            rd: _,
             ethernet_tag,
             prefix,
         } => format!("ip-prefix rd={rd} ethernet_tag={ethernet_tag} prefix={prefix}"),
         rustbgpd_wire::EvpnRouteKey::Smet {
-            rd,
+            rd: _,
             ethernet_tag,
             source_ip,
             group_ip,
@@ -473,6 +474,45 @@ pub(super) fn dataplane_summary_to_bgp_event(
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn rd_event_output_round_trips_the_exact_event_filter() {
+        use rustbgpd_rib::RouteEventType;
+        use rustbgpd_wire::EvpnRoute;
+        for rd in [
+            rustbgpd_wire::RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+            rustbgpd_wire::RouteDistinguisher([0, 2, 0, 0, 0xfd, 0xe8, 0, 100]),
+        ] {
+            let mut event = crate::test_support::evpn_event(
+                RouteEventType::Added,
+                Some("192.0.2.1".parse().unwrap()),
+                None,
+            );
+            let EvpnRoute::MacIp(route) = &mut event.best.as_mut().unwrap().route else {
+                unreachable!()
+            };
+            route.rd = rd;
+            event.key = event.best.as_ref().unwrap().key();
+            let output = evpn_event_to_bgp_event(event);
+            let Some(proto::bgp_event::Payload::Evpn(payload)) = output.payload else {
+                unreachable!()
+            };
+            let expected = format_rd(rd);
+            assert_eq!(payload.rd, expected);
+            assert_eq!(payload.route.unwrap().rd, expected);
+            assert!(payload.route_key.contains(&format!("rd={expected} ")));
+            for rd_filter in [expected.clone(), expected.to_ascii_uppercase()] {
+                let filter = super::super::filters::parse_list_evpn_events_filter(
+                    &proto::ListEvpnEventsRequest {
+                        rd_filter,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(filter.rd, Some(rd));
+            }
+        }
+    }
 
     #[test]
     fn peer_presence_events_lower_with_exact_state_and_classification() {

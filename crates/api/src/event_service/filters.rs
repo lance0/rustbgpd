@@ -655,15 +655,6 @@ fn parse_evpn_route_type_filter(route_type: u32) -> Result<Option<u8>, Status> {
     }
 }
 
-fn parse_evpn_rd_filter(rd: &str) -> Result<Option<RouteDistinguisher>, Status> {
-    if rd.is_empty() {
-        return Ok(None);
-    }
-    rd.parse::<RouteDistinguisher>()
-        .map(Some)
-        .map_err(|e| Status::invalid_argument(format!("invalid EVPN rd_filter: {e}")))
-}
-
 pub(super) fn session_lifecycle_event_type_to_bgp_event_type(
     event_type: SessionLifecycleEventType,
 ) -> proto::BgpEventType {
@@ -841,7 +832,7 @@ pub(super) fn parse_list_evpn_events_filter(
         peer,
         event_types,
         route_type: parse_evpn_route_type_filter(req.route_type_filter)?,
-        rd: parse_evpn_rd_filter(&req.rd_filter)?,
+        rd: crate::route_distinguisher::parse_family_rd(&req.rd_filter)?,
         limit: req.limit as usize,
     })
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import difflib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,12 @@ import time
 
 BASELINE = "c862af9338aa828b7462f3cf85781f63b0e79fe8"
 INTERMEDIATE = "bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00"
+SCAN_SCHEMA = "rustbgpd.recovery-scan.v1"
+SCAN_PROFILES = {"full-uc": 1_230_000, "full-vpn": 1_230_000, "evpn-soak": 37_500}
+SCAN_DISPATCH = (
+    "mod recovery_scan;\n",
+    '    if mode == "recovery-scan" {\n        recovery_scan::main(&args[2..]);\n        return;\n    }\n',
+)
 CELLS = ("dataset-reevaluate", "peer-down", "widen", "unsynchronized-dirty")
 FAMILIES = ("ipv4_unicast", "ipv6_unicast", "vpnv4", "vpnv6")
 PROFILES = {
@@ -430,6 +437,7 @@ def run_scope(
     expected_digest: str,
     profile: str,
     clients: int,
+    scan: bool = False,
 ) -> None:
     """Run inside the already fenced scope; capture before its owner exits."""
     output.mkdir(parents=True, exist_ok=True)
@@ -449,8 +457,12 @@ def run_scope(
     (output / "cgroup-path.txt").write_text(str(cgroup) + "\n", encoding="utf-8")
     snapshot_scope(cgroup, output / "before")
     capture_ownership(cgroup, output, owned, "before")
-    require(profile in PROFILES and clients > 0, "invalid workload profile")
-    command = [str(binary), "recovery-memory", cell, str(clients), profile]
+    if scan:
+        require(profile in SCAN_PROFILES and cell == "capture-scan", "invalid scan profile")
+        command = [str(binary), "recovery-scan", profile]
+    else:
+        require(profile in PROFILES and clients > 0, "invalid workload profile")
+        command = [str(binary), "recovery-memory", cell, str(clients), profile]
     write_json(output / "command.json", command)
     env = dict(os.environ, RRHARNESS_RECOVERY_CGROUP=str(cgroup))
     status = {"exit": None, "timeout": False, "cgroup_valid": False, "ownership_valid": False}
@@ -871,6 +883,8 @@ def summarize(root: Path) -> None:
         )
         entries[name] = digest
     require(set(entries) == set(INSTRUMENT_INPUTS), "incomplete frozen instrumentation")
+    if "memory_entrypoint_derivation_sha256" in manifest:
+        validate_memory_derivation(root, manifest["memory_entrypoint_derivation_sha256"])
     binary_hashes = {}
     for role in ("baseline", "intermediate", "candidate"):
         require(
@@ -1043,28 +1057,225 @@ def summarize(root: Path) -> None:
     )
 
 
-def summarize_failed(root: Path, driver_exit: int) -> None:
+def summarize_failed(root: Path, driver_exit: int, *, scan: bool = False) -> None:
     """Retain an explicitly unqualified envelope after an aborted invocation."""
     require(1 <= driver_exit <= 255, "failure finalization requires a nonzero driver exit")
     root.mkdir(parents=True, exist_ok=True)
     error = f"driver invocation failed with exit {driver_exit}; raw evidence is unqualified"
     # Do not validate partial legs or preserve ratios from an earlier summary.
     # Failure finalization is evidence retention, never a qualification fallback.
-    write_json(
-        root / "comparison.json",
-        {
-            "schema": "rustbgpd.recovery-memory.comparison.v2",
-            "phase": None,
-            "primary": "scope memory.peak bytes",
-            "scope": "manager-direct RIB, production exact-export preflight, harness consumers; no final wire/TCP",
-            "rows": [],
-            "summaries": [],
+    comparison = {
+        "schema": "rustbgpd.recovery-memory.comparison.v2",
+        "phase": None,
+        "primary": "scope memory.peak bytes",
+        "scope": "manager-direct RIB, production exact-export preflight, harness consumers; no final wire/TCP",
+        "rows": [],
+        "summaries": [],
+        "candidate_failures": [error],
+        "qualification_passed": False,
+        "driver_invocation_exit": driver_exit,
+    }
+    if scan:
+        comparison = {
+            "schema": SCAN_SCHEMA,
+            "scope": "component scans/capture only; no daemon, fleet, readiness or wire qualification",
+            "samples": [],
+            "comparisons": [],
             "candidate_failures": [error],
             "qualification_passed": False,
             "driver_invocation_exit": driver_exit,
-        },
-    )
+        }
+    write_json(root / "comparison.json", comparison)
     raise InvalidReceipt(error)
+
+
+def normalize_memory_entrypoint(path: Path, output: Path) -> None:
+    """Derive the same memory-only main for all historical/candidate roles."""
+    original = path.read_text()
+    derived = original
+    for block in SCAN_DISPATCH:
+        require(derived.count(block) == 1, "component dispatch anchor drift")
+        derived = derived.replace(block, "", 1)
+    patch = "".join(difflib.unified_diff(original.splitlines(True), derived.splitlines(True),
+                                       fromfile="committed/main.rs", tofile="memory/main.rs"))
+    path.write_text(derived)
+    output.with_suffix(".source.rs").write_text(original)
+    output.with_suffix(".patch").write_text(patch)
+    write_json(output, {"source_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                        "derived_sha256": hashlib.sha256(derived.encode()).hexdigest(),
+                        "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+                        "removed_exact_snippets": list(SCAN_DISPATCH)})
+
+
+def validate_memory_derivation(root: Path, digest: str) -> None:
+    metadata = root / "memory-entrypoint-derivation.json"
+    require(hashlib.sha256(metadata.read_bytes()).hexdigest() == digest,
+            "memory entrypoint derivation metadata mismatch")
+    details = json.loads(metadata.read_text())
+    original = metadata.with_suffix(".source.rs").read_text()
+    derived = original
+    for block in SCAN_DISPATCH:
+        require(derived.count(block) == 1, "memory derivation source anchor drift")
+        derived = derived.replace(block, "", 1)
+    actual = (root / "frozen-instrumentation/bench/scale/rrharness/src/main.rs").read_text()
+    patch = "".join(difflib.unified_diff(original.splitlines(True), derived.splitlines(True),
+                                       fromfile="committed/main.rs", tofile="memory/main.rs"))
+    require(actual == derived and metadata.with_suffix(".patch").read_text() == patch
+            and details == {"source_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                            "derived_sha256": hashlib.sha256(derived.encode()).hexdigest(),
+                            "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+                            "removed_exact_snippets": list(SCAN_DISPATCH)},
+            "memory entrypoint is not the exact recorded derivation")
+
+
+def validate_scan_log(path: Path, profile: str) -> dict:
+    """A distinct component schema: never infer daemon or memory qualification."""
+    require(profile in SCAN_PROFILES, "unknown scan profile")
+    groups = {name: [] for name in (
+        "recovery_scan", "recovery_scan_environment", "recovery_scan_complete", "recovery_identity"
+    )}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        prefix, _, body = line.partition(" ")
+        if prefix in groups:
+            groups[prefix].append(json.loads(body))
+    environment = groups["recovery_scan_environment"]
+    require(len(environment) == 1 and environment[0].get("schema") == SCAN_SCHEMA,
+            "missing scan environment")
+    require(environment[0].get("phase_passes") == "independent shape and capture invocations"
+            and environment[0].get("credit_scope") ==
+            "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS",
+            "scan phases or credit scope are not qualified")
+    ticks = uint(environment[0].get("cpu_ticks_per_second"), "CPU tick rate")
+    require(ticks > 0, "missing measured CPU tick rate")
+    require(len(groups["recovery_identity"]) == 1, "missing scan process identity")
+    require(groups["recovery_scan_complete"] == [{"profile": profile, "cells": 6, "legs": 24}],
+            "incomplete scan campaign")
+    samples = groups["recovery_scan"]
+    require(len(samples) == 24, "wrong scan leg count")
+    summaries = []
+    cursor = 0
+    for records in (2, 64, 480):
+        for layout in ("dense", "older-sparse"):
+            rows = samples[cursor:cursor + 4]
+            cursor += 4
+            for leg, (row, arm) in enumerate(zip(rows, ("flat", "shared", "shared", "flat"))):
+                require(row.get("schema") == SCAN_SCHEMA and row.get("profile") == profile
+                        and row.get("keys") == SCAN_PROFILES[profile]
+                        and row.get("records") == records and row.get("layout") == layout
+                        and row.get("leg") == leg and row.get("arm") == arm
+                        and row.get("measured") is True, "scan shape/order/mode mismatch")
+                refusal = row.get("refusal")
+                require(refusal is None or refusal in (
+                    "peer_limit", "daemon_limit", "allocation_failure", "missing_proof",
+                    "capture_unavailable", "admission_invariant", "anchor_not_shared"
+                ), "unknown scan refusal")
+                for key in ("old_keys", "additions", "shape_callbacks", "comparisons", "proof_keys",
+                            "retained_bytes", "peak_bytes", "empty_bytes", "settled_bytes"):
+                    uint(row.get(key), key)
+                if refusal is not None:
+                    continue  # Retain the row; never give a refused proof a ratio.
+                keys = SCAN_PROFILES[profile]
+                require(row["old_keys"] == row["proof_keys"] == keys,
+                        "incomplete scan proof")
+                require(row.get("shared") is (arm == "shared"), "flat/share control was bypassed")
+                require(row["additions"] == (records if layout == "older-sparse" and arm == "shared" else 0),
+                        "incorrect OLD sparse classification")
+                require(row["shape_callbacks"] == keys + row["comparisons"],
+                        "comparison count is not separate from key visits")
+                require((keys <= row["comparisons"] <= keys * (keys.bit_length() + 1))
+                        if arm == "shared" else row["comparisons"] == 0,
+                        "missing binary-search work or non-linear flat classification")
+                require(row["settled_bytes"] == row["empty_bytes"] > 0
+                        and row["empty_bytes"] < row["retained_bytes"] <= row["peak_bytes"],
+                        "proof charge or last-owner retirement differs")
+                phases = row.get("phases")
+                require(isinstance(phases, dict) and set(phases) == {"shape", "capture"},
+                        "missing measured capture phases")
+                for phase in phases.values():
+                    require(set(phase) == {"wall_ns", "cpu_ticks"}, "unknown phase fields")
+                    require(uint(phase["wall_ns"], "phase wall") > 0, "empty timing phase")
+                    uint(phase["cpu_ticks"], "phase CPU")
+                # These are independent invocations, not nested timings. Tick
+                # quantization and scheduling permit shape > complete capture.
+            eligible = all(row.get("refusal") is None for row in rows)
+            ratios = {}
+            if eligible:
+                for phase in ("shape", "capture"):
+                    ratios[phase] = {}
+                    for quantity in ("wall_ns", "cpu_ticks"):
+                        flat = sum(rows[i]["phases"][phase][quantity] for i in (0, 3))
+                        shared = sum(rows[i]["phases"][phase][quantity] for i in (1, 2))
+                        ratios[phase][quantity] = shared / flat if flat else None
+            summaries.append({"records": records, "layout": layout, "eligible": eligible,
+                              "shared_over_flat": ratios if eligible else None})
+    return {"schema": SCAN_SCHEMA, "profile": profile, "samples": samples,
+            "comparisons": summaries, "cpu_ticks_per_second": ticks,
+            "phase_passes": environment[0]["phase_passes"],
+            "credit_scope": environment[0]["credit_scope"],
+            "workload_identity": groups["recovery_identity"][0],
+            "scope": "component scans/capture only; no daemon, fleet, readiness or wire qualification"}
+
+
+def summarize_scan(root: Path) -> None:
+    manifest = json.loads((root / "manifest.json").read_text())
+    require(manifest.get("schema") == "rustbgpd.recovery-scan.campaign.v1", "wrong scan manifest")
+    require(manifest.get("profile") in SCAN_PROFILES and manifest.get("build_jobs") == 4,
+            "wrong scan profile/build")
+    require(manifest.get("order_per_cell") == ["flat", "shared", "shared", "flat"],
+            "wrong scan comparison order")
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", manifest.get("candidate", ""))), "wrong scan source")
+    inputs = root / "instrumentation.sha256"
+    require(hashlib.sha256(inputs.read_bytes()).hexdigest() == manifest["instrumentation_manifest_sha256"],
+            "scan instrumentation manifest mismatch")
+    names = set()
+    for line in inputs.read_text().splitlines():
+        digest, name = line.split("  ", 1)
+        require(name in (*INSTRUMENT_INPUTS, "bench/scale/rrharness/src/recovery_scan.rs")
+                and name not in names, "unexpected scan instrumentation")
+        require(hashlib.sha256((root / "frozen-instrumentation" / name).read_bytes()).hexdigest() == digest,
+                "scan frozen source mismatch")
+        names.add(name)
+    require(names == {*INSTRUMENT_INPUTS, "bench/scale/rrharness/src/recovery_scan.rs"},
+            "missing scan instrumentation")
+    require((root / "candidate-build.exit").read_text().strip() == "0", "scan build failed")
+    require((root / "candidate.sha").read_text().strip() == manifest["candidate"], "scan source mismatch")
+    directory = root / "scan"
+    require((directory / "launcher.exit").read_text().strip() == "0", "scan launcher failed")
+    status = json.loads((directory / "status.json").read_text())
+    require(status == {"exit": 0, "timeout": False, "cgroup_valid": True, "ownership_valid": True},
+            "scan workload/scope failed")
+    result = validate_scan_log(directory / "harness.log", manifest["profile"])
+    identity = result["workload_identity"]
+    process = json.loads((directory / "binary-process.json").read_text())
+    digest = (root / "candidate-binary.sha256").read_text().strip()
+    require(bool(re.fullmatch(r"[0-9a-f]{64}", digest)) and process["exe_sha256"] == digest,
+            "scan executed binary mismatch")
+    require(identity["source_sha"] == manifest["candidate"]
+            and identity["instrumentation_sha256"] == manifest["instrumentation_manifest_sha256"]
+            and (identity["pid"], identity["start_ticks"]) == (process["pid"], process["start_ticks"]),
+            "scan compiled/process identity mismatch")
+    cgroup = (directory / "cgroup-path.txt").read_text().strip()
+    require(identity["cgroup"] == cgroup
+            and process["cgroup"].strip() == "0::" + cgroup.removeprefix("/sys/fs/cgroup"),
+            "scan scope identity mismatch")
+    validate_ownership_log(directory, cgroup, process)
+    check_peak_coverage(scope_values(directory / "before"), [], scope_values(directory / "after"))
+    before = (root / "host-oom.before").read_text().strip()
+    require(before.isdigit() and before == (root / "host-oom.after").read_text().strip(),
+            "host OOM invalidates scan receipt")
+    refused_legs = sum(row["refusal"] is not None for row in result["samples"])
+    result["qualification_passed"] = (
+        len(result["samples"]) == 24 and len(result["comparisons"]) == 6
+        and refused_legs == 0 and all(cell["eligible"] for cell in result["comparisons"])
+    )
+    if not result["qualification_passed"]:
+        write_json(root / "unqualified-comparison.json", result)
+    write_json(root / "comparison.json", result)
+    require(result["qualification_passed"],
+            "all 6 scan cells must have complete, proof-checked non-refused comparisons")
+    print(json.dumps({"schema": SCAN_SCHEMA, "profile": manifest["profile"],
+                      "component_cells": 6, "timed_legs": 24, "refused_legs": refused_legs,
+                      "qualification_passed": result["qualification_passed"]}))
 
 
 def main() -> None:
@@ -1072,6 +1283,9 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     observer = sub.add_parser("instrument-observer")
     observer.add_argument("tree", type=Path)
+    normalize = sub.add_parser("normalize-memory-entrypoint")
+    normalize.add_argument("path", type=Path)
+    normalize.add_argument("output", type=Path)
     scope = sub.add_parser("scope-check")
     scope.add_argument("path", type=Path)
     snapshot = sub.add_parser("scope-snapshot")
@@ -1080,11 +1294,15 @@ def main() -> None:
     run = sub.add_parser("run-scope")
     run.add_argument("binary", type=Path)
     run.add_argument("output", type=Path)
-    run.add_argument("cell", choices=CELLS)
+    run.add_argument("cell", choices=(*CELLS, "capture-scan"))
     run.add_argument("cgroup", type=Path)
     run.add_argument("expected_digest")
-    run.add_argument("profile", choices=PROFILES)
+    run.add_argument("profile", choices=(*PROFILES, "evpn-soak"))
     run.add_argument("clients", type=int)
+    run.add_argument("--scan", action="store_true")
+    scan = sub.add_parser("summarize-scan")
+    scan.add_argument("root", type=Path)
+    scan.add_argument("--failed-driver-exit", type=int)
     compare = sub.add_parser("summarize")
     compare.add_argument("root", type=Path)
     compare.add_argument("--failed-driver-exit", type=int)
@@ -1092,6 +1310,8 @@ def main() -> None:
     try:
         if args.command == "instrument-observer":
             instrument_observer(args.tree)
+        elif args.command == "normalize-memory-entrypoint":
+            normalize_memory_entrypoint(args.path, args.output)
         elif args.command == "scope-check":
             print(json.dumps(scope_values(args.path), sort_keys=True))
         elif args.command == "scope-snapshot":
@@ -1105,7 +1325,13 @@ def main() -> None:
                 args.expected_digest,
                 args.profile,
                 args.clients,
+                scan=args.scan,
             )
+        elif args.command == "summarize-scan":
+            if args.failed_driver_exit is not None:
+                summarize_failed(args.root, args.failed_driver_exit, scan=True)
+            else:
+                summarize_scan(args.root)
         else:
             if args.failed_driver_exit is not None:
                 summarize_failed(args.root, args.failed_driver_exit)

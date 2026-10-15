@@ -663,12 +663,42 @@ impl std::fmt::Display for ExactExportReason {
     }
 }
 
+/// Fail-closed refusals of an outbound transaction before it reaches the peer
+/// writer. A refusal is not a writer-channel drop: the RIB keeps the peer dirty
+/// and its automatic resync retries once the refusing condition clears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OutboundCommitRefusal {
+    /// The batch intersects an active RFC 4724 selection-deferral gate.
+    SelectionGate,
+    /// A route-bearing batch has no exact export encoder for the peer.
+    MissingEncoder,
+    /// EVPN recovery admission declined the batch.
+    EvpnRecovery,
+}
+
+impl OutboundCommitRefusal {
+    pub const ALL: [Self; 3] = [
+        Self::SelectionGate,
+        Self::MissingEncoder,
+        Self::EvpnRecovery,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SelectionGate => "selection_gate",
+            Self::MissingEncoder => "missing_encoder",
+            Self::EvpnRecovery => "evpn_recovery",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         EvpnRecoveryExhaustionCause, ExactExportReason, ImportRejectReason,
         MalformedUpdateDisposition, MalformedUpdateReason, NextHopOwnershipBlockReason,
-        OtcBlockReason, RrLoopReason, SessionDownReason,
+        OtcBlockReason, OutboundCommitRefusal, RrLoopReason, SessionDownReason,
     };
 
     fn assert_snake_case(label: &str) {
@@ -883,6 +913,14 @@ mod tests {
                 "message_too_long",
                 "multiple_labels_not_negotiated",
             ]
+        );
+        let refusals: Vec<&str> = OutboundCommitRefusal::ALL
+            .iter()
+            .map(|r| r.as_str())
+            .collect();
+        assert_eq!(
+            refusals,
+            ["selection_gate", "missing_encoder", "evpn_recovery"]
         );
     }
 }

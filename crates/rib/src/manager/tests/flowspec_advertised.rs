@@ -196,33 +196,45 @@ fn advertised_flowspec_retains_prior_until_full_channel_withdrawal_commits() {
         .insert(peer, permissive_test_exact_export_encoder());
     let route = make_flowspec_route(Ipv4Addr::new(192, 0, 2, 2));
     let key = route.selection_key();
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            flowspec_announce: vec![route],
-            ..Default::default()
-        }
-    ));
-    assert!(!manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            flowspec_withdraw: vec![key.clone()],
-            ..Default::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    flowspec_announce: vec![route],
+                    ..Default::default()
+                }
+            )
+            .is_ok()
+    );
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    flowspec_withdraw: vec![key.clone()],
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
     let rows = manager
         .collect_advertised_flowspec(peer, None, || false)
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].selection_key(), key);
     out_rx.try_recv().unwrap();
-    assert!(manager.try_send_and_commit_outbound_update(
-        peer,
-        OutboundCommitBatch {
-            flowspec_withdraw: vec![key],
-            ..Default::default()
-        }
-    ));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    flowspec_withdraw: vec![key],
+                    ..Default::default()
+                }
+            )
+            .is_ok()
+    );
     assert!(
         manager
             .collect_advertised_flowspec(peer, None, || false)

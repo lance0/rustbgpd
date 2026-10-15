@@ -440,6 +440,17 @@ Adj-RIB-In snapshots and BMP's successfully written UPDATE feed remain unchanged
 > [bounded-proof amendment](#amendment-2026-10-14-bounded-unicastvpn-recovery-proofs)
 > for its causes and limits; complete proofs and EVPN keep targeted withdrawals.
 
+Unicast/VPN proofs may reuse a still-live older key universe after group contents
+change. Each capture reconstructs actual OLD admission through member mask bits
+and bounded sparse additions; desired membership or a cache hint alone proves
+no admission. New keys still consume sparse storage per member. Private/regroup
+captures can instead reserve bounded flat proofs. Group cache hints reset on
+recreation; sharing across recreated groups remains unqualified.
+Sharing an empty proof reserves its immediate sparse requirement before
+attachment; refusal retries a fitting flat proof before the counted no-proof
+fallback. The [snapshot-churn receipt](../perf/update-group-recovery-snapshot-churn-2026-10-14.md)
+qualifies its recorded shapes, not arbitrary churn or general regroup scale.
+
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
 withdraws equals the per-peer path, with exact NLRI and prepared attribute bytes.
@@ -515,6 +526,16 @@ tests.
    against the maintained contract without changing the stable inventory here.
    Keep unqualified RTC EVPN on its private-family fallback.
 
+Qualify recovery capture scans separately with same-revision shared and explicit
+flat controls. Exercise live older universes, sparse OLD additions/removals and
+owner-record scaling; count key visits and search comparisons in passes separate
+from measured count/capture phases. Preserve refusals without reporting a ratio.
+Materialize OLD inputs before timing and measure count and complete capture in
+independent invocations. Credit rows describe logical daemon ledger reservation,
+excluding input fixtures, allocator overhead and RSS.
+These component receipts do not qualify complete-feed settlement, fleet regroup,
+readiness, daemon memory or wire behavior.
+
 Before activating grouping in main, repeat the fixed-route-total,
 two-receiver-count memory cells with release,
 jemalloc and a daemon-only cgroup with no swap. Record allocated/live and peak/
@@ -533,6 +554,19 @@ temporary capacity charged in section E. Size or revise the provisional
 ordinary backpressure must not introduce fleet-wide session resets absent from
 the matching per-peer control. A run that exceeds a cap and resets peers fails
 qualification rather than establishing an acceptable recovery envelope.
+
+Count execution-confirmed resets for every fixed cause: `peer_limit`,
+`daemon_limit`, `allocation_failure`, `capture_unavailable` and
+`admission_invariant`. A run with a capture or admission-invariant reset fails
+qualification just as a cap-induced reset does; queue admission alone does not
+prove that a reset executed.
+
+Add a **whole-fleet policy-regroup cell at the same shape**. Prove that the
+members actually move between groups and every receiver converges under section
+F, preserving the per-key event contract for clean regroup. Require zero resets
+for all five causes, report retained/peak charge and headroom, and verify that
+settled members release their recovery duties and charge. An ordinary policy
+edit must not retain a fleet of recovery proofs indefinitely.
 
 Run convergence/readiness and soak-shape qualification on a quiet host. Correctness
 and quiet-host resource gates must pass before production activation. Publish

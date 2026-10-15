@@ -2566,8 +2566,8 @@ impl RibManager {
                 }),
             }
         });
-        let sent = !has_outbound_diff
-            || self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+        let sent = if has_outbound_diff {
+            self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
                     force_unicast_replay: true,
@@ -2593,11 +2593,13 @@ impl RibManager {
                 shared_unicast_precommit,
                 member_of.is_none().then_some(&otc_prefixes),
                 None,
-            );
+            )
+        } else {
+            Ok(())
+        };
         export_memo.retire_with(&mut checkpoint);
-        if !sent {
-            warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
-            self.metrics.record_outbound_route_drop(&peer.to_string());
+        if let Err(failure) = sent {
+            warn!(%peer, reason = failure.as_str(), "initial dump not sent — marking dirty");
             for f in &eor_families {
                 self.pending_eor.entry(peer).or_default().insert(*f);
             }

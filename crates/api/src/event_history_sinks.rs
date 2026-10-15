@@ -230,9 +230,14 @@ fn evpn_event_envelope(event: EvpnRouteEvent, timestamp_ns: i64) -> EventEnvelop
         previous_peer: event.previous_peer,
         target_peer: None,
     };
-    let rd = rustbgpd_rib::event::evpn_key_rd(&event.key).map(|rd| rd.to_string());
     let evpn_route_type = Some(i32::from(event.key.route_type()));
     let proto_event = convert::evpn_event_to_bgp_event(event);
+    let rd = match proto_event.payload.as_ref() {
+        Some(proto::bgp_event::Payload::Evpn(event)) if !event.rd.is_empty() => {
+            Some(event.rd.clone())
+        }
+        _ => None,
+    };
     EventEnvelope {
         timestamp_ns,
         category: Category::Evpn,
@@ -535,6 +540,67 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn rd_persisted_queries_select_each_colliding_identity_from_returned_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let manager = EventHistoryManager::start(small_ehm_config(&dir, &metrics))
+            .await
+            .unwrap();
+        let handle = manager.handle();
+        let mut live = handle.subscribe_live();
+        let (sink, stage) = make_rib_event_sink(handle, metrics);
+        let mut committed_rows = Vec::new();
+        for rd in [
+            rustbgpd_wire::RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+            rustbgpd_wire::RouteDistinguisher([0, 2, 0, 0, 0xfd, 0xe8, 0, 100]),
+        ] {
+            let mut event = sample_evpn_event();
+            let EvpnRoute::MacIp(route) = &mut event.best.as_mut().unwrap().route else {
+                unreachable!()
+            };
+            route.rd = rd;
+            event.key = event.best.as_ref().unwrap().key();
+            sink.publish_evpn_event(&Arc::new(event));
+            let committed = tokio::time::timeout(TEST_BACKSTOP, live.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let payload = proto::BgpEvent::decode(committed.envelope.payload.as_slice()).unwrap();
+            let Some(proto::bgp_event::Payload::Evpn(payload)) = payload.payload else {
+                unreachable!()
+            };
+            assert_eq!(committed.envelope.rd.as_deref(), Some(payload.rd.as_str()));
+            assert_eq!(
+                crate::route_distinguisher::parse_rd(&payload.rd).unwrap(),
+                rd
+            );
+            committed_rows.push((payload.rd, committed));
+        }
+        let ceiling = committed_rows.last().unwrap().1.event_id;
+        for (rd, committed) in &committed_rows {
+            let persisted = manager
+                .query_persisted(
+                    0,
+                    ceiling,
+                    10,
+                    rustbgpd_event_history::QueryFilter {
+                        category: Some(Category::Evpn),
+                        rd: Some(rd.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(persisted.len(), 1);
+            assert_eq!(persisted[0].event_id, committed.event_id);
+            assert_eq!(persisted[0].payload, committed.envelope.payload);
+        }
+        stage.shutdown().await;
+        drop(sink);
+        manager.shutdown().await;
+    }
+
     fn small_ehm_config(dir: &tempfile::TempDir, metrics: &BgpMetrics) -> EventHistoryConfig {
         EventHistoryConfig {
             path: dir.path().join("events.db"),
@@ -669,7 +735,7 @@ mod tests {
         assert_eq!(envelope.peers.target_peer, None);
         assert_eq!(
             envelope.rd,
-            rustbgpd_rib::event::evpn_key_rd(&event.key).map(|rd| rd.to_string())
+            rustbgpd_rib::event::evpn_key_rd(&event.key).map(crate::route_distinguisher::format_rd)
         );
         assert_eq!(
             envelope.evpn_route_type,

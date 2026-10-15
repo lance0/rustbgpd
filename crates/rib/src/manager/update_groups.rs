@@ -680,6 +680,13 @@ pub(in crate::manager) struct GroupRibOut {
 const GROUP_FILTERED_PLACEHOLDER: IpAddr = LOCAL_PEER;
 
 impl GroupRibOut {
+    #[cfg(test)]
+    pub(in crate::manager) fn recovery_snapshot_for_test(
+        &self,
+    ) -> Option<admitted_recovery::SnapshotHandle> {
+        self.recovery_snapshot
+    }
+
     /// Every unicast prefix a per-member residue query can return:
     /// export-policy denials, OTC-blocked winners and runner-up lane
     /// entries. A grouped join scopes its inventory to these.
@@ -809,6 +816,12 @@ impl GroupRibOut {
     /// synthesis (non-RTC).
     pub(in crate::manager) fn rtc_negotiated(&self) -> bool {
         self.sendable.contains(&(Afi::Ipv4, Safi::RtConstrain))
+    }
+
+    /// RTC EVPN keeps its private projection until OLD membership capture
+    /// and separate RTC qualification are implemented.
+    pub(in crate::manager) fn owns_evpn_routes(&self) -> bool {
+        self.owns_evpn && !self.rtc_negotiated()
     }
 
     fn record_otc_blocked<S: std::hash::BuildHasher>(
@@ -1960,7 +1973,7 @@ impl RibManager {
                     group.recovery_snapshot,
                     raw_count,
                     raw,
-                    count,
+                    (count, additions),
                     &mut checkpoint,
                 );
                 let handle = shared.ok().flatten();
@@ -2001,11 +2014,13 @@ impl RibManager {
         true
     }
 
-    pub(in crate::manager) fn prepare_empty_group_recovery_admission(
+    pub(in crate::manager) fn prepare_empty_group_recovery_admission<A>(
         &mut self,
         peer: IpAddr,
-        candidates: usize,
-    ) {
+        candidates: A,
+    ) where
+        A: Clone + Iterator<Item = admitted_recovery::Key>,
+    {
         use admitted_recovery::Key;
         if self
             .pending_group_admitted
@@ -2020,6 +2035,25 @@ impl RibManager {
         let Some(group) = self.group_ribs.get_mut(&gid) else {
             return;
         };
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = |force| super::replacement_readiness_checkpoint(&readiness, force);
+        let shape = candidates.fold((0, 0), |(count, additions), key| {
+            checkpoint(false);
+            let present = self
+                .pending_group_admitted
+                .candidate_universe_contains(peer, group.recovery_snapshot, &key, &mut checkpoint)
+                .unwrap_or_else(|| match key {
+                    Key::Unicast(prefix, path_id) => group.table.get(&prefix, path_id).is_some(),
+                    Key::Vpn(nlri_key, path_id) => {
+                        group.stages_vpn()
+                            && group
+                                .table
+                                .get_vpn(&VpnRibRouteKey { nlri_key, path_id })
+                                .is_some()
+                    }
+                });
+            (count + 1, additions + usize::from(!present))
+        });
         let count = group.table.len().saturating_add(if group.stages_vpn() {
             group.table.vpn_len()
         } else {
@@ -2039,14 +2073,13 @@ impl RibManager {
                         Key::Vpn(key.nlri_key, key.path_id)
                     }),
             );
-        let readiness = self.replacement_readiness.clone();
         if let Ok(Some(handle)) = self.pending_group_admitted.share_capture_with_checkpoint(
             peer,
             group.recovery_snapshot,
             count,
             raw,
-            candidates,
-            &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
+            shape,
+            &mut checkpoint,
         ) {
             group.recovery_snapshot = Some(handle);
         }
@@ -2499,7 +2532,7 @@ impl RibManager {
             .inspect(|_| checkpoint())
             .map(|key| key.nlri_key)
             .collect();
-        if self.try_send_and_commit_outbound_update(
+        if let Err(failure) = self.try_send_and_commit_outbound_update(
             peer,
             OutboundCommitBatch {
                 vpn_announce,
@@ -2507,9 +2540,7 @@ impl RibManager {
                 ..OutboundCommitBatch::default()
             },
         ) {
-            self.bump_export_counters(peer, &permit_rows);
-        } else {
-            warn!(%peer, "outbound channel full — RTC membership delta deferred to resync");
+            warn!(%peer, reason = failure.as_str(), "RTC membership delta not sent — deferred to resync");
             // The v1 dirty machinery takes over: the member's resync
             // announces the Φ-passing table; the narrow's withdraws
             // ride the candidate withdrawal residue.
@@ -2524,6 +2555,8 @@ impl RibManager {
                     .extend(withdraw_keys.drain(..).inspect(|_| checkpoint()));
                 self.refresh_group_residue_gauge();
             }
+        } else {
+            self.bump_export_counters(peer, &permit_rows);
         }
         super::retire_vec(&mut withdraw_keys, &mut || checkpoint());
         super::retire_vec(&mut permit_rows, &mut || checkpoint());

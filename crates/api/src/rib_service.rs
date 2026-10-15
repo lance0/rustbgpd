@@ -12,6 +12,7 @@ use tonic::{Request, Response, Status};
 
 use crate::actor_read::{KnownPeerQueries, rib_manager_read};
 use crate::proto;
+use crate::route_distinguisher::{format_rd, parse_family_rd, parse_rd};
 use rustbgpd_rib::update::ordered_route_query_filter;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, EvpnRouteQueryKey, ExplainAdvertisedRoute,
@@ -291,9 +292,6 @@ impl RibService {
         let peer = req.neighbor_address.parse::<IpAddr>().map_err(|error| {
             Status::invalid_argument(format!("invalid neighbor_address: {error}"))
         })?;
-        if req.page_size > 1000 {
-            return Err(Status::invalid_argument("page_size must be at most 1000"));
-        }
         let scope = if advertised {
             RouteQueryScope::Advertised { peer }
         } else {
@@ -320,7 +318,7 @@ impl RibService {
         let page_size = if req.page_size == 0 {
             DEFAULT_ROUTE_PAGE_SIZE
         } else {
-            req.page_size as usize
+            req.page_size.min(1000) as usize
         };
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutesPage {
             scope,
@@ -1231,20 +1229,6 @@ fn family_prefix_matches(
     })
 }
 
-fn parse_family_rd(value: &str) -> Result<Option<rustbgpd_wire::RouteDistinguisher>, Status> {
-    if value.is_empty() {
-        return Ok(None);
-    }
-    if let Some(hex) = value.strip_prefix("0x") {
-        return parse_page_octets(hex)
-            .map(|raw| Some(rustbgpd_wire::RouteDistinguisher(raw.to_be_bytes())));
-    }
-    value
-        .parse()
-        .map(Some)
-        .map_err(|error| Status::invalid_argument(format!("invalid rd_filter: {error}")))
-}
-
 fn parse_page_octets(hex: &str) -> Result<u64, Status> {
     if hex.len() != 16 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Status::invalid_argument(
@@ -1340,13 +1324,10 @@ fn family_page_params<K>(
     identity: &str,
     parse: impl FnOnce(&str) -> Result<K, Status>,
 ) -> Result<(usize, Option<K>, Option<RoutePageVersion>), Status> {
-    if size > 1000 {
-        return Err(Status::invalid_argument("page_size must be at most 1000"));
-    }
     let size = if size == 0 {
         DEFAULT_ROUTE_PAGE_SIZE
     } else {
-        size as usize
+        size.min(1000) as usize
     };
     if token.is_empty() {
         return Ok((size, None, None));
@@ -1785,20 +1766,13 @@ fn route_page_to_response(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep exact-key validation for all supported EVPN selector variants together"
-)]
 fn parse_evpn_selector(
     selector: &proto::EvpnRouteSelector,
 ) -> Result<rustbgpd_wire::EvpnRouteKey, Status> {
     use proto::evpn_route_selector::Route as Selector;
     use rustbgpd_wire::{EthernetTagId, EvpnIpPrefixValue, EvpnRouteKey};
 
-    let rd = selector
-        .rd
-        .parse::<rustbgpd_wire::RouteDistinguisher>()
-        .map_err(|error| Status::invalid_argument(format!("invalid EVPN RD: {error}")))?;
+    let rd = parse_rd(&selector.rd)?;
     let ip = |value: &str| {
         value
             .parse::<IpAddr>()
@@ -2153,7 +2127,7 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
             .collect(),
         update_group_id: explain.update_group_id,
         already_advertised: explain.already_advertised,
-        rd: explain.rd.map_or_else(String::new, |rd| rd.to_string()),
+        rd: explain.rd.map_or_else(String::new, format_rd),
         source: explain.source.map(|source| proto::RouteSourceIdentity {
             peer_address: source.peer.to_string(),
             path_id: source.path_id,
@@ -2476,15 +2450,7 @@ impl proto::rib_service_server::RibService for RibService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
         let prefix = parse_prefix_request(&req.prefix, req.prefix_length)?;
-        let rd = if req.rd.is_empty() {
-            None
-        } else {
-            Some(
-                req.rd
-                    .parse::<rustbgpd_wire::RouteDistinguisher>()
-                    .map_err(|e| Status::invalid_argument(format!("invalid rd: {e}")))?,
-            )
-        };
+        let rd = parse_family_rd(&req.rd)?;
         if req.labeled && rd.is_some() {
             return Err(Status::invalid_argument(
                 "rd and labeled are mutually exclusive: a route is VPN or labeled-unicast, not both",
@@ -2719,20 +2685,7 @@ impl proto::rib_service_server::RibService for RibService {
             )));
         }
         let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
-        let rd_filter = if req.rd_filter.is_empty() {
-            None
-        } else {
-            Some(
-                req.rd_filter
-                    .parse::<rustbgpd_wire::RouteDistinguisher>()
-                    .map_err(|error| {
-                        Status::invalid_argument(format!(
-                            "invalid rd_filter {:?}: {error}",
-                            req.rd_filter
-                        ))
-                    })?,
-            )
-        };
+        let rd_filter = parse_family_rd(&req.rd_filter)?;
 
         let type_filter = req.route_type_filter;
         let filter = row_filter(
@@ -3247,9 +3200,6 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListBestEvpnRoutesRequest>,
     ) -> Result<Response<proto::ListBestEvpnRoutesResponse>, Status> {
         let req = request.into_inner();
-        if req.page_size > 1000 {
-            return Err(Status::invalid_argument("page_size must be at most 1000"));
-        }
         let (filter, identity) = evpn_loc_filter(&req)?;
         let scope = RouteQueryScope::Best;
         let (after, expected_version) = if req.page_token.is_empty() {
@@ -3266,7 +3216,7 @@ impl proto::rib_service_server::RibService for RibService {
         let page_size = if req.page_size == 0 {
             DEFAULT_ROUTE_PAGE_SIZE
         } else {
-            req.page_size as usize
+            req.page_size.min(1000) as usize
         };
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutesPage {
             scope,
@@ -3836,7 +3786,7 @@ pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
     proto::VpnRouteEntry {
         afi_safi: vpn_family_label(route).to_string(),
         route_distinguisher: route.nlri.route_distinguisher.0.to_vec(),
-        route_distinguisher_str: route.nlri.route_distinguisher.to_string(),
+        route_distinguisher_str: format_rd(route.nlri.route_distinguisher),
         prefix: route.nlri.prefix.to_string(),
         labels: route.nlri.labels.iter().map(|l| l.label).collect(),
         next_hop: route.next_hop.to_string(),
@@ -4016,7 +3966,7 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
 
     let (rd, esi, ethernet_tag, mac, ip, prefix, gateway, label, label2) = match &route.route {
         EvpnRoute::EadPerEs(e) => (
-            e.rd.to_string(),
+            format_rd(e.rd),
             e.esi.to_string(),
             e.ethernet_tag.to_string(),
             String::new(),
@@ -4027,7 +3977,7 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
             0,
         ),
         EvpnRoute::EadPerEvi(e) => (
-            e.rd.to_string(),
+            format_rd(e.rd),
             e.esi.to_string(),
             e.ethernet_tag.to_string(),
             String::new(),
@@ -4038,7 +3988,7 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
             0,
         ),
         EvpnRoute::MacIp(e) => (
-            e.rd.to_string(),
+            format_rd(e.rd),
             e.esi.to_string(),
             e.ethernet_tag.to_string(),
             e.mac.to_string(),
@@ -4049,7 +3999,7 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
             e.label2.map_or(0, |l| l.value()),
         ),
         EvpnRoute::Imet(e) => (
-            e.rd.to_string(),
+            format_rd(e.rd),
             String::new(),
             e.ethernet_tag.to_string(),
             String::new(),
@@ -4060,7 +4010,7 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
             0,
         ),
         EvpnRoute::Es(e) => (
-            e.rd.to_string(),
+            format_rd(e.rd),
             e.esi.to_string(),
             String::new(),
             String::new(),
@@ -4071,7 +4021,7 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
             0,
         ),
         EvpnRoute::IpPrefix(e) => (
-            e.rd.to_string(),
+            format_rd(e.rd),
             e.esi.to_string(),
             e.ethernet_tag.to_string(),
             String::new(),
@@ -4082,7 +4032,7 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
             0,
         ),
         EvpnRoute::Smet(e) => (
-            e.rd.to_string(),
+            format_rd(e.rd),
             String::new(),
             e.ethernet_tag.to_string(),
             String::new(),
@@ -4811,6 +4761,9 @@ mod tests {
         };
         vec![base, vpn]
     }
+
+    #[path = "rd_roundtrip_tests.rs"]
+    mod rd_roundtrip;
 
     #[path = "family_pages_tests.rs"]
     mod family_pages;
@@ -6499,10 +6452,6 @@ mod tests {
             },
             proto::ListPeerEvpnRoutesRequest {
                 rd_filter: "bad".into(),
-                ..request.clone()
-            },
-            proto::ListPeerEvpnRoutesRequest {
-                page_size: 1001,
                 ..request.clone()
             },
         ] {

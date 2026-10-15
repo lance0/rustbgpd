@@ -74,6 +74,10 @@ pub async fn list_best_page(
     Ok(())
 }
 
+#[expect(
+    deprecated,
+    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
+)]
 pub async fn list(
     connection: Connection,
     route_type: Option<u32>,
@@ -214,10 +218,7 @@ pub(crate) fn validate_peer_view(peer: &str, rd: Option<&str>) -> Result<(), Cli
             )
         })?;
     if let Some(rd) = rd {
-        rd.parse::<rustbgpd_wire::RouteDistinguisher>()
-            .map_err(|err| {
-                CliError::Argument(format!("invalid EVPN Route Distinguisher: {err}"))
-            })?;
+        parse_rd(rd).map_err(CliError::Argument)?;
     }
     Ok(())
 }
@@ -302,6 +303,15 @@ fn peer_page_to_json(
 }
 
 pub(crate) fn parse_rd(value: &str) -> Result<String, String> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        if hex.len() != 16 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("raw RD requires 0x followed by exactly 16 hexadecimal digits".into());
+        }
+        return Ok(value.to_ascii_lowercase());
+    }
     value
         .parse::<rustbgpd_wire::RouteDistinguisher>()
         .map(|rd| rd.to_string())
@@ -309,12 +319,6 @@ pub(crate) fn parse_rd(value: &str) -> Result<String, String> {
 }
 
 pub(crate) fn parse_page_rd(value: &str) -> Result<String, String> {
-    if let Some(hex) = value.strip_prefix("0x") {
-        if hex.len() != 16 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("raw RD requires 0x followed by exactly 16 hexadecimal digits".into());
-        }
-        return Ok(value.to_ascii_lowercase());
-    }
     parse_rd(value)
 }
 
@@ -1849,6 +1853,10 @@ fn diagnose_json(
 }
 
 /// Read-only EVPN alpha health summary.
+#[expect(
+    deprecated,
+    reason = "retain the legacy whole-table CLI behavior while bounded RPCs replace it for new clients"
+)]
 pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut evpn_client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -3856,7 +3864,11 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             parse_page_rd("0x00020000FDE80064").unwrap(),
             "0x00020000fde80064"
         );
-        assert!(parse_rd("0x00020000fde80064").is_err());
+        assert_eq!(
+            parse_rd("0X00020000FDE80064").unwrap(),
+            "0x00020000fde80064"
+        );
+        assert!(super::validate_peer_view("192.0.2.1", Some("0X00020000FDE80064")).is_ok());
         assert!(parse_page_rd("0x0002").is_err());
         assert!(parse_page_rd("0x00020000fde800zz").is_err());
         assert!(parse_rd("65536:65536").is_err());

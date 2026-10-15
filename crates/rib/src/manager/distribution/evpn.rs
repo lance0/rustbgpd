@@ -840,7 +840,7 @@ impl RibManager {
         );
 
         if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
-            && !self.try_send_and_commit_outbound_update(
+            && let Err(failure) = self.try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
                     evpn_announce,
@@ -849,6 +849,7 @@ impl RibManager {
                 },
             )
             && self.mark_outbound_dirty(peer)
+            && failure == super::OutboundCommitFailure::WriterUnavailable
         {
             warn!(%peer, "outbound channel full — EVPN update deferred");
         }
@@ -879,7 +880,11 @@ impl RibManager {
             EvpnGroupDelta, EvpnGroupEntry, EvpnGroupInput, EvpnGroupStageOutput,
         };
         let mut out = EvpnGroupStageOutput::default();
-        let Some(group) = self.group_ribs.get(&gid).filter(|group| group.owns_evpn) else {
+        let Some(group) = self
+            .group_ribs
+            .get(&gid)
+            .filter(|group| group.owns_evpn_routes())
+        else {
             return out;
         };
         // Production owns_evpn is false. Activation additionally needs the
