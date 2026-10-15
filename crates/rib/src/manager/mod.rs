@@ -1602,12 +1602,8 @@ pub(in crate::manager) const COMMIT_MEMBERS_PER_POLL: usize = 8;
 /// fleet size — a fixed 8-item poll at ~10 ms of interleaved actor work per
 /// poll seam cost ~0.88 s of staggered emission at 700 members.
 const FLUSH_POLL_BUDGET: std::time::Duration = std::time::Duration::from_millis(25);
-/// Stride of dirty peers handed to one `distribute_changes` pass between
-/// wall-clock checks inside a resync-timer tick. Each dirty peer costs
-/// O(table) enumeration and staging, so an unbounded pass stalls the actor
-/// for the whole backlog; the tick keeps taking strides until
-/// [`FLUSH_POLL_BUDGET`] elapses, then a withheld remainder re-arms the
-/// timer at [`DIRTY_RESYNC_BACKLOG_INTERVAL`].
+/// Maximum deferred inbound-refresh retries in a resync-timer tick. Dirty
+/// route replays poll the work budget after each complete peer instead.
 const RESYNC_PEERS_PER_TICK: usize = 8;
 /// Re-arm interval while a withheld dirty-resync backlog remains. Short by
 /// design: the backlog is work the actor already owes, so the next slice
@@ -3026,8 +3022,8 @@ impl RibManager {
 
     /// Run one bounded resync-timer tick. ADR-0113 recovery replays at most
     /// one peer/family; dirty peers are handed to `distribute_changes` in
-    /// [`RESYNC_PEERS_PER_TICK`]-sized slices until the poll's wall-clock
-    /// budget elapses. Selection round-robins from
+    /// one-peer slices until the poll's wall-clock budget elapses.
+    /// Selection round-robins from
     /// [`Self::dirty_resync_cursor`] and never re-attempts a peer within the
     /// same tick.
     ///
@@ -3079,10 +3075,10 @@ impl RibManager {
         let poll_start = std::time::Instant::now();
         let mut attempted: HashSet<IpAddr> = HashSet::new();
         loop {
-            // Ring selection: up to RESYNC_PEERS_PER_TICK unattempted peers,
-            // starting strictly after the cursor and wrapping. Ring order is
-            // preserved so the cursor lands on the last peer actually
-            // attempted, not the numerically largest.
+            // One full-table member can consume the poll budget on its own.
+            // Check after that real transaction completes so a healthy fleet
+            // does not become one readiness owner older than the stall bound.
+            // Cheap peers can still drain within the same poll budget.
             let ring: Vec<IpAddr> = {
                 let after = self
                     .dirty_peers
@@ -3098,7 +3094,7 @@ impl RibManager {
                 after
                     .chain(wrapped)
                     .filter(|peer| !attempted.contains(*peer))
-                    .take(RESYNC_PEERS_PER_TICK)
+                    .take(1)
                     .copied()
                     .collect()
             };
@@ -3117,10 +3113,19 @@ impl RibManager {
                 .iter()
                 .filter_map(|peer| self.dirty_since.get(peer).map(|since| (*peer, *since)))
                 .collect();
+            // A failed forced replay is also dirty. Its force bit must not
+            // bypass this same peer slice; unrelated force-only work keeps
+            // its existing path and scheduling.
+            let withheld_force: Vec<IpAddr> = withheld
+                .iter()
+                .copied()
+                .filter(|peer| self.force_outbound_peers.remove(peer))
+                .collect();
             self.dirty_peers = selected;
             self.distribute_changes(&HashSet::new(), &HashSet::new());
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
+            self.force_outbound_peers.extend(withheld_force);
             let unattempted_remain = self
                 .dirty_peers
                 .iter()
