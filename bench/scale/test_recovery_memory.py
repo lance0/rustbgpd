@@ -1656,7 +1656,7 @@ class RecoveryScanTests(unittest.TestCase):
     def test_memory_entrypoint_derivation_is_exact_and_verifiable(self):
         path = self.root / "frozen-instrumentation/bench/scale/rrharness/src/main.rs"
         path.parent.mkdir(parents=True)
-        original = "// fixture\n" + "".join(receipt.SCAN_DISPATCH) + "// memory path\n"
+        original = "// fixture\n" + "".join(receipt.COMPONENT_DISPATCH) + "// memory path\n"
         path.write_text(original)
         metadata = self.root / "memory-entrypoint-derivation.json"
         receipt.normalize_memory_entrypoint(path, metadata)
@@ -1668,10 +1668,10 @@ class RecoveryScanTests(unittest.TestCase):
             receipt.validate_memory_derivation(self.root, digest)
 
     def test_memory_entrypoint_missing_duplicate_or_mutated_anchor_fails_closed(self):
-        original = "".join(receipt.SCAN_DISPATCH)
-        for block in receipt.SCAN_DISPATCH:
+        original = "".join(receipt.COMPONENT_DISPATCH)
+        for block in receipt.COMPONENT_DISPATCH:
             for broken in (original.replace(block, ""), original + block,
-                           original.replace(block, block.replace("recovery_scan", "wrong_scan"))):
+                           original.replace(block, block.replace("recovery_", "wrong_"))):
                 with self.subTest(block=block, broken=broken):
                     path = self.root / "main.rs"
                     path.write_text(broken)
@@ -1686,9 +1686,371 @@ class RecoveryScanTests(unittest.TestCase):
         path.write_text(original)
         receipt.normalize_memory_entrypoint(path, self.root / "derivation.json")
         expected = original
-        for block in receipt.SCAN_DISPATCH:
+        for block in receipt.COMPONENT_DISPATCH:
             expected = expected.replace(block, "", 1)
         self.assertEqual(expected, path.read_text())
+
+    def test_memory_entrypoint_legacy_scan_only_normalizes(self):
+        path = self.root / "main.rs"
+        original = "// legacy v2 fixture\n" + "".join(receipt.SCAN_DISPATCH) + "// memory path\n"
+        path.write_text(original)
+        metadata = self.root / "derivation.json"
+        receipt.normalize_memory_entrypoint(path, metadata)
+        self.assertEqual(path.read_text(), "// legacy v2 fixture\n// memory path\n")
+        self.assertEqual(json.loads(metadata.read_text())["removed_exact_snippets"], list(receipt.SCAN_DISPATCH))
+
+    def test_memory_entrypoint_legacy_v2_derivation_replays(self):
+        path = self.root / "frozen-instrumentation/bench/scale/rrharness/src/main.rs"
+        path.parent.mkdir(parents=True)
+        original = "// legacy v2 fixture\n" + "".join(receipt.SCAN_DISPATCH) + "// memory path\n"
+        derived = original
+        for block in receipt.SCAN_DISPATCH:
+            derived = derived.replace(block, "", 1)
+        patch = "".join(receipt.difflib.unified_diff(original.splitlines(True), derived.splitlines(True),
+                      fromfile="committed/main.rs", tofile="memory/main.rs"))
+        path.write_text(derived)
+        metadata = self.root / "memory-entrypoint-derivation.json"
+        metadata.with_suffix(".source.rs").write_text(original)
+        metadata.with_suffix(".patch").write_text(patch)
+        receipt.write_json(metadata, {"source_sha256": receipt.hashlib.sha256(original.encode()).hexdigest(),
+                          "derived_sha256": receipt.hashlib.sha256(derived.encode()).hexdigest(),
+                          "patch_sha256": receipt.hashlib.sha256(patch.encode()).hexdigest(),
+                          "removed_exact_snippets": list(receipt.SCAN_DISPATCH)})
+        receipt.validate_memory_derivation(self.root, receipt.file_digest(metadata))
+
+    def test_memory_entrypoint_rejects_resealed_partial_mixed_or_unknown_metadata(self):
+        path = self.root / "frozen-instrumentation/bench/scale/rrharness/src/main.rs"
+        path.parent.mkdir(parents=True)
+        path.write_text("".join(receipt.COMPONENT_DISPATCH))
+        metadata = self.root / "memory-entrypoint-derivation.json"
+        receipt.normalize_memory_entrypoint(path, metadata)
+        original = json.loads(metadata.read_text())
+        for snippets in (list(receipt.SCAN_DISPATCH), list(receipt.COMPONENT_DISPATCH[:-1]),
+                         [*receipt.COMPONENT_DISPATCH, receipt.COMPONENT_DISPATCH[0]],
+                         ["unknown component dispatch"], list(reversed(receipt.COMPONENT_DISPATCH))):
+            with self.subTest(snippets=snippets):
+                receipt.write_json(metadata, {**original, "removed_exact_snippets": snippets})
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_memory_derivation(self.root, receipt.file_digest(metadata))
+
+
+class RetirementReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = RecoveryReceiptTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.root = self.fixture.root
+
+    def row(self, profile="full-vpn", cell="retirement-full", measured=True):
+        seed = receipt.PROFILES[profile][0] if cell == "retirement-full" else (0, 0, 0, 0)
+        keys = sum(seed)
+        families = lambda settled: {name: {"present": 0 if settled else n, "announces": n,
+                                          "withdrawals": n if settled else 0}
+                                    for name, n in zip(receipt.FAMILIES, seed, strict=True)}
+        vpn = keys > 0 and "vpn" in profile
+        return {"profile": profile, "cell": cell, "measured": measured, "receivers": 1, "keys": keys,
+                "initial": families(False), "settled": families(True),
+                "vpn_stage": {"calls": int(vpn), "keys": keys if vpn else 0, "groups": int(vpn),
+                              "elapsed_ns": 100 if vpn and measured else None},
+                "adj_rib_in": {"calls": 1, "keys": keys, "groups": 0,
+                               "elapsed_ns": 200 if measured else None},
+                "operation_to_barrier_ns": 500 if measured else None}
+
+    def log(self, row, path=None, identity=None):
+        path = path or self.root / "retirement.log"
+        prefix = ""
+        if row["measured"]:
+            prefix = "recovery_identity " + json.dumps(identity or {"pid": 123, "start_ticks": 456}) + "\n"
+        path.write_text(prefix + "retirement_receipt " + json.dumps(row) + "\n")
+        return path
+
+    def campaign(self, profile="full-vpn"):
+        root = self.fixture.campaign(selected_cell="peer-down")
+        template = root / "ipv4-100k-peer-down-baseline-2-candidate"
+        names = {*receipt.INSTRUMENT_INPUTS, *receipt.RETIREMENT_INPUTS}
+        maps = {}
+        inputs = []
+        repository = Path(receipt.__file__).resolve().parents[2]
+        for name in sorted(names):
+            path = root / "frozen-instrumentation" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((repository / name).read_bytes())
+            maps[name] = receipt.file_digest(path)
+            inputs.append(maps[name] + "  " + name + "\n")
+        maps.update({name: "d" * 64 for name in ("Cargo.toml", "Cargo.lock", "crates/rib/Cargo.toml")})
+        (root / "instrumentation.sha256").write_text("".join(inputs))
+        instrumentation = receipt.file_digest(root / "instrumentation.sha256")
+        manifest = {"schema": "rustbgpd.retirement-timing.campaign.v1", "candidate": "a" * 40,
+                    "instrumentation_manifest_sha256": instrumentation, "profile": profile,
+                    "order": list(receipt.RETIREMENT_ORDER),
+                    "cells": ["retirement-empty", "retirement-full"], "memory_max": receipt.RETIREMENT_LIMIT}
+        receipt.write_json(root / "manifest.json", manifest)
+        receipt.write_json(root / "committed-inputs.json", maps)
+        receipt.write_json(root / "cleanup-proof.json", {"candidate_worktree_exit": 0,
+                           "old_drop_worktree_exit": 0, "scratch_remove_exit": 0})
+        receipt.write_json(root / "retirement-preflight.json", {"available_bytes": receipt.RETIREMENT_LIMIT,
+                           "minimum_bytes": receipt.RETIREMENT_LIMIT, "memory_max": receipt.RETIREMENT_LIMIT, "swap_max": 0})
+        (root / "driver.exit").write_text("0\n")
+        original = (root / "frozen-instrumentation" / receipt.RETIREMENT_SOURCE).read_text()
+        control = receipt.retirement_control(original)
+        (root / "old-drop-source.rs").write_text(control)
+        (root / "bin").mkdir()
+        for role in ("candidate", "old-drop"):
+            role_map = maps.copy()
+            if role == "old-drop":
+                role_map[receipt.RETIREMENT_SOURCE] = receipt.hashlib.sha256(control.encode()).hexdigest()
+            for suffix in ("inputs", "inputs-after"):
+                receipt.write_json(root / f"{role}-{suffix}.json", role_map)
+            (root / f"{role}-build.log").write_text("Compiling rustbgpd-rib v0.0.0\n")
+            (root / f"{role}-build.exit").write_text("0\n")
+            (root / "bin" / role).write_text(role)
+            (root / f"{role}-binary.sha256").write_text(receipt.file_digest(root / "bin" / role) + "\n")
+        ordinal = 0
+        for cell in manifest["cells"]:
+            for leg, role in enumerate(receipt.RETIREMENT_ORDER):
+                directory = root / f"{cell}-{leg}-{role}"
+                shutil.copytree(template, directory)
+                process = json.loads((directory / "binary-process.json").read_text())
+                process.update(executable=str(root / "bin" / role), exe_sha256=receipt.file_digest(root / "bin" / role))
+                owners = {name: json.loads((directory / name).read_text())
+                          for name in ("launcher-process.json", "scope-process.json")}
+                owners["binary-process.json"] = process
+                cgroup = f"/sys/fs/cgroup/retirement-{ordinal}.scope"
+                mapping = {item["pid"]: 10000 + ordinal * 3 + index
+                           for index, item in enumerate(owners.values())}
+                fresh = {}
+                for index, (name, item) in enumerate(owners.items()):
+                    old_pid = item["pid"]
+                    item = {**item, "pid": mapping[old_pid],
+                            "parent_pid": mapping.get(item["parent_pid"], item["parent_pid"]),
+                            "start_ticks": 50000 + ordinal * 3 + index,
+                            "cgroup": "0::" + cgroup.removeprefix("/sys/fs/cgroup") + "\n"}
+                    fresh[old_pid] = item
+                    receipt.write_json(directory / name, item)
+                process = json.loads((directory / "binary-process.json").read_text())
+                (directory / "cgroup-path.txt").write_text(cgroup + "\n")
+                ownership = [json.loads(line) for line in (directory / "ownership.jsonl").read_text().splitlines()]
+                for record in ownership:
+                    record["processes"] = [fresh[item["pid"]] for item in record["processes"]]
+                    record["members"] = [mapping[pid] for pid in record["members"]]
+                    record["cgroup_procs_raw"] = "".join(f"{pid}\n" for pid in record["members"])
+                (directory / "ownership.jsonl").write_text("\n".join(map(json.dumps, ownership)) + "\n")
+                identity = {"pid": process["pid"], "start_ticks": process["start_ticks"],
+                            "cgroup": (directory / "cgroup-path.txt").read_text().strip(),
+                            "source_sha": manifest["candidate"], "instrumentation_sha256": instrumentation}
+                self.log(self.row(profile, cell), directory / "harness.log", identity)
+                receipt.write_json(directory / "command.json", [process["executable"], "recovery-retirement", cell, profile])
+                for boundary in ("before", "after"):
+                    (directory / boundary / "memory.max").write_text(str(receipt.RETIREMENT_LIMIT))
+                receipt.write_json(directory / "raw-sha256.json", receipt.retirement_raw_hashes(directory))
+                ordinal += 1
+        return root
+
+    def test_retirement_full_and_empty_log_contracts_and_null_correctness_clocks(self):
+        for profile in ("full-uc", "full-vpn"):
+            for cell in ("retirement-empty", "retirement-full"):
+                for measured in (False, True):
+                    with self.subTest(profile=profile, cell=cell, measured=measured):
+                        row = self.row(profile, cell, measured)
+                        result = receipt.validate_retirement_log(self.log(row), profile, cell, measured=measured)
+                        self.assertEqual(result["sample"], row)
+
+    def test_retirement_rejects_missing_or_wrong_cardinality(self):
+        for phase in ("vpn_stage", "adj_rib_in"):
+            for field, value in (("calls", 0), ("keys", 0), ("keys", 1_229_999), ("keys", True)):
+                with self.subTest(phase=phase, field=field, value=value):
+                    row = self.row()
+                    row[phase][field] = value
+                    with self.assertRaises(receipt.InvalidReceipt):
+                        receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+
+    def test_retirement_rejects_clock_leaks_and_uncontained_or_missing_phases(self):
+        for measured, path, value in (
+            (False, ("vpn_stage", "elapsed_ns"), 100),
+            (True, ("adj_rib_in", "elapsed_ns"), None),
+            (True, ("vpn_stage", "elapsed_ns"), 0),
+            (True, ("vpn_stage", "elapsed_ns"), 600),
+        ):
+            with self.subTest(measured=measured, value=value):
+                row = self.row(measured=measured)
+                row[path[0]][path[1]] = value
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full", measured=measured)
+
+    def test_retirement_control_changes_only_the_existing_stage_retirement(self):
+        source = Path(receipt.__file__).resolve().parents[2] / receipt.RETIREMENT_SOURCE
+        original = source.read_text()
+        changed = receipt.retirement_control(original)
+        self.assertIn("        drop(vpn_group_stage);\n", changed)
+        self.assertEqual(changed.split("        drop(vpn_group_stage);\n", 1)[1],
+                         original.split("        crate::adj_rib_out::release_hash_map(&mut vpn_group_stage, &mut checkpoint);\n", 1)[1])
+        with self.assertRaises(receipt.InvalidReceipt):
+            receipt.retirement_control(changed)
+
+    def test_retirement_complete_campaign_replays_all_eight_actual_shape_legs(self):
+        root = self.campaign()
+        receipt.summarize_retirement(root)
+        result = json.loads((root / "comparison.json").read_text())
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(len(result["samples"]), 8)
+        self.assertEqual(len(result["summaries"]), 4)
+        self.assertNotIn("qualification_passed", result)
+
+    def test_retirement_rejects_resealed_duplicate_leg_scope_or_workload(self):
+        root = self.campaign()
+        source = root / "retirement-full-1-candidate"
+        target = root / "retirement-full-2-candidate"
+        original = {str(path.relative_to(target)): path.read_bytes()
+                    for path in target.rglob("*") if path.is_file()}
+        source_process = json.loads((source / "binary-process.json").read_text())
+        source_cgroup = (source / "cgroup-path.txt").read_text().strip()
+        for kind in ("copied-leg", "scope-only", "workload-only"):
+            with self.subTest(kind=kind):
+                for name, data in original.items():
+                    (target / name).write_bytes(data)
+                if kind == "copied-leg":
+                    shutil.rmtree(target)
+                    shutil.copytree(source, target)
+                else:
+                    process = json.loads((target / "binary-process.json").read_text())
+                    old_pid = process["pid"]
+                    ownership = [json.loads(line) for line in (target / "ownership.jsonl").read_text().splitlines()]
+                    if kind == "scope-only":
+                        (target / "cgroup-path.txt").write_text(source_cgroup + "\n")
+                        for name in ("launcher-process.json", "scope-process.json", "binary-process.json"):
+                            item = json.loads((target / name).read_text())
+                            item["cgroup"] = "0::" + source_cgroup.removeprefix("/sys/fs/cgroup") + "\n"
+                            receipt.write_json(target / name, item)
+                        for record in ownership:
+                            for item in record["processes"]:
+                                item["cgroup"] = "0::" + source_cgroup.removeprefix("/sys/fs/cgroup") + "\n"
+                    else:
+                        process.update(pid=source_process["pid"], start_ticks=source_process["start_ticks"])
+                        receipt.write_json(target / "binary-process.json", process)
+                        for record in ownership:
+                            record["processes"] = [process if item["pid"] == old_pid else item
+                                                   for item in record["processes"]]
+                            record["members"] = [process["pid"] if pid == old_pid else pid for pid in record["members"]]
+                            record["cgroup_procs_raw"] = "".join(f"{pid}\n" for pid in record["members"])
+                    (target / "ownership.jsonl").write_text("\n".join(map(json.dumps, ownership)) + "\n")
+                    lines = (target / "harness.log").read_text().splitlines()
+                    identity = json.loads(lines[0].removeprefix("recovery_identity "))
+                    if kind == "scope-only":
+                        identity["cgroup"] = source_cgroup
+                    else:
+                        identity.update(pid=source_process["pid"], start_ticks=source_process["start_ticks"])
+                    lines[0] = "recovery_identity " + json.dumps(identity)
+                    (target / "harness.log").write_text("\n".join(lines) + "\n")
+                receipt.write_json(target / "raw-sha256.json", receipt.retirement_raw_hashes(target))
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "reused scope or workload identity"):
+                    receipt.summarize_retirement(root)
+
+    def test_retirement_campaign_rejects_raw_source_resource_and_cleanup_tampering(self):
+        root = self.campaign()
+        directory = root / "retirement-full-1-candidate"
+        for path, replacement in (
+            (directory / "harness.log", ""),
+            (root / "old-drop-source.rs", "wrong control"),
+            (directory / "raw-sha256.json", "{}"),
+            (root / "cleanup-proof.json", "{}"),
+            (root / "old-drop-inputs-after.json", "{}"),
+            (root / "committed-inputs.json", "{}"),
+        ):
+            with self.subTest(path=path):
+                original = path.read_bytes()
+                path.write_text(replacement)
+                try:
+                    with self.assertRaises(receipt.InvalidReceipt):
+                        receipt.summarize_retirement(root)
+                finally:
+                    path.write_bytes(original)
+        path = directory / "before/memory.max"
+        path.write_text("max")
+        receipt.write_json(directory / "raw-sha256.json", receipt.retirement_raw_hashes(directory))
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "memory limit"):
+            receipt.summarize_retirement(root)
+
+    def test_retirement_failed_driver_emits_no_timing_verdict(self):
+        receipt.summarize_retirement(self.root, 137)
+        result = json.loads((self.root / "comparison.json").read_text())
+        self.assertEqual(result["status"], "INVALID")
+        self.assertEqual(result["samples"], [])
+        self.assertNotIn("summaries", result)
+
+    def test_retirement_rejects_identical_binaries_with_different_digest_whitespace(self):
+        root = self.campaign()
+        shutil.copyfile(root / "bin/candidate", root / "bin/old-drop")
+        digest = receipt.file_digest(root / "bin/candidate")
+        (root / "old-drop-binary.sha256").write_text(digest + "\n\n")
+        self.assertNotEqual((root / "candidate-binary.sha256").read_text(),
+                            (root / "old-drop-binary.sha256").read_text())
+        for cell in ("retirement-empty", "retirement-full"):
+            for leg in (0, 3):
+                directory = root / f"{cell}-{leg}-old-drop"
+                process = json.loads((directory / "binary-process.json").read_text())
+                process["exe_sha256"] = digest
+                receipt.write_json(directory / "binary-process.json", process)
+                ownership = [json.loads(line) for line in (directory / "ownership.jsonl").read_text().splitlines()]
+                for record in ownership:
+                    record["processes"] = [process if item["pid"] == process["pid"] else item
+                                           for item in record["processes"]]
+                (directory / "ownership.jsonl").write_text("\n".join(map(json.dumps, ownership)) + "\n")
+                receipt.write_json(directory / "raw-sha256.json", receipt.retirement_raw_hashes(directory))
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "same binary"):
+            receipt.summarize_retirement(root)
+
+    def test_retirement_full_replay_rejects_false_empty_phase_with_consistent_hashes(self):
+        root = self.campaign()
+        directory = root / "retirement-full-1-candidate"
+        path = directory / "harness.log"
+        lines = path.read_text().splitlines()
+        row = json.loads(lines[-1].removeprefix("retirement_receipt "))
+        row["vpn_stage"].update(calls=0, keys=0)
+        lines[-1] = "retirement_receipt " + json.dumps(row)
+        path.write_text("\n".join(lines) + "\n")
+        receipt.write_json(directory / "raw-sha256.json", receipt.retirement_raw_hashes(directory))
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "cardinality"):
+            receipt.summarize_retirement(root)
+
+    def test_actual_retirement_exit_handler_preserves_failure_and_checks_cleanup(self):
+        wrapper = Path(receipt.__file__).with_name("compare-recovery-memory.sh").read_text()
+        begin = wrapper.index("finish_retirement() {\n")
+        end = wrapper.index("trap finish EXIT\n", begin)
+        handler = wrapper[begin:end]
+        setup = r'''
+set -euo pipefail
+output=$TEST_OUTPUT
+work_root=$TEST_SCRATCH
+repository=unused
+checker=unused
+git() {
+    [[ ! -e $output/driver.exit ]] || exit 92
+    if [[ ${*: -1} == */candidate ]]; then return "$TEST_CANDIDATE"; fi
+    return "$TEST_OLD"
+}
+rm() { [[ ! -e $output/driver.exit ]] || exit 93; return "$TEST_REMOVE"; }
+awk() { printf '0\n'; return "$TEST_AWK"; }
+python3() { return 0; }
+'''
+        for initial, candidate, old, removal, observer, expected in (
+            (0, 0, 0, 0, 0, 0), (0, 7, 0, 0, 0, 1),
+            (0, 0, 8, 0, 0, 1), (0, 0, 0, 9, 0, 1),
+            (0, 0, 0, 0, 11, 1), (23, 0, 0, 0, 11, 23),
+        ):
+            with self.subTest(initial=initial, candidate=candidate, old=old, removal=removal, observer=observer):
+                output = self.root / f"handler-{initial}-{candidate}-{old}-{removal}-{observer}"
+                output.mkdir()
+                scratch = output / "scratch"
+                scratch.mkdir()
+                result = subprocess.run(["bash", "-c", setup + handler +
+                                        '\ntrap finish_retirement EXIT\nexit "$TEST_INITIAL"\n'],
+                    env=os.environ | {"TEST_OUTPUT": str(output), "TEST_SCRATCH": str(scratch),
+                                      "TEST_INITIAL": str(initial), "TEST_CANDIDATE": str(candidate),
+                                      "TEST_OLD": str(old), "TEST_REMOVE": str(removal), "TEST_AWK": str(observer)},
+                    text=True, capture_output=True, timeout=5, check=False)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                self.assertEqual((output / "driver.exit").read_text(), f"{expected}\n")
+                self.assertEqual((output / "scratch-retained.txt").exists(), expected != 0)
 
 
 if __name__ == "__main__":

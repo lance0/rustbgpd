@@ -42,6 +42,37 @@ compiling against `crates/rib`, `crates/wire`, and `crates/telemetry` on `main`.
   transport-harness scale-receipt headline), recorded in
   [`docs/perf/ixp-matrix-2026-07.md`](../../../docs/perf/ixp-matrix-2026-07.md#1000-client-rr-cell--in-repo-manager-direct-harness).
 
+## Hosted retirement attribution
+
+The optional `CI` dispatch with `recovery_memory_receipt=true` and
+`recovery_receipt_mode=retirement` measures two actual actor boundaries:
+VPN stage-map retirement, and the detached Adj-RIB-In destructor after
+peer-down recomputation and before attribute-intern garbage collection.
+The containing peer-down-to-query-barrier duration is reported separately.
+
+Each fresh hosted VM runs one full-table profile: one million IPv4 plus
+230,000 IPv6 routes, either unicast or VPN, with one receiver. Empty and full
+controls each run in old-drop, current, current, old-drop order. The old-drop
+binary differs only by restoring the former VPN stage-map drop. Both arms
+use the current source, locked dependencies, scale profile and jemalloc.
+Every leg must finish exact announced/withdrawn receiver inventories, actor
+barriers and the required full-size retirement phases. Missing or empty
+eligible work is invalid; absent VPN work in the unicast profile is reported
+as ineligible rather than a zero-cost observation.
+
+The in-process actor and harness share one 12 GiB cgroup with swap disabled.
+The receipt retains complete build-input maps, the control source patch,
+binary/process identity, commands, raw evidence hashes, resource readouts and
+cleanup outcomes. Raw observations and descriptive medians/maxima do not
+constitute a daemon readiness, fleet, throughput or memory qualification.
+There is no timing pass threshold or automatic chunking decision.
+
+For correctness checks, `rrharness recovery-retirement
+retirement-full|retirement-empty full-uc|full-vpn|smoke-uc|smoke-vpn
+--correctness-only` uses the same actor boundaries without sampling durations;
+all duration fields are null. Measured execution requires the hosted receipt
+launcher. This mode does not chunk lifecycle collections or change deadlines.
+
 ## Allocator
 
 The harness links jemalloc as its global allocator, the same allocator the

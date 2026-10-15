@@ -31,6 +31,81 @@ use crate::update::{
     RouteQueryScope,
 };
 
+// A retirement receipt runs one actor per process. Keeping its optional capture
+// here adds no fields or clocks to the normal manager build.
+static RETIREMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RETIREMENT_MEASURED: AtomicBool = AtomicBool::new(false);
+static RETIREMENT_COUNTS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+pub(in crate::manager) struct RetirementSample {
+    keys: usize,
+    groups: usize,
+    started: Option<std::time::Instant>,
+}
+
+pub(in crate::manager) fn retirement_begin(
+    inventory: impl FnOnce() -> (usize, usize),
+) -> Option<RetirementSample> {
+    if !RETIREMENT_ACTIVE.load(Ordering::Acquire) {
+        return None;
+    }
+    let (keys, groups) = inventory();
+    Some(RetirementSample {
+        keys,
+        groups,
+        started: RETIREMENT_MEASURED
+            .load(Ordering::Relaxed)
+            .then(std::time::Instant::now),
+    })
+}
+
+pub(in crate::manager) fn retirement_end(phase: usize, sample: Option<RetirementSample>) {
+    if let Some(sample) = sample {
+        let elapsed = sample.started.map(|started| started.elapsed());
+        let offset = phase * 4;
+        RETIREMENT_COUNTS[offset].fetch_add(1, Ordering::Relaxed);
+        RETIREMENT_COUNTS[offset + 1].fetch_add(
+            u64::try_from(sample.keys).expect("retirement inventory fits u64"),
+            Ordering::Relaxed,
+        );
+        RETIREMENT_COUNTS[offset + 2].fetch_add(
+            u64::try_from(sample.groups).expect("retirement groups fit u64"),
+            Ordering::Relaxed,
+        );
+        if let Some(elapsed) = elapsed {
+            bench_add_duration(&RETIREMENT_COUNTS[offset + 3], elapsed);
+        }
+    }
+}
+
+impl RibManager {
+    /// Start one process-local, bench-only capture after fixture convergence.
+    /// Correctness mode records inventories without reading a clock.
+    ///
+    /// # Panics
+    /// Panics when a prior capture has not finished.
+    pub fn bench_start_retirement_capture(measured: bool) {
+        assert!(!RETIREMENT_ACTIVE.load(Ordering::Relaxed));
+        for counter in &RETIREMENT_COUNTS {
+            counter.store(0, Ordering::Relaxed);
+        }
+        RETIREMENT_MEASURED.store(measured, Ordering::Relaxed);
+        RETIREMENT_ACTIVE.store(true, Ordering::Release);
+    }
+
+    /// Stop after an actor FIFO barrier. Each four-field phase is calls,
+    /// retired keys, groups, and elapsed nanoseconds (zero when unmeasured).
+    /// Phase zero covers the VPN stage map; phase one only detached Adj-RIB-In.
+    ///
+    /// # Panics
+    /// Panics when no capture is active.
+    #[must_use]
+    pub fn bench_finish_retirement_capture() -> [u64; 8] {
+        assert!(RETIREMENT_ACTIVE.swap(false, Ordering::Acquire));
+        std::array::from_fn(|index| RETIREMENT_COUNTS[index].load(Ordering::Relaxed))
+    }
+}
+
 /// Component-only inputs; no live group ownership or route delivery is enabled.
 #[derive(Clone, Copy, Debug)]
 pub struct RecoveryScanSpec {

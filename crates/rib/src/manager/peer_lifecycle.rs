@@ -609,7 +609,22 @@ impl RibManager {
         // (after the recomputes above dropped any Loc-RIB selected-route
         // clones) so a departed peer cannot leave stranded attribute sets —
         // the reclaim the per-peer tables used to get for free on drop.
+        #[cfg(feature = "bench-internals")]
+        let retirement = super::bench_support::retirement_begin(|| {
+            (
+                rib.len()
+                    + rib.vpn_len()
+                    + rib.evpn_len()
+                    + rib.flowspec_len()
+                    + rib.bgpls_len()
+                    + rib.labeled_len()
+                    + rib.rtc_len(),
+                0,
+            )
+        });
         drop(rib);
+        #[cfg(feature = "bench-internals")]
+        super::bench_support::retirement_end(1, retirement);
         self.gc_attr_intern();
     }
 

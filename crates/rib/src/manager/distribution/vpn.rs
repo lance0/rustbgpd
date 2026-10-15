@@ -1147,6 +1147,16 @@ impl RibManager {
             }
         }
         self.release_speculative_group_admitted_keys(&speculative_group_admitted);
+        #[cfg(feature = "bench-internals")]
+        let retirement = super::super::bench_support::retirement_begin(|| {
+            (
+                vpn_group_stage
+                    .values()
+                    .map(|stage| stage.deltas.len())
+                    .sum(),
+                vpn_group_stage.len(),
+            )
+        });
         for (_, mut stage) in vpn_group_stage.drain() {
             #[cfg(test)]
             if let Some(observer) = &retirement_observer {
@@ -1165,6 +1175,8 @@ impl RibManager {
             }
         }
         crate::adj_rib_out::release_hash_map(&mut vpn_group_stage, &mut checkpoint);
+        #[cfg(feature = "bench-internals")]
+        super::super::bench_support::retirement_end(0, retirement);
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
         super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
     }

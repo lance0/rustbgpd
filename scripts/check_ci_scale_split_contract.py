@@ -237,7 +237,7 @@ def check(root: Path) -> list[str]:
     scan_input = re.search(r"(?m)^      recovery_receipt_mode:\n(?:        [^\n]*\n)+", dispatch)
     if scan_input is None or any(
         re.findall(rf"(?m)^        {name}:[ \t]*(.*?)[ \t]*$", scan_input.group()) != [value]
-        for name, value in (("type", "choice"), ("options", "[memory, scan]"),
+        for name, value in (("type", "choice"), ("options", "[memory, scan, retirement]"),
                             ("default", "memory"), ("required", "false"))
     ):
         errors.append("recovery receipt mode must be an optional choice defaulting to memory")
@@ -253,13 +253,13 @@ def check(root: Path) -> list[str]:
         errors.append("recovery_memory_receipt must provide the stable toolchain input")
 
     matrix = re.findall(
-        r"(?m)^        include: \$\{\{ fromJSON\(inputs\.recovery_receipt_mode == 'scan' && '([^']*)' \|\| '([^']*)'\) \}\}[ \t]*$",
+        r"(?m)^        include: \$\{\{ fromJSON\(inputs\.recovery_receipt_mode == 'retirement' && '([^']*)' \|\| inputs\.recovery_receipt_mode == 'scan' && '([^']*)' \|\| '([^']*)'\) \}\}[ \t]*$",
         recovery,
     )
     try:
-        selected_scan, selected_memory = map(json.loads, matrix[0]) if len(matrix) == 1 else (None, None)
+        selected_retirement, selected_scan, selected_memory = map(json.loads, matrix[0]) if len(matrix) == 1 else (None, None, None)
     except ValueError:
-        selected_scan = selected_memory = None
+        selected_retirement = selected_scan = selected_memory = None
     expected_memory = [
         {"profile": profile, "cell": cell}
         for profile, cells in (
@@ -271,6 +271,8 @@ def check(root: Path) -> list[str]:
             ("full-vpn", ("unsynchronized-dirty",)),
         ) for cell in cells
     ]
+    if selected_retirement != [{"profile": profile, "cell": "retirement"} for profile in ("full-uc", "full-vpn")]:
+        errors.append("retirement mode must isolate the two full-table profiles")
     if selected_memory != expected_memory or selected_scan != [
         {"profile": profile, "cell": "capture-scan", "old_order": old_order}
         for profile in ("full-uc", "full-vpn", "evpn-soak") for old_order in ("sorted", "shuffled")
