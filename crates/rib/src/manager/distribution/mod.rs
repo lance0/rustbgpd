@@ -2906,6 +2906,8 @@ impl RibManager {
     ) -> Result<(), OutboundCommitFailure> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        #[cfg(test)]
+        let retirement_observer = self.replacement_readiness_test_hook.clone();
         checkpoint();
 
         let mut owns_refresh_prior = false;
@@ -3505,7 +3507,7 @@ impl RibManager {
                     })
                 })
                 .flatten();
-            let probe_results = if let Some(results) = reused_results {
+            let mut probe_results = if let Some(results) = reused_results {
                 #[cfg(any(test, feature = "bench-internals"))]
                 {
                     self.adj_rib_out_commit_stats.exact_probe_cache_reuses = self
@@ -3603,7 +3605,23 @@ impl RibManager {
                 enabled
             };
 
-            if !fast_path {
+            if fast_path {
+                #[cfg(test)]
+                if let Some(observer) = &retirement_observer {
+                    observer("exact_probe_retirement_before");
+                }
+                super::retire_vec(&mut probe_results, &mut || {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "exact_probe_retirement",
+                        false,
+                    );
+                });
+                #[cfg(test)]
+                if let Some(observer) = &retirement_observer {
+                    observer("exact_probe_retirement_after");
+                }
+            } else {
                 // Reconciliation may filter this member's announce inventory.
                 // A shared encode cell is only valid while every member still
                 // carries the identical Arc-backed payload; transport proves
@@ -4492,6 +4510,17 @@ impl RibManager {
                 .adj_rib_out_commit_stats
                 .successful_enqueues
                 .saturating_add(1);
+        }
+        #[cfg(test)]
+        if let Some(observer) = &retirement_observer {
+            observer("group_prior_retirement_before");
+        }
+        super::retire_hash_set(&mut group_prior, &mut || {
+            super::replacement_readiness_checkpoint_at(&readiness, "group_prior_retirement", false);
+        });
+        #[cfg(test)]
+        if let Some(observer) = &retirement_observer {
+            observer("group_prior_retirement_after");
         }
         Ok(())
     }
@@ -8558,6 +8587,9 @@ impl RibManager {
                             let mut prior = HashSet::new();
                             if is_dirty || is_force {
                                 if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                                    self.replacement_checkpoint(true);
+                                    prior.reserve(admitted.len());
+                                    self.replacement_checkpoint(true);
                                     prior.extend(admitted.iter_with_checkpoint(|_| checkpoint()));
                                 }
                             } else if !defer_clean_group_prior
