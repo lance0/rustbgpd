@@ -457,15 +457,19 @@ requires ordering costs in the measured phase, separate sorted/shuffled receipts
 and a matched whole-system comparison; logical byte savings alone do not accept
 the live unicast/VPN CPU trade.
 
-Capture cost remains a release gate for the live unicast/VPN path. The
-[merge-capture receipt](../perf/update-group-recovery-merge-capture-scans-2026-10-15.md)
-misses the approximately 1.5 times shared/flat target in all 24 unicast/VPN cells.
-Linear classification alone does not accept complete-capture cost or the
-CPU/memory trade. See the [capture-cost amendment](#amendment-2026-10-15-capture-cost-candidate-not-accepted).
+The [slot-indexed capture receipt](../perf/update-group-recovery-slot-capture-scans-2026-10-15.md)
+passes the approximately 1.5 times warm component target at its recorded source:
+actual pure-unicast sharing takes 0.151–0.752 times flat, including 0.671–0.752
+for shuffled OLD. VPN-negotiated groups select exact flat full-OLD proofs at
+0.991–1.008 times the flat control; this is not a VPN sharing win. Six dormant
+EVPN cells miss the cost target and EVPN ownership remains disabled.
 
 The [slot-indexed selection amendment](#amendment-2026-10-15-slot-indexed-full-old-selection)
-prepares an indexed candidate for pure-unicast groups and flat full-OLD proofs
-for VPN-negotiated groups. Its measured capture-cost bar remains pending.
+and [current component result](#amendment-2026-10-15-slot-indexed-component-cost-result)
+keep cold pool cost, the unchanged flat-memory trade and matched whole-system
+mass-dirty readiness/convergence plus an actual-release-candidate soak as open
+qualification requirements. The earlier failed capture-cost amendments remain
+historical evidence; the component pass does not waive those release gates.
 
 Use one definition for unicast, VPN and EVPN: outside the recovery paths below,
 for every receiver and route key the **ordered sequence** of announces and
@@ -740,3 +744,31 @@ Preserve the dated failed-cost receipts. Qualify the new method with fresh,
 source-pinned sorted/shuffled campaigns, the approximately 1.5-times flat cost
 bar, matched whole-system readiness/convergence and memory evidence, and a soak
 on the actual release candidate. EVPN ownership remains disabled.
+
+## Amendment (2026-10-15): slot-indexed component cost result
+
+The [slot-indexed capture receipt](../perf/update-group-recovery-slot-capture-scans-2026-10-15.md)
+measures source `03ee2ad6d905df3c32e1537ccf3d1646de0d856c` in hosted run
+38680284008. Six fresh sorted/shuffled profile campaigns completed 36 cells and
+144 ABBA legs with exact OLD proofs, zero refusals and clean settlement. Actual
+unicast slab sharing passes the approximately 1.5-times warm component bar at
+0.151–0.752 times flat; shuffled unicast is 0.671–0.752. Negotiated VPN selects
+exact flat at 0.991–1.008 times its flat control, not a sharing or memory gain.
+Six dormant EVPN cells exceed 1.5 and do not qualify ownership or activation.
+
+This closes the selected common-family component cost bar, not whole-system
+qualification. Each leg has one anchor and one full capturing member; other
+records are empty. Shuffled unicast cold anchor creation costs 739.603–818.664 ms.
+Both warm arms use the same profile-selected cold-anchor policy: unicast shared,
+VPN flat. The receipt supplies no attributable cold sharing-on/off ratio.
+First-pool cost can still affect whole-system readiness. Logical credit is
+separate from allocator, RSS and cgroup measurements; finite two-sample pairs
+and 10 ms CPU ticks do not describe latency distributions.
+
+Keep 64 MiB per-peer / 512 MiB daemon limits and the conservative no-proof
+contract unchanged. VPN-negotiated and private/regroup full OLD captures retain
+their flat-memory trade. Matched whole-system mass-dirty readiness, remote
+receiver convergence and memory qualification, followed by the actual release
+candidate's soak, remain pending. The previous key-only and sorted-merge
+receipts remain unchanged and are not attributable absolute comparators or
+pooled samples for this different method. EVPN ownership remains disabled.
