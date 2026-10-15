@@ -2262,11 +2262,18 @@ impl RibManager {
     /// actor-owned invariant while readiness acknowledgements and optional
     /// frozen operator summaries interleave.
     fn with_replacement_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        let installed = self.begin_replacement_readiness();
+        let result = work(self);
+        self.finish_readiness_owner(installed);
+        result
+    }
+
+    fn begin_replacement_readiness(&mut self) -> bool {
         let age = self.pending_clean_policy_transition.as_ref().map_or(
             std::time::Duration::ZERO,
             distribution::PendingCleanPolicyTransition::elapsed,
         );
-        self.with_replacement_readiness_age(age, work)
+        self.begin_readiness_owner(age, false)
     }
 
     fn with_replacement_readiness_age<T>(
@@ -2290,8 +2297,16 @@ impl RibManager {
         selection_release: bool,
         work: impl FnOnce(&mut Self) -> T,
     ) -> T {
+        let installed = self.begin_readiness_owner(age, selection_release);
+        let result = work(self);
+        self.finish_readiness_owner(installed);
+        result
+    }
+
+    /// Nested work retains the existing owner's exact identity and age.
+    fn begin_readiness_owner(&mut self, age: std::time::Duration, selection_release: bool) -> bool {
         if self.replacement_readiness.is_some() {
-            return work(self);
+            return false;
         }
         let started = tokio::time::Instant::now() - age;
         self.replacement_readiness = Some(Arc::new(ReplacementReadinessContext {
@@ -2321,7 +2336,14 @@ impl RibManager {
         }));
         self.replacement_checkpoint(true);
         self.record_replacement_capacities();
-        let result = work(self);
+        true
+    }
+
+    /// Call after all temporary checkpoint handles have left the work frame.
+    fn finish_readiness_owner(&mut self, installed: bool) {
+        if !installed {
+            return;
+        }
         self.record_replacement_capacities();
         self.replacement_checkpoint_at("terminal_cleanup", true);
         let context = self
@@ -2359,7 +2381,6 @@ impl RibManager {
                     serviced: readiness.serviced,
                 });
         }
-        result
     }
 
     /// Call only after a complete prefix mutation, before any checkpoint can

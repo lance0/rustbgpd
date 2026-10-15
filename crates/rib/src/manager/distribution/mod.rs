@@ -7009,822 +7009,854 @@ impl RibManager {
             #[cfg(any(test, feature = "bench-internals"))]
             &mut self.adj_rib_out_commit_stats,
         );
-        for peer in peers {
-            checkpoint();
-            // Cold ingest is the path that requires in-pass readiness:
-            // service the dedicated, read-only lane at each peer boundary
-            // without admitting general queries or mutations. Keep the
-            // transition age in direct-drive use so a genuinely stalled
-            // transition still fails closed.
-            if service_ingest_readiness {
-                let transition_elapsed = self
-                    .pending_clean_policy_transition
-                    .as_ref()
-                    .map(PendingCleanPolicyTransition::elapsed);
-                self.drain_readiness_queries(transition_elapsed);
-            }
-            // A session closes its receiver before its queued PeerDown is
-            // handled. Other peers' withdrawals must not prepare more work
-            // for that dead receiver; lifecycle cleanup still owns its state.
-            if self.outbound_channel_gone(peer) {
-                self.drop_gone_dirty_peer(peer);
-                continue;
-            }
-            let member_of = self.grouped_member_of(peer);
-            let evpn_group_owned = self.evpn_grouped_member_of(peer).is_some();
-            // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
-            if self.evpn_recovery_reset_pending(peer) {
-                self.retry_evpn_recovery_reset(peer);
-                continue;
-            }
-            let is_dirty = self.dirty_peers.contains(&peer);
-            // `is_force` peers are dirty-equivalent for prefix enumeration AND
-            // bypass the AdjRibOut equality suppression in the per-prefix
-            // helpers — see `RibUpdate::RefreshPeerOutbound` rationale on
-            // `force_outbound_peers`.
-            let is_force = self.force_outbound_peers.contains(&peer);
-            let evpn_coverage_required = evpn_group_owned || self.has_private_evpn_handoff(peer);
-            // A grouped force-only resync intentionally re-announces the
-            // current group table and ignores pass tombstones/deltas. Its
-            // setters synchronously run an empty distribution pass, so it
-            // cannot meet a genuine change pass — an all-affected-only
-            // pass included, since that stages real deltas for
-            // per-client-best groups. A failed force send is
-            // also dirty and is valid here: dirty assembly includes the
-            // tombstones needed to heal subsequent churn.
-            debug_assert!(
-                member_of.is_none()
-                    || !is_force
-                    || is_dirty
-                    || (best_changed.is_empty() && all_affected.is_empty()),
-                "a grouped force-only resync cannot share a nonempty distribution pass"
-            );
-            // Dirty and forced resyncs build the peer's whole table, then
-            // need one free slot. A full channel makes that send certain to
-            // fail, even on the first forced pass. Keep missed-pass residue
-            // and the force flag for the retry; no drop is counted because
-            // nothing was built. Only this actor sends on the channel, so a
-            // free slot seen here is still free at the send.
-            if (is_dirty || is_force) && self.outbound_channel_full(peer) {
-                debug!(%peer, "outbound channel still full — deferring resync");
-                self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
-                continue;
-            }
-            let resync = is_dirty || is_force;
-            let private_evpn_recovery = (resync && !evpn_group_owned)
-                .then(|| self.evpn_recovery_handle(peer))
-                .flatten();
-            let mut complete_evpn_feed = evpn_feeds.remove(&peer);
-            if complete_evpn_feed.is_none()
-                && resync
-                && let Some(gid) = self.evpn_grouped_member_of(peer)
-                && (is_force || !self.evpn_feed_is_current(peer))
-                && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
-            {
-                // A real missed admission already retained its actual key
-                // proof. Never reconstruct OLD from the advanced group table.
-                complete_evpn_feed = self.prepare_complete_evpn_feed(peer, gid, None, false);
-            }
-            #[cfg(test)]
-            if resync {
-                self.adj_rib_out_commit_stats.resync_builds = self
-                    .adj_rib_out_commit_stats
-                    .resync_builds
-                    .saturating_add(1);
-            }
-            #[cfg(feature = "bench-internals")]
-            let bench_per_client_best_resync = resync && self.peer_per_client_best.contains(&peer);
-            #[cfg(feature = "bench-internals")]
-            let bench_enumeration_started =
-                bench_per_client_best_resync.then(std::time::Instant::now);
-            let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
-                let mut capacity = self.loc_rib.len();
-                if let Some(gid) = member_of {
-                    if let Some(group) = self.group_ribs.get(&gid) {
-                        capacity += group.table.len() + group.tombstones.len();
-                    }
-                    capacity += self
-                        .pending_regroup_baseline
-                        .get(&peer)
-                        .map_or(0, |base| base.unicast.len());
-                } else {
-                    if self.peer_has_any_add_path_send(peer)
-                        || self.peer_per_client_best.contains(&peer)
-                    {
-                        capacity += self
-                            .ribs
-                            .values()
-                            .inspect(|_| checkpoint())
-                            .map(AdjRibIn::len)
-                            .sum::<usize>();
-                    }
-                    capacity += self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
+        // Staging can mark members dirty. Check here, before any peer work;
+        // sends below only dirty their own current member, never a later one.
+        // Clean incremental fanout retains its existing synchronous fast path.
+        let replay_handoff = !self.dirty_peers.is_empty() || !self.force_outbound_peers.is_empty();
+        let distribute_peers = || {
+            for peer in peers {
+                checkpoint();
+                // Cold ingest is the path that requires in-pass readiness:
+                // service the dedicated, read-only lane at each peer boundary
+                // without admitting general queries or mutations. Keep the
+                // transition age in direct-drive use so a genuinely stalled
+                // transition still fails closed.
+                if service_ingest_readiness {
+                    let transition_elapsed = self
+                        .pending_clean_policy_transition
+                        .as_ref()
+                        .map(PendingCleanPolicyTransition::elapsed);
+                    self.drain_readiness_queries(transition_elapsed);
                 }
-                capacity += self
-                    .pending_extra_withdraws
-                    .get(&peer)
-                    .map_or(0, |extra| extra.unicast.len());
-                capacity += self.peer_otc_blocked.get(&peer).map_or(0, HashMap::len);
-                self.replacement_checkpoint(true);
-                let mut all = HashSet::with_capacity(capacity);
-                self.replacement_checkpoint(true);
-                all.extend(
-                    self.loc_rib
-                        .iter()
-                        .inspect(|_| checkpoint())
-                        .map(|r| r.prefix),
+                // A session closes its receiver before its queued PeerDown is
+                // handled. Other peers' withdrawals must not prepare more work
+                // for that dead receiver; lifecycle cleanup still owns its state.
+                if self.outbound_channel_gone(peer) {
+                    self.drop_gone_dirty_peer(peer);
+                    continue;
+                }
+                let member_of = self.grouped_member_of(peer);
+                let evpn_group_owned = self.evpn_grouped_member_of(peer).is_some();
+                // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
+                if self.evpn_recovery_reset_pending(peer) {
+                    self.retry_evpn_recovery_reset(peer);
+                    continue;
+                }
+                let is_dirty = self.dirty_peers.contains(&peer);
+                // `is_force` peers are dirty-equivalent for prefix enumeration AND
+                // bypass the AdjRibOut equality suppression in the per-prefix
+                // helpers — see `RibUpdate::RefreshPeerOutbound` rationale on
+                // `force_outbound_peers`.
+                let is_force = self.force_outbound_peers.contains(&peer);
+                let evpn_coverage_required =
+                    evpn_group_owned || self.has_private_evpn_handoff(peer);
+                // A grouped force-only resync intentionally re-announces the
+                // current group table and ignores pass tombstones/deltas. Its
+                // setters synchronously run an empty distribution pass, so it
+                // cannot meet a genuine change pass — an all-affected-only
+                // pass included, since that stages real deltas for
+                // per-client-best groups. A failed force send is
+                // also dirty and is valid here: dirty assembly includes the
+                // tombstones needed to heal subsequent churn.
+                debug_assert!(
+                    member_of.is_none()
+                        || !is_force
+                        || is_dirty
+                        || (best_changed.is_empty() && all_affected.is_empty()),
+                    "a grouped force-only resync cannot share a nonempty distribution pass"
                 );
-                if let Some(gid) = member_of {
-                    // A grouped member's advertised state is the group
-                    // table (plus any pending withdraw residue); the
-                    // per-peer Adj-RIB-Out holds no unicast for it.
-                    if let Some(group) = self.group_ribs.get(&gid) {
+                // Dirty and forced resyncs build the peer's whole table, then
+                // need one free slot. A full channel makes that send certain to
+                // fail, even on the first forced pass. Keep missed-pass residue
+                // and the force flag for the retry; no drop is counted because
+                // nothing was built. Only this actor sends on the channel, so a
+                // free slot seen here is still free at the send.
+                if (is_dirty || is_force) && self.outbound_channel_full(peer) {
+                    debug!(%peer, "outbound channel still full — deferring resync");
+                    self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
+                    continue;
+                }
+                let resync = is_dirty || is_force;
+                // Ingest and direct callers can replay dirty members without a
+                // timer owner. Bound that readiness episode to this transaction,
+                // retaining any existing outer owner's age and selection mode.
+                let installed = resync && self.begin_replacement_readiness();
+                'member: {
+                    let readiness = self.replacement_readiness.clone();
+                    let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+                    let private_evpn_recovery = (resync && !evpn_group_owned)
+                        .then(|| self.evpn_recovery_handle(peer))
+                        .flatten();
+                    let mut complete_evpn_feed = evpn_feeds.remove(&peer);
+                    if complete_evpn_feed.is_none()
+                        && resync
+                        && let Some(gid) = self.evpn_grouped_member_of(peer)
+                        && (is_force || !self.evpn_feed_is_current(peer))
+                        && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
+                    {
+                        // A real missed admission already retained its actual key
+                        // proof. Never reconstruct OLD from the advanced group table.
+                        complete_evpn_feed =
+                            self.prepare_complete_evpn_feed(peer, gid, None, false);
+                    }
+                    #[cfg(test)]
+                    if resync {
+                        self.adj_rib_out_commit_stats.resync_builds = self
+                            .adj_rib_out_commit_stats
+                            .resync_builds
+                            .saturating_add(1);
+                    }
+                    #[cfg(feature = "bench-internals")]
+                    let bench_per_client_best_resync =
+                        resync && self.peer_per_client_best.contains(&peer);
+                    #[cfg(feature = "bench-internals")]
+                    let bench_enumeration_started =
+                        bench_per_client_best_resync.then(std::time::Instant::now);
+                    let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
+                        let mut capacity = self.loc_rib.len();
+                        if let Some(gid) = member_of {
+                            if let Some(group) = self.group_ribs.get(&gid) {
+                                capacity += group.table.len() + group.tombstones.len();
+                            }
+                            capacity += self
+                                .pending_regroup_baseline
+                                .get(&peer)
+                                .map_or(0, |base| base.unicast.len());
+                        } else {
+                            if self.peer_has_any_add_path_send(peer)
+                                || self.peer_per_client_best.contains(&peer)
+                            {
+                                capacity += self
+                                    .ribs
+                                    .values()
+                                    .inspect(|_| checkpoint())
+                                    .map(AdjRibIn::len)
+                                    .sum::<usize>();
+                            }
+                            capacity += self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
+                        }
+                        capacity += self
+                            .pending_extra_withdraws
+                            .get(&peer)
+                            .map_or(0, |extra| extra.unicast.len());
+                        capacity += self.peer_otc_blocked.get(&peer).map_or(0, HashMap::len);
+                        self.replacement_checkpoint(true);
+                        let mut all = HashSet::with_capacity(capacity);
+                        self.replacement_checkpoint(true);
                         all.extend(
-                            group
-                                .table
+                            self.loc_rib
                                 .iter()
                                 .inspect(|_| checkpoint())
                                 .map(|r| r.prefix),
                         );
-                        all.extend(
-                            group
-                                .tombstones
+                        if let Some(gid) = member_of {
+                            // A grouped member's advertised state is the group
+                            // table (plus any pending withdraw residue); the
+                            // per-peer Adj-RIB-Out holds no unicast for it.
+                            if let Some(group) = self.group_ribs.get(&gid) {
+                                all.extend(
+                                    group
+                                        .table
+                                        .iter()
+                                        .inspect(|_| checkpoint())
+                                        .map(|r| r.prefix),
+                                );
+                                all.extend(
+                                    group
+                                        .tombstones
+                                        .iter()
+                                        .inspect(|_| checkpoint())
+                                        .map(|(p, _)| *p),
+                                );
+                            }
+                            if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                                all.extend(
+                                    base.unicast
+                                        .keys()
+                                        .inspect(|_| checkpoint())
+                                        .map(|(p, _)| *p),
+                                );
+                            }
+                        } else {
+                            // For multi-path (and per-client-best — same
+                            // Adj-RIB-In candidate source) dirty resync, also
+                            // include all Adj-RIB-In prefixes
+                            if self.peer_has_any_add_path_send(peer)
+                                || self.peer_per_client_best.contains(&peer)
+                            {
+                                for rib in self.ribs.values() {
+                                    checkpoint();
+                                    all.extend(
+                                        rib.iter().inspect(|_| checkpoint()).map(|r| r.prefix),
+                                    );
+                                }
+                            }
+                            if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                                all.extend(
+                                    rib_out.iter().inspect(|_| checkpoint()).map(|r| r.prefix),
+                                );
+                            }
+                        }
+                        // Extra (over-)withdraw residue keys can be in NONE of
+                        // the sources above (withdrawn while the peer was
+                        // dirty, then carried across a regroup): without them
+                        // a resync can enumerate empty — or skip the keys
+                        // entirely — and the owed withdraws are never emitted.
+                        if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
+                            all.extend(
+                                extras
+                                    .unicast
+                                    .iter()
+                                    .inspect(|_| checkpoint())
+                                    .map(|(prefix, _)| *prefix),
+                            );
+                        }
+                        if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                            let keys = admitted.iter_with_checkpoint(|_| checkpoint());
+                            all.extend(keys.filter_map(|key| match key {
+                                crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
+                                _ => None,
+                            }));
+                        }
+                        if let Some(blocked) = self.peer_otc_blocked.get(&peer) {
+                            all.extend(blocked.keys().inspect(|_| checkpoint()).copied());
+                        }
+                        all.retain(|prefix| {
+                            checkpoint();
+                            !self.selection_deferred(prefix_family(prefix))
+                        });
+                        Cow::Owned(all)
+                    } else if let Some(gid) = member_of {
+                        // Grouped peers have no ORR / Add-Path extras (both are
+                        // grouping disqualifiers). A plain group's deltas cover
+                        // exactly the best-changed set; a per-client-best group
+                        // stages from the widened all-affected set (its winner
+                        // walk reads the candidate list, not the Loc-RIB best),
+                        // so its members' pass scope — the empty-pass gate and
+                        // the filtered-inventory and OTC reconciliations —
+                        // widens the same way.
+                        let group_per_client_best = self
+                            .group_ribs
+                            .get(&gid)
+                            .is_some_and(|group| group.per_client_best);
+                        if group_per_client_best && !all_affected.is_empty() {
+                            let mut prefixes =
+                                HashSet::with_capacity(best_changed.len() + all_affected.len());
+                            prefixes.extend(best_changed.iter().inspect(|_| checkpoint()).copied());
+                            prefixes.extend(all_affected.iter().inspect(|_| checkpoint()).copied());
+                            Cow::Owned(prefixes)
+                        } else {
+                            Cow::Borrowed(&best_changed)
+                        }
+                    } else {
+                        // An RFC 9107 ORR peer selects from the per-target
+                        // candidate set, not the Loc-RIB best — a candidate
+                        // change that leaves the Loc-RIB best untouched can
+                        // still flip the vantage best, so ORR peers stage every
+                        // affected prefix (same reasoning as Add-Path send).
+                        // Per-client-best (RFC 7947 §2.3.2) selects from the
+                        // same per-target candidate set — a candidate change
+                        // can flip the filtered best without moving the Loc-RIB
+                        // best, so those peers stage every affected prefix too.
+                        let peer_has_resolved_orr = self
+                            .peer_orr_vantage
+                            .get(&peer)
+                            .is_some_and(|vantage| self.orr.spf.contains_key(vantage));
+                        let peer_per_client_best = self.peer_per_client_best.contains(&peer);
+                        if !peer_has_resolved_orr
+                            && !peer_per_client_best
+                            && !self.peer_has_any_add_path_send(peer)
+                        {
+                            Cow::Borrowed(&best_changed)
+                        } else {
+                            let extras: Vec<Prefix> = all_affected
                                 .iter()
                                 .inspect(|_| checkpoint())
-                                .map(|(p, _)| *p),
-                        );
-                    }
-                    if let Some(base) = self.pending_regroup_baseline.get(&peer) {
-                        all.extend(
-                            base.unicast
-                                .keys()
-                                .inspect(|_| checkpoint())
-                                .map(|(p, _)| *p),
-                        );
-                    }
-                } else {
-                    // For multi-path (and per-client-best — same
-                    // Adj-RIB-In candidate source) dirty resync, also
-                    // include all Adj-RIB-In prefixes
-                    if self.peer_has_any_add_path_send(peer)
-                        || self.peer_per_client_best.contains(&peer)
-                    {
-                        for rib in self.ribs.values() {
-                            checkpoint();
-                            all.extend(rib.iter().inspect(|_| checkpoint()).map(|r| r.prefix));
-                        }
-                    }
-                    if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                        all.extend(rib_out.iter().inspect(|_| checkpoint()).map(|r| r.prefix));
-                    }
-                }
-                // Extra (over-)withdraw residue keys can be in NONE of
-                // the sources above (withdrawn while the peer was
-                // dirty, then carried across a regroup): without them
-                // a resync can enumerate empty — or skip the keys
-                // entirely — and the owed withdraws are never emitted.
-                if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
-                    all.extend(
-                        extras
-                            .unicast
-                            .iter()
-                            .inspect(|_| checkpoint())
-                            .map(|(prefix, _)| *prefix),
-                    );
-                }
-                if let Some(admitted) = self.pending_group_admitted.get(&peer) {
-                    let keys = admitted.iter_with_checkpoint(|_| checkpoint());
-                    all.extend(keys.filter_map(|key| match key {
-                        crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
-                        _ => None,
-                    }));
-                }
-                if let Some(blocked) = self.peer_otc_blocked.get(&peer) {
-                    all.extend(blocked.keys().inspect(|_| checkpoint()).copied());
-                }
-                all.retain(|prefix| {
-                    checkpoint();
-                    !self.selection_deferred(prefix_family(prefix))
-                });
-                Cow::Owned(all)
-            } else if let Some(gid) = member_of {
-                // Grouped peers have no ORR / Add-Path extras (both are
-                // grouping disqualifiers). A plain group's deltas cover
-                // exactly the best-changed set; a per-client-best group
-                // stages from the widened all-affected set (its winner
-                // walk reads the candidate list, not the Loc-RIB best),
-                // so its members' pass scope — the empty-pass gate and
-                // the filtered-inventory and OTC reconciliations —
-                // widens the same way.
-                let group_per_client_best = self
-                    .group_ribs
-                    .get(&gid)
-                    .is_some_and(|group| group.per_client_best);
-                if group_per_client_best && !all_affected.is_empty() {
-                    let mut prefixes =
-                        HashSet::with_capacity(best_changed.len() + all_affected.len());
-                    prefixes.extend(best_changed.iter().inspect(|_| checkpoint()).copied());
-                    prefixes.extend(all_affected.iter().inspect(|_| checkpoint()).copied());
-                    Cow::Owned(prefixes)
-                } else {
-                    Cow::Borrowed(&best_changed)
-                }
-            } else {
-                // An RFC 9107 ORR peer selects from the per-target
-                // candidate set, not the Loc-RIB best — a candidate
-                // change that leaves the Loc-RIB best untouched can
-                // still flip the vantage best, so ORR peers stage every
-                // affected prefix (same reasoning as Add-Path send).
-                // Per-client-best (RFC 7947 §2.3.2) selects from the
-                // same per-target candidate set — a candidate change
-                // can flip the filtered best without moving the Loc-RIB
-                // best, so those peers stage every affected prefix too.
-                let peer_has_resolved_orr = self
-                    .peer_orr_vantage
-                    .get(&peer)
-                    .is_some_and(|vantage| self.orr.spf.contains_key(vantage));
-                let peer_per_client_best = self.peer_per_client_best.contains(&peer);
-                if !peer_has_resolved_orr
-                    && !peer_per_client_best
-                    && !self.peer_has_any_add_path_send(peer)
-                {
-                    Cow::Borrowed(&best_changed)
-                } else {
-                    let extras: Vec<Prefix> = all_affected
-                        .iter()
-                        .inspect(|_| checkpoint())
-                        .filter(|prefix| {
-                            #[cfg(any(test, feature = "bench-internals"))]
-                            {
-                                self.adj_rib_out_commit_stats.private_extra_prefix_scans = self
-                                    .adj_rib_out_commit_stats
-                                    .private_extra_prefix_scans
-                                    .saturating_add(1);
+                                .filter(|prefix| {
+                                    #[cfg(any(test, feature = "bench-internals"))]
+                                    {
+                                        self.adj_rib_out_commit_stats.private_extra_prefix_scans =
+                                            self.adj_rib_out_commit_stats
+                                                .private_extra_prefix_scans
+                                                .saturating_add(1);
+                                    }
+                                    (peer_has_resolved_orr
+                                        || peer_per_client_best
+                                        || self.add_path_send_max_for_prefix(peer, prefix) > 0)
+                                        && !best_changed.contains(*prefix)
+                                })
+                                .copied()
+                                .collect();
+                            // Common case (no ORR vantage, no Add-Path extras):
+                            // borrow the shared changed set instead of re-hashing a
+                            // per-peer clone of it — this loop runs once per
+                            // outbound peer per distribution pass.
+                            if extras.is_empty() {
+                                Cow::Borrowed(&best_changed)
+                            } else {
+                                let mut prefixes =
+                                    HashSet::with_capacity(best_changed.len() + all_affected.len());
+                                prefixes
+                                    .extend(best_changed.iter().inspect(|_| checkpoint()).copied());
+                                let mut extras = extras;
+                                prefixes.extend(extras.drain(..).inspect(|_| checkpoint()));
+                                super::retire_vec(&mut extras, &mut || checkpoint());
+                                Cow::Owned(prefixes)
                             }
-                            (peer_has_resolved_orr
-                                || peer_per_client_best
-                                || self.add_path_send_max_for_prefix(peer, prefix) > 0)
-                                && !best_changed.contains(*prefix)
-                        })
-                        .copied()
-                        .collect();
-                    // Common case (no ORR vantage, no Add-Path extras):
-                    // borrow the shared changed set instead of re-hashing a
-                    // per-peer clone of it — this loop runs once per
-                    // outbound peer per distribution pass.
-                    if extras.is_empty() {
-                        Cow::Borrowed(&best_changed)
-                    } else {
-                        let mut prefixes =
-                            HashSet::with_capacity(best_changed.len() + all_affected.len());
-                        prefixes.extend(best_changed.iter().inspect(|_| checkpoint()).copied());
-                        let mut extras = extras;
-                        prefixes.extend(extras.drain(..).inspect(|_| checkpoint()));
-                        super::retire_vec(&mut extras, &mut || checkpoint());
-                        Cow::Owned(prefixes)
-                    }
-                }
-            };
-            let mut effective_flowspec_rules: HashSet<crate::route::FlowSpecKey> = if resync {
-                self.replacement_checkpoint(true);
-                let mut all: HashSet<crate::route::FlowSpecKey> = HashSet::with_capacity(
-                    self.loc_rib.flowspec_len()
-                        + self
-                            .adj_ribs_out
-                            .get(&peer)
-                            .map_or(0, AdjRibOut::flowspec_len),
-                );
-                self.replacement_checkpoint(true);
-                all.extend(
-                    self.loc_rib
-                        .iter_flowspec()
-                        .inspect(|_| checkpoint())
-                        .map(crate::route::FlowSpecRoute::selection_key),
-                );
-                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(
-                        rib_out
-                            .iter_flowspec()
-                            .inspect(|_| checkpoint())
-                            .map(crate::route::FlowSpecRoute::selection_key),
-                    );
-                }
-                all.retain(|key| {
-                    checkpoint();
-                    !self.selection_deferred((key.afi, Safi::FlowSpec))
-                });
-                all
-            } else {
-                HashSet::new()
-            };
-
-            let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync {
-                self.replacement_checkpoint(true);
-                let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::with_capacity(
-                    self.loc_rib.evpn_len()
-                        + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::evpn_len),
-                );
-                self.replacement_checkpoint(true);
-                all.extend(
-                    self.loc_rib
-                        .iter_evpn()
-                        .inspect(|_| checkpoint())
-                        .map(crate::route::EvpnRibRoute::key),
-                );
-                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(
-                        rib_out
-                            .iter_evpn()
-                            .inspect(|_| checkpoint())
-                            .map(crate::route::EvpnRibRoute::key),
-                    );
-                }
-                if let Some(handle) = private_evpn_recovery
-                    && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
-                {
-                    all.extend(proof.iter_with_checkpoint(|force| {
-                        super::replacement_readiness_checkpoint(&readiness, force);
-                    }));
-                }
-                if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
-                    super::retire_hash_set(&mut all, &mut || checkpoint());
-                }
-                all
-            } else {
-                HashSet::new()
-            };
-
-            let private_evpn_feed_seal = if resync && !evpn_group_owned {
-                self.private_evpn_feed_seal(peer)
-            } else {
-                None
-            };
-            let mut effective_bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = if resync {
-                self.replacement_checkpoint(true);
-                let mut all: HashSet<crate::route::BgpLsRouteKey> = HashSet::with_capacity(
-                    self.loc_rib.bgpls_len()
-                        + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::bgpls_len),
-                );
-                self.replacement_checkpoint(true);
-                all.extend(
-                    self.loc_rib
-                        .iter_bgpls()
-                        .inspect(|_| checkpoint())
-                        .map(crate::route::BgpLsRibRoute::key),
-                );
-                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(
-                        rib_out
-                            .iter_bgpls()
-                            .inspect(|_| checkpoint())
-                            .map(crate::route::BgpLsRibRoute::key),
-                    );
-                }
-                all.retain(|key| {
-                    checkpoint();
-                    !self.selection_deferred(key.family.to_afi_safi())
-                });
-                all
-            } else {
-                HashSet::new()
-            };
-
-            // A member of a VPN-staging group holds no per-peer VPN
-            // Adj-RIB-Out: its advertised VPN state is the group table
-            // (plus pending withdraw residue), so the resync enumeration
-            // synthesizes from those — mirroring the unicast synthesis
-            // above. (RTC members' Φ is applied by the resync assembly,
-            // not the enumeration — over-enumeration is harmless.)
-            let vpn_grouped = self.vpn_grouped_member_of(peer);
-            let mut effective_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = if resync {
-                self.replacement_checkpoint(true);
-                let mut all: HashSet<rustbgpd_wire::VpnRouteKey> = HashSet::with_capacity(
-                    self.loc_rib.vpn_len()
-                        + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::vpn_len)
-                        + self
-                            .group_ribs
-                            .get(&vpn_grouped.unwrap_or(usize::MAX))
-                            .map_or(0, |group| {
-                                group.table.vpn_len() + group.vpn_tombstones.len()
-                            })
-                        + self
-                            .pending_regroup_baseline
-                            .get(&peer)
-                            .map_or(0, |base| base.vpn.len())
-                        + self
-                            .pending_extra_withdraws
-                            .get(&peer)
-                            .map_or(0, |extra| extra.vpn.len())
-                        + if self.peer_vpn_add_path_send(peer) {
-                            self.ribs
-                                .values()
-                                .inspect(|_| checkpoint())
-                                .map(AdjRibIn::vpn_len)
-                                .sum::<usize>()
-                        } else {
-                            0
-                        },
-                );
-                self.replacement_checkpoint(true);
-                all.extend(
-                    self.loc_rib
-                        .iter_vpn()
-                        .inspect(|_| checkpoint())
-                        .map(|route| route.nlri.key()),
-                );
-                if let Some(gid) = vpn_grouped {
-                    if let Some(group) = self.group_ribs.get(&gid) {
+                        }
+                    };
+                    let mut effective_flowspec_rules: HashSet<crate::route::FlowSpecKey> = if resync
+                    {
+                        self.replacement_checkpoint(true);
+                        let mut all: HashSet<crate::route::FlowSpecKey> = HashSet::with_capacity(
+                            self.loc_rib.flowspec_len()
+                                + self
+                                    .adj_ribs_out
+                                    .get(&peer)
+                                    .map_or(0, AdjRibOut::flowspec_len),
+                        );
+                        self.replacement_checkpoint(true);
                         all.extend(
-                            group
-                                .table
+                            self.loc_rib
+                                .iter_flowspec()
+                                .inspect(|_| checkpoint())
+                                .map(crate::route::FlowSpecRoute::selection_key),
+                        );
+                        if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                            all.extend(
+                                rib_out
+                                    .iter_flowspec()
+                                    .inspect(|_| checkpoint())
+                                    .map(crate::route::FlowSpecRoute::selection_key),
+                            );
+                        }
+                        all.retain(|key| {
+                            checkpoint();
+                            !self.selection_deferred((key.afi, Safi::FlowSpec))
+                        });
+                        all
+                    } else {
+                        HashSet::new()
+                    };
+
+                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync {
+                        self.replacement_checkpoint(true);
+                        let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::with_capacity(
+                            self.loc_rib.evpn_len()
+                                + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::evpn_len),
+                        );
+                        self.replacement_checkpoint(true);
+                        all.extend(
+                            self.loc_rib
+                                .iter_evpn()
+                                .inspect(|_| checkpoint())
+                                .map(crate::route::EvpnRibRoute::key),
+                        );
+                        if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                            all.extend(
+                                rib_out
+                                    .iter_evpn()
+                                    .inspect(|_| checkpoint())
+                                    .map(crate::route::EvpnRibRoute::key),
+                            );
+                        }
+                        if let Some(handle) = private_evpn_recovery
+                            && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
+                        {
+                            all.extend(proof.iter_with_checkpoint(|force| {
+                                super::replacement_readiness_checkpoint(&readiness, force);
+                            }));
+                        }
+                        if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
+                            super::retire_hash_set(&mut all, &mut || checkpoint());
+                        }
+                        all
+                    } else {
+                        HashSet::new()
+                    };
+
+                    let private_evpn_feed_seal = if resync && !evpn_group_owned {
+                        self.private_evpn_feed_seal(peer)
+                    } else {
+                        None
+                    };
+                    let mut effective_bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = if resync {
+                        self.replacement_checkpoint(true);
+                        let mut all: HashSet<crate::route::BgpLsRouteKey> = HashSet::with_capacity(
+                            self.loc_rib.bgpls_len()
+                                + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::bgpls_len),
+                        );
+                        self.replacement_checkpoint(true);
+                        all.extend(
+                            self.loc_rib
+                                .iter_bgpls()
+                                .inspect(|_| checkpoint())
+                                .map(crate::route::BgpLsRibRoute::key),
+                        );
+                        if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                            all.extend(
+                                rib_out
+                                    .iter_bgpls()
+                                    .inspect(|_| checkpoint())
+                                    .map(crate::route::BgpLsRibRoute::key),
+                            );
+                        }
+                        all.retain(|key| {
+                            checkpoint();
+                            !self.selection_deferred(key.family.to_afi_safi())
+                        });
+                        all
+                    } else {
+                        HashSet::new()
+                    };
+
+                    // A member of a VPN-staging group holds no per-peer VPN
+                    // Adj-RIB-Out: its advertised VPN state is the group table
+                    // (plus pending withdraw residue), so the resync enumeration
+                    // synthesizes from those — mirroring the unicast synthesis
+                    // above. (RTC members' Φ is applied by the resync assembly,
+                    // not the enumeration — over-enumeration is harmless.)
+                    let vpn_grouped = self.vpn_grouped_member_of(peer);
+                    let mut effective_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = if resync {
+                        self.replacement_checkpoint(true);
+                        let mut all: HashSet<rustbgpd_wire::VpnRouteKey> = HashSet::with_capacity(
+                            self.loc_rib.vpn_len()
+                                + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::vpn_len)
+                                + self
+                                    .group_ribs
+                                    .get(&vpn_grouped.unwrap_or(usize::MAX))
+                                    .map_or(0, |group| {
+                                        group.table.vpn_len() + group.vpn_tombstones.len()
+                                    })
+                                + self
+                                    .pending_regroup_baseline
+                                    .get(&peer)
+                                    .map_or(0, |base| base.vpn.len())
+                                + self
+                                    .pending_extra_withdraws
+                                    .get(&peer)
+                                    .map_or(0, |extra| extra.vpn.len())
+                                + if self.peer_vpn_add_path_send(peer) {
+                                    self.ribs
+                                        .values()
+                                        .inspect(|_| checkpoint())
+                                        .map(AdjRibIn::vpn_len)
+                                        .sum::<usize>()
+                                } else {
+                                    0
+                                },
+                        );
+                        self.replacement_checkpoint(true);
+                        all.extend(
+                            self.loc_rib
                                 .iter_vpn()
                                 .inspect(|_| checkpoint())
                                 .map(|route| route.nlri.key()),
                         );
-                        all.extend(
-                            group
-                                .vpn_tombstones
-                                .iter()
-                                .inspect(|_| checkpoint())
-                                .copied(),
-                        );
-                    }
-                    if let Some(base) = self.pending_regroup_baseline.get(&peer) {
-                        all.extend(base.vpn.keys().inspect(|_| checkpoint()).copied());
-                    }
-                } else {
-                    // For a VPN Add-Path-send resync, the staged top-N draws from
-                    // every Adj-RIB-In identity, not just the Loc-RIB bests.
-                    if self.peer_vpn_add_path_send(peer) {
-                        for rib in self.ribs.values() {
+                        if let Some(gid) = vpn_grouped {
+                            if let Some(group) = self.group_ribs.get(&gid) {
+                                all.extend(
+                                    group
+                                        .table
+                                        .iter_vpn()
+                                        .inspect(|_| checkpoint())
+                                        .map(|route| route.nlri.key()),
+                                );
+                                all.extend(
+                                    group
+                                        .vpn_tombstones
+                                        .iter()
+                                        .inspect(|_| checkpoint())
+                                        .copied(),
+                                );
+                            }
+                            if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                                all.extend(base.vpn.keys().inspect(|_| checkpoint()).copied());
+                            }
+                        } else {
+                            // For a VPN Add-Path-send resync, the staged top-N draws from
+                            // every Adj-RIB-In identity, not just the Loc-RIB bests.
+                            if self.peer_vpn_add_path_send(peer) {
+                                for rib in self.ribs.values() {
+                                    checkpoint();
+                                    all.extend(
+                                        rib.iter_vpn()
+                                            .inspect(|_| checkpoint())
+                                            .map(|route| route.nlri.key()),
+                                    );
+                                }
+                            }
+                            if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                                all.extend(
+                                    rib_out
+                                        .iter_vpn()
+                                        .inspect(|_| checkpoint())
+                                        .map(|route| route.nlri.key()),
+                                );
+                            }
+                        }
+                        // Same residue rule as the unicast enumeration above.
+                        if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
+                            all.extend(extras.vpn.iter().inspect(|_| checkpoint()).copied());
+                        }
+                        if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                            let keys = admitted.iter_with_checkpoint(|_| checkpoint());
+                            all.extend(keys.filter_map(|key| match key {
+                                crate::update::ExactExportKey::Vpn(key) => Some(key.nlri_key),
+                                _ => None,
+                            }));
+                        }
+                        all.retain(|key| {
                             checkpoint();
+                            let family = match key.prefix.family() {
+                                rustbgpd_wire::VpnAddressFamily::V4 => (Afi::Ipv4, Safi::MplsVpn),
+                                rustbgpd_wire::VpnAddressFamily::V6 => (Afi::Ipv6, Safi::MplsVpn),
+                            };
+                            !self.selection_deferred(family)
+                        });
+                        all
+                    } else {
+                        HashSet::new()
+                    };
+
+                    let mut effective_labeled_keys: HashSet<Prefix> = if resync {
+                        self.replacement_checkpoint(true);
+                        let mut all: HashSet<Prefix> = HashSet::with_capacity(
+                            self.loc_rib.labeled_len()
+                                + self
+                                    .adj_ribs_out
+                                    .get(&peer)
+                                    .map_or(0, AdjRibOut::labeled_len)
+                                + if self.peer_labeled_add_path_send(peer) {
+                                    self.ribs
+                                        .values()
+                                        .inspect(|_| checkpoint())
+                                        .map(AdjRibIn::labeled_len)
+                                        .sum::<usize>()
+                                } else {
+                                    0
+                                },
+                        );
+                        self.replacement_checkpoint(true);
+                        all.extend(
+                            self.loc_rib
+                                .iter_labeled()
+                                .inspect(|_| checkpoint())
+                                .map(|route| route.nlri.key()),
+                        );
+                        // For a labeled Add-Path-send resync, the staged top-N draws
+                        // from every Adj-RIB-In identity, not just the Loc-RIB bests.
+                        if self.peer_labeled_add_path_send(peer) {
+                            for rib in self.ribs.values() {
+                                checkpoint();
+                                all.extend(
+                                    rib.iter_labeled()
+                                        .inspect(|_| checkpoint())
+                                        .map(|route| route.nlri.key()),
+                                );
+                            }
+                        }
+                        if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
                             all.extend(
-                                rib.iter_vpn()
+                                rib_out
+                                    .iter_labeled()
                                     .inspect(|_| checkpoint())
                                     .map(|route| route.nlri.key()),
                             );
                         }
-                    }
-                    if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                        all.extend(
-                            rib_out
-                                .iter_vpn()
-                                .inspect(|_| checkpoint())
-                                .map(|route| route.nlri.key()),
-                        );
-                    }
-                }
-                // Same residue rule as the unicast enumeration above.
-                if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
-                    all.extend(extras.vpn.iter().inspect(|_| checkpoint()).copied());
-                }
-                if let Some(admitted) = self.pending_group_admitted.get(&peer) {
-                    let keys = admitted.iter_with_checkpoint(|_| checkpoint());
-                    all.extend(keys.filter_map(|key| match key {
-                        crate::update::ExactExportKey::Vpn(key) => Some(key.nlri_key),
-                        _ => None,
-                    }));
-                }
-                all.retain(|key| {
-                    checkpoint();
-                    let family = match key.prefix.family() {
-                        rustbgpd_wire::VpnAddressFamily::V4 => (Afi::Ipv4, Safi::MplsVpn),
-                        rustbgpd_wire::VpnAddressFamily::V6 => (Afi::Ipv6, Safi::MplsVpn),
+                        all.retain(|prefix| {
+                            checkpoint();
+                            let afi = match prefix {
+                                Prefix::V4(_) => Afi::Ipv4,
+                                Prefix::V6(_) => Afi::Ipv6,
+                            };
+                            !self.selection_deferred((afi, Safi::LabeledUnicast))
+                        });
+                        all
+                    } else {
+                        HashSet::new()
                     };
-                    !self.selection_deferred(family)
-                });
-                all
-            } else {
-                HashSet::new()
-            };
 
-            let mut effective_labeled_keys: HashSet<Prefix> = if resync {
-                self.replacement_checkpoint(true);
-                let mut all: HashSet<Prefix> = HashSet::with_capacity(
-                    self.loc_rib.labeled_len()
-                        + self
-                            .adj_ribs_out
-                            .get(&peer)
-                            .map_or(0, AdjRibOut::labeled_len)
-                        + if self.peer_labeled_add_path_send(peer) {
-                            self.ribs
-                                .values()
-                                .inspect(|_| checkpoint())
-                                .map(AdjRibIn::labeled_len)
-                                .sum::<usize>()
-                        } else {
-                            0
-                        },
-                );
-                self.replacement_checkpoint(true);
-                all.extend(
-                    self.loc_rib
-                        .iter_labeled()
-                        .inspect(|_| checkpoint())
-                        .map(|route| route.nlri.key()),
-                );
-                // For a labeled Add-Path-send resync, the staged top-N draws
-                // from every Adj-RIB-In identity, not just the Loc-RIB bests.
-                if self.peer_labeled_add_path_send(peer) {
-                    for rib in self.ribs.values() {
-                        checkpoint();
+                    let mut effective_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = if resync {
+                        self.replacement_checkpoint(true);
+                        let mut all: HashSet<crate::route::RtcRibRouteKey> = HashSet::with_capacity(
+                            self.loc_rib.rtc_len()
+                                + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::rtc_len),
+                        );
+                        self.replacement_checkpoint(true);
                         all.extend(
-                            rib.iter_labeled()
+                            self.loc_rib
+                                .iter_rtc()
                                 .inspect(|_| checkpoint())
-                                .map(|route| route.nlri.key()),
+                                .map(crate::route::RtcRibRoute::key),
                         );
-                    }
-                }
-                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(
-                        rib_out
-                            .iter_labeled()
-                            .inspect(|_| checkpoint())
-                            .map(|route| route.nlri.key()),
-                    );
-                }
-                all.retain(|prefix| {
-                    checkpoint();
-                    let afi = match prefix {
-                        Prefix::V4(_) => Afi::Ipv4,
-                        Prefix::V6(_) => Afi::Ipv6,
-                    };
-                    !self.selection_deferred((afi, Safi::LabeledUnicast))
-                });
-                all
-            } else {
-                HashSet::new()
-            };
-
-            let mut effective_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = if resync {
-                self.replacement_checkpoint(true);
-                let mut all: HashSet<crate::route::RtcRibRouteKey> = HashSet::with_capacity(
-                    self.loc_rib.rtc_len()
-                        + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::rtc_len),
-                );
-                self.replacement_checkpoint(true);
-                all.extend(
-                    self.loc_rib
-                        .iter_rtc()
-                        .inspect(|_| checkpoint())
-                        .map(crate::route::RtcRibRoute::key),
-                );
-                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(
-                        rib_out
-                            .iter_rtc()
-                            .inspect(|_| checkpoint())
-                            .map(crate::route::RtcRibRoute::key),
-                    );
-                }
-                if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
-                    super::retire_hash_set(&mut all, &mut || checkpoint());
-                }
-                all
-            } else {
-                HashSet::new()
-            };
-            #[cfg(feature = "bench-internals")]
-            if let Some(started) = bench_enumeration_started {
-                super::bench_support::bench_record_per_client_best_enumeration(
-                    effective_prefixes.len(),
-                    started.elapsed(),
-                );
-            }
-
-            if let Cow::Owned(prefixes) = &effective_prefixes {
-                self.replacement_capacity(
-                    "effective_prefixes",
-                    prefixes.len(),
-                    prefixes.capacity(),
-                );
-            }
-            self.replacement_capacity(
-                "effective_flowspec",
-                effective_flowspec_rules.len(),
-                effective_flowspec_rules.capacity(),
-            );
-            self.replacement_capacity(
-                "effective_evpn",
-                effective_evpn_keys.len(),
-                effective_evpn_keys.capacity(),
-            );
-            self.replacement_capacity(
-                "effective_bgpls",
-                effective_bgpls_keys.len(),
-                effective_bgpls_keys.capacity(),
-            );
-            self.replacement_capacity(
-                "effective_vpn",
-                effective_l3vpn_keys.len(),
-                effective_l3vpn_keys.capacity(),
-            );
-            self.replacement_capacity(
-                "effective_labeled",
-                effective_labeled_keys.len(),
-                effective_labeled_keys.capacity(),
-            );
-            self.replacement_capacity(
-                "effective_rtc",
-                effective_rtc_keys.len(),
-                effective_rtc_keys.capacity(),
-            );
-            if effective_prefixes.is_empty()
-                && effective_flowspec_rules.is_empty()
-                && effective_evpn_keys.is_empty()
-                && effective_bgpls_keys.is_empty()
-                && effective_l3vpn_keys.is_empty()
-                && effective_labeled_keys.is_empty()
-                && effective_rtc_keys.is_empty()
-                && complete_evpn_feed.is_none()
-                && private_evpn_feed_seal.is_none()
-            {
-                // An empty force/dirty resync replaces this peer's complete
-                // export view, so an empty filtered inventory is
-                // authoritative. An uninvolved sibling in the same
-                // empty-input pass was not re-evaluated: preserve its
-                // retained policy-denial inventory.
-                if resync {
-                    self.clear_policy_filtered_routes_for_peer(peer);
-                }
-                // Resync flags must clear here too — otherwise a
-                // force-only refresh on a peer with no exportable
-                // routes would leave `force_outbound_peers` populated,
-                // and the next unrelated dirty resync (or another
-                // RefreshPeerOutbound for a different reason) would
-                // accidentally inherit the bypass-equality-suppression
-                // semantics. Same shape for `dirty_peers` for symmetry.
-                // The residue drop is safe here: pending extra
-                // withdraws feed the enumerations above, so an empty
-                // enumeration proves there is no residue to emit.
-                if is_dirty {
-                    self.dirty_peers.remove(&peer);
-                    self.clear_grouped_member_synced(peer);
-                }
-                if is_force {
-                    self.force_outbound_peers.remove(&peer);
-                }
-                super::retire_hash_set(&mut effective_flowspec_rules, &mut || checkpoint());
-                super::retire_hash_set(&mut effective_evpn_keys, &mut || checkpoint());
-                super::retire_hash_set(&mut effective_bgpls_keys, &mut || checkpoint());
-                super::retire_hash_set(&mut effective_l3vpn_keys, &mut || checkpoint());
-                super::retire_hash_set(&mut effective_labeled_keys, &mut || checkpoint());
-                super::retire_hash_set(&mut effective_rtc_keys, &mut || checkpoint());
-                if let Cow::Owned(prefixes) = &mut effective_prefixes {
-                    super::retire_hash_set(prefixes, &mut || checkpoint());
-                }
-                self.replacement_checkpoint(true);
-                continue;
-            }
-
-            #[cfg(feature = "bench-internals")]
-            let bench_staging_started = bench_per_client_best_resync.then(std::time::Instant::now);
-            let mut unicast = UnicastDistributionResult::default();
-            if member_of.is_none() || resync {
-                unicast.announce.reserve(effective_prefixes.len());
-                unicast.next_hop_override.reserve(effective_prefixes.len());
-                unicast.withdraw.reserve(effective_prefixes.len());
-            }
-            self.replacement_checkpoint(true);
-            // Set for an in-sync grouped member covered by the group's
-            // pre-built shared emission: the announce payload is an Arc
-            // clone shared across members, not a per-member Vec build.
-            let mut shared_unicast: Option<super::update_groups::SharedUnicastPayload> = None;
-            let mut unicast_otc_prechecked = false;
-            let mut announce_source_exclusion = None;
-            let mut shared_group_encode = None;
-            let mut fs_announce = Vec::new();
-            let mut fs_withdraw = Vec::new();
-            let mut evpn_announce = Vec::new();
-            let mut evpn_withdraw = Vec::new();
-            let mut bgpls_announce = Vec::new();
-            let mut bgpls_withdraw = Vec::new();
-            let mut vpn_announce = Vec::new();
-            let mut vpn_withdraw = Vec::new();
-            let mut labeled_announce = Vec::new();
-            let mut labeled_withdraw = Vec::new();
-            let mut rtc_announce = Vec::new();
-            let mut rtc_withdraw = Vec::new();
-            let mut group_otc_blocked = Vec::new();
-            let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
-                HashSet::with_capacity(effective_prefixes.len());
-
-            // Grouped member: the unicast portion comes from the group —
-            // source-flip matrix over this pass's deltas for a clean
-            // member, full-table replay (tombstone withdraws / regroup
-            // one-shot diff) for a resyncing one. No per-prefix staging,
-            // no policy eval: the shared group pass already ran once.
-            // Non-unicast families ride the per-peer path below
-            // unchanged, in the same OutboundRouteUpdate.
-            if let Some(gid) = member_of {
-                // The member's Φ: the VPN resync assembles under the
-                // CURRENT filter — the member may have gone dirty across
-                // a Φ change, which is why the membership-delta path
-                // defers to this (design §2.4).
-                let member_filter = self.member_rt_filter(peer);
-                // The member's rs-control context (LAN-474): per-target
-                // divergence for tagged routes applies at every grouped
-                // emit seam below; untagged routes emit exactly the
-                // shared shape.
-                let rs_control = self
-                    .peer_rs_control
-                    .get(&peer)
-                    .copied()
-                    .zip(self.peer_asn.get(&peer).copied());
-                if resync && !self.pending_group_admitted.contains_key(&peer) {
-                    self.set_group_recovery_fallback(
-                        peer,
-                        super::update_groups::RecoveryFallbackCause::MissingProof,
-                    );
-                }
-                if let Some(group) = self.group_ribs.get(&gid) {
-                    unicast_otc_prechecked = !group.per_client_best;
-                    if resync {
-                        Self::assemble_group_resync(
-                            group,
-                            peer,
-                            rs_control,
-                            is_dirty,
-                            is_force,
-                            self.pending_regroup_baseline
-                                .get(&peer)
-                                .map(|base| &base.unicast),
-                            self.pending_regroup_baseline
-                                .get(&peer)
-                                .map(|base| &base.next_hop_overrides),
-                            self.pending_extra_withdraws
-                                .get(&peer)
-                                .map(|extras| &extras.unicast),
-                            self.pending_group_admitted.get(&peer),
-                            &mut unicast.announce,
-                            &mut unicast.withdraw,
-                            &mut unicast.next_hop_override,
-                            &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
-                        );
-                        // VPN portion of the resync, from the group's VPN
-                        // maps under the member's Φ; the per-peer VPN
-                        // staging below is skipped for these members
-                        // (`vpn_grouped` gate).
-                        if group.stages_vpn() {
-                            Self::assemble_group_vpn_resync(
-                                group,
-                                peer,
-                                member_filter.as_ref(),
-                                is_dirty,
-                                is_force,
-                                self.pending_regroup_baseline
-                                    .get(&peer)
-                                    .map(|base| &base.vpn),
-                                self.pending_extra_withdraws
-                                    .get(&peer)
-                                    .map(|extras| &extras.vpn),
-                                self.pending_group_admitted.get(&peer),
-                                &mut vpn_announce,
-                                &mut vpn_withdraw,
-                                &mut |force| {
-                                    super::replacement_readiness_checkpoint(&readiness, force);
-                                },
+                        if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                            all.extend(
+                                rib_out
+                                    .iter_rtc()
+                                    .inspect(|_| checkpoint())
+                                    .map(crate::route::RtcRibRoute::key),
                             );
                         }
-                    } else if let Some(stage) = group_stage.get(&gid) {
-                        // An rs-control member shares the pre-built
-                        // emission unless this pass staged a tagged
-                        // route or tag-only transition (memoized scan)
-                        // — then its announce/withdraw set can diverge
-                        // per target and it walks the matrix itself.
-                        let rs_diverges = rs_control.is_some_and(|(rs_asn, _)| {
-                            *rs_tagged_pass.entry((gid, rs_asn)).or_insert_with(|| {
-                                stage.has_tagged_route_with_checkpoint(rs_asn, &mut || checkpoint())
-                            })
-                        });
-                        let shared_exact = stage.shared_applies_to(peer);
-                        let shared_with_source_exclusion = !shared_exact
-                            && stage.shared_applies_with_source_exclusion(peer)
-                            && stage.shared_has_payload_after_source_exclusion(peer);
-                        if (shared_exact || shared_with_source_exclusion) && !rs_diverges {
-                            #[cfg(feature = "bench-internals")]
-                            {
-                                bench_grouped_paths.0 += 1;
-                            }
-                            // Common case: this member's matrix output IS
-                            // the shared emission after transport omits any
-                            // newly staged own-source routes. Enqueue Arc
-                            // clones and one encode cell for the whole group.
-                            shared_unicast =
-                                Some((stage.shared_announce.clone(), stage.shared_nh.clone()));
-                            announce_source_exclusion =
-                                shared_with_source_exclusion.then_some(peer);
-                            shared_group_encode =
-                                Some(Arc::clone(shared_group_encodes.entry(gid).or_insert_with(
-                                    || Arc::new(crate::update::SharedGroupEncode::default()),
-                                )));
-                            unicast.withdraw.extend_from_slice(&stage.shared_withdraw);
-                        } else {
-                            #[cfg(feature = "bench-internals")]
-                            {
-                                bench_grouped_paths.1 += 1;
-                            }
-                            super::update_groups::emit_group_deltas_for_member_with_checkpoint(
+                        if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
+                            super::retire_hash_set(&mut all, &mut || checkpoint());
+                        }
+                        all
+                    } else {
+                        HashSet::new()
+                    };
+                    #[cfg(feature = "bench-internals")]
+                    if let Some(started) = bench_enumeration_started {
+                        super::bench_support::bench_record_per_client_best_enumeration(
+                            effective_prefixes.len(),
+                            started.elapsed(),
+                        );
+                    }
+
+                    if let Cow::Owned(prefixes) = &effective_prefixes {
+                        self.replacement_capacity(
+                            "effective_prefixes",
+                            prefixes.len(),
+                            prefixes.capacity(),
+                        );
+                    }
+                    self.replacement_capacity(
+                        "effective_flowspec",
+                        effective_flowspec_rules.len(),
+                        effective_flowspec_rules.capacity(),
+                    );
+                    self.replacement_capacity(
+                        "effective_evpn",
+                        effective_evpn_keys.len(),
+                        effective_evpn_keys.capacity(),
+                    );
+                    self.replacement_capacity(
+                        "effective_bgpls",
+                        effective_bgpls_keys.len(),
+                        effective_bgpls_keys.capacity(),
+                    );
+                    self.replacement_capacity(
+                        "effective_vpn",
+                        effective_l3vpn_keys.len(),
+                        effective_l3vpn_keys.capacity(),
+                    );
+                    self.replacement_capacity(
+                        "effective_labeled",
+                        effective_labeled_keys.len(),
+                        effective_labeled_keys.capacity(),
+                    );
+                    self.replacement_capacity(
+                        "effective_rtc",
+                        effective_rtc_keys.len(),
+                        effective_rtc_keys.capacity(),
+                    );
+                    if effective_prefixes.is_empty()
+                        && effective_flowspec_rules.is_empty()
+                        && effective_evpn_keys.is_empty()
+                        && effective_bgpls_keys.is_empty()
+                        && effective_l3vpn_keys.is_empty()
+                        && effective_labeled_keys.is_empty()
+                        && effective_rtc_keys.is_empty()
+                        && complete_evpn_feed.is_none()
+                        && private_evpn_feed_seal.is_none()
+                    {
+                        // An empty force/dirty resync replaces this peer's complete
+                        // export view, so an empty filtered inventory is
+                        // authoritative. An uninvolved sibling in the same
+                        // empty-input pass was not re-evaluated: preserve its
+                        // retained policy-denial inventory.
+                        if resync {
+                            self.clear_policy_filtered_routes_for_peer(peer);
+                        }
+                        // Resync flags must clear here too — otherwise a
+                        // force-only refresh on a peer with no exportable
+                        // routes would leave `force_outbound_peers` populated,
+                        // and the next unrelated dirty resync (or another
+                        // RefreshPeerOutbound for a different reason) would
+                        // accidentally inherit the bypass-equality-suppression
+                        // semantics. Same shape for `dirty_peers` for symmetry.
+                        // The residue drop is safe here: pending extra
+                        // withdraws feed the enumerations above, so an empty
+                        // enumeration proves there is no residue to emit.
+                        if is_dirty {
+                            self.dirty_peers.remove(&peer);
+                            self.clear_grouped_member_synced(peer);
+                        }
+                        if is_force {
+                            self.force_outbound_peers.remove(&peer);
+                        }
+                        super::retire_hash_set(&mut effective_flowspec_rules, &mut || checkpoint());
+                        super::retire_hash_set(&mut effective_evpn_keys, &mut || checkpoint());
+                        super::retire_hash_set(&mut effective_bgpls_keys, &mut || checkpoint());
+                        super::retire_hash_set(&mut effective_l3vpn_keys, &mut || checkpoint());
+                        super::retire_hash_set(&mut effective_labeled_keys, &mut || checkpoint());
+                        super::retire_hash_set(&mut effective_rtc_keys, &mut || checkpoint());
+                        if let Cow::Owned(prefixes) = &mut effective_prefixes {
+                            super::retire_hash_set(prefixes, &mut || checkpoint());
+                        }
+                        self.replacement_checkpoint(true);
+                        break 'member;
+                    }
+
+                    #[cfg(feature = "bench-internals")]
+                    let bench_staging_started =
+                        bench_per_client_best_resync.then(std::time::Instant::now);
+                    let mut unicast = UnicastDistributionResult::default();
+                    if member_of.is_none() || resync {
+                        unicast.announce.reserve(effective_prefixes.len());
+                        unicast.next_hop_override.reserve(effective_prefixes.len());
+                        unicast.withdraw.reserve(effective_prefixes.len());
+                    }
+                    self.replacement_checkpoint(true);
+                    // Set for an in-sync grouped member covered by the group's
+                    // pre-built shared emission: the announce payload is an Arc
+                    // clone shared across members, not a per-member Vec build.
+                    let mut shared_unicast: Option<super::update_groups::SharedUnicastPayload> =
+                        None;
+                    let mut unicast_otc_prechecked = false;
+                    let mut announce_source_exclusion = None;
+                    let mut shared_group_encode = None;
+                    let mut fs_announce = Vec::new();
+                    let mut fs_withdraw = Vec::new();
+                    let mut evpn_announce = Vec::new();
+                    let mut evpn_withdraw = Vec::new();
+                    let mut bgpls_announce = Vec::new();
+                    let mut bgpls_withdraw = Vec::new();
+                    let mut vpn_announce = Vec::new();
+                    let mut vpn_withdraw = Vec::new();
+                    let mut labeled_announce = Vec::new();
+                    let mut labeled_withdraw = Vec::new();
+                    let mut rtc_announce = Vec::new();
+                    let mut rtc_withdraw = Vec::new();
+                    let mut group_otc_blocked = Vec::new();
+                    let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
+                        HashSet::with_capacity(effective_prefixes.len());
+
+                    // Grouped member: the unicast portion comes from the group —
+                    // source-flip matrix over this pass's deltas for a clean
+                    // member, full-table replay (tombstone withdraws / regroup
+                    // one-shot diff) for a resyncing one. No per-prefix staging,
+                    // no policy eval: the shared group pass already ran once.
+                    // Non-unicast families ride the per-peer path below
+                    // unchanged, in the same OutboundRouteUpdate.
+                    if let Some(gid) = member_of {
+                        // The member's Φ: the VPN resync assembles under the
+                        // CURRENT filter — the member may have gone dirty across
+                        // a Φ change, which is why the membership-delta path
+                        // defers to this (design §2.4).
+                        let member_filter = self.member_rt_filter(peer);
+                        // The member's rs-control context (LAN-474): per-target
+                        // divergence for tagged routes applies at every grouped
+                        // emit seam below; untagged routes emit exactly the
+                        // shared shape.
+                        let rs_control = self
+                            .peer_rs_control
+                            .get(&peer)
+                            .copied()
+                            .zip(self.peer_asn.get(&peer).copied());
+                        if resync && !self.pending_group_admitted.contains_key(&peer) {
+                            self.set_group_recovery_fallback(
+                                peer,
+                                super::update_groups::RecoveryFallbackCause::MissingProof,
+                            );
+                        }
+                        if let Some(group) = self.group_ribs.get(&gid) {
+                            unicast_otc_prechecked = !group.per_client_best;
+                            if resync {
+                                Self::assemble_group_resync(
+                                    group,
+                                    peer,
+                                    rs_control,
+                                    is_dirty,
+                                    is_force,
+                                    self.pending_regroup_baseline
+                                        .get(&peer)
+                                        .map(|base| &base.unicast),
+                                    self.pending_regroup_baseline
+                                        .get(&peer)
+                                        .map(|base| &base.next_hop_overrides),
+                                    self.pending_extra_withdraws
+                                        .get(&peer)
+                                        .map(|extras| &extras.unicast),
+                                    self.pending_group_admitted.get(&peer),
+                                    &mut unicast.announce,
+                                    &mut unicast.withdraw,
+                                    &mut unicast.next_hop_override,
+                                    &mut |force| {
+                                        super::replacement_readiness_checkpoint(&readiness, force);
+                                    },
+                                );
+                                // VPN portion of the resync, from the group's VPN
+                                // maps under the member's Φ; the per-peer VPN
+                                // staging below is skipped for these members
+                                // (`vpn_grouped` gate).
+                                if group.stages_vpn() {
+                                    Self::assemble_group_vpn_resync(
+                                        group,
+                                        peer,
+                                        member_filter.as_ref(),
+                                        is_dirty,
+                                        is_force,
+                                        self.pending_regroup_baseline
+                                            .get(&peer)
+                                            .map(|base| &base.vpn),
+                                        self.pending_extra_withdraws
+                                            .get(&peer)
+                                            .map(|extras| &extras.vpn),
+                                        self.pending_group_admitted.get(&peer),
+                                        &mut vpn_announce,
+                                        &mut vpn_withdraw,
+                                        &mut |force| {
+                                            super::replacement_readiness_checkpoint(
+                                                &readiness, force,
+                                            );
+                                        },
+                                    );
+                                }
+                            } else if let Some(stage) = group_stage.get(&gid) {
+                                // An rs-control member shares the pre-built
+                                // emission unless this pass staged a tagged
+                                // route or tag-only transition (memoized scan)
+                                // — then its announce/withdraw set can diverge
+                                // per target and it walks the matrix itself.
+                                let rs_diverges = rs_control.is_some_and(|(rs_asn, _)| {
+                                    *rs_tagged_pass.entry((gid, rs_asn)).or_insert_with(|| {
+                                        stage.has_tagged_route_with_checkpoint(rs_asn, &mut || {
+                                            checkpoint();
+                                        })
+                                    })
+                                });
+                                let shared_exact = stage.shared_applies_to(peer);
+                                let shared_with_source_exclusion = !shared_exact
+                                    && stage.shared_applies_with_source_exclusion(peer)
+                                    && stage.shared_has_payload_after_source_exclusion(peer);
+                                if (shared_exact || shared_with_source_exclusion) && !rs_diverges {
+                                    #[cfg(feature = "bench-internals")]
+                                    {
+                                        bench_grouped_paths.0 += 1;
+                                    }
+                                    // Common case: this member's matrix output IS
+                                    // the shared emission after transport omits any
+                                    // newly staged own-source routes. Enqueue Arc
+                                    // clones and one encode cell for the whole group.
+                                    shared_unicast = Some((
+                                        stage.shared_announce.clone(),
+                                        stage.shared_nh.clone(),
+                                    ));
+                                    announce_source_exclusion =
+                                        shared_with_source_exclusion.then_some(peer);
+                                    shared_group_encode = Some(Arc::clone(
+                                        shared_group_encodes.entry(gid).or_insert_with(|| {
+                                            Arc::new(crate::update::SharedGroupEncode::default())
+                                        }),
+                                    ));
+                                    unicast.withdraw.extend_from_slice(&stage.shared_withdraw);
+                                } else {
+                                    #[cfg(feature = "bench-internals")]
+                                    {
+                                        bench_grouped_paths.1 += 1;
+                                    }
+                                    super::update_groups::emit_group_deltas_for_member_with_checkpoint(
                                 &stage.deltas,
                                 peer,
                                 rs_control,
@@ -7833,13 +7865,13 @@ impl RibManager {
                                 &mut unicast.next_hop_override,
                                 &mut || checkpoint(),
                             );
-                            // ADR-0126 Decision 5 lane arm: a
-                            // member-scoped emission toward the ONE
-                            // member each lane transition names
-                            // (`source(w)`); a no-op for everyone
-                            // else and for plain groups (no lane
-                            // deltas exist).
-                            super::update_groups::emit_lane_deltas_for_member_with_checkpoint(
+                                    // ADR-0126 Decision 5 lane arm: a
+                                    // member-scoped emission toward the ONE
+                                    // member each lane transition names
+                                    // (`source(w)`); a no-op for everyone
+                                    // else and for plain groups (no lane
+                                    // deltas exist).
+                                    super::update_groups::emit_lane_deltas_for_member_with_checkpoint(
                                 &stage.lane_deltas,
                                 peer,
                                 rs_control,
@@ -7848,854 +7880,897 @@ impl RibManager {
                                 &mut unicast.next_hop_override,
                                 &mut || checkpoint(),
                             );
-                            super::update_groups::emit_rs_tag_transitions_with_checkpoint(
-                                &stage.rs_transitions,
+                                    super::update_groups::emit_rs_tag_transitions_with_checkpoint(
+                                        &stage.rs_transitions,
+                                        peer,
+                                        rs_control,
+                                        &mut unicast.announce,
+                                        &mut unicast.withdraw,
+                                        &mut unicast.next_hop_override,
+                                        &mut || checkpoint(),
+                                    );
+                                }
+                            }
+                            let mut filtered = group.policy_filtered_for_member_with_checkpoint(
                                 peer,
-                                rs_control,
-                                &mut unicast.announce,
-                                &mut unicast.withdraw,
-                                &mut unicast.next_hop_override,
+                                &effective_prefixes,
                                 &mut || checkpoint(),
+                            );
+                            current_policy_filtered_routes.reserve(filtered.len());
+                            current_policy_filtered_routes
+                                .extend(filtered.drain(..).inspect(|_| checkpoint()));
+                            super::retire_vec(&mut filtered, &mut || checkpoint());
+                            group_otc_blocked = if resync {
+                                group.otc_blocked_for_member_with_checkpoint(
+                                    peer,
+                                    None,
+                                    &mut || {
+                                        checkpoint();
+                                    },
+                                )
+                            } else if group.per_client_best {
+                                // The staging pass just refreshed the residue for
+                                // exactly its staged prefixes, and the residue
+                                // derivation substitutes the lane runner-up toward
+                                // `source(w)` — the per-member outcome of the
+                                // pre-commit backstop (ADR-0126), which the flat
+                                // pass vector below cannot express.
+                                group.otc_blocked_for_member_with_checkpoint(
+                                    peer,
+                                    Some(&effective_prefixes),
+                                    &mut || checkpoint(),
+                                )
+                            } else {
+                                group_stage
+                                    .get(&gid)
+                                    .into_iter()
+                                    .inspect(|_| checkpoint())
+                                    .flat_map(|stage| {
+                                        stage.otc_blocked.iter().inspect(|_| checkpoint())
+                                    })
+                                    .filter(|route| route.peer != peer)
+                                    .cloned()
+                                    .collect()
+                            };
+                        }
+                        // Per-member export-policy counters — integer adds, no
+                        // per-(prefix × peer) work. A clean pass takes the group
+                        // verdict delta; a resync (dirty or force) replays
+                        // join-style full-table counters, matching the ungrouped
+                        // per-prefix staging path which re-records every Loc-RIB
+                        // entry on resync (LAN-210).
+                        if resync {
+                            self.apply_group_join_counters(peer, gid, None);
+                        } else if let Some(stage) = group_stage.get(&gid) {
+                            self.apply_group_policy_counters(peer, &stage.evals);
+                        }
+                    }
+                    if member_of.is_some() {
+                        self.reconcile_peer_otc_blocked(
+                            peer,
+                            &effective_prefixes,
+                            group_otc_blocked,
+                        );
+                    }
+
+                    // Resolve export policy, sendable families, and RR state before
+                    // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
+                    let export_pol = self
+                        .export_policy_for(peer)
+                        .map(rustbgpd_policy::PolicyChain::share);
+                    let sendable = self.peer_sendable_families.get(&peer).cloned();
+                    let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
+                    let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+                    let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
+                    let rs_control_asn = self.peer_rs_control.get(&peer).copied();
+                    let target_is_rr_client =
+                        self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+                    let target_peer_asn = self.peer_asn.get(&peer).copied();
+                    let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
+                    let cluster_id = self.cluster_id;
+                    let peer_add_path_send_max =
+                        self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
+                    let peer_add_path_send_limits = self
+                        .peer_add_path_send_limits
+                        .get(&peer)
+                        .cloned()
+                        .unwrap_or_default();
+                    let peer_add_path_send_families = self
+                        .peer_add_path_send_families
+                        .get(&peer)
+                        .cloned()
+                        .unwrap_or_default();
+                    // ORF state, resolved before the &mut rib_out borrow below. Cloning
+                    // is cheap: ORF filters are small and present only for peers that
+                    // negotiated ORF (None for everyone else).
+                    let orf_filters = self.peer_orf_filters.get(&peer).cloned();
+                    // ADR-0137 conditional-advertisement gate; `None` unless an
+                    // attached definition is suppressing (or pending).
+                    let conditional = self.conditional_gate(peer, false);
+                    // RFC 9107 ORR: a peer bound to a vantage that resolved this
+                    // pass takes the per-vantage best below; an unresolved
+                    // vantage silently falls back to the standard single-best
+                    // (the status is surfaced by `rbgp orr`).
+                    let orr_ctx = self
+                        .peer_orr_vantage
+                        .get(&peer)
+                        .and_then(|vantage| self.orr.spf.get(vantage))
+                        .map(|spf| (&self.orr.topology, spf));
+                    let per_client_best = self.peer_per_client_best.contains(&peer);
+                    let rtc_filter = self.rtc_export_filter(peer, sendable.as_ref());
+                    let orf_gated = self
+                        .peer_orf_pending
+                        .get(&peer)
+                        .cloned()
+                        .unwrap_or_default();
+                    let loc_rib = &self.loc_rib;
+                    let loc_rib_len = loc_rib.len();
+                    let target_peer_label = peer.to_string();
+                    let policy_stats = self.export_policy_stats.entry(peer).or_default();
+
+                    let rib_out = self
+                        .adj_ribs_out
+                        .entry(peer)
+                        .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
+
+                    // Stage: compute delta without mutating AdjRibOut. Grouped
+                    // members skip the per-prefix staging wholesale — their
+                    // unicast update was assembled from the group table above.
+                    let empty_prefixes: HashSet<Prefix> = HashSet::new();
+                    let staging_prefixes: &HashSet<Prefix> = if member_of.is_none() {
+                        &effective_prefixes
+                    } else {
+                        &empty_prefixes
+                    };
+                    for prefix in staging_prefixes {
+                        checkpoint();
+                        let family = prefix_family(prefix);
+                        // RFC 5291 §6 gate: suppress this family's advertisement (incl.
+                        // ongoing churn) until the peer's first ROUTE-REFRESH lifts it.
+                        if orf_gated.contains(&family) {
+                            continue;
+                        }
+                        let orf = orf_filters.as_ref().and_then(|m| m.get(&family));
+                        let prefix_send_max = if peer_add_path_send_families.contains(&family) {
+                            peer_add_path_send_limits
+                                .get(&family)
+                                .copied()
+                                .unwrap_or(peer_add_path_send_max)
+                        } else {
+                            0
+                        };
+                        if prefix_send_max > 0 {
+                            // Multi-path: collect all candidates, filter, sort, diff
+                            Self::distribute_multipath_prefix_with_checkpoint(
+                                &self.ribs,
+                                &self.unicast_prefix_peers,
+                                rib_out,
+                                &self.peer_is_rr_client,
+                                prefix,
+                                peer,
+                                target_peer_asn,
+                                target_peer_group,
+                                prefix_send_max,
+                                false,
+                                target_is_ebgp,
+                                interpret_rfc1997,
+                                rs_control_asn,
+                                target_is_rr_client,
+                                cluster_id,
+                                sendable.as_ref(),
+                                llgr.as_ref(),
+                                export_pol.as_ref(),
+                                orf,
+                                conditional.as_ref(),
+                                orr_ctx,
+                                &mut export_memo,
+                                &metrics,
+                                policy_stats,
+                                &target_peer_label,
+                                &mut unicast,
+                                is_force,
+                                &mut || checkpoint(),
+                            );
+                            current_policy_filtered_routes.extend(
+                                unicast.policy_filtered.drain(..).inspect(|_| checkpoint()),
+                            );
+                        } else if per_client_best {
+                            // RFC 7947 §2.3.2 per-client best-path: the first
+                            // export-policy-permitted candidate from the
+                            // per-target candidate set, staged at path_id 0
+                            // (single-best shape). Add-Path families took the
+                            // multipath arm above — a negotiated capability
+                            // outranks the fallback. ORR cannot coexist: the
+                            // vantage requires an iBGP route-reflector-client
+                            // while per_client_best requires an eBGP
+                            // route-server client (validation-enforced).
+                            debug_assert!(
+                                orr_ctx.is_none(),
+                                "ORR vantage on a per-client-best peer"
+                            );
+                            Self::distribute_multipath_prefix_with_checkpoint(
+                                &self.ribs,
+                                &self.unicast_prefix_peers,
+                                rib_out,
+                                &self.peer_is_rr_client,
+                                prefix,
+                                peer,
+                                target_peer_asn,
+                                target_peer_group,
+                                1,
+                                true,
+                                target_is_ebgp,
+                                interpret_rfc1997,
+                                rs_control_asn,
+                                target_is_rr_client,
+                                cluster_id,
+                                sendable.as_ref(),
+                                llgr.as_ref(),
+                                export_pol.as_ref(),
+                                orf,
+                                conditional.as_ref(),
+                                None,
+                                &mut export_memo,
+                                &metrics,
+                                policy_stats,
+                                &target_peer_label,
+                                &mut unicast,
+                                is_force,
+                                &mut || checkpoint(),
+                            );
+                            current_policy_filtered_routes.extend(
+                                unicast.policy_filtered.drain(..).inspect(|_| checkpoint()),
+                            );
+                        } else if let Some((orr_topology, orr_spf)) = orr_ctx {
+                            // ORR peer with a resolved vantage: per-vantage best.
+                            Self::distribute_orr_best_prefix_with_checkpoint(
+                                &self.ribs,
+                                &self.unicast_prefix_peers,
+                                rib_out,
+                                &self.peer_is_rr_client,
+                                orr_topology,
+                                orr_spf,
+                                prefix,
+                                peer,
+                                target_peer_asn,
+                                target_peer_group,
+                                target_is_ebgp,
+                                interpret_rfc1997,
+                                target_is_rr_client,
+                                cluster_id,
+                                sendable.as_ref(),
+                                llgr.as_ref(),
+                                export_pol.as_ref(),
+                                orf,
+                                conditional.as_ref(),
+                                &mut export_memo,
+                                &metrics,
+                                policy_stats,
+                                &target_peer_label,
+                                &mut unicast,
+                                is_force,
+                                &mut || checkpoint(),
+                            );
+                            current_policy_filtered_routes.extend(
+                                unicast.policy_filtered.drain(..).inspect(|_| checkpoint()),
+                            );
+                        } else {
+                            let mut target = ExportTarget::Peer {
+                                peer,
+                                peer_asn: target_peer_asn,
+                                peer_group: target_peer_group,
+                                metrics: &metrics,
+                                policy_stats: &mut *policy_stats,
+                                peer_label: &target_peer_label,
+                            };
+                            Self::distribute_single_best_prefix_with_checkpoint(
+                                loc_rib,
+                                rib_out,
+                                &self.peer_is_rr_client,
+                                prefix,
+                                &mut target,
+                                target_is_ebgp,
+                                interpret_rfc1997,
+                                rs_control_asn,
+                                target_is_rr_client,
+                                cluster_id,
+                                sendable.as_ref(),
+                                llgr.as_ref(),
+                                export_pol.as_ref(),
+                                orf,
+                                conditional.as_ref(),
+                                &mut export_memo,
+                                &mut unicast,
+                                is_force,
+                                &mut || checkpoint(),
+                            );
+                            current_policy_filtered_routes.extend(
+                                unicast.policy_filtered.drain(..).inspect(|_| checkpoint()),
                             );
                         }
                     }
-                    let mut filtered = group.policy_filtered_for_member_with_checkpoint(
-                        peer,
-                        &effective_prefixes,
-                        &mut || checkpoint(),
-                    );
-                    current_policy_filtered_routes.reserve(filtered.len());
-                    current_policy_filtered_routes
-                        .extend(filtered.drain(..).inspect(|_| checkpoint()));
-                    super::retire_vec(&mut filtered, &mut || checkpoint());
-                    group_otc_blocked = if resync {
-                        group.otc_blocked_for_member_with_checkpoint(peer, None, &mut || {
-                            checkpoint();
-                        })
-                    } else if group.per_client_best {
-                        // The staging pass just refreshed the residue for
-                        // exactly its staged prefixes, and the residue
-                        // derivation substitutes the lane runner-up toward
-                        // `source(w)` — the per-member outcome of the
-                        // pre-commit backstop (ADR-0126), which the flat
-                        // pass vector below cannot express.
-                        group.otc_blocked_for_member_with_checkpoint(
+
+                    if resync && !effective_flowspec_rules.is_empty() {
+                        Self::stage_flowspec_rules_with_checkpoint(
+                            loc_rib,
+                            rib_out,
+                            &self.peer_is_rr_client,
+                            &effective_flowspec_rules,
                             peer,
-                            Some(&effective_prefixes),
+                            target_peer_asn,
+                            target_peer_group,
+                            target_is_ebgp,
+                            interpret_rfc1997,
+                            target_is_rr_client,
+                            cluster_id,
+                            sendable.as_ref(),
+                            llgr.as_ref(),
+                            export_pol.as_ref(),
+                            &metrics,
+                            policy_stats,
+                            &target_peer_label,
+                            &mut fs_announce,
+                            &mut fs_withdraw,
                             &mut || checkpoint(),
-                        )
-                    } else {
-                        group_stage
-                            .get(&gid)
-                            .into_iter()
-                            .inspect(|_| checkpoint())
-                            .flat_map(|stage| stage.otc_blocked.iter().inspect(|_| checkpoint()))
-                            .filter(|route| route.peer != peer)
-                            .cloned()
-                            .collect()
-                    };
-                }
-                // Per-member export-policy counters — integer adds, no
-                // per-(prefix × peer) work. A clean pass takes the group
-                // verdict delta; a resync (dirty or force) replays
-                // join-style full-table counters, matching the ungrouped
-                // per-prefix staging path which re-records every Loc-RIB
-                // entry on resync (LAN-210).
-                if resync {
-                    self.apply_group_join_counters(peer, gid, None);
-                } else if let Some(stage) = group_stage.get(&gid) {
-                    self.apply_group_policy_counters(peer, &stage.evals);
-                }
-            }
-            if member_of.is_some() {
-                self.reconcile_peer_otc_blocked(peer, &effective_prefixes, group_otc_blocked);
-            }
-
-            // Resolve export policy, sendable families, and RR state before
-            // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
-            let export_pol = self
-                .export_policy_for(peer)
-                .map(rustbgpd_policy::PolicyChain::share);
-            let sendable = self.peer_sendable_families.get(&peer).cloned();
-            let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
-            let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
-            let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
-            let rs_control_asn = self.peer_rs_control.get(&peer).copied();
-            let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
-            let target_peer_asn = self.peer_asn.get(&peer).copied();
-            let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
-            let cluster_id = self.cluster_id;
-            let peer_add_path_send_max =
-                self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
-            let peer_add_path_send_limits = self
-                .peer_add_path_send_limits
-                .get(&peer)
-                .cloned()
-                .unwrap_or_default();
-            let peer_add_path_send_families = self
-                .peer_add_path_send_families
-                .get(&peer)
-                .cloned()
-                .unwrap_or_default();
-            // ORF state, resolved before the &mut rib_out borrow below. Cloning
-            // is cheap: ORF filters are small and present only for peers that
-            // negotiated ORF (None for everyone else).
-            let orf_filters = self.peer_orf_filters.get(&peer).cloned();
-            // ADR-0137 conditional-advertisement gate; `None` unless an
-            // attached definition is suppressing (or pending).
-            let conditional = self.conditional_gate(peer, false);
-            // RFC 9107 ORR: a peer bound to a vantage that resolved this
-            // pass takes the per-vantage best below; an unresolved
-            // vantage silently falls back to the standard single-best
-            // (the status is surfaced by `rbgp orr`).
-            let orr_ctx = self
-                .peer_orr_vantage
-                .get(&peer)
-                .and_then(|vantage| self.orr.spf.get(vantage))
-                .map(|spf| (&self.orr.topology, spf));
-            let per_client_best = self.peer_per_client_best.contains(&peer);
-            let rtc_filter = self.rtc_export_filter(peer, sendable.as_ref());
-            let orf_gated = self
-                .peer_orf_pending
-                .get(&peer)
-                .cloned()
-                .unwrap_or_default();
-            let loc_rib = &self.loc_rib;
-            let loc_rib_len = loc_rib.len();
-            let target_peer_label = peer.to_string();
-            let policy_stats = self.export_policy_stats.entry(peer).or_default();
-
-            let rib_out = self
-                .adj_ribs_out
-                .entry(peer)
-                .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
-
-            // Stage: compute delta without mutating AdjRibOut. Grouped
-            // members skip the per-prefix staging wholesale — their
-            // unicast update was assembled from the group table above.
-            let empty_prefixes: HashSet<Prefix> = HashSet::new();
-            let staging_prefixes: &HashSet<Prefix> = if member_of.is_none() {
-                &effective_prefixes
-            } else {
-                &empty_prefixes
-            };
-            for prefix in staging_prefixes {
-                checkpoint();
-                let family = prefix_family(prefix);
-                // RFC 5291 §6 gate: suppress this family's advertisement (incl.
-                // ongoing churn) until the peer's first ROUTE-REFRESH lifts it.
-                if orf_gated.contains(&family) {
-                    continue;
-                }
-                let orf = orf_filters.as_ref().and_then(|m| m.get(&family));
-                let prefix_send_max = if peer_add_path_send_families.contains(&family) {
-                    peer_add_path_send_limits
-                        .get(&family)
-                        .copied()
-                        .unwrap_or(peer_add_path_send_max)
-                } else {
-                    0
-                };
-                if prefix_send_max > 0 {
-                    // Multi-path: collect all candidates, filter, sort, diff
-                    Self::distribute_multipath_prefix_with_checkpoint(
-                        &self.ribs,
-                        &self.unicast_prefix_peers,
-                        rib_out,
-                        &self.peer_is_rr_client,
-                        prefix,
-                        peer,
-                        target_peer_asn,
-                        target_peer_group,
-                        prefix_send_max,
-                        false,
-                        target_is_ebgp,
-                        interpret_rfc1997,
-                        rs_control_asn,
-                        target_is_rr_client,
-                        cluster_id,
-                        sendable.as_ref(),
-                        llgr.as_ref(),
-                        export_pol.as_ref(),
-                        orf,
-                        conditional.as_ref(),
-                        orr_ctx,
-                        &mut export_memo,
-                        &metrics,
-                        policy_stats,
-                        &target_peer_label,
-                        &mut unicast,
-                        is_force,
-                        &mut || checkpoint(),
-                    );
-                    current_policy_filtered_routes
-                        .extend(unicast.policy_filtered.drain(..).inspect(|_| checkpoint()));
-                } else if per_client_best {
-                    // RFC 7947 §2.3.2 per-client best-path: the first
-                    // export-policy-permitted candidate from the
-                    // per-target candidate set, staged at path_id 0
-                    // (single-best shape). Add-Path families took the
-                    // multipath arm above — a negotiated capability
-                    // outranks the fallback. ORR cannot coexist: the
-                    // vantage requires an iBGP route-reflector-client
-                    // while per_client_best requires an eBGP
-                    // route-server client (validation-enforced).
-                    debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
-                    Self::distribute_multipath_prefix_with_checkpoint(
-                        &self.ribs,
-                        &self.unicast_prefix_peers,
-                        rib_out,
-                        &self.peer_is_rr_client,
-                        prefix,
-                        peer,
-                        target_peer_asn,
-                        target_peer_group,
-                        1,
-                        true,
-                        target_is_ebgp,
-                        interpret_rfc1997,
-                        rs_control_asn,
-                        target_is_rr_client,
-                        cluster_id,
-                        sendable.as_ref(),
-                        llgr.as_ref(),
-                        export_pol.as_ref(),
-                        orf,
-                        conditional.as_ref(),
-                        None,
-                        &mut export_memo,
-                        &metrics,
-                        policy_stats,
-                        &target_peer_label,
-                        &mut unicast,
-                        is_force,
-                        &mut || checkpoint(),
-                    );
-                    current_policy_filtered_routes
-                        .extend(unicast.policy_filtered.drain(..).inspect(|_| checkpoint()));
-                } else if let Some((orr_topology, orr_spf)) = orr_ctx {
-                    // ORR peer with a resolved vantage: per-vantage best.
-                    Self::distribute_orr_best_prefix_with_checkpoint(
-                        &self.ribs,
-                        &self.unicast_prefix_peers,
-                        rib_out,
-                        &self.peer_is_rr_client,
-                        orr_topology,
-                        orr_spf,
-                        prefix,
-                        peer,
-                        target_peer_asn,
-                        target_peer_group,
-                        target_is_ebgp,
-                        interpret_rfc1997,
-                        target_is_rr_client,
-                        cluster_id,
-                        sendable.as_ref(),
-                        llgr.as_ref(),
-                        export_pol.as_ref(),
-                        orf,
-                        conditional.as_ref(),
-                        &mut export_memo,
-                        &metrics,
-                        policy_stats,
-                        &target_peer_label,
-                        &mut unicast,
-                        is_force,
-                        &mut || checkpoint(),
-                    );
-                    current_policy_filtered_routes
-                        .extend(unicast.policy_filtered.drain(..).inspect(|_| checkpoint()));
-                } else {
-                    let mut target = ExportTarget::Peer {
-                        peer,
-                        peer_asn: target_peer_asn,
-                        peer_group: target_peer_group,
-                        metrics: &metrics,
-                        policy_stats: &mut *policy_stats,
-                        peer_label: &target_peer_label,
-                    };
-                    Self::distribute_single_best_prefix_with_checkpoint(
-                        loc_rib,
-                        rib_out,
-                        &self.peer_is_rr_client,
-                        prefix,
-                        &mut target,
-                        target_is_ebgp,
-                        interpret_rfc1997,
-                        rs_control_asn,
-                        target_is_rr_client,
-                        cluster_id,
-                        sendable.as_ref(),
-                        llgr.as_ref(),
-                        export_pol.as_ref(),
-                        orf,
-                        conditional.as_ref(),
-                        &mut export_memo,
-                        &mut unicast,
-                        is_force,
-                        &mut || checkpoint(),
-                    );
-                    current_policy_filtered_routes
-                        .extend(unicast.policy_filtered.drain(..).inspect(|_| checkpoint()));
-                }
-            }
-
-            if resync && !effective_flowspec_rules.is_empty() {
-                Self::stage_flowspec_rules_with_checkpoint(
-                    loc_rib,
-                    rib_out,
-                    &self.peer_is_rr_client,
-                    &effective_flowspec_rules,
-                    peer,
-                    target_peer_asn,
-                    target_peer_group,
-                    target_is_ebgp,
-                    interpret_rfc1997,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    llgr.as_ref(),
-                    export_pol.as_ref(),
-                    &metrics,
-                    policy_stats,
-                    &target_peer_label,
-                    &mut fs_announce,
-                    &mut fs_withdraw,
-                    &mut || checkpoint(),
-                );
-            }
-
-            let mut evpn_complete_feed = None;
-            if let Some(feed) = complete_evpn_feed {
-                evpn_announce = feed.announce;
-                evpn_withdraw = feed.withdraw;
-                evpn_complete_feed = Some(feed.seal);
-            } else if resync && !effective_evpn_keys.is_empty() && !evpn_group_owned {
-                Self::stage_evpn_routes_with_checkpoint(
-                    loc_rib,
-                    rib_out,
-                    &self.peer_is_rr_client,
-                    &effective_evpn_keys,
-                    &mut crate::manager::distribution::ExportTarget::Peer {
-                        peer,
-                        peer_asn: target_peer_asn,
-                        peer_group: target_peer_group,
-                        metrics: &metrics,
-                        policy_stats,
-                        peer_label: &target_peer_label,
-                    },
-                    target_is_ebgp,
-                    interpret_rfc1997,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    llgr.as_ref(),
-                    export_pol.as_ref(),
-                    rtc_filter.as_ref(),
-                    &mut evpn_announce,
-                    &mut evpn_withdraw,
-                    is_force,
-                    &mut || checkpoint(),
-                );
-                if let Some(handle) = private_evpn_recovery
-                    && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
-                {
-                    // A dirty leaver retained actual keys, not OLD bodies.
-                    // Current eligible candidates get their normal probe;
-                    // only the remaining proof-owned keys owe a withdrawal.
-                    Self::append_private_evpn_proof_withdrawals(
-                        proof,
-                        rib_out,
-                        &mut evpn_announce,
-                        &mut evpn_withdraw,
-                        &mut |force| {
-                            super::replacement_readiness_checkpoint(&readiness, force);
-                        },
-                    );
-                }
-            }
-
-            if evpn_complete_feed.is_none() {
-                evpn_complete_feed = private_evpn_feed_seal;
-            }
-            let complete_evpn_producer = evpn_complete_feed.is_some();
-
-            if resync && !effective_bgpls_keys.is_empty() {
-                Self::stage_bgpls_routes_with_checkpoint(
-                    loc_rib,
-                    rib_out,
-                    &self.peer_is_rr_client,
-                    &effective_bgpls_keys,
-                    peer,
-                    target_peer_asn,
-                    target_peer_group,
-                    target_is_ebgp,
-                    interpret_rfc1997,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    llgr.as_ref(),
-                    export_pol.as_ref(),
-                    &metrics,
-                    policy_stats,
-                    &target_peer_label,
-                    &mut bgpls_announce,
-                    &mut bgpls_withdraw,
-                    is_force,
-                    &mut || checkpoint(),
-                );
-            }
-
-            let vpn_labeled_context = super::VpnLabeledStagingContext {
-                loc_rib,
-                ribs: &self.ribs,
-                rib_out,
-                peer_is_rr_client: &self.peer_is_rr_client,
-                target_is_ebgp,
-                interpret_rfc1997,
-                target_is_rr_client,
-                cluster_id,
-                sendable: sendable.as_ref(),
-                llgr: llgr.as_ref(),
-                orr_ctx,
-                add_path_send_max: peer_add_path_send_max,
-                add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
-                add_path_send_families: &peer_add_path_send_families,
-                export_pol: export_pol.as_ref(),
-                force: is_force,
-            };
-
-            // A VPN-staging group member's VPN resync was assembled from
-            // the group table above — no per-peer staging, no policy
-            // re-evaluation.
-            if resync && vpn_grouped.is_none() && !effective_l3vpn_keys.is_empty() {
-                let mut target = ExportTarget::Peer {
-                    peer,
-                    peer_asn: target_peer_asn,
-                    peer_group: target_peer_group,
-                    metrics: &metrics,
-                    policy_stats: &mut *policy_stats,
-                    peer_label: &target_peer_label,
-                };
-                Self::stage_vpn_routes_with_checkpoint(
-                    &vpn_labeled_context,
-                    &effective_l3vpn_keys,
-                    &mut target,
-                    rtc_filter.as_ref(),
-                    &mut vpn_announce,
-                    &mut vpn_withdraw,
-                    &mut || checkpoint(),
-                );
-            }
-
-            if resync && !effective_labeled_keys.is_empty() {
-                let mut target = ExportTarget::Peer {
-                    peer,
-                    peer_asn: target_peer_asn,
-                    peer_group: target_peer_group,
-                    metrics: &metrics,
-                    policy_stats: &mut *policy_stats,
-                    peer_label: &target_peer_label,
-                };
-                Self::stage_labeled_routes_with_checkpoint(
-                    &vpn_labeled_context,
-                    &effective_labeled_keys,
-                    &mut target,
-                    &mut labeled_announce,
-                    &mut labeled_withdraw,
-                    &mut || checkpoint(),
-                );
-            }
-
-            if resync && !effective_rtc_keys.is_empty() {
-                Self::stage_rtc_routes_with_checkpoint(
-                    loc_rib,
-                    rib_out,
-                    &self.peer_is_rr_client,
-                    &effective_rtc_keys,
-                    peer,
-                    target_peer_asn,
-                    target_peer_group,
-                    target_is_ebgp,
-                    interpret_rfc1997,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    llgr.as_ref(),
-                    export_pol.as_ref(),
-                    &metrics,
-                    policy_stats,
-                    &target_peer_label,
-                    &mut rtc_announce,
-                    &mut rtc_withdraw,
-                    is_force,
-                    &mut || checkpoint(),
-                );
-            }
-
-            // A dirty group leaver can hold keys absent from the private
-            // Adj-RIB-Out. Heal only its actually admitted keys, preserving
-            // exact Add-Path identities after the membership change.
-            if is_dirty
-                && member_of.is_none()
-                && let Some(admitted) = self.pending_group_admitted.get(&peer)
-            {
-                use crate::update::ExactExportKey;
-                let mut announced: HashSet<_> = unicast
-                    .announce
-                    .iter()
-                    .map(|r| ExactExportKey::Unicast(r.prefix, r.path_id))
-                    .chain(vpn_announce.iter().map(|r| ExactExportKey::Vpn(r.key())))
-                    .inspect(|_| checkpoint())
-                    .collect();
-                let mut staged: HashSet<_> = unicast
-                    .withdraw
-                    .iter()
-                    .map(|&(prefix, path_id)| ExactExportKey::Unicast(prefix, path_id))
-                    .chain(vpn_withdraw.iter().cloned().map(ExactExportKey::Vpn))
-                    .inspect(|_| checkpoint())
-                    .collect();
-                for key in admitted.iter_with_checkpoint(|_| checkpoint()) {
-                    if announced.contains(&key) || staged.contains(&key) {
-                        continue;
-                    }
-                    match key {
-                        ExactExportKey::Unicast(prefix, path_id)
-                            if rib_out.get(&prefix, path_id).is_none() =>
-                        {
-                            unicast.withdraw.push((prefix, path_id));
-                        }
-                        ExactExportKey::Vpn(key) if rib_out.get_vpn(&key).is_none() => {
-                            vpn_withdraw.push(key);
-                        }
-                        _ => {}
-                    }
-                }
-                super::retire_hash_set(&mut announced, &mut || checkpoint());
-                super::retire_hash_set(&mut staged, &mut || checkpoint());
-            }
-
-            #[cfg(feature = "bench-internals")]
-            if let Some(started) = bench_staging_started {
-                super::bench_support::bench_record_per_client_best_staging(
-                    effective_prefixes.len(),
-                    started.elapsed(),
-                );
-            }
-            // The outbound payload: the group-shared Arc for a covered
-            // member, otherwise this peer's own staged vectors. A shared
-            // member never stages per-peer unicast (grouped + in-sync),
-            // so the locals are empty by construction when it is taken.
-            debug_assert!(
-                shared_unicast.is_none()
-                    || (unicast.announce.is_empty() && unicast.next_hop_override.is_empty()),
-                "shared group payload must not coexist with per-peer staged unicast"
-            );
-            super::retire_vec(&mut unicast.policy_filtered, &mut || checkpoint());
-            self.replacement_capacity(
-                "private_announce",
-                unicast.announce.len(),
-                unicast.announce.capacity(),
-            );
-            self.replacement_capacity(
-                "private_withdraw",
-                unicast.withdraw.len(),
-                unicast.withdraw.capacity(),
-            );
-            self.replacement_checkpoint(true);
-            let shared_unicast_cache_group = shared_unicast.as_ref().and(member_of);
-            let (announce, nh_override_flags): super::update_groups::SharedUnicastPayload =
-                match shared_unicast {
-                    Some(shared) => shared,
-                    None => (unicast.announce.into(), unicast.next_hop_override.into()),
-                };
-            self.replacement_checkpoint(true);
-            if !announce.is_empty()
-                || !unicast.withdraw.is_empty()
-                || !fs_announce.is_empty()
-                || !fs_withdraw.is_empty()
-                || !evpn_announce.is_empty()
-                || !evpn_withdraw.is_empty()
-                || evpn_complete_feed.is_some()
-                || !bgpls_announce.is_empty()
-                || !bgpls_withdraw.is_empty()
-                || !vpn_announce.is_empty()
-                || !vpn_withdraw.is_empty()
-                || !labeled_announce.is_empty()
-                || !labeled_withdraw.is_empty()
-                || !rtc_announce.is_empty()
-                || !rtc_withdraw.is_empty()
-                || self.pending_otc_blocked.contains_key(&peer)
-            {
-                // If a prior initial dump / route-refresh EoR was deferred,
-                // piggyback only convergence-ready families on the successful
-                // dirty resync update so they cannot be starved behind the
-                // resync message on a small queue. Collision-failback holds
-                // stay pending until peer EoRR or the original timer, and
-                // RFC 4684 §6 VPN/EVPN holds until the peer's RT-Constrain
-                // EoR or the hold cap.
-                // EoR piggyback only attaches to *dirty* resyncs (the
-                // dump-deferral pattern). A force-only resync is a
-                // GShut-style outbound-attribute refresh and never
-                // carries pending EoR by definition.
-                let mut pending_eor: Vec<_> = if is_dirty {
-                    self.pending_eor
-                        .get(&peer)
-                        .map(|families| {
-                            families
-                                .iter()
-                                .inspect(|_| checkpoint())
-                                .copied()
-                                .filter(|family| !self.eor_held(peer, *family))
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    vec![]
-                };
-                if evpn_coverage_required && pending_eor.contains(&(Afi::L2Vpn, Safi::Evpn)) {
-                    if let Some(seal) = evpn_complete_feed.as_mut() {
-                        seal.required_markers |=
-                            Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
-                    }
-                    // Enqueue succeeds before the post-admission coverage
-                    // check. Its EVPN terminal needs a later current receipt.
-                    pending_eor.retain(|&family| family != (Afi::L2Vpn, Safi::Evpn));
-                }
-                let announced_count = announce.len();
-                let withdrawn_count = unicast.withdraw.len();
-                let has_non_unicast_route_payload = !fs_announce.is_empty()
-                    || !fs_withdraw.is_empty()
-                    || !evpn_announce.is_empty()
-                    || !evpn_withdraw.is_empty()
-                    || !bgpls_announce.is_empty()
-                    || !bgpls_withdraw.is_empty()
-                    || !vpn_announce.is_empty()
-                    || !vpn_withdraw.is_empty()
-                    || !labeled_announce.is_empty()
-                    || !labeled_withdraw.is_empty()
-                    || !rtc_announce.is_empty()
-                    || !rtc_withdraw.is_empty();
-                // Only the ordinary, clean, shared-unicast path may defer
-                // its advertised-state delta walk. Every exception/resync,
-                // regroup, overlay, VPN-bearing, or mixed-family envelope
-                // retains the existing eager prior and authoritative slow
-                // path.
-                let lazy_group_prior_eligible = !resync
-                    && shared_unicast_cache_group.is_some()
-                    && !has_non_unicast_route_payload
-                    && !self.pending_regroup_baseline.contains_key(&peer)
-                    && !self.peer_unexportable.contains_key(&peer);
-                // Resolve the optional borrowed stage before deciding whether
-                // eager prior construction may be suppressed. Missing group
-                // identity or staging must take the authoritative slow path.
-                let lazy_group_prior = resolve_lazy_clean_group_prior(
-                    lazy_group_prior_eligible,
-                    peer,
-                    shared_unicast_cache_group,
-                    |group_id| {
-                        group_stage
-                            .get(&group_id)
-                            .map(|stage| stage.deltas.as_slice())
-                    },
-                );
-                let defer_clean_group_prior = lazy_group_prior.is_some();
-                let group_prior = if let Some(gid) = member_of {
-                    let mut prior = HashSet::new();
-                    if is_dirty || is_force {
-                        if let Some(admitted) = self.pending_group_admitted.get(&peer) {
-                            prior.extend(admitted.iter_with_checkpoint(|_| checkpoint()));
-                        }
-                    } else if !defer_clean_group_prior && let Some(stage) = group_stage.get(&gid) {
-                        for delta in &stage.deltas {
-                            checkpoint();
-                            if self.clean_group_delta_was_admitted(peer, delta) {
-                                prior.insert(crate::update::ExactExportKey::Unicast(
-                                    delta.prefix,
-                                    delta.path_id,
-                                ));
-                            }
-                        }
-                        for delta in &stage.lane_deltas {
-                            checkpoint();
-                            if let Some(entry) = &delta.prior
-                                && entry.winner_source == peer
-                                && self.clean_group_route_was_admitted(
-                                    peer,
-                                    &entry.route,
-                                    entry.source_attrs.as_ref(),
-                                )
-                            {
-                                prior.insert(crate::update::ExactExportKey::Unicast(
-                                    delta.prefix,
-                                    0,
-                                ));
-                            }
-                        }
-                        for transition in &stage.rs_transitions {
-                            checkpoint();
-                            if self.clean_group_route_was_admitted(
-                                peer,
-                                &transition.route,
-                                transition.prior_source_attrs.as_ref(),
-                            ) {
-                                prior.insert(crate::update::ExactExportKey::Unicast(
-                                    transition.prefix,
-                                    transition.path_id,
-                                ));
-                            }
-                        }
-                    }
-                    if let Some(base) = self.pending_regroup_baseline.get(&peer) {
-                        prior.extend(base.unicast.keys().map(|(prefix, path_id)| {
-                            crate::update::ExactExportKey::Unicast(*prefix, *path_id)
-                        }));
-                        prior.extend(base.vpn.keys().map(|key| {
-                            crate::update::ExactExportKey::Vpn(crate::route::VpnRibRouteKey {
-                                nlri_key: *key,
-                                path_id: 0,
-                            })
-                        }));
-                    }
-                    prior
-                } else {
-                    HashSet::new()
-                };
-                let commit = self
-                    .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
-                        peer,
-                        OutboundCommitBatch {
-                            force_unicast_replay: is_force,
-                            unicast_otc_prechecked,
-                            announce_source_exclusion,
-                            shared_group_encode,
-                            withdraw: unicast.withdraw,
-                            end_of_rib: pending_eor.clone(),
-                            flowspec_announce: fs_announce,
-                            flowspec_withdraw: fs_withdraw,
-                            evpn_announce,
-                            evpn_withdraw,
-                            evpn_complete_feed,
-                            bgpls_announce,
-                            bgpls_withdraw,
-                            vpn_announce,
-                            vpn_withdraw,
-                            labeled_announce,
-                            labeled_withdraw,
-                            rtc_announce,
-                            rtc_withdraw,
-                            ..OutboundCommitBatch::with_unicast(announce, nh_override_flags)
-                        },
-                        group_prior,
-                        shared_unicast_cache_group.map(|group_id| SharedUnicastPrecommit {
-                            group_id,
-                            probe_cache: &mut shared_unicast_probe_cache,
-                            lazy_group_prior,
-                        }),
-                        member_of.is_none().then_some(effective_prefixes.as_ref()),
-                        member_of.and_then(|gid| group_stage.get(&gid)),
-                        None,
-                    );
-                if commit.is_ok() {
-                    self.update_policy_filtered_routes_for_prefixes(
-                        peer,
-                        &effective_prefixes,
-                        &current_policy_filtered_routes,
-                    );
-                    if resync {
-                        info!(
-                            %peer,
-                            announced = announced_count,
-                            withdrawn = withdrawn_count,
-                            dirty = is_dirty,
-                            force = is_force,
-                            "outbound routes resynced"
                         );
-                        let evpn_covered = !evpn_coverage_required
-                            || self.evpn_resync_data_is_covered(peer, complete_evpn_producer);
-                        if is_dirty {
-                            // Other-family markers in this admitted envelope
-                            // are done even if EVPN coverage was rejected.
-                            let empty = self.pending_eor.get_mut(&peer).is_some_and(|families| {
-                                families.retain(|family| !pending_eor.contains(family));
-                                families.is_empty()
-                            });
-                            if empty {
-                                self.pending_eor.remove(&peer);
+                    }
+
+                    let mut evpn_complete_feed = None;
+                    if let Some(feed) = complete_evpn_feed {
+                        evpn_announce = feed.announce;
+                        evpn_withdraw = feed.withdraw;
+                        evpn_complete_feed = Some(feed.seal);
+                    } else if resync && !effective_evpn_keys.is_empty() && !evpn_group_owned {
+                        Self::stage_evpn_routes_with_checkpoint(
+                            loc_rib,
+                            rib_out,
+                            &self.peer_is_rr_client,
+                            &effective_evpn_keys,
+                            &mut crate::manager::distribution::ExportTarget::Peer {
+                                peer,
+                                peer_asn: target_peer_asn,
+                                peer_group: target_peer_group,
+                                metrics: &metrics,
+                                policy_stats,
+                                peer_label: &target_peer_label,
+                            },
+                            target_is_ebgp,
+                            interpret_rfc1997,
+                            target_is_rr_client,
+                            cluster_id,
+                            sendable.as_ref(),
+                            llgr.as_ref(),
+                            export_pol.as_ref(),
+                            rtc_filter.as_ref(),
+                            &mut evpn_announce,
+                            &mut evpn_withdraw,
+                            is_force,
+                            &mut || checkpoint(),
+                        );
+                        if let Some(handle) = private_evpn_recovery
+                            && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
+                        {
+                            // A dirty leaver retained actual keys, not OLD bodies.
+                            // Current eligible candidates get their normal probe;
+                            // only the remaining proof-owned keys owe a withdrawal.
+                            Self::append_private_evpn_proof_withdrawals(
+                                proof,
+                                rib_out,
+                                &mut evpn_announce,
+                                &mut evpn_withdraw,
+                                &mut |force| {
+                                    super::replacement_readiness_checkpoint(&readiness, force);
+                                },
+                            );
+                        }
+                    }
+
+                    if evpn_complete_feed.is_none() {
+                        evpn_complete_feed = private_evpn_feed_seal;
+                    }
+                    let complete_evpn_producer = evpn_complete_feed.is_some();
+
+                    if resync && !effective_bgpls_keys.is_empty() {
+                        Self::stage_bgpls_routes_with_checkpoint(
+                            loc_rib,
+                            rib_out,
+                            &self.peer_is_rr_client,
+                            &effective_bgpls_keys,
+                            peer,
+                            target_peer_asn,
+                            target_peer_group,
+                            target_is_ebgp,
+                            interpret_rfc1997,
+                            target_is_rr_client,
+                            cluster_id,
+                            sendable.as_ref(),
+                            llgr.as_ref(),
+                            export_pol.as_ref(),
+                            &metrics,
+                            policy_stats,
+                            &target_peer_label,
+                            &mut bgpls_announce,
+                            &mut bgpls_withdraw,
+                            is_force,
+                            &mut || checkpoint(),
+                        );
+                    }
+
+                    let vpn_labeled_context = super::VpnLabeledStagingContext {
+                        loc_rib,
+                        ribs: &self.ribs,
+                        rib_out,
+                        peer_is_rr_client: &self.peer_is_rr_client,
+                        target_is_ebgp,
+                        interpret_rfc1997,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable: sendable.as_ref(),
+                        llgr: llgr.as_ref(),
+                        orr_ctx,
+                        add_path_send_max: peer_add_path_send_max,
+                        add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
+                        add_path_send_families: &peer_add_path_send_families,
+                        export_pol: export_pol.as_ref(),
+                        force: is_force,
+                    };
+
+                    // A VPN-staging group member's VPN resync was assembled from
+                    // the group table above — no per-peer staging, no policy
+                    // re-evaluation.
+                    if resync && vpn_grouped.is_none() && !effective_l3vpn_keys.is_empty() {
+                        let mut target = ExportTarget::Peer {
+                            peer,
+                            peer_asn: target_peer_asn,
+                            peer_group: target_peer_group,
+                            metrics: &metrics,
+                            policy_stats: &mut *policy_stats,
+                            peer_label: &target_peer_label,
+                        };
+                        Self::stage_vpn_routes_with_checkpoint(
+                            &vpn_labeled_context,
+                            &effective_l3vpn_keys,
+                            &mut target,
+                            rtc_filter.as_ref(),
+                            &mut vpn_announce,
+                            &mut vpn_withdraw,
+                            &mut || checkpoint(),
+                        );
+                    }
+
+                    if resync && !effective_labeled_keys.is_empty() {
+                        let mut target = ExportTarget::Peer {
+                            peer,
+                            peer_asn: target_peer_asn,
+                            peer_group: target_peer_group,
+                            metrics: &metrics,
+                            policy_stats: &mut *policy_stats,
+                            peer_label: &target_peer_label,
+                        };
+                        Self::stage_labeled_routes_with_checkpoint(
+                            &vpn_labeled_context,
+                            &effective_labeled_keys,
+                            &mut target,
+                            &mut labeled_announce,
+                            &mut labeled_withdraw,
+                            &mut || checkpoint(),
+                        );
+                    }
+
+                    if resync && !effective_rtc_keys.is_empty() {
+                        Self::stage_rtc_routes_with_checkpoint(
+                            loc_rib,
+                            rib_out,
+                            &self.peer_is_rr_client,
+                            &effective_rtc_keys,
+                            peer,
+                            target_peer_asn,
+                            target_peer_group,
+                            target_is_ebgp,
+                            interpret_rfc1997,
+                            target_is_rr_client,
+                            cluster_id,
+                            sendable.as_ref(),
+                            llgr.as_ref(),
+                            export_pol.as_ref(),
+                            &metrics,
+                            policy_stats,
+                            &target_peer_label,
+                            &mut rtc_announce,
+                            &mut rtc_withdraw,
+                            is_force,
+                            &mut || checkpoint(),
+                        );
+                    }
+
+                    // A dirty group leaver can hold keys absent from the private
+                    // Adj-RIB-Out. Heal only its actually admitted keys, preserving
+                    // exact Add-Path identities after the membership change.
+                    if is_dirty
+                        && member_of.is_none()
+                        && let Some(admitted) = self.pending_group_admitted.get(&peer)
+                    {
+                        use crate::update::ExactExportKey;
+                        let mut announced: HashSet<_> = unicast
+                            .announce
+                            .iter()
+                            .map(|r| ExactExportKey::Unicast(r.prefix, r.path_id))
+                            .chain(vpn_announce.iter().map(|r| ExactExportKey::Vpn(r.key())))
+                            .inspect(|_| checkpoint())
+                            .collect();
+                        let mut staged: HashSet<_> = unicast
+                            .withdraw
+                            .iter()
+                            .map(|&(prefix, path_id)| ExactExportKey::Unicast(prefix, path_id))
+                            .chain(vpn_withdraw.iter().cloned().map(ExactExportKey::Vpn))
+                            .inspect(|_| checkpoint())
+                            .collect();
+                        for key in admitted.iter_with_checkpoint(|_| checkpoint()) {
+                            if announced.contains(&key) || staged.contains(&key) {
+                                continue;
                             }
-                            if evpn_covered {
+                            match key {
+                                ExactExportKey::Unicast(prefix, path_id)
+                                    if rib_out.get(&prefix, path_id).is_none() =>
+                                {
+                                    unicast.withdraw.push((prefix, path_id));
+                                }
+                                ExactExportKey::Vpn(key) if rib_out.get_vpn(&key).is_none() => {
+                                    vpn_withdraw.push(key);
+                                }
+                                _ => {}
+                            }
+                        }
+                        super::retire_hash_set(&mut announced, &mut || checkpoint());
+                        super::retire_hash_set(&mut staged, &mut || checkpoint());
+                    }
+
+                    #[cfg(feature = "bench-internals")]
+                    if let Some(started) = bench_staging_started {
+                        super::bench_support::bench_record_per_client_best_staging(
+                            effective_prefixes.len(),
+                            started.elapsed(),
+                        );
+                    }
+                    // The outbound payload: the group-shared Arc for a covered
+                    // member, otherwise this peer's own staged vectors. A shared
+                    // member never stages per-peer unicast (grouped + in-sync),
+                    // so the locals are empty by construction when it is taken.
+                    debug_assert!(
+                        shared_unicast.is_none()
+                            || (unicast.announce.is_empty()
+                                && unicast.next_hop_override.is_empty()),
+                        "shared group payload must not coexist with per-peer staged unicast"
+                    );
+                    super::retire_vec(&mut unicast.policy_filtered, &mut || checkpoint());
+                    self.replacement_capacity(
+                        "private_announce",
+                        unicast.announce.len(),
+                        unicast.announce.capacity(),
+                    );
+                    self.replacement_capacity(
+                        "private_withdraw",
+                        unicast.withdraw.len(),
+                        unicast.withdraw.capacity(),
+                    );
+                    self.replacement_checkpoint(true);
+                    let shared_unicast_cache_group = shared_unicast.as_ref().and(member_of);
+                    let (announce, nh_override_flags): super::update_groups::SharedUnicastPayload =
+                        match shared_unicast {
+                            Some(shared) => shared,
+                            None => (unicast.announce.into(), unicast.next_hop_override.into()),
+                        };
+                    self.replacement_checkpoint(true);
+                    if !announce.is_empty()
+                        || !unicast.withdraw.is_empty()
+                        || !fs_announce.is_empty()
+                        || !fs_withdraw.is_empty()
+                        || !evpn_announce.is_empty()
+                        || !evpn_withdraw.is_empty()
+                        || evpn_complete_feed.is_some()
+                        || !bgpls_announce.is_empty()
+                        || !bgpls_withdraw.is_empty()
+                        || !vpn_announce.is_empty()
+                        || !vpn_withdraw.is_empty()
+                        || !labeled_announce.is_empty()
+                        || !labeled_withdraw.is_empty()
+                        || !rtc_announce.is_empty()
+                        || !rtc_withdraw.is_empty()
+                        || self.pending_otc_blocked.contains_key(&peer)
+                    {
+                        // If a prior initial dump / route-refresh EoR was deferred,
+                        // piggyback only convergence-ready families on the successful
+                        // dirty resync update so they cannot be starved behind the
+                        // resync message on a small queue. Collision-failback holds
+                        // stay pending until peer EoRR or the original timer, and
+                        // RFC 4684 §6 VPN/EVPN holds until the peer's RT-Constrain
+                        // EoR or the hold cap.
+                        // EoR piggyback only attaches to *dirty* resyncs (the
+                        // dump-deferral pattern). A force-only resync is a
+                        // GShut-style outbound-attribute refresh and never
+                        // carries pending EoR by definition.
+                        let mut pending_eor: Vec<_> = if is_dirty {
+                            self.pending_eor
+                                .get(&peer)
+                                .map(|families| {
+                                    families
+                                        .iter()
+                                        .inspect(|_| checkpoint())
+                                        .copied()
+                                        .filter(|family| !self.eor_held(peer, *family))
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            vec![]
+                        };
+                        if evpn_coverage_required && pending_eor.contains(&(Afi::L2Vpn, Safi::Evpn))
+                        {
+                            if let Some(seal) = evpn_complete_feed.as_mut() {
+                                seal.required_markers |= Self::evpn_admitted_marker_bits(
+                                    &[(Afi::L2Vpn, Safi::Evpn)],
+                                    &[],
+                                );
+                            }
+                            // Enqueue succeeds before the post-admission coverage
+                            // check. Its EVPN terminal needs a later current receipt.
+                            pending_eor.retain(|&family| family != (Afi::L2Vpn, Safi::Evpn));
+                        }
+                        let announced_count = announce.len();
+                        let withdrawn_count = unicast.withdraw.len();
+                        let has_non_unicast_route_payload = !fs_announce.is_empty()
+                            || !fs_withdraw.is_empty()
+                            || !evpn_announce.is_empty()
+                            || !evpn_withdraw.is_empty()
+                            || !bgpls_announce.is_empty()
+                            || !bgpls_withdraw.is_empty()
+                            || !vpn_announce.is_empty()
+                            || !vpn_withdraw.is_empty()
+                            || !labeled_announce.is_empty()
+                            || !labeled_withdraw.is_empty()
+                            || !rtc_announce.is_empty()
+                            || !rtc_withdraw.is_empty();
+                        // Only the ordinary, clean, shared-unicast path may defer
+                        // its advertised-state delta walk. Every exception/resync,
+                        // regroup, overlay, VPN-bearing, or mixed-family envelope
+                        // retains the existing eager prior and authoritative slow
+                        // path.
+                        let lazy_group_prior_eligible = !resync
+                            && shared_unicast_cache_group.is_some()
+                            && !has_non_unicast_route_payload
+                            && !self.pending_regroup_baseline.contains_key(&peer)
+                            && !self.peer_unexportable.contains_key(&peer);
+                        // Resolve the optional borrowed stage before deciding whether
+                        // eager prior construction may be suppressed. Missing group
+                        // identity or staging must take the authoritative slow path.
+                        let lazy_group_prior = resolve_lazy_clean_group_prior(
+                            lazy_group_prior_eligible,
+                            peer,
+                            shared_unicast_cache_group,
+                            |group_id| {
+                                group_stage
+                                    .get(&group_id)
+                                    .map(|stage| stage.deltas.as_slice())
+                            },
+                        );
+                        let defer_clean_group_prior = lazy_group_prior.is_some();
+                        let group_prior = if let Some(gid) = member_of {
+                            let mut prior = HashSet::new();
+                            if is_dirty || is_force {
+                                if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                                    prior.extend(admitted.iter_with_checkpoint(|_| checkpoint()));
+                                }
+                            } else if !defer_clean_group_prior
+                                && let Some(stage) = group_stage.get(&gid)
+                            {
+                                for delta in &stage.deltas {
+                                    checkpoint();
+                                    if self.clean_group_delta_was_admitted(peer, delta) {
+                                        prior.insert(crate::update::ExactExportKey::Unicast(
+                                            delta.prefix,
+                                            delta.path_id,
+                                        ));
+                                    }
+                                }
+                                for delta in &stage.lane_deltas {
+                                    checkpoint();
+                                    if let Some(entry) = &delta.prior
+                                        && entry.winner_source == peer
+                                        && self.clean_group_route_was_admitted(
+                                            peer,
+                                            &entry.route,
+                                            entry.source_attrs.as_ref(),
+                                        )
+                                    {
+                                        prior.insert(crate::update::ExactExportKey::Unicast(
+                                            delta.prefix,
+                                            0,
+                                        ));
+                                    }
+                                }
+                                for transition in &stage.rs_transitions {
+                                    checkpoint();
+                                    if self.clean_group_route_was_admitted(
+                                        peer,
+                                        &transition.route,
+                                        transition.prior_source_attrs.as_ref(),
+                                    ) {
+                                        prior.insert(crate::update::ExactExportKey::Unicast(
+                                            transition.prefix,
+                                            transition.path_id,
+                                        ));
+                                    }
+                                }
+                            }
+                            if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                                prior.extend(base.unicast.keys().map(|(prefix, path_id)| {
+                                    crate::update::ExactExportKey::Unicast(*prefix, *path_id)
+                                }));
+                                prior.extend(base.vpn.keys().map(|key| {
+                                    crate::update::ExactExportKey::Vpn(
+                                        crate::route::VpnRibRouteKey {
+                                            nlri_key: *key,
+                                            path_id: 0,
+                                        },
+                                    )
+                                }));
+                            }
+                            prior
+                        } else {
+                            HashSet::new()
+                        };
+                        let commit = self
+                            .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+                                peer,
+                                OutboundCommitBatch {
+                                    force_unicast_replay: is_force,
+                                    unicast_otc_prechecked,
+                                    announce_source_exclusion,
+                                    shared_group_encode,
+                                    withdraw: unicast.withdraw,
+                                    end_of_rib: pending_eor.clone(),
+                                    flowspec_announce: fs_announce,
+                                    flowspec_withdraw: fs_withdraw,
+                                    evpn_announce,
+                                    evpn_withdraw,
+                                    evpn_complete_feed,
+                                    bgpls_announce,
+                                    bgpls_withdraw,
+                                    vpn_announce,
+                                    vpn_withdraw,
+                                    labeled_announce,
+                                    labeled_withdraw,
+                                    rtc_announce,
+                                    rtc_withdraw,
+                                    ..OutboundCommitBatch::with_unicast(announce, nh_override_flags)
+                                },
+                                group_prior,
+                                shared_unicast_cache_group.map(|group_id| SharedUnicastPrecommit {
+                                    group_id,
+                                    probe_cache: &mut shared_unicast_probe_cache,
+                                    lazy_group_prior,
+                                }),
+                                member_of.is_none().then_some(effective_prefixes.as_ref()),
+                                member_of.and_then(|gid| group_stage.get(&gid)),
+                                None,
+                            );
+                        if commit.is_ok() {
+                            self.update_policy_filtered_routes_for_prefixes(
+                                peer,
+                                &effective_prefixes,
+                                &current_policy_filtered_routes,
+                            );
+                            if resync {
+                                info!(
+                                    %peer,
+                                    announced = announced_count,
+                                    withdrawn = withdrawn_count,
+                                    dirty = is_dirty,
+                                    force = is_force,
+                                    "outbound routes resynced"
+                                );
+                                let evpn_covered = !evpn_coverage_required
+                                    || self
+                                        .evpn_resync_data_is_covered(peer, complete_evpn_producer);
+                                if is_dirty {
+                                    // Other-family markers in this admitted envelope
+                                    // are done even if EVPN coverage was rejected.
+                                    let empty =
+                                        self.pending_eor.get_mut(&peer).is_some_and(|families| {
+                                            families.retain(|family| !pending_eor.contains(family));
+                                            families.is_empty()
+                                        });
+                                    if empty {
+                                        self.pending_eor.remove(&peer);
+                                    }
+                                    if evpn_covered {
+                                        self.dirty_peers.remove(&peer);
+                                        self.clear_grouped_member_synced(peer);
+                                        self.flush_pending_eor(peer);
+                                        self.retry_pending_refresh(peer);
+                                    }
+                                }
+                                // A force request is complete only when every covered
+                                // family's data reached its actual admission boundary.
+                                if is_force && evpn_covered {
+                                    self.force_outbound_peers.remove(&peer);
+                                }
+                            }
+                        } else if let Err(failure) = commit {
+                            warn!(%peer, reason = failure.as_str(), "outbound update not sent — marking dirty for resync");
+                            self.defer_unsent_outbound_pass(
+                                peer,
+                                member_of,
+                                &group_stage,
+                                &checkpoint,
+                            );
+                        }
+                    } else {
+                        super::retire_vec(&mut unicast.withdraw, &mut || checkpoint());
+                        super::retire_vec(&mut fs_announce, &mut || checkpoint());
+                        super::retire_vec(&mut fs_withdraw, &mut || checkpoint());
+                        super::retire_vec(&mut evpn_announce, &mut || checkpoint());
+                        super::retire_vec(&mut evpn_withdraw, &mut || checkpoint());
+                        super::retire_vec(&mut bgpls_announce, &mut || checkpoint());
+                        super::retire_vec(&mut bgpls_withdraw, &mut || checkpoint());
+                        super::retire_vec(&mut vpn_announce, &mut || checkpoint());
+                        super::retire_vec(&mut vpn_withdraw, &mut || checkpoint());
+                        super::retire_vec(&mut labeled_announce, &mut || checkpoint());
+                        super::retire_vec(&mut labeled_withdraw, &mut || checkpoint());
+                        super::retire_vec(&mut rtc_announce, &mut || checkpoint());
+                        super::retire_vec(&mut rtc_withdraw, &mut || checkpoint());
+                        self.replacement_checkpoint(true);
+                        drop((announce, nh_override_flags));
+                        self.replacement_checkpoint(true);
+                        self.update_policy_filtered_routes_for_prefixes(
+                            peer,
+                            &effective_prefixes,
+                            &current_policy_filtered_routes,
+                        );
+                        if resync {
+                            // Resync triggered but no diff — already in sync.
+                            debug!(%peer, "outbound routes unchanged after resync");
+                            let evpn_covered = !evpn_coverage_required
+                                || self.evpn_resync_data_is_covered(peer, complete_evpn_producer);
+                            if is_dirty && evpn_covered {
                                 self.dirty_peers.remove(&peer);
                                 self.clear_grouped_member_synced(peer);
                                 self.flush_pending_eor(peer);
-                                self.retry_pending_refresh(peer);
+                                if !self.dirty_peers.contains(&peer) {
+                                    self.retry_pending_refresh(peer);
+                                }
+                            }
+                            if is_force && evpn_covered {
+                                self.force_outbound_peers.remove(&peer);
                             }
                         }
-                        // A force request is complete only when every covered
-                        // family's data reached its actual admission boundary.
-                        if is_force && evpn_covered {
-                            self.force_outbound_peers.remove(&peer);
-                        }
                     }
-                } else if let Err(failure) = commit {
-                    warn!(%peer, reason = failure.as_str(), "outbound update not sent — marking dirty for resync");
-                    self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
+                    self.replacement_capacity(
+                        "current_policy_filtered",
+                        current_policy_filtered_routes.len(),
+                        current_policy_filtered_routes.capacity(),
+                    );
+                    super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
+                        checkpoint();
+                    });
+                    super::retire_hash_set(&mut effective_flowspec_rules, &mut || checkpoint());
+                    super::retire_hash_set(&mut effective_evpn_keys, &mut || checkpoint());
+                    super::retire_hash_set(&mut effective_bgpls_keys, &mut || checkpoint());
+                    super::retire_hash_set(&mut effective_l3vpn_keys, &mut || checkpoint());
+                    super::retire_hash_set(&mut effective_labeled_keys, &mut || checkpoint());
+                    super::retire_hash_set(&mut effective_rtc_keys, &mut || checkpoint());
+                    if let Cow::Owned(prefixes) = &mut effective_prefixes {
+                        super::retire_hash_set(prefixes, &mut || checkpoint());
+                    }
+                    self.replacement_checkpoint(true);
                 }
-            } else {
-                super::retire_vec(&mut unicast.withdraw, &mut || checkpoint());
-                super::retire_vec(&mut fs_announce, &mut || checkpoint());
-                super::retire_vec(&mut fs_withdraw, &mut || checkpoint());
-                super::retire_vec(&mut evpn_announce, &mut || checkpoint());
-                super::retire_vec(&mut evpn_withdraw, &mut || checkpoint());
-                super::retire_vec(&mut bgpls_announce, &mut || checkpoint());
-                super::retire_vec(&mut bgpls_withdraw, &mut || checkpoint());
-                super::retire_vec(&mut vpn_announce, &mut || checkpoint());
-                super::retire_vec(&mut vpn_withdraw, &mut || checkpoint());
-                super::retire_vec(&mut labeled_announce, &mut || checkpoint());
-                super::retire_vec(&mut labeled_withdraw, &mut || checkpoint());
-                super::retire_vec(&mut rtc_announce, &mut || checkpoint());
-                super::retire_vec(&mut rtc_withdraw, &mut || checkpoint());
-                self.replacement_checkpoint(true);
-                drop((announce, nh_override_flags));
-                self.replacement_checkpoint(true);
-                self.update_policy_filtered_routes_for_prefixes(
-                    peer,
-                    &effective_prefixes,
-                    &current_policy_filtered_routes,
-                );
-                if resync {
-                    // Resync triggered but no diff — already in sync.
-                    debug!(%peer, "outbound routes unchanged after resync");
-                    let evpn_covered = !evpn_coverage_required
-                        || self.evpn_resync_data_is_covered(peer, complete_evpn_producer);
-                    if is_dirty && evpn_covered {
-                        self.dirty_peers.remove(&peer);
-                        self.clear_grouped_member_synced(peer);
-                        self.flush_pending_eor(peer);
-                        if !self.dirty_peers.contains(&peer) {
-                            self.retry_pending_refresh(peer);
-                        }
-                    }
-                    if is_force && evpn_covered {
-                        self.force_outbound_peers.remove(&peer);
-                    }
-                }
+                self.finish_readiness_owner(installed);
             }
-            self.replacement_capacity(
-                "current_policy_filtered",
-                current_policy_filtered_routes.len(),
-                current_policy_filtered_routes.capacity(),
-            );
-            super::retire_hash_set(&mut current_policy_filtered_routes, &mut || checkpoint());
-            super::retire_hash_set(&mut effective_flowspec_rules, &mut || checkpoint());
-            super::retire_hash_set(&mut effective_evpn_keys, &mut || checkpoint());
-            super::retire_hash_set(&mut effective_bgpls_keys, &mut || checkpoint());
-            super::retire_hash_set(&mut effective_l3vpn_keys, &mut || checkpoint());
-            super::retire_hash_set(&mut effective_labeled_keys, &mut || checkpoint());
-            super::retire_hash_set(&mut effective_rtc_keys, &mut || checkpoint());
-            if let Cow::Owned(prefixes) = &mut effective_prefixes {
-                super::retire_hash_set(prefixes, &mut || checkpoint());
-            }
-            self.replacement_checkpoint(true);
+        };
+        if replay_handoff {
+            super::with_executor_handoff(distribute_peers);
+        } else {
+            distribute_peers();
         }
         // One line per pass that mixes unicast withdrawals and announcements
         // in a group (a failover), so a daemon-level benchmark can count the

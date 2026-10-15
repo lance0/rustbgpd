@@ -9715,6 +9715,396 @@ async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_dirty_replay_services_interior_readiness() {
+    Box::pin(ingest_dirty_replay_readiness(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_private_dirty_replay_services_interior_readiness() {
+    Box::pin(ingest_dirty_replay_readiness(true)).await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actual ingest regression retains dirty OLD, held probes, lane fences and exact recovery assertions together"
+)]
+async fn ingest_dirty_replay_readiness(ungrouped: bool) {
+    let (mut manager, stuck, live, mut outbound, mut live_outbound) =
+        full_channel_manager(ungrouped);
+    let dirty_since = manager.dirty_since[&stuck];
+    let empty_credit =
+        super::super::update_groups::admitted_recovery::AdmittedRecovery::new().bytes();
+    if !ungrouped {
+        assert_eq!(manager.pending_group_admitted.get(&stuck).unwrap().len(), 7);
+    }
+    assert!(manager.replacement_readiness.is_none());
+    for _ in 0..FULL_CHANNEL_CAPACITY {
+        outbound.try_recv().unwrap();
+    }
+    let family = (Afi::Ipv4, Safi::Unicast);
+    manager.pending_eor.entry(stuck).or_default().insert(family);
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    manager.peer_export_encoders.insert(
+        stuck,
+        Arc::new(HeldDirtyResyncEncoder(Arc::new(DirtyResyncProbeHold {
+            calls: AtomicUsize::new(0),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }))),
+    );
+    // No timer or cold-capture wrapper owns this path: an admitted source
+    // UPDATE finishes its real chunk and distribution window while dirty.
+    let actor = tokio::spawn(async move {
+        let update = manager.rx.recv().await.unwrap();
+        manager.handle_update(update);
+        while manager.process_next_route_chunk() {}
+        manager
+    });
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: FULL_CHANNEL_SOURCE.into(),
+        announced: (20..if ungrouped { 22 } else { 21 })
+            .map(|third| {
+                crate::test_support::make_route(
+                    Ipv4Prefix::new(Ipv4Addr::new(198, 51, third, 0), 24),
+                    FULL_CHANNEL_SOURCE,
+                )
+            })
+            .collect(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    let mut readiness = queue_replacement_readiness(&readiness_tx);
+    let (reply, mut ordinary) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(RibUpdate::PeerDown {
+        peer: live,
+        session_id: 0,
+    })
+    .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let interior_reply = readiness.try_recv();
+    let ordinary_held = matches!(
+        ordinary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    let mutation_held = tx.capacity() == 7;
+    release_tx.send(()).unwrap();
+    let mut manager = actor.await.unwrap();
+    let recovered = outbound.try_recv().unwrap();
+    let announced: HashSet<_> = recovered
+        .announce
+        .iter()
+        .map(|route| route.prefix)
+        .collect();
+    let expected: HashSet<_> = if ungrouped {
+        vec![20, 21]
+    } else {
+        vec![1, 2, 10, 11, 12, 13, 20]
+    }
+    .into_iter()
+    .map(full_channel_prefix)
+    .collect();
+    assert_eq!(announced, expected);
+    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    assert_eq!(recovered.end_of_rib, vec![family]);
+    assert!(!manager.pending_eor.contains_key(&stuck));
+    assert!(!manager.dirty_peers.contains(&stuck));
+    assert_eq!(manager.dirty_since[&stuck], dirty_since);
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    assert!(manager.replacement_readiness.is_none());
+    let count = if ungrouped { 8 } else { 7 };
+    assert_eq!(manager.loc_rib.len(), count);
+    let update = manager.query_rx.try_recv().unwrap();
+    manager.handle_update(update);
+    assert_eq!(ordinary.await.unwrap(), count);
+    assert!(
+        matches!(manager.rx.try_recv().unwrap(), RibUpdate::PeerDown { peer, .. } if peer == live)
+    );
+    assert!(live_outbound.try_recv().is_ok());
+    assert!(
+        ordinary_held,
+        "ordinary reads stay queued inside full replay"
+    );
+    assert!(mutation_held, "mutations stay queued inside full replay");
+    assert!(
+        matches!(interior_reply, Ok(Ok(reply)) if reply == count),
+        "dedicated readiness must complete between actual ingest replay probes: {interior_reply:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_readiness_keeps_independent_member_ages() {
+    Box::pin(replay_readiness_member_ages(
+        &[20, 20],
+        ReplayReadinessOwner::Fresh,
+    ))
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_readiness_rejects_one_stalled_member() {
+    Box::pin(replay_readiness_member_ages(
+        &[31],
+        ReplayReadinessOwner::Fresh,
+    ))
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_readiness_preserves_nested_replacement_owner() {
+    Box::pin(replay_readiness_member_ages(
+        &[0],
+        ReplayReadinessOwner::Replacement,
+    ))
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_readiness_preserves_nested_selection_owner() {
+    Box::pin(replay_readiness_member_ages(
+        &[0],
+        ReplayReadinessOwner::Selection,
+    ))
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_readiness_inherits_pending_transition_age_without_owner() {
+    Box::pin(replay_readiness_member_ages(
+        &[0],
+        ReplayReadinessOwner::Pending,
+    ))
+    .await;
+}
+
+#[derive(Clone, Copy)]
+enum ReplayReadinessOwner {
+    Fresh,
+    Replacement,
+    Selection,
+    Pending,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the paused-time replay control keeps actual OLD, member holds, inherited owners and settlement in one ordered transaction"
+)]
+async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner) {
+    let (mut manager, peers, mut outbound) = direct_clean_transition_manager(3, 4, None);
+    let empty_credit = manager.pending_group_admitted.bytes();
+    let held: Vec<_> = peers[..ages.len()]
+        .iter()
+        .flat_map(|peer| {
+            (0..8).map(|_| {
+                manager.outbound_peers[peer]
+                    .clone()
+                    .try_reserve_owned()
+                    .unwrap()
+            })
+        })
+        .collect();
+    full_channel_pass(&mut manager, &[], &[0]);
+    assert_eq!(manager.loc_rib.len(), 3);
+    assert_eq!(manager.dirty_peers.len(), ages.len());
+    let dirty_since = manager.dirty_since.clone();
+    for &peer in &peers[..ages.len()] {
+        assert_eq!(manager.pending_group_admitted.get(&peer).unwrap().len(), 4);
+    }
+    drop(held);
+    for rx in &mut outbound {
+        while rx.try_recv().is_ok() {}
+    }
+    manager.replacement_readiness_receipts.clear();
+    if matches!(owner, ReplayReadinessOwner::Pending) {
+        manager.pending_clean_policy_transition = Some(
+            super::distribution::PendingCleanPolicyTransition::new(Vec::new(), None),
+        );
+        tokio::time::advance(Duration::from_secs(31)).await;
+    }
+    let mut entered = Vec::new();
+    let mut releases = Vec::new();
+    for &peer in &peers[..ages.len()] {
+        manager
+            .pending_eor
+            .entry(peer)
+            .or_default()
+            .insert((Afi::Ipv4, Safi::Unicast));
+        let (entered_tx, entered_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        manager.peer_export_encoders.insert(
+            peer,
+            Arc::new(HeldDirtyResyncEncoder(Arc::new(DirtyResyncProbeHold {
+                calls: AtomicUsize::new(0),
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            }))),
+        );
+        entered.push(entered_rx);
+        releases.push(release_tx);
+    }
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    let runtime = tokio::runtime::Handle::current();
+    let actor = tokio::task::spawn_blocking(move || {
+        runtime.block_on(async move {
+            let replay = |manager: &mut RibManager| {
+                manager.distribute_changes(&HashSet::new(), &HashSet::new());
+            };
+            if matches!(
+                owner,
+                ReplayReadinessOwner::Replacement | ReplayReadinessOwner::Selection
+            ) {
+                manager.with_readiness_owner(
+                    Duration::from_secs(31),
+                    matches!(owner, ReplayReadinessOwner::Selection),
+                    |manager| {
+                        let original = manager.replacement_readiness.clone().unwrap();
+                        let started = original.state.lock().unwrap().started;
+                        replay(manager);
+                        assert!(Arc::ptr_eq(
+                            &original,
+                            manager.replacement_readiness.as_ref().unwrap()
+                        ));
+                        assert_eq!(original.state.lock().unwrap().started, started);
+                    },
+                );
+            } else {
+                assert!(manager.replacement_readiness.is_none());
+                replay(&mut manager);
+            }
+            manager
+        })
+    });
+    let mut replies = Vec::new();
+    let mut general = Vec::new();
+    let mut visited = HashSet::new();
+    for _ in ages {
+        let (member, call) = next_dirty_resync_hold(&mut entered).await;
+        assert_eq!(call, 0);
+        assert!(visited.insert(member));
+        tokio::time::advance(Duration::from_secs(ages[member])).await;
+        let mut readiness = queue_replacement_readiness(&readiness_tx);
+        let (reply, mut ordinary) = oneshot::channel();
+        query_tx
+            .try_send(RibUpdate::QueryLocRibCount { reply })
+            .unwrap();
+        tx.try_send(RibUpdate::PeerDown {
+            peer: peers[2],
+            session_id: 0,
+        })
+        .unwrap();
+        let capacity = tx.capacity();
+        releases[member].send(()).unwrap();
+        assert_eq!(entered[member].recv().await, Some(1));
+        replies.push((member, readiness.try_recv()));
+        assert!(matches!(
+            ordinary.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(tx.capacity(), capacity);
+        general.push(ordinary);
+        releases[member].send(()).unwrap();
+    }
+    let mut manager = actor.await.unwrap();
+    for rx in &mut outbound[..ages.len()] {
+        let update = rx.try_recv().unwrap();
+        assert_eq!(update.announce.len(), 3);
+        assert_eq!(update.withdraw, vec![(full_channel_prefix(0), 0)]);
+        assert_eq!(update.end_of_rib, ipv4_sendable());
+    }
+    assert!(manager.dirty_peers.is_empty());
+    assert_eq!(manager.dirty_since, dirty_since);
+    assert!(manager.pending_group_admitted.is_empty());
+    assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
+    assert!(manager.replacement_readiness.is_none());
+    assert!(manager.readiness_rx.is_some());
+    assert!(manager.pending_eor.is_empty());
+    for response in general {
+        let update = manager.query_rx.try_recv().unwrap();
+        manager.handle_update(update);
+        assert_eq!(response.await.unwrap(), 3);
+    }
+    for (member, response) in replies {
+        let expected = match owner {
+            ReplayReadinessOwner::Selection => {
+                Err(crate::update::RibReadinessError::SelectionReleaseStalled)
+            }
+            ReplayReadinessOwner::Replacement | ReplayReadinessOwner::Pending => {
+                Err(crate::update::RibReadinessError::PolicyTransitionStalled)
+            }
+            ReplayReadinessOwner::Fresh if ages[member] >= 30 => {
+                Err(crate::update::RibReadinessError::PolicyTransitionStalled)
+            }
+            ReplayReadinessOwner::Fresh => Ok(3),
+        };
+        assert_eq!(response, Ok(expected));
+    }
+}
+
+#[test]
+fn replay_readiness_restores_empty_and_force_scopes_without_wrapping_clean_fanout() {
+    let (mut manager, peers, mut outbound) = direct_clean_transition_manager(2, 0, None);
+    let (tx, rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(rx);
+    manager.replacement_readiness_receipts.clear();
+    full_channel_pass(&mut manager, &[20, 21], &[]);
+    assert!(manager.replacement_readiness_receipts.is_empty());
+    for rx in &mut outbound {
+        while rx.try_recv().is_ok() {}
+    }
+    manager.force_outbound_peers.insert(peers[0]);
+    let mut response = queue_replacement_readiness(&tx);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert_eq!(response.try_recv().unwrap(), Ok(2));
+    assert_eq!(outbound[0].try_recv().unwrap().announce.len(), 2);
+    assert!(manager.force_outbound_peers.is_empty());
+    assert!(manager.replacement_readiness.is_none());
+    assert!(manager.readiness_rx.is_some());
+    full_channel_pass(&mut manager, &[], &[20, 21]);
+    manager.mark_outbound_dirty(peers[0]);
+    let mut response = queue_replacement_readiness(&tx);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert_eq!(response.try_recv().unwrap(), Ok(0));
+    assert!(manager.dirty_peers.is_empty());
+    assert!(manager.pending_group_admitted.is_empty());
+    assert!(manager.replacement_readiness.is_none());
+    assert!(manager.readiness_rx.is_some());
+}
+
 async fn next_dirty_resync_hold(entered: &mut [mpsc::UnboundedReceiver<usize>]) -> (usize, usize) {
     if entered.len() == 1 {
         return (0, entered[0].recv().await.unwrap());
