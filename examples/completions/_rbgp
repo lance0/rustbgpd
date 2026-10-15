@@ -1206,7 +1206,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
-'--rd=[Route Distinguisher ("asn\:nn" or "ip\:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
+'--rd=[Route Distinguisher ("asn\:nn", "ip\:nn", or 0x/0X plus 16 hex digits) - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
 '(--rd --labeled)--source-peer=[Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id]:PEER:_default' \
 '(--rd --labeled)--source-path-id=[Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector]:ID:_default' \
 '(--count --explain)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
@@ -1248,7 +1248,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
-'--rd=[Route Distinguisher ("asn\:nn" or "ip\:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
+'--rd=[Route Distinguisher ("asn\:nn", "ip\:nn", or 0x/0X plus 16 hex digits) - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
 '(--rd --labeled)--source-peer=[Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id]:PEER:_default' \
 '(--rd --labeled)--source-path-id=[Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector]:ID:_default' \
 '(--count --explain)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
@@ -2715,7 +2715,7 @@ esac
 ;;
 (add-mac-ip)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
+'--rd=[Route Distinguisher\: "asn\:value", "ip\:value", or 0x/0X plus 16 hex digits]:RD:_default' \
 '--ethernet-tag=[Ethernet-tag identifying the EVI (default 0)]:ETHERNET_TAG:_default' \
 '--mac=[MAC address "aa\:bb\:cc\:dd\:ee\:ff"]:MAC:_default' \
 '--ip=[Host IP (optional — MAC-only route if omitted)]:IP:_default' \
@@ -2741,7 +2741,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (add-imet)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
+'--rd=[Route Distinguisher\: "asn\:value", "ip\:value", or 0x/0X plus 16 hex digits]:RD:_default' \
 '--ethernet-tag=[Ethernet-tag identifying the EVI (default 0)]:ETHERNET_TAG:_default' \
 '--ip=[Originator IP (required for Type 3)]:IP:_default' \
 '--originator-ip=[Originator IP (required for Type 3)]:IP:_default' \
@@ -2765,7 +2765,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (add-ip-prefix)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
+'--rd=[Route Distinguisher\: "asn\:value", "ip\:value", or 0x/0X plus 16 hex digits]:RD:_default' \
 '--ethernet-tag=[Ethernet Tag ID. Must be 0 for supported Type 5 injection]:ETHERNET_TAG:_default' \
 '--prefix=[IP prefix, e.g. "10.0.0.0/24" or "2001\:db8\:\:/48"]:PREFIX:_default' \
 '--label=[L3VNI for this IP-VRF]:LABEL:_default' \
@@ -2791,7 +2791,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (delete-mac-ip)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
+'--rd=[Route Distinguisher\: "asn\:value", "ip\:value", or 0x/0X plus 16 hex digits]:RD:_default' \
 '--ethernet-tag=[Ethernet-tag identifying the EVI (default 0)]:ETHERNET_TAG:_default' \
 '--mac=[MAC address "aa\:bb\:cc\:dd\:ee\:ff"]:MAC:_default' \
 '--ip=[Host IP (omit for the MAC-only route)]:IP:_default' \
@@ -2812,7 +2812,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (delete-imet)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
+'--rd=[Route Distinguisher\: "asn\:value", "ip\:value", or 0x/0X plus 16 hex digits]:RD:_default' \
 '--ethernet-tag=[Ethernet-tag identifying the EVI (default 0)]:ETHERNET_TAG:_default' \
 '--ip=[Originator IP]:IP:_default' \
 '--originator-ip=[Originator IP]:IP:_default' \
@@ -2833,7 +2833,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (delete-ip-prefix)
 _arguments "${_arguments_options[@]}" : \
-'--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
+'--rd=[Route Distinguisher\: "asn\:value", "ip\:value", or 0x/0X plus 16 hex digits]:RD:_default' \
 '--ethernet-tag=[Ethernet Tag ID. Must be 0 for Type 5 withdrawal]:ETHERNET_TAG:_default' \
 '--prefix=[IP prefix, e.g. "10.0.0.0/24" or "2001\:db8\:\:/48"]:PREFIX:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \

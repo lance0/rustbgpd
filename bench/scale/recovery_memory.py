@@ -17,7 +17,7 @@ import time
 
 BASELINE = "c862af9338aa828b7462f3cf85781f63b0e79fe8"
 INTERMEDIATE = "bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00"
-SCAN_SCHEMA = "rustbgpd.recovery-scan.v2"
+SCAN_SCHEMA = "rustbgpd.recovery-scan.v3"
 SCAN_PROFILES = {"full-uc": 1_230_000, "full-vpn": 1_230_000, "evpn-soak": 37_500}
 SCAN_DISPATCH = (
     "mod recovery_scan;\n",
@@ -1133,7 +1133,7 @@ def validate_memory_derivation(root: Path, digest: str) -> None:
 
 
 def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> dict:
-    """A distinct component schema: never infer daemon or memory qualification."""
+    """Qualify complete component evidence, never CPU-cost or release acceptance."""
     require(profile in SCAN_PROFILES, "unknown scan profile")
     require(old_order in ("sorted", "shuffled"), "unknown OLD key order")
     groups = {name: [] for name in (
@@ -1146,12 +1146,18 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
     environment = groups["recovery_scan_environment"]
     require(len(environment) == 1 and environment[0].get("schema") == SCAN_SCHEMA,
             "missing scan environment")
-    require(environment[0].get("old_order") == old_order, "scan environment OLD order mismatch")
-    require(environment[0].get("phase_passes") == "independent shape and capture invocations"
-            and environment[0].get("credit_scope") ==
+    environment = environment[0]
+    require(environment.get("old_order") == old_order, "scan environment OLD order mismatch")
+    require(environment.get("phase_passes") ==
+            "shape independently invoked; cold anchor and warm capture are separate intervals"
+            and environment.get("fixture_lineage") ==
+            "common families use one actual AdjRibOut; order is insertion order; sparse mutation reuses and appends slots"
+            and environment.get("cold_scope") ==
+            "common anchor begin/full helper/seal; identical policy before both warm arms; no attributable cold arm ratio; EVPN cold unmeasured"
+            and environment.get("credit_scope") ==
             "logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS",
-            "scan phases or credit scope are not qualified")
-    ticks = uint(environment[0].get("cpu_ticks_per_second"), "CPU tick rate")
+            "scan phases, lineage or credit scope are not qualified")
+    ticks = uint(environment.get("cpu_ticks_per_second"), "CPU tick rate")
     require(ticks > 0, "missing measured CPU tick rate")
     require(len(groups["recovery_identity"]) == 1, "missing scan process identity")
     require(groups["recovery_scan_complete"] == [{"profile": profile, "cells": 6, "legs": 24}],
@@ -1164,72 +1170,119 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
         for layout in ("dense", "older-sparse"):
             rows = samples[cursor:cursor + 4]
             cursor += 4
-            for leg, (row, arm) in enumerate(zip(rows, ("flat", "shared", "shared", "flat"))):
+            qualified = []
+            for leg, (row, arm) in enumerate(zip(rows, ("flat", "candidate", "candidate", "flat"))):
                 require(row.get("schema") == SCAN_SCHEMA and row.get("profile") == profile
                         and row.get("old_order") == old_order
+                        and row.get("vpn_negotiated") is (profile == "full-vpn")
                         and row.get("keys") == SCAN_PROFILES[profile]
                         and row.get("records") == records and row.get("layout") == layout
                         and row.get("leg") == leg and row.get("arm") == arm
                         and row.get("measured") is True, "scan shape/order/mode mismatch")
+                require(row.get("comparison_counter_scope") == (
+                    "ordered-evpn-checkpoints-minus-old-visits" if profile == "evpn-soak"
+                    else "typed-full-old-shape"), "comparison counter scope differs")
                 refusal = row.get("refusal")
                 require(refusal is None or refusal in (
                     "peer_limit", "daemon_limit", "allocation_failure", "missing_proof",
                     "capture_unavailable", "admission_invariant", "anchor_not_shared"
                 ), "unknown scan refusal")
                 for key in ("old_keys", "additions", "shape_callbacks", "comparisons", "proof_keys",
-                            "retained_bytes", "peak_bytes", "empty_bytes", "settled_bytes"):
+                            "retained_bytes", "peak_bytes", "empty_bytes", "settled_bytes",
+                            "mismatches", "source_slots"):
                     uint(row.get(key), key)
                 if refusal is not None:
-                    continue  # Retain the row; never give a refused proof a ratio.
+                    qualified.append(False)
+                    continue
                 keys = SCAN_PROFILES[profile]
-                require(row["old_keys"] == row["proof_keys"] == keys,
-                        "incomplete scan proof")
-                require(row.get("shared") is (arm == "shared"), "flat/share control was bypassed")
-                require(row["additions"] == (records if layout == "older-sparse" and arm == "shared" else 0),
-                        "incorrect OLD sparse classification")
-                require(row["shape_callbacks"] == keys + row["comparisons"],
-                        "comparison count is not separate from key visits")
-                require((keys <= row["comparisons"] <= 2 * keys + keys.bit_length() + 2)
-                        if arm == "shared" else row["comparisons"] == 0,
-                        "missing sorted merge work or non-linear classification")
+                require(row["old_keys"] == row["proof_keys"] == keys, "incomplete scan proof")
+                expected_shared = arm == "candidate" and profile != "full-vpn"
+                expected_strategy = ("uc-slab-shared" if profile == "full-uc" else "evpn-sort-shared") if expected_shared else "exact-flat"
+                expected_reason = "explicit-flat-control" if arm == "flat" else (
+                    "vpn-negotiated" if profile == "full-vpn" else "eligible")
+                require(row.get("selected_strategy") in ("uc-slab-shared", "evpn-sort-shared", "exact-flat")
+                        and row.get("selection_reason") in (
+                            "explicit-flat-control", "vpn-negotiated", "eligible", "sharing-disabled",
+                            "missing-index", "slot-churn", "representation", "share-refused"),
+                        "unknown capture selection")
+                selection_ok = row["selected_strategy"] == expected_strategy and row["selection_reason"] == expected_reason
+                require(row.get("shared") is (row["selected_strategy"] != "exact-flat"),
+                        "selected storage and shared flag disagree")
+                qualified.append(selection_ok)
+                sparse = records if layout == "older-sparse" else 0
+                if selection_ok:
+                    require(row["additions"] == (sparse if expected_shared else 0),
+                            "incorrect OLD sparse classification")
+                if profile == "full-uc":
+                    require(row["source_slots"] == keys + sparse // 2,
+                            "OLD slab lineage lost its reused slots, appended slots or holes")
+                    require(row["shape_callbacks"] == row["source_slots"] + row["comparisons"],
+                            "slot visits and exact-key comparisons disagree")
+                    if selection_ok and expected_shared:
+                        require(row["mismatches"] == sparse
+                                and keys - sparse <= row["comparisons"] <= keys + sparse * (keys.bit_length() + 3),
+                                "missing slot validation or excessive lookup work")
+                else:
+                    require(row["source_slots"] == 0 and row["mismatches"] == 0,
+                            "non-slab path reported slot work")
+                    require(row["shape_callbacks"] == keys + row["comparisons"],
+                            "comparison count is not separate from key visits")
+                    if expected_shared and selection_ok:
+                        minimum = 2 * keys - 1 if layout == "dense" else keys
+                        require(minimum <= row["comparisons"] <= 2 * keys + keys.bit_length() + 2,
+                                "missing sorted merge work or non-linear classification")
+                if row["selected_strategy"] == "exact-flat":
+                    require(row["comparisons"] == 0 or not selection_ok,
+                            "flat path performed indexed classification")
+                require(row["mismatches"] <= 4097, "unbounded slot-mismatch classification")
                 require(row["settled_bytes"] == row["empty_bytes"] > 0
                         and row["empty_bytes"] < row["retained_bytes"] <= row["peak_bytes"],
                         "proof charge or last-owner retirement differs")
                 phases = row.get("phases")
-                require(isinstance(phases, dict) and set(phases) == {"shape", "capture"},
+                require(isinstance(phases, dict) and set(phases) == {"shape", "capture", "cold_anchor_capture"},
                         "missing measured capture phases")
+                if profile == "evpn-soak":
+                    require(phases["cold_anchor_capture"] is None
+                            and row.get("cold_anchor_strategy") == "not-measured"
+                            and row.get("cold_anchor_unavailable_reason") == "evpn-not-production-cold-path",
+                            "unavailable cold phase must be explicit null")
+                else:
+                    require(phases["cold_anchor_capture"] is not None
+                            and row.get("cold_anchor_strategy") == ("uc-slab-shared" if profile == "full-uc" else "exact-flat")
+                            and row.get("cold_anchor_unavailable_reason") is None,
+                            "common cold anchor policy differs between warm arms")
                 for phase in phases.values():
+                    if phase is None:
+                        continue
                     require(set(phase) == {"wall_ns", "cpu_ticks"}, "unknown phase fields")
                     require(uint(phase["wall_ns"], "phase wall") > 0, "empty timing phase")
                     uint(phase["cpu_ticks"], "phase CPU")
-                # These are independent invocations, not nested timings. Tick
-                # quantization and scheduling permit shape > complete capture.
-            eligible = all(row.get("refusal") is None for row in rows)
+            eligible = all(qualified)
             ratios = {}
             if eligible:
                 for phase in ("shape", "capture"):
                     ratios[phase] = {}
                     for quantity in ("wall_ns", "cpu_ticks"):
                         flat = sum(rows[i]["phases"][phase][quantity] for i in (0, 3))
-                        shared = sum(rows[i]["phases"][phase][quantity] for i in (1, 2))
-                        ratios[phase][quantity] = shared / flat if flat else None
+                        candidate = sum(rows[i]["phases"][phase][quantity] for i in (1, 2))
+                        ratios[phase][quantity] = candidate / flat if flat else None
             summaries.append({"records": records, "layout": layout, "eligible": eligible,
-                              "shared_over_flat": ratios if eligible else None})
+                              "candidate_over_flat": ratios if eligible else None})
     return {"schema": SCAN_SCHEMA, "profile": profile, "old_order": old_order, "samples": samples,
             "comparisons": summaries, "cpu_ticks_per_second": ticks,
-            "phase_passes": environment[0]["phase_passes"],
-            "credit_scope": environment[0]["credit_scope"],
+            "phase_passes": environment["phase_passes"], "fixture_lineage": environment["fixture_lineage"],
+            "cold_scope": environment["cold_scope"], "credit_scope": environment["credit_scope"],
             "workload_identity": groups["recovery_identity"][0],
             "scope": "component scans/capture only; no daemon, fleet, readiness or wire qualification"}
 
 
 def summarize_scan(root: Path) -> None:
     manifest = json.loads((root / "manifest.json").read_text())
-    require(manifest.get("schema") == "rustbgpd.recovery-scan.campaign.v2", "wrong scan manifest")
+    require(manifest.get("schema") == "rustbgpd.recovery-scan.campaign.v3", "wrong scan manifest")
     require(manifest.get("profile") in SCAN_PROFILES and manifest.get("build_jobs") == 4,
             "wrong scan profile/build")
     require(manifest.get("old_order") in ("sorted", "shuffled"), "wrong scan OLD order")
-    require(manifest.get("order_per_cell") == ["flat", "shared", "shared", "flat"],
+    require(manifest.get("order_per_cell") == ["flat", "candidate", "candidate", "flat"],
             "wrong scan comparison order")
     require(bool(re.fullmatch(r"[0-9a-f]{40}", manifest.get("candidate", ""))), "wrong scan source")
     inputs = root / "instrumentation.sha256"

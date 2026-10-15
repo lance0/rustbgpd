@@ -22,7 +22,10 @@ fn capture(
     let mut phases = BTreeMap::new();
     let receipt = bench_recovery_capture_scan(spec, false, |name, begin| {
         // Normal tests and --correctness-only never sample clocks or /proc.
-        if measured && name == selected_phase {
+        if measured
+            && (name == selected_phase
+                || (selected_phase == "capture" && name == "cold_anchor_capture"))
+        {
             if begin {
                 let cpu = cpu_ticks();
                 start = Some((Instant::now(), cpu));
@@ -51,6 +54,14 @@ fn checked_refusal(
     );
     if refusal.is_none() {
         assert_eq!(receipt.proof_keys, counted.proof_keys);
+        assert_eq!(receipt.old_keys, counted.old_keys);
+        assert_eq!(receipt.additions, counted.additions);
+        assert_eq!(receipt.shared, counted.shared);
+        assert_eq!(receipt.selected_strategy, counted.selected_strategy);
+        assert_eq!(receipt.selection_reason, counted.selection_reason);
+        assert_eq!(receipt.cold_anchor_strategy, counted.cold_anchor_strategy);
+        assert_eq!(receipt.source_slots, counted.source_slots);
+        assert_eq!(receipt.mismatches, counted.mismatches);
     }
     refusal
 }
@@ -85,17 +96,15 @@ fn sample(
         let shape_refusal = if measured {
             let (shape_receipt, shape_phases) = capture(spec, true, "shape");
             phases.extend(shape_phases);
-            shape_receipt.refusal
+            checked_refusal(true, &receipt, &shape_receipt, None)
         } else {
             None
         };
         let counted = &counted[usize::from(shared)];
         let refusal = checked_refusal(measured, &receipt, counted, shape_refusal);
         let callbacks = counted.shape_callbacks;
-        let comparisons = callbacks
-            .checked_sub(counted.old_keys)
-            .expect("one checkpoint per OLD key");
-        let phases = phases
+        let comparisons = counted.comparisons;
+        let mut phases = phases
             .into_iter()
             .map(|(name, phase)| {
                 format!(
@@ -103,15 +112,34 @@ fn sample(
                     phase.wall_ns, phase.cpu_ticks
                 )
             })
-            .collect::<Vec<_>>()
-            .join(",");
+            .collect::<Vec<_>>();
+        if measured && profile == "evpn-soak" {
+            phases.push("\"cold_anchor_capture\":null".to_owned());
+        }
+        let phases = phases.join(",");
         let refusal = refusal.map_or_else(|| "null".to_owned(), |cause| format!("\"{cause}\""));
+        let cold_unavailable = if profile == "evpn-soak" {
+            "\"evpn-not-production-cold-path\""
+        } else {
+            "null"
+        };
+        let vpn_negotiated = profile == "full-vpn";
+        let comparison_counter_scope = if profile == "evpn-soak" {
+            "ordered-evpn-checkpoints-minus-old-visits"
+        } else {
+            "typed-full-old-shape"
+        };
         println!(
-            "recovery_scan {{\"schema\":\"rustbgpd.recovery-scan.v2\",\"profile\":\"{profile}\",\"old_order\":\"{old_order}\",\"keys\":{keys},\"records\":{records},\"layout\":\"{}\",\"arm\":\"{}\",\"leg\":{leg},\"measured\":{measured},\"old_keys\":{},\"additions\":{},\"shape_callbacks\":{callbacks},\"comparisons\":{comparisons},\"proof_keys\":{},\"shared\":{},\"retained_bytes\":{},\"peak_bytes\":{},\"empty_bytes\":{},\"settled_bytes\":{},\"refusal\":{refusal},\"phases\":{{{phases}}}}}",
+            "recovery_scan {{\"schema\":\"rustbgpd.recovery-scan.v3\",\"profile\":\"{profile}\",\"old_order\":\"{old_order}\",\"vpn_negotiated\":{vpn_negotiated},\"keys\":{keys},\"records\":{records},\"layout\":\"{}\",\"arm\":\"{}\",\"leg\":{leg},\"measured\":{measured},\"old_keys\":{},\"additions\":{},\"shape_callbacks\":{callbacks},\"comparisons\":{comparisons},\"comparison_counter_scope\":\"{comparison_counter_scope}\",\"mismatches\":{},\"source_slots\":{},\"selected_strategy\":\"{}\",\"selection_reason\":\"{}\",\"cold_anchor_strategy\":\"{}\",\"cold_anchor_unavailable_reason\":{cold_unavailable},\"proof_keys\":{},\"shared\":{},\"retained_bytes\":{},\"peak_bytes\":{},\"empty_bytes\":{},\"settled_bytes\":{},\"refusal\":{refusal},\"phases\":{{{phases}}}}}",
             if sparse { "older-sparse" } else { "dense" },
-            if shared { "shared" } else { "flat" },
+            if shared { "candidate" } else { "flat" },
             receipt.old_keys,
             receipt.additions,
+            counted.mismatches,
+            receipt.source_slots,
+            receipt.selected_strategy,
+            receipt.selection_reason,
+            receipt.cold_anchor_strategy,
             receipt.proof_keys,
             receipt.shared,
             receipt.retained_bytes,
@@ -165,7 +193,7 @@ pub(super) fn main(args: &[String]) {
     };
     let ticks = ticks.map_or_else(|| "null".to_owned(), |n| n.to_string());
     println!(
-        "recovery_scan_environment {{\"schema\":\"rustbgpd.recovery-scan.v2\",\"old_order\":\"{old_order}\",\"cpu_ticks_per_second\":{ticks},\"phase_passes\":\"independent shape and capture invocations\",\"credit_scope\":\"logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS\",\"scope\":\"component-only; no live ownership, delivery, readiness, fleet or daemon-memory qualification\"}}"
+        "recovery_scan_environment {{\"schema\":\"rustbgpd.recovery-scan.v3\",\"old_order\":\"{old_order}\",\"cpu_ticks_per_second\":{ticks},\"phase_passes\":\"shape independently invoked; cold anchor and warm capture are separate intervals\",\"fixture_lineage\":\"common families use one actual AdjRibOut; order is insertion order; sparse mutation reuses and appends slots\",\"cold_scope\":\"common anchor begin/full helper/seal; identical policy before both warm arms; no attributable cold arm ratio; EVPN cold unmeasured\",\"credit_scope\":\"logical daemon ledger reservation; excludes input fixtures, allocator overhead and RSS\",\"scope\":\"component-only; no live ownership, delivery, readiness, fleet or daemon-memory qualification\"}}"
     );
     let keys = if !measured {
         64
@@ -217,33 +245,69 @@ mod tests {
     }
 
     #[test]
+    fn capture_passes_cannot_mix_different_storage_selection() {
+        let receipt = RecoveryScanReceipt {
+            proof_keys: 64,
+            shared: true,
+            ..RecoveryScanReceipt::default()
+        };
+        let mut counted = receipt.clone();
+        counted.shared = false;
+        assert!(
+            std::panic::catch_unwind(|| checked_refusal(true, &receipt, &counted, None)).is_err()
+        );
+    }
+
+    #[test]
     fn component_capture_correctness_has_no_measurement_and_checks_actual_old() {
         for family in ["full-uc", "full-vpn", "evpn-soak"] {
             for shared in [false, true] {
-                let spec = RecoveryScanSpec {
-                    family,
-                    keys: 64,
-                    records: 4,
-                    sparse: true,
-                    shared,
-                    shuffled: true,
-                };
-                let counted = bench_recovery_capture_scan(spec, true, |_, _| {});
-                let (receipt, phases) = capture(spec, false, "capture");
-                assert!(
-                    phases.is_empty(),
-                    "correctness mode has no clock or CPU receipt"
-                );
-                assert_eq!(receipt.refusal, None);
-                assert_eq!(receipt.proof_keys, 64);
-                assert_eq!(receipt.shared, shared);
-                assert_eq!(receipt.additions, if shared { 4 } else { 0 });
-                assert_eq!(receipt.settled_bytes, receipt.empty_bytes);
-                assert_eq!(counted.old_keys, 64);
-                if shared {
-                    assert!(counted.shape_callbacks > 64);
-                } else {
-                    assert_eq!(counted.shape_callbacks, 64);
+                for shuffled in [false, true] {
+                    for sparse in [false, true] {
+                        let spec = RecoveryScanSpec {
+                            family,
+                            keys: 64,
+                            records: 4,
+                            sparse,
+                            shared,
+                            shuffled,
+                        };
+                        let counted = bench_recovery_capture_scan(spec, true, |_, _| {});
+                        let (receipt, phases) = capture(spec, false, "capture");
+                        assert!(
+                            phases.is_empty(),
+                            "correctness mode has no clock or CPU receipt"
+                        );
+                        assert_eq!(receipt.refusal, None);
+                        assert_eq!(receipt.proof_keys, 64);
+                        let expected_shared = shared && family != "full-vpn";
+                        assert_eq!(receipt.shared, expected_shared);
+                        assert_eq!(
+                            receipt.additions,
+                            if expected_shared && sparse { 4 } else { 0 }
+                        );
+                        assert_eq!(receipt.settled_bytes, receipt.empty_bytes);
+                        assert_eq!(counted.old_keys, 64);
+                        if family == "full-uc" {
+                            assert_eq!(receipt.source_slots, if sparse { 66 } else { 64 });
+                            assert_eq!(receipt.mismatches, if shared && sparse { 4 } else { 0 });
+                        }
+                        if expected_shared {
+                            assert!(counted.shape_callbacks > 64);
+                            if family == "evpn-soak" && !sparse {
+                                assert!(counted.comparisons >= 127 && counted.comparisons <= 137);
+                            }
+                        } else {
+                            assert_eq!(
+                                counted.shape_callbacks,
+                                if family == "full-uc" {
+                                    receipt.source_slots
+                                } else {
+                                    64
+                                }
+                            );
+                        }
+                    }
                 }
             }
         }

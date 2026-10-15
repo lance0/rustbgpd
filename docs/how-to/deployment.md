@@ -1324,14 +1324,6 @@ therefore own the graceful stop and the verification that follows it.
 
 ### Upgrade
 
-RD-bearing API and CLI output now uses raw hexadecimal for a Type 2 RD
-whose ASN is at most 65535, so it cannot be confused with a different
-Type 0 RD. Clients can pass the returned spelling back to RD filters and
-selectors. Ordinary RD output is unchanged; persisted historical event
-labels and payloads are not migrated. See
-[Route Distinguisher identity](../reference/api.md#route-distinguisher-identity)
-for the accepted input grammar and optional versus required fields.
-
 1. Read the target release's CHANGELOG section and verify the downloaded
    package against its release checksum. Config compatibility is not assumed
    across minor releases.
