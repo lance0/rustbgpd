@@ -4,6 +4,12 @@
 
 The independently verified dataset below measures the final reviewed harness source `5b905336750ee5a8fb9a4e411f2d8d94249a7d7f` in [run 38659117804](https://github.com/lance0/rustbgpd/actions/runs/38659117804), started at **2026-10-15T00:16:52Z**: 18 component cells, 72/72 timed legs, zero refused legs, and three outer invocation exits of zero. All three measured profile jobs succeeded. This qualifies the recorded harness head for these component measurements. It does not measure containing main or qualify production activation.
 
+## Acceptance and cost verdict
+
+The measurement-evidence bar is a complete 18-cell matrix with all 72 legs eligible, no refused captures, exact OLD-key proofs, last-owner retirement to empty-ledger charge, successful invocation exits and verified source/artifact provenance. This dataset passes that bar. A successful process exit alone is insufficient: a summary containing no eligible comparison does not qualify.
+
+The runtime cost is **not accepted for deployment by this receipt**. Shared complete capture was slower than the flat control in every cell, by 4.13–16.33 times; lower logical ledger reservation does not establish an acceptable recovery-latency tradeoff. There is no component-ratio threshold in the agreed deployment contract, and this receipt does not invent one. Activation still requires the [ADR-0099 qualification](../adr/0099-update-groups-v2.md): matched whole-system memory and readiness/convergence evidence, complete recovery and wire parity, including simultaneous mass-dirty and whole-fleet regroup cells with no execution-confirmed recovery resets. The component result identifies a cost that those gates must resolve or explicitly justify; it does not pass them.
+
 ## Workload and phase boundaries
 
 Each leg has one full anchor proof keeping an immutable key universe alive and one capturing target. The remaining records are empty. Record counts 2, 64 and 480 include both anchor and target; this is not 2/64/480 simultaneous full peer captures or an actor/fleet workload.
