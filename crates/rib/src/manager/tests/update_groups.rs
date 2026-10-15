@@ -6365,9 +6365,8 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
     handle.await.unwrap();
 }
 
-/// LAN-447 companion bound: one resync-timer tick hands at most
-/// `RESYNC_PEERS_PER_TICK` dirty peers to the O(table) resync pass; the
-/// withheld remainder survives untouched for the next tick.
+/// A zero-budget resync tick completes one peer transaction; the withheld
+/// remainder and its admitted proofs survive for the following ticks.
 #[tokio::test]
 async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
     const PEER_COUNT: usize = 12;
@@ -6384,10 +6383,7 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
     // the withheld backlog is reported and survives untouched.
     let backlog = manager.resync_dirty_peers_bounded();
     assert!(backlog, "a withheld remainder must be reported as backlog");
-    assert_eq!(
-        manager.dirty_peers.len(),
-        PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
-    );
+    assert_eq!(manager.dirty_peers.len(), PEER_COUNT - 1);
     assert_eq!(
         manager
             .pending_group_admitted
@@ -6401,11 +6397,23 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
         .iter_mut()
         .filter_map(|receiver| receiver.try_recv().ok())
         .count();
-    assert_eq!(first_tick_envelopes, super::super::RESYNC_PEERS_PER_TICK);
+    assert_eq!(first_tick_envelopes, 1);
 
-    // Second tick drains the remainder without over-reporting backlog.
-    let backlog = manager.resync_dirty_peers_bounded();
-    assert!(!backlog, "no withheld peers remain");
+    // Every subsequent tick completes one more peer, retaining the exact
+    // proofs of the remaining backlog without over-reporting completion.
+    for remaining in (0..PEER_COUNT - 1).rev() {
+        let backlog = manager.resync_dirty_peers_bounded();
+        assert_eq!(backlog, remaining != 0);
+        assert_eq!(manager.dirty_peers.len(), remaining);
+        assert_eq!(
+            manager
+                .pending_group_admitted
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            manager.dirty_peers
+        );
+    }
     assert!(manager.dirty_peers.is_empty());
     assert!(
         manager.pending_group_admitted.is_empty(),
@@ -6415,10 +6423,7 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
         .iter_mut()
         .filter_map(|receiver| receiver.try_recv().ok())
         .count();
-    assert_eq!(
-        second_tick_envelopes,
-        PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
-    );
+    assert_eq!(second_tick_envelopes, PEER_COUNT - 1);
 }
 
 /// With wall-clock budget in hand, one resync tick keeps taking strides
@@ -6829,20 +6834,24 @@ fn forced_peer_outside_dirty_tick_slice_waits_for_capacity() {
 
     manager.resync_dirty_peers_bounded();
     assert_eq!(
-        manager.adj_rib_out_commit_stats.resync_builds,
-        super::super::RESYNC_PEERS_PER_TICK,
+        manager.adj_rib_out_commit_stats.resync_builds, 1,
         "the withheld forced peer must not rebuild against its full channel"
     );
     assert!(manager.force_outbound_peers.contains(&withheld));
     assert!(manager.dirty_peers.contains(&withheld));
     assert!(receivers[peer_count - 1].try_recv().is_err());
-    for receiver in &mut receivers[..peer_count - 1] {
+    for receiver in &mut receivers[..1] {
         assert_eq!(receiver.try_recv().unwrap().announce.len(), 1);
+        assert!(receiver.try_recv().is_err());
+    }
+    for receiver in &mut receivers[1..peer_count - 1] {
         assert!(receiver.try_recv().is_err());
     }
 
     drop(permits);
-    manager.resync_dirty_peers_bounded();
+    for _ in 1..peer_count {
+        manager.resync_dirty_peers_bounded();
+    }
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, peer_count);
     assert_eq!(
         receivers[peer_count - 1].try_recv().unwrap().announce.len(),
@@ -9704,6 +9713,265 @@ async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
         mutation_held,
         "ordinary mutations stay queued during recovery"
     );
+}
+
+async fn next_dirty_resync_hold(entered: &mut [mpsc::UnboundedReceiver<usize>]) -> (usize, usize) {
+    if entered.len() == 1 {
+        return (0, entered[0].recv().await.unwrap());
+    }
+    let (first, second) = entered.split_at_mut(1);
+    tokio::select! {
+        call = first[0].recv() => (0, call.unwrap()),
+        call = second[0].recv() => (1, call.unwrap()),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn dirty_resync_timer_returns_between_slow_member_transactions() {
+    dirty_resync_timer_member_ages(&[Duration::from_secs(20), Duration::from_secs(20)]).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn dirty_resync_timer_one_stalled_member_still_fails_closed() {
+    dirty_resync_timer_member_ages(&[Duration::from_secs(31)]).await;
+}
+
+#[test]
+fn dirty_resync_tick_withholds_forced_siblings_with_free_channels() {
+    let (mut manager, peers, mut outbound) = direct_clean_transition_manager(3, 1, None);
+    for &peer in &peers {
+        manager.mark_outbound_dirty(peer);
+        manager.force_outbound_peers.insert(peer);
+    }
+    let original_since = manager.dirty_since.clone();
+    assert!(manager.resync_dirty_peers_bounded());
+    assert_eq!(
+        manager.dirty_peers.len(),
+        2,
+        "one peer replay completes before the budget check"
+    );
+    assert_eq!(
+        manager.force_outbound_peers.len(),
+        2,
+        "withheld force flags must survive without bypassing the slice"
+    );
+    assert_eq!(
+        outbound
+            .iter_mut()
+            .filter_map(|rx| rx.try_recv().ok())
+            .count(),
+        1
+    );
+    for peer in &manager.dirty_peers {
+        assert_eq!(manager.dirty_since.get(peer), original_since.get(peer));
+        assert!(manager.pending_group_admitted.contains_key(peer));
+    }
+    assert!(manager.resync_dirty_peers_bounded());
+    assert!(!manager.resync_dirty_peers_bounded());
+    for receiver in &mut outbound {
+        while let Ok(update) = receiver.try_recv() {
+            assert_eq!(update.announce.len(), 1);
+            assert_eq!(update.withdraw, []);
+        }
+    }
+    assert!(manager.dirty_peers.is_empty());
+    assert!(manager.force_outbound_peers.is_empty());
+    assert!(manager.pending_group_admitted.is_empty());
+}
+
+#[test]
+fn dirty_resync_tick_preserves_unrelated_force_only_replay() {
+    let (mut manager, peers, mut outbound) = direct_clean_transition_manager(2, 1, None);
+    manager.mark_outbound_dirty(peers[0]);
+    manager.force_outbound_peers.insert(peers[1]);
+    assert!(!manager.dirty_peers.contains(&peers[1]));
+    assert!(!manager.resync_dirty_peers_bounded());
+    for receiver in &mut outbound {
+        let update = receiver.try_recv().unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.withdraw, []);
+        assert!(receiver.try_recv().is_err());
+    }
+    assert!(manager.force_outbound_peers.is_empty());
+    assert!(manager.dirty_peers.is_empty());
+    assert!(manager.pending_group_admitted.is_empty());
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actual timer fixture keeps paused member age, held readiness, fenced lanes and exact proof settlement in one ordered path"
+)]
+async fn dirty_resync_timer_member_ages(ages: &[Duration]) {
+    let (mut manager, peers, mut outbound) = direct_clean_transition_manager(3, 3, None);
+    let metrics = manager.metrics.clone();
+    let empty_credit = manager.pending_group_admitted.bytes();
+    let removed = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 0, 0), 24));
+    let permits: Vec<_> = peers[..ages.len()]
+        .iter()
+        .flat_map(|peer| {
+            (0..8).map(|_| {
+                manager.outbound_peers[peer]
+                    .clone()
+                    .try_reserve_owned()
+                    .unwrap()
+            })
+        })
+        .collect();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(FULL_CHANNEL_SOURCE),
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![(removed, 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+    assert_eq!(manager.loc_rib.len(), 2);
+    assert_eq!(manager.dirty_peers.len(), ages.len());
+    for peer in &peers[..ages.len()] {
+        assert_eq!(manager.pending_group_admitted.get(peer).unwrap().len(), 3);
+    }
+    drop(permits);
+    while outbound[2].try_recv().is_ok() {}
+    let mut entered = Vec::new();
+    let mut releases = Vec::new();
+    for &peer in &peers[..ages.len()] {
+        let (entered_tx, entered_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        manager.peer_export_encoders.insert(
+            peer,
+            Arc::new(HeldDirtyResyncEncoder(Arc::new(DirtyResyncProbeHold {
+                calls: AtomicUsize::new(0),
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            }))),
+        );
+        entered.push(entered_rx);
+        releases.push(release_tx);
+    }
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.query_rx = query_rx;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(readiness_rx);
+    // Keep the actor on a blocking task while this current-thread runtime
+    // advances its paused clock; no real-time sleep or latency assertion.
+    let runtime = tokio::runtime::Handle::current();
+    let actor = tokio::task::spawn_blocking(move || runtime.block_on(manager.run()));
+    let (reply, started) = oneshot::channel();
+    query_tx
+        .send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    assert_eq!(started.await.unwrap(), 2);
+    tokio::time::advance(super::super::DIRTY_RESYNC_INTERVAL).await;
+    let mut next = None;
+    let mut replies = Vec::new();
+    let mut queued_reads = Vec::new();
+    let mut visited = HashSet::new();
+    for (index, age) in ages.iter().enumerate() {
+        let (member, call) = match next.take() {
+            Some(entry) => entry,
+            None => next_dirty_resync_hold(&mut entered).await,
+        };
+        assert_eq!(call, 0);
+        assert!(visited.insert(member));
+        tokio::time::advance(*age).await;
+        let mut readiness = queue_replacement_readiness(&readiness_tx);
+        let (reply, mut ordinary) = oneshot::channel();
+        query_tx
+            .send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        tx.send(RibUpdate::PeerDown {
+            peer: peers[2],
+            session_id: 0,
+        })
+        .await
+        .unwrap();
+        let queued_capacity = tx.capacity();
+        releases[member].send(()).unwrap();
+        assert_eq!(entered[member].recv().await.unwrap(), 1);
+        replies.push(readiness.try_recv());
+        assert!(matches!(
+            ordinary.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            tx.capacity(),
+            queued_capacity,
+            "mutations stay fenced inside a member replay"
+        );
+        releases[member].send(()).unwrap();
+        let recovered = outbound[member].recv().await.unwrap();
+        assert_eq!(recovered.announce.len(), 2);
+        assert_eq!(recovered.withdraw, vec![(removed, 0)]);
+        if index + 1 == ages.len() {
+            queued_reads.push(ordinary);
+        } else {
+            // The old eight-member transaction enters the next encoder
+            // without releasing this query; a real actor return serves it.
+            next = tokio::select! {
+                response = &mut ordinary => {
+                    assert_eq!(response.unwrap(), 2);
+                    tokio::time::advance(super::super::DIRTY_RESYNC_BACKLOG_INTERVAL).await;
+                    Some(next_dirty_resync_hold(&mut entered).await)
+                }
+                entry = next_dirty_resync_hold(&mut entered) => {
+                    queued_reads.push(ordinary);
+                    Some(entry)
+                }
+            };
+        }
+    }
+    for response in queued_reads {
+        assert_eq!(response.await.unwrap(), 2);
+    }
+    let (reply, health) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryOutboundHealth { reply })
+        .await
+        .unwrap();
+    assert_eq!(health.await.unwrap(), (0, 0, 0, 0, 0, 0));
+    let gauge = |name| {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)
+            .unwrap()
+            .get_metric()[0]
+            .get_gauge()
+            .get_value()
+    };
+    assert_eq!(
+        gauge("bgp_update_group_recovery_entries").to_bits(),
+        0_f64.to_bits()
+    );
+    assert_eq!(
+        gauge("bgp_update_group_recovery_bytes").to_bits(),
+        f64::from(u32::try_from(empty_credit).unwrap()).to_bits()
+    );
+    drop(tx);
+    actor.await.unwrap();
+    for (index, response) in replies.into_iter().enumerate() {
+        if ages[index] >= super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE {
+            assert!(matches!(
+                response,
+                Ok(Err(
+                    crate::update::RibReadinessError::PolicyTransitionStalled
+                ))
+            ));
+        } else {
+            assert!(
+                matches!(response, Ok(Ok(2))),
+                "a completed prior member must not age the next actor transaction: {response:?}"
+            );
+        }
+    }
 }
 
 #[test]
