@@ -76,7 +76,11 @@ fn register_session(
 
 fn own(manager: &mut RibManager, peer: IpAddr, fresh: bool) {
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(manager.register_evpn_recovery(peer, fresh));
 }
 
@@ -107,6 +111,10 @@ fn owned_capture_is_retained_across_stale_membership_changes_and_generic_cleanup
     let old = route(1).key();
     assert!(manager.capture_evpn_recovery_before_projection(peer, [old].into_iter()));
     let handle = manager.evpn_recovery_handle(peer).unwrap();
+    // Membership setters may now run the live complete-feed recovery. Keep its
+    // delivery refused while checking that generic cleanup cannot retire OLD.
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
     manager.mark_outbound_dirty(peer);
     manager.set_rt_membership(
         peer,
@@ -429,7 +437,11 @@ fn exact_replay_moves_the_pending_execution_receipt_without_a_second_attempt() {
     let (mut manager, peer, _output) = fixture(8);
     manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(0, 1024 * 1024);
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     let requests = capture_reset_requests(&mut manager);
     assert!(!manager.register_evpn_recovery(peer, true));
     let (_, reply) = requests.lock().unwrap().pop().unwrap();
@@ -454,7 +466,11 @@ fn replaced_connection_discards_old_execution_receipt_with_the_same_actor_id() {
     let (mut manager, peer, _output) = fixture(8);
     manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(0, 1024 * 1024);
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     let requests = capture_reset_requests(&mut manager);
     assert!(!manager.register_evpn_recovery(peer, true));
     let (old, old_reply) = requests.lock().unwrap().pop().unwrap();
@@ -466,7 +482,11 @@ fn replaced_connection_discards_old_execution_receipt_with_the_same_actor_id() {
         Err(EvpnRecoveryResetOutcome::Executed)
     );
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(!manager.register_evpn_recovery(peer, true));
     manager.retry_evpn_recovery_reset(peer);
     let record = manager.live_sessions[&peer].last().unwrap();
@@ -743,7 +763,11 @@ fn ownership_registration_refusal_has_bounded_session_reset_control() {
     let (mut manager, peer, _output) = fixture(8);
     manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(0, 1024 * 1024);
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
     manager.evpn_recovery_reset = Some(Arc::new(move |request, reply| {
@@ -779,7 +803,11 @@ fn ownership_registration_refusal_has_bounded_session_reset_control() {
     // The preparatory classifier stays off after a fresh registration;
     // explicitly commit the synthetic G2 owner for the replacement.
     let gid = manager.grouped_member_of(peer).unwrap();
-    manager.group_ribs.get_mut(&gid).unwrap().owns_evpn = true;
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
     assert!(!manager.register_evpn_recovery(peer, true));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     manager.clear_outbound_peer_state(peer);
@@ -910,6 +938,7 @@ impl FinalTransactionFixture {
                 None,
                 Some(&scope),
                 None,
+                None,
             )
             .is_ok()
     }
@@ -940,6 +969,8 @@ fn assert_final_transaction_refusal(fault: FinalAdmissionFault, deferred_capture
         manager.evpn_recovery.proof_keys(handle).unwrap(),
         Some(vec![route(1).key()])
     );
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
     let overlay = manager.peer_unexportable[&peer].clone();
     let rejections = exact_rejection_count(manager);
     let common = (
@@ -1010,15 +1041,17 @@ fn assert_final_transaction_refusal(fault: FinalAdmissionFault, deferred_capture
         fixture.output.try_recv().is_err(),
         "no ANN, WD or EoR may escape refusal"
     );
-    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 1);
-    let retained = manager.adj_ribs_out[&peer]
-        .get_evpn(&route(1).key())
-        .unwrap();
-    assert_eq!(retained.next_hop, route(1).next_hop);
-    assert!(
-        manager.adj_ribs_out[&peer]
-            .get_evpn(&route(2).key())
-            .is_none()
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(handle).unwrap_err().cause,
+        EvpnRecoveryExhaustionCause::AdmissionInvariant,
+        "retained storage must not grant an exhausted proof authority"
+    );
+    assert_eq!(
+        manager.evpn_recovery.retained_keys_for_test(handle),
+        Some(vec![route(1).key()]),
+        "the real owned OLD admission must survive final refusal"
     );
     assert_eq!(
         manager.peer_unexportable[&peer], overlay,
@@ -1122,16 +1155,8 @@ fn final_evpn_admission_publishes_one_mixed_family_transaction_after_validation(
             HashSet::from([ExactExportKey::Evpn(route(1).key())])
         );
         assert!((exact_rejection_count(manager) - rejections - 1.0).abs() < f64::EPSILON);
-        assert!(
-            manager.adj_ribs_out[&peer]
-                .get_evpn(&route(1).key())
-                .is_none()
-        );
-        assert!(
-            manager.adj_ribs_out[&peer]
-                .get_evpn(&route(2).key())
-                .is_some()
-        );
+        assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+        assert_eq!(manager.evpn_admitted_count(peer), 1);
         let handle = manager.evpn_recovery_handle(peer).unwrap();
         assert_eq!(
             manager.evpn_recovery.proof_keys(handle).unwrap(),

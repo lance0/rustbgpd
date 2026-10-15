@@ -160,6 +160,7 @@ impl RibManager {
         self.pending_peer_gr_context.remove(&(peer, session_id));
         self.pending_peer_source_context.remove(&(peer, session_id));
         self.pending_peer_policy_context.remove(&(peer, session_id));
+        self.drop_evpn_feed_receipts(peer, Some(session_id));
         let Some(&registered) = self.outbound_session_ids.get(&peer) else {
             // No registration. Ordinarily `live_sessions` is empty for the
             // peer here and the full teardown proceeds; during the LAN-475
@@ -464,6 +465,7 @@ impl RibManager {
         // for teardowns, fresh registration for PeerUp). Pending registration
         // contexts belong to their stamped sessions: ordinary teardown and
         // GR expiry must preserve a replacement staged before its PeerUp.
+        self.drop_evpn_feed_receipts(peer, None);
         self.live_sessions.remove(&peer);
         self.clear_policy_filtered_routes_for_peer(peer);
         if self.gr_peers.remove(&peer).is_some() {
@@ -666,6 +668,7 @@ impl RibManager {
     }
 
     fn clear_outbound_peer_state_inner(&mut self, peer: IpAddr, same_connection_replay: bool) {
+        self.invalidate_evpn_feed_completion(peer);
         if !same_connection_replay {
             self.retire_evpn_recovery(peer);
         }
@@ -899,6 +902,7 @@ impl RibManager {
         // A replacement never receives the prior connection's acknowledgement.
         let (evpn_recovery_reset_receipt, evpn_recovery_reset_retry_reported) =
             self.take_evpn_recovery_reset_receipt(peer, session_id, &outbound_tx);
+        let evpn_feed_completion = self.take_evpn_feed_completion(peer, session_id, &outbound_tx);
         let previous_session = self.live_sessions.get(&peer).and_then(|sessions| {
             sessions
                 .iter()
@@ -909,6 +913,9 @@ impl RibManager {
             .map_or((None, None), |old| {
                 (old.evpn_recovery_reset, old.group_recovery_fallback)
             });
+        let evpn_admitted_count = previous_session
+            .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
+            .map_or(0, |record| record.evpn_admitted_count);
         let record = LiveSessionRecord {
             session_id,
             source_context: self
@@ -947,8 +954,12 @@ impl RibManager {
             evpn_recovery_reset,
             evpn_recovery_reset_receipt,
             evpn_recovery_reset_retry_reported,
+            evpn_feed_completion,
+            evpn_admitted_count,
             group_recovery_fallback,
         };
+        self.drop_evpn_feed_receipts(peer, Some(session_id));
+        self.evpn_feed_receipt_count += usize::from(record.evpn_feed_completion.is_some());
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0
         // emitters collapse every session to one id): replace in place so
@@ -957,6 +968,7 @@ impl RibManager {
         sessions.push(record);
         if sessions.len() > MAX_LIVE_SESSIONS_PER_PEER {
             let dropped = sessions.remove(0);
+            self.evpn_feed_receipt_count -= usize::from(dropped.evpn_feed_completion.is_some());
             warn!(
                 %peer,
                 dropped_session_id = dropped.session_id,
@@ -1427,7 +1439,9 @@ impl RibManager {
         // registration's group membership / ungrouped reason. Runs after
         // every fingerprint input map above is populated; distribution
         // (including the initial dump below) does not read it.
-        self.recompute_update_group(peer);
+        // Initial replay is produced after the new registration owns its
+        // fresh/retained proof, rather than retaining payload across deferral.
+        let _ = self.recompute_update_group(peer);
         // ADR-0113: resolve this generation's effective outbound maxima
         // before the initial dump, so a reconnecting limited peer admits its
         // feed up to the cap rather than flooding and only then discovering
@@ -1449,6 +1463,15 @@ impl RibManager {
             self.refresh_group_recovery_gauges();
         }
         self.register_evpn_recovery(peer, true);
+        if self.evpn_grouped_member_of(peer).is_none()
+            && self
+                .evpn_recovery_handle(peer)
+                .is_some_and(|handle| !self.evpn_recovery.is_dormant(handle))
+        {
+            // Same-channel replay retained actual admitted keys while its
+            // private bodies and old group were retired during registration.
+            self.begin_private_evpn_handoff(peer);
+        }
         true
     }
 
@@ -1907,6 +1930,36 @@ impl RibManager {
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
 
+        let owned_evpn = self.evpn_grouped_member_of(peer);
+        let owned_evpn_feed =
+            owned_evpn.and_then(|gid| self.prepare_complete_evpn_feed(peer, gid, None, false));
+        let private_evpn_recovery = (owned_evpn.is_none()
+            && self.has_private_evpn_handoff(peer)
+            && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
+        .then(|| self.evpn_recovery_handle(peer))
+        .flatten();
+        let private_evpn_feed =
+            private_evpn_recovery.and_then(|_| self.private_evpn_feed_seal(peer));
+        let evpn_coverage_required = owned_evpn.is_some()
+            || self.has_private_evpn_handoff(peer)
+            || self.evpn_recovery_reset_pending(peer);
+        if (owned_evpn.is_some()
+            && owned_evpn_feed.is_none()
+            && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
+            || (private_evpn_recovery.is_some() && private_evpn_feed.is_none())
+        {
+            // A missing owned producer is not an empty private inventory.
+            self.pending_eor
+                .entry(peer)
+                .or_default()
+                .insert((Afi::L2Vpn, Safi::Evpn));
+            if let Some(handle) = self.evpn_recovery_handle(peer) {
+                self.evpn_recovery.fail_admission(handle);
+            }
+            self.mark_outbound_dirty_inner(peer, false);
+            self.retry_evpn_recovery_reset(peer);
+            return;
+        }
         let member_of = self.grouped_member_of(peer);
         if member_of.is_some() {
             // Fresh registration retains its empty seed; an existing-session
@@ -2268,17 +2321,29 @@ impl RibManager {
             );
         }
 
+        let mut evpn_complete_feed = None;
         // EVPN initial dump — without this, peers that join after the
         // fabric has converged see an EoR with zero EVPN routes and
         // operate with no EVPN reachability until unrelated RIB churn
         // forces redistribution. Mirrors the FlowSpec staging block.
-        let all_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = self
+        let mut all_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = self
             .loc_rib
             .iter_evpn()
             .inspect(|_| checkpoint_at("initial_inventory"))
             .map(crate::route::EvpnRibRoute::key)
             .collect();
-        if !all_evpn_keys.is_empty() {
+        if let Some(handle) = private_evpn_recovery
+            && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
+        {
+            all_evpn_keys.extend(proof.iter_with_checkpoint(|force| {
+                super::replacement_readiness_checkpoint(&readiness, force);
+            }));
+        }
+        if let Some(feed) = owned_evpn_feed {
+            evpn_announce = feed.announce;
+            evpn_withdraw = feed.withdraw;
+            evpn_complete_feed = Some(feed.seal);
+        } else if owned_evpn.is_none() && !all_evpn_keys.is_empty() {
             Self::stage_evpn_routes_with_checkpoint(
                 loc_rib,
                 &initial_view,
@@ -2305,6 +2370,22 @@ impl RibManager {
                 false, // initial dump — equality check is correct
                 &mut checkpoint,
             );
+            if let Some(handle) = private_evpn_recovery
+                && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
+            {
+                Self::append_private_evpn_proof_withdrawals(
+                    proof,
+                    &initial_view,
+                    &mut evpn_announce,
+                    &mut evpn_withdraw,
+                    &mut |force| {
+                        super::replacement_readiness_checkpoint(&readiness, force);
+                    },
+                );
+            }
+        }
+        if evpn_complete_feed.is_none() {
+            evpn_complete_feed = private_evpn_feed;
         }
 
         let all_bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = self
@@ -2533,6 +2614,7 @@ impl RibManager {
         let (announce, next_hop_override) = grouped_unicast
             .unwrap_or_else(|| (unicast.announce.into(), unicast.next_hop_override.into()));
         let has_outbound_diff = !announce.is_empty()
+            || evpn_complete_feed.is_some()
             || !unicast.withdraw.is_empty()
             || !fs_announce.is_empty()
             || !fs_withdraw.is_empty()
@@ -2566,6 +2648,16 @@ impl RibManager {
                 }),
             }
         });
+        if let Some(seal) = evpn_complete_feed.as_mut() {
+            // Held or separately queued initial EoR still covers this feed.
+            if sendable
+                .as_ref()
+                .is_some_and(|families| families.contains(&(Afi::L2Vpn, Safi::Evpn)))
+            {
+                seal.required_markers |=
+                    Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
+            }
+        }
         let sent = if has_outbound_diff {
             self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
@@ -2579,6 +2671,7 @@ impl RibManager {
                     flowspec_withdraw: fs_withdraw,
                     evpn_announce,
                     evpn_withdraw,
+                    evpn_complete_feed,
                     bgpls_announce,
                     bgpls_withdraw,
                     vpn_announce,
@@ -2592,6 +2685,7 @@ impl RibManager {
                 HashSet::new(),
                 shared_unicast_precommit,
                 member_of.is_none().then_some(&otc_prefixes),
+                None,
                 None,
             )
         } else {
@@ -2611,13 +2705,25 @@ impl RibManager {
             &all_prefixes,
             &current_policy_filtered_routes,
         );
-        if !self.dirty_peers.contains(&peer) && self.finish_evpn_recovery(peer) {
+        let owned_evpn_covered = !evpn_coverage_required || self.evpn_feed_is_current(peer);
+        if !self.dirty_peers.contains(&peer)
+            && owned_evpn_covered
+            && self.finish_evpn_recovery(peer)
+        {
             self.release_group_admitted_keys(peer);
+        }
+
+        if !owned_evpn_covered && eor_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+            self.pending_eor
+                .entry(peer)
+                .or_default()
+                .insert((Afi::L2Vpn, Safi::Evpn));
+            eor_families.retain(|family| *family != (Afi::L2Vpn, Safi::Evpn));
         }
 
         // Send End-of-RIB markers for all sendable families
         if !eor_families.is_empty()
-            && let Some(tx) = self.outbound_peers.get(&peer)
+            && let Some(tx) = self.outbound_peers.get(&peer).cloned()
         {
             let eor = OutboundRouteUpdate {
                 end_of_rib: eor_families.clone(),
@@ -2628,7 +2734,12 @@ impl RibManager {
                 for f in &eor_families {
                     self.pending_eor.entry(peer).or_default().insert(*f);
                 }
-                self.mark_outbound_dirty(peer);
+                if !self.evpn_feed_is_current(peer) {
+                    self.mark_outbound_dirty(peer);
+                }
+            } else {
+                let bits = Self::evpn_admitted_marker_bits(&eor_families, &[]);
+                self.evpn_feed_markers_admitted(peer, &tx, bits);
             }
         }
     }

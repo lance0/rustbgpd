@@ -1418,6 +1418,7 @@ mod dataplane_paging;
 mod distribution_window;
 mod events_metrics;
 mod evpn;
+mod evpn_complete_feed;
 mod evpn_dataplane_query;
 mod evpn_explain;
 mod evpn_group_checkpoints;

@@ -252,6 +252,9 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
+    /// Controlled refusal at the actual post-admission completeness seam.
+    #[cfg(test)]
+    fail_evpn_feed_completion: bool,
 }
 
 #[cfg(test)]
@@ -601,6 +604,9 @@ pub struct RibManager {
     /// an Established session. Entries are removed by their session's own
     /// `PeerDown`/GR-down or by full peer teardown.
     live_sessions: HashMap<IpAddr, Vec<LiveSessionRecord>>,
+    /// Physical live-session completion options, including collision records.
+    /// Zero avoids fleet scans while EVPN completion control is inactive.
+    evpn_feed_receipt_count: usize,
     /// Session-stamped local role staged before `PeerUp`, so the initial
     /// Adj-RIB-Out build can enforce RFC 9234 OTC egress rules.
     pending_peer_export_context: HashMap<(IpAddr, u64), Option<BgpRole>>,
@@ -1057,6 +1063,10 @@ pub struct RibManager {
     /// families and unicast group membership do not establish that ownership.
     evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance,
     evpn_recovery_reset: Option<crate::update::EvpnRecoveryResetFn>,
+    /// Unique across group recreation and paired EVPN route/input writes.
+    evpn_table_stamp: u64,
+    /// Fairness position for marker-only completion retries on the resync timer.
+    evpn_marker_cursor: Option<IpAddr>,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
@@ -1533,6 +1543,10 @@ pub(super) struct LiveSessionRecord {
     evpn_recovery_reset_receipt: Option<evpn_recovery::ResetReceipt>,
     /// Bound refusal/drop diagnostics to one warning per connection episode.
     evpn_recovery_reset_retry_reported: bool,
+    /// Fixed completion metadata, separate from charged recovery key storage.
+    evpn_feed_completion: Option<evpn_recovery::EvpnFeedCompletion>,
+    /// Actual group-owned EVPN admission, including clean deltas without keys.
+    evpn_admitted_count: usize,
     group_recovery_fallback: Option<update_groups::RecoveryFallbackCause>,
 }
 
@@ -2047,6 +2061,7 @@ impl RibManager {
             flush_poll_budget: FLUSH_POLL_BUDGET,
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
+            evpn_feed_receipt_count: 0,
             pending_peer_export_context: HashMap::new(),
             pending_peer_rs_control: HashMap::new(),
             pending_peer_export_encoders: HashMap::new(),
@@ -2126,6 +2141,8 @@ impl RibManager {
             pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
             evpn_recovery_reset: None,
+            evpn_table_stamp: 0,
+            evpn_marker_cursor: None,
             #[cfg(test)]
             test_force_ungrouped: false,
             #[cfg(test)]
@@ -2995,6 +3012,15 @@ impl RibManager {
     fn resync_tick_pending(&self) -> bool {
         !self.dirty_peers.is_empty()
             || !self.pending_inbound_refresh.is_empty()
+            || (self.evpn_feed_receipt_count != 0
+                && self.live_sessions.keys().any(|&peer| {
+                    self.replacement_checkpoint(false);
+                    self.evpn_marker_retry_runnable(peer)
+                }))
+            || self.pending_eor.keys().any(|&peer| {
+                self.replacement_checkpoint(false);
+                self.evpn_marker_retry_runnable(peer)
+            })
             || self.outbound_limit_recovery_runnable()
     }
 
@@ -3026,6 +3052,7 @@ impl RibManager {
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
         let recovered = self.drain_outbound_limit_recovery();
         self.retry_pending_inbound_refresh_bounded();
+        self.retry_evpn_feed_markers_bounded();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap

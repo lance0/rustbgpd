@@ -1127,20 +1127,24 @@ impl RibManager {
             return;
         }
         let mut regrouped = false;
+        let mut evpn_feeds = std::collections::HashMap::new();
         for peer in regroup {
             if self.update_groups.members.contains_key(&peer) {
-                self.recompute_update_group(peer);
+                if let Some(feed) = self.recompute_update_group(peer) {
+                    evpn_feeds.insert(peer, feed);
+                }
                 regrouped = true;
             }
         }
         for peer in dirty {
-            self.mark_outbound_dirty(peer);
+            let mut feed = evpn_feeds.remove(&peer);
+            self.mark_outbound_dirty_with_evpn_feed(peer, &mut feed);
+            if let Some(feed) = feed {
+                evpn_feeds.insert(peer, feed);
+            }
         }
         if regrouped {
-            self.distribute_changes_after_advertised_page_advance(
-                &std::collections::HashSet::new(),
-                &std::collections::HashSet::new(),
-            );
+            self.distribute_changes_with_evpn_feeds(evpn_feeds, true);
         }
     }
 

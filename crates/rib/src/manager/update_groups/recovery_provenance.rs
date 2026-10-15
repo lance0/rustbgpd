@@ -642,6 +642,10 @@ impl EvpnRecoveryProvenance {
             .ok()
     }
 
+    pub(in crate::manager) fn universe_is_live(&self, handle: UniverseHandle) -> bool {
+        self.universe_index(handle).is_some()
+    }
+
     fn peer_references_universe(&self, peer: IpAddr, universe: UniverseHandle) -> bool {
         self.records[self.peer_range(peer)]
             .iter()
@@ -1425,6 +1429,16 @@ impl EvpnRecoveryProvenance {
     ) -> Result<Option<Vec<EvpnRouteKey>>, Exhaustion> {
         self.proof(handle)
             .map(|proof| proof.map(|proof| proof.iter_with_checkpoint(|_| {}).collect()))
+    }
+
+    /// Inspect retained storage without granting an exhausted proof authority.
+    #[cfg(test)]
+    pub(in crate::manager) fn retained_keys_for_test(
+        &self,
+        handle: ProvenanceHandle,
+    ) -> Option<Vec<EvpnRouteKey>> {
+        self.index(handle)
+            .map(|index| self.view(index).iter_with_checkpoint(|_| {}).collect())
     }
 
     /// Keep a charged immutable copy under the same peer/session ownership.

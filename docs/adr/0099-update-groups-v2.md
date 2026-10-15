@@ -533,7 +533,9 @@ tests.
 
 1. Extend the reviewed recovery machinery for EVPN with the bounded key
    provenance, counted/logged reset fallback and admitted views in section E;
-   pin dirty RTC changes, repeated regroup and limit/allocation-failure behavior.
+   pin non-RTC dirty changes, repeated regroup and limit/allocation-failure
+   behavior. Negotiated RTC EVPN stays private until OLD-membership capture and
+   separate RTC qualification are complete.
 2. Add EVPN staging/storage/member views behind the existing grouping classifier,
    with Type 1–6 identities, source flips, pre-policy RT changes under modifying
    policy, GR/LLGR, eligibility and no-op suppression coverage.
