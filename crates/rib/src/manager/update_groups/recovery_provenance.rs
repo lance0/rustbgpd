@@ -240,7 +240,7 @@ impl EvpnRecoveryProvenance {
     }
 
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "bench-internals")),
         expect(
             dead_code,
             reason = "G4 mass-dirty qualification will consume retained and peak daemon credits"
