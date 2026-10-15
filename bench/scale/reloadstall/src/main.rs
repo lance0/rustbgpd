@@ -384,6 +384,38 @@ struct HttpFetchTrace {
     response: Vec<u8>,
 }
 
+fn http_trace_wall_ns(at: SystemTime) -> Option<u64> {
+    u64::try_from(at.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok()
+}
+
+fn http_trace_elapsed_ns(start: Option<Instant>, end: Option<Instant>) -> Option<u64> {
+    u64::try_from(end?.checked_duration_since(start?)?.as_nanos()).ok()
+}
+
+fn emit_http_client_trace(
+    event: &'static str,
+    trace: &HttpFetchTrace,
+    before: Option<Instant>,
+    outcome: &'static str,
+) {
+    let Some(attempt) = trace.readiness_attempt else {
+        return;
+    };
+    // At connect, before is the unchanged connected_at stamp used by the
+    // original failure record. Its sampling span includes endpoint readback.
+    let wall = before.and_then(|_| http_trace_wall_ns(SystemTime::now()));
+    let after = before.map(|_| Instant::now());
+    let since_connect = http_trace_elapsed_ns(trace.connected_at, before);
+    let span = http_trace_elapsed_ns(before, after);
+    let number =
+        |value: Option<u64>| value.map_or_else(|| "null".into(), |value| value.to_string());
+    let line = format!(
+        "readiness_http_client attempt={attempt} event={event} client={:?} server={:?} wall_unix_ns={} since_connect_ns={} clock_pair_span_ns={} outcome={outcome}\n",
+        trace.client_endpoint, trace.server_endpoint, number(wall), number(since_connect), number(span),
+    );
+    let _ = std::io::stderr().lock().write_all(line.as_bytes());
+}
+
 fn diagnostic_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len().min(HTTP_TRACE_PREFIX_BYTES) * 2);
@@ -417,14 +449,15 @@ async fn fetch_http_traced(
         let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
         observation.connected_at = observation.record_clocks.then(Instant::now);
         observation.phase = "request_write";
-        if let Some(attempt) = observation.readiness_attempt {
+        if observation.readiness_attempt.is_some() {
             observation.client_endpoint = stream.local_addr().ok();
             observation.server_endpoint = stream.peer_addr().ok();
-            let line = format!(
-                "readiness_http_client attempt={attempt} client={:?} server={:?}\n",
-                observation.client_endpoint, observation.server_endpoint,
+            emit_http_client_trace(
+                "connected",
+                &observation,
+                observation.connected_at,
+                "connected",
             );
-            let _ = std::io::stderr().lock().write_all(line.as_bytes());
         }
         stream
             .write_all(
@@ -480,6 +513,16 @@ async fn fetch_http_traced(
         Ok(body.to_owned())
     };
     let result = tokio::time::timeout_at(deadline.into(), work).await;
+    emit_http_client_trace(
+        "fetch_return",
+        &observation,
+        observation.record_clocks.then(Instant::now),
+        match &result {
+            Ok(Ok(_)) => "ok",
+            Ok(Err(_)) => "http_error",
+            Err(_) => "deadline",
+        },
+    );
     if let Some(trace) = trace {
         *trace = observation;
     }
@@ -7534,6 +7577,7 @@ mod tests {
     async fn traced_http_fixture(
         response: Option<&'static [u8]>,
         hold_eof: bool,
+        record_clocks: bool,
     ) -> (Result<String, String>, HttpFetchTrace) {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -7560,6 +7604,7 @@ mod tests {
         });
         let client = tokio::spawn(async move {
             let mut trace = HttpFetchTrace {
+                record_clocks,
                 readiness_attempt: Some(210),
                 ..HttpFetchTrace::default()
             };
@@ -7585,45 +7630,119 @@ mod tests {
     }
 
     #[test]
-    fn http_trace_stderr_correlates_attempt_and_socket_endpoints() {
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::http_trace_preserves_success_and_correctness_clock_nulls",
-                "--nocapture",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            child.status.success(),
-            "{}",
-            String::from_utf8_lossy(&child.stderr)
+    fn http_trace_clock_fields_reject_invalid_time() {
+        assert_eq!(http_trace_wall_ns(UNIX_EPOCH), Some(0));
+        assert_eq!(
+            http_trace_wall_ns(UNIX_EPOCH - Duration::from_nanos(1)),
+            None
         );
-        let stderr = String::from_utf8(child.stderr).unwrap();
-        let records: Vec<_> = stderr
-            .lines()
-            .filter(|line| line.starts_with("readiness_http_client "))
-            .collect();
-        assert_eq!(records.len(), 1, "{stderr}");
-        assert!(records[0].starts_with("readiness_http_client attempt=210 "));
-        for field in ["client=Some(", "server=Some("] {
-            let endpoint: SocketAddr = records[0]
-                .split_ascii_whitespace()
-                .find_map(|value| value.strip_prefix(field))
-                .unwrap()
-                .strip_suffix(')')
-                .unwrap()
-                .parse()
+        assert_eq!(
+            http_trace_wall_ns(
+                UNIX_EPOCH + Duration::from_nanos(u64::MAX) + Duration::from_nanos(1)
+            ),
+            None
+        );
+        let now = Instant::now();
+        assert_eq!(http_trace_elapsed_ns(Some(now), Some(now)), Some(0));
+        assert_eq!(
+            http_trace_elapsed_ns(Some(now + Duration::from_nanos(1)), Some(now)),
+            None
+        );
+        assert_eq!(http_trace_elapsed_ns(None, Some(now)), None);
+    }
+
+    #[test]
+    fn http_trace_stderr_correlates_attempt_and_socket_endpoints() {
+        for (fixture, clocks) in [
+            (
+                "tests::http_trace_preserves_success_and_correctness_clock_nulls",
+                false,
+            ),
+            ("tests::http_trace_reports_connect_clock_anchor", true),
+        ] {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", fixture, "--nocapture"])
+                .output()
                 .unwrap();
-            assert!(endpoint.ip().is_loopback());
-            assert_ne!(endpoint.port(), 0);
+            assert!(
+                child.status.success(),
+                "{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            let stderr = String::from_utf8(child.stderr).unwrap();
+            let records: Vec<_> = stderr
+                .lines()
+                .filter(|line| line.starts_with("readiness_http_client "))
+                .collect();
+            assert_eq!(records.len(), 2, "{stderr}");
+            for (record, event) in records.iter().zip(["connected", "fetch_return"]) {
+                assert!(record.starts_with("readiness_http_client attempt=210 "));
+                assert!(record.contains(&format!("event={event} ")));
+                for field in ["client=Some(", "server=Some("] {
+                    let endpoint: SocketAddr = record
+                        .split_ascii_whitespace()
+                        .find_map(|value| value.strip_prefix(field))
+                        .unwrap()
+                        .strip_suffix(')')
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    assert!(endpoint.ip().is_loopback());
+                    assert_ne!(endpoint.port(), 0);
+                }
+                for field in ["wall_unix_ns=", "since_connect_ns=", "clock_pair_span_ns="] {
+                    let value = record
+                        .split_ascii_whitespace()
+                        .find_map(|value| value.strip_prefix(field))
+                        .unwrap();
+                    if clocks {
+                        assert!(value.parse::<u64>().is_ok(), "{record}");
+                    } else {
+                        assert_eq!(value, "null");
+                    }
+                }
+            }
+            assert!(records[0].contains("outcome=connected"));
+            assert!(records[1].contains("outcome=ok"));
         }
+    }
+
+    #[tokio::test]
+    async fn http_trace_reports_connect_clock_anchor() {
+        const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let (result, trace) = traced_http_fixture(Some(RESPONSE), false, true).await;
+        assert_eq!(result.unwrap(), "ok");
+        assert!(trace.connected_at.is_some());
+        assert!(trace.request_written_at.is_some());
+        assert!(trace.read_completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn http_trace_connect_failure_keeps_endpoint_and_connected_clock_missing() {
+        let mut trace = HttpFetchTrace {
+            record_clocks: true,
+            readiness_attempt: Some(211),
+            ..HttpFetchTrace::default()
+        };
+        let result = fetch_http_traced(
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+            "/readyz",
+            Instant::now() + Duration::from_secs(1),
+            Some(&mut trace),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(trace.phase, "connect");
+        assert!(trace.connected_at.is_none());
+        assert!(trace.client_endpoint.is_none());
+        assert!(trace.server_endpoint.is_none());
+        assert_eq!(trace.response, Vec::<u8>::new());
     }
 
     #[tokio::test]
     async fn http_trace_retains_200_while_waiting_for_eof() {
         const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
-        let (result, trace) = traced_http_fixture(Some(RESPONSE), true).await;
+        let (result, trace) = traced_http_fixture(Some(RESPONSE), true, false).await;
         assert_eq!(result.unwrap_err(), "/readyz checkpoint exceeded deadline");
         assert_eq!(trace.response, RESPONSE);
         assert_eq!(trace.phase, "response_read_to_eof");
@@ -7632,7 +7751,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_trace_silent_server_retains_zero_response_bytes() {
-        let (result, trace) = traced_http_fixture(None, true).await;
+        let (result, trace) = traced_http_fixture(None, true, false).await;
         assert_eq!(result.unwrap_err(), "/readyz checkpoint exceeded deadline");
         assert_eq!(trace.phase, "response_read_to_eof");
         assert!(trace.response.is_empty());
@@ -7641,7 +7760,7 @@ mod tests {
     #[tokio::test]
     async fn http_trace_preserves_503_status_error() {
         const RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
-        let (result, trace) = traced_http_fixture(Some(RESPONSE), false).await;
+        let (result, trace) = traced_http_fixture(Some(RESPONSE), false, false).await;
         assert_eq!(
             result.unwrap_err(),
             "/readyz HTTP status is not 200: HTTP/1.1 503 Service Unavailable"
@@ -7653,7 +7772,7 @@ mod tests {
     #[tokio::test]
     async fn http_trace_preserves_success_and_correctness_clock_nulls() {
         const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
-        let (result, trace) = traced_http_fixture(Some(RESPONSE), false).await;
+        let (result, trace) = traced_http_fixture(Some(RESPONSE), false, false).await;
         assert_eq!(result.unwrap(), "ok");
         assert_eq!(trace.phase, "response_validation");
         assert_eq!(trace.response, RESPONSE);

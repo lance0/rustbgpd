@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_api::accept_backoff::AcceptBackoff;
 use rustbgpd_api::health_probe::{CORE_READINESS_DEADLINE, CoreReadinessProbe};
@@ -34,7 +34,22 @@ const IDLE_EVICTION_GRACE: Duration = Duration::from_millis(250);
 const READINESS_WARNING_THRESHOLD: Duration = Duration::from_millis(100);
 
 // Research-only breadcrumbs use stderr so they do not share the stdout subscriber lock.
-fn emit_http_trace(record: &serde_json::Value) {
+fn http_trace_wall_ns(at: SystemTime) -> Option<u64> {
+    u64::try_from(at.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok()
+}
+
+fn http_trace_elapsed_ns(start: Option<Instant>, end: Option<Instant>) -> Option<u64> {
+    u64::try_from(end?.checked_duration_since(start?)?.as_nanos()).ok()
+}
+
+fn emit_http_trace(record: &mut serde_json::Value, accepted: Option<Instant>) {
+    let before = Instant::now();
+    let wall = http_trace_wall_ns(SystemTime::now());
+    let after = Instant::now();
+    record["wall_unix_ns"] = serde_json::json!(wall);
+    record["since_accept_ns"] = serde_json::json!(http_trace_elapsed_ns(accepted, Some(before)));
+    record["clock_pair_span_ns"] =
+        serde_json::json!(http_trace_elapsed_ns(Some(before), Some(after)));
     let Ok(mut line) = serde_json::to_vec(record) else {
         return;
     };
@@ -66,15 +81,18 @@ impl HttpPhaseTrace {
     }
 
     fn record(&self, event: &'static str) {
-        emit_http_trace(&serde_json::json!({
-            "kind": "readiness_http_server",
-            "connection": self.connection,
-            "event": event,
-            "phase": self.phase,
-            "peer": self.peer,
-            "local": self.local,
-            "outcome": self.outcome,
-        }));
+        emit_http_trace(
+            &mut serde_json::json!({
+                "kind": "readiness_http_server",
+                "connection": self.connection,
+                "event": event,
+                "phase": self.phase,
+                "peer": self.peer,
+                "local": self.local,
+                "outcome": self.outcome,
+            }),
+            Some(self.accepted),
+        );
     }
 
     fn step(&mut self, phase: &'static str) {
@@ -205,11 +223,14 @@ async fn serve_incoming<S>(
     let mut next_connection = 1_u64;
 
     loop {
-        emit_http_trace(&serde_json::json!({
-            "kind": "readiness_http_server",
-            "event": "permit_wait",
-            "next_connection": next_connection,
-        }));
+        emit_http_trace(
+            &mut serde_json::json!({
+                "kind": "readiness_http_server",
+                "event": "permit_wait",
+                "next_connection": next_connection,
+            }),
+            None,
+        );
         // Acquire permit before accepting to enforce an exact connection cap.
         // While the budget is full, connections that have not sent their
         // request line within IDLE_EVICTION_GRACE of being accepted are asked
@@ -242,11 +263,14 @@ async fn serve_incoming<S>(
             return;
         };
 
-        emit_http_trace(&serde_json::json!({
-            "kind": "readiness_http_server",
-            "event": "accept_wait",
-            "next_connection": next_connection,
-        }));
+        emit_http_trace(
+            &mut serde_json::json!({
+                "kind": "readiness_http_server",
+                "event": "accept_wait",
+                "next_connection": next_connection,
+            }),
+            None,
+        );
         let stream = match incoming.next().await {
             Some(Ok(stream)) => stream,
             Some(Err(_)) => continue,
@@ -1025,6 +1049,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn research_http_trace_clock_fields_reject_invalid_time() {
+        assert_eq!(http_trace_wall_ns(UNIX_EPOCH), Some(0));
+        assert_eq!(
+            http_trace_wall_ns(UNIX_EPOCH - Duration::from_nanos(1)),
+            None
+        );
+        assert_eq!(
+            http_trace_wall_ns(
+                UNIX_EPOCH + Duration::from_nanos(u64::MAX) + Duration::from_nanos(1)
+            ),
+            None
+        );
+        let now = Instant::now();
+        assert_eq!(http_trace_elapsed_ns(Some(now), Some(now)), Some(0));
+        assert_eq!(
+            http_trace_elapsed_ns(Some(now + Duration::from_nanos(1)), Some(now)),
+            None
+        );
+        assert_eq!(http_trace_elapsed_ns(None, Some(now)), None);
+    }
+
+    #[test]
     fn research_http_trace_preserves_socket_order_and_cancellation_evidence() {
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -1058,6 +1104,9 @@ pub(crate) mod tests {
                         assert!(endpoint.ip().is_loopback());
                         assert_ne!(endpoint.port(), 0);
                     }
+                    for field in ["wall_unix_ns", "since_accept_ns", "clock_pair_span_ns"] {
+                        assert!(row[field].as_u64().is_some(), "{row}");
+                    }
                     row["phase"].as_str().unwrap()
                 })
                 .collect::<Vec<_>>()
@@ -1087,6 +1136,12 @@ pub(crate) mod tests {
         );
         assert_eq!(phases(703), ["accepted", "accepted"]);
         for (connection, outcome) in [(701, "ok"), (702, "pending"), (703, "pending")] {
+            let offsets: Vec<_> = records
+                .iter()
+                .filter(|row| row["connection"].as_u64() == Some(connection))
+                .map(|row| row["since_accept_ns"].as_u64().unwrap())
+                .collect();
+            assert!(offsets.windows(2).all(|pair| pair[0] <= pair[1]));
             assert!(
                 records
                     .iter()
