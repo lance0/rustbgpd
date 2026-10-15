@@ -18,10 +18,15 @@ ROSTER = {
     "msrv",
     "evpn_bum_filter_kernel",
     "recovery_memory_receipt",
+    "recovery_mass_dirty_receipt",
 }
 RECOVERY_MEMORY_SELECTOR = (
     "${{ github.event_name == 'workflow_dispatch' && "
-    "inputs.recovery_memory_receipt == true }}"
+    "inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode != 'mass-dirty' }}"
+)
+RECOVERY_MASS_DIRTY_SELECTOR = (
+    "${{ github.event_name == 'workflow_dispatch' && "
+    "inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode == 'mass-dirty' }}"
 )
 RECOVERY_MEMORY_CONCURRENCY = (
     "${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && "
@@ -127,6 +132,97 @@ def aggregate_shell(job: str) -> str:
         job,
     )
     return "" if match is None else re.sub(r"(?m)^          ", "", match.group(1))
+
+
+def _named_step(job: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^      - name: {re.escape(name)}\n(.*?)(?=^      - |\Z)", job,
+    )
+    return match.group(1) if match else ""
+
+
+def step_shell(job: str, name: str) -> str:
+    match = re.search(r"(?ms)^        run: \|\n(.*)\Z", _named_step(job, name))
+    return "" if match is None else re.sub(r"(?m)^          ", "", match.group(1))
+
+
+def _check_mass_dirty(job: str, errors: list[str]) -> None:
+    if re.findall(r"(?m)^ {4}if:[ \t]*(.*?)[ \t]*$", job) != [RECOVERY_MASS_DIRTY_SELECTOR]:
+        errors.append("mass-dirty receipt must keep its separate operator-dispatch selector")
+    if re.findall(r"(?m)^ {4}runs-on:[ \t]*(.*?)[ \t]*$", job) != ["ubuntu-24.04"]:
+        errors.append("mass-dirty receipt must use a fresh ubuntu-24.04 hosted runner")
+    if "    timeout-minutes: 120\n" not in job or "      fail-fast: false\n" not in job:
+        errors.append("mass-dirty receipt must bound each independent matrix job without canceling siblings")
+    matrix = re.findall(r"(?m)^        include: \$\{\{ fromJSON\('([^']*)'\) \}\}[ \t]*$", job)
+    try:
+        selected = json.loads(matrix[0]) if len(matrix) == 1 else None
+    except ValueError:
+        selected = None
+    if selected != [
+        {"profile": profile, "cohort": cohort}
+        for profile in ("full-uc", "full-vpn") for cohort in ("no-refusal", "cap-pressure")
+    ]:
+        errors.append("mass-dirty receipt must isolate all four fixed profile/cohort cells")
+    checkout = _action_inputs(job, "actions/checkout")
+    if any(re.findall(rf"(?m)^ {{10}}{name}:[ \t]*(.*?)[ \t]*$", checkout) != [value]
+           for name, value in (("ref", "${{ github.sha }}"), ("fetch-depth", "0"))):
+        errors.append("mass-dirty receipt must check out its exact dispatched source with history")
+    toolchain = _action_inputs(job, "dtolnay/rust-toolchain")
+    if re.findall(r"(?m)^ {10}toolchain:[ \t]*(.*?)[ \t]*$", toolchain) != ["stable"]:
+        errors.append("mass-dirty receipt must provide the stable toolchain input")
+    if "      - uses: ./.github/actions/install-protobuf\n" not in job:
+        errors.append("mass-dirty receipt must install protobuf for its exact source build")
+    if any(required not in job for required in (
+        '      CARGO_BUILD_JOBS: "4"',
+        '      RECOVERY_MASS_DIRTY_PROFILE: ${{ matrix.profile }}',
+        '      RECOVERY_MASS_DIRTY_COHORT: ${{ matrix.cohort }}',
+    )):
+        errors.append("mass-dirty receipt must bind its build limit and selected profile/cohort")
+    fixtures = step_shell(job, "Check mass-dirty receipt negative fixtures")
+    if fixtures.splitlines() != [
+        "bash -n bench/scale/reloadstall/run-recovery-mass-dirty.sh",
+        "python3 -m unittest discover -s bench/scale/reloadstall -p test_recovery_mass_dirty.py -v",
+    ]:
+        errors.append("mass-dirty receipt must run its controller negative fixtures before qualification")
+    reserve = step_shell(job, "Reserve time for mass-dirty evidence finalization")
+    driver = step_shell(job, "Run frozen-source daemon mass-dirty comparison")
+    if any(required not in reserve for required in (
+        'mkdir -p "$RUNNER_TEMP/update-group-recovery-mass-dirty"',
+        'RECOVERY_MASS_DIRTY_DRIVER_DEADLINE={time.monotonic() + 110 * 60}',
+    )) or any(required not in driver for required in (
+        'Path("/proc/meminfo").read_text()', 'values["MemAvailable"]',
+        'required = 12 * 1024**3', 'if available < required:',
+        'raise SystemExit("fresh runner has less than 12 GiB available; refusing qualification")',
+        "<<'PY' > \"$evidence/preflight.log\" 2>&1 || status=$?",
+        'if [[ $status == 0 ]]; then', 'if [[ $remaining -gt 0 ]]; then',
+        'os.environ["RECOVERY_MASS_DIRTY_DRIVER_DEADLINE"]',
+        'timeout --foreground --signal=TERM --kill-after=150s "${remaining}s"',
+        'bash bench/scale/reloadstall/run-recovery-mass-dirty.sh',
+        '--head "$GITHUB_SHA"', '--output-dir "$evidence/campaign"',
+        '--profile "$RECOVERY_MASS_DIRTY_PROFILE"', '--cohort "$RECOVERY_MASS_DIRTY_COHORT"',
+        '> "$evidence/driver.log" 2>&1 || status=$?', 'status=124',
+        'printf \'%s\\n\' "$status" > "$evidence/driver-invocation.exit"', 'exit "$status"',
+    )):
+        errors.append("mass-dirty driver must preflight 12 GiB, bound execution, and retain its real failure")
+    finalizer_step = _named_step(job, "Finalize mass-dirty evidence even after failure")
+    finalizer = step_shell(job, "Finalize mass-dirty evidence even after failure")
+    if "        if: always()\n" not in finalizer_step or any(required not in finalizer for required in (
+        'timeout --foreground --signal=TERM --kill-after=5s 60s',
+        'python3 bench/scale/reloadstall/recovery_mass_dirty.py finalize "$evidence/campaign"',
+        '> "$evidence/finalizer.log" 2>&1 || status=$?',
+        'printf \'%s\\n\' "$status" > "$evidence/finalizer.exit"', 'exit "$status"',
+    )):
+        errors.append("mass-dirty finalizer must always run, retain failure evidence, and fail closed")
+    upload = _named_step(job, "Upload mass-dirty evidence even after refusal or failure")
+    if any(required not in upload for required in (
+        '        if: always()', '        uses: actions/upload-artifact@v7',
+        'name: update-group-recovery-mass-dirty-${{ matrix.profile }}-${{ matrix.cohort }}-${{ github.sha }}',
+        'path: ${{ runner.temp }}/update-group-recovery-mass-dirty',
+        'if-no-files-found: error', 'retention-days: 30',
+    )):
+        errors.append("mass-dirty receipt must always upload distinct retained evidence and reject missing files")
+    if re.search(r"(?m)^\s*continue-on-error:", job) or "--correctness-only" in driver:
+        errors.append("mass-dirty qualification must not suppress errors or substitute a correctness-only run")
 
 
 def _logical_lines(text: str) -> list[str]:
@@ -237,7 +333,7 @@ def check(root: Path) -> list[str]:
     scan_input = re.search(r"(?m)^      recovery_receipt_mode:\n(?:        [^\n]*\n)+", dispatch)
     if scan_input is None or any(
         re.findall(rf"(?m)^        {name}:[ \t]*(.*?)[ \t]*$", scan_input.group()) != [value]
-        for name, value in (("type", "choice"), ("options", "[memory, scan]"),
+        for name, value in (("type", "choice"), ("options", "[memory, scan, mass-dirty]"),
                             ("default", "memory"), ("required", "false"))
     ):
         errors.append("recovery receipt mode must be an optional choice defaulting to memory")
@@ -289,6 +385,8 @@ def check(root: Path) -> list[str]:
         "${{ matrix.old_order && format('-{0}', matrix.old_order) || '' }}",
     )):
         errors.append("component scans must preserve OLD order through invocation and artifact identity")
+
+    _check_mass_dirty(jobs.get("recovery_mass_dirty_receipt", ""), errors)
 
     scale_commands = Counter(command for _, command in _cargo_commands(jobs.get("scale_receipts", "")))
     for command in SCALE_COMMANDS:
