@@ -1016,9 +1016,9 @@ is established. Full qualification remains **UNQUALIFIED**, release remains held
 and an actual identified release-candidate soak is still required. EVPN ownership
 stays disabled; the separate dataset acknowledgement path is not qualified.
 
-The measured source remains `4dac2d09f661501ef476196c7b68d5ec3df2e1be`. Its tracked
-production source matches historical main `f95dd04df0eca75b1ccaefae060e68c557771d56`
-outside the ten qualification harness/workflow paths, not literal tree or RC
-measurement equivalence. Local controls remain at their actual `123847d7` source.
+The measured source remains `4dac2d09f661501ef476196c7b68d5ec3df2e1be`. All tracked
+modes, types and Git blobs outside the ten qualification harness/workflow paths
+match historical main `f95dd04df0eca75b1ccaefae060e68c557771d56`, not literal tree
+or RC measurement equivalence. Local controls remain at their actual `123847d7` source.
 All earlier dated amendments and evidence, including the four-attempt failed
 receipt and `a1854eee` single-cell pass, remain unchanged and unpooled.

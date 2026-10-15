@@ -96,9 +96,11 @@ Both VPN jobs stop in **flat leg 0/B before the first fold**. The no-refusal
 native attempt 99 and pressure attempt 135 connect and write the HTTP request,
 then receive **zero response bytes** in `response_read_to_eof` before the unchanged
 250 ms deadline. The observed abort intervals are 251.517 ms and 251.481 ms;
-eventual server response latency is unknown. The retained outer readiness warning
-does not identify a RIB, peer-manager or runtime scheduling cause. No initiating
-blocked stack or daemon cause is established.
+eventual server response latency is unknown. Pressure retains an outer readiness
+warning; no-refusal's daemon log has no such warning. Both archived startup logs
+report `worker_threads=2`, with daemon affinity CPUs 0–1. These observations do not
+identify a RIB, peer-manager or runtime scheduling cause. No initiating blocked
+stack or daemon cause is established.
 
 Neither VPN candidate arm starts. There is no complete VPN operation, session
 continuity receipt, final resource/cap/OOM/swap boundary, cost ratio or memory
@@ -134,10 +136,11 @@ The manual workflow runs all **50** frozen controller tests in each cell.
 Rust/Cargo are 1.99.1; daemon CPUs are 0–1 and native CPUs 2–3 on four distinct
 fresh hosted runners.
 
-Production tracked modes, types and Git blobs match historical main
-`f95dd04df0eca75b1ccaefae060e68c557771d56` outside exactly ten qualification
-harness/workflow paths: **9,023 common entries**. The qualification tree and main
-tree are not identical. Main's separate five ordinary workflows pass, with
+All tracked modes, types and Git blobs outside exactly ten qualification
+harness/workflow paths match historical main
+`f95dd04df0eca75b1ccaefae060e68c557771d56`: **9,023 common entries**, including
+documentation and fixtures. The qualification tree and main tree are not
+identical. Main's separate five ordinary workflows pass, with
 105 successful checks and two expected skips; this does not turn ordinary CI
 into the manual native campaign or an actual release-candidate soak.
 
