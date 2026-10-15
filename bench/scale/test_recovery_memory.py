@@ -1977,6 +1977,118 @@ class RetirementReceiptTests(unittest.TestCase):
         self.assertEqual(result["samples"], [])
         self.assertNotIn("summaries", result)
 
+    def test_retirement_failed_setup_creates_missing_campaign_receipt(self):
+        root = self.root / "not-created" / "campaign"
+        result = subprocess.run(
+            [sys.executable, str(Path(receipt.__file__).resolve()), "summarize-retirement",
+             str(root), "--failed-driver-exit", "124"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        envelope = json.loads((root / "comparison.json").read_text())
+        self.assertEqual(envelope["status"], "INVALID")
+        self.assertEqual(envelope["driver_invocation_exit"], 124)
+        self.assertEqual(envelope["samples"], [])
+        self.assertNotIn("summaries", envelope)
+
+    def retirement_scope_startup(self, active_phase):
+        scope = self.fixture.scope()
+        (scope / "memory.max").write_text(str(receipt.RETIREMENT_LIMIT))
+        output = self.root / active_phase
+        events = []
+        child = None
+
+        class Acknowledgment:
+            def write(self, data):
+                self_test.assertEqual(events, ["held", "identity", "active"])
+                self_test.assertEqual(data, b"1")
+                events.append("ack")
+                child.returncode = 0  # The empty control finishes immediately on release.
+                return len(data)
+
+            def flush(self):
+                self_test.assertEqual(events[-1], "ack")
+
+            def close(self):
+                pass
+
+        class Child:
+            pid = 3
+
+            def __init__(self, held):
+                self.stdin = Acknowledgment() if held else None
+                self.returncode = None if held else 0
+                self.killed = False
+                self.reaped = False
+                events.append("held" if held else "exited")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                if self.stdin is not None:
+                    self.stdin.close()
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self_test.assertIsNotNone(self.returncode, "wait before ownership ACK")
+                self.reaped = True
+                return self.returncode
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+        self_test = self
+        checker = {"pid": 1, "executable": str(Path(sys.executable).resolve())}
+        launcher = {"pid": 2, "executable": str(Path(shutil.which("bash")).resolve())}
+        identities = [checker, launcher]
+
+        def identity(_pid, **_kwargs):
+            if identities:
+                return identities.pop(0)
+            if child.returncode is not None:
+                raise FileNotFoundError("fast empty control exited before identity capture")
+            events.append("identity")
+            return {"pid": 3, "parent_pid": 1, "exe_sha256": "a" * 64}
+
+        def spawn(_command, **kwargs):
+            nonlocal child
+            child = Child(kwargs.get("stdin") == subprocess.PIPE)
+            return child
+
+        def ownership(_scope, _output, _owned, phase, *_args):
+            if phase == "active":
+                self.assertEqual(events, ["held", "identity"])
+                self.assertIsNone(child.returncode, "child released before active capture")
+                events.append("active")
+                return {"phase": active_phase}
+            return {"phase": phase}
+
+        with (patch.object(receipt, "proc_identity", side_effect=identity),
+              patch.object(receipt, "snapshot_scope"),
+              patch.object(receipt, "capture_ownership", side_effect=ownership),
+              patch.object(receipt.subprocess, "Popen", side_effect=spawn)):
+            if active_phase == "active":
+                receipt.run_scope(Path("/binary"), output, "retirement-empty", scope,
+                                  "a" * 64, "full-uc", 1, retirement=True)
+                self.assertEqual(events, ["held", "identity", "active", "ack"])
+                self.assertFalse(child.killed)
+            else:
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "active.*ownership"):
+                    receipt.run_scope(Path("/binary"), output, "retirement-empty", scope,
+                                      "a" * 64, "full-uc", 1, retirement=True)
+                self.assertNotIn("ack", events)
+                self.assertTrue(child.killed)
+        self.assertTrue(child.reaped)
+
+    def test_retirement_scope_holds_fast_child_until_identity_and_active_ownership(self):
+        for active_phase in ("active", "after"):
+            with self.subTest(active_phase=active_phase):
+                self.retirement_scope_startup(active_phase)
+
     def test_retirement_rejects_identical_binaries_with_different_digest_whitespace(self):
         root = self.campaign()
         shutil.copyfile(root / "bin/candidate", root / "bin/old-drop")

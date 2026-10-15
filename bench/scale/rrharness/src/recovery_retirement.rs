@@ -2,7 +2,16 @@
 
 use super::recovery_memory::{populate, verify_memory_identity, RecoveryHarness, Spec};
 use super::{oneshot, RibManager, RibUpdate};
+use std::io::Read;
 use std::time::{Duration, Instant};
+
+fn wait_for_ownership_ack(input: &mut impl Read) {
+    let mut acknowledgment = [0];
+    input
+        .read_exact(&mut acknowledgment)
+        .expect("missing launcher ownership acknowledgment");
+    assert_eq!(acknowledgment, [b'1'], "invalid ownership acknowledgment");
+}
 
 fn optional_ns(value: Option<u128>) -> String {
     value.map_or_else(|| "null".into(), |value| value.to_string())
@@ -129,6 +138,9 @@ pub(super) fn main(args: &[String]) {
         let cgroup =
             std::env::var("RRHARNESS_RECOVERY_CGROUP").expect("swap-fenced launcher required");
         verify_memory_identity(std::path::Path::new(&cgroup));
+        // The launcher owns the startup deadline and captures active membership
+        // before releasing this hold. All measured work starts afterward.
+        wait_for_ownership_ack(&mut std::io::stdin().lock());
     }
     let spec = Spec::named(&args[1]);
     tokio::runtime::Builder::new_multi_thread()
@@ -141,4 +153,63 @@ pub(super) fn main(args: &[String]) {
                 .await
                 .expect("retirement cell did not complete its actual actor barriers");
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_ownership_ack;
+    use std::io::{self, Cursor, Read};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn ownership_ack_holds_until_the_launcher_releases_it() {
+        struct HeldAck {
+            started: mpsc::Sender<()>,
+            release: mpsc::Receiver<u8>,
+        }
+
+        impl Read for HeldAck {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let Some(first) = buffer.first_mut() else {
+                    return Ok(0);
+                };
+                self.started.send(()).unwrap();
+                *first = self.release.recv().unwrap();
+                Ok(1)
+            }
+        }
+
+        let (started, reading) = mpsc::channel();
+        let (release, acknowledgment) = mpsc::channel();
+        let (finished, completion) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            wait_for_ownership_ack(&mut HeldAck {
+                started,
+                release: acknowledgment,
+            });
+            finished.send(()).unwrap();
+        });
+        reading.recv_timeout(Duration::from_secs(5)).unwrap();
+        let held = matches!(completion.try_recv(), Err(mpsc::TryRecvError::Empty));
+        release.send(b'1').unwrap();
+        completion.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+        assert!(
+            held,
+            "work started before the launcher acknowledged ownership"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "missing launcher ownership acknowledgment")]
+    fn ownership_ack_rejects_eof() {
+        wait_for_ownership_ack(&mut Cursor::new(b""));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid ownership acknowledgment")]
+    fn ownership_ack_rejects_a_wrong_byte() {
+        wait_for_ownership_ack(&mut Cursor::new(b"0"));
+    }
 }

@@ -523,9 +523,10 @@ def run_scope(
     write_json(output / "command.json", command)
     env = dict(os.environ, RRHARNESS_RECOVERY_CGROUP=str(cgroup))
     status = {"exit": None, "timeout": False, "cgroup_valid": False, "ownership_valid": False}
+    startup = {"stdin": subprocess.PIPE} if retirement else {}
     try:
         with (output / "harness.log").open("w", encoding="utf-8") as log:
-            with subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT) as child:
+            with subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, **startup) as child:
                 try:
                     workload = proc_identity(child.pid, executable_digest=True)
                     write_json(output / "binary-process.json", workload)
@@ -539,6 +540,12 @@ def run_scope(
                     active[child.pid] = workload
                     deadline = time.monotonic() + 1830
                     previous = capture_ownership(cgroup, output, active, "active", child)
+                    if retirement:
+                        require(previous["phase"] == "active", "missing active retirement startup ownership")
+                        require(child.stdin is not None, "missing retirement ownership acknowledgment pipe")
+                        require(child.stdin.write(b"1") == 1, "incomplete retirement ownership acknowledgment")
+                        child.stdin.flush()
+                        child.stdin.close()
                     while True:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
@@ -1456,6 +1463,7 @@ def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bo
 def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> None:
     if failed_driver_exit is not None:
         require(type(failed_driver_exit) is int and failed_driver_exit != 0, "failure exit must be nonzero")
+        root.mkdir(parents=True, exist_ok=True)
         write_json(root / "comparison.json", {"schema": "rustbgpd.retirement-timing.v1", "status": "INVALID",
                    "driver_invocation_exit": failed_driver_exit, "samples": [],
                    "scope": "component attribution only; no daemon/fleet/readiness qualification"})
