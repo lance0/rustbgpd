@@ -605,31 +605,29 @@ groups:
             limiting_peer; find why members miss delivery.
 
       - alert: BgpOutboundResyncStalled
-        # State-based: the gauge is sampled from the RIB's dirty set on every
-        # loop iteration. The resync timer retries each dirty peer every
-        # second, so a healthy episode drains in seconds; 15 minutes of a
-        # nonzero gauge is far outside that. The `unless` drops the alert
-        # after any recorded full drain, so recurring short episodes whose
-        # zero gap falls between scrapes stay quiet. A missed `cleared`
-        # record can only leave the alert to the gauge, never suppress it.
-        expr: >-
-          bgp_rib_outbound_dirty_peers > 0
-          unless ignoring(outcome)
-          increase(bgp_rib_dirty_resync_total{outcome="cleared"}[5m]) > 0
-        for: 15m
+        # State-based: the gauge is the age of the oldest dirty episode among
+        # peers still dirty, sampled every RIB loop iteration. An episode ends
+        # only when that peer's resync completes, so constant churn across
+        # many peers keeps it low, while one stuck peer raises it. The 60s
+        # threshold matches the rbgp doctor outbound_resync warning: about
+        # sixty failed one-second retries, twice the default slow-peer
+        # duration, so a merely slow receiver is flagged as slow first.
+        expr: bgp_rib_outbound_dirty_oldest_seconds >= 60
+        for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "Outbound resync not draining on {{ $labels.instance }}"
+          summary: "Outbound resync stalled on {{ $labels.instance }}"
           description: >-
-            bgp_rib_outbound_dirty_peers on {{ $labels.instance }} has stayed
-            above zero for 15 minutes (now {{ $value | printf "%.0f" }}) with no
-            full drain of dirty outbound work. The resync timer retries every
-            second, so at least one peer has not received its current
-            advertised view for that long. Find it with rbgp doctor
-            (peer.<addr>.outbound_resync) or rbgp neighbor, and check
-            bgp_peer_slow, bgp_peer_outbound_queue_depth and
-            bgp_outbound_commit_refusals_total for the cause.
+            bgp_rib_outbound_dirty_oldest_seconds on {{ $labels.instance }} is
+            {{ $value | printf "%.0f" }} seconds: at least one peer has been
+            dirty, without its current advertised view, for 60 seconds or
+            more. The resync timer retries
+            every second, so about sixty retries have failed; other peers
+            cycling through short dirty episodes do not raise this. Find the
+            peer with rbgp doctor (peer.<addr>.outbound_resync) or rbgp
+            neighbor, and check bgp_peer_slow, bgp_peer_outbound_queue_depth
+            and bgp_outbound_commit_refusals_total for the cause.
 
       - alert: BgpPolicyTransitionStalled
         # Healthy transitions are expected to finish well below this window.

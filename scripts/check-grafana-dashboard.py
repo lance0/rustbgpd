@@ -377,6 +377,9 @@ TARGETS = {
     ("Outbound dirty peers", "A"): (
         'bgp_rib_outbound_dirty_peers{instance=~"$instance"}'
     ),
+    ("Outbound dirty peers", "B"): (
+        'bgp_rib_outbound_dirty_oldest_seconds{instance=~"$instance"}'
+    ),
     ("Slow peers", "A"): (
         'bgp_peer_slow{instance=~"$instance",peer=~"$peer"}'
     ),
@@ -543,6 +546,7 @@ REQUIRED_LEGENDS = {
     ("Update-group recovery", "C"): "{{instance}} peak bytes",
     ("Update-group recovery", "D"): "{{instance}} {{scope}} cap bytes",
     ("Outbound dirty peers", "A"): "{{instance}} dirty peers",
+    ("Outbound dirty peers", "B"): "{{instance}} oldest dirty seconds",
     ("ORR SPF activity and topology", "A"): "{{instance}} SPF runs/s",
     ("ORR SPF activity and topology", "B"): "{{instance}} nodes",
     ("ORR SPF activity and topology", "C"): "{{instance}} usable links",

@@ -1711,7 +1711,7 @@
       "id": 79,
       "type": "timeseries",
       "title": "Outbound dirty peers",
-      "description": "bgp_rib_outbound_dirty_peers: peers marked dirty and awaiting outbound resync, sampled from the RIB's dirty set on each loop iteration. The resync timer retries every second, so a healthy episode returns to 0 within seconds; a value that never returns to 0 is what BgpOutboundResyncStalled alerts on. Find the peer with rbgp doctor or rbgp neighbor.",
+      "description": "bgp_rib_outbound_dirty_peers: peers marked dirty and awaiting outbound resync (left axis), and bgp_rib_outbound_dirty_oldest_seconds: the age of the oldest current dirty episode (right axis), both sampled from the RIB's dirty set on each loop iteration. Under churn the count can stay above 0 while every episode completes quickly; an oldest age of 60 seconds or more is what BgpOutboundResyncStalled alerts on. Find the peer with rbgp doctor or rbgp neighbor.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1735,7 +1735,24 @@
             "showPoints": "never"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* seconds$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -1757,6 +1774,15 @@
           "expr": "bgp_rib_outbound_dirty_peers{instance=~\"$instance\"}",
           "legendFormat": "{{instance}} dirty peers",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_rib_outbound_dirty_oldest_seconds{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} oldest dirty seconds",
+          "refId": "B"
         }
       ]
     },

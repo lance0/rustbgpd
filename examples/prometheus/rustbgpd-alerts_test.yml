@@ -1387,65 +1387,66 @@ tests:
         exp_alerts: []
 
   # ── BgpOutboundResyncStalled ──────────────────────────────────
-  # edge1 holds dirty peers with no drain: pending at 14m, firing at 16m
-  # (pins for: 15m). edge2 has recurring short episodes with a scraped zero
-  # and no recorded drain (an undercounted `cleared`): the zero resets the
-  # for clock. edge3 never scrapes a zero, but records a full drain every
-  # 4 minutes: the `unless` keeps it quiet.
+  # edge1 is a busy reflector: peers are always dirty (the old
+  # dirty-peers > 0 shape would fire) but every episode completes within a
+  # minute, peaking at 59 seconds. It must never fire. On edge2 the same
+  # churn continues while one peer stays dirty from 2m: the oldest age
+  # reaches exactly 60 at 3m (pins >= 60 and for: 0m) and clears at 7m
+  # when that peer resyncs.
   - interval: 1m
     input_series:
       - series: 'bgp_rib_outbound_dirty_peers{job="rustbgpd", instance="edge1:9179"}'
-        values: "2x40"
-      - series: 'bgp_rib_dirty_resync_total{job="rustbgpd", instance="edge1:9179", outcome="cleared"}'
-        values: "0x40"
-      - series: 'bgp_rib_outbound_dirty_peers{job="rustbgpd", instance="edge2:9179"}'
-        values: "1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1 1 1 0 1"
-      - series: 'bgp_rib_dirty_resync_total{job="rustbgpd", instance="edge2:9179", outcome="cleared"}'
-        values: "0x40"
-      - series: 'bgp_rib_outbound_dirty_peers{job="rustbgpd", instance="edge3:9179"}'
-        values: "3x40"
-      - series: 'bgp_rib_dirty_resync_total{job="rustbgpd", instance="edge3:9179", outcome="cleared"}'
-        values: "0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8 8 8 9 9 9 9 10"
+        values: "40 55 38 61 47 52 44 58 41 50 39"
+      - series: 'bgp_rib_outbound_dirty_oldest_seconds{job="rustbgpd", instance="edge1:9179"}'
+        values: "12 40 59 8 33 51 20 45 59 30 14"
+      - series: 'bgp_rib_outbound_dirty_oldest_seconds{job="rustbgpd", instance="edge2:9179"}'
+        values: "12 40 30 60 120 180 240 25 45 59 14"
     alert_rule_test:
-      - eval_time: 14m
+      - eval_time: 2m
         alertname: BgpOutboundResyncStalled
         exp_alerts: []
-      - eval_time: 16m
+      - eval_time: 3m
         alertname: BgpOutboundResyncStalled
         exp_alerts:
           - exp_labels:
               severity: warning
               job: rustbgpd
-              instance: edge1:9179
+              instance: edge2:9179
             exp_annotations:
-              summary: "Outbound resync not draining on edge1:9179"
+              summary: "Outbound resync stalled on edge2:9179"
               description: >-
-                bgp_rib_outbound_dirty_peers on edge1:9179 has stayed
-                above zero for 15 minutes (now 2) with no
-                full drain of dirty outbound work. The resync timer retries every
-                second, so at least one peer has not received its current
-                advertised view for that long. Find it with rbgp doctor
-                (peer.<addr>.outbound_resync) or rbgp neighbor, and check
-                bgp_peer_slow, bgp_peer_outbound_queue_depth and
-                bgp_outbound_commit_refusals_total for the cause.
-      - eval_time: 40m
+                bgp_rib_outbound_dirty_oldest_seconds on edge2:9179 is
+                60 seconds: at least one peer has been dirty, without its current
+                advertised view, for 60 seconds or more. The resync timer retries
+                every second, so about sixty retries have failed; other peers
+                cycling through short dirty episodes do not raise this. Find the
+                peer with rbgp doctor (peer.<addr>.outbound_resync) or rbgp
+                neighbor, and check bgp_peer_slow, bgp_peer_outbound_queue_depth
+                and bgp_outbound_commit_refusals_total for the cause.
+      - eval_time: 6m
         alertname: BgpOutboundResyncStalled
         exp_alerts:
           - exp_labels:
               severity: warning
               job: rustbgpd
-              instance: edge1:9179
+              instance: edge2:9179
             exp_annotations:
-              summary: "Outbound resync not draining on edge1:9179"
+              summary: "Outbound resync stalled on edge2:9179"
               description: >-
-                bgp_rib_outbound_dirty_peers on edge1:9179 has stayed
-                above zero for 15 minutes (now 2) with no
-                full drain of dirty outbound work. The resync timer retries every
-                second, so at least one peer has not received its current
-                advertised view for that long. Find it with rbgp doctor
-                (peer.<addr>.outbound_resync) or rbgp neighbor, and check
-                bgp_peer_slow, bgp_peer_outbound_queue_depth and
-                bgp_outbound_commit_refusals_total for the cause.
+                bgp_rib_outbound_dirty_oldest_seconds on edge2:9179 is
+                240 seconds: at least one peer has been dirty, without its current
+                advertised view, for 60 seconds or more. The resync timer retries
+                every second, so about sixty retries have failed; other peers
+                cycling through short dirty episodes do not raise this. Find the
+                peer with rbgp doctor (peer.<addr>.outbound_resync) or rbgp
+                neighbor, and check bgp_peer_slow, bgp_peer_outbound_queue_depth
+                and bgp_outbound_commit_refusals_total for the cause.
+      - eval_time: 8m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpOutboundResyncStalled
+        exp_alerts: []
 
   # ── BgpPolicyTransitionStalled ────────────────────────────────
   - interval: 30s

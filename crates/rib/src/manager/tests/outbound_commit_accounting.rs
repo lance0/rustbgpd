@@ -345,6 +345,7 @@ async fn handler_drained_resync_records_one_cleared_outcome() {
 async fn outbound_dirty_peers_gauge_tracks_dirty_set() {
     let metrics = BgpMetrics::new();
     let dirty_peers = || gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_peers", &[]);
+    let oldest = || gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_oldest_seconds", &[]);
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
@@ -384,6 +385,7 @@ async fn outbound_dirty_peers_gauge_tracks_dirty_set() {
     barrier(&tx).await;
     assert!(dirty_resync(&metrics, "still_dirty") >= 1.0);
     assert!((dirty_peers() - 1.0).abs() < f64::EPSILON);
+    assert!(oldest() >= 1.0);
 
     tx.send(RibUpdate::PeerDown {
         peer: PEER,
@@ -393,7 +395,47 @@ async fn outbound_dirty_peers_gauge_tracks_dirty_set() {
     .unwrap();
     barrier(&tx).await;
     assert!(dirty_peers().abs() < f64::EPSILON);
+    assert!(oldest().abs() < f64::EPSILON);
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// The age is the oldest episode among peers still dirty: a lingering
+/// `dirty_since` stamp from a finished episode does not count.
+#[tokio::test(start_paused = true)]
+async fn outbound_dirty_oldest_seconds_is_max_over_current_episodes() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let oldest = |m: &RibManager| {
+        gauge_metric_value(&m.metrics, "bgp_rib_outbound_dirty_oldest_seconds", &[])
+    };
+    let [settled, old, young] = [70, 71, 72].map(|o| IpAddr::V4(Ipv4Addr::new(192, 0, 2, o)));
+    manager
+        .dirty_since
+        .insert(settled, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_mins(15)).await;
+    manager.dirty_peers.insert(old);
+    manager.dirty_since.insert(old, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(95)).await;
+    manager.dirty_peers.insert(young);
+    manager
+        .dirty_since
+        .insert(young, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(5)).await;
+
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(oldest(&manager), 100.0);
+    assert_eq!(
+        gauge_metric_value(&manager.metrics, "bgp_rib_outbound_dirty_peers", &[]),
+        2.0
+    );
+
+    manager.dirty_peers.remove(&old);
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(oldest(&manager), 5.0);
+
+    manager.dirty_peers.clear();
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(oldest(&manager), 0.0);
 }

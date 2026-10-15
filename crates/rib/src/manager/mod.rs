@@ -3003,6 +3003,25 @@ impl RibManager {
         }
     }
 
+    /// Publish the dirty-set size and the age of its oldest episode.
+    /// `dirty_since` is stamped when a peer enters the set and outlives it,
+    /// so only peers still dirty count.
+    fn sample_outbound_dirty_gauges(&self) {
+        let now = tokio::time::Instant::now();
+        let oldest = self
+            .dirty_peers
+            .iter()
+            .filter_map(|peer| self.dirty_since.get(peer))
+            .map(|since| now.saturating_duration_since(*since).as_secs())
+            .max()
+            .unwrap_or(0);
+        self.metrics.set_rib_outbound_dirty_peers(
+            i64::try_from(self.dirty_peers.len()).unwrap_or(i64::MAX),
+        );
+        self.metrics
+            .set_rib_outbound_dirty_oldest_seconds(i64::try_from(oldest).unwrap_or(i64::MAX));
+    }
+
     /// Whether the resync timer still has runnable work: failed outbound
     /// sends, deferred collision-failback inbound refreshes, or an ADR-0113
     /// capacity recovery that is not selection/ORF gated. Gate-blocked
@@ -5327,9 +5346,7 @@ impl RibManager {
             self.metrics.set_rib_ingest_channel_depth(
                 i64::try_from(self.primary_backlog()).unwrap_or(i64::MAX),
             );
-            self.metrics.set_rib_outbound_dirty_peers(
-                i64::try_from(self.dirty_peers.len()).unwrap_or(i64::MAX),
-            );
+            self.sample_outbound_dirty_gauges();
 
             if let Some(mut pending) = self.pending_clean_policy_transition.take() {
                 // A newly owned transition supersedes any trace still armed

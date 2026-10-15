@@ -660,6 +660,7 @@ struct BgpMetricsInner {
     rib_outbound_registration_failover: IntCounterVec,
     rib_dirty_resync: IntCounterVec,
     rib_outbound_dirty_peers: IntGauge,
+    rib_outbound_dirty_oldest_seconds: IntGauge,
     rib_ingest_channel_depth: IntGauge,
     rib_policy_transition_in_progress: IntGauge,
     rib_policy_transition_last_duration_milliseconds: IntGauge,
@@ -1661,6 +1662,13 @@ impl BgpMetrics {
             "bgp_rib_outbound_dirty_peers",
             "Peers currently marked dirty and awaiting outbound resync, sampled \
              once per RIB manager loop iteration.",
+        )
+        .expect("valid metric definition");
+        let rib_outbound_dirty_oldest_seconds = IntGauge::new(
+            "bgp_rib_outbound_dirty_oldest_seconds",
+            "Age in whole seconds of the oldest current dirty-peer episode (0 when no \
+             peer is dirty), sampled once per RIB manager loop iteration. An episode \
+             starts when a peer becomes dirty and ends when its resync completes.",
         )
         .expect("valid metric definition");
 
@@ -3211,6 +3219,9 @@ impl BgpMetrics {
             .register(Box::new(rib_outbound_dirty_peers.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_dirty_oldest_seconds.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_policy_transition_in_progress.clone()))
             .expect("metric not already registered");
         registry
@@ -3744,6 +3755,7 @@ impl BgpMetrics {
             rib_outbound_registration_failover,
             rib_dirty_resync,
             rib_outbound_dirty_peers,
+            rib_outbound_dirty_oldest_seconds,
             rib_ingest_channel_depth,
             rib_policy_transition_in_progress,
             rib_policy_transition_last_duration_milliseconds,
@@ -5415,6 +5427,11 @@ impl BgpMetrics {
     /// Set the sampled number of peers awaiting dirty outbound resync.
     pub fn set_rib_outbound_dirty_peers(&self, count: i64) {
         self.0.rib_outbound_dirty_peers.set(count);
+    }
+
+    /// Set the sampled age of the oldest current dirty-peer episode.
+    pub fn set_rib_outbound_dirty_oldest_seconds(&self, seconds: i64) {
+        self.0.rib_outbound_dirty_oldest_seconds.set(seconds);
     }
 
     /// Set the sampled depth of the RIB manager ingest channel.
@@ -10482,11 +10499,13 @@ mod tests {
         let metrics = BgpMetrics::new();
         metrics.set_update_group_recovery_limit_bytes(64, 512);
         metrics.set_rib_outbound_dirty_peers(3);
+        metrics.set_rib_outbound_dirty_oldest_seconds(42);
         let text = gather_text(&metrics);
         for series in [
             "bgp_update_group_recovery_limit_bytes{scope=\"peer\"} 64",
             "bgp_update_group_recovery_limit_bytes{scope=\"daemon\"} 512",
             "bgp_rib_outbound_dirty_peers 3",
+            "bgp_rib_outbound_dirty_oldest_seconds 42",
         ] {
             assert!(text.lines().any(|line| line == series), "missing {series}");
         }
