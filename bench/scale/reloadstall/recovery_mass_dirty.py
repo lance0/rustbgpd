@@ -36,6 +36,12 @@ OWNED_INPUTS = ("src/main.rs", "src/recovery_mass_dirty.rs", "recovery_mass_dirt
 SUPPORT_INPUTS = ("sample-daemon-cgroup.py", "../provenance.sh", "../cgroup-memory.sh",
                   "../../../tests/soak/host-lock.sh")
 FIXTURE_INPUTS = ("config.toml", "member.rpol", "generation.list")
+BUILD_ROLES = ("candidate", "flat", "harness", "rbgp")
+BUILD_EVIDENCE_FILES = ("campaign.json", "campaign.sha256", "candidate.sha", "capture-source.rs",
+                        "flat-control-source.rs", "flat-control.patch", "derivation.json",
+                        "rustc-version.txt", "cargo-version.txt", "binaries.sha256", "binary-validation.json",
+                        *(f"build-{role}.{suffix}" for role in BUILD_ROLES for suffix in ("log", "exit")))
+BUILD_EVIDENCE_SEAL = "campaign-build-evidence.json"
 
 
 def require(condition, message):
@@ -300,6 +306,67 @@ def load_manifest(root):
     for name, expected in manifest["support_inputs"].items():
         require(digest(HERE / name) == expected, f"support instrument changed: {name}")
     return manifest
+
+
+def campaign_build_evidence(root, manifest):
+    """Validate immutable build inputs independently of their recorded hashes."""
+    root = Path(root)
+    archived = {"frozen-instrumentation/" + name: expected for name, expected in manifest["inputs"].items()}
+    archived.update({"frozen-support/" + os.path.normpath("bench/scale/reloadstall/" + name): expected
+                     for name, expected in manifest["support_inputs"].items()})
+    for directory in ("frozen-instrumentation", "frozen-support"):
+        base = root / directory
+        require(stat.S_ISDIR(base.lstat().st_mode), f"missing/non-directory build archive: {directory}")
+        actual = set()
+        for path in base.rglob("*"):
+            mode = path.lstat().st_mode
+            require(stat.S_ISDIR(mode) or stat.S_ISREG(mode), f"non-regular build archive entry: {path.name}")
+            if stat.S_ISREG(mode):
+                actual.add(path.relative_to(root).as_posix())
+        require(actual == {name for name in archived if name.startswith(directory + "/")},
+                f"build archive roster differs: {directory}")
+    names = set(BUILD_EVIDENCE_FILES) | archived.keys()
+    for name in names:
+        require(stat.S_ISREG((root / name).lstat().st_mode), f"non-regular campaign build evidence: {name}")
+    hashes = {name: digest(root / name) for name in sorted(names)}
+    for name, expected in archived.items():
+        require(hashes[name] == expected, f"archived campaign input changed: {name}")
+    for role in BUILD_ROLES:
+        require((root / f"build-{role}.exit").read_text() == "0\n", f"campaign build did not succeed: {role}")
+        require((root / f"build-{role}.log").stat().st_size > 0, f"empty campaign build log: {role}")
+    for name in ("rustc-version.txt", "cargo-version.txt"):
+        require((root / name).read_text().strip(), f"empty build toolchain evidence: {name}")
+    require((root / "candidate.sha").read_text().strip() == manifest["head"], "candidate source identity differs")
+    binaries = verified_binaries(root)
+    require(json.loads((root / "binary-validation.json").read_text()) == binaries, "binary validation evidence differs")
+    return hashes, binaries
+
+
+def seal_build(root):
+    root = Path(root)
+    seal = root / BUILD_EVIDENCE_SEAL
+    require(not os.path.lexists(seal), "campaign build evidence is already sealed")
+    require(not any(root.glob("leg-*")) and not any(root.glob("controller-*.log"))
+            and not (root / "driver.exit").exists(), "campaign build evidence must be sealed before the first leg")
+    manifest = load_manifest(root)
+    hashes, _ = campaign_build_evidence(root, manifest)
+    # Exclusive creation makes this a one-time pre-leg record. Consumers only
+    # verify it; mutable leg, controller, driver and verdict files stay outside.
+    with seal.open("x") as stream:
+        stream.write(json.dumps({"schema": "rustbgpd.mass-dirty-build-evidence.v1",
+                                 "head": manifest["head"], "files": hashes}, indent=2, sort_keys=True) + "\n")
+
+
+def verified_build_evidence(root, manifest):
+    seal = Path(root) / BUILD_EVIDENCE_SEAL
+    require(stat.S_ISREG(seal.lstat().st_mode), "missing/non-regular campaign build evidence seal")
+    record = json.loads(seal.read_text())
+    require(type(record) is dict and set(record) == {"schema", "head", "files"}
+            and record["schema"] == "rustbgpd.mass-dirty-build-evidence.v1"
+            and record["head"] == manifest["head"], "campaign build evidence seal identity differs")
+    hashes, binaries = campaign_build_evidence(root, manifest)
+    require(type(record["files"]) is dict and record["files"] == hashes, "campaign build evidence hash roster differs")
+    return binaries
 
 
 def dirty_receipts(text, receivers):
@@ -590,7 +657,7 @@ def run_cell(args):
     require(args.arm in ("candidate", "flat"), "unknown arm")
     require(0 <= args.index < len(manifest["schedule"]) and manifest["schedule"][args.index] == args.arm, "arm order changed")
     binary, harness_binary, rbgp = [Path(path).resolve(strict=True) for path in (args.daemon, args.harness, args.rbgp)]
-    binaries = verified_binaries(root)
+    binaries = verified_build_evidence(root, manifest)
     require(digest(binary) == binaries[f"rustbgpd-{args.arm}"] and
             digest(harness_binary) == binaries["reloadstall"] and digest(rbgp) == binaries["rbgp"],
             "run-cell binary identity differs")
@@ -861,6 +928,7 @@ def verified_binaries(root):
 def analyze(root):
     root = Path(root)
     manifest = load_manifest(root)
+    binary_hashes = verified_build_evidence(root, manifest)
     require((root / "candidate.sha").read_text().strip() == manifest["head"], "candidate source identity differs")
     expected_legs = {f"leg-{index}-{arm}" for index, arm in enumerate(manifest["schedule"])}
     require({path.name for path in root.glob("leg-*")} == expected_legs, "leg roster differs")
@@ -876,7 +944,6 @@ def analyze(root):
             and derivation["expression_before"] == "!group.stages_vpn()"
             and derivation["expression_after"] == "false"
             and derivation["vpn_full_old_already_flat"] is True, "flat source derivation changed")
-    binary_hashes = verified_binaries(root)
     rows = []
     for index, arm in enumerate(manifest["schedule"]):
         path = root / f"leg-{index}-{arm}" / "result.json"
@@ -1116,6 +1183,8 @@ def main():
         cell.add_argument("--" + name, required=True)
     binaries = sub.add_parser("check-binaries")
     binaries.add_argument("output")
+    seal = sub.add_parser("seal-build")
+    seal.add_argument("output")
     verdict = sub.add_parser("analyze")
     verdict.add_argument("output")
     final = sub.add_parser("finalize")
@@ -1129,6 +1198,8 @@ def main():
         run_cell(args)
     elif args.command == "check-binaries":
         print(json.dumps(verified_binaries(args.output)))
+    elif args.command == "seal-build":
+        seal_build(args.output)
     else:
         result = finalize(args.output) if args.command == "finalize" else analyze(args.output)
         print(json.dumps(result))

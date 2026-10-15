@@ -131,20 +131,27 @@ for role in candidate flat; do
     # Source worktrees must not reuse a role's cached RIB fingerprint. The
     # off-source mutation predates both builds, so one shared target is unsafe.
     target=$scratch/target-$role
-    (
-        cd "$scratch/$role"
+    if (
+        cd "$scratch/$role" || exit
         printf 'CARGO_BUILD_JOBS=%s CARGO_TARGET_DIR=%q cargo build --release --locked --bin rustbgpd\n' "$jobs" "$target"
         CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --release --locked --bin rustbgpd
-    ) >"$output/build-$role.log" 2>&1
+    ) >"$output/build-$role.log" 2>&1; then build_exit=0; else build_exit=$?; fi
+    printf '%s\n' "$build_exit" >"$output/build-$role.exit"
+    [[ $build_exit == 0 ]] || exit "$build_exit"
     cp -- "$target/release/rustbgpd" "$output/bin/rustbgpd-$role"
 done
 target=$scratch/target-candidate
-(cd "$scratch/candidate" && CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --profile scale --locked -p reloadstall) >"$output/build-harness.log" 2>&1
+if (cd "$scratch/candidate" && CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --profile scale --locked -p reloadstall) >"$output/build-harness.log" 2>&1; then build_exit=0; else build_exit=$?; fi
+printf '%s\n' "$build_exit" >"$output/build-harness.exit"
+[[ $build_exit == 0 ]] || exit "$build_exit"
 cp -- "$target/scale/reloadstall" "$output/bin/reloadstall"
-(cd "$scratch/candidate" && CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --release --locked --bin rbgp) >"$output/build-rbgp.log" 2>&1
+if (cd "$scratch/candidate" && CARGO_BUILD_JOBS=$jobs CARGO_TARGET_DIR=$target cargo build --release --locked --bin rbgp) >"$output/build-rbgp.log" 2>&1; then build_exit=0; else build_exit=$?; fi
+printf '%s\n' "$build_exit" >"$output/build-rbgp.exit"
+[[ $build_exit == 0 ]] || exit "$build_exit"
 cp -- "$target/release/rbgp" "$output/bin/rbgp"
 sha256sum "$output"/bin/* >"$output/binaries.sha256"
 python3 "$checker" check-binaries "$output" >"$output/binary-validation.json"
+python3 "$checker" seal-build "$output"
 mapfile -t schedule < <(python3 - "$output/campaign.json" <<'PY'
 import json, sys
 for arm in json.load(open(sys.argv[1]))['schedule']:

@@ -726,7 +726,7 @@ class MassDirtyTests(unittest.TestCase):
         (root / "driver.exit").write_text("0\n")
         self.assertEqual(receipt.finalize(root)["status"], "INVALID")
 
-    def test_actual_driver_cleanup_failures_invalidate_a_complete_campaign(self):
+    def complete_campaign(self):
         root, manifest = self.manifest()
         (root / "candidate.sha").write_text(manifest["head"] + "\n")
         source = ("    fn capture_group_admitted_keys_inner(\n"
@@ -743,6 +743,27 @@ class MassDirtyTests(unittest.TestCase):
             (binaries / name).write_text(name + "\n")
         (root / "binaries.sha256").write_text("".join(
             f"{receipt.digest(path)}  {path}\n" for path in sorted(binaries.iterdir())))
+        # Complete immutable build/source fixture. The fixture's byte strings
+        # stand for build outputs; no compiler or daemon runs in these controls.
+        for role in ("candidate", "flat", "harness", "rbgp"):
+            (root / f"build-{role}.log").write_text(f"successful fixture build: {role}\n")
+            (root / f"build-{role}.exit").write_text("0\n")
+        (root / "rustc-version.txt").write_text("rustc fixture version\n")
+        (root / "cargo-version.txt").write_text("cargo fixture version\n")
+        (root / "flat-control.patch").write_text("-!group.stages_vpn()\n+false\n")
+        receipt.write_json(root / "binary-validation.json", receipt.verified_binaries(root))
+        for name in receipt.OWNED_INPUTS:
+            path = root / "frozen-instrumentation" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((receipt.HERE / name).read_bytes())
+        for name in receipt.SUPPORT_INPUTS:
+            relative = os.path.normpath("bench/scale/reloadstall/" + name)
+            path = root / "frozen-support" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((receipt.HERE / name).read_bytes())
+        receipt.seal_build(root)
+        seal = json.loads((root / "campaign-build-evidence.json").read_text())
+        self.assertEqual(set(seal["files"]), set(self.build_evidence_names()))
         for index, arm in enumerate(manifest["schedule"]):
             leg, row = self.small_leg(manifest)
             row.update({"arm": arm, "index": index, "source": manifest["head"], "status": "CORRECTNESS_ONLY",
@@ -754,6 +775,153 @@ class MassDirtyTests(unittest.TestCase):
             leg.rename(root / f"leg-{index}-{arm}")
         (root / "driver.exit").write_text("0\n")
         self.assertEqual(receipt.finalize(root)["status"], "CORRECTNESS_ONLY")
+        return root, manifest
+
+    def build_evidence_names(self):
+        return ("campaign.json", "campaign.sha256", "candidate.sha", "capture-source.rs",
+                "flat-control-source.rs", "flat-control.patch", "derivation.json",
+                "rustc-version.txt", "cargo-version.txt", "binaries.sha256", "binary-validation.json",
+                *(f"build-{role}.{suffix}" for role in ("candidate", "flat", "harness", "rbgp")
+                  for suffix in ("log", "exit")),
+                *("frozen-instrumentation/" + name for name in receipt.OWNED_INPUTS),
+                "frozen-support/bench/scale/reloadstall/sample-daemon-cgroup.py",
+                "frozen-support/bench/scale/provenance.sh", "frozen-support/bench/scale/cgroup-memory.sh",
+                "frozen-support/tests/soak/host-lock.sh")
+
+    def test_campaign_build_evidence_cannot_be_removed_or_changed(self):
+        for name in (*self.build_evidence_names(), "campaign-build-evidence.json"):
+            for change in ("remove", "alter"):
+                with self.subTest(name=name, change=change), tempfile.TemporaryDirectory(prefix="rmd-build-") as directory:
+                    with mock.patch.object(self, "root", Path(directory)):
+                        root, _ = self.complete_campaign()
+                        path = root / name
+                        if change == "remove":
+                            path.unlink()
+                        else:
+                            path.write_bytes(path.read_bytes() + b"changed\n")
+                        self.assertEqual(receipt.finalize(root)["status"], "INVALID")
+
+    def test_campaign_resealed_archives_must_match_manifest_inputs(self):
+        for name in self.build_evidence_names():
+            if not name.startswith("frozen-"):
+                continue
+            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="rmd-archive-") as directory:
+                with mock.patch.object(self, "root", Path(directory)):
+                    root, _ = self.complete_campaign()
+                    path = root / name
+                    path.write_bytes(path.read_bytes() + b"changed archived source\n")
+                    seal = json.loads((root / "campaign-build-evidence.json").read_text())
+                    seal["files"][name] = receipt.digest(path)
+                    receipt.write_json(root / "campaign-build-evidence.json", seal)
+                    result = receipt.finalize(root)
+                    self.assertEqual(result["status"], "INVALID")
+                    self.assertIn("archived campaign input changed", result["reason"])
+
+    def test_campaign_build_seal_is_exact_one_time_and_precedes_legs(self):
+        root, manifest = self.complete_campaign()
+        seal_path = root / "campaign-build-evidence.json"
+        original = seal_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "already sealed"):
+            receipt.seal_build(root)
+        self.assertEqual(seal_path.read_bytes(), original)
+        seal_path.unlink()
+        with self.assertRaisesRegex(ValueError, "before the first leg"):
+            receipt.seal_build(root)
+        self.assertFalse(seal_path.exists())
+        self.assertEqual(receipt.finalize(root)["status"], "INVALID")
+        self.assertFalse(seal_path.exists(), "consumers must not recreate a missing seal")
+        args = argparse.Namespace(output=str(root), arm="flat", index=0,
+            daemon=str(root / "bin/rustbgpd-flat"), harness=str(root / "bin/reloadstall"), rbgp=str(root / "bin/rbgp"))
+        with mock.patch.object(receipt, "generate") as generate, mock.patch.object(receipt.subprocess, "Popen") as launch:
+            with self.assertRaises(FileNotFoundError):
+                receipt.run_cell(args)
+        generate.assert_not_called()
+        launch.assert_not_called()
+        self.assertFalse(seal_path.exists(), "run-cell must verify, never regenerate build evidence")
+        receipt.write_json(seal_path, json.loads(original))
+        record = json.loads(original)
+        for change in ("omitted", "extra", "wrong-hash", "wrong-head", "wrong-schema"):
+            with self.subTest(change=change):
+                altered = copy.deepcopy(record)
+                if change == "omitted":
+                    del altered["files"]["build-candidate.log"]
+                elif change == "extra":
+                    altered["files"]["controller-0.log"] = "0" * 64
+                elif change == "wrong-hash":
+                    altered["files"]["build-candidate.log"] = "0" * 64
+                else:
+                    altered[change.removeprefix("wrong-")] = "changed"
+                receipt.write_json(seal_path, altered)
+                self.assertEqual(receipt.finalize(root)["status"], "INVALID")
+        receipt.write_json(seal_path, record)
+        self.assertEqual(receipt.verified_build_evidence(root, manifest), receipt.verified_binaries(root))
+
+    def test_campaign_resealed_evidence_cannot_hide_failed_builds_or_live_archives(self):
+        for change in ("failed-build", "binary-proof", "extra-archive", "linked-archive"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(prefix="rmd-seal-") as directory:
+                with mock.patch.object(self, "root", Path(directory)):
+                    root, _ = self.complete_campaign()
+                    if change == "failed-build":
+                        name = "build-candidate.exit"
+                        (root / name).write_text("17\n")
+                    elif change == "binary-proof":
+                        name = "binary-validation.json"
+                        receipt.write_json(root / name, {})
+                    elif change == "extra-archive":
+                        name = "frozen-instrumentation/unrecorded.rs"
+                        (root / name).write_text("unexpected archived input\n")
+                    else:
+                        name = "frozen-instrumentation/README.md"
+                        (root / name).unlink()
+                        (root / name).symlink_to(receipt.HERE / "README.md")
+                    seal = json.loads((root / "campaign-build-evidence.json").read_text())
+                    seal["files"][name] = receipt.digest(root / name)
+                    receipt.write_json(root / "campaign-build-evidence.json", seal)
+                    self.assertEqual(receipt.finalize(root)["status"], "INVALID")
+
+    def test_campaign_build_exit_markers_are_actual_command_results(self):
+        source = Path(__file__).with_name("run-recovery-mass-dirty.sh").read_text()
+        begin = source.index("for role in candidate flat; do", source.index("jobs=${CARGO_BUILD_JOBS"))
+        end = source.index('sha256sum "$output"/bin/*', begin)
+        self.assertLess(source.index('check-binaries "$output"'), source.index('seal-build "$output"'))
+        self.assertLess(source.index('seal-build "$output"'), source.index("mapfile -t schedule"))
+        setup = r'''
+set -euo pipefail
+output=$TEST_OUTPUT scratch=$TEST_SCRATCH jobs=2
+cargo() {
+    local role binary directory=release
+    if [[ $* == *"-p reloadstall"* ]]; then role=harness binary=reloadstall directory=scale
+    elif [[ $* == *"--bin rbgp"* ]]; then role=rbgp binary=rbgp
+    else role=${PWD##*/} binary=rustbgpd; fi
+    printf 'fixture cargo completed %s\n' "$role"
+    [[ $TEST_FAIL_ROLE != "$role" ]] || return 17
+    mkdir -p "$CARGO_TARGET_DIR/$directory"
+    printf '%s\n' "$role" >"$CARGO_TARGET_DIR/$directory/$binary"
+}
+'''
+        for failed in ("none", "candidate", "flat", "harness", "rbgp"):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory(prefix="rmd-exit-") as directory:
+                root = Path(directory)
+                output, scratch = root / "output", root / "scratch"
+                (output / "bin").mkdir(parents=True)
+                for role in ("candidate", "flat"):
+                    (scratch / role).mkdir(parents=True)
+                result = subprocess.run(["bash", "-c", setup + source[begin:end]],
+                    env=os.environ | {"TEST_OUTPUT": str(output), "TEST_SCRATCH": str(scratch), "TEST_FAIL_ROLE": failed},
+                    text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0 if failed == "none" else 17, result.stderr)
+                reached_failure = False
+                for role in ("candidate", "flat", "harness", "rbgp"):
+                    marker = output / f"build-{role}.exit"
+                    if reached_failure:
+                        self.assertFalse(marker.exists(), "unexecuted commands cannot claim completion")
+                    else:
+                        self.assertEqual(marker.read_text(), "17\n" if role == failed else "0\n")
+                        self.assertIn(f"fixture cargo completed {role}", (output / f"build-{role}.log").read_text())
+                    reached_failure |= role == failed
+
+    def test_actual_driver_cleanup_failures_invalidate_a_complete_campaign(self):
+        root, _ = self.complete_campaign()
 
         source = Path(__file__).with_name("run-recovery-mass-dirty.sh").read_text()
         handler = source[source.index("finish() {"):source.index('mkdir -p "$output/bin"')]
