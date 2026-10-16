@@ -1087,6 +1087,12 @@ pub struct RibManager {
     /// cohort admission (LAN-1826): the per-turn work bound.
     #[cfg(test)]
     join_cohort_tag_scans: usize,
+    /// Grouped VPN member emissions and clean→dirty deferral warnings:
+    /// an already-dirty member must cost neither on later passes.
+    #[cfg(test)]
+    vpn_group_member_emits: usize,
+    #[cfg(test)]
+    vpn_member_deferral_warnings: usize,
     #[cfg(test)]
     test_force_exact_export_slow_path: bool,
     #[cfg(test)]
@@ -2307,6 +2313,10 @@ impl RibManager {
             test_force_ungrouped: false,
             #[cfg(test)]
             join_cohort_tag_scans: 0,
+            #[cfg(test)]
+            vpn_group_member_emits: 0,
+            #[cfg(test)]
+            vpn_member_deferral_warnings: 0,
             #[cfg(test)]
             test_force_exact_export_slow_path: false,
             #[cfg(test)]
