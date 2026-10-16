@@ -66,7 +66,7 @@ fn shared_unicast_otc_gate_falls_back_only_for_blocked_roles() {
 impl PeerSession {
     /// Direct encoder fixtures explicitly drive the same bounded cursor used
     /// by `run()`; control responsiveness is tested through the real actor.
-    async fn test_drain_outbound(&mut self, update: OutboundRouteUpdate) {
+    pub(super) async fn test_drain_outbound(&mut self, update: OutboundRouteUpdate) {
         self.handle_outbound_route_update(update).await;
         while let Some(pending) = self.pending_outbound.as_ref() {
             pending.ready(self.writer_bulk_tx.as_ref()).await;
@@ -2052,8 +2052,7 @@ fn prefix_attr_map(frames: &[Vec<u8>]) -> std::collections::BTreeMap<String, Vec
 /// and the elected encoder and shared follower must produce the per-key NLRI
 /// and attribute bytes, ordered events and `EoR` coverage that the private
 /// encoder produces for it. This does not show that grouped RIB output equals
-/// per-peer RIB output; the RIB oracle owns that comparison, on normalized
-/// routes rather than bytes.
+/// per-peer RIB output; `update_group_wire_parity` compares those on the wire.
 #[expect(
     clippy::too_many_lines,
     reason = "pins elected encoder, follower and private wire events plus EoR coverage in one sequence"

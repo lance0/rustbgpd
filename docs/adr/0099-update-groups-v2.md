@@ -520,11 +520,15 @@ The oracle compares normalized routes and next-hop actions, not encoded bytes.
 The transport shared-encoding tests give every member the same envelope. They
 compare the elected encoder's and the shared follower's per-key NLRI and
 attribute bytes with the private encoder's output, which shows encoder parity
-only. No test yet feeds grouped and per-peer RIB output through transport
-encoding and compares the final bytes per key. Preserve the original ADR's dated
-as-built history while correcting affected shared recovery behavior before the
-EVPN classifier is enabled. An exception must be named here, not inferred from
-a failing test.
+only. The transport test `update_group_wire_parity` runs one scenario through
+the real RIB manager twice, grouped and on the per-peer path, and encodes each
+receiver's output in a real session. It compares ordered per-key NLRI and
+attribute bytes and EoR coverage for IPv4 and IPv6 unicast and VPNv4, including
+withdrawals and a pass that promotes routes from two sources with mixed
+next-hop overrides. It covers that scenario, not the recovery paths above.
+Preserve the original ADR's dated as-built history while correcting affected
+shared recovery behavior before the EVPN classifier is enabled. An exception
+must be named here, not inferred from a failing test.
 
 ### G. Implementation and qualification gates
 
