@@ -293,10 +293,10 @@ mod tests {
                             assert_eq!(receipt.mismatches, if shared && sparse { 4 } else { 0 });
                         }
                         if expected_shared && family == "full-vpn" {
-                            // A current pool admits without probing; churn probes
-                            // every row and reads one empty bucket per addition.
+                            // A current pool admits without probing; logged churn
+                            // looks up only changed keys, one empty bucket per addition.
                             if sparse {
-                                assert!(counted.comparisons >= 60);
+                                assert!(counted.comparisons <= 8 * 4);
                                 assert_eq!(counted.shape_callbacks, 64 + counted.comparisons + 4);
                             } else {
                                 assert_eq!((counted.comparisons, counted.shape_callbacks), (0, 64));

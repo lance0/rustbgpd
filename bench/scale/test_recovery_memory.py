@@ -1358,7 +1358,7 @@ class RecoveryScanTests(unittest.TestCase):
                 for leg, arm in enumerate(("flat", "candidate", "candidate", "flat")):
                     shared = arm == "candidate"
                     comparisons = {"full-uc": keys, "evpn-soak": 2 * keys,
-                                   "full-vpn": 2 * keys if sparse else 0}[profile] if shared else 0
+                                   "full-vpn": 2 * sparse}[profile] if shared else 0
                     additions = sparse if shared else 0
                     slots = keys + sparse // 2 if profile == "full-uc" else 0
                     rows.append(dict(
@@ -1528,10 +1528,8 @@ class RecoveryScanTests(unittest.TestCase):
             "vpn-negotiated-flat": (1, dict(selected_strategy="exact-flat", selection_reason="vpn-negotiated",
                                             shared=False, comparisons=0, shape_callbacks=keys)),
             "dense-current-pool-probed": (1, dict(comparisons=1, shape_callbacks=keys + 1)),
-            "sparse-superlinear-probes": (5, dict(comparisons=3 * keys + 1,
-                                                  shape_callbacks=keys + 3 * keys + 1 + 2)),
-            "sparse-missing-lookups": (5, dict(comparisons=keys - 3, shape_callbacks=keys + keys - 3 + 2)),
-            "bucket-visits-disagree": (5, dict(shape_callbacks=keys + 2 * keys)),
+            "sparse-row-probes": (5, dict(comparisons=keys, shape_callbacks=keys + keys + 2)),
+            "bucket-visits-disagree": (5, dict(shape_callbacks=keys + 4)),
             "flat-cold-anchor": (1, dict(cold_anchor_strategy="exact-flat")),
         }
         for name, (index, change) in cases.items():

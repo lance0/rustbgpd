@@ -1212,8 +1212,8 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                             require(row["comparisons"] == 0,
                                     "a current VPN pool must admit its keys without probing")
                         else:
-                            require(keys - sparse <= row["comparisons"] <= 3 * keys,
-                                    "missing exact VPN lookups or non-linear probing")
+                            require(row["comparisons"] <= 8 * sparse,
+                                    "VPN key churn must look up only the logged keys")
                 else:
                     require(row["source_slots"] == 0 and row["mismatches"] == 0,
                             "non-slab path reported slot work")

@@ -1060,3 +1060,10 @@ from. While the versions match, every projected VPN row is a pool key, so the
 shape pass counts VPN rows without probing, and a projection that covers all
 pool VPN keys sets that whole bit range. A partial projection on a current
 pool probes without additions; any version mismatch takes the exact probe path.
+
+Group tables also log their last 4,096 VPN key-set changes; a full log or a
+clear restarts it. A pool whose version the log still covers is treated as
+current plus those changes: shape skips row probes and counts logged keys that
+are present but not pooled as sparse additions, and a full projection sets the
+pool's VPN range, clears logged removals and adds logged insertions. Partial
+projections and uncovered gaps keep the exact probe path.

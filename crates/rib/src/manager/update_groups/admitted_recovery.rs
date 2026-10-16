@@ -200,13 +200,17 @@ struct Snapshot {
     indexed: bool,
 }
 
+/// A pool's VPN positions plus every VPN key change its source table made
+/// since the pool was built; empty when the pool is exactly current.
+type VpnChanges<'t> = (std::ops::Range<usize>, &'t [(VpnRibRouteKey, bool)]);
+
 impl Snapshot {
-    /// The pool's VPN positions when they are exactly `table`'s VPN keys.
-    fn current_vpn(&self, table: &AdjRibOut) -> Option<std::ops::Range<usize>> {
-        (self.vpn_keys == Some(table.vpn_key_version())).then(|| {
-            self.keys
-                .partition_point(|key| matches!(key, Key::Unicast(..)))..self.keys.len()
-        })
+    fn vpn_changes<'t>(&self, table: &'t AdjRibOut) -> Option<VpnChanges<'t>> {
+        let changes = table.vpn_key_changes_since(self.vpn_keys?)?;
+        let start = self
+            .keys
+            .partition_point(|key| matches!(key, Key::Unicast(..)));
+        Some((start..self.keys.len(), changes))
     }
 }
 
@@ -1127,7 +1131,8 @@ impl AdmittedRecovery {
             vpn: 0,
             vpn_identity: true,
         };
-        let current_vpn = snapshot.is_some_and(|snapshot| snapshot.current_vpn(table).is_some());
+        let vpn_changes = snapshot.and_then(|snapshot| snapshot.vpn_changes(table));
+        let current_vpn = vpn_changes.is_some();
         Self::walk_full_old(
             table,
             &project_uc,
@@ -1149,7 +1154,7 @@ impl AdmittedRecovery {
                                 shape.additions.checked_add(1).ok_or_else(Self::overflow)?;
                         }
                     }
-                    // A current pool holds every VPN key of this table: no addition.
+                    // The pool holds every row key except logged additions, counted below.
                     if current_vpn && shape.vpn_identity {
                         return Ok(());
                     }
@@ -1176,6 +1181,25 @@ impl AdmittedRecovery {
                 Ok(())
             },
         )?;
+        if shape.fallback.is_none()
+            && let (Some(snapshot), Some((_, changes))) = (snapshot, vpn_changes)
+        {
+            // Every row key outside the pool was inserted after it: an upper
+            // bound even when the same key is logged more than once.
+            for (key, _) in changes {
+                if table.get_vpn(key).is_some()
+                    && Self::vpn_position(
+                        snapshot,
+                        Key::Vpn(key.nlri_key, key.path_id),
+                        &mut shape.comparisons,
+                        checkpoint,
+                    )
+                    .is_none()
+                {
+                    shape.additions = shape.additions.checked_add(1).ok_or_else(Self::overflow)?;
+                }
+            }
+        }
         Ok(shape)
     }
 
@@ -1238,14 +1262,13 @@ impl AdmittedRecovery {
             self.reserve_capture_with_checkpoint(peer, shape.count, checkpoint)?;
         }
         let invalid = self.missing_proof(peer);
-        let snapshot = handle
-            .and_then(|handle| self.snapshot_index(handle))
-            .map(|index| &self.snapshots[index]);
-        // Every projected VPN row is a current pool key, and as many rows as
-        // pool VPN keys means all of them: admit the whole range, no probe.
+        let snapshot_index = handle.and_then(|handle| self.snapshot_index(handle));
+        let snapshot = snapshot_index.map(|index| &self.snapshots[index]);
+        // Every table VPN row projected as its own key: admit the pool's VPN
+        // range, then apply the logged changes since the pool was built.
         let all_vpn = snapshot
-            .and_then(|snapshot| snapshot.current_vpn(table))
-            .filter(|range| shape.vpn_identity && range.len() == shape.vpn);
+            .and_then(|snapshot| snapshot.vpn_changes(table))
+            .filter(|_| shape.vpn_identity && shape.vpn == table.vpn_len());
         let record = &mut self.records[index];
         let mut count = 0_usize;
         let mut mismatches = 0;
@@ -1296,7 +1319,8 @@ impl AdmittedRecovery {
         if count != shape.count {
             return Err(self.fail(index, invalid, checkpoint));
         }
-        if let Some(range) = all_vpn {
+        if let (Some((range, changes)), Some(snapshot_index)) = (all_vpn, snapshot_index) {
+            let snapshot = &self.snapshots[snapshot_index];
             let record = &mut self.records[index];
             let mut position = range.start;
             while position < range.end {
@@ -1307,6 +1331,34 @@ impl AdmittedRecovery {
                 record.masked += (bits & !record.words[word]).count_ones() as usize;
                 record.words[word] |= bits;
                 position = word * 64 + high;
+            }
+            let mut overflow = false;
+            for (key, _) in changes {
+                let present = table.get_vpn(key).is_some();
+                let pooled = Key::Vpn(key.nlri_key, key.path_id);
+                match (
+                    present,
+                    Self::vpn_position(snapshot, pooled, &mut comparisons, checkpoint),
+                ) {
+                    (false, Some(position)) => {
+                        let bit = 1_u64 << (position % 64);
+                        if record.words[position / 64] & bit != 0 {
+                            record.words[position / 64] &= !bit;
+                            record.masked -= 1;
+                        }
+                    }
+                    (true, None) => {
+                        if record.keys.0.len() == record.keys.0.capacity() {
+                            overflow = true;
+                            break;
+                        }
+                        record.keys.0.push(pooled);
+                    }
+                    _ => {}
+                }
+            }
+            if overflow {
+                return Err(self.fail(index, invalid, checkpoint));
             }
         }
         Ok(FullCaptureOutcome {
@@ -3497,6 +3549,71 @@ mod tests {
             assert!(proof.contains(&vpn_exact(4)) && proof.contains(&vpn_exact(6)));
             assert_eq!(proof.len(), 200);
         }
+    }
+
+    #[test]
+    fn logged_vpn_churn_brings_an_older_pool_current_without_probing_rows() {
+        let mut table = vpn_table(0).with_vpn_key_log();
+        for n in 0..200 {
+            table.insert_vpn(vpn_route(n));
+        }
+        let mut ledger = AdmittedRecovery::new();
+        let hint = capture_vpn(&mut ledger, peer(1), None, &table, true).handle;
+        assert!(table.remove_vpn(&vpn_route(3).key()));
+        table.insert_vpn(vpn_route(500));
+        // Transient and restored keys are logged twice but change nothing.
+        table.insert_vpn(vpn_route(600));
+        assert!(table.remove_vpn(&vpn_route(600).key()));
+        assert!(table.remove_vpn(&vpn_route(9).key()));
+        table.insert_vpn(vpn_route(9));
+        let shape = vpn_shape(&ledger, hint, &table);
+        assert_eq!((shape.count, shape.vpn, shape.additions), (200, 200, 1));
+        assert!(shape.comparisons < 20, "only logged keys are looked up");
+        let warm = capture_vpn(&mut ledger, peer(2), hint, &table, true);
+        assert_eq!(warm.handle, hint);
+        let proof = ledger.get(&peer(2)).unwrap();
+        assert!(
+            !proof.contains(&vpn_exact(3)),
+            "a removed key is never admitted"
+        );
+        assert!(!proof.contains(&vpn_exact(600)));
+        assert!(proof.contains(&vpn_exact(500)) && proof.contains(&vpn_exact(9)));
+        assert_eq!(proof.len(), 200);
+        assert!(
+            (0..200)
+                .filter(|n| *n != 3)
+                .all(|n| proof.contains(&vpn_exact(n)))
+        );
+        assert_retained_credit(&ledger);
+        // A partial projection still probes every row and stays exact.
+        let partial = capture_vpn_where(&mut ledger, peer(3), hint, &table, true, |route| {
+            route.nlri.prefix != VpnPrefix::v4(Ipv4Addr::from(500), 32).unwrap()
+        });
+        assert_eq!(partial.handle, hint);
+        let proof = ledger.get(&peer(3)).unwrap();
+        assert_eq!(proof.len(), 199);
+        assert!(!proof.contains(&vpn_exact(500)) && !proof.contains(&vpn_exact(3)));
+    }
+
+    #[test]
+    fn a_full_vpn_key_log_restarts_and_older_pools_probe_exactly() {
+        let mut table = vpn_table(0).with_vpn_key_log();
+        for n in 0..200 {
+            table.insert_vpn(vpn_route(n));
+        }
+        let mut ledger = AdmittedRecovery::new();
+        let hint = capture_vpn(&mut ledger, peer(1), None, &table, true).handle;
+        for _ in 0..2049 {
+            assert!(table.remove_vpn(&vpn_route(7).key()));
+            table.insert_vpn(vpn_route(7));
+        }
+        assert!(table.remove_vpn(&vpn_route(8).key()));
+        let shape = vpn_shape(&ledger, hint, &table);
+        assert!(shape.comparisons >= 199, "an unlogged gap probes every row");
+        capture_vpn(&mut ledger, peer(2), hint, &table, true);
+        let proof = ledger.get(&peer(2)).unwrap();
+        assert_eq!(proof.len(), 199);
+        assert!(!proof.contains(&vpn_exact(8)) && proof.contains(&vpn_exact(7)));
     }
 
     #[test]

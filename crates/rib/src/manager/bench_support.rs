@@ -924,7 +924,8 @@ fn run_common_recovery_scan(
             .map_err(|e| e.cause.as_str())?;
     }
     let anchor = scan_peer(0);
-    let mut table = AdjRibOut::with_capacity(anchor, spec.keys);
+    // Like a group table, the fixture logs VPN key changes for pool reuse.
+    let mut table = AdjRibOut::with_capacity(anchor, spec.keys).with_vpn_key_log();
     let at = std::time::Instant::now();
     let mut insertion = (0..spec.keys).collect::<Vec<_>>();
     if spec.shuffled {
