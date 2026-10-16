@@ -210,9 +210,11 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
              "[global.telemetry.grpc_uds]", f"path = {json.dumps(str(directory / 'grpc.sock'))}", "",
              "[policy]", 'rpol_files = ["member.rpol"]', 'export_chain = ["member-out"]', "",
              "[policy.datasets.generation_b]", 'path = "generation.list"', ""]
+    # Receivers are held paused with full queues on purpose; the daemon's 30 s
+    # slow-peer timer is not under test and must not flag the held cohort.
     for index in range(receivers + 1):
         lines.extend(["[[neighbors]]", f'address = "{peer(index)}"', "remote_asn = 64512",
-                      f"families = {families}", "hold_time = 180",
+                      f"families = {families}", "hold_time = 180", "slow_peer_duration = 0",
                       f"route_reflector_client = {'true' if index else 'false'}", ""])
     (directory / "config.toml").write_text("\n".join(lines))
     return {name: digest(directory / name) for name in FIXTURE_INPUTS}
