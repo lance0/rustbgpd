@@ -102,7 +102,10 @@ The in-process actor and harness share one 12 GiB cgroup with swap disabled.
 The receipt retains both source patches, one hash per built binary, process
 identity, commands, resource readouts and the driver exit, which covers
 cleanup. The candidate patch must be empty, the control patch must touch only
-the VPN distribution source, and the two binaries must differ. Raw observations and descriptive medians/maxima do not
+the VPN distribution source, and the two binaries must differ. Both arms embed
+the candidate SHA, so each leg records the hash of the binary it executed and
+must match its own arm. A readiness bar breach is a `FAIL` that keeps every
+measurement; malformed or missing evidence is `INVALID`. Raw observations and descriptive medians/maxima do not
 constitute a daemon readiness, fleet, throughput or memory qualification.
 Phase costs have no speedup pass threshold or automatic chunking decision.
 

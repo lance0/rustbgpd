@@ -1677,7 +1677,7 @@ class RetirementReceiptTests(unittest.TestCase):
             receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
         for field, value in (("errors", 1), ("max_inflight", 2), ("before_capture_replies", 0),
                              ("after_barrier_replies", 0), ("admitted", 2), ("replied", 2),
-                             ("max_enqueue_reply_ns", 102), ("max_attempt_reply_ns", 200_000_001)):
+                             ("max_enqueue_reply_ns", 102)):
             with self.subTest(field=field):
                 row = self.with_readiness(self.row())
                 row["readiness"]["probe"][field] = value
@@ -1689,7 +1689,7 @@ class RetirementReceiptTests(unittest.TestCase):
                              ("body_callbacks", 1_229_999), ("callbacks", 1_230_001),
                              ("admitted", 0), ("replied", 0), ("serviced", 0), ("body_replied", 0),
                              ("overlap", False), ("eligible", False),
-                             ("max_checkpoint_interval_ns", 25_000_001), ("service_budget_ns", 26_000_000)):
+                             ("max_checkpoint_interval_ns", 0), ("service_budget_ns", 26_000_000)):
             with self.subTest(field=field):
                 row = self.with_readiness(self.row())
                 row["readiness"]["owners"]["received_cleanup_including_gc"][field] = value
@@ -1700,6 +1700,39 @@ class RetirementReceiptTests(unittest.TestCase):
         owner.update(admitted=0, serviced=0, replied=0, body_replied=0, overlap=False, eligible=False)
         with self.assertRaisesRegex(receipt.InvalidReceipt, "lacks real in-owner"):
             receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+
+    def readiness_breach(self, row, bar):
+        if bar == "reply":
+            row["readiness"]["probe"]["max_attempt_reply_ns"] = 200_000_001
+        else:
+            row["readiness"]["owners"]["received_cleanup_including_gc"]["max_checkpoint_interval_ns"] = 25_000_001
+        return row
+
+    def test_retirement_readiness_bar_breach_is_a_measurement_not_invalid_evidence(self):
+        for bar, text in (("reply", "200 ms deadline"), ("callback", "25 ms budget")):
+            with self.subTest(bar=bar):
+                row = self.readiness_breach(self.row(), bar)
+                result = receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+                self.assertEqual(len(result["breaches"]), 1)
+                self.assertIn(text, result["breaches"][0])
+                self.assertEqual(result["sample"], row)
+
+    def test_retirement_bar_breach_fails_and_keeps_measurements(self):
+        for bar in ("reply", "callback"):
+            with self.subTest(bar=bar):
+                root = self.campaign()
+                path = root / "retirement-full-2-candidate/harness.log"
+                lines = path.read_text().splitlines()
+                row = self.readiness_breach(json.loads(lines[-1].removeprefix("retirement_receipt ")), bar)
+                lines[-1] = "retirement_receipt " + json.dumps(row)
+                path.write_text("\n".join(lines) + "\n")
+                self.assertFalse(receipt.conclude(root, "schema", receipt.summarize_retirement))
+                result = json.loads((root / "comparison.json").read_text())
+                self.assertEqual(result["verdict"], "FAIL")
+                self.assertIn("retirement-full-2-candidate", result["reason"])
+                self.assertEqual(len(result["samples"]), 24)
+                self.assertEqual(len(result["summaries"]), 8)
+                shutil.rmtree(root)
 
     def test_retirement_readiness_boundary_only_replies_cannot_qualify_full_cleanup(self):
         row = self.with_readiness(self.row())
@@ -1879,6 +1912,8 @@ class RetirementReceiptTests(unittest.TestCase):
                     fresh[old_pid] = item
                     receipt.write_json(directory / name, item)
                 process = json.loads((directory / "binary-process.json").read_text())
+                process["exe_sha256"] = (root / f"{role}-binary.sha256").read_text().strip()
+                receipt.write_json(directory / "binary-process.json", process)
                 (directory / "cgroup-path.txt").write_text(cgroup + "\n")
                 ownership = [json.loads(line) for line in (directory / "ownership.jsonl").read_text().splitlines()]
                 for record in ownership:
@@ -2247,6 +2282,39 @@ class RetirementReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(receipt.InvalidReceipt, "manifest differs|not exact"):
                     receipt.summarize_retirement(root)
                 shutil.rmtree(root)
+
+    def test_retirement_leg_running_the_other_arm_binary_is_rejected(self):
+        # Both arms embed the candidate SHA; only the executed binary separates them.
+        root = self.campaign()
+        candidate = (root / "candidate-binary.sha256").read_text().strip()
+        for leg in (0, 3):
+            path = root / f"retirement-full-{leg}-old-drop/binary-process.json"
+            receipt.write_json(path, {**json.loads(path.read_text()), "exe_sha256": candidate})
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "did not execute its arm's binary"):
+            receipt.summarize_retirement(root)
+
+    def test_malformed_json_types_replace_an_earlier_pass_with_invalid(self):
+        memory = self.fixture.campaign(profile="full-uc", selected_cell="peer-down")
+        for summary, root in ((receipt.summarize, memory), (receipt.summarize_retirement, self.campaign())):
+            for name, value in (("manifest", []), ("candidate", None), ("candidate", 7),
+                                ("status", "ok"), ("process", [1])):
+                with self.subTest(summary=summary.__name__, name=name, value=value):
+                    self.assertTrue(receipt.conclude(root, "schema", summary))
+                    leg = root / ("retirement-full-1-candidate" if summary is receipt.summarize_retirement
+                                  else "full-uc-peer-down-baseline-2-candidate")
+                    path = {"manifest": root / "manifest.json", "candidate": root / "manifest.json",
+                            "status": leg / "status.json", "process": leg / "binary-process.json"}[name]
+                    original = path.read_bytes()
+                    if name == "candidate":
+                        receipt.write_json(path, {**json.loads(original), "candidate": value})
+                    else:
+                        receipt.write_json(path, value)
+                    self.assertFalse(receipt.conclude(root, "schema", summary))
+                    result = json.loads((root / "comparison.json").read_text())
+                    self.assertEqual(result["verdict"], "INVALID")
+                    self.assertNotIn("rows", result)
+                    self.assertNotIn("samples", result)
+                    path.write_bytes(original)
 
     def test_retirement_rejects_identical_binaries_with_different_digest_whitespace(self):
         root = self.campaign()
