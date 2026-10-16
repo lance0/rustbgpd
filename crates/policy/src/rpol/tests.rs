@@ -6662,7 +6662,10 @@ test scrubbed {
 }
 ";
     let policy = "policy scrub { term t { remove large-community 65000:*:*; accept } }";
-    assert!(failures_of(&format!("{policy}{tests}")).is_empty());
+    assert_eq!(
+        failures_of(&format!("{policy}{tests}")),
+        Vec::<String>::new()
+    );
     for broken in [
         "policy scrub { term t { accept } }",
         "policy scrub { term t { remove large-community 65000:1:2; accept } }",
@@ -6689,7 +6692,10 @@ fn not_removed_requires_a_fixture_value_and_rejects_overmatching_scrubs() {
             "test retained {{ route {{ {field} [{literal}] }} expect scrub == accept with not removed {kind} {literal} }}"
         );
         let clean = "policy scrub { term t { accept } }";
-        assert!(failures_of(&format!("{clean}{tests}")).is_empty());
+        assert_eq!(
+            failures_of(&format!("{clean}{tests}")),
+            Vec::<String>::new()
+        );
         let broken =
             format!("policy scrub {{ term t {{ remove {kind} {literal}; accept }} }}{tests}");
         assert!(failures_of(&broken)[0].contains("not to be removed"));
@@ -6703,11 +6709,11 @@ fn not_removed_requires_a_fixture_value_and_rejects_overmatching_scrubs() {
 #[test]
 fn with_only_rejects_every_unlisted_modification_kind() {
     let tests = "test exact { route { } expect p == accept with only local-pref 200 }";
-    assert!(
+    assert_eq!(
         failures_of(&format!(
             "policy p {{ term t {{ set local-pref 200; accept }} }}{tests}"
-        ))
-        .is_empty()
+        )),
+        Vec::<String>::new()
     );
     for extra in [
         "set med 5",
@@ -6728,7 +6734,10 @@ fn with_only_rejects_every_unlisted_modification_kind() {
             failures[0].contains("unexpected modifications"),
             "{extra}: {failures:?}"
         );
-        assert!(failures_of(&broken.replace("with only", "with")).is_empty());
+        assert_eq!(
+            failures_of(&broken.replace("with only", "with")),
+            Vec::<String>::new()
+        );
     }
     // Negative assertions do not authorize otherwise unlisted changes.
     let unexpected = "policy p { term t { remove community 65000:1; accept } }
@@ -6753,7 +6762,7 @@ test exact { route { large-communities [65000:3:4, 65000:5:6, 65001:7:8] }
         removes ext-community OV_VALID, not removed large-community 65001:7:8
 }
 ";
-    assert!(failures_of(source).is_empty());
+    assert_eq!(failures_of(source), Vec::<String>::new());
     let formatted = super::format_rpol(source).expect("new assertions format");
     assert!(formatted.contains("with only community"), "{formatted}");
     assert!(
@@ -6766,7 +6775,7 @@ test exact { route { large-communities [65000:3:4, 65000:5:6, 65001:7:8] }
     );
     assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
     compile_rpol(&formatted, &mut SetStore::new()).expect("formatted output compiles");
-    assert!(failures_of(&formatted).is_empty());
+    assert_eq!(failures_of(&formatted), Vec::<String>::new());
 }
 
 #[test]
