@@ -5610,6 +5610,8 @@ impl RibManager {
         tokio::pin!(resync_sleep);
         let mut resync_armed = false;
         let mut query_rx_open = true;
+        // Start of the current run of primary updates applied without a yield.
+        let mut primary_run_started: Option<std::time::Instant> = None;
 
         // A deferred attribute sweep must also run when UPDATE traffic stops.
         let attr_gc_sleep = tokio::time::sleep(ATTR_INTERN_GC_INTERVAL);
@@ -6040,10 +6042,23 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
+                                let started =
+                                    *primary_run_started.get_or_insert_with(std::time::Instant::now);
                                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                                     manager.handle_update(update);
                                 });
                                 self.drain_general_queries_if_unfenced();
+                                // Bound one actor poll by the flush budget.
+                                // Otherwise the loop drains a deep backlog up
+                                // to Tokio's whole cooperative budget in one
+                                // poll, and a task woken meanwhile (a readiness
+                                // reply's probe) waits behind it on this
+                                // worker. Yielding after every update instead
+                                // measurably slowed bulk VPN ingest.
+                                if started.elapsed() >= self.flush_poll_budget {
+                                    primary_run_started = None;
+                                    tokio::task::yield_now().await;
+                                }
                             }
                             None => break,
                         }
@@ -6109,10 +6124,17 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
+                                let started =
+                                    *primary_run_started.get_or_insert_with(std::time::Instant::now);
                                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                                     manager.handle_update(update);
                                 });
                                 self.drain_general_queries_if_unfenced();
+                                // Same poll bound as the timer-aware wait above.
+                                if started.elapsed() >= self.flush_poll_budget {
+                                    primary_run_started = None;
+                                    tokio::task::yield_now().await;
+                                }
                             }
                             None => break,
                         }
