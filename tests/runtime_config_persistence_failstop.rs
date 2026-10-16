@@ -41,10 +41,12 @@ impl Daemon {
         let stderr = File::create(&log_path).expect("create daemon log");
         let stdout = stderr.try_clone().expect("clone daemon log handle");
         let mut command = Command::new(env!("CARGO_BIN_EXE_rustbgpd"));
+        // One worker waits at phase 0 while another serves the readiness 503.
         command
             .arg(config)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
+            .env("RUSTBGPD_WORKER_THREADS", "2")
             .env_remove("RUSTBGPD_TEST_FAIL_STOP_HOLD");
         if let Some((name, value)) = fault {
             command.env(name, value);
