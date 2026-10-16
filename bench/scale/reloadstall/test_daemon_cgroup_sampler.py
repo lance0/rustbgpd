@@ -479,6 +479,51 @@ class ContainerOwnershipTests(unittest.TestCase):
             self.assertEqual(rows[0]["vmrss_kib"], "4096")
             self.assertEqual(rows[0]["peak_bytes"], "16384")
 
+    def kill_target_mid_read(self, site):
+        # A real /proc handle opened before the target dies raises ESRCH on read.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc, cgroup, pid, owner = self.exit_fixture(root)
+            (cgroup / "memory.current").write_text("8192")
+            (cgroup / "memory.peak").write_text("16384")
+            (cgroup / "memory.stat").write_text(
+                "anon 4096\nsock 1024\nfile 2048\nkernel 1024\nslab 128\npagetables 256\n")
+            (proc / "task" / "7").mkdir(parents=True)
+            (proc / "task" / "7" / "stat").write_text((proc / "stat").read_text())
+            (proc / "task" / "7" / "status").write_text(
+                "voluntary_ctxt_switches: 1\nnonvoluntary_ctxt_switches: 2\n")
+            target = subprocess.Popen(["sleep", "60"])
+            self.addCleanup(target.kill)
+            victim = proc / "task" / "7" / "stat" if site == "thread" else proc / "status"
+            # The thread dies on the first sample; status dies on the second.
+            kill_on, reads, read_text = (1 if site == "thread" else 2), [], Path.read_text
+
+            def kill_mid_read(path, *args, **kwargs):
+                if path == victim:
+                    reads.append(path)
+                    if len(reads) == kill_on:
+                        with open(f"/proc/{target.pid}/stat") as handle:
+                            target.kill()
+                            target.wait()
+                            shutil.rmtree(proc)  # the owned daemon is gone too
+                            return handle.read()  # raises the kernel's ESRCH
+                return read_text(path, *args, **kwargs)
+
+            paths = {f"/proc/{pid}": proc, "/sys/fs/cgroup": Path("/")}
+            with patch.object(sampler, "Path", side_effect=lambda value: paths[value]), \
+                    patch.object(Path, "read_text", kill_mid_read), patch.object(sampler.time, "sleep"):
+                sampler.sample(pid, root / "out.csv", 0.025, owner=owner)
+            self.assertEqual(target.returncode, -signal.SIGKILL)
+            return list(sampler.csv.DictReader((root / "out.csv").read_text().splitlines()))
+
+    def test_target_killed_mid_thread_read_ends_sampling(self):
+        rows = self.kill_target_mid_read("thread")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["threads_read"], rows[0]["threads_raced"]), ("0", "1"))
+
+    def test_target_killed_mid_status_read_ends_sampling(self):
+        self.assertEqual(len(self.kill_target_mid_read("status")), 1)
+
     def test_empty_zombie_membership_requires_all_ownership_evidence(self):
         for fault in [None, "live", "reuse", "swap", "cgroup", "foreign", "descendant", "missing"]:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
