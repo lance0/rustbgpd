@@ -1364,9 +1364,42 @@ fn replacement_readiness_checkpoint_at(
     #[cfg(all(not(test), not(feature = "bench-internals")))]
     let _ = stage;
     #[cfg(feature = "bench-internals")]
-    replacement_readiness_checkpoint_tagged(readiness, force, Some(stage));
+    replacement_readiness_checkpoint_tagged(readiness, force, Some(stage), false);
     #[cfg(not(feature = "bench-internals"))]
     replacement_readiness_checkpoint(readiness, force);
+}
+
+/// Classify only the current helper callback, never a remembered stage or ordinal.
+#[expect(clippy::ref_option, reason = "cleanup borrows its existing owner")]
+fn replacement_readiness_cleanup_checkpoint(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    stage: &'static str,
+    progress: crate::adj_rib_out::RetirementProgress,
+) {
+    #[cfg(all(test, feature = "bench-internals"))]
+    if let Some(context) = readiness {
+        let observer = context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observer
+            .clone();
+        if let Some(observer) = observer {
+            observer(stage);
+        }
+    }
+    #[cfg(feature = "bench-internals")]
+    replacement_readiness_checkpoint_tagged(
+        readiness,
+        false,
+        Some(stage),
+        progress == crate::adj_rib_out::RetirementProgress::Progress,
+    );
+    #[cfg(not(feature = "bench-internals"))]
+    {
+        let _ = progress;
+        replacement_readiness_checkpoint_at(readiness, stage, false);
+    }
 }
 
 /// Call only on the actor while its synchronous readiness owner is held.
@@ -1410,7 +1443,7 @@ fn replacement_readiness_checkpoint(
     readiness: &Option<Arc<ReplacementReadinessContext>>,
     force: bool,
 ) {
-    replacement_readiness_checkpoint_tagged(readiness, force, None);
+    replacement_readiness_checkpoint_tagged(readiness, force, None, false);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1422,6 +1455,7 @@ fn replacement_readiness_checkpoint_tagged(
     readiness: &Option<Arc<ReplacementReadinessContext>>,
     force: bool,
     stage: Option<&'static str>,
+    progress: bool,
 ) {
     let Some(context) = readiness else {
         return;
@@ -1435,7 +1469,9 @@ fn replacement_readiness_checkpoint_tagged(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = tokio::time::Instant::now();
-        readiness.retirement.checkpoint(now, stage, force);
+        readiness
+            .retirement
+            .checkpoint(now, stage, force || !progress);
         if force || now.duration_since(readiness.last_service) >= readiness.budget {
             readiness.max_gap = readiness
                 .max_gap
@@ -1446,7 +1482,7 @@ fn replacement_readiness_checkpoint_tagged(
     service_replacement_readiness_with_origin(
         context,
         force,
-        !force && bench_support::retirement_body_stage(stage),
+        !force && progress && bench_support::retirement_body_stage(stage),
     );
 }
 
@@ -2017,7 +2053,10 @@ impl RibManager {
         self.gc_attr_intern_with_checkpoint(&mut || {});
     }
 
-    fn gc_attr_intern_with_checkpoint(&mut self, checkpoint: &mut impl FnMut()) {
+    fn gc_attr_intern_with_checkpoint(
+        &mut self,
+        checkpoint: &mut impl crate::adj_rib_out::RetirementCheckpoint,
+    ) {
         self.attr_intern.gc_with_checkpoint(checkpoint);
         self.attr_intern_gc_displaced = 0;
         self.attr_intern_gc_deadline = None;

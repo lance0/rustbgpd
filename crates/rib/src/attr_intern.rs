@@ -20,6 +20,8 @@
 //! injection, other-family, GR/LLGR and refresh seams retain immediate sweeps.
 //! `Arc`'s reference count *is* the refcount; there is no separate bookkeeping
 //! to drift out of sync.
+use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
+
 //
 // ponytail: gc remains an O(table) sweep. Unicast hot-path frequency is bounded,
 // but each sweep still visits the global table. Revisit incremental sweeping
@@ -70,13 +72,13 @@ impl AttrInternTable {
         self.gc_with_checkpoint(&mut || {});
     }
 
-    pub(crate) fn gc_with_checkpoint(&mut self, checkpoint: &mut impl FnMut()) {
-        checkpoint();
+    pub(crate) fn gc_with_checkpoint(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
+        checkpoint.checkpoint(RetirementProgress::Boundary);
         self.set.retain(|a| {
-            checkpoint();
+            checkpoint.checkpoint(RetirementProgress::Progress);
             Arc::strong_count(a) > 1
         });
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
     }
 
     /// Number of unique interned attribute sets.

@@ -505,7 +505,10 @@ impl RegroupBaseline {
         merge_owned_maps(&mut self.vpn, prior.vpn, checkpoint);
     }
 
-    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+    pub(in crate::manager) fn retire_with(
+        &mut self,
+        checkpoint: &mut impl crate::adj_rib_out::RetirementCheckpoint,
+    ) {
         crate::adj_rib_out::release_hash_map(&mut self.unicast, checkpoint);
         crate::adj_rib_out::release_hash_map(&mut self.next_hop_overrides, checkpoint);
         crate::adj_rib_out::release_hash_map(&mut self.vpn, checkpoint);

@@ -292,7 +292,11 @@ mod retirement_readiness_tests {
         manager.replacement_checkpoint_at("peer_adj_out_retirement", true);
         assert_eq!(entry.await.unwrap(), Ok(0));
         for _ in 0..200 {
-            manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+            super::super::replacement_readiness_cleanup_checkpoint(
+                &manager.replacement_readiness,
+                "peer_adj_out_retirement",
+                crate::adj_rib_out::RetirementProgress::Progress,
+            );
         }
         let terminal = enqueue(&tx);
         manager.replacement_checkpoint_at("terminal_cleanup", true);
@@ -317,7 +321,11 @@ mod retirement_readiness_tests {
         }
         let body = enqueue(&tx);
         tokio::time::advance(Duration::from_millis(25)).await;
-        manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+        super::super::replacement_readiness_cleanup_checkpoint(
+            &manager.replacement_readiness,
+            "peer_adj_out_retirement",
+            crate::adj_rib_out::RetirementProgress::Progress,
+        );
         assert_eq!(body.await.unwrap(), Ok(0));
         let state = manager
             .replacement_readiness
@@ -341,12 +349,20 @@ mod retirement_readiness_tests {
                 drop(answer);
             } else {
                 tokio::time::advance(Duration::from_millis(25)).await;
-                manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+                super::super::replacement_readiness_cleanup_checkpoint(
+                    &manager.replacement_readiness,
+                    "peer_adj_out_retirement",
+                    crate::adj_rib_out::RetirementProgress::Progress,
+                );
                 assert!(answer.await.unwrap().is_err());
             }
             if age.is_zero() {
                 tokio::time::advance(Duration::from_millis(25)).await;
-                manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+                super::super::replacement_readiness_cleanup_checkpoint(
+                    &manager.replacement_readiness,
+                    "peer_adj_out_retirement",
+                    crate::adj_rib_out::RetirementProgress::Progress,
+                );
             }
             let state = manager
                 .replacement_readiness
@@ -360,6 +376,130 @@ mod retirement_readiness_tests {
                 (1, 0)
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actual_cleanup_helpers_reject_empty_and_tail_only_replies() {
+        use crate::adj_rib_out::{ClassifiedCheckpoint, RetirementProgress};
+        // Every helper keeps serving boundary queries, including empty maps and
+        // final shells. None may certify productive cleanup from that service.
+        let mut body_replies = Vec::new();
+        for case in 0..4 {
+            let (mut manager, tx) = manager_with_queries(Duration::ZERO);
+            manager
+                .replacement_readiness
+                .as_ref()
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .budget = Duration::ZERO;
+            let mut answer = None;
+            let mut saw_progress = false;
+            let cleanup_label = match case {
+                0 => "peer_adj_in_retirement",
+                1 => "peer_adj_out_retirement",
+                2 => "peer_regroup_retirement",
+                _ => "peer_attribute_gc",
+            };
+            let mut checkpoint = ClassifiedCheckpoint(|progress| {
+                // Populate real work first; inject only at the subsequent empty
+                // family/storage tail, never during the element callbacks.
+                if progress == RetirementProgress::Progress {
+                    saw_progress = true;
+                } else if answer.is_none() && (saw_progress || case == 0) {
+                    answer = Some(enqueue(&tx));
+                }
+                super::super::replacement_readiness_cleanup_checkpoint(
+                    &manager.replacement_readiness,
+                    cleanup_label,
+                    progress,
+                );
+            });
+            let peer = "192.0.2.1".parse().unwrap();
+            let prefix =
+                rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new([10, 0, 0, 0].into(), 24));
+            let route = crate::test_support::make_route_with_path_id(prefix, 0);
+            match case {
+                0 => crate::adj_rib_in::AdjRibIn::new(peer).retire_with(&mut checkpoint),
+                1 => {
+                    let mut rib = crate::adj_rib_out::AdjRibOut::new(peer);
+                    rib.insert(route);
+                    rib.retire_with(&mut checkpoint);
+                }
+                2 => {
+                    let mut baseline = super::super::update_groups::RegroupBaseline::default();
+                    baseline.unicast.insert((prefix, 0), route);
+                    baseline.retire_with(&mut checkpoint);
+                }
+                _ => {
+                    // One real interned element followed by the sweep tail.
+                    let mut attrs = crate::attr_set::AttrSet::new(vec![]);
+                    manager.attr_intern.intern(&mut attrs);
+                    let readiness = manager.replacement_readiness.clone();
+                    // Use a separate callback so the existing mutable borrow
+                    // of the intern table never aliases the manager.
+                    manager
+                        .attr_intern
+                        .gc_with_checkpoint(&mut ClassifiedCheckpoint(|progress| {
+                            if progress == RetirementProgress::Progress {
+                                saw_progress = true;
+                            } else if saw_progress && answer.is_none() {
+                                answer = Some(enqueue(&tx));
+                            }
+                            super::super::replacement_readiness_cleanup_checkpoint(
+                                &readiness,
+                                cleanup_label,
+                                progress,
+                            );
+                        }));
+                }
+            }
+            assert!(answer.is_some(), "actual tail must be reached: {case}");
+            assert_eq!(answer.unwrap().await.unwrap(), Ok(0));
+            let state = manager
+                .replacement_readiness
+                .as_ref()
+                .unwrap()
+                .state
+                .lock()
+                .unwrap();
+            body_replies.push(state.retirement.body_replied);
+            assert_eq!(state.retirement.delivered, 1);
+            if case != 0 {
+                assert!(state.retirement.body_callbacks > 0);
+            }
+        }
+        assert_eq!(
+            body_replies,
+            [0, 0, 0, 0],
+            "all real empty/tail callbacks are boundaries"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actual_nonempty_map_checkpoint_supplies_productive_reply() {
+        let (manager, tx) = manager_with_queries(Duration::ZERO);
+        let answer = enqueue(&tx);
+        let mut map = std::collections::HashMap::from([(1_u8, 2_u8)]);
+        let context = manager.replacement_readiness.clone();
+        // Zero budget makes the controlled body callback eligible without any
+        // wall-clock assertion or synthetic service-origin flag.
+        context.as_ref().unwrap().state.lock().unwrap().budget = Duration::ZERO;
+        crate::adj_rib_out::retire_hash_map(
+            &mut map,
+            &mut crate::adj_rib_out::ClassifiedCheckpoint(|progress| {
+                super::super::replacement_readiness_cleanup_checkpoint(
+                    &context,
+                    "peer_adj_out_retirement",
+                    progress,
+                );
+            }),
+        );
+        assert_eq!(answer.await.unwrap(), Ok(0));
+        let state = context.as_ref().unwrap().state.lock().unwrap();
+        assert_eq!(state.retirement.body_replied, 1);
+        assert_eq!(state.retirement.body_callbacks, 2);
     }
 
     #[test]

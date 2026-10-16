@@ -72,30 +72,56 @@ pub struct AdjRibOut {
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
 }
 
+/// Whether this callback surrounds a real retired element or only storage boundaries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetirementProgress {
+    Progress,
+    Boundary,
+}
+
+/// Existing zero-argument consumers retain exactly the same callback sequence.
+pub(crate) trait RetirementCheckpoint {
+    fn checkpoint(&mut self, progress: RetirementProgress);
+}
+
+impl<F: FnMut()> RetirementCheckpoint for F {
+    fn checkpoint(&mut self, _progress: RetirementProgress) {
+        self();
+    }
+}
+
+pub(crate) struct ClassifiedCheckpoint<F>(pub(crate) F);
+
+impl<F: FnMut(RetirementProgress)> RetirementCheckpoint for ClassifiedCheckpoint<F> {
+    fn checkpoint(&mut self, progress: RetirementProgress) {
+        (self.0)(progress);
+    }
+}
+
 pub(crate) fn retire_hash_map<K, V, S>(
     map: &mut std::collections::HashMap<K, V, S>,
-    checkpoint: &mut impl FnMut(),
+    checkpoint: &mut impl RetirementCheckpoint,
 ) {
     let mut entries = map.drain();
     for entry in entries.by_ref() {
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Progress);
         drop(entry);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Progress);
     }
-    checkpoint();
+    checkpoint.checkpoint(RetirementProgress::Boundary);
     drop(entries);
-    checkpoint();
+    checkpoint.checkpoint(RetirementProgress::Boundary);
 }
 
 pub(crate) fn release_hash_map<K, V, S: Default>(
     map: &mut std::collections::HashMap<K, V, S>,
-    checkpoint: &mut impl FnMut(),
+    checkpoint: &mut impl RetirementCheckpoint,
 ) {
     retire_hash_map(map, checkpoint);
     let retired = std::mem::take(map);
-    checkpoint();
+    checkpoint.checkpoint(RetirementProgress::Boundary);
     drop(retired);
-    checkpoint();
+    checkpoint.checkpoint(RetirementProgress::Boundary);
 }
 
 /// Rebuild a route-bearing map before a known batch of inserts so no commit
@@ -496,7 +522,7 @@ impl AdjRibOut {
     }
 
     /// Retire every advertised family while retaining its backing allocations.
-    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.routes.retire_with(checkpoint);
         retire_hash_map(&mut self.next_hop_overrides, checkpoint);
         self.self_next_hop.clear();
