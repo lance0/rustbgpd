@@ -3,8 +3,9 @@
 //! [`TimedActor`] times every poll of the actor future, which is how long the
 //! actor holds a runtime worker without yielding. Within a poll, the
 //! timeline is also cut at every [`SAMPLE_EVERY`]th readiness checkpoint and
-//! at the poll end; each piece is one slice, labelled by the last checkpoint
-//! it contains. Checkpoints fire per item in long loops, so a clock read on
+//! at the poll end; each piece is one slice, labelled by the most recent
+//! checkpoint at or before its end. The tail after a cut keeps the cut
+//! checkpoint's label, so work after the last checkpoint is never dropped. Checkpoints fire per item in long loops, so a clock read on
 //! every one measurably slowed full-table work: an unsampled checkpoint costs
 //! one thread-local cell update. A long gap between two checkpoints stays
 //! inside one slice, so a stall is never split. The recorder flushes to the
@@ -34,7 +35,8 @@ type Stage = Option<&'static str>;
 struct Countdown {
     /// Checkpoints left before the next cut; 0 outside a timed poll.
     remaining: u32,
-    /// The last checkpoint of the open slice, if it has one.
+    /// The most recent checkpoint in this poll, if any; it labels the
+    /// poll-end slice.
     last: Option<Stage>,
 }
 
@@ -58,7 +60,7 @@ pub(super) fn checkpoint(stage: Stage) {
         1 => {
             countdown.set(Countdown {
                 remaining: SAMPLE_EVERY,
-                last: None,
+                last: Some(stage),
             });
             cut(stage, Instant::now());
         }
@@ -180,6 +182,58 @@ impl<F: Future> Future for TimedActor<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_telemetry::BgpMetrics;
+
+    /// Retirement samples above 60 ms, and the published retirement maximum.
+    fn retirement_stall(metrics: &BgpMetrics) -> (u64, f64) {
+        metrics.publish_render_window_maxima();
+        let families = metrics.registry().gather();
+        let series = |name: &str| {
+            families
+                .iter()
+                .find(|family| family.name() == name)
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .iter()
+                        .find(|metric| metric.get_label()[0].value() == "retirement")
+                })
+                .expect("pre-initialised retirement series")
+        };
+        let histogram = series("bgp_rib_actor_slice_seconds").get_histogram();
+        let at = |bound: f64| {
+            histogram
+                .get_bucket()
+                .iter()
+                .find(|bucket| (bucket.upper_bound() - bound).abs() < 1e-9)
+                .expect("configured bucket edge")
+                .cumulative_count()
+        };
+        let max = series("bgp_rib_actor_slice_max_microseconds")
+            .get_gauge()
+            .get_value();
+        (at(2.0) - at(0.06), max / 1e6)
+    }
+
+    /// Exactly `SAMPLE_EVERY` quick checkpoints put the poll's only cut on
+    /// the last one; the stall after it must still reach that stage.
+    #[tokio::test]
+    async fn stall_after_a_boundary_checkpoint_keeps_its_stage() {
+        let metrics = BgpMetrics::new();
+        TimedActor::new(
+            async {
+                for _ in 0..SAMPLE_EVERY {
+                    checkpoint(Some("peer_adj_out_retirement"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(70));
+            },
+            metrics.rib_actor_slice_recorder(),
+        )
+        .await;
+        let (samples, max) = retirement_stall(&metrics);
+        assert_eq!(samples, 1, "the tail stall is a retirement slice");
+        assert!((0.07..2.0).contains(&max), "retirement max {max}");
+    }
 
     #[test]
     fn checkpoint_names_collapse_into_the_closed_stage_set() {
