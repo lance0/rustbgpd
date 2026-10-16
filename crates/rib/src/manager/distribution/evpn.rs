@@ -970,7 +970,7 @@ impl RibManager {
                         evpn_complete_feed: complete,
                         ..OutboundCommitBatch::default()
                     },
-                    HashSet::new(),
+                    crate::fast_hash::FastSet::default(),
                     None,
                     None,
                     None,

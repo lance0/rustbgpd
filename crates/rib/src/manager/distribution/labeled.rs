@@ -99,9 +99,9 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "labeled staging mirrors the VPN multipath/single-best distribution context for RR/export parity"
     )]
-    pub(in crate::manager) fn stage_labeled_routes_with_checkpoint(
+    pub(in crate::manager) fn stage_labeled_routes_with_checkpoint<S: std::hash::BuildHasher>(
         context: &crate::manager::VpnLabeledStagingContext<'_>,
-        keys: &HashSet<Prefix>,
+        keys: &HashSet<Prefix, S>,
         target: &mut super::ExportTarget<'_>,
         labeled_announce: &mut Vec<LabeledRibRoute>,
         labeled_withdraw: &mut Vec<LabeledRibRouteKey>,

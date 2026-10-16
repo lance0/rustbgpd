@@ -28,6 +28,7 @@ mod replacement_summaries;
 use peer_lifecycle::SessionTeardownDisposition;
 mod route_refresh;
 mod selection_deferral;
+mod slice_timing;
 mod update_groups;
 
 #[cfg(test)]
@@ -252,6 +253,9 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
+    /// Distinct keys collected into per-peer VPN resync enumerations.
+    #[cfg(test)]
+    vpn_resync_key_inserts: usize,
     /// Controlled refusal at the actual post-admission completeness seam.
     #[cfg(test)]
     fail_evpn_feed_completion: bool,
@@ -1372,7 +1376,10 @@ fn replacement_readiness_checkpoint_at(
     #[cfg(feature = "bench-internals")]
     replacement_readiness_checkpoint_tagged(readiness, force, Some(stage), false);
     #[cfg(not(feature = "bench-internals"))]
-    replacement_readiness_checkpoint(readiness, force);
+    {
+        slice_timing::checkpoint(Some(stage));
+        replacement_readiness_checkpoint_untimed(readiness, force);
+    }
 }
 
 /// Classify only the current helper callback, never a remembered stage or ordinal.
@@ -1420,6 +1427,20 @@ fn replacement_readiness_checkpoint(
     readiness: &Option<Arc<ReplacementReadinessContext>>,
     force: bool,
 ) {
+    slice_timing::checkpoint(None);
+    replacement_readiness_checkpoint_untimed(readiness, force);
+}
+
+#[cfg(not(feature = "bench-internals"))]
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+#[inline]
+fn replacement_readiness_checkpoint_untimed(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    force: bool,
+) {
     let Some(context) = readiness else {
         return;
     };
@@ -1463,6 +1484,7 @@ fn replacement_readiness_checkpoint_tagged(
     stage: Option<&'static str>,
     progress: bool,
 ) {
+    slice_timing::checkpoint(stage);
     let Some(context) = readiness else {
         return;
     };
@@ -5569,11 +5591,19 @@ impl RibManager {
     /// started when `dirty_peers` transitions from empty to non-empty and
     /// reset after each retry tick; it is not recreated per loop iteration,
     /// so incoming messages cannot starve it.
+    ///
+    /// Every poll, and every readiness-checkpoint slice within it, is timed
+    /// into `bgp_rib_actor_slice_seconds`.
+    pub async fn run(self) {
+        let recorder = self.metrics.rib_actor_slice_recorder();
+        slice_timing::TimedActor::new(self.run_actor(), recorder).await;
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "event loop with timer arms and query draining"
     )]
-    pub async fn run(mut self) {
+    async fn run_actor(mut self) {
         // Persistent timer: starts far in the future (disabled). Reset to
         // DIRTY_RESYNC_INTERVAL when dirty_peers becomes non-empty.
         let resync_sleep = tokio::time::sleep(DIRTY_RESYNC_INTERVAL);

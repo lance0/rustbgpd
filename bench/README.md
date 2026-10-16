@@ -300,6 +300,11 @@ host, and the noise floor is whatever a same-SHA control on *this* host at
 retired runner's ~11% spread was that runner's figure and transfers to
 nothing.
 
+A published receipt follows the
+[receipt convention](../docs/perf/README.md#writing-a-receipt): predeclared
+bars, a curated comparison JSON, an artifacts README with one hash per stored
+file, and `PASS` / `FAIL` / `INVALID` verdicts with a one-line reason.
+
 ## VPN query campaign
 
 `run-vpn-query-campaign.sh` drives the retained VPN query benchmark

@@ -33,6 +33,7 @@ use super::{
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
+use crate::fast_hash::FastSet;
 use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
@@ -556,7 +557,7 @@ impl RibManager {
 fn materialize_clean_group_prior(
     manager: &RibManager,
     lazy: LazyCleanGroupPrior<'_>,
-) -> HashSet<crate::update::ExactExportKey> {
+) -> FastSet<crate::update::ExactExportKey> {
     lazy.deltas
         .iter()
         .inspect(|_| {
@@ -1065,7 +1066,7 @@ fn reconcile_exact_export_overlay(
     candidate_keys: &[crate::update::ExactExportKey],
     probe_results: &[Result<crate::update::ExactExportResult, crate::update::ExactExportError>],
     source_excluded: &[bool],
-    previously_advertised: &HashSet<crate::update::ExactExportKey>,
+    previously_advertised: &FastSet<crate::update::ExactExportKey>,
     evpn_prior: impl Fn(&rustbgpd_wire::EvpnRouteKey) -> bool,
 ) -> ExactExportOverlayDecision {
     debug_assert_eq!(candidate_keys.len(), source_excluded.len());
@@ -2638,7 +2639,12 @@ impl RibManager {
         peer: IpAddr,
         batch: OutboundCommitBatch,
     ) -> Result<(), OutboundCommitFailure> {
-        self.try_send_and_commit_outbound_update_with_group_prior(peer, batch, HashSet::new(), None)
+        self.try_send_and_commit_outbound_update_with_group_prior(
+            peer,
+            batch,
+            FastSet::default(),
+            None,
+        )
     }
 
     /// Count one failed outbound transaction under its own metric and return
@@ -2907,7 +2913,7 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         batch: OutboundCommitBatch,
-        group_prior: HashSet<crate::update::ExactExportKey>,
+        group_prior: FastSet<crate::update::ExactExportKey>,
         shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
     ) -> Result<(), OutboundCommitFailure> {
         self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
@@ -2930,7 +2936,7 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         mut batch: OutboundCommitBatch,
-        mut group_prior: HashSet<crate::update::ExactExportKey>,
+        mut group_prior: FastSet<crate::update::ExactExportKey>,
         mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
         otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
         group_stage: Option<&super::update_groups::GroupStageOutput>,
@@ -7671,27 +7677,65 @@ impl RibManager {
                     };
 
                     // A member of a VPN-staging group holds no per-peer VPN
-                    // Adj-RIB-Out: its advertised VPN state is the group table
-                    // (plus pending withdraw residue), so the resync enumeration
-                    // synthesizes from those — mirroring the unicast synthesis
-                    // above. (RTC members' Φ is applied by the resync assembly,
-                    // not the enumeration — over-enumeration is harmless.)
+                    // Adj-RIB-Out: the resync assembly below rebuilds its VPN
+                    // state from the group table (plus pending withdraw
+                    // residue), and the per-peer staging that consumes this
+                    // key set is skipped. Only its emptiness matters, so the
+                    // member's sources are probed for one non-deferred key
+                    // instead of being collected: the Loc-RIB, the group table
+                    // and tombstones, the regroup baseline, extra withdraws
+                    // and the admitted proof.
                     let vpn_grouped = self.vpn_grouped_member_of(peer);
-                    let mut effective_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = if resync {
-                        self.replacement_checkpoint(true);
-                        let mut all: HashSet<rustbgpd_wire::VpnRouteKey> = HashSet::with_capacity(
-                            self.loc_rib.vpn_len()
-                                + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::vpn_len)
-                                + self
-                                    .group_ribs
-                                    .get(&vpn_grouped.unwrap_or(usize::MAX))
-                                    .map_or(0, |group| {
-                                        group.table.vpn_len() + group.vpn_tombstones.len()
-                                    })
-                                + self
+                    let vpn_key_live = |key: &rustbgpd_wire::VpnRouteKey| {
+                        checkpoint();
+                        let family = match key.prefix.family() {
+                            rustbgpd_wire::VpnAddressFamily::V4 => (Afi::Ipv4, Safi::MplsVpn),
+                            rustbgpd_wire::VpnAddressFamily::V6 => (Afi::Ipv6, Safi::MplsVpn),
+                        };
+                        !self.selection_deferred(family)
+                    };
+                    let grouped_vpn_live = resync
+                        && vpn_grouped.is_some_and(|gid| {
+                            self.replacement_checkpoint(true);
+                            let group = self.group_ribs.get(&gid);
+                            self.loc_rib
+                                .iter_vpn()
+                                .any(|route| vpn_key_live(&route.nlri.key()))
+                                || group.is_some_and(|group| {
+                                    group
+                                        .table
+                                        .iter_vpn()
+                                        .any(|route| vpn_key_live(&route.nlri.key()))
+                                        || group.vpn_tombstones.iter().any(vpn_key_live)
+                                })
+                                || self
                                     .pending_regroup_baseline
                                     .get(&peer)
-                                    .map_or(0, |base| base.vpn.len())
+                                    .is_some_and(|base| base.vpn.keys().any(vpn_key_live))
+                                || self
+                                    .pending_extra_withdraws
+                                    .get(&peer)
+                                    .is_some_and(|extras| extras.vpn.iter().any(vpn_key_live))
+                                || self
+                                    .pending_group_admitted
+                                    .get(&peer)
+                                    .is_some_and(|admitted| {
+                                        admitted.iter_with_checkpoint(|_| checkpoint()).any(|key| {
+                                            matches!(
+                                                key,
+                                                crate::update::ExactExportKey::Vpn(key)
+                                                    if vpn_key_live(&key.nlri_key)
+                                            )
+                                        })
+                                    })
+                        });
+                    let mut effective_l3vpn_keys: FastSet<rustbgpd_wire::VpnRouteKey> = if resync
+                        && vpn_grouped.is_none()
+                    {
+                        self.replacement_checkpoint(true);
+                        let mut all = FastSet::with_capacity_and_hasher(
+                            self.loc_rib.vpn_len()
+                                + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::vpn_len)
                                 + self
                                     .pending_extra_withdraws
                                     .get(&peer)
@@ -7705,6 +7749,7 @@ impl RibManager {
                                 } else {
                                     0
                                 },
+                            crate::fast_hash::FastState::default(),
                         );
                         self.replacement_checkpoint(true);
                         all.extend(
@@ -7713,47 +7758,25 @@ impl RibManager {
                                 .inspect(|_| checkpoint())
                                 .map(|route| route.nlri.key()),
                         );
-                        if let Some(gid) = vpn_grouped {
-                            if let Some(group) = self.group_ribs.get(&gid) {
+                        // For a VPN Add-Path-send resync, the staged top-N draws from
+                        // every Adj-RIB-In identity, not just the Loc-RIB bests.
+                        if self.peer_vpn_add_path_send(peer) {
+                            for rib in self.ribs.values() {
+                                checkpoint();
                                 all.extend(
-                                    group
-                                        .table
-                                        .iter_vpn()
-                                        .inspect(|_| checkpoint())
-                                        .map(|route| route.nlri.key()),
-                                );
-                                all.extend(
-                                    group
-                                        .vpn_tombstones
-                                        .iter()
-                                        .inspect(|_| checkpoint())
-                                        .copied(),
-                                );
-                            }
-                            if let Some(base) = self.pending_regroup_baseline.get(&peer) {
-                                all.extend(base.vpn.keys().inspect(|_| checkpoint()).copied());
-                            }
-                        } else {
-                            // For a VPN Add-Path-send resync, the staged top-N draws from
-                            // every Adj-RIB-In identity, not just the Loc-RIB bests.
-                            if self.peer_vpn_add_path_send(peer) {
-                                for rib in self.ribs.values() {
-                                    checkpoint();
-                                    all.extend(
-                                        rib.iter_vpn()
-                                            .inspect(|_| checkpoint())
-                                            .map(|route| route.nlri.key()),
-                                    );
-                                }
-                            }
-                            if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                                all.extend(
-                                    rib_out
-                                        .iter_vpn()
+                                    rib.iter_vpn()
                                         .inspect(|_| checkpoint())
                                         .map(|route| route.nlri.key()),
                                 );
                             }
+                        }
+                        if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                            all.extend(
+                                rib_out
+                                    .iter_vpn()
+                                    .inspect(|_| checkpoint())
+                                    .map(|route| route.nlri.key()),
+                            );
                         }
                         // Same residue rule as the unicast enumeration above.
                         if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
@@ -7766,6 +7789,10 @@ impl RibManager {
                                 _ => None,
                             }));
                         }
+                        #[cfg(test)]
+                        {
+                            self.adj_rib_out_commit_stats.vpn_resync_key_inserts += all.len();
+                        }
                         all.retain(|key| {
                             checkpoint();
                             let family = match key.prefix.family() {
@@ -7776,12 +7803,12 @@ impl RibManager {
                         });
                         all
                     } else {
-                        HashSet::new()
+                        FastSet::default()
                     };
 
-                    let mut effective_labeled_keys: HashSet<Prefix> = if resync {
+                    let mut effective_labeled_keys: FastSet<Prefix> = if resync {
                         self.replacement_checkpoint(true);
-                        let mut all: HashSet<Prefix> = HashSet::with_capacity(
+                        let mut all = FastSet::with_capacity_and_hasher(
                             self.loc_rib.labeled_len()
                                 + self
                                     .adj_ribs_out
@@ -7796,6 +7823,7 @@ impl RibManager {
                                 } else {
                                     0
                                 },
+                            crate::fast_hash::FastState::default(),
                         );
                         self.replacement_checkpoint(true);
                         all.extend(
@@ -7834,7 +7862,7 @@ impl RibManager {
                         });
                         all
                     } else {
-                        HashSet::new()
+                        FastSet::default()
                     };
 
                     let mut effective_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = if resync {
@@ -7915,6 +7943,7 @@ impl RibManager {
                         && effective_evpn_keys.is_empty()
                         && effective_bgpls_keys.is_empty()
                         && effective_l3vpn_keys.is_empty()
+                        && !grouped_vpn_live
                         && effective_labeled_keys.is_empty()
                         && effective_rtc_keys.is_empty()
                         && complete_evpn_feed.is_none()
@@ -8815,7 +8844,7 @@ impl RibManager {
                         );
                         let defer_clean_group_prior = lazy_group_prior.is_some();
                         let group_prior = if let Some(gid) = member_of {
-                            let mut prior = HashSet::new();
+                            let mut prior = FastSet::default();
                             if is_dirty || is_force {
                                 if let Some(admitted) = self.pending_group_admitted.get(&peer) {
                                     self.replacement_checkpoint(true);
@@ -8880,7 +8909,7 @@ impl RibManager {
                             }
                             prior
                         } else {
-                            HashSet::new()
+                            FastSet::default()
                         };
                         let commit = self
                             .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
