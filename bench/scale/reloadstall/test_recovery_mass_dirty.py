@@ -183,6 +183,7 @@ class MassDirtyTests(unittest.TestCase):
             self.assertFalse(config["neighbors"][0]["route_reflector_client"])
             self.assertTrue(all(row["route_reflector_client"] for row in config["neighbors"][1:]))
             self.assertTrue(all(row["slow_peer_duration"] == 0 for row in config["neighbors"]))
+            self.assertTrue(all(row["send_hold_time"] == 0 for row in config["neighbors"]))
             expected = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"] if profile == "full-vpn" else ["ipv4_unicast", "ipv6_unicast"]
             self.assertEqual(config["neighbors"][0]["families"], expected)
             policy = (scenario / "member.rpol").read_text()

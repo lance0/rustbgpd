@@ -64,7 +64,8 @@ withdrawal must have an actual prior route, and every final family fold must be
 exact. Session replacement, slow-peer isolation, bystander/duplicate withdrawals,
 unexpected families, labels, attributes or next hops fail the run.
 Receivers are held paused with full queues on purpose, so the fixture sets
-`slow_peer_duration = 0`; the cell does not measure slow-peer detection.
+`slow_peer_duration = 0` and `send_hold_time = 0`; the cell does not measure
+slow-peer detection or the RFC 9687 send hold timer.
 Announcement checks cover the complete semantic attribute set, including the
 expected reflector additions; UPDATE packing and attribute order may differ.
 During recovery, an already-present value may be replayed before that key's
