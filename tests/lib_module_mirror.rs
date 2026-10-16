@@ -46,6 +46,7 @@ const NOT_MIRRORED: &[&str] = &[
     "peer_manager",
     "policy_admin",
     "reload",
+    "runtime_probe",
     "sd_notify",
 ];
 
