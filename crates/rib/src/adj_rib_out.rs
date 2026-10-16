@@ -70,6 +70,27 @@ pub struct AdjRibOut {
     labeled_key_path_ids: HashMap<Prefix, SmallVec<[u32; 1]>>,
     /// RT-Constrain routes advertised to this peer, keyed by RFC 4684 identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
+    /// Changes whenever the set of VPN keys may have changed.
+    vpn_keys: VpnKeyVersion,
+}
+
+/// Identifies one VPN key set of one table: a process-unique table id and a
+/// count of key-set changes. Replacing an existing route's value keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VpnKeyVersion(u64, u64);
+
+impl VpnKeyVersion {
+    fn new() -> Self {
+        static NEXT_TABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(
+            NEXT_TABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            0,
+        )
+    }
+
+    fn bump(&mut self) {
+        self.1 = self.1.wrapping_add(1);
+    }
 }
 
 /// Whether this callback surrounds a real retired element or only storage boundaries.
@@ -188,6 +209,7 @@ impl AdjRibOut {
             labeled_routes: HashMap::default(),
             labeled_key_path_ids: HashMap::default(),
             rtc_routes: HashMap::default(),
+            vpn_keys: VpnKeyVersion::new(),
         }
     }
 
@@ -470,6 +492,7 @@ impl AdjRibOut {
     /// callers that expect the VPN table to refill. Use [`Self::release_vpn`]
     /// when ownership moves to an update group.
     pub fn clear_vpn(&mut self) {
+        self.vpn_keys.bump();
         self.vpn_routes.clear();
         self.vpn_key_path_ids.clear();
     }
@@ -477,12 +500,14 @@ impl AdjRibOut {
     /// Remove only the VPN routes and their secondary key index, releasing
     /// their backing allocations while leaving every other family untouched.
     pub fn release_vpn(&mut self) {
+        self.vpn_keys.bump();
         self.vpn_routes = HashMap::default();
         self.vpn_key_path_ids = HashMap::default();
     }
 
     /// Retire and release VPN state while leaving every other family intact.
     pub(crate) fn release_vpn_with(&mut self, checkpoint: &mut impl FnMut()) {
+        self.vpn_keys.bump();
         release_hash_map(&mut self.vpn_routes, checkpoint);
         release_hash_map(&mut self.vpn_key_path_ids, checkpoint);
     }
@@ -514,6 +539,7 @@ impl AdjRibOut {
         self.flowspec_routes.clear();
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
+        self.vpn_keys.bump();
         self.vpn_routes.clear();
         self.vpn_key_path_ids.clear();
         self.labeled_routes.clear();
@@ -531,6 +557,7 @@ impl AdjRibOut {
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
         retire_hash_map(&mut self.evpn_routes, checkpoint);
         retire_hash_map(&mut self.bgpls_routes, checkpoint);
+        self.vpn_keys.bump();
         retire_hash_map(&mut self.vpn_routes, checkpoint);
         retire_hash_map(&mut self.vpn_key_path_ids, checkpoint);
         retire_hash_map(&mut self.labeled_routes, checkpoint);
@@ -716,6 +743,7 @@ impl AdjRibOut {
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
         let key = route.key();
         if self.vpn_routes.insert(key.clone(), route).is_none() {
+            self.vpn_keys.bump();
             let ids = self.vpn_key_path_ids.entry(key.nlri_key).or_default();
             if !ids.contains(&key.path_id) {
                 ids.push(key.path_id);
@@ -726,6 +754,9 @@ impl AdjRibOut {
     /// Remove an advertised VPN route by key. Returns `true` if it existed.
     pub fn remove_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
         let removed = self.vpn_routes.remove(key).is_some();
+        if removed {
+            self.vpn_keys.bump();
+        }
         if removed && let Some(ids) = self.vpn_key_path_ids.get_mut(&key.nlri_key) {
             ids.retain(|id| *id != key.path_id);
             if ids.is_empty() {
@@ -753,6 +784,11 @@ impl AdjRibOut {
     /// Iterate over all advertised VPN routes.
     pub fn iter_vpn(&self) -> impl Iterator<Item = &VpnRibRoute> {
         self.vpn_routes.values()
+    }
+
+    /// The current VPN key-set version; equal versions hold equal key sets.
+    pub(crate) fn vpn_key_version(&self) -> VpnKeyVersion {
+        self.vpn_keys
     }
 
     /// Return the number of advertised VPN routes.
