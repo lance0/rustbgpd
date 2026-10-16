@@ -101,6 +101,12 @@ The manifest fixes these bars before any result:
   must be at most flat × 1.10 + 30 ms. This includes all ingress filling, cold capture
   and the mandatory paused dirty-witness work. Post-resume receiver quantiles
   are diagnostic and cannot replace the whole-operation bar.
+- Source churn is attributed, not assumed. Each operation retains the harness's
+  source-socket write timing (every write that blocked at least 20 ms, with its
+  offset), the harness process CPU, kernel TCP counter deltas, `ss -tinm` for the
+  source socket, and per-CPU host steal on the daemon and harness CPUs. Steal
+  above 5% of those CPUs' time during a churn makes the campaign INVALID with the
+  leg and generation named; it is never charged to the fold bar.
 - Cap-pressure cells must recover correctly within the fixed 1,800-second
   whole-leg deadline and disclose every fallback cause. They are resource and
   correctness controls, not pure storage performance comparisons. Flat payload

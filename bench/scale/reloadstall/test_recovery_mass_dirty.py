@@ -919,6 +919,40 @@ class MassDirtyTests(unittest.TestCase):
                 self.assertEqual(set(verdict["readiness"]), {path.name for path in root.glob("leg-*")})
                 self.assertEqual(set(verdict["readiness_comparison"]), {"p99_ms", "max_ms"})
 
+    def test_host_steal_during_source_churn_is_invalid_not_a_fold_fail(self):
+        for stolen, status in ((receipt.LIMITS["source_feed_steal_fraction"], "FAIL"), (.06, "INVALID")):
+            with self.subTest(stolen=stolen), tempfile.TemporaryDirectory(prefix="rmd-steal-") as directory, \
+                    mock.patch.object(self, "root", Path(directory)):
+                root, _ = self.complete_campaign(measured_failure=True)  # slow candidate: fold-bar FAIL
+                path = root / "leg-1-candidate" / "result.json"
+                row = json.loads(path.read_text())
+                row["operations"][0]["source_feed"]["steal_fraction"] = stolen
+                receipt.write_json(path, row)
+                (root / "driver.exit").write_text("1\n")
+                verdict = receipt.finalize(root)
+                self.assertEqual(verdict["status"], status, verdict["reason"])
+                if status == "INVALID":
+                    self.assertEqual(verdict["reason"], "leg-1-candidate generation b: host CPU steal 6.0% "
+                                                        "of daemon/harness CPU time during source churn")
+
+    def test_source_feed_receipt_must_match_the_harness_record(self):
+        root, _ = self.complete_campaign()
+        path = root / "leg-0-flat" / "result.json"
+        row = json.loads(path.read_text())
+        row["operations"][1]["source_feed"]["feed"]["writes"] -= 1
+        receipt.write_json(path, row)
+        self.assertEqual(receipt.finalize(root)["reason"], "source feed receipt differs")
+
+    def test_feed_snapshot_reads_live_host_and_process_counters(self):
+        before = receipt.feed_snapshot(os.getpid())
+        sum(range(200_000))
+        after = receipt.feed_snapshot(os.getpid())
+        feed = receipt.source_feed(before, after, {"generation": "b"}, {0})
+        self.assertEqual(feed["cpus"], [0])
+        self.assertGreaterEqual(feed["steal_fraction"], 0)
+        self.assertGreaterEqual(feed["harness_cpu_seconds"], 0)
+        self.assertIn("Tcp:RetransSegs", before["tcp"])
+
     def test_actual_analyze_failure_survives_driver_cleanup_and_finalizer(self):
         root, _ = self.complete_campaign(measured_failure=True)
         expected = receipt.analyze(root)
@@ -1490,6 +1524,10 @@ rm() {
         daemon_log = bytearray(b'{"fields":{"message":"startup"}}\n')
         for generation in ("b", "a"):
             lines.append("mass_dirty_paused " + json.dumps({"generation": generation, "receivers": receivers}))
+            feed = {"generation": generation, "writes": 2 * stimulus["origin_cardinality"], "stall_threshold_ms": 20,
+                    "stall_roster_limit": 2048, "write_seconds": None, "stalls": None, "stall_seconds": None,
+                    "stall_roster": None}
+            lines.append("mass_dirty_feed " + json.dumps(feed))
             lines.append("mass_dirty_sent " + json.dumps({"generation": generation, "family_keys": manifest["family_keys"],
                 "announcement_messages": stimulus["origin_cardinality"], "eor_messages": stimulus["origin_cardinality"],
                 "origin_cardinality": stimulus["origin_cardinality"], "writer_drained": True, "drained_monotonic_seconds": None}))
@@ -1502,7 +1540,10 @@ rm() {
                          "trigger_to_drain_seconds": None, "drain_to_resume_seconds": None, "resume_to_observed_fold_seconds": None,
                          "trigger_monotonic_seconds": None, "drain_monotonic_seconds": None,
                          "resume_monotonic_seconds": None, "fold_monotonic_seconds": None,
-                         "readiness_coverage": {"sample_count": None, "max_start_gap_seconds": None}}
+                         "readiness_coverage": {"sample_count": None, "max_start_gap_seconds": None},
+                         "source_feed": {"window_seconds": 1.0, "cpus": [0, 1, 2], "steal_seconds": 0.0, "cpu_seconds": 3.0,
+                                         "steal_fraction": 0.0, "harness_cpu_seconds": 0.5, "tcp_deltas": {},
+                                         "source_socket_before": "", "source_socket_after": "", "feed": feed}}
             row["operations"].append(operation)
             dirty = [{"message": "outbound routes resynced", "peer": item["peer"], "dirty": True, "force": False,
                       "generation": generation} for item in peers]
