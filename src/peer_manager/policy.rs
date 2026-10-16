@@ -3145,7 +3145,6 @@ impl PeerManager {
                     export_peers.clone(),
                     false,
                     OperatorReadAdmission::Served,
-                    true,
                 )
                 .await;
             if let Err(error) = outcome {
@@ -3316,12 +3315,21 @@ impl PeerManager {
 
     /// The down-peer exception is only used for a singleton batch, so typed
     /// `NotFound` proves that exact peer has no old outbound object to retain.
+    ///
+    /// Only channel admission has a deadline: nothing has been dispatched
+    /// before it, so expiry is a clean rejection. Once dispatched, the RIB
+    /// runs the whole re-evaluation (OLD capture, group restaging and the
+    /// members' dirty resyncs) before replying, and it cannot be cancelled.
+    /// At full-table scale that is tens of seconds, so the reply wait has no
+    /// deadline of its own, like the export-policy cohort transition: a
+    /// timer here could not stop the work, only misreport a healthy
+    /// completion as ambiguous. The owning operation's settlement budget
+    /// bounds a RIB that never answers, and a dropped reply is ambiguous.
     pub(super) async fn reevaluate_dataset_exports(
         &mut self,
         peers: Vec<IpAddr>,
         known_down: bool,
         operator_reads: OperatorReadAdmission,
-        wall_reply_budget: bool,
     ) -> Result<(), DatasetRefreshFailure> {
         if peers.is_empty() {
             return Ok(());
@@ -3354,33 +3362,17 @@ impl PeerManager {
         }
         let (reply, response) = oneshot::channel();
         permit.send(RibUpdate::ReevaluatePeerExportPolicies { peers, reply });
-        // Legacy refresh charged wall time; generation settlement excludes
-        // read servicing from its acknowledgement budget. Keep both contracts.
-        let response = async {
-            if wall_reply_budget {
-                tokio::time::timeout(RIB_REPLY_TIMEOUT, response).await.ok()
-            } else {
-                Some(response.await)
-            }
-        };
-        match self
-            .await_with_readiness_budget(response, RIB_REPLY_TIMEOUT, operator_reads)
-            .await
-            .flatten()
-        {
-            Some(Ok(Ok(()))) => Ok(()),
-            Some(Ok(Err(RibCommandError::NotFound(_)))) if known_down => Ok(()),
-            Some(Ok(Err(error @ RibCommandError::NotFound(_)))) => Err(
-                DatasetRefreshFailure::Rejected(format!("dataset export re-evaluation: {error}")),
-            ),
-            Some(Ok(Err(error @ RibCommandError::Internal(_)))) => Err(
-                DatasetRefreshFailure::Ambiguous(format!("dataset export re-evaluation: {error}")),
-            ),
-            Some(Err(_)) => Err(DatasetRefreshFailure::Ambiguous(
-                "dataset export RIB dropped acknowledgement".to_string(),
+        match self.await_with_readiness(response, operator_reads).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(RibCommandError::NotFound(_))) if known_down => Ok(()),
+            Ok(Err(error @ RibCommandError::NotFound(_))) => Err(DatasetRefreshFailure::Rejected(
+                format!("dataset export re-evaluation: {error}"),
             )),
-            None => Err(DatasetRefreshFailure::Ambiguous(
-                "dataset export RIB acknowledgement timed out".to_string(),
+            Ok(Err(error @ RibCommandError::Internal(_))) => Err(DatasetRefreshFailure::Ambiguous(
+                format!("dataset export re-evaluation: {error}"),
+            )),
+            Err(_) => Err(DatasetRefreshFailure::Ambiguous(
+                "dataset export RIB dropped acknowledgement".to_string(),
             )),
         }
     }
@@ -3437,7 +3429,6 @@ impl PeerManager {
                         vec![dependent.peer.address],
                         true,
                         operator_reads,
-                        false,
                     )
                     .await?;
                     // A missing outbound registration is safe only while this
@@ -3460,7 +3451,7 @@ impl PeerManager {
                 }
             }
         }
-        self.reevaluate_dataset_exports(exports, false, operator_reads, false)
+        self.reevaluate_dataset_exports(exports, false, operator_reads)
             .await?;
         for (dependent, is_established) in dependents.iter().zip(&established) {
             if dependent.import

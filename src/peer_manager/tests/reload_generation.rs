@@ -4020,6 +4020,150 @@ async fn dataset_generation_lost_export_ack_fences_before_import_refresh() {
     harness.shutdown().await;
 }
 
+/// Hold the first dataset export re-evaluation's reply for the test and
+/// forward every other RIB command to the generation stub.
+fn hold_first_dataset_export(
+    harness: &mut GenerationHarness,
+) -> (
+    mpsc::Receiver<oneshot::Sender<Result<(), rustbgpd_rib::RibCommandError>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (proxy_tx, mut proxy_rx) = mpsc::channel::<RibUpdate>(16);
+    let forwarding = std::mem::replace(&mut harness.mgr.rib_tx, proxy_tx);
+    let (held_tx, held_rx) = mpsc::channel(1);
+    let proxy = tokio::spawn(async move {
+        let mut held = false;
+        while let Some(update) = proxy_rx.recv().await {
+            match update {
+                RibUpdate::ReevaluatePeerExportPolicies { reply, .. } if !held => {
+                    held = true;
+                    let _ = held_tx.send(reply).await;
+                }
+                other => {
+                    if forwarding.send(other).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    (held_rx, proxy)
+}
+
+/// Full-table dataset re-evaluation is one uncancellable RIB command that
+/// outlives `RIB_REPLY_TIMEOUT`. The generation keeps ownership, serves
+/// readiness and operator reads, and commits once the RIB acknowledges the
+/// completed work.
+#[tokio::test(start_paused = true)]
+async fn dataset_generation_awaits_export_completion_past_rib_reply_timeout() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let mut harness = GenerationHarness::new(&prior);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    harness.mgr = harness
+        .mgr
+        .with_readiness_queries(readiness_rx)
+        .with_operator_queries(operator_rx);
+    let (mut held_rx, proxy) = hold_first_dataset_export(&mut harness);
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let driver = async {
+        let reply = held_rx
+            .recv()
+            .await
+            .expect("export re-evaluation dispatched");
+        assert_eq!(live.pin().generation, 2, "contents published before export");
+        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_secs(1)).await;
+        let (probe, answered) = oneshot::channel();
+        readiness_tx
+            .send(PeerManagerReadinessQuery::Ping { reply: probe })
+            .await
+            .unwrap();
+        answered
+            .await
+            .expect("readiness is served while the RIB works");
+        let (list, response) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply: list }.into())
+            .await
+            .unwrap();
+        assert_eq!(response.await.unwrap().len(), 3, "operator read is served");
+        // Well past the old five-second reply deadline, inside the
+        // settlement budget: still owned, never reported ambiguous.
+        tokio::time::advance(Duration::from_mins(20)).await;
+        reply.send(Ok(())).unwrap();
+    };
+    // An early outcome leaves the driver's served-read handshake unanswered;
+    // the outer bound turns that into a failure instead of a hang.
+    let (outcome, ()) = tokio::time::timeout(Duration::from_hours(1), async {
+        tokio::join!(
+            Box::pin(
+                harness
+                    .mgr
+                    .apply_reload_generation(candidate, Vec::new(), prepared)
+            ),
+            driver
+        )
+    })
+    .await
+    .expect("the generation stays owned and serves reads until the RIB acknowledges");
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(live.pin().generation, 2);
+    assert!(
+        harness
+            .mgr
+            .peers
+            .values()
+            .all(|managed| !managed.pending_export_apply && !managed.pending_refresh),
+        "completed export and import refreshes clear their debt"
+    );
+    harness.shutdown().await;
+    proxy.await.unwrap();
+}
+
+/// A RIB that never acknowledges does not resolve the generation by itself:
+/// it stays owned with the export debt armed, so the settlement watchdog's
+/// budget is the only terminal path (its `budget_expired` fence and exit 70
+/// are pinned in `runtime_config_settlement`).
+#[tokio::test(start_paused = true)]
+async fn dataset_generation_unanswered_export_stays_owned_with_debt_armed() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (mut held_rx, proxy) = hold_first_dataset_export(&mut harness);
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let generation = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    );
+    // Just inside the default 30-minute settlement budget.
+    let still_owned = tokio::time::timeout(Duration::from_mins(29), generation).await;
+    assert!(
+        still_owned.is_err(),
+        "an unanswered export is not timed out into an outcome"
+    );
+    let reply = held_rx
+        .recv()
+        .await
+        .expect("export re-evaluation dispatched");
+    assert!(
+        harness
+            .mgr
+            .peers
+            .values()
+            .all(|managed| managed.pending_export_apply),
+        "the owed export stays armed"
+    );
+    drop(reply);
+    harness.shutdown().await;
+    proxy.await.unwrap();
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
