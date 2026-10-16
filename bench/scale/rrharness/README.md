@@ -111,6 +111,8 @@ unmixed cleanup owner, the maximum interval between all checkpoint callbacks
 covers entry, productive cleanup, and the final callback after backing storage
 is released. Received-row cleanup includes attribute-intern garbage collection,
 although the historical Adj-RIB-In phase timer still ends before that sweep.
+The fixture uses at most four shared attribute sets, so this does not measure
+attribute cleanup at real-table diversity or its full-table cost.
 An eligible full cleanup must have productive callbacks for its real inventory,
 successful in-owner queries delivered at a nonforced tagged cleanup callback,
 and a maximum
