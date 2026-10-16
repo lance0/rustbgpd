@@ -941,13 +941,14 @@ fn run_common_recovery_scan(
         let key = route.key();
         Some(Key::Vpn(key.nlri_key, key.path_id))
     };
-    // Both warm arms retain the same cold anchor policy and actual slot lineage.
-    let pure_uc = spec.family == "full-uc";
-    receipt.cold_anchor_strategy = if pure_uc {
-        "uc-slab-shared"
+    // Both warm arms retain the same shared cold anchor and actual slot lineage.
+    // Production shares unicast through slab slots and VPN through pool buckets.
+    let shared_strategy = if spec.family == "full-vpn" {
+        "vpn-pool-shared"
     } else {
-        "exact-flat"
+        "uc-slab-shared"
     };
+    receipt.cold_anchor_strategy = shared_strategy;
     phase("cold_anchor_capture", true);
     let cold = (|| {
         ledger.begin_capture_with_checkpoint(anchor, &mut |_| {})?;
@@ -955,7 +956,7 @@ fn run_common_recovery_scan(
             anchor,
             None,
             &table,
-            pure_uc,
+            true,
             uc_key,
             vpn_key,
             &mut |_| {},
@@ -965,7 +966,7 @@ fn run_common_recovery_scan(
     })();
     phase("cold_anchor_capture", false);
     let cold = cold.map_err(|e| e.cause.as_str())?;
-    if pure_uc && cold.strategy != FullCaptureStrategy::Indexed {
+    if cold.strategy != FullCaptureStrategy::Indexed {
         return Err("anchor_not_shared");
     }
     let anchor_proof = ledger.get(&anchor).expect("sealed cold anchor proof");
@@ -1012,7 +1013,7 @@ fn run_common_recovery_scan(
                 peer,
                 hint,
                 &table,
-                pure_uc && spec.shared,
+                spec.shared,
                 uc_key,
                 vpn_key,
                 &mut |_| {},
@@ -1021,15 +1022,11 @@ fn run_common_recovery_scan(
         receipt.old_keys = outcome.keys;
         receipt.shared = outcome.strategy == FullCaptureStrategy::Indexed;
         receipt.selected_strategy = if receipt.shared {
-            "uc-slab-shared"
+            shared_strategy
         } else {
             "exact-flat"
         };
-        receipt.selection_reason = if !spec.shared {
-            "explicit-flat-control"
-        } else if !pure_uc {
-            "vpn-negotiated"
-        } else {
+        receipt.selection_reason = if spec.shared {
             match outcome.fallback {
                 None => "eligible",
                 Some(FullCaptureFallback::SharingDisabled) => "sharing-disabled",
@@ -1038,6 +1035,8 @@ fn run_common_recovery_scan(
                 Some(FullCaptureFallback::Representation) => "representation",
                 Some(FullCaptureFallback::ShareRefused) => "share-refused",
             }
+        } else {
+            "explicit-flat-control"
         };
         receipt.mismatches = outcome.mismatches;
         ledger
@@ -1053,7 +1052,7 @@ fn run_common_recovery_scan(
             .full_old_shape_with_checkpoint(
                 hint,
                 &table,
-                pure_uc && spec.shared,
+                spec.shared,
                 uc_key,
                 vpn_key,
                 shape_checkpoint,
