@@ -36,6 +36,7 @@ pub async fn render_text(metrics: &BgpMetrics) -> std::io::Result<String> {
             // The permit moves with the render, so a dropped or timed-out
             // caller does not release the slot while the render still runs.
             let _permit = permit;
+            metrics.publish_render_window_maxima();
             let families = metrics.registry().gather();
             let mut buf = Vec::new();
             TextEncoder::new()
@@ -148,5 +149,22 @@ mod tests {
         );
         let text = second.await.unwrap().unwrap();
         assert!(text.contains("test_gated_render 0\n"), "{text}");
+    }
+
+    /// Each render publishes the RIB slice maximum since the previous render.
+    #[tokio::test]
+    async fn render_publishes_and_resets_the_slice_maximum() {
+        let metrics = BgpMetrics::new();
+        let mut recorder = metrics.rib_actor_slice_recorder();
+        recorder.observe(
+            rustbgpd_telemetry::metrics::RibActorSliceStage::ActorPoll,
+            std::time::Duration::from_millis(150),
+        );
+        recorder.flush();
+        let series = "bgp_rib_actor_slice_max_microseconds{stage=\"actor_poll\"}";
+        let first = render_text(&metrics).await.unwrap();
+        assert!(first.contains(&format!("{series} 150000\n")), "{first}");
+        let second = render_text(&metrics).await.unwrap();
+        assert!(second.contains(&format!("{series} 0\n")), "{second}");
     }
 }

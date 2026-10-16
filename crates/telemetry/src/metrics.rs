@@ -677,6 +677,7 @@ struct BgpMetricsInner {
     rib_actor_work_duration_seconds: HistogramVec,
     rib_readiness_query_wait_seconds: HistogramVec,
     peer_manager_operator_query_wait_seconds: HistogramVec,
+    stall: StallMetrics,
 
     // ── Update groups (shared outbound staging) ─────────────────
     update_groups: IntGauge,
@@ -3707,6 +3708,7 @@ impl BgpMetrics {
         registry
             .register(Box::new(jemalloc_stats::JemallocCollector::new()))
             .expect("metric not already registered");
+        let stall = StallMetrics::new(&registry);
 
         Self(Arc::new(BgpMetricsInner {
             registry,
@@ -3805,6 +3807,7 @@ impl BgpMetrics {
             rib_actor_work_duration_seconds,
             rib_readiness_query_wait_seconds,
             peer_manager_operator_query_wait_seconds,
+            stall,
             update_groups,
             update_group_members,
             peer_update_group,
@@ -7075,6 +7078,212 @@ impl Default for BgpMetrics {
     }
 }
 
+/// Stall buckets: 1 ms to 2 s, dense around the 25, 50, 100, 200 (the
+/// readiness deadline) and 500 ms edges.
+const STALL_DURATION_BUCKETS: [f64; 25] = [
+    0.001, 0.0025, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.075, 0.1, 0.125,
+    0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.5, 2.0,
+];
+
+/// Closed `stage` labels of the RIB actor slice metrics. `ActorPoll` is one
+/// whole poll of the actor task; the others collapse the readiness
+/// checkpoint names that label slices within a poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RibActorSliceStage {
+    ActorPoll,
+    Selection,
+    Retirement,
+    UpdateGroup,
+    Flowspec,
+    Refresh,
+    Other,
+}
+
+impl RibActorSliceStage {
+    pub const ALL: [Self; 7] = [
+        Self::ActorPoll,
+        Self::Selection,
+        Self::Retirement,
+        Self::UpdateGroup,
+        Self::Flowspec,
+        Self::Refresh,
+        Self::Other,
+    ];
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ActorPoll => "actor_poll",
+            Self::Selection => "selection",
+            Self::Retirement => "retirement",
+            Self::UpdateGroup => "update_group",
+            Self::Flowspec => "flowspec",
+            Self::Refresh => "refresh",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Direct stall measurements: RIB actor slices and tokio scheduling delay.
+#[derive(Debug)]
+struct StallMetrics {
+    rib_actor_slice_seconds: HistogramVec,
+    rib_actor_slice_max_microseconds: IntGaugeVec,
+    /// Per-stage maximum in microseconds since the previous render.
+    rib_actor_slice_max_micros: Arc<[AtomicU64; 7]>,
+    /// The single child of the unlabelled lateness family.
+    runtime_scheduler_lateness: prometheus::Histogram,
+    runtime_worker_busy_microseconds: IntCounterVec,
+}
+
+impl StallMetrics {
+    fn new(registry: &Registry) -> Self {
+        let rib_actor_slice_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_actor_slice_seconds",
+                "Wall-clock duration of RIB actor slices. `stage=\"actor_poll\"` is one whole poll of the actor task, measured in wall-clock time; it includes executor handoffs (block_in_place) during which other tasks run, so it is not uninterrupted worker occupancy. The other stages split each poll at every 64th readiness checkpoint and at the poll end, labelling each slice by the most recent checkpoint at or before its end; a gap between two checkpoints is never split.",
+            )
+            .buckets(STALL_DURATION_BUCKETS.to_vec()),
+            &["stage"],
+        )
+        .expect("valid metric definition");
+        let rib_actor_slice_max_microseconds = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rib_actor_slice_max_microseconds",
+                "Longest RIB actor slice per stage, in microseconds, since the previous metrics render (any /metrics scrape or GetMetrics call); 0 when no slice of that stage completed.",
+            ),
+            &["stage"],
+        )
+        .expect("valid metric definition");
+        for stage in RibActorSliceStage::ALL {
+            rib_actor_slice_seconds.with_label_values(&[stage.as_str()]);
+            rib_actor_slice_max_microseconds.with_label_values(&[stage.as_str()]);
+        }
+        let runtime_scheduler_lateness_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_runtime_scheduler_lateness_seconds",
+                "Delay between the scheduled and the actual wake of a 10 ms tokio interval probe. Samples above the timer's 1 ms resolution mean every runtime worker was busy or blocked, delaying all ready tasks.",
+            )
+            .buckets(STALL_DURATION_BUCKETS.to_vec()),
+            &[],
+        )
+        .expect("valid metric definition");
+        let runtime_scheduler_lateness =
+            runtime_scheduler_lateness_seconds.with_label_values::<&str>(&[]);
+        let runtime_worker_busy_microseconds = IntCounterVec::new(
+            Opts::new(
+                "bgp_runtime_worker_busy_microseconds_total",
+                "Microseconds each tokio runtime worker spent busy (not parked), from the runtime's stable metrics; rate() / 1e6 is the busy ratio. The probe refreshes it every 10 ms.",
+            ),
+            &["worker"],
+        )
+        .expect("valid metric definition");
+        registry
+            .register(Box::new(rib_actor_slice_seconds.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_actor_slice_max_microseconds.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(runtime_scheduler_lateness_seconds.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(runtime_worker_busy_microseconds.clone()))
+            .expect("metric not already registered");
+        Self {
+            rib_actor_slice_seconds,
+            rib_actor_slice_max_microseconds,
+            rib_actor_slice_max_micros: Arc::default(),
+            runtime_scheduler_lateness,
+            runtime_worker_busy_microseconds,
+        }
+    }
+}
+
+/// Single-owner accumulator for RIB actor slices. `observe` is local and
+/// lock-free; `flush` publishes to the shared histogram and maximum.
+#[derive(Debug)]
+pub struct RibActorSliceRecorder {
+    local: Vec<prometheus::local::LocalHistogram>,
+    max: [std::time::Duration; 7],
+    shared_max: Arc<[AtomicU64; 7]>,
+}
+
+impl RibActorSliceRecorder {
+    pub fn observe(&mut self, stage: RibActorSliceStage, duration: std::time::Duration) {
+        let index = stage as usize;
+        self.local[index].observe(duration.as_secs_f64());
+        self.max[index] = self.max[index].max(duration);
+    }
+
+    pub fn flush(&mut self) {
+        for (index, local) in self.local.iter().enumerate() {
+            local.flush();
+            let max = std::mem::take(&mut self.max[index]);
+            if !max.is_zero() {
+                let micros = u64::try_from(max.as_micros()).unwrap_or(u64::MAX);
+                self.shared_max[index].fetch_max(micros, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl BgpMetrics {
+    /// A recorder for one RIB actor's slices.
+    #[must_use]
+    pub fn rib_actor_slice_recorder(&self) -> RibActorSliceRecorder {
+        let stall = &self.0.stall;
+        RibActorSliceRecorder {
+            local: RibActorSliceStage::ALL
+                .iter()
+                .map(|stage| {
+                    stall
+                        .rib_actor_slice_seconds
+                        .with_label_values(&[stage.as_str()])
+                        .local()
+                })
+                .collect(),
+            max: [std::time::Duration::ZERO; 7],
+            shared_max: Arc::clone(&stall.rib_actor_slice_max_micros),
+        }
+    }
+
+    /// Publish and reset the since-last-render maxima. Call once per render,
+    /// immediately before gathering the registry.
+    pub fn publish_render_window_maxima(&self) {
+        let stall = &self.0.stall;
+        for stage in RibActorSliceStage::ALL {
+            let micros =
+                stall.rib_actor_slice_max_micros[stage as usize].swap(0, Ordering::Relaxed);
+            stall
+                .rib_actor_slice_max_microseconds
+                .with_label_values(&[stage.as_str()])
+                .set(i64::try_from(micros).unwrap_or(i64::MAX));
+        }
+    }
+
+    pub fn observe_runtime_scheduler_lateness(&self, lateness: std::time::Duration) {
+        self.0
+            .stall
+            .runtime_scheduler_lateness
+            .observe(lateness.as_secs_f64());
+    }
+
+    /// Busy-microsecond counters for runtime workers `0..workers`, created
+    /// now so every worker series exists before its first update.
+    #[must_use]
+    pub fn runtime_worker_busy_counters(&self, workers: usize) -> Vec<IntCounter> {
+        (0..workers)
+            .map(|worker| {
+                self.0
+                    .stall
+                    .runtime_worker_busy_microseconds
+                    .with_label_values(&[&worker.to_string()])
+            })
+            .collect()
+    }
+}
+
 /// RAII subscriber-count guard for live event streams.
 #[derive(Debug)]
 pub struct EventStreamSubscriberGuard {
@@ -8918,6 +9127,79 @@ mod tests {
         assert_eq!(observed["policy_transition_fence"].0, 0);
         assert_eq!(observed["selection_release"].0, 0);
         assert_eq!(observed["peer_teardown"].0, 0);
+    }
+
+    #[test]
+    fn stall_metrics_start_zeroed_and_publish_on_flush_and_render() {
+        let m = BgpMetrics::new();
+        let max = |stage: &str| {
+            m.registry()
+                .gather()
+                .into_iter()
+                .find(|family| family.name() == "bgp_rib_actor_slice_max_microseconds")
+                .expect("max gauge registered")
+                .get_metric()
+                .iter()
+                .find(|metric| metric.get_label()[0].value() == stage)
+                .map(|metric| metric.get_gauge().get_value())
+                .expect("pre-initialised stage")
+        };
+        let slices = gathered_histogram_series(&m, "bgp_rib_actor_slice_seconds", "stage");
+        let stages: Vec<_> = RibActorSliceStage::ALL
+            .map(RibActorSliceStage::as_str)
+            .into();
+        let mut sorted = stages.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            slices.keys().map(String::as_str).collect::<Vec<_>>(),
+            sorted
+        );
+        let expected_buckets = STALL_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+        for (stage, (count, buckets)) in &slices {
+            assert_eq!(*count, 0, "fresh {stage} series is zeroed");
+            assert_eq!(*buckets, expected_buckets, "stall buckets for {stage}");
+        }
+        for stage in &stages {
+            assert!(max(stage).abs() < f64::EPSILON);
+        }
+        let lateness = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_runtime_scheduler_lateness_seconds")
+            .expect("lateness histogram registered");
+        assert_eq!(lateness.get_metric().len(), 1);
+        assert_eq!(
+            lateness.get_metric()[0].get_histogram().get_sample_count(),
+            0
+        );
+
+        let mut recorder = m.rib_actor_slice_recorder();
+        recorder.observe(
+            RibActorSliceStage::ActorPoll,
+            std::time::Duration::from_millis(3),
+        );
+        recorder.observe(
+            RibActorSliceStage::ActorPoll,
+            std::time::Duration::from_millis(120),
+        );
+        let unflushed = gathered_histogram_series(&m, "bgp_rib_actor_slice_seconds", "stage");
+        assert_eq!(
+            unflushed["actor_poll"].0, 0,
+            "observations stay local until flush"
+        );
+        recorder.flush();
+        let flushed = gathered_histogram_series(&m, "bgp_rib_actor_slice_seconds", "stage");
+        assert_eq!(flushed["actor_poll"].0, 2);
+        assert_eq!(flushed["other"].0, 0);
+
+        m.publish_render_window_maxima();
+        assert!((max("actor_poll") - 120_000.0).abs() < f64::EPSILON);
+        m.publish_render_window_maxima();
+        assert!(
+            max("actor_poll").abs() < f64::EPSILON,
+            "a render resets the window"
+        );
     }
 
     #[test]
