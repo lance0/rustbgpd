@@ -17,8 +17,8 @@ An explicitly **Alpha** EVPN operations dashboard lives at
 (uid `rustbgpd-evpn-alpha`). It covers the currently exported Type-2 local
 origination signals, aggregate Type-3-inclusive Loc-RIB state, Type-5/IP-VRF
 state, DF and attachment-circuit state, duplicate-MAC quarantine, dataplane
-repair/adoption/reap activity, ownership conflicts, and decomposed-runtime
-fail-stops. Alpha means its panels and variable contract may change with the
+repair/adoption/reap activity, ownership conflicts, decomposed-runtime
+fail-stops, and the core-isolation hold state and signals. Alpha means its panels and variable contract may change with the
 VTEP surface.
 
 ## Enable the metrics endpoint
@@ -253,6 +253,13 @@ inside the bounded window does.
   breakdown.
 - **Dynamic-neighbor admission rejections** plots the non-zero admission
   rejection rate for each selected scrape instance.
+- **Inbound connection drops by reason** plots the non-zero accept-path drop
+  rate by `reason`. `notification_backoff` means a configured neighbor keeps
+  dialling in during its escalated NOTIFICATION reconnect wait;
+  `BgpInboundNotificationBackoffDrops` alerts on it.
+- **Readiness probe failures** plots the non-zero rate of `/readyz` `503`
+  responses by the failing component (`reason`). Successful but slow probes
+  are not counted; they appear only as delayed-phase log warnings.
 - Outbound queue depth is an absolute gauge of coalesced UPDATE frames, sampled
   at enqueue-batch and writer-drain boundaries. A short convergence spike is
   not itself a slow peer; `bgp_peer_slow` is the daemon's persistent 0/1 state.
@@ -270,6 +277,7 @@ inside the bounded window does.
 - **Policy transition outcomes** shows terminal committed, authoritative
   fallback-handoff, and cleanup-error rates by instance. It excludes work that
   never acquired transition ownership and non-terminal actor polls.
+  `BgpPolicyTransitionFallback` alerts on either fallback outcome.
 - **Config lifecycle outcomes** combines config-transaction activity with the
   bounded SIGHUP signal/task outcome rate. A recovery-fenced reload remains
   owned rather than terminal; use the `bgp_runtime_config_settlement_*` series

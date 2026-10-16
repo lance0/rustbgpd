@@ -752,6 +752,43 @@ tests:
         alertname: BgpDynamicNeighborLimitRejected
         exp_alerts: []
 
+  # ── BgpInboundNotificationBackoffDrops ─────────────────────────
+  # Only reason="notification_backoff" counts: the unconfigured drops never
+  # fire. Two drops at 10m fire at 20m and have aged out of the 15m window
+  # at 26m.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_inbound_connections_dropped_total{reason="notification_backoff", instance="edge1:9179"}'
+        values: "0x9 2x20"
+      - series: 'bgp_inbound_connections_dropped_total{reason="unconfigured", instance="edge1:9179"}'
+        values: "0+5x29"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BgpInboundNotificationBackoffDrops
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: BgpInboundNotificationBackoffDrops
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: notification_backoff
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Inbound connections held by NOTIFICATION backoff on edge1:9179"
+              description: >-
+                edge1:9179 closed 2 inbound
+                connection(s) in the last 15 minutes from a configured neighbor
+                waiting out an escalated reconnect wait after two or more
+                consecutive NOTIFICATION teardowns. The session is in a
+                NOTIFICATION loop (for example an OPEN mismatch or repeated hold
+                expiry). Find the neighbor with rbgp neighbor
+                (reconnect_in_seconds and the last error) or the throttled
+                notification-backoff log line, and fix the cause the
+                NOTIFICATION names.
+      - eval_time: 26m
+        alertname: BgpInboundNotificationBackoffDrops
+        exp_alerts: []
+
   # ── BgpPeerSlow ───────────────────────────────────────────────
   # Load-bearing: reverting `== 1`, shortening/lengthening `for: 5m`,
   # or aggregating away the endpoint makes one of these exact boundary
@@ -1833,6 +1870,80 @@ tests:
                 used a complete release sweep; inspect table scale and
                 retained-key pressure.
 
+  # ── BgpPolicyTransitionFallback ────────────────────────────────
+  # Committed transitions never fire. Both fallback outcomes fire; the 10m
+  # handoff has aged out of the 15m window at 27m while the 15m cleanup
+  # error still fires.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rib_policy_transition_total{outcome="committed", instance="edge1:9179"}'
+        values: "0+1x29"
+      - series: 'bgp_rib_policy_transition_total{outcome="fallback_handoff", instance="edge1:9179"}'
+        values: "0x9 1x20"
+      - series: 'bgp_rib_policy_transition_total{outcome="fallback_cleanup_error", instance="edge1:9179"}'
+        values: "0x14 1x15"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BgpPolicyTransitionFallback
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: BgpPolicyTransitionFallback
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: fallback_handoff
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Export-policy transition fell back on edge1:9179 (fallback_handoff)"
+              description: >-
+                bgp_rib_policy_transition_total{outcome="fallback_handoff"}
+                on edge1:9179 increased in the last 15 minutes. The
+                RIB abandoned an atomic cohort export-policy transition before
+                commit. fallback_handoff means the uncommitted work was cleaned up
+                and the reload continues on the slower authoritative per-peer
+                path; fallback_cleanup_error means that cleanup failed and the
+                reload did not complete. If every reload falls back, the cohort
+                fast path does not apply to this change; the RIB log line
+                "RIB export-policy transition completed" and any preceding
+                warning give the reason.
+          - exp_labels:
+              severity: warning
+              outcome: fallback_cleanup_error
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Export-policy transition fell back on edge1:9179 (fallback_cleanup_error)"
+              description: >-
+                bgp_rib_policy_transition_total{outcome="fallback_cleanup_error"}
+                on edge1:9179 increased in the last 15 minutes. The
+                RIB abandoned an atomic cohort export-policy transition before
+                commit. fallback_handoff means the uncommitted work was cleaned up
+                and the reload continues on the slower authoritative per-peer
+                path; fallback_cleanup_error means that cleanup failed and the
+                reload did not complete. If every reload falls back, the cohort
+                fast path does not apply to this change; the RIB log line
+                "RIB export-policy transition completed" and any preceding
+                warning give the reason.
+      - eval_time: 27m
+        alertname: BgpPolicyTransitionFallback
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: fallback_cleanup_error
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Export-policy transition fell back on edge1:9179 (fallback_cleanup_error)"
+              description: >-
+                bgp_rib_policy_transition_total{outcome="fallback_cleanup_error"}
+                on edge1:9179 increased in the last 15 minutes. The
+                RIB abandoned an atomic cohort export-policy transition before
+                commit. fallback_handoff means the uncommitted work was cleaned up
+                and the reload continues on the slower authoritative per-peer
+                path; fallback_cleanup_error means that cleanup failed and the
+                reload did not complete. If every reload falls back, the cohort
+                fast path does not apply to this change; the RIB log line
+                "RIB export-policy transition completed" and any preceding
+                warning give the reason.
+
   # ── BgpOutboundRouteDrops ─────────────────────────────────
   # Load-bearing: the old increment pins 10m versus 5m, the reset then
   # increment pins reset-safe increase versus delta, and the same-evaluation
@@ -2500,3 +2611,69 @@ tests:
                 partner. For reconverge_failed, applying the change failed and is
                 retried, and the previous ESI's routes may still be originated;
                 check the daemon log.
+
+  # ── EvpnCoreIsolationHold / EvpnCoreIsolationFault ─────────────
+  # bond0 is isolated from 3m to 12m: Hold is pending at 4m, fires at 6m
+  # and clears at 14m. bond1 is released and bond2 sits in startup_hold;
+  # neither fires. bond3 enters action_failed at 1m: Fault is pending at
+  # 5m and fires at 7m, and never raises Hold.
+  - interval: 1m
+    input_series:
+      - series: 'evpn_es_core_isolation_state{interface="bond0", state="isolated", instance="vtep1:9179"}'
+        values: "0x2 1x9 0x8"
+      - series: 'evpn_es_core_isolation_state{interface="bond1", state="released", instance="vtep1:9179"}'
+        values: "1x20"
+      - series: 'evpn_es_core_isolation_state{interface="bond2", state="startup_hold", instance="vtep1:9179"}'
+        values: "1x20"
+      - series: 'evpn_es_core_isolation_state{interface="bond3", state="action_failed", instance="vtep1:9179"}'
+        values: "0 1x19"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: EvpnCoreIsolationHold
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: EvpnCoreIsolationHold
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              interface: bond0
+              state: isolated
+              instance: "vtep1:9179"
+            exp_annotations:
+              summary: "EVPN core isolation isolated on bond0"
+              description: >-
+                Bound Ethernet Segment bond0 on
+                vtep1:9179 has been in core-isolation state
+                isolated for 2 minutes. isolated: the PE lost its EVPN
+                sessions or every uplink (evpn_core_isolated names the signal) and
+                holds the CE-facing members down. backstop_released: the hold was
+                released before EVPN synced. suppressed_no_peer: the PE is
+                isolated but the segment has no remote ES peer, so its links stay
+                up. overridden: another writer raised a held member. rbgp doctor
+                reports evpn.es.bond0.core_isolation.
+      - eval_time: 14m
+        alertname: EvpnCoreIsolationHold
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: EvpnCoreIsolationFault
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: EvpnCoreIsolationFault
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              interface: bond3
+              state: action_failed
+              instance: "vtep1:9179"
+            exp_annotations:
+              summary: "EVPN core isolation action_failed on bond3"
+              description: >-
+                Bound Ethernet Segment bond3 on
+                vtep1:9179 has been in core-isolation state
+                action_failed for 5 minutes. action_failed: an admin-state
+                write or receipt publication failed. ownership_ambiguous: a
+                receipt entry no longer matches its link, which is left down.
+                uplink_overlap: a configured uplink is, is enslaved under, or is
+                stacked on this binding and is excluded from the uplink signal.
+                See the daemon log and rbgp doctor
+                evpn.es.bond3.core_isolation.

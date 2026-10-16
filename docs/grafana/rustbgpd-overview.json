@@ -2658,11 +2658,51 @@
       ]
     },
     {
+      "id": 80,
+      "type": "timeseries",
+      "title": "Readiness probe failures",
+      "description": "Failed /readyz probes (503 responses) by bounded reason: deadline, peer_manager_unavailable, peer_manager_timeout, rib_unavailable, rib_timeout, rib_stalled or daemon_unavailable. The daemon WARN log carries the exact error and phase timings. Zero-valued series are suppressed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 123 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (instance, reason) (rate(bgp_readiness_probe_failures_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{instance}} {{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 46,
       "type": "row",
       "title": "Operator signals",
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 123 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 131 },
       "panels": []
     },
     {
@@ -2671,7 +2711,7 @@
       "title": "Outbound queue by peer",
       "description": "Absolute coalesced UPDATE frames buffered for each peer. A sustained backlog is stronger evidence than a short convergence burst.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 124 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 132 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2689,7 +2729,7 @@
       "title": "Slow peers",
       "description": "1 while an Established peer has persistently failed to drain its outbound queue; 0 after recovery or teardown.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 124 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 132 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1, "custom": { "lineInterpolation": "stepAfter" } }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2707,7 +2747,7 @@
       "title": "Update group by peer",
       "description": "Current stable update-group ID for each peer. -1 is a legitimate value: that peer uses the per-peer fallback path.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 124 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 132 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
       "options": { "showHeader": true },
       "targets": [
@@ -2726,7 +2766,7 @@
       "title": "Policy transition in progress",
       "description": "Current ownership state only: 1 while the RIB actor owns an export-policy transition, otherwise 0.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 132 },
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 140 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "targets": [
@@ -2743,7 +2783,7 @@
       "title": "Last completed policy transition",
       "description": "Terminal duration of the most recently completed transition. This retained sample is not the live elapsed time of an in-progress transition.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 132 },
+      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 140 },
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "targets": [
@@ -2760,7 +2800,7 @@
       "title": "Policy-transition actor poll p99",
       "description": "Fifteen-minute p99 by instance, scrape job, and bounded poll kind. This is actor occupancy per poll, not total transition duration.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 132 },
+      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 140 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2778,7 +2818,7 @@
       "title": "Policy-transition actor polls over 200ms",
       "description": "Fifteen-minute increase estimate for actor polls above the exact 200ms bucket boundary, preserving instance, scrape job, and poll kind.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 132 },
+      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 140 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2796,7 +2836,7 @@
       "title": "Policy transition outcomes",
       "description": "Terminal actor-owned policy transitions by instance and bounded outcome.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 132 },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 140 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2814,7 +2854,7 @@
       "title": "Accepted policy generation age",
       "description": "Informational age of the last successfully accepted full policy generation. It is not an alert threshold; rejected reloads intentionally leave the timestamp unchanged.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 138 },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 146 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "targets": [
@@ -2831,7 +2871,7 @@
       "title": "Max-prefix usage and finite limit",
       "description": "Authoritative live session-actor usage and finite configured limit by bounded scope. Limit series are absent for unlimited scopes; every series is absent while disconnected.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 144 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 152 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2855,7 +2895,7 @@
       "title": "Max-prefix remaining headroom",
       "description": "Saturating finite-limit headroom by live peer and scope. No data means unlimited or disconnected, not zero headroom.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 144 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 152 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "asc" } },
       "targets": [
@@ -2872,7 +2912,7 @@
       "type": "row",
       "title": "Route safety",
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 152 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 160 },
       "panels": []
     },
     {
@@ -2881,7 +2921,7 @@
       "title": "Export rejections / malformed UPDATEs / inbound attribute discards",
       "description": "Exact-export rejections, malformed UPDATE dispositions, and inbound attribute discards (the operator-configured list and the RFC 7606 external-neighbor ORIGINATOR_ID/CLUSTER_LIST rule) are route-safety signals partitioned by bounded labels.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 153 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 161 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2911,7 +2951,7 @@
       "title": "Selection-deferral state",
       "description": "Raw per-family gate state and frozen-roster waiter count. These are normal convergence state, not alert conditions; step rendering preserves discrete transitions.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 153 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 161 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0, "custom": { "lineInterpolation": "stepAfter" } }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2935,7 +2975,7 @@
       "title": "Selection-deferral exceptional events",
       "description": "Per-family rates for timer fallback and bounded-ledger overflow. Ordinary all-EoR, collision-refresh, and all-excluded releases are intentionally omitted.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 153 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 161 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2959,7 +2999,7 @@
       "title": "RFC 8212 missing policy",
       "description": "Raw configured-peer state by direction. Zero-valued series remain present while enforcement is off; 1 means the reserved fail-closed policy is installed for that direction.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 161 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 169 },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -3001,7 +3041,7 @@
       "title": "Outbound prefix capacity",
       "description": "Current peer/family usage, finite limit, saturating headroom, and 0/1 blocking state. Limit and headroom are absent when unlimited; cumulative blocked events are intentionally excluded.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 161 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 169 },
       "fieldConfig": {
         "defaults": { "unit": "short", "decimals": 0, "min": 0 },
         "overrides": [
@@ -3049,7 +3089,7 @@
       "title": "Dynamic-neighbor admission capacity",
       "description": "Process-global dynamic-neighbor slots per selected scrape instance. The daemon metrics are label-free: no listener- or range-level breakdown exists.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 169 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 177 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -3079,7 +3119,7 @@
       "title": "Dynamic-neighbor admission rejections",
       "description": "Per-instance rate of matching inbound dynamic connections rejected because the process-global slot limit was full. Zero-valued series are suppressed.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 169 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 177 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -3092,11 +3132,51 @@
       ]
     },
     {
+      "id": 81,
+      "type": "timeseries",
+      "title": "Inbound connection drops by reason",
+      "description": "Accept-path inbound connection drops by bounded reason: unconfigured source, rate_limited, dynamic_limit, or notification_backoff (a configured neighbor dialled in while its session waited out an escalated reconnect wait after consecutive NOTIFICATION teardowns). Zero-valued series are suppressed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 185 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (instance, reason) (rate(bgp_inbound_connections_dropped_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{instance}} {{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 66,
       "type": "row",
       "title": "MRT dump export",
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 177 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 193 },
       "panels": []
     },
     {
@@ -3105,7 +3185,7 @@
       "title": "Last successful MRT dump",
       "description": "mrt_last_dump_success_timestamp_seconds rendered as an age. 'never' means no dump has been published since start; the MrtDumpStale alert fires once the age exceeds twice mrt_dump_interval_seconds. Check mrt_dump_failures_total by stage when stale.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 178 },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 194 },
       "fieldConfig": {
         "defaults": {
           "unit": "dateTimeFromNow",
@@ -3129,7 +3209,7 @@
       "type": "row",
       "title": "ORR",
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 182 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 198 },
       "panels": []
     },
     {
@@ -3138,7 +3218,7 @@
       "title": "ORR SPF activity and topology",
       "description": "Per-instance RFC 9107 ORR SPF computation rate with the current cached topology node and usable directed-link counts for context. All three series remain zero while ORR has no configured vantage.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 183 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 199 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -3167,7 +3247,7 @@
       "type": "row",
       "title": "Kernel discard routes",
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 191 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 207 },
       "panels": []
     },
     {
@@ -3176,7 +3256,7 @@
       "title": "BLACKHOLE discard activity",
       "description": "Successful RFC 7999 discard install/removal event rates per instance.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 192 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 208 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -3200,7 +3280,7 @@
       "title": "BLACKHOLE active rows",
       "description": "Current receipt-authorized owned and adopted-pending discard rows.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 192 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 208 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0, "decimals": 0 }, "overrides": [] },
       "options": {
         "colorMode": "value",
@@ -3225,7 +3305,7 @@
       "type": "row",
       "title": "Peer identity",
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 200 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 216 },
       "panels": []
     },
     {
@@ -3234,7 +3314,7 @@
       "title": "Peer identity",
       "description": "Configured identity of every selected peer from bgp_peer_info: remote ASN, description, and peer group. The description falls back to the neighbor address when none is configured; free-text labels are scrubbed and bounded to 128 characters.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 201 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 217 },
       "fieldConfig": {
         "defaults": { "unit": "short", "decimals": 0 },
         "overrides": [
@@ -3265,7 +3345,7 @@
       "title": "Session truth by member identity",
       "description": "The exact active-primary Established state from the session-truth panel, joined to bgp_peer_info so the legend names the member instead of the bare address. A peer with no bgp_peer_info row is absent here and still visible on the session-truth panel.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 201 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 217 },
       "fieldConfig": {
         "defaults": {
           "unit": "short",

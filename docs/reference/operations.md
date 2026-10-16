@@ -1625,6 +1625,18 @@ not a bound on total HTTP wall-clock time: runtime scheduling and response
 delivery can take longer, and a successful probe observed after the deadline
 is rejected.
 
+Every `503` from `/readyz` increments
+`bgp_readiness_probe_failures_total{reason}` once, with the failing component
+as a closed `reason`: `deadline` (the probe missed the shared deadline or
+succeeded only after it), `peer_manager_unavailable` (PeerManager channel
+closed or reply dropped), `peer_manager_timeout`, `rib_unavailable` (RIB
+channel closed or reply dropped), `rib_timeout`, `rib_stalled` (an export-policy
+transition, selection-deferral release or source-peer teardown exceeded its
+30-second bound) and `daemon_unavailable` (listener bind failure or coordinated
+shutdown). The `503` body and the WARN log keep the exact error. Probes that
+succeed are not counted, including slow ones that only log a delayed-phase
+warning.
+
 Consumers choose their own failure policy. Kubernetes defaults to three failed
 probes, a 10-second interval, and a one-second timeout; an HTTP 503 still fails
 that probe even when it arrives within one second. The flagship RS soak instead
@@ -1745,6 +1757,12 @@ waited out an escalated NOTIFICATION reconnect wait; see
 [Debugging a session that won't establish](#debugging-a-session-that-wont-establish)).
 There is deliberately no per-source label — source cardinality is unbounded
 exactly under the floods these drops account for.
+The Grafana overview graphs every reason in "Inbound connection drops by
+reason". `BgpInboundNotificationBackoffDrops` (warning) fires when a
+`notification_backoff` drop was recorded in the last 15 minutes: a configured
+neighbor keeps dialling in while its session is in a NOTIFICATION loop. The
+alert carries no neighbor label; `rbgp neighbor` and the throttled log line
+name it.
 
 | Metric | What it tells you |
 |--------|-------------------|
@@ -1796,7 +1814,8 @@ exactly under the floods these drops account for.
 | `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). Mutations remain fenced until the transition is terminal; general RIB queries are served from the pre-commit state between the pre-commit polls and wait only through the commit batches, while the dedicated core-readiness lane remains responsive throughout |
 | `bgp_rib_policy_transition_last_duration_milliseconds` | Monotonic elapsed duration of the most recently completed atomic export-policy transition; retained across idle periods for post-event diagnosis |
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
-| `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it |
+| `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it. `BgpPolicyTransitionFallback` fires when either fallback outcome increased in the last 15 minutes |
+| `bgp_readiness_probe_failures_total{reason}` | Failed `/readyz` probes, one per `503` response, by the closed `reason` set described under [HTTP probes](#http-probes): `deadline`, `peer_manager_unavailable`, `peer_manager_timeout`, `rib_unavailable`, `rib_timeout`, `rib_stalled`, `daemon_unavailable`. All seven series are exported at 0 from startup |
 | `bgp_policy_routes_total{peer,policy,direction,action}` | Routes evaluated through an import or export policy chain, attributed to the denying member (`policy`), `chain_default_permit` for a nonempty-chain Permit, or `inline` for an anonymous denial or an absent or empty chain |
 | `bgp_policy_eval_errors_total{direction,kind}` | Policy evaluation errors by `kind`. With `direction` `import` or `export`, each one denied a route (fail closed); the per-chain policy and term are in `rbgp policy stats`. `direction="condition"` is described under [Conditional advertisement state](#conditional-advertisement-state) |
 | `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` | Duration of complete synchronous outbound prefix-limit work on the RIB actor. The closed `operation` set is `apply` (one active transaction after its identity/epoch gates, including the live-peer precondition recheck and any successful installation) and `recovery` (one non-empty scheduled batch that replays at least one live peer/family). An apply whose live precondition recheck rejects still contributes its real scan time; discarded, missing, superseded, idempotent, and empty paths do not contribute samples |
@@ -1806,7 +1825,11 @@ exactly under the floods these drops account for.
 | `bgp_orr_input_objects{classification}` | Inputs considered by the ORR default-topology builder before NLRI deduplication. Exactly five classifications exist: `included_default`, `excluded_nondefault`, `malformed_topology`, `malformed_attribute_29`, and `default_with_ignored_flex_algo`. The Flex series is a subset of included default objects: its base object and classic metric remain usable. All series reset to zero when no vantage is configured |
 
 The shipped alert pack raises `BgpPolicyTransitionStalled` when
-`bgp_rib_policy_transition_in_progress == 1` for one minute. Independently,
+`bgp_rib_policy_transition_in_progress == 1` for one minute, and
+`BgpPolicyTransitionFallback` when a transition ended in `fallback_handoff` or
+`fallback_cleanup_error` within 15 minutes. A handoff is correct but slower:
+the reload continues on the authoritative per-peer path. A change that always
+falls back keeps raising it on every reload. Independently,
 readiness remains healthy during bounded progress below 30 seconds, then fails
 closed with `RIB export-policy transition stalled` until commit or a cleaned-up
 fallback restores it. A selection-deferral release shares that 30-second bound

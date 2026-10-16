@@ -93,6 +93,7 @@ EVPN_REQUIRED_ROWS = {
     "Duplicate-MAC quarantine",
     "Dataplane repair, adoption, and single-active state",
     "Ownership conflicts and fail-stops",
+    "Core isolation",
 }
 
 EVPN_REQUIRED_PANELS = {
@@ -154,6 +155,8 @@ EVPN_REQUIRED_PANELS = {
         "evpn_foreign_nhid_range_conflicts_total",
     },
     "Runtime decomposed fail-stops": {"evpn_runtime_decomposed_fail_stops_total"},
+    "Core-isolation segment states": {"evpn_es_core_isolation_state"},
+    "Core-isolation signals": {"evpn_core_isolated"},
 }
 
 # These expressions are operator semantics, not presentation. Pinning them
@@ -316,6 +319,14 @@ EVPN_TARGETS: dict[tuple[str, str], tuple[str, str]] = {
         'sum by (instance) (increase(evpn_runtime_decomposed_fail_stops_total{instance=~"$instance"}[15m]))',
         "{{instance}} fail-stops/15m",
     ),
+    ("Core-isolation segment states", "A"): (
+        'sum by (instance, state) (evpn_es_core_isolation_state{instance=~"$instance"} == 1)',
+        "{{instance}} {{state}} segments",
+    ),
+    ("Core-isolation signals", "A"): (
+        'max by (instance, signal) (evpn_core_isolated{instance=~"$instance"})',
+        "{{instance}} {{signal}} isolated",
+    ),
 }
 
 EVPN_TARGET_DATASOURCE = {"type": "prometheus", "uid": "${datasource}"}
@@ -326,6 +337,8 @@ EVPN_DISCRETE_PANELS = {
     "Ethernet-segment drain reasons",
     "Quarantined local Type-2 keys",
     "Managed netdev state",
+    "Core-isolation segment states",
+    "Core-isolation signals",
 }
 
 VARIABLES = {
@@ -479,6 +492,14 @@ TARGETS = {
         "rate(bgp_dynamic_neighbor_limit_rejections_total"
         '{instance=~"$instance"}[$__rate_interval]) > 0'
     ),
+    ("Inbound connection drops by reason", "A"): (
+        "sum by (instance, reason) (rate(bgp_inbound_connections_dropped_total"
+        '{instance=~"$instance"}[$__rate_interval])) > 0'
+    ),
+    ("Readiness probe failures", "A"): (
+        "sum by (instance, reason) (rate(bgp_readiness_probe_failures_total"
+        '{instance=~"$instance"}[$__rate_interval])) > 0'
+    ),
     ("ORR SPF activity and topology", "A"): (
         "sum by (instance) (rate(bgp_orr_spf_runs_total"
         '{instance=~"$instance"}[$__rate_interval]))'
@@ -538,6 +559,8 @@ REQUIRED_LEGENDS = {
     ("Dynamic-neighbor admission capacity", "B"): "{{instance}} limit",
     ("Dynamic-neighbor admission capacity", "C"): "{{instance}} headroom",
     ("Dynamic-neighbor admission rejections", "A"): "{{instance}} rejected",
+    ("Inbound connection drops by reason", "A"): "{{instance}} {{reason}}",
+    ("Readiness probe failures", "A"): "{{instance}} {{reason}}",
     ("RIB ingest pressure", "B"): "inbound safely parked {{peer}}",
     ("RIB ingest pressure", "C"): "outbound deferred {{peer}}",
     ("RIB ingest pressure", "D"): "outbound refused {{peer}} {{reason}}",

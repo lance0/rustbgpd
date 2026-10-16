@@ -359,6 +359,26 @@ groups:
             the last 10 minutes because the process-global slot limit was
             full.
 
+      - alert: BgpInboundNotificationBackoffDrops
+        # The counter has no per-source label, so this fires per instance;
+        # the throttled log line and rbgp neighbor name the neighbor.
+        expr: increase(bgp_inbound_connections_dropped_total{reason="notification_backoff"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inbound connections held by NOTIFICATION backoff on {{ $labels.instance }}"
+          description: >-
+            {{ $labels.instance }} closed {{ $value | printf "%.0f" }} inbound
+            connection(s) in the last 15 minutes from a configured neighbor
+            waiting out an escalated reconnect wait after two or more
+            consecutive NOTIFICATION teardowns. The session is in a
+            NOTIFICATION loop (for example an OPEN mismatch or repeated hold
+            expiry). Find the neighbor with rbgp neighbor
+            (reconnect_in_seconds and the last error) or the throttled
+            notification-backoff log line, and fix the cause the
+            NOTIFICATION names.
+
       - alert: BgpRfc8212MissingImportPolicy
         expr: bgp_rfc8212_missing_import_policy == 1
         for: 5m
@@ -673,6 +693,25 @@ groups:
             concurrent readiness probe and other RIB work; inspect the
             dashboard p99 and transition state before retrying a reload.
 
+      - alert: BgpPolicyTransitionFallback
+        expr: increase(bgp_rib_policy_transition_total{outcome=~"fallback_handoff|fallback_cleanup_error"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Export-policy transition fell back on {{ $labels.instance }} ({{ $labels.outcome }})"
+          description: >-
+            bgp_rib_policy_transition_total{outcome="{{ $labels.outcome }}"}
+            on {{ $labels.instance }} increased in the last 15 minutes. The
+            RIB abandoned an atomic cohort export-policy transition before
+            commit. fallback_handoff means the uncommitted work was cleaned up
+            and the reload continues on the slower authoritative per-peer
+            path; fallback_cleanup_error means that cleanup failed and the
+            reload did not complete. If every reload falls back, the cohort
+            fast path does not apply to this change; the RIB log line
+            "RIB export-policy transition completed" and any preceding
+            warning give the reason.
+
       - alert: BgpOutboundRouteDrops
         # Every family counts here when the peer writer channel is full or
         # closed. The RIB marks the peer dirty and resyncs it, so this is a
@@ -986,3 +1025,43 @@ groups:
             partner. For reconverge_failed, applying the change failed and is
             retried, and the previous ESI's routes may still be originated;
             check the daemon log.
+
+      - alert: EvpnCoreIsolationHold
+        # Mirrors the rbgp doctor Warn states of
+        # evpn.es.<interface>.core_isolation. Keyed on the state series, so a
+        # change between these states restarts the hold.
+        expr: evpn_es_core_isolation_state{state=~"isolated|backstop_released|suppressed_no_peer|overridden"} == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EVPN core isolation {{ $labels.state }} on {{ $labels.interface }}"
+          description: >-
+            Bound Ethernet Segment {{ $labels.interface }} on
+            {{ $labels.instance }} has been in core-isolation state
+            {{ $labels.state }} for 2 minutes. isolated: the PE lost its EVPN
+            sessions or every uplink (evpn_core_isolated names the signal) and
+            holds the CE-facing members down. backstop_released: the hold was
+            released before EVPN synced. suppressed_no_peer: the PE is
+            isolated but the segment has no remote ES peer, so its links stay
+            up. overridden: another writer raised a held member. rbgp doctor
+            reports evpn.es.{{ $labels.interface }}.core_isolation.
+
+      - alert: EvpnCoreIsolationFault
+        # Mirrors the rbgp doctor Fail states.
+        expr: evpn_es_core_isolation_state{state=~"action_failed|ownership_ambiguous|uplink_overlap"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EVPN core isolation {{ $labels.state }} on {{ $labels.interface }}"
+          description: >-
+            Bound Ethernet Segment {{ $labels.interface }} on
+            {{ $labels.instance }} has been in core-isolation state
+            {{ $labels.state }} for 5 minutes. action_failed: an admin-state
+            write or receipt publication failed. ownership_ambiguous: a
+            receipt entry no longer matches its link, which is left down.
+            uplink_overlap: a configured uplink is, is enslaved under, or is
+            stacked on this binding and is excluded from the uplink signal.
+            See the daemon log and rbgp doctor
+            evpn.es.{{ $labels.interface }}.core_isolation.

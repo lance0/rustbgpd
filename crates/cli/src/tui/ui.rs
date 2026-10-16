@@ -196,7 +196,13 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         let state_color = theme.state_color_with_stale(n.state, n.stale);
         let uptime = format_duration(n.uptime_seconds);
         let rx = format_number(n.prefixes_received);
-        let tx = format_number(n.prefixes_sent);
+        // Mirrors `rbgp neighbor`: a grouped member's desired count, not
+        // yet delivered, while its outbound resync is pending.
+        let tx = if n.prefixes_sent_pending == Some(true) {
+            format!("~{}", format_number(n.prefixes_sent))
+        } else {
+            format_number(n.prefixes_sent)
+        };
         let rate = app.peer_update_rate(&identity);
         let rate_str = if rate < 0.05 {
             "0.0".to_string()
@@ -514,7 +520,18 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
             format_number(neighbor.prefixes_received),
             text,
         ),
-        row("Prefixes Tx:", format_number(neighbor.prefixes_sent), text),
+        row(
+            "Prefixes Tx:",
+            if neighbor.prefixes_sent_pending == Some(true) {
+                format!(
+                    "{} (pending outbound resync)",
+                    format_number(neighbor.prefixes_sent)
+                )
+            } else {
+                format_number(neighbor.prefixes_sent)
+            },
+            text,
+        ),
         row(
             "Updates Rx:",
             format_number(neighbor.updates_received),
@@ -1689,6 +1706,34 @@ mod tests {
         );
         assert_detail_row(&rendered, "Import:", "unknown");
         assert_detail_row(&rendered, "Export:", "unknown");
+    }
+
+    /// Red proof: dropping either pending branch shows the desired count as
+    /// if it had been delivered.
+    #[test]
+    fn pending_prefixes_tx_is_marked_in_table_and_detail() {
+        let mut neighbor = safety_neighbor();
+        neighbor.prefixes_sent = 4_200;
+        neighbor.prefixes_sent_pending = Some(true);
+        let mut app = App::new();
+        app.on_data(snapshot(vec![neighbor.clone()], Freshness::Fresh));
+        let table = rendered_detail(&mut app, 130, 8);
+        assert!(table.contains(" ~4,200 "), "{table}");
+        app.view = View::PeerDetail("192.0.2.2".into());
+        let detail = rendered_detail(&mut app, 130, 50);
+        assert_detail_row(&detail, "Prefixes Tx:", "4,200 (pending outbound resync)");
+
+        neighbor.prefixes_sent_pending = Some(false);
+        let mut app = App::new();
+        app.on_data(snapshot(vec![neighbor], Freshness::Fresh));
+        let table = rendered_detail(&mut app, 130, 8);
+        assert!(
+            !table.contains("~4,200") && table.contains(" 4,200 "),
+            "{table}"
+        );
+        app.view = View::PeerDetail("192.0.2.2".into());
+        let detail = rendered_detail(&mut app, 130, 50);
+        assert!(!detail.contains("pending outbound resync"), "{detail}");
     }
 
     /// Mutation receipt: forcing the production paragraph scroll offset to zero

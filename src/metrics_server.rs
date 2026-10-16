@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_api::accept_backoff::AcceptBackoff;
-use rustbgpd_api::health_probe::{CORE_READINESS_DEADLINE, CoreReadinessProbe};
+use rustbgpd_api::health_probe::{CORE_READINESS_DEADLINE, CoreReadinessError, CoreReadinessProbe};
 use rustbgpd_api::metrics_render::render_text;
 use rustbgpd_evpn_linux::worker_progress::WorkerProgressState;
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::reason_labels::ReadinessProbeFailureReason;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, oneshot, watch};
@@ -313,6 +314,7 @@ async fn handle_connection(
                     text_response("200 OK", "ready\n")
                 }
                 Ok(Err(error)) => {
+                    metrics.record_readiness_probe_failure(readiness_failure_reason(&error));
                     warn!(
                         %error,
                         accept_to_handler_ms = handler_started.duration_since(accepted).as_millis(),
@@ -328,6 +330,7 @@ async fn handle_connection(
                     text_response("503 Service Unavailable", &format!("not ready: {error}\n"))
                 }
                 Ok(Ok(())) | Err(_) => {
+                    metrics.record_readiness_probe_failure(ReadinessProbeFailureReason::Deadline);
                     warn!(
                         accept_to_handler_ms = handler_started.duration_since(accepted).as_millis(),
                         handler_to_request_line_ms = request_line_completed
@@ -374,6 +377,25 @@ async fn handle_connection(
     drop(scrape_slot);
 
     Ok(())
+}
+
+/// Groups the probe error into the counter's closed reason set.
+fn readiness_failure_reason(error: &CoreReadinessError) -> ReadinessProbeFailureReason {
+    match error {
+        CoreReadinessError::PeerManagerUnavailable
+        | CoreReadinessError::PeerManagerDroppedReply => {
+            ReadinessProbeFailureReason::PeerManagerUnavailable
+        }
+        CoreReadinessError::PeerManagerTimedOut => ReadinessProbeFailureReason::PeerManagerTimeout,
+        CoreReadinessError::RibUnavailable | CoreReadinessError::RibDroppedReply => {
+            ReadinessProbeFailureReason::RibUnavailable
+        }
+        CoreReadinessError::RibTimedOut => ReadinessProbeFailureReason::RibTimeout,
+        CoreReadinessError::RibPolicyTransitionStalled
+        | CoreReadinessError::RibSelectionReleaseStalled
+        | CoreReadinessError::RibPeerTeardownStalled => ReadinessProbeFailureReason::RibStalled,
+        CoreReadinessError::DaemonUnavailable(_) => ReadinessProbeFailureReason::DaemonUnavailable,
+    }
 }
 
 fn metrics_response(rendered: std::io::Result<String>) -> String {
@@ -428,7 +450,14 @@ pub(crate) mod tests {
         readiness_probe: CoreReadinessProbe,
         dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
     ) -> SocketAddr {
-        let metrics = BgpMetrics::new();
+        start_server_with_metrics(BgpMetrics::new(), readiness_probe, dataplane_probe).await
+    }
+
+    async fn start_server_with_metrics(
+        metrics: BgpMetrics,
+        readiness_probe: CoreReadinessProbe,
+        dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
+    ) -> SocketAddr {
         let server = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
@@ -787,11 +816,67 @@ pub(crate) mod tests {
         assert!(response.ends_with("ok\n"));
     }
 
+    /// Non-zero `bgp_readiness_probe_failures_total` rows.
+    async fn readiness_failure_rows(metrics: &BgpMetrics) -> Vec<String> {
+        render_text(metrics)
+            .await
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.starts_with("bgp_readiness_probe_failures_total{") && !line.ends_with(" 0")
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn readiness_failure_reason_groups_errors_into_closed_set() {
+        use ReadinessProbeFailureReason as R;
+        for (error, reason) in [
+            (
+                CoreReadinessError::PeerManagerUnavailable,
+                R::PeerManagerUnavailable,
+            ),
+            (
+                CoreReadinessError::PeerManagerDroppedReply,
+                R::PeerManagerUnavailable,
+            ),
+            (
+                CoreReadinessError::PeerManagerTimedOut,
+                R::PeerManagerTimeout,
+            ),
+            (CoreReadinessError::RibUnavailable, R::RibUnavailable),
+            (CoreReadinessError::RibDroppedReply, R::RibUnavailable),
+            (CoreReadinessError::RibTimedOut, R::RibTimeout),
+            (
+                CoreReadinessError::RibPolicyTransitionStalled,
+                R::RibStalled,
+            ),
+            (
+                CoreReadinessError::RibSelectionReleaseStalled,
+                R::RibStalled,
+            ),
+            (CoreReadinessError::RibPeerTeardownStalled, R::RibStalled),
+            (
+                CoreReadinessError::DaemonUnavailable("shutdown"),
+                R::DaemonUnavailable,
+            ),
+        ] {
+            assert_eq!(readiness_failure_reason(&error), reason, "{error}");
+        }
+    }
+
     #[tokio::test]
     async fn get_readyz_returns_200_when_core_actors_respond() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
-        let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
+        let metrics = BgpMetrics::new();
+        let addr = start_server_with_metrics(
+            metrics.clone(),
+            CoreReadinessProbe::new(peer_tx, rib_tx),
+            None,
+        )
+        .await;
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
@@ -807,6 +892,7 @@ pub(crate) mod tests {
         let response = request(addr, "/readyz").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.ends_with("ready\n"));
+        assert_eq!(readiness_failure_rows(&metrics).await, Vec::<String>::new());
     }
 
     #[tokio::test]
@@ -948,7 +1034,13 @@ pub(crate) mod tests {
     async fn get_readyz_returns_503_when_peer_manager_drops_reply() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
-        let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
+        let metrics = BgpMetrics::new();
+        let addr = start_server_with_metrics(
+            metrics.clone(),
+            CoreReadinessProbe::new(peer_tx, rib_tx),
+            None,
+        )
+        .await;
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
@@ -959,6 +1051,11 @@ pub(crate) mod tests {
         let response = request(addr, "/readyz").await;
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(response.ends_with("not ready: peer manager dropped reply\n"));
+        // Red proof: removing the error-arm increment leaves no row.
+        assert_eq!(
+            readiness_failure_rows(&metrics).await,
+            ["bgp_readiness_probe_failures_total{reason=\"peer_manager_unavailable\"} 1"]
+        );
     }
 
     #[tokio::test]
@@ -1037,6 +1134,8 @@ pub(crate) mod tests {
         let (wedge_tx, mut wedge_rx) = mpsc::channel::<Duration>(1);
         let (engaged_tx, engaged_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+        let metrics = BgpMetrics::new();
+        let server_metrics = metrics.clone();
 
         // The server runs on its own single-threaded runtime so the test
         // can wedge exactly the worker that owns the probe timers.
@@ -1046,7 +1145,7 @@ pub(crate) mod tests {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                let metrics = BgpMetrics::new();
+                let metrics = server_metrics;
                 let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 addr_tx.send(listener.local_addr().unwrap()).unwrap();
@@ -1104,6 +1203,11 @@ pub(crate) mod tests {
             "late probe success must not be certified as ready: {response}"
         );
         assert!(response.ends_with("not ready: readiness probe deadline exceeded\n"));
+        // Red proof: removing the deadline-arm increment leaves no row.
+        assert_eq!(
+            readiness_failure_rows(&metrics).await,
+            ["bgp_readiness_probe_failures_total{reason=\"deadline\"} 1"]
+        );
     }
 
     #[tokio::test]
