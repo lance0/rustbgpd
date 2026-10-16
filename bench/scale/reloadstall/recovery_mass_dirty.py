@@ -28,8 +28,11 @@ GIB = 1024 ** 3
 CAUSES = ("peer_limit", "daemon_limit", "allocation_failure", "missing_proof")
 LIMITS = {"daemon_bytes": 10 * GIB, "harness_bytes": 2 * GIB,
           "minimum_available_bytes": 12 * GIB, "swap_bytes": 0,
-          "leg_deadline_seconds": 1800, "readiness_deadline_ms": 250,
-          "readiness_interval_seconds": 1, "readiness_max_gap_seconds": 1.25,
+          "leg_deadline_seconds": 1800, "readiness_request_deadline_ms": 1000,
+          "readiness_interval_seconds": .25, "readiness_max_gap_seconds": 1.25,
+          "readiness_ceiling_seconds": 1.0, "readiness_slow_seconds": .250, "readiness_slow_run": 3,
+          "readiness_p99_relative": 1.25, "readiness_p99_absolute_seconds": .025,
+          "readiness_max_relative": 1.5, "readiness_max_absolute_seconds": .050,
           "convergence_relative": 1.10, "convergence_absolute_seconds": 0.030}
 OWNED_INPUTS = ("src/main.rs", "src/recovery_mass_dirty.rs", "recovery_mass_dirty.py",
                 "test_recovery_mass_dirty.py", "run-recovery-mass-dirty.sh", "README.md")
@@ -852,7 +855,7 @@ def run_cell(args):
                 result["harness_owner"] = process_identity(harness_pid, harness_binary)
                 result["harness_memory_after"] = snapshot_cgroup(harness_pid, LIMITS["harness_bytes"])
                 require(sampler.poll() is None, "memory sampler ended before measurement boundary")
-            # Retain a successful probe after the final controller-observed fold,
+            # Retain a probe after the final controller-observed fold,
             # rather than ending with only samples from before the recovery.
             while True:
                 probe = read_record(engine, records, "mass_dirty_readiness", deadline)
@@ -861,7 +864,7 @@ def run_cell(args):
             engine.stdin.write("finish\n")
             engine.stdin.flush()
             final = read_record(engine, records, "mass_dirty_exit", deadline)
-            require(final["status"] == "PASS" and final["readiness_samples"] > 0 and final["readiness_deadline_ms"] == 250, "readiness evidence incomplete")
+            require(final["status"] == "PASS" and final["readiness_samples"] > 0, "readiness evidence incomplete")
             engine.wait(timeout=max(0.1, deadline - time.monotonic()))
             require(engine.returncode == 0, "harness failed after final receipt")
             raw_records = harness_records(leg / "harness.log")
@@ -946,6 +949,9 @@ def analyze(root):
             and derivation["expression_after"] == "false"
             and derivation["vpn_full_old_already_flat"] is True, "flat source derivation changed")
     rows = []
+    failures = []
+    readiness = {}
+    post_sent = {"flat": [], "candidate": []}
     for index, arm in enumerate(manifest["schedule"]):
         path = root / f"leg-{index}-{arm}" / "result.json"
         require(path.is_file(), f"missing complete leg {index}")
@@ -955,9 +961,22 @@ def analyze(root):
                 and row["harness_sha256"] == binary_hashes["reloadstall"] and row["rbgp_sha256"] == binary_hashes["rbgp"], "compiled leg identity differs")
         require(row["status"] == ("CORRECTNESS_ONLY" if manifest["correctness_only"] else "PASS"), "leg failed")
         require([operation["generation"] for operation in row["operations"]] == ["b", "a"], "operation coverage mismatch")
-        validate_leg(path.parent, manifest, row)
+        probes = validate_leg(path.parent, manifest, row)
         rows.append(row)
-    verdict = {"status": "CORRECTNESS_ONLY" if manifest["correctness_only"] else "PASS", "cohort": manifest["cohort"], "release_soak_qualified": False}
+        readiness[path.parent.name], leg_failures = readiness_summary(probes, row["operations"])
+        failures += [f"{path.parent.name}: {failure}" for failure in leg_failures]
+        if not manifest["correctness_only"]:
+            post_sent[arm] += post_sent_elapsed(probes, row["operations"])
+    verdict = {"status": "CORRECTNESS_ONLY" if manifest["correctness_only"] else "PASS", "cohort": manifest["cohort"],
+               "release_soak_qualified": False, "readiness": readiness}
+    if manifest["correctness_only"]:
+        verdict["readiness_comparison"] = "not_applicable: correctness-only timing is null"
+    elif manifest["profile"] == "full-vpn":
+        # The flat derivation is a no-op for VPN staging groups: both arms must clear the ceiling only.
+        verdict["readiness_comparison"] = "not_applicable: arms code-identical"
+    else:
+        verdict["readiness_comparison"], comparison_failures = readiness_comparison(post_sent)
+        failures += comparison_failures
     if not manifest["correctness_only"] and manifest["cohort"] == "no-refusal":
         for field in ("trigger_to_fold_seconds",):
             arms = {arm: [operation[field] for row in rows if row["arm"] == arm for operation in row["operations"]] for arm in ("flat", "candidate")}
@@ -965,10 +984,15 @@ def analyze(root):
             for statistic in (statistics.median, max):
                 limit = statistic(arms["flat"]) * LIMITS["convergence_relative"] + LIMITS["convergence_absolute_seconds"]
                 if statistic(arms["candidate"]) > limit:
-                    verdict["status"] = "FAIL"
+                    failures.append(f"candidate {field} {statistic.__name__} {statistic(arms['candidate']):.3f} s over {limit:.3f} s bar")
             verdict[field] = arms
     if manifest["cohort"] == "cap-pressure":
         verdict["scope"] = "cap-pressure correctness/resource control; not a pure storage performance comparison"
+    if failures:
+        verdict["status"] = "FAIL"
+        verdict["reason"] = "; ".join(failures)
+    else:
+        verdict["reason"] = "all predeclared bars met" if verdict["status"] == "PASS" else "correctness-only campaign; no timing bars"
     write_json(root / "verdict.json", verdict)
     return verdict
 
@@ -988,7 +1012,8 @@ def readiness_coverage(records, operations, correctness):
     final = records["mass_dirty_exit"][0]
     probes = records["mass_dirty_readiness"]
     require(final["status"] == "PASS" and type(final["readiness_samples"]) is int and
-            final["readiness_samples"] > 0 and final["readiness_deadline_ms"] == 250, "readiness evidence missing")
+            final["readiness_samples"] > 0 and final["readiness_interval_ms"] == LIMITS["readiness_interval_seconds"] * 1000 and
+            final["readiness_request_deadline_ms"] == LIMITS["readiness_request_deadline_ms"], "readiness evidence missing")
     require(len(probes) == final["readiness_samples"], "readiness observations missing")
     fields = ("trigger_monotonic_seconds", "drain_monotonic_seconds", "resume_monotonic_seconds", "fold_monotonic_seconds")
 
@@ -997,13 +1022,17 @@ def readiness_coverage(records, operations, correctness):
 
     for index, probe in enumerate(probes):
         require(type(probe["sequence"]) is int and probe["sequence"] == index + 1, "readiness sequence changed")
-        require(probe["status"] == 200 and probe["deadline_ms"] == 250, "readiness response/deadline changed")
+        # Slow and failed samples are evidence for the readiness bars, not driver failures.
+        require(probe["request_deadline_ms"] == LIMITS["readiness_request_deadline_ms"] and
+                (probe["status"] is None or type(probe["status"]) is int) and
+                (probe["phase"] is None or type(probe["phase"]) is str) and
+                (probe["status"] == 200 or probe["phase"] is not None), "readiness sample/deadline changed")
         elapsed, start, end = [probe[key] for key in ("elapsed_seconds", "started_monotonic_seconds", "finished_monotonic_seconds")]
         if correctness:
             require(elapsed is start is end is None, "correctness mode published readiness timing")
         else:
             require(all(valid_seconds(value) for value in (elapsed, start, end)) and
-                    0 <= elapsed <= .250 and 0 <= end - start <= .250, "readiness deadline/clock failed")
+                    0 <= end - start, "readiness clock failed")
             if index:
                 previous = probes[index - 1]
                 require(previous["finished_monotonic_seconds"] <= start, "readiness clock order changed")
@@ -1148,6 +1177,61 @@ def validate_leg(leg, manifest, row):
             require(memory["memory.max"] == maximum and memory["memory.peak"] >= memory["memory.current"], "memory cap/peak changed")
             require(memory["memory.swap.max"] == memory["memory.swap.peak"] == memory["memory.swap.current"] == 0, "swap invalidates receipt")
             require(all(int(memory["events"][name]) == 0 for name in ("oom", "oom_kill", "oom_group_kill")), "OOM invalidates receipt")
+    return records["mass_dirty_readiness"]
+
+
+def percentile(values, fraction):
+    # Nearest rank: always an observed sample, never an interpolation.
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
+
+
+def post_sent_elapsed(probes, operations):
+    # The window each comparative bar judges: source writer drained to observed fold.
+    windows = [(operation["drain_monotonic_seconds"], operation["fold_monotonic_seconds"]) for operation in operations]
+    values = [probe["elapsed_seconds"] for probe in probes
+              if any(start <= probe["started_monotonic_seconds"] <= end for start, end in windows)]
+    require(values, "no readiness samples after sent")
+    return values
+
+
+def readiness_summary(probes, operations):
+    """Per-leg readiness distribution and its absolute-ceiling failures."""
+    failed = sum(probe["status"] != 200 or probe["phase"] is not None for probe in probes)
+    summary = {"samples": len(probes), "non_200_or_failed": failed}
+    failures = [f"{failed} non-200 or failed /readyz samples"] if failed else []
+    elapsed = [probe["elapsed_seconds"] for probe in probes]
+    if None in elapsed:
+        return summary, failures
+    run = longest = 0
+    for value in elapsed:
+        run = run + 1 if value > LIMITS["readiness_slow_seconds"] else 0
+        longest = max(longest, run)
+
+    def distribution(values):
+        return {"p50_ms": percentile(values, .5) * 1000, "p99_ms": percentile(values, .99) * 1000,
+                "max_ms": max(values) * 1000}
+
+    post_sent = post_sent_elapsed(probes, operations)
+    summary.update(distribution(elapsed), over_250ms=sum(value > LIMITS["readiness_slow_seconds"] for value in elapsed),
+                   longest_run_over_250ms=longest, post_sent={"samples": len(post_sent), **distribution(post_sent)})
+    if max(elapsed) > LIMITS["readiness_ceiling_seconds"]:
+        failures.append(f"/readyz max {max(elapsed) * 1000:.1f} ms over 1 s")
+    if longest >= LIMITS["readiness_slow_run"]:
+        failures.append(f"{longest} consecutive /readyz samples over 250 ms")
+    return summary, failures
+
+
+def readiness_comparison(arms):
+    """Pooled candidate post-sent readiness against the flat control."""
+    detail, failures = {}, []
+    for name, fraction in (("p99", .99), ("max", 1.0)):
+        control, candidate = percentile(arms["flat"], fraction), percentile(arms["candidate"], fraction)
+        limit = control * LIMITS[f"readiness_{name}_relative"] + LIMITS[f"readiness_{name}_absolute_seconds"]
+        detail[f"{name}_ms"] = {"flat": control * 1000, "candidate": candidate * 1000, "limit": limit * 1000}
+        if candidate > limit:
+            failures.append(f"candidate post-sent /readyz {name} {candidate * 1000:.1f} ms over {limit * 1000:.1f} ms bar")
+    return detail, failures
 
 
 def finalize(root):

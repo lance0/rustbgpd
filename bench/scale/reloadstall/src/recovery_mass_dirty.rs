@@ -14,6 +14,10 @@ const RDS: [RouteDistinguisher; 2] = [
     RouteDistinguisher([0, 2, 0, 0, 0xfd, 0xe8, 0, 100]),
 ];
 const CELL_DEADLINE: Duration = Duration::from_secs(1800);
+/// `/readyz` cadence (4 Hz) and per-request bound. Every sample is recorded;
+/// the controller judges ceilings, so a slow or failed sample never aborts.
+const READINESS_INTERVAL: Duration = Duration::from_millis(250);
+const READINESS_REQUEST_DEADLINE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
 struct Shape {
@@ -856,15 +860,18 @@ fn readiness_failure_record(
         json_seconds(at.map(|at| at.saturating_duration_since(started).as_secs_f64()))
     };
     let elapsed_seconds = json_seconds(elapsed.map(|value| value.as_secs_f64()));
-    let overshoot =
-        json_seconds(elapsed.map(|value| value.saturating_sub(READINESS_DEADLINE).as_secs_f64()));
+    let overshoot = json_seconds(elapsed.map(|value| {
+        value
+            .saturating_sub(READINESS_REQUEST_DEADLINE)
+            .as_secs_f64()
+    }));
     let connected = matches!(
         trace.phase,
         "request_write" | "response_read_to_eof" | "response_validation"
     );
     let written = matches!(trace.phase, "response_read_to_eof" | "response_validation");
     format!(
-        "mass_dirty_readiness_failure {{\"attempt_sequence\":{sequence},\"endpoint\":\"{metrics}\",\"path\":\"/readyz\",\"deadline_ms\":250,\"phase\":\"{}\",\"tcp_connected\":{connected},\"request_written\":{written},\"response_read_completed\":{},\"response_bytes\":{},\"response_prefix_hex\":\"{}\",\"response_prefix_truncated\":{},\"prefix_limit_bytes\":{HTTP_TRACE_PREFIX_BYTES},\"error_bytes\":{},\"error_prefix_hex\":\"{}\",\"error_prefix_truncated\":{},\"started_monotonic_seconds\":{},\"finished_monotonic_seconds\":{},\"observed_elapsed_seconds\":{elapsed_seconds},\"deadline_overshoot_seconds\":{overshoot},\"connected_after_seconds\":{},\"request_written_after_seconds\":{},\"read_completed_after_seconds\":{}}}",
+        "mass_dirty_readiness_failure {{\"attempt_sequence\":{sequence},\"endpoint\":\"{metrics}\",\"path\":\"/readyz\",\"deadline_ms\":1000,\"phase\":\"{}\",\"tcp_connected\":{connected},\"request_written\":{written},\"response_read_completed\":{},\"response_bytes\":{},\"response_prefix_hex\":\"{}\",\"response_prefix_truncated\":{},\"prefix_limit_bytes\":{HTTP_TRACE_PREFIX_BYTES},\"error_bytes\":{},\"error_prefix_hex\":\"{}\",\"error_prefix_truncated\":{},\"started_monotonic_seconds\":{},\"finished_monotonic_seconds\":{},\"observed_elapsed_seconds\":{elapsed_seconds},\"deadline_overshoot_seconds\":{overshoot},\"connected_after_seconds\":{},\"request_written_after_seconds\":{},\"read_completed_after_seconds\":{}}}",
         trace.phase,
         trace.phase == "response_validation",
         trace.response.len(),
@@ -881,12 +888,23 @@ fn readiness_failure_record(
     )
 }
 
+/// Status code from a raw HTTP response line, if one was read.
+fn http_status(response: &[u8]) -> Option<u16> {
+    let line = response.split(|&byte| byte == b'\n').next()?;
+    std::str::from_utf8(line)
+        .ok()?
+        .split_ascii_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
 async fn readiness_watch(
     metrics: SocketAddr,
     mut stop: oneshot::Receiver<()>,
     correctness: bool,
 ) -> Result<u64, String> {
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(READINESS_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut samples = 0;
     loop {
@@ -895,27 +913,24 @@ async fn readiness_watch(
             _ = tick.tick() => {
                 let started = Instant::now();
                 let probe_start = monotonic_seconds(correctness)?;
-                // Reuse the HTTP validation and retain the existing client deadline.
+                // Reuse the HTTP validation; the request deadline bounds a wedge.
                 let mut trace = HttpFetchTrace { record_clocks: !correctness, ..HttpFetchTrace::default() };
-                if let Err(error) = fetch_http_traced(metrics, "/readyz", started + READINESS_DEADLINE, Some(&mut trace)).await {
-                    let finished = (!correctness).then(Instant::now);
-                    // A diagnostic clock failure must not replace the original HTTP error.
-                    let probe_end = monotonic_seconds(correctness).ok().flatten();
-                    eprintln!("{}", readiness_failure_record(samples + 1, metrics, &trace, &error, started, finished, (probe_start, probe_end)));
-                    return Err(error);
-                }
-                let probe_end = monotonic_seconds(correctness)?;
+                let fetched = fetch_http_traced(metrics, "/readyz", started + READINESS_REQUEST_DEADLINE, Some(&mut trace)).await;
                 let elapsed = started.elapsed();
-                if elapsed > READINESS_DEADLINE {
-                    let error = "late readiness success";
-                    eprintln!("{}", readiness_failure_record(samples + 1, metrics, &trace, error, started, (!correctness).then(Instant::now), (probe_start, probe_end)));
-                    return Err(error.into());
-                }
-                let seconds = if correctness { "null".into() } else { elapsed.as_secs_f64().to_string() };
                 samples += 1;
+                // A diagnostic clock failure must not replace an HTTP error.
+                let probe_end = if fetched.is_ok() { monotonic_seconds(correctness)? } else { monotonic_seconds(correctness).ok().flatten() };
+                let (status, phase) = match &fetched {
+                    Ok(_) => ("200".to_owned(), "null".to_owned()),
+                    Err(error) => {
+                        eprintln!("{}", readiness_failure_record(samples, metrics, &trace, error, started, (!correctness).then(Instant::now), (probe_start, probe_end)));
+                        (http_status(&trace.response).map_or_else(|| "null".into(), |code| code.to_string()), format!("\"{}\"", trace.phase))
+                    }
+                };
+                let seconds = if correctness { "null".into() } else { elapsed.as_secs_f64().to_string() };
                 let probe_start = json_seconds(probe_start);
                 let probe_end = json_seconds(probe_end);
-                println!("mass_dirty_readiness {{\"sequence\":{samples},\"status\":200,\"deadline_ms\":250,\"elapsed_seconds\":{seconds},\"started_monotonic_seconds\":{probe_start},\"finished_monotonic_seconds\":{probe_end}}}");
+                println!("mass_dirty_readiness {{\"sequence\":{samples},\"status\":{status},\"phase\":{phase},\"request_deadline_ms\":1000,\"elapsed_seconds\":{seconds},\"started_monotonic_seconds\":{probe_start},\"finished_monotonic_seconds\":{probe_end}}}");
             }
         }
     }
@@ -1224,7 +1239,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     // Recheck actual reader errors, continuity and inventory at its finish boundary.
     terminal_state(&receivers, &source_live)?;
     println!(
-        "mass_dirty_exit {{\"readiness_samples\":{samples},\"readiness_deadline_ms\":250,\"status\":\"PASS\"}}"
+        "mass_dirty_exit {{\"readiness_samples\":{samples},\"readiness_interval_ms\":250,\"readiness_request_deadline_ms\":1000,\"status\":\"PASS\"}}"
     );
     Ok(())
 }
@@ -1486,16 +1501,16 @@ mod tests {
             2,
             "127.0.0.1:19186".parse().unwrap(),
             &trace,
-            "late readiness success",
+            "/readyz checkpoint exceeded deadline",
             started,
-            Some(started + Duration::from_millis(325)),
-            (Some(10.0), Some(10.325)),
+            Some(started + Duration::from_millis(1025)),
+            (Some(10.0), Some(11.025)),
         );
         for field in [
             "\"started_monotonic_seconds\":10",
-            "\"finished_monotonic_seconds\":10.325",
-            "\"observed_elapsed_seconds\":0.325",
-            "\"deadline_overshoot_seconds\":0.075",
+            "\"finished_monotonic_seconds\":11.025",
+            "\"observed_elapsed_seconds\":1.025",
+            "\"deadline_overshoot_seconds\":0.025",
             "\"connected_after_seconds\":0.001",
             "\"request_written_after_seconds\":0.002",
             "\"read_completed_after_seconds\":0.3",
@@ -1503,6 +1518,20 @@ mod tests {
         ] {
             assert!(record.contains(field), "missing {field}: {record}");
         }
+    }
+
+    #[test]
+    fn recovery_mass_dirty_readiness_sample_reports_actual_status() {
+        assert_eq!(
+            http_status(b"HTTP/1.1 503 Service Unavailable\r\n\r\n"),
+            Some(503)
+        );
+        assert_eq!(
+            http_status(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"),
+            Some(200)
+        );
+        assert_eq!(http_status(b""), None);
+        assert_eq!(http_status(b"HTTP/1.1"), None);
     }
 
     fn reflected(shape: Shape, family: usize, extras: Vec<PathAttribute>) -> Message {

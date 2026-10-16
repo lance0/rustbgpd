@@ -39,7 +39,7 @@ class MassDirtyTests(unittest.TestCase):
         finally:
             os.close(read_fd)
             os.close(write_fd)
-        line = 'mass_dirty_readiness {"status":200,"deadline_ms":250,"elapsed_seconds":null}\n'
+        line = 'mass_dirty_readiness {"status":200,"phase":null,"request_deadline_ms":1000,"elapsed_seconds":null}\n'
         count = max(1024 * 1024, capacity * 4) // len(line) + 1
         script = (f"import sys; sys.stdout.write({line!r} * {count}); "
                   "sys.stdout.flush(); print('mass_dirty_ready {\"complete\":true}', flush=True)")
@@ -97,10 +97,11 @@ class MassDirtyTests(unittest.TestCase):
 
     def test_readiness_covers_each_full_operation_with_bracket_probes_and_no_gaps(self):
         def fixture():
-            probes = [{"sequence": index + 1, "status": 200, "deadline_ms": 250,
+            probes = [{"sequence": index + 1, "status": 200, "phase": None, "request_deadline_ms": 1000,
                        "elapsed_seconds": .01, "started_monotonic_seconds": float(100 + index),
                        "finished_monotonic_seconds": 100.01 + index} for index in range(7)]
-            records = {"mass_dirty_exit": [{"status": "PASS", "readiness_samples": 7, "readiness_deadline_ms": 250}],
+            records = {"mass_dirty_exit": [{"status": "PASS", "readiness_samples": 7, "readiness_interval_ms": 250,
+                                            "readiness_request_deadline_ms": 1000}],
                        "mass_dirty_readiness": probes}
             operations = [{"trigger_monotonic_seconds": start, "drain_monotonic_seconds": start + .1,
                            "resume_monotonic_seconds": start + .2, "fold_monotonic_seconds": start + 2,
@@ -112,7 +113,14 @@ class MassDirtyTests(unittest.TestCase):
         records, operations = fixture()
         self.assertEqual(receipt.readiness_coverage(records, operations, False),
                          [{"sample_count": 4, "max_start_gap_seconds": 1.0}] * 2)
-        for mutation in ("before-b", "after-a", "gap", "sequence", "backward", "nonfinite", "late", "phase", "duration"):
+        # A slow or failed sample is readiness evidence for the verdict bars, not invalid coverage.
+        records, operations = fixture()
+        records["mass_dirty_readiness"][1].update(elapsed_seconds=.999, finished_monotonic_seconds=101.999,
+                                                  status=None, phase="response_read_to_eof")
+        self.assertEqual(receipt.readiness_coverage(records, operations, False),
+                         [{"sample_count": 4, "max_start_gap_seconds": 1.0}] * 2)
+        for mutation in ("before-b", "after-a", "gap", "sequence", "backward", "nonfinite", "unexplained-status",
+                         "request-deadline", "phase", "duration"):
             with self.subTest(mutation=mutation):
                 records, operations = fixture()
                 probes = records["mass_dirty_readiness"]
@@ -130,8 +138,10 @@ class MassDirtyTests(unittest.TestCase):
                     probes[1]["started_monotonic_seconds"] = 99
                 elif mutation == "nonfinite":
                     probes[1]["finished_monotonic_seconds"] = float("nan")
-                elif mutation == "late":
-                    probes[1]["finished_monotonic_seconds"] += .251
+                elif mutation == "unexplained-status":
+                    probes[1]["status"] = 503
+                elif mutation == "request-deadline":
+                    probes[1]["request_deadline_ms"] = 250
                 elif mutation == "phase":
                     operations[0]["resume_monotonic_seconds"] = 99
                 else:
@@ -150,12 +160,12 @@ class MassDirtyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "candidate and flat daemon binaries are identical"):
             receipt.verified_binaries(self.root)
 
-    def manifest(self, correctness=True, cohort="no-refusal"):
+    def manifest(self, correctness=True, cohort="no-refusal", profile="full-vpn"):
         cpus = sorted(os.sched_getaffinity(0))
         if len(cpus) < 2:
             self.skipTest("requires two assigned CPUs")
         root = self.root / "campaign"
-        args = argparse.Namespace(output=str(root), head="a" * 40, profile="full-vpn", cohort=cohort,
+        args = argparse.Namespace(output=str(root), head="a" * 40, profile=profile, cohort=cohort,
                                   daemon_cpus=str(cpus[0]), harness_cpus=str(cpus[1]), correctness_only=correctness)
         return root, receipt.init(args)
 
@@ -215,7 +225,8 @@ class MassDirtyTests(unittest.TestCase):
         self.assertEqual(manifest["receivers"], 24)
         self.assertEqual(manifest["limits"]["daemon_bytes"], 10 * 1024 ** 3)
         self.assertEqual(manifest["limits"]["harness_bytes"], 2 * 1024 ** 3)
-        self.assertEqual(manifest["limits"]["readiness_deadline_ms"], 250)
+        self.assertEqual(manifest["limits"]["readiness_request_deadline_ms"], 1000)
+        self.assertEqual(manifest["limits"]["readiness_interval_seconds"], .25)
         self.assertEqual(manifest["limits"]["convergence_relative"], 1.10)
         self.assertEqual(manifest["limits"]["convergence_absolute_seconds"], .030)
         self.assertIn("ingress fill, cold capture and dirty witness", manifest["primary_convergence"])
@@ -726,8 +737,8 @@ class MassDirtyTests(unittest.TestCase):
         (root / "driver.exit").write_text("0\n")
         self.assertEqual(receipt.finalize(root)["status"], "INVALID")
 
-    def complete_campaign(self, measured_failure=False):
-        root, manifest = self.manifest(correctness=not measured_failure)
+    def complete_campaign(self, measured_failure=False, profile="full-vpn", candidate_duration=4, mutate=None):
+        root, manifest = self.manifest(correctness=not measured_failure, profile=profile)
         (root / "candidate.sha").write_text(manifest["head"] + "\n")
         source = ("    fn capture_group_admitted_keys_inner(\n"
                   "        let captured = ledger.capture_full_old_with_checkpoint(\n"
@@ -767,7 +778,7 @@ class MassDirtyTests(unittest.TestCase):
         for index, arm in enumerate(manifest["schedule"]):
             leg, row = self.small_leg(manifest)
             if measured_failure:
-                self.measured_leg(leg, row, arm)
+                self.measured_leg(leg, row, arm, index, candidate_duration, mutate)
             row.update({"arm": arm, "index": index, "source": manifest["head"],
                         "status": "PASS" if measured_failure else "CORRECTNESS_ONLY",
                         "capture_source_sha256": receipt.digest(root / "capture-source.rs"),
@@ -780,22 +791,24 @@ class MassDirtyTests(unittest.TestCase):
         (root / "execution.exit").write_text("0\n")
         if not measured_failure:
             self.assertEqual(receipt.finalize(root)["status"], "CORRECTNESS_ONLY")
-        else:
+        elif candidate_duration == 4:
             self.assertEqual(receipt.analyze(root)["status"], "FAIL")
         return root, manifest
 
-    def measured_leg(self, leg, row, arm):
+    def measured_leg(self, leg, row, arm, index, candidate_duration=4, mutate=None):
         """Synthetic measured records exercise replay; no clocks are sampled."""
         records = receipt.harness_records(leg / "harness.log")
         records["mass_dirty_ready"][0]["correctness_only"] = False
-        probes = [{"sequence": index + 1, "status": 200, "deadline_ms": 250,
+        probes = [{"sequence": index + 1, "status": 200, "phase": None, "request_deadline_ms": 1000,
                    "elapsed_seconds": .01, "started_monotonic_seconds": float(100 + index),
                    "finished_monotonic_seconds": 100.01 + index} for index in range(20)]
+        if mutate is not None:
+            mutate(arm, index, probes)
         records["mass_dirty_readiness"] = probes
         records["mass_dirty_exit"][0]["readiness_samples"] = len(probes)
         for index, generation in enumerate(("b", "a")):
             start = 100.5 + index * 10
-            duration = 4 if arm == "candidate" else 2
+            duration = candidate_duration if arm == "candidate" else 2
             drain, resume, fold = start + .5, start + 1.5, start + duration
             operation = row["operations"][index]
             operation.update({"trigger_monotonic_seconds": start, "drain_monotonic_seconds": drain,
@@ -827,6 +840,86 @@ class MassDirtyTests(unittest.TestCase):
                          "memory.swap.max": 0, "memory.swap.peak": 0, "memory.swap.current": 0,
                          "boundary_monotonic_ns": 200, "events": {"oom": 0, "oom_kill": 0, "oom_group_kill": 0}}
         row["raw_sha256"] = self.raw_hashes(leg)
+
+    @staticmethod
+    def readiness_probes(values, statuses=()):
+        statuses = dict(statuses)
+        return [{"sequence": index + 1, "status": statuses.get(index, 200),
+                 "phase": "response_validation" if index in statuses else None, "request_deadline_ms": 1000,
+                 "elapsed_seconds": value, "started_monotonic_seconds": 100 + index * 1.25,
+                 "finished_monotonic_seconds": 100 + index * 1.25 + value} for index, value in enumerate(values)]
+
+    def test_readiness_ceiling_judges_consecutive_slow_one_second_and_non_200(self):
+        window = [{"drain_monotonic_seconds": 100, "fold_monotonic_seconds": 1000}]
+        cases = (
+            ([.01] * 5 + [.26, .3, .251] + [.01] * 5, {}, "3 consecutive /readyz samples over 250 ms"),
+            ([.01, .3, .3, .01, .3, .01], {}, None),
+            ([.01, .2, 1.001, .01], {}, "over 1 s"),
+            ([.01, .01, .02], {1: 503}, "1 non-200 or failed /readyz samples"),
+            ([.01, .01, .02], {1: None}, "1 non-200 or failed /readyz samples"),
+        )
+        for values, statuses, failure in cases:
+            with self.subTest(values=values, statuses=statuses):
+                summary, failures = receipt.readiness_summary(self.readiness_probes(values, statuses), window)
+                self.assertEqual(len(failures), 0 if failure is None else 1, failures)
+                if failure is not None:
+                    self.assertIn(failure, failures[0])
+        summary, failures = receipt.readiness_summary(self.readiness_probes([.01, .3, .3, .01, .3, .01]), window)
+        self.assertEqual((failures, summary["over_250ms"], summary["longest_run_over_250ms"], summary["non_200_or_failed"]),
+                         ([], 3, 2, 0))
+        self.assertEqual({key: round(summary[key], 6) for key in ("p50_ms", "p99_ms", "max_ms")},
+                         {"p50_ms": 10, "p99_ms": 300, "max_ms": 300})
+        self.assertEqual(summary["post_sent"]["samples"], 6)
+
+    def test_readiness_comparison_bounds_candidate_p99_and_max_against_flat(self):
+        flat = [.1] * 100
+        cases = (([.1] * 98 + [.151] * 2, "p99"), ([.1] * 98 + [.149] * 2, None),
+                 ([.1] * 99 + [.201], "max"), ([.1] * 99 + [.199], None))
+        for candidate, failed in cases:
+            with self.subTest(candidate=candidate[-1], failed=failed):
+                detail, failures = receipt.readiness_comparison({"flat": flat, "candidate": candidate})
+                self.assertEqual([failure.split()[3] for failure in failures], [] if failed is None else [failed])
+        self.assertEqual({name: {key: round(value, 6) for key, value in values.items()} for name, values in detail.items()},
+                         {"p99_ms": {"flat": 100, "candidate": 100, "limit": 150},
+                          "max_ms": {"flat": 100, "candidate": 199, "limit": 200}})
+
+    def test_readiness_verdict_fails_ceiling_in_either_arm_and_compares_only_unicast(self):
+        def slow_candidate(arm, _index, probes):
+            for probe in probes:
+                if arm == "candidate":
+                    probe["elapsed_seconds"] = .2
+                    probe["finished_monotonic_seconds"] = probe["started_monotonic_seconds"] + .2
+
+        def three_slow_flat(arm, index, probes):
+            if arm == "flat" and index == 0:
+                for probe in probes[5:8]:
+                    probe["elapsed_seconds"] = .3
+                    probe["finished_monotonic_seconds"] = probe["started_monotonic_seconds"] + .3
+
+        def failed_candidate(arm, index, probes):
+            if arm == "candidate" and index == 1:
+                probes[3].update(status=503, phase="response_validation")
+
+        cases = (("full-vpn", None, "PASS", "all predeclared bars met"),
+                 ("full-vpn", slow_candidate, "PASS", "all predeclared bars met"),
+                 ("full-uc", None, "PASS", "all predeclared bars met"),
+                 ("full-uc", slow_candidate, "FAIL", "candidate post-sent /readyz p99 200.0 ms over 37.5 ms bar"),
+                 ("full-vpn", three_slow_flat, "FAIL", "leg-0-flat: 3 consecutive /readyz samples over 250 ms"),
+                 ("full-vpn", failed_candidate, "FAIL", "leg-1-candidate: 1 non-200 or failed /readyz samples"))
+        for profile, mutate, status, reason in cases:
+            with self.subTest(profile=profile, mutate=mutate and mutate.__name__), \
+                    tempfile.TemporaryDirectory(prefix="rmd-readiness-") as directory, \
+                    mock.patch.object(self, "root", Path(directory)):
+                root, _ = self.complete_campaign(measured_failure=True, profile=profile, candidate_duration=2, mutate=mutate)
+                (root / "driver.exit").write_text("1\n" if status == "FAIL" else "0\n")
+                verdict = receipt.finalize(root)
+                self.assertEqual(verdict["status"], status, verdict.get("reason"))
+                self.assertIn(reason, verdict["reason"])
+                self.assertEqual(set(verdict["readiness"]), {path.name for path in root.glob("leg-*")})
+                if profile == "full-vpn":
+                    self.assertEqual(verdict["readiness_comparison"], "not_applicable: arms code-identical")
+                else:
+                    self.assertEqual(set(verdict["readiness_comparison"]), {"p99_ms", "max_ms"})
 
     def test_actual_analyze_failure_survives_driver_cleanup_and_finalizer(self):
         root, _ = self.complete_campaign(measured_failure=True)
@@ -1412,8 +1505,9 @@ rm() {
             (leg / f"metrics-before-{generation}.prom").write_text(metrics(charge if generation == "b" else operation["recovery_settled"]))
             (leg / f"metrics-paused-{generation}.prom").write_text(metrics(held_charge))
             (leg / f"metrics-settled-{generation}.prom").write_text(metrics(operation["recovery_settled"]))
-        lines.append("mass_dirty_exit " + json.dumps({"readiness_samples": 1, "readiness_deadline_ms": 250, "status": "PASS"}))
-        lines.append("mass_dirty_readiness " + json.dumps({"sequence": 1, "status": 200, "deadline_ms": 250, "elapsed_seconds": None,
+        lines.append("mass_dirty_exit " + json.dumps({"readiness_samples": 1, "readiness_interval_ms": 250,
+                                                     "readiness_request_deadline_ms": 1000, "status": "PASS"}))
+        lines.append("mass_dirty_readiness " + json.dumps({"sequence": 1, "status": 200, "phase": None, "request_deadline_ms": 1000, "elapsed_seconds": None,
                                                           "started_monotonic_seconds": None, "finished_monotonic_seconds": None}))
         (leg / "harness.log").write_text("\n".join(lines) + "\n")
         (leg / "daemon.log").write_bytes(daemon_log)

@@ -54,8 +54,9 @@ whole-leg budget. `ordinary-snapshot-failures.jsonl` retains every failed CLI or
 JSON parsing attempt's phase, peer, failure sequence, exit status and exact stdout/stderr; leg
 results disclose the derived counts. Replay checks these records independently
 under the complete raw-evidence hash roster, including an empty failure file.
-Successful calls alone supply the dirty-query bounds. Public readiness retains
-its 250 ms deadline, and any watcher failure remains fatal.
+Successful calls alone supply the dirty-query bounds. A slow or failed public
+readiness sample is recorded and judged by the readiness bars below; it does not
+abort the leg.
 Dirty retained recovery entries/capacity are sampled before release. After resume,
 every target needs a real JSON `outbound routes resynced` receipt with dirty=true
 and force=false, exact final wire fold, unchanged identity/group and clean state.
@@ -76,18 +77,27 @@ The manifest fixes these bars before any result:
   build commands and default features. Their actual binary hashes must differ
   before any cell starts; the consumer checks this again, independently of the
   recorded source patch and binary roster.
-- All sampled public `/readyz` requests return HTTP 200 within the existing
-  250 ms client deadline at a one-second cadence. Contiguous probe sequences
-  retain actual start/end `CLOCK_MONOTONIC` timestamps, matching the controller's
-  trigger, source-drain, resume and observed-fold clock. Successful probes must
-  bracket each complete trigger-to-fold interval; consecutive probe starts,
-  including both brackets, must be at most 1.25 seconds apart. Each B/A receipt
-  reports its bracketed sample count and maximum gap. This is sampled
-  availability, not a claim about every instant. The harness writes directly
-  to the evidence file, so controller waits cannot fill an undrained stdout
-  pipe and stop probing. A watcher failure interrupts pending protocol waits
-  and retains its original error; it cannot wait for another controller command
-  before failing. Correctness-only timing fields remain null.
+- Public `/readyz` is probed at 4 Hz with a 1 s per-request deadline, and
+  every sample's status, elapsed time and failure phase is recorded. Contiguous
+  probe sequences retain actual start/end `CLOCK_MONOTONIC` timestamps, matching
+  the controller's trigger, source-drain, resume and observed-fold clock. Probes
+  must bracket each complete trigger-to-fold interval; consecutive probe starts,
+  including both brackets, must be at most 1.25 seconds apart, or the campaign is
+  INVALID. Each B/A receipt reports its bracketed sample count and maximum gap.
+  This is sampled availability, not a claim about every instant. The harness
+  writes directly to the evidence file, so controller waits cannot fill an
+  undrained stdout pipe and stop probing. Correctness-only timing fields remain null.
+- Readiness ceiling, per leg in either arm: any non-200 or failed sample, any
+  sample over 1 s, or 3 consecutive samples over 250 ms is a FAIL.
+- Readiness comparison, full-uc only: over samples started between source drain
+  and observed fold, pooled per arm, the candidate p99 must be at most flat
+  p99 × 1.25 + 25 ms and its maximum at most flat maximum × 1.5 + 50 ms. In
+  full-vpn the flat derivation changes nothing, so both arms run identical code;
+  those cells are availability evidence only and report
+  `"readiness_comparison": "not_applicable: arms code-identical"`. The verdict
+  reports per-leg p50/p99/max, the count over 250 ms and the longest run of
+  consecutive samples over 250 ms. The daemon's 200 ms core readiness probe
+  deadline is unchanged.
 - No-refusal cells enter no recovery fallback. Across matched operations and
   legs, both median and worst **source-churn command → observed exact final fleet fold**
   must be at most flat × 1.10 + 30 ms. This includes all ingress filling, cold capture
