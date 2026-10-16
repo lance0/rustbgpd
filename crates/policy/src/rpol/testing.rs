@@ -623,9 +623,10 @@ fn check_assertion(
             let present = match lit.node {
                 CommunityLit::Standard(value) => fixture.communities.contains(&value),
                 CommunityLit::Large(value) => fixture.large_communities.contains(&value),
-                CommunityLit::Ext { .. } | CommunityLit::ExtRaw(_) => {
-                    fixture.extended_communities.contains(&ext_value(&lit.node))
-                }
+                CommunityLit::Ext { .. } | CommunityLit::ExtRaw(_) => fixture
+                    .extended_communities
+                    .iter()
+                    .any(|ec| lit.node.to_match().matches_ec(ec)),
             };
             if present {
                 community_listed(&lit.node, mods, false).then(|| {
@@ -707,7 +708,13 @@ fn discard_asserted(assertion: &WithAssertion, fixture: &Fixture, mods: &mut Rou
                 } else {
                     &mut mods.extended_communities_remove
                 }
-                .retain(|v| *v != ext_value(&lit.node)),
+                .retain(|v| {
+                    if add {
+                        *v != ext_value(&lit.node)
+                    } else {
+                        !lit.node.to_match().matches_ec(v)
+                    }
+                }),
             }
         }
         WithAssertion::NotRemoved(_)
@@ -750,13 +757,13 @@ fn community_listed(
         }
         .contains(&lc),
         CommunityLit::Ext { .. } | CommunityLit::ExtRaw(_) => {
-            let value = ext_value(lit);
             if added {
-                &mods.extended_communities_add
+                mods.extended_communities_add.contains(&ext_value(lit))
             } else {
-                &mods.extended_communities_remove
+                mods.extended_communities_remove
+                    .iter()
+                    .any(|ec| lit.to_match().matches_ec(ec))
             }
-            .contains(&value)
         }
     }
 }

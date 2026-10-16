@@ -1225,6 +1225,9 @@ not authorize removals outside that fixture. Pair it with
 `not removed large-community 65501:1:2` and a fixture containing that value to
 catch an overmatching scrub.
 
+Extended-community removal assertions use the policy engine's decoded RT/RO
+identity across encodings. Other extended communities match by their raw bytes.
+
 `with only ASSERTION, ...` also rejects any unlisted modification, including
 an extra scalar assignment, prepend, or community addition or removal. Community
 lists are compared as sets, so their order and repeated assertions do not matter.

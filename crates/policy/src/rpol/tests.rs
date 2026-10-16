@@ -6707,6 +6707,49 @@ fn not_removed_requires_a_fixture_value_and_rejects_overmatching_scrubs() {
 }
 
 #[test]
+fn extended_community_removal_assertions_use_logical_rt_ro_identity() {
+    for kind in ["RT", "RO"] {
+        for (fixture, removal) in [
+            ("65000:1", "0.0.253.232:1"),
+            ("0.0.253.232:1", "65000:1"),
+            ("65536:1", "0.1.0.0:1"),
+            ("0.1.0.0:1", "65536:1"),
+        ] {
+            let policy = format!(
+                "policy p {{ term t {{ remove ext-community {kind}:{removal}; accept }} }}"
+            );
+            let route = format!("route {{ ext-communities [{kind}:{fixture}] }}");
+            let removed = format!(
+                "{policy} test t {{ {route} expect p == accept with not removed ext-community {kind}:{fixture} }}"
+            );
+            let failures = failures_of(&removed);
+            assert_eq!(failures.len(), 1, "{removed}: {failures:?}");
+            assert!(failures[0].contains("not to be removed"));
+            let exact = format!(
+                "{policy} test t {{ {route} expect p == accept with only removes ext-community {kind}:{fixture} }}"
+            );
+            assert_eq!(failures_of(&exact), Vec::<String>::new());
+            let retained = format!(
+                "policy p {{ term t {{ accept }} }} test t {{ {route} expect p == accept with not removed ext-community {kind}:{removal} }}"
+            );
+            assert_eq!(failures_of(&retained), Vec::<String>::new());
+        }
+    }
+    for (fixture, removal) in [
+        ("OV_VALID", "OV_INVALID"),
+        ("RT:65000:1", "RO:65000:1"),
+        ("RO:65000:1", "RT:65000:1"),
+    ] {
+        let retained = format!(
+            "policy p {{ term t {{ remove ext-community {removal}; accept }} }}
+             test t {{ route {{ ext-communities [{fixture}] }}
+             expect p == accept with not removed ext-community {fixture} }}"
+        );
+        assert_eq!(failures_of(&retained), Vec::<String>::new());
+    }
+}
+
+#[test]
 fn with_only_rejects_every_unlisted_modification_kind() {
     let tests = "test exact { route { } expect p == accept with only local-pref 200 }";
     assert_eq!(
