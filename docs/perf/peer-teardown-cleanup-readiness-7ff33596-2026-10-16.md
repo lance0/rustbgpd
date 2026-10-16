@@ -33,19 +33,39 @@ All three pass in every full cell and both arms. No probe errors occurred.
 
 ## Full cells, current arm, maximum over legs
 
-| Profile / cell | Phase (ms) | Max checkpoint interval (ms) | Min body replies | RIB reply max (ms) |
+| Profile / cell | Timed phase (ms) | Max checkpoint interval (ms) | Min body replies | RIB reply max (ms) |
 |---|---:|---:|---:|---:|
-| UC received + GC | 757.9 | 0.86 | 29 | 49.4 |
+| UC received cleanup | 757.9 | 0.86 | 29 | 49.4 |
 | UC private outbound | 259.5 | 1.64 | 10 | 25.0 |
 | UC regroup baseline | 264.0 | 1.05 | 10 | 25.0 |
-| VPN received + GC | 541.8 | 9.16 | 21 | 81.3 |
+| VPN received cleanup | 541.8 | 9.16 | 21 | 81.3 |
 | VPN private outbound | 256.5 | 1.65 | 10 | 25.0 |
 | VPN regroup baseline | 321.0 | 1.39 | 12 | 25.0 |
 
-In the VPN received cell, the VPN stage-map retirement accounts for about 140 ms
-of the phase. Old-drop phase durations are within 5% of the current arm in every
-full cell; the largest gap is UC private outbound, where old-drop is 4.3% slower.
-Empty cells complete in microseconds and are not productive-overlap cells.
+What the timed phase covers differs by row. Received cleanup is the detached
+Adj-RIB-In retirement only; its timer stops before attribute garbage collection.
+Private outbound is the detached private Adj-RIB-Out retirement, and regroup
+baseline is the retained baseline retirement. The readiness columns
+(checkpoint interval, body replies, RIB reply) cover the whole owner, including
+attribute garbage collection for received cleanup; the duration timer does not.
+
+Across these tabulated phase maxima, old-drop is within 5% of the current arm;
+the widest gap is UC private outbound, where old-drop is 4.3% slower. Empty
+cells complete in microseconds and are not productive-overlap cells.
+
+### VPN stage-map retirement
+
+Timed separately in the VPN received cell, with its own timer:
+
+| Arm | Max (ms) |
+|---|---:|
+| Current | 140.1 |
+| Old-drop | 32.3 |
+
+The extra current-arm time is the per-checkpoint instrumentation (a lock and a
+clock read at every checkpoint) that old-drop's single bulk drop does not pay.
+This is instrumented cost, not production cost, and is not within the 5% range
+above.
 
 ## Scope
 
