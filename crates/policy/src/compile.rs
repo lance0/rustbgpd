@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use crate::engine::{AsPathRegex, NamedPolicy, PolicyAction, PolicyChain, PolicyStatement};
 use crate::ir::{
-    Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetSlot, MatchExpr, PolicySource, RegexId,
-    SetId, Term, TermAction,
+    Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetSlot, ForEachNode, LoopSource, MatchExpr,
+    PolicySource, RegexId, SetId, Term, TermAction,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, SetStore};
 
@@ -193,21 +193,43 @@ fn splice_policy(
     donor: &CompiledChain,
     sets: &mut ChainSets,
 ) -> CompiledPolicy {
-    let terms = policy
-        .terms
+    CompiledPolicy {
+        name: policy.name.clone(),
+        terms: remap_terms(&policy.terms, donor, sets),
+        default_action: policy.default_action,
+        source: policy.source,
+    }
+}
+
+/// Remap every term's guard **and** action: `for` loop sources and loop
+/// bodies carry their own table ids, which index the merged tables after
+/// splicing exactly like top-level guards do.
+fn remap_terms(terms: &[Term], donor: &CompiledChain, sets: &mut ChainSets) -> Vec<Term> {
+    terms
         .iter()
         .map(|term| Term {
             name: term.name.clone(),
             guard: remap_expr(&term.guard, donor, sets),
-            action: term.action.clone(),
+            action: match &term.action {
+                TermAction::ForEach(node) => TermAction::ForEach(Box::new(ForEachNode {
+                    source: match &node.source {
+                        LoopSource::AsnSet(id) => {
+                            let index = id.0 as usize;
+                            LoopSource::AsnSet(sets.asn_set_id(
+                                donor.asn_sets[index].clone(),
+                                donor.asn_set_names.get(index).cloned().flatten(),
+                            ))
+                        }
+                        other => *other,
+                    },
+                    slot: node.slot,
+                    var: node.var.clone(),
+                    body: remap_terms(&node.body, donor, sets),
+                })),
+                other => other.clone(),
+            },
         })
-        .collect();
-    CompiledPolicy {
-        name: policy.name.clone(),
-        terms,
-        default_action: policy.default_action,
-        source: policy.source,
-    }
+        .collect()
 }
 
 /// Rewrite set/regex table ids from `donor`'s tables into `sets`.
@@ -241,6 +263,28 @@ fn remap_expr(expr: &MatchExpr, donor: &CompiledChain, sets: &mut ChainSets) -> 
                 donor.asn_sets[index].clone(),
                 donor.asn_set_names.get(index).cloned().flatten(),
             ))
+        }
+        MatchExpr::LocalInAsnSet { slot, name, set } => {
+            let index = set.0 as usize;
+            MatchExpr::LocalInAsnSet {
+                slot: *slot,
+                name: name.clone(),
+                set: sets.asn_set_id(
+                    donor.asn_sets[index].clone(),
+                    donor.asn_set_names.get(index).cloned().flatten(),
+                ),
+            }
+        }
+        MatchExpr::LocalInCommunitySet { slot, name, set } => {
+            let index = set.0 as usize;
+            MatchExpr::LocalInCommunitySet {
+                slot: *slot,
+                name: name.clone(),
+                set: sets.community_set_id(
+                    donor.community_sets[index].clone(),
+                    donor.community_set_names.get(index).cloned().flatten(),
+                ),
+            }
         }
         MatchExpr::AsPathMatches(id) => {
             MatchExpr::AsPathMatches(sets.regex_id(donor.as_path_regexes[id.0 as usize].clone()))

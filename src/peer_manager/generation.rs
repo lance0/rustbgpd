@@ -116,8 +116,8 @@ impl AppliedEffects {
 /// Ignore unused RPOL source tables only at generation resolution. Keep the
 /// installed evaluation handle and counters; the candidate config still owns
 /// its complete source/catalog. Compiling mixed/TOML chains can discard source
-/// distinctions. Unremapped local/loop guards and collapsed set aliases also
-/// keep their existing structural comparison.
+/// distinctions. Local/loop guards and collapsed set aliases also keep their
+/// existing structural comparison.
 fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Option<PolicyChain>) {
     let (Some(installed), Some(next)) = (installed, candidate.as_ref()) else {
         return;

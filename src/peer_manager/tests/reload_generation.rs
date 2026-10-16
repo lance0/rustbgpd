@@ -742,17 +742,17 @@ async fn generation_policy_normalization_preserves_referenced_sets_and_loop_fall
         (
             "asn-set selected { 65001 } policy members-out { term t { let x = route.origin-as; if x in selected { reject } accept } }",
             "asn-set selected { 65002 } policy members-out { term t { let x = route.origin-as; if x in selected { reject } accept } }".to_string(),
-            true,
+            false,
         ),
         (
             "community-set selected { 65000:1 } policy members-out { term t { let x = 4259840001; if x in selected { reject } accept } }",
             "community-set selected { 65000:2 } policy members-out { term t { let x = 4259840001; if x in selected { reject } accept } }".to_string(),
-            true,
+            false,
         ),
         (RS_RPOL_MED_10, RS_RPOL_MED_20.to_string(), false),
-        // Nested loop guards are not remapped by RPOL splicing. Even if its
-        // projected chain compares equal, keep this source change actionable.
-        (loop_policy, loop_policy.replace("65000:1", "65000:2"), true),
+        // Binding and loop set probes are spliced into the chain's set
+        // tables, so the edited member compiles differently and is applied.
+        (loop_policy, loop_policy.replace("65000:1", "65000:2"), false),
     ] {
         let fixture = RsFixture::new();
         let path = fixture.dir.path().join("members.rpol");

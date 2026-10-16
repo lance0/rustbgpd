@@ -6323,3 +6323,47 @@ fn chain_node_budget_excludes_shared_set_contents_and_unused_policies() {
     assert_eq!(chain.policies.len(), 20);
     assert_eq!(chain.asn_sets.len(), 1);
 }
+
+/// Loop sources and loop-body guards carry their own set ids. Splicing a
+/// member into a daemon chain must remap them with the guards, or a body
+/// probes another member's set (or indexes past the merged tables).
+#[test]
+fn chain_splice_remaps_loop_set_ids() {
+    let other = compile_ok(
+        "community-set other { 65000:9 }\n\
+         policy pa { term t { if route.communities in other { reject } } }",
+    );
+    let scrub = compile_ok(
+        "community-set unused { 65000:9 }\n\
+         community-set scrub { 65000:1 }\n\
+         asn-set bogons { 64512 }\n\
+         policy pb {\n\
+           term s { for c in route.communities { if c in scrub { remove community c } } }\n\
+           term b { for asn in bogons { if asn == 64512 { add community 65000:2 } } }\n\
+           term l { let x = 4259840001; if x in scrub { add community 65000:3 } }\n\
+         }",
+    );
+    let scrubbed = (65000 << 16) | 1;
+    let ctx = route_ctx(v4(10, 0, 0, 0, 8), &[scrubbed], RpkiValidation::NotFound);
+    for members in [
+        vec![("pb", scrub.clone())],
+        vec![("pa", other), ("pb", scrub)],
+    ] {
+        let chain = crate::PolicyChain::from_named(
+            members
+                .into_iter()
+                .map(|(name, compiled)| {
+                    crate::NamedPolicy::from_rpol(name.into(), Arc::new(compiled))
+                })
+                .collect(),
+        );
+        let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
+        assert_eq!(evaluation.eval_error, None);
+        assert_eq!(result.action, PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_remove, vec![scrubbed]);
+        assert_eq!(
+            result.modifications.communities_add,
+            vec![(65000 << 16) | 2, (65000 << 16) | 3]
+        );
+    }
+}
