@@ -3590,6 +3590,83 @@ async fn oracle_vpn_source_flip_withdraw_lost_to_full_channel_recovers() {
     );
 }
 
+/// Passes that stage while the member is ALREADY dirty skip its
+/// emission. Their withdrawals ride the staging tombstones and a source
+/// flip onto the member rides its extra-withdraw residue, so the resync
+/// still folds to the per-peer path's exact state.
+#[tokio::test]
+async fn oracle_vpn_passes_while_already_dirty_fold_exactly() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up_families(A, false, true, None, 64, vpn_sendable())
+            .await;
+        o.peer_up_families(B, false, true, None, 64, vpn_sendable())
+            .await;
+        o.peer_up_families(C, false, true, None, 1, vpn_sendable())
+            .await;
+        let eor = o.drain_one(C).await;
+        assert!(eor.vpn_announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // Identities 1 and 3 land in C's channel (fills it).
+        o.vpn_routes(
+            A,
+            vec![
+                vpn_route(vpn_nlri(1, 100), A, 100, vec![]),
+                vpn_route(vpn_nlri(3, 300), A, 100, vec![]),
+            ],
+            vec![],
+        )
+        .await;
+        // Identity 2 announce fails for C → C goes dirty.
+        o.vpn_routes(A, vec![vpn_route(vpn_nlri(2, 200), A, 100, vec![])], vec![])
+            .await;
+        // Already dirty from here on.
+        // Source flip ONTO C: the key stays in the group table.
+        o.vpn_routes(C, vec![vpn_route(vpn_nlri(1, 100), C, 200, vec![])], vec![])
+            .await;
+        // Table withdrawal of an admitted identity (tombstone).
+        o.vpn_routes(A, vec![], vec![vpn_key(3, 300)]).await;
+        // Announce-then-withdraw of a never-admitted identity.
+        o.vpn_routes(A, vec![vpn_route(vpn_nlri(4, 400), A, 100, vec![])], vec![])
+            .await;
+        o.vpn_routes(A, vec![], vec![vpn_key(4, 400)]).await;
+        o.vpn_routes(A, vec![vpn_route(vpn_nlri(5, 500), A, 100, vec![])], vec![])
+            .await;
+
+        let first = o
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
+        assert_eq!(first.vpn_announce.len(), 2, "ids 1+3 preceded the jam");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.check_vpn_invariant("post already-dirty resync").await;
+        o.end_recovery(C).await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
+    assert_eq!(
+        fold_vpn(&grouped),
+        fold_vpn(&ungrouped),
+        "final advertised VPN state must converge on both paths"
+    );
+    let c_final = fold_vpn(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    let key = |n: u8, label: u32| format!("{:?}", vpn_nlri(n, label).key());
+    assert!(
+        !c_final.contains_key(&key(1, 100)),
+        "the source flip onto the already-dirty member must be withdrawn"
+    );
+    assert!(
+        !c_final.contains_key(&key(3, 300)),
+        "the table withdrawal while dirty must be withdrawn"
+    );
+    assert!(!c_final.contains_key(&key(4, 400)));
+    assert!(c_final.contains_key(&key(2, 200)));
+    assert!(c_final.contains_key(&key(5, 500)));
+}
+
 /// RTC-negotiated peers group AND stage VPN (v2 slice 2), with the RFC
 /// 4684 RT membership filter `Φ_m` applied per member at emit. A
 /// wildcard-interest member receives the VPN table; a strict-empty-

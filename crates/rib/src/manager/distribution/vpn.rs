@@ -942,6 +942,38 @@ impl RibManager {
                 // never compared by the oracle).
                 self.apply_group_policy_counters(peer, &stage.evals);
                 let member_filter = self.member_rt_filter(peer);
+                // A member already dirty when this pass staged cannot
+                // take the wire delta: its advertised state is behind
+                // and its pending resync announces the Φ-filtered table.
+                // Staging recorded this pass's withdrawals as VPN
+                // tombstones (its `dirty_members` was non-empty), so
+                // only the member-scoped withdraws, which keep the key
+                // IN the table, need a record. Same shape as the RTC
+                // membership-change path for a dirty member.
+                if self
+                    .group_ribs
+                    .get(&gid)
+                    .is_some_and(|group| group.dirty_members.contains(&peer))
+                {
+                    let lost: Vec<VpnRouteKey> = stage
+                        .member_scoped_withdraws(peer, member_filter.as_ref(), || {
+                            super::super::replacement_readiness_checkpoint(&readiness, false);
+                        })
+                        .collect();
+                    if !lost.is_empty() {
+                        self.pending_extra_withdraws
+                            .entry(peer)
+                            .or_default()
+                            .vpn
+                            .extend(lost);
+                        self.refresh_group_residue_gauge();
+                    }
+                    continue;
+                }
+                #[cfg(test)]
+                {
+                    self.vpn_group_member_emits += 1;
+                }
                 let mut vpn_announce = Vec::new();
                 let mut vpn_withdraw = Vec::new();
                 let count_delta =
@@ -1003,7 +1035,14 @@ impl RibManager {
                             super::super::update_groups::RecoveryFallbackCause::MissingProof,
                         );
                     }
-                    if self.mark_outbound_dirty_inner(peer, false) {
+                    // Warn on the clean→dirty transition only: a member
+                    // that stays blocked would otherwise warn every pass.
+                    let newly_dirty = !self.dirty_peers.contains(&peer);
+                    if self.mark_outbound_dirty_inner(peer, false) && newly_dirty {
+                        #[cfg(test)]
+                        {
+                            self.vpn_member_deferral_warnings += 1;
+                        }
                         warn!(%peer, "outbound VPN update deferred without admission");
                     }
                     // The member missed this pass's withdrawals: record

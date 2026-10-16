@@ -4101,6 +4101,171 @@ fn grouped_vpn_non_full_encoder_refusal_keeps_the_owed_withdrawal() {
     assert!(!manager.dirty_peers.contains(&MEMBER));
 }
 
+/// One RR-client VPN member with a capacity-1 outbound channel; VPN
+/// routes arrive from `OTHER1`.
+fn capacity_one_vpn_member() -> (
+    RibManager,
+    tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate>,
+) {
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+    let mut manager = RibManager::new(
+        rx,
+        query_rx,
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        rustbgpd_telemetry::BgpMetrics::new(),
+    );
+    let (outbound, mut receiver) = tokio::sync::mpsc::channel(1);
+    manager.handle_update(crate::update::RibUpdate::PeerUp {
+        peer: MEMBER,
+        session_id: 0,
+        peer_asn: TARGET_ASN,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: outbound,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while receiver.try_recv().is_ok() {}
+    assert!(manager.vpn_grouped_member_of(MEMBER).is_some());
+    (manager, receiver)
+}
+
+fn receive_vpn(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    announced: Vec<VpnRibRoute>,
+    withdrawn: Vec<VpnRibRouteKey>,
+) {
+    manager.handle_update(crate::update::RibUpdate::VpnRoutesReceived {
+        peer,
+        session_id: 0,
+        announced,
+        withdrawn,
+    });
+}
+
+/// Fold the member's queued updates onto `advertised`; returns the
+/// withdrawn identities.
+fn fold_vpn_wire(
+    receiver: &mut tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate>,
+    advertised: &mut HashSet<VpnRouteKey>,
+) -> HashSet<VpnRouteKey> {
+    let mut withdrawn = HashSet::new();
+    while let Ok(update) = receiver.try_recv() {
+        for key in &update.vpn_withdraw {
+            withdrawn.insert(key.nlri_key);
+            advertised.remove(&key.nlri_key);
+        }
+        advertised.extend(update.vpn_announce.iter().map(|r| r.nlri.key()));
+    }
+    withdrawn
+}
+
+/// A VPN member blocked behind a full channel warns once, on the
+/// clean→dirty transition; later passes skip its emission entirely.
+/// Its resync still folds to the exact table: withdrawals made while
+/// it was dirty reach the wire only for identities it had admitted.
+#[test]
+fn blocked_vpn_member_warns_once_and_skips_emission_until_resync() {
+    let (mut manager, mut receiver) = capacity_one_vpn_member();
+    let key = |n: u8| vpn_route(n, OTHER1).key();
+
+    // Identity 1 fills the channel; identity 2 is refused → dirty.
+    receive_vpn(&mut manager, OTHER1, vec![vpn_route(1, OTHER1)], vec![]);
+    assert!(manager.outbound_channel_full(MEMBER));
+    receive_vpn(&mut manager, OTHER1, vec![vpn_route(2, OTHER1)], vec![]);
+    assert!(manager.dirty_peers.contains(&MEMBER));
+    assert_eq!(manager.vpn_member_deferral_warnings, 1);
+    let emits = manager.vpn_group_member_emits;
+
+    // N more passes while blocked: announces, plus withdrawals of an
+    // admitted (1), a refused (2) and a never-sent (3) identity.
+    for n in 3..=10 {
+        receive_vpn(&mut manager, OTHER1, vec![vpn_route(n, OTHER1)], vec![]);
+    }
+    receive_vpn(&mut manager, OTHER1, vec![], vec![key(1), key(2), key(3)]);
+    assert_eq!(
+        manager.vpn_member_deferral_warnings, 1,
+        "an already-dirty member must not warn again"
+    );
+    assert_eq!(
+        manager.vpn_group_member_emits, emits,
+        "an already-dirty member must not re-emit group deltas"
+    );
+
+    let first = receiver.try_recv().unwrap();
+    assert_eq!(first.vpn_announce.len(), 1);
+    assert_eq!(first.vpn_announce[0].key(), key(1));
+    while manager.resync_dirty_peers_bounded() {}
+    assert!(!manager.dirty_peers.contains(&MEMBER));
+    let mut advertised = HashSet::from([key(1).nlri_key]);
+    let withdrawn = fold_vpn_wire(&mut receiver, &mut advertised);
+    assert_eq!(
+        withdrawn,
+        HashSet::from([key(1).nlri_key]),
+        "only the admitted identity is withdrawn"
+    );
+    assert_eq!(advertised, (4..=10).map(vpn_key).collect::<HashSet<_>>());
+}
+
+/// Without an admitted-key proof the resync withdraws only recorded
+/// residue. Skipped passes for an already-dirty member must still leave
+/// both kinds: staging tombstones for table withdrawals, and the
+/// member-scoped withdraw of a source flip that keeps the key in the
+/// group table.
+#[test]
+fn blocked_vpn_member_without_proof_still_withdraws_missed_keys() {
+    let (mut manager, mut receiver) = capacity_one_vpn_member();
+    receive_vpn(
+        &mut manager,
+        OTHER1,
+        vec![vpn_route(1, OTHER1), vpn_route(3, OTHER1)],
+        vec![],
+    );
+    receive_vpn(&mut manager, OTHER1, vec![vpn_route(2, OTHER1)], vec![]);
+    assert!(manager.dirty_peers.contains(&MEMBER));
+    // The proof-refusal state: no admitted keys, conservative fallback.
+    manager.release_group_admitted_keys(MEMBER);
+    manager.set_group_recovery_fallback(MEMBER, RecoveryFallbackCause::MissingProof);
+
+    let mut own = vpn_route(1, MEMBER);
+    own.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::LocalPref(200),
+    ]);
+    receive_vpn(&mut manager, MEMBER, vec![own], vec![]);
+    assert_eq!(manager.loc_rib.get_vpn(&vpn_key(1)).unwrap().peer, MEMBER);
+    receive_vpn(
+        &mut manager,
+        OTHER1,
+        vec![],
+        vec![vpn_route(3, OTHER1).key()],
+    );
+
+    let first = receiver.try_recv().unwrap();
+    assert_eq!(first.vpn_announce.len(), 2);
+    while manager.resync_dirty_peers_bounded() {}
+    assert!(!manager.dirty_peers.contains(&MEMBER));
+    let mut advertised = HashSet::from([vpn_key(1), vpn_key(3)]);
+    let withdrawn = fold_vpn_wire(&mut receiver, &mut advertised);
+    assert!(withdrawn.contains(&vpn_key(1)), "source flip withdrawn");
+    assert!(
+        withdrawn.contains(&vpn_key(3)),
+        "table withdrawal withdrawn"
+    );
+    assert_eq!(advertised, HashSet::from([vpn_key(2)]));
+}
+
 /// Risk-2 exhaustive VPN source-flip matrix: every combination of
 /// `{old source} × {new source | withdraw}` for a fixed member,
 /// asserted against the per-peer-path reference semantics (design
