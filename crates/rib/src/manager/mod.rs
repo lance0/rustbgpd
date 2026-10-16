@@ -6041,6 +6041,13 @@ impl RibManager {
                                     manager.handle_update(update);
                                 });
                                 self.drain_general_queries_if_unfenced();
+                                // One primary update per actor poll, as
+                                // `drain_ready_updates` does. Without this the
+                                // loop drains a deep backlog up to Tokio's
+                                // whole cooperative budget in one poll; a task
+                                // woken meanwhile (a readiness reply's probe)
+                                // then waits behind that poll on this worker.
+                                tokio::task::yield_now().await;
                             }
                             None => break,
                         }
@@ -6110,6 +6117,8 @@ impl RibManager {
                                     manager.handle_update(update);
                                 });
                                 self.drain_general_queries_if_unfenced();
+                                // One primary update per poll; see above.
+                                tokio::task::yield_now().await;
                             }
                             None => break,
                         }

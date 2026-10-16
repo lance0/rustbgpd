@@ -270,3 +270,56 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// The ordinary event loop applies one primary update per actor poll, as the
+/// timer drain does. Draining a deep backlog inside one poll, up to Tokio's
+/// whole cooperative budget, holds the worker: a task woken meanwhile, such as
+/// a readiness probe answered mid-backlog, waits behind the rest of that poll.
+async fn assert_event_loop_yields_between_primary_updates(armed_timer: bool) {
+    const QUEUED: usize = 16;
+    let (tx, rx) = mpsc::channel(QUEUED);
+    // An armed (not yet due) timer selects the loop's timer-aware wait.
+    let manager = if armed_timer {
+        timer_manager(rx, dummy_query_rx())
+    } else {
+        RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+    };
+    let mut responses = Vec::new();
+    for _ in 0..QUEUED {
+        let (reply, response) = oneshot::channel();
+        tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+        responses.push(response);
+    }
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    let answered = responses
+        .iter_mut()
+        .flat_map(oneshot::Receiver::try_recv)
+        .count();
+    assert_eq!(
+        answered, 1,
+        "one actor poll applied {answered} of {QUEUED} queued primary updates"
+    );
+    drop(tx);
+    actor.await;
+    let rest = responses
+        .iter_mut()
+        .flat_map(oneshot::Receiver::try_recv)
+        .count();
+    assert_eq!(answered + rest, QUEUED);
+}
+
+#[tokio::test(start_paused = true)]
+async fn event_loop_yields_between_queued_primary_updates() {
+    assert_event_loop_yields_between_primary_updates(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn timer_wait_yields_between_queued_primary_updates() {
+    assert_event_loop_yields_between_primary_updates(true).await;
+}

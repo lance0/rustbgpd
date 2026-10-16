@@ -1410,6 +1410,9 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
         "observer retry missed the staged table"
     );
 
+    // The actor arms the resync timer at the top of its next turn. A primary
+    // round trip proves that turn ran before the paused clock moves.
+    let _ = query_state(&tx, observer).await;
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
     let _ = query_state(&tx, observer).await;
