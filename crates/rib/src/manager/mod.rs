@@ -1290,6 +1290,13 @@ struct ReplacementReadinessContext {
     state: Mutex<ReplacementReadiness>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadinessOwnerKind {
+    Replacement,
+    SelectionRelease,
+    PeerTeardown,
+}
+
 /// Register the checkpoint wake when empty, without charging the synchronous
 /// owner's Tokio task budget. The caller retains the existing per-lane cap.
 fn poll_readiness_query<T>(rx: &mut mpsc::Receiver<T>, cx: &mut Context<'_>) -> Poll<Option<T>> {
@@ -1305,8 +1312,9 @@ struct ReplacementReadiness {
     rx: Option<mpsc::Receiver<RibReadinessQuery>>,
     metrics: BgpMetrics,
     count: usize,
-    /// Only selection release changes Loc-RIB while this owner is held.
-    selection_release: bool,
+    /// Selection release and source teardown publish completed prefix changes;
+    /// replacement ownership always keeps its original frozen count.
+    kind: ReadinessOwnerKind,
     started: tokio::time::Instant,
     /// Tokio's clock, so a test can hold the service budget still with a
     /// paused clock; outside a paused runtime it reads the system clock.
@@ -1325,6 +1333,7 @@ struct ReplacementReadiness {
 #[cfg(test)]
 #[derive(Debug)]
 struct ReplacementReadinessReceipt {
+    kind: ReadinessOwnerKind,
     count: usize,
     elapsed: std::time::Duration,
     max_gap: std::time::Duration,
@@ -1487,18 +1496,19 @@ fn service_replacement_readiness_with_origin(
         };
         received += 1;
         let RibReadinessQuery::LocRibCount { reply, enqueued } = query;
-        // Selection release shares the owner and its healthy bound, but an
-        // operator reading `/readyz` must learn which mechanism is running.
-        let (seam, stalled) = if readiness.selection_release {
-            (
+        // Each mechanism shares the healthy bound but reports its own cause.
+        let (seam, stalled) = match readiness.kind {
+            ReadinessOwnerKind::SelectionRelease => (
                 "selection_release",
                 RibReadinessError::SelectionReleaseStalled,
-            )
-        } else {
-            (
+            ),
+            ReadinessOwnerKind::PeerTeardown => {
+                ("peer_teardown", RibReadinessError::PeerTeardownStalled)
+            }
+            ReadinessOwnerKind::Replacement => (
                 "policy_transition_fence",
                 RibReadinessError::PolicyTransitionStalled,
-            )
+            ),
         };
         readiness
             .metrics
@@ -2387,6 +2397,20 @@ impl RibManager {
         with_executor_handoff(|| self.with_readiness_owner(std::time::Duration::ZERO, true, work))
     }
 
+    /// End changing-count teardown before detached-table and attribute cleanup.
+    fn with_peer_teardown_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        let age = self.pending_clean_policy_transition.as_ref().map_or(
+            std::time::Duration::ZERO,
+            distribution::PendingCleanPolicyTransition::elapsed,
+        );
+        with_executor_handoff(|| {
+            let installed = self.begin_readiness_owner_kind(age, ReadinessOwnerKind::PeerTeardown);
+            let result = work(self);
+            self.finish_readiness_owner(installed);
+            result
+        })
+    }
+
     fn with_readiness_owner<T>(
         &mut self,
         age: std::time::Duration,
@@ -2401,6 +2425,21 @@ impl RibManager {
 
     /// Nested work retains the existing owner's exact identity and age.
     fn begin_readiness_owner(&mut self, age: std::time::Duration, selection_release: bool) -> bool {
+        self.begin_readiness_owner_kind(
+            age,
+            if selection_release {
+                ReadinessOwnerKind::SelectionRelease
+            } else {
+                ReadinessOwnerKind::Replacement
+            },
+        )
+    }
+
+    fn begin_readiness_owner_kind(
+        &mut self,
+        age: std::time::Duration,
+        kind: ReadinessOwnerKind,
+    ) -> bool {
         if self.replacement_readiness.is_some() {
             return false;
         }
@@ -2419,7 +2458,7 @@ impl RibManager {
                 rx: self.readiness_rx.take(),
                 metrics: self.metrics.clone(),
                 count: self.loc_rib.len(),
-                selection_release,
+                kind,
                 started,
                 last_service: tokio::time::Instant::now(),
                 budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
@@ -2478,6 +2517,7 @@ impl RibManager {
         {
             self.replacement_readiness_receipts
                 .push(ReplacementReadinessReceipt {
+                    kind: readiness.kind,
                     count: readiness.count,
                     elapsed: readiness.started.elapsed(),
                     max_gap: readiness.max_gap,
@@ -2494,7 +2534,7 @@ impl RibManager {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !context.selection_release {
+            if context.kind == ReadinessOwnerKind::Replacement {
                 return;
             }
             context.count = self.loc_rib.len();
@@ -4682,22 +4722,35 @@ impl RibManager {
             .collect()
     }
 
-    fn exact_export_nlri_is_live(&self, key: &ExactExportKey) -> bool {
+    fn exact_export_nlri_is_live(
+        &self,
+        key: &ExactExportKey,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
         match key {
-            ExactExportKey::Unicast(prefix, _) => {
-                self.unicast_prefix_peers.peers(prefix).any(|peer| {
+            ExactExportKey::Unicast(prefix, _) => self
+                .unicast_prefix_peers
+                .peers(prefix)
+                .inspect(|_| checkpoint())
+                .any(|peer| {
                     self.ribs
                         .get(&peer)
                         .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
-                })
-            }
+                }),
             ExactExportKey::FlowSpec(key) => self.ribs.values().any(|rib| {
+                checkpoint();
                 rib.iter_flowspec()
+                    .inspect(|_| checkpoint())
                     .any(|route| route.selection_key() == *key)
             }),
-            ExactExportKey::Evpn(key) => self.ribs.values().any(|rib| rib.get_evpn(key).is_some()),
+            ExactExportKey::Evpn(key) => self
+                .ribs
+                .values()
+                .inspect(|_| checkpoint())
+                .any(|rib| rib.get_evpn(key).is_some()),
             ExactExportKey::BgpLs(key) => self.ribs.values().any(|rib| {
-                rib.iter_bgpls().any(|route| {
+                checkpoint();
+                rib.iter_bgpls().inspect(|_| checkpoint()).any(|route| {
                     ExactExportKey::BgpLs(route.key()).nlri_identity()
                         == ExactExportKey::BgpLs(key.clone()).nlri_identity()
                 })
@@ -4705,13 +4758,16 @@ impl RibManager {
             ExactExportKey::Vpn(key) => self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .any(|rib| rib.iter_vpn_for_nlri(&key.nlri_key).next().is_some()),
             ExactExportKey::Labeled(key) => self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .any(|rib| rib.iter_labeled_for_prefix(&key.prefix).next().is_some()),
             ExactExportKey::Rtc(key) => self.ribs.values().any(|rib| {
-                rib.iter_rtc().any(|route| {
+                checkpoint();
+                rib.iter_rtc().inspect(|_| checkpoint()).any(|route| {
                     ExactExportKey::Rtc(route.key()).nlri_identity()
                         == ExactExportKey::Rtc(key.clone()).nlri_identity()
                 })
@@ -4730,34 +4786,56 @@ impl RibManager {
         if self.peer_unexportable.is_empty() {
             return;
         }
-        let withdrawn = withdrawn
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            replacement_readiness_checkpoint_at(&readiness, "exact_rejection_retirement", false);
+        };
+        let mut withdrawn = withdrawn
             .into_iter()
-            .map(|key| key.nlri_identity())
+            .map(|key| {
+                checkpoint();
+                key.nlri_identity()
+            })
             .collect::<HashSet<_>>();
         if withdrawn.is_empty() {
             return;
         }
-        let rejected_withdrawn = self
-            .peer_unexportable
-            .values()
-            .flat_map(|rejected| rejected.iter().map(ExactExportKey::nlri_identity))
-            .filter(|identity| withdrawn.contains(identity))
-            .collect::<HashSet<_>>();
+        let mut rejected_withdrawn = HashSet::new();
+        for rejected in self.peer_unexportable.values() {
+            checkpoint();
+            for key in rejected {
+                checkpoint();
+                let identity = key.nlri_identity();
+                if withdrawn.contains(&identity) {
+                    rejected_withdrawn.insert(identity);
+                }
+            }
+        }
         if rejected_withdrawn.is_empty() {
+            retire_hash_set(&mut withdrawn, &mut checkpoint);
+            retire_hash_set(&mut rejected_withdrawn, &mut checkpoint);
             return;
         }
-        let live = rejected_withdrawn
+        let mut live = rejected_withdrawn
             .iter()
-            .filter(|key| self.exact_export_nlri_is_live(key))
+            .filter(|key| {
+                checkpoint();
+                self.exact_export_nlri_is_live(key, &mut checkpoint)
+            })
             .cloned()
             .collect::<HashSet<_>>();
         self.peer_unexportable.retain(|_, rejected| {
+            checkpoint();
             rejected.retain(|key| {
+                checkpoint();
                 let identity = key.nlri_identity();
                 !rejected_withdrawn.contains(&identity) || live.contains(&identity)
             });
             !rejected.is_empty()
         });
+        retire_hash_set(&mut live, &mut checkpoint);
+        retire_hash_set(&mut rejected_withdrawn, &mut checkpoint);
+        retire_hash_set(&mut withdrawn, &mut checkpoint);
     }
 
     fn publish_route_event(&mut self, mut event: RouteEvent) {
