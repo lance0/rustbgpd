@@ -313,23 +313,20 @@ pub mod settlement_test_control {
     }
 
     /// Hold the real exit until a process test has observed the fenced daemon.
-    pub fn before_fail_stop() {
+    #[cfg(not(test))]
+    pub(super) fn before_fail_stop() -> std::io::Result<()> {
         let Some(path) = std::env::var_os("RUSTBGPD_TEST_FAIL_STOP_HOLD") else {
-            return;
+            return Ok(());
         };
-        let mut stream =
-            std::os::unix::net::UnixStream::connect(path).expect("connect fail-stop test hold");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
-            .expect("bound fail-stop test hold");
-        stream
-            .write_all(&[1])
-            .expect("report fail-stop exit boundary");
+        let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.write_all(&[1])?;
         let mut release = [0];
-        stream
-            .read_exact(&mut release)
-            .expect("await fail-stop release");
-        assert_eq!(release, [1], "invalid fail-stop test release");
+        stream.read_exact(&mut release)?;
+        if release != [1] {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        Ok(())
     }
 
     fn read_required(directory: &Path, name: &str) -> Result<String, String> {
@@ -2059,8 +2056,9 @@ fn terminate_process() -> ! {
 
 #[cfg(not(test))]
 fn run_terminal_action(_registry: &Registry) -> ! {
+    // A failed test controller must not disable the mandatory exit.
     #[cfg(debug_assertions)]
-    settlement_test_control::before_fail_stop();
+    let _ = settlement_test_control::before_fail_stop();
     terminate_process()
 }
 

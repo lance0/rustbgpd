@@ -450,7 +450,7 @@ fn post_rename_failure_fences_and_restart_loads_complete_candidate() {
     exercise("publication_ambiguous", true);
 }
 
-fn exercise_sighup_ack_loss(fault: &str) {
+fn exercise_sighup_ack_loss(fault: &str, release: Option<u8>) {
     let dir = RetainOnPanic::new(tempfile::tempdir().expect("create test dir"));
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let runtime_dir = dir.path().join("runtime");
@@ -493,9 +493,12 @@ fn exercise_sighup_ack_loss(fault: &str) {
     daemon.assert_running();
     daemon.sigterm();
     let exiting_at = Instant::now();
-    fail_stop_hold
-        .write_all(&[1])
-        .expect("release fail-stop exit");
+    if let Some(release) = release {
+        fail_stop_hold
+            .write_all(&[release])
+            .expect("release fail-stop exit");
+    }
+    drop(fail_stop_hold);
     let remaining_grace = FAILSTOP_EXIT_LIMIT
         .checked_sub(exiting_at.elapsed())
         .expect("fail-stop release exceeded the exit bound");
@@ -569,13 +572,23 @@ fn exercise_sighup_ack_loss(fault: &str) {
 #[test]
 fn sighup_reconcile_ack_loss_fences_and_exits_once() {
     for _ in 0..3 {
-        exercise_sighup_ack_loss("reconcile");
+        exercise_sighup_ack_loss("reconcile", Some(1));
     }
 }
 
 #[test]
 fn sighup_bridge_persister_ack_loss_fences_and_exits_once() {
     for _ in 0..3 {
-        exercise_sighup_ack_loss("bridge");
+        exercise_sighup_ack_loss("bridge", Some(1));
     }
+}
+
+#[test]
+fn sighup_fail_stop_exits_if_controller_disconnects() {
+    exercise_sighup_ack_loss("bridge", None);
+}
+
+#[test]
+fn sighup_fail_stop_exits_if_controller_release_is_invalid() {
+    exercise_sighup_ack_loss("bridge", Some(0));
 }
