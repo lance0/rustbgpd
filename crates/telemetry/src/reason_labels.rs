@@ -488,6 +488,57 @@ impl InboundConnectionDropReason {
     }
 }
 
+/// Closed `reason` vocabulary of `bgp_readiness_probe_failures_total`: one
+/// row per failed `/readyz` probe, grouped by the failing component. The
+/// rendered 503 body and the WARN log carry the exact error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadinessProbeFailureReason {
+    /// The probe as a whole missed the shared readiness deadline, or
+    /// succeeded only after it.
+    Deadline,
+    /// The peer manager's command channel or reply channel is closed.
+    PeerManagerUnavailable,
+    /// The peer manager did not answer before its deadline.
+    PeerManagerTimeout,
+    /// The RIB manager's command channel or reply channel is closed.
+    RibUnavailable,
+    /// The RIB manager did not answer before its deadline.
+    RibTimeout,
+    /// The RIB answered, but a policy transition, selection-deferral
+    /// release or source-peer teardown has exceeded its stall bound.
+    RibStalled,
+    /// The daemon recorded a fatal availability fault (listener bind
+    /// failure or coordinated shutdown).
+    DaemonUnavailable,
+}
+
+impl ReadinessProbeFailureReason {
+    /// Every canonical reason, preinitialized at zero.
+    pub const ALL: [Self; 7] = [
+        Self::Deadline,
+        Self::PeerManagerUnavailable,
+        Self::PeerManagerTimeout,
+        Self::RibUnavailable,
+        Self::RibTimeout,
+        Self::RibStalled,
+        Self::DaemonUnavailable,
+    ];
+
+    /// The canonical reason label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deadline => "deadline",
+            Self::PeerManagerUnavailable => "peer_manager_unavailable",
+            Self::PeerManagerTimeout => "peer_manager_timeout",
+            Self::RibUnavailable => "rib_unavailable",
+            Self::RibTimeout => "rib_timeout",
+            Self::RibStalled => "rib_stalled",
+            Self::DaemonUnavailable => "daemon_unavailable",
+        }
+    }
+}
+
 impl std::fmt::Display for InboundConnectionDropReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())

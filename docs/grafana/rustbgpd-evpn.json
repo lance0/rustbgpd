@@ -421,6 +421,48 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 23,
+      "type": "row",
+      "title": "Core isolation",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 50},
+      "panels": []
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Core-isolation segment states",
+      "description": "Bound Ethernet Segments by ADR-0140 core-isolation state, aggregated over interface. isolated, backstop_released, suppressed_no_peer and overridden warn; action_failed, ownership_ambiguous and uplink_overlap fail (rbgp doctor evpn.es.<interface>.core_isolation names the interface).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 51},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (instance, state) (evpn_es_core_isolation_state{instance=~\"$instance\"} == 1)",
+          "legendFormat": "{{instance}} {{state}} segments",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Core-isolation signals",
+      "description": "ADR-0140 core-isolation signals, 1 while held: sessions (no Established or GR/LLGR-stale L2VPN/EVPN session) and uplinks (every configured uplink without carrier). The PE is core-isolated while either is 1.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 51},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "max": 1, "decimals": 0, "custom": {"lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "max by (instance, signal) (evpn_core_isolated{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} {{signal}} isolated",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

@@ -1392,8 +1392,8 @@ fn assert_dynamic_neighbor_capacity(
     );
 }
 
-/// `None` when the reason's series does not exist yet — a reason never
-/// recorded has no child, so `None` doubles as "never dropped".
+/// Every reason is exported at 0 from startup, so `Some(0.0)` means "never
+/// dropped" and `None` means the series is missing.
 fn inbound_drop_metric(metrics: &BgpMetrics, reason: &str) -> Option<f64> {
     metrics
         .registry()

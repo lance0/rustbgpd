@@ -611,7 +611,12 @@ members of each bound segment administratively down while the PE is
 core-isolated and at startup until EVPN syncs. The state of each binding is in
 `rbgp doctor` (`evpn.es.<interface>.core_isolation`), the
 `evpn_es_core_isolation_state{interface, state}` gauge, and one log line per
-transition with the state as `reason`.
+transition with the state as `reason`. The EVPN dashboard's "Core isolation"
+row graphs both gauges. The alert pack mirrors the doctor verdicts:
+`EvpnCoreIsolationHold` (warning) fires after a binding has spent 2 minutes in
+`isolated`, `backstop_released`, `suppressed_no_peer` or `overridden`, and
+`EvpnCoreIsolationFault` (critical) after 5 minutes in `action_failed`,
+`ownership_ambiguous` or `uplink_overlap`.
 
 | State | Meaning and next check |
 |-------|------------------------|
