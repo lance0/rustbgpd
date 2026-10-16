@@ -1184,17 +1184,13 @@ impl AdmittedRecovery {
         if shape.fallback.is_none()
             && let (Some(snapshot), Some((_, changes))) = (snapshot, vpn_changes)
         {
-            // Every row key outside the pool was inserted after it: an upper
-            // bound even when the same key is logged more than once.
+            // Every admitted row key outside the pool was inserted after it: an
+            // upper bound even when the same key is logged more than once. Rows
+            // the member does not project add nothing.
             for (key, _) in changes {
-                if table.get_vpn(key).is_some()
-                    && Self::vpn_position(
-                        snapshot,
-                        Key::Vpn(key.nlri_key, key.path_id),
-                        &mut shape.comparisons,
-                        checkpoint,
-                    )
-                    .is_none()
+                if let Some(projected) = table.get_vpn(key).and_then(&project_vpn)
+                    && Self::vpn_position(snapshot, projected, &mut shape.comparisons, checkpoint)
+                        .is_none()
                 {
                     shape.additions = shape.additions.checked_add(1).ok_or_else(Self::overflow)?;
                 }
@@ -3683,6 +3679,46 @@ mod tests {
         assert!(proof.contains(&vpn_exact(700)));
         assert!((0..200).all(|n| proof.contains(&vpn_exact(n))));
         assert_retained_credit(&ledger);
+    }
+
+    #[test]
+    fn logged_keys_a_member_does_not_project_reserve_no_sparse_capacity() {
+        let mut table = logged_vpn_table(200);
+        let mut ledger = AdmittedRecovery::new();
+        let admits = |route: &VpnRibRoute| match route.nlri.prefix {
+            VpnPrefix::V4 { addr, .. } => addr.to_bits() < 1_000,
+            VpnPrefix::V6 { .. } => false,
+        };
+        let hint = capture_vpn_where(&mut ledger, peer(1), None, &table, true, admits).handle;
+        // As many filtered insertions as pooled keys: counting them as sparse
+        // additions would make the shared view costlier than a flat proof.
+        for n in 1_000..1_200 {
+            table.insert_vpn(vpn_route(n));
+        }
+        let shape = ledger
+            .full_old_shape_with_checkpoint(
+                hint,
+                &table,
+                true,
+                |_| None,
+                |route| {
+                    let key = route.key();
+                    admits(route).then_some(Key::Vpn(key.nlri_key, key.path_id))
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!((shape.count, shape.additions), (200, 0));
+        let warm = capture_vpn_where(&mut ledger, peer(2), hint, &table, true, admits);
+        assert_eq!(
+            warm.handle, hint,
+            "filtered churn must not force a flat proof"
+        );
+        assert_eq!(warm.fallback, None);
+        let proof = ledger.get(&peer(2)).unwrap();
+        assert_eq!(proof.len(), 200);
+        assert!((0..200).all(|n| proof.contains(&vpn_exact(n))));
+        assert!(!proof.contains(&vpn_exact(1_000)));
     }
 
     #[test]
