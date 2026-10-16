@@ -2356,8 +2356,15 @@ class RetirementReceiptTests(unittest.TestCase):
                                                   "repository": "unused", "checker": receipt.__file__},
                                 text=True, capture_output=True, timeout=30, check=False)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual((root / "driver.exit").read_text(), "1\n")
+        # Execution and cleanup succeeded; only the verdict is red.
+        self.assertEqual((root / "driver.exit").read_text(), "0\n")
         self.assertIn("FAIL: readiness bar exceeded: retirement-regroup-full-3-old-drop", result.stderr)
+        resummarized = subprocess.run([sys.executable, receipt.__file__, "summarize-retirement", str(root)],
+                                      capture_output=True, text=True, timeout=30)
+        self.assertEqual(resummarized.returncode, 1)
+        again = json.loads((root / "comparison.json").read_text())
+        self.assertEqual((again["verdict"], len(again["samples"])), ("FAIL", 24))
+        self.assertIn("readiness bar exceeded", again["reason"])
         finalized = subprocess.run([sys.executable, receipt.__file__, "summarize-retirement", str(root),
                                     "--failed-driver-exit", "1"], capture_output=True, text=True, timeout=30)
         self.assertEqual(finalized.returncode, 1)

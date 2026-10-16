@@ -110,10 +110,11 @@ finish_retirement() {
         if [[ $candidate_status != 0 || $old_status != 0 || $remove_status != 0 ]]; then status=1; fi
     fi
     [[ $status == 0 ]] || printf '%s\n' "$work_root" > "$output/scratch-retained.txt"
+    # driver.exit records execution and cleanup only; the verdict lives in
+    # comparison.json, so re-summarizing a completed FAIL stays FAIL.
     printf '%s\n' "$status" > "$output/driver.exit"
     if [[ $status == 0 ]]; then
         python3 "$checker" summarize-retirement "$output" || status=$?
-        printf '%s\n' "$status" > "$output/driver.exit"
     fi
     exit "$status"
 }
