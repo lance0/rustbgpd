@@ -1052,3 +1052,11 @@ The capture-scan harness still measures VPN as an explicit flat control, so
 this amendment records no shared-VPN capture-cost result. Flat fallback,
 conservative withdrawal and the receipt's disqualification rule are unchanged.
 Private and regroup captures stay flat.
+
+Each table also carries a VPN key-set version: a process-unique table id plus
+a count of VPN key additions, removals and clears; replacing an existing
+route's value keeps it. A pool records the version of the table it was built
+from. While the versions match, every projected VPN row is a pool key, so the
+shape pass counts VPN rows without probing, and a projection that covers all
+pool VPN keys sets that whole bit range. A partial projection on a current
+pool probes without additions; any version mismatch takes the exact probe path.
