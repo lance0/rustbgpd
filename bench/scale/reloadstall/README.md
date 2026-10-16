@@ -64,7 +64,11 @@ withdrawal must have an actual prior route, and every final family fold must be
 exact. Session replacement, slow-peer isolation, bystander/duplicate withdrawals,
 unexpected families, labels, attributes or next hops fail the run.
 Receivers are held paused with full queues on purpose, so the fixture sets
-`slow_peer_duration = 0`; the cell does not measure slow-peer detection.
+`slow_peer_duration = 0` and `send_hold_time = 0`; the cell does not measure
+slow-peer detection or the RFC 9687 send hold timer.
+The source session uses an Ethernet-sized 1448-byte MSS. Loopback's 64 KiB
+segments can exceed the daemon's autotuned receive buffer, which forces
+receive-queue drops and leaves the feed waiting on backed-off TCP timers.
 Announcement checks cover the complete semantic attribute set, including the
 expected reflector additions; UPDATE packing and attribute order may differ.
 During recovery, an already-present value may be replayed before that key's
@@ -101,6 +105,14 @@ The manifest fixes these bars before any result:
   must be at most flat × 1.10 + 30 ms. This includes all ingress filling, cold capture
   and the mandatory paused dirty-witness work. Post-resume receiver quantiles
   are diagnostic and cannot replace the whole-operation bar.
+- Source churn is attributed, not assumed. Each operation retains the harness's
+  source-socket write timing (every write that blocked at least 20 ms, with its
+  offset), the harness process CPU, kernel TCP counter deltas, `ss -tinmo` for both
+  ends of the source session (also sampled every 100 ms during the churn, with
+  the feeder's sampled persist and retransmit timer time as a diagnostic that
+  never feeds a bar; a failed sample makes it unavailable), and per-CPU host steal on the daemon and harness CPUs. Steal
+  above 5% of those CPUs' time during a churn makes the campaign INVALID with the
+  leg and generation named; it is never charged to the fold bar.
 - Cap-pressure cells must recover correctly within the fixed 1,800-second
   whole-leg deadline and disclose every fallback cause. They are resource and
   correctness controls, not pure storage performance comparisons. Flat payload

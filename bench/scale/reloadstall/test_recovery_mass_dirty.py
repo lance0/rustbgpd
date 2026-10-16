@@ -7,6 +7,8 @@ import fcntl
 import importlib.util
 import io
 import json
+import shutil
+import threading
 import os
 from pathlib import Path
 import subprocess
@@ -181,6 +183,7 @@ class MassDirtyTests(unittest.TestCase):
             self.assertFalse(config["neighbors"][0]["route_reflector_client"])
             self.assertTrue(all(row["route_reflector_client"] for row in config["neighbors"][1:]))
             self.assertTrue(all(row["slow_peer_duration"] == 0 for row in config["neighbors"]))
+            self.assertTrue(all(row["send_hold_time"] == 0 for row in config["neighbors"]))
             expected = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"] if profile == "full-vpn" else ["ipv4_unicast", "ipv6_unicast"]
             self.assertEqual(config["neighbors"][0]["families"], expected)
             policy = (scenario / "member.rpol").read_text()
@@ -919,6 +922,132 @@ class MassDirtyTests(unittest.TestCase):
                 self.assertEqual(set(verdict["readiness"]), {path.name for path in root.glob("leg-*")})
                 self.assertEqual(set(verdict["readiness_comparison"]), {"p99_ms", "max_ms"})
 
+    def test_host_steal_during_source_churn_is_invalid_not_a_fold_fail(self):
+        for (steal, total), status in (((28, 560), "FAIL"), ((6, 100), "INVALID")):
+            with self.subTest(steal=steal, total=total), tempfile.TemporaryDirectory(prefix="rmd-steal-") as directory, \
+                    mock.patch.object(self, "root", Path(directory)):
+                root, _ = self.complete_campaign(measured_failure=True)  # slow candidate: fold-bar FAIL
+                path = root / "leg-1-candidate" / "result.json"
+                row = json.loads(path.read_text())
+                row["operations"][0]["source_feed"].update(steal_ticks=steal, cpu_ticks=total, steal_fraction=steal / total)
+                receipt.write_json(path, row)
+                (root / "driver.exit").write_text("1\n")
+                verdict = receipt.finalize(root)
+                self.assertEqual(verdict["status"], status, verdict["reason"])
+                if status == "INVALID":
+                    self.assertEqual(verdict["reason"], "leg-1-candidate generation b: host CPU steal 6.0% "
+                                                        "of daemon/harness CPU time during source churn")
+
+    def test_source_feed_receipt_must_match_the_harness_record(self):
+        root, _ = self.complete_campaign()
+        path = root / "leg-0-flat" / "result.json"
+        row = json.loads(path.read_text())
+        row["operations"][1]["source_feed"]["feed"]["writes"] -= 1
+        receipt.write_json(path, row)
+        self.assertEqual(receipt.finalize(root)["reason"], "source feed receipt differs")
+
+    def test_steal_bar_is_exact_at_the_inclusive_limit_through_source_feed(self):
+        def snapshot(total, steal):
+            return {"monotonic": 0.0, "cpus": {0: {"total": total, "steal": steal}}, "harness_cpu_ticks": 0,
+                    "tcp": {}, "source_socket": None, "source_socket_error": None}
+        with mock.patch.object(receipt.os, "sysconf", return_value=100):
+            at_limit = receipt.source_feed(snapshot(0, 0), snapshot(560, 28), {}, {0})
+            over = receipt.source_feed(snapshot(0, 0), snapshot(560, 29), {}, {0})
+        # Seconds-first arithmetic gave 0.05000000000000001 and a false INVALID.
+        self.assertGreater((28 / 100) / (560 / 100), receipt.LIMITS["source_feed_steal_fraction"])
+        self.assertEqual((at_limit["steal_ticks"], at_limit["cpu_ticks"]), (28, 560))
+        self.assertFalse(receipt.host_steal_exceeds(at_limit))
+        self.assertTrue(receipt.host_steal_exceeds(over))
+
+    def test_source_socket_parse_and_timer_diagnostic(self):
+        text = ("ESTAB 0      0      127.0.0.1:17986 127.1.0.1:59409\n"
+                "\t skmem:(r0,rb131072,t0,tb2626560,f1328,w0,o0,bl0,d3) cubic rto:201\n"
+                "ESTAB 0      17259  127.1.0.1:59409 127.0.0.1:17986 timer:(persist,482ms,1)\n"
+                "\t skmem:(r0,rb131072,t0,tb2626560,f2261,w18219,o0,bl0,d0) cubic rto:203 backoff:4 "
+                "unacked:2 retrans:0/7 snd_wnd:0\n")
+        ends = receipt.source_sockets(text)
+        self.assertEqual(ends["daemon"], {"recvq": 0, "sendq": 0, "timer": None, "snd_wnd": 0, "backoff": 0,
+                                          "unacked": 0, "retrans": 0, "rmem": 0, "rcvbuf": 131072, "drops": 3})
+        self.assertEqual((ends["feeder"]["timer"], ends["feeder"]["backoff"], ends["feeder"]["retrans"]),
+                         ("persist", 4, 7))
+        path = self.root / "socket.jsonl"
+        on = {**ends, "feeder": {**ends["feeder"], "timer": "on"}}
+        path.write_text("".join(json.dumps({"monotonic": t, **row}) + "\n" for t, row in
+                                ((0.0, on), (0.1, ends), (0.4, ends), (0.5, on), (0.6, ends))))
+        timers = receipt.source_socket_timers(path, True)
+        self.assertAlmostEqual(timers["persist_timer_seconds"], 0.4)
+        self.assertAlmostEqual(timers["retransmit_timer_seconds"], 0.2)
+        self.assertIsNone(timers["unavailable"])
+
+    def test_socket_collection_failure_is_unavailable_not_a_zero(self):
+        failed = subprocess.CompletedProcess([], 1, stdout="", stderr="netlink denied")
+        missing = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        for name, effect in (("failed", [failed]), ("missing", [missing]),
+                             ("timeout", subprocess.TimeoutExpired("ss", 5))):
+            with self.subTest(name=name):
+                with mock.patch.object(receipt.subprocess, "run", side_effect=effect if name == "timeout" else effect * 3):
+                    ends, error = receipt.read_source_session()
+                    self.assertIsNone(ends)
+                    self.assertTrue(error)
+                    path, stop = self.root / f"{name}.jsonl", threading.Event()
+                    sampler = threading.Thread(target=receipt.sample_source_session, args=(path, stop, .01))
+                    sampler.start()
+                    time.sleep(.03)
+                    stop.set()
+                    sampler.join(timeout=10)
+                timers = receipt.source_socket_timers(path, True)
+                self.assertEqual(set(timers), {"unavailable"})
+                self.assertIn("socket samples failed", timers["unavailable"])
+        real_run = subprocess.run
+
+        def missing_ss(args, **kwargs):
+            return real_run([str(self.root / "no-such-ss"), *args[1:]], **kwargs)
+
+        with mock.patch.object(receipt.subprocess, "run", side_effect=missing_ss):
+            ends, error = receipt.read_source_session()
+            self.assertIsNone(ends)
+            self.assertIn("ss could not run", error)
+            snapshot = receipt.feed_snapshot(os.getpid())
+        self.assertEqual((snapshot["source_socket"], snapshot["source_socket_error"][:16]), (None, "ss could not run"))
+        self.assertEqual(receipt.source_socket_timers(path, False), {"unavailable": "socket sampler did not stop"})
+        self.assertEqual(receipt.source_socket_timers(self.root / "absent.jsonl", True),
+                         {"unavailable": "fewer than two socket samples"})
+
+    def test_source_session_sampler_sees_both_live_ends(self):
+        if shutil.which("ss") is None:
+            self.skipTest("ss unavailable")
+        with socket.socket() as server, socket.socket() as client:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                server.bind(("127.0.0.1", 17986))
+            except OSError:
+                self.skipTest("port 17986 busy")
+            server.listen()
+            client.bind(("127.1.0.1", 0))
+            client.connect(("127.0.0.1", 17986))
+            accepted, _ = server.accept()
+            with accepted:
+                client.sendall(b"x" * 4096)
+                stop, path = threading.Event(), self.root / "live.jsonl"
+                sampler = threading.Thread(target=receipt.sample_source_session, args=(path, stop, .01))
+                sampler.start()
+                time.sleep(.05)
+                stop.set()
+                sampler.join(timeout=10)
+        row = json.loads(path.read_text().splitlines()[0])
+        self.assertEqual(row["daemon"]["recvq"], 4096)
+        self.assertEqual(row["feeder"]["sendq"], 0)
+
+    def test_feed_snapshot_reads_live_host_and_process_counters(self):
+        before = receipt.feed_snapshot(os.getpid())
+        sum(range(200_000))
+        after = receipt.feed_snapshot(os.getpid())
+        feed = receipt.source_feed(before, after, {"generation": "b"}, {0})
+        self.assertEqual(feed["cpus"], [0])
+        self.assertGreaterEqual(feed["steal_fraction"], 0)
+        self.assertGreaterEqual(feed["harness_cpu_seconds"], 0)
+        self.assertIn("Tcp:RetransSegs", before["tcp"])
+
     def test_actual_analyze_failure_survives_driver_cleanup_and_finalizer(self):
         root, _ = self.complete_campaign(measured_failure=True)
         expected = receipt.analyze(root)
@@ -1490,6 +1619,10 @@ rm() {
         daemon_log = bytearray(b'{"fields":{"message":"startup"}}\n')
         for generation in ("b", "a"):
             lines.append("mass_dirty_paused " + json.dumps({"generation": generation, "receivers": receivers}))
+            feed = {"generation": generation, "writes": 2 * stimulus["origin_cardinality"], "stall_threshold_ms": 20,
+                    "stall_roster_limit": 2048, "write_seconds": None, "stalls": None, "stall_seconds": None,
+                    "stall_roster": None}
+            lines.append("mass_dirty_feed " + json.dumps(feed))
             lines.append("mass_dirty_sent " + json.dumps({"generation": generation, "family_keys": manifest["family_keys"],
                 "announcement_messages": stimulus["origin_cardinality"], "eor_messages": stimulus["origin_cardinality"],
                 "origin_cardinality": stimulus["origin_cardinality"], "writer_drained": True, "drained_monotonic_seconds": None}))
@@ -1502,7 +1635,13 @@ rm() {
                          "trigger_to_drain_seconds": None, "drain_to_resume_seconds": None, "resume_to_observed_fold_seconds": None,
                          "trigger_monotonic_seconds": None, "drain_monotonic_seconds": None,
                          "resume_monotonic_seconds": None, "fold_monotonic_seconds": None,
-                         "readiness_coverage": {"sample_count": None, "max_start_gap_seconds": None}}
+                         "readiness_coverage": {"sample_count": None, "max_start_gap_seconds": None},
+                         "source_feed": {"window_seconds": 1.0, "cpus": [0, 1, 2], "steal_ticks": 0, "cpu_ticks": 300,
+                                         "clock_ticks_per_second": 100, "steal_seconds": 0.0, "cpu_seconds": 3.0,
+                                         "steal_fraction": 0.0, "harness_cpu_seconds": 0.5, "tcp_deltas": {},
+                                         "source_socket_before": None, "source_socket_after": None,
+                                         "source_socket_errors": [], "feed": feed,
+                                         "source_socket_timers": {"unavailable": "fixture"}}}
             row["operations"].append(operation)
             dirty = [{"message": "outbound routes resynced", "peer": item["peer"], "dirty": True, "force": False,
                       "generation": generation} for item in peers]

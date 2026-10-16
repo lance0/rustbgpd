@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -18,6 +19,7 @@ import statistics
 import stat
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.request
@@ -33,7 +35,10 @@ LIMITS = {"daemon_bytes": 10 * GIB, "harness_bytes": 2 * GIB,
           "readiness_ceiling_seconds": 1.0, "readiness_slow_seconds": .250, "readiness_slow_run": 3,
           "readiness_p99_relative": 1.25, "readiness_p99_absolute_seconds": .025,
           "readiness_max_relative": 1.5, "readiness_max_absolute_seconds": .050,
-          "convergence_relative": 1.10, "convergence_absolute_seconds": 0.030}
+          "convergence_relative": 1.10, "convergence_absolute_seconds": 0.030,
+          # Host CPU steal on the daemon/harness CPUs during a source churn
+          # above this fraction makes the leg INVALID, not a timing FAIL.
+          "source_feed_steal_fraction": .05}
 OWNED_INPUTS = ("src/main.rs", "src/recovery_mass_dirty.rs", "recovery_mass_dirty.py",
                 "test_recovery_mass_dirty.py", "run-recovery-mass-dirty.sh", "README.md")
 SUPPORT_INPUTS = ("sample-daemon-cgroup.py", "../provenance.sh", "../cgroup-memory.sh",
@@ -210,11 +215,12 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
              "[global.telemetry.grpc_uds]", f"path = {json.dumps(str(directory / 'grpc.sock'))}", "",
              "[policy]", 'rpol_files = ["member.rpol"]', 'export_chain = ["member-out"]', "",
              "[policy.datasets.generation_b]", 'path = "generation.list"', ""]
-    # Receivers are held paused with full queues on purpose; the daemon's 30 s
-    # slow-peer timer is not under test and must not flag the held cohort.
+    # Receivers are held paused with full queues on purpose; neither the daemon's
+    # 30 s slow-peer timer nor its RFC 9687 send hold timer (default 480 s) is
+    # under test, and neither may flag or drop the held cohort.
     for index in range(receivers + 1):
         lines.extend(["[[neighbors]]", f'address = "{peer(index)}"', "remote_asn = 64512",
-                      f"families = {families}", "hold_time = 180", "slow_peer_duration = 0",
+                      f"families = {families}", "hold_time = 180", "slow_peer_duration = 0", "send_hold_time = 0",
                       f"route_reflector_client = {'true' if index else 'false'}", ""])
     (directory / "config.toml").write_text("\n".join(lines))
     return {name: digest(directory / name) for name in FIXTURE_INPUTS}
@@ -614,6 +620,126 @@ def snapshot_cgroup(pid, maximum):
     return {"path": str(group), **values, "events": events, "boundary_monotonic_ns": time.monotonic_ns()}
 
 
+def kernel_tcp_counters():
+    counters = {}
+    for path in ("/proc/net/snmp", "/proc/net/netstat"):
+        lines = Path(path).read_text().splitlines()
+        for names, values in zip(lines[::2], lines[1::2]):
+            group, *keys = names.split()
+            if group in ("Tcp:", "TcpExt:"):
+                counters.update({group + key: int(value) for key, value in zip(keys, values.split()[1:])})
+    return counters
+
+
+# Both ends of the source session: the daemon side's skmem drop count (d)
+# separates receive-queue drops from host-wide counters the receivers share.
+SOURCE_SESSION = ("(", "src", "127.1.0.1", "and", "dport", "=", ":17986", ")", "or",
+                  "(", "dst", "127.1.0.1", "and", "sport", "=", ":17986", ")")
+
+
+def source_sockets(text):
+    """Compact per-end fields from `ss -tinmoH` for the source session."""
+    ends = {}
+    lines = text.splitlines()
+    for header, info in zip(lines[::2], lines[1::2]):
+        _state, recvq, sendq, local = header.split()[:4]
+        timer = re.search(r"\btimer:\((\w+),", header)
+        fields = {"recvq": int(recvq), "sendq": int(sendq), "timer": timer.group(1) if timer else None}
+        for name, pattern in (("snd_wnd", r"\bsnd_wnd:(\d+)"), ("backoff", r"\bbackoff:(\d+)"),
+                              ("unacked", r"\bunacked:(\d+)"), ("retrans", r"\bretrans:\d+/(\d+)")):
+            match = re.search(pattern, info)
+            fields[name] = int(match.group(1)) if match else 0
+        memory = re.search(r"skmem:\(r(\d+),rb(\d+),.*?,d(\d+)\)", info)
+        if memory:
+            fields.update(rmem=int(memory.group(1)), rcvbuf=int(memory.group(2)), drops=int(memory.group(3)))
+        ends["daemon" if local.endswith(":17986") else "feeder"] = fields
+    return ends
+
+
+def read_source_session():
+    """Both source-session ends, or an error string; a failure is never an empty measurement."""
+    try:
+        run = subprocess.run(["ss", "-tinmoH", *SOURCE_SESSION], capture_output=True, text=True, timeout=5, check=False)
+    except subprocess.TimeoutExpired:
+        return None, "ss timed out"
+    except OSError as error:  # missing or non-executable ss is a diagnostic, not a driver failure
+        return None, f"ss could not run: {error}"
+    if run.returncode != 0:
+        return None, f"ss exit {run.returncode}: {run.stderr.strip()}"
+    ends = source_sockets(run.stdout)
+    if set(ends) != {"daemon", "feeder"}:
+        return None, "source session ends missing"
+    return ends, None
+
+
+def sample_source_session(path, stop, interval=.1):
+    """Both source-session ends every interval until stop, for stall attribution."""
+    with path.open("w") as out:
+        while not stop.is_set():
+            ends, error = read_source_session()
+            out.write(json.dumps({"monotonic": time.monotonic(), **(ends or {"error": error})}) + "\n")
+            stop.wait(interval)
+
+
+def source_socket_timers(path, stopped):
+    """Sampled time the feeder's kernel TCP timer was persist or retransmit.
+
+    Diagnostic only: it attributes a slow ingest and never feeds a bar. Any
+    failed or missing sample makes the whole diagnostic unavailable.
+    """
+    if not stopped:
+        return {"unavailable": "socket sampler did not stop"}
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.is_file() else []
+    failed = [row["error"] for row in rows if "error" in row]
+    if failed:
+        return {"unavailable": f"{len(failed)} of {len(rows)} socket samples failed: {failed[0]}"}
+    if len(rows) < 2:
+        return {"unavailable": "fewer than two socket samples"}
+    timers = {"persist": 0.0, "on": 0.0}
+    for row, after in zip(rows, rows[1:]):
+        if row["feeder"]["timer"] in timers:
+            timers[row["feeder"]["timer"]] += after["monotonic"] - row["monotonic"]
+    return {"unavailable": None, "samples": len(rows), "persist_timer_seconds": timers["persist"],
+            "retransmit_timer_seconds": timers["on"]}
+
+
+def feed_snapshot(harness_pid):
+    """Host steal, harness CPU, kernel TCP counters and the source socket around a churn."""
+    cpus = {}
+    for line in Path("/proc/stat").read_text().splitlines():
+        name, *values = line.split()
+        if name.startswith("cpu") and name != "cpu":
+            ticks = [int(value) for value in values[:8]]
+            cpus[int(name[3:])] = {"total": sum(ticks), "steal": ticks[7]}
+    fields = Path(f"/proc/{harness_pid}/stat").read_text().rsplit(")", 1)[1].split()
+    ends, error = read_source_session()
+    return {"monotonic": time.monotonic(), "cpus": cpus, "harness_cpu_ticks": int(fields[11]) + int(fields[12]),
+            "tcp": kernel_tcp_counters(), "source_socket": ends, "source_socket_error": error}
+
+
+def source_feed(before, after, feed, cpus):
+    ticks = os.sysconf("SC_CLK_TCK")
+    steal = sum(after["cpus"][cpu]["steal"] - before["cpus"][cpu]["steal"] for cpu in cpus)
+    total = sum(after["cpus"][cpu]["total"] - before["cpus"][cpu]["total"] for cpu in cpus)
+    # Integer ticks decide the bar; seconds and the float fraction are reporting only.
+    return {"window_seconds": after["monotonic"] - before["monotonic"], "cpus": sorted(cpus),
+            "steal_ticks": steal, "cpu_ticks": total, "clock_ticks_per_second": ticks,
+            "steal_seconds": steal / ticks, "cpu_seconds": total / ticks,
+            "steal_fraction": steal / total if total else 0.0,
+            "harness_cpu_seconds": (after["harness_cpu_ticks"] - before["harness_cpu_ticks"]) / ticks,
+            "tcp_deltas": {name: value - before["tcp"].get(name, 0) for name, value in after["tcp"].items()
+                           if value != before["tcp"].get(name, 0)},
+            "source_socket_before": before["source_socket"], "source_socket_after": after["source_socket"],
+            "source_socket_errors": [error for error in (before["source_socket_error"], after["source_socket_error"]) if error],
+            "feed": feed}
+
+
+def host_steal_exceeds(feed):
+    """Exact tick comparison against the inclusive predeclared steal bar."""
+    return feed["cpu_ticks"] > 0 and (Fraction(feed["steal_ticks"], feed["cpu_ticks"])
+                                      > Fraction(str(LIMITS["source_feed_steal_fraction"])))
+
+
 def start_harness(args, log, errors):
     # Readiness writes continue while the controller waits for churn/dirty receipts.
     # A regular evidence file has no undrained-pipe dependency on those waits.
@@ -767,10 +893,22 @@ def run_cell(args):
                 if manifest["cohort"] == "no-refusal":
                     require(not any(operation_fallback.values()), "no-refusal cell entered conservative fallback before churn")
                 log_offset = (leg / "daemon.log").stat().st_size
+                feed_before = feed_snapshot(engine_pid)
+                socket_log, socket_stop = leg / f"source-socket-{generation}.jsonl", threading.Event()
+                socket_sampler = threading.Thread(target=sample_source_session, args=(socket_log, socket_stop), daemon=True)
+                socket_sampler.start()
                 triggered = None if correct else time.monotonic()
                 engine.stdin.write(f"churn {generation}\n")
                 engine.stdin.flush()
-                sent = read_record(engine, records, "mass_dirty_sent", deadline)
+                try:
+                    feed = read_record(engine, records, "mass_dirty_feed", deadline)
+                    sent = read_record(engine, records, "mass_dirty_sent", deadline)
+                finally:
+                    socket_stop.set()
+                    socket_sampler.join(timeout=10)
+                feed = source_feed(feed_before, feed_snapshot(engine_pid), feed,
+                                   cpu_set(manifest["daemon_cpus"]) | cpu_set(manifest["harness_cpus"]))
+                feed["source_socket_timers"] = source_socket_timers(socket_log, not socket_sampler.is_alive())
                 require(sent["generation"] == generation and sent["family_keys"] == manifest["family_keys"] and
                         sent["writer_drained"] is True and
                         all(sent[name] == manifest["wire_stimulus"]["origin_cardinality"] for name in
@@ -855,7 +993,8 @@ def run_cell(args):
                     "trigger_to_fold_seconds": None if correct else observed_at - triggered,
                     "trigger_to_drain_seconds": None if correct else drained_at - triggered,
                     "drain_to_resume_seconds": None if correct else resumed_at - drained_at,
-                    "resume_to_observed_fold_seconds": None if correct else observed_at - resumed_at})
+                    "resume_to_observed_fold_seconds": None if correct else observed_at - resumed_at,
+                    "source_feed": feed})
             validate_fixture(scenario, hashes)
             require(process_identity(pid, binary) == owner, "daemon identity changed")
             if not correct:
@@ -970,6 +1109,12 @@ def analyze(root):
         require(row["status"] == ("CORRECTNESS_ONLY" if manifest["correctness_only"] else "PASS"), "leg failed")
         require([operation["generation"] for operation in row["operations"]] == ["b", "a"], "operation coverage mismatch")
         probes = validate_leg(path.parent, manifest, row)
+        if not manifest["correctness_only"]:
+            for operation in row["operations"]:
+                feed = operation["source_feed"]
+                require(not host_steal_exceeds(feed),
+                        f"{path.parent.name} generation {operation['generation']}: host CPU steal "
+                        f"{feed['steal_fraction']:.1%} of daemon/harness CPU time during source churn")
         rows.append(row)
         readiness[path.parent.name], leg_failures = readiness_summary(probes, row["operations"])
         failures += [f"{path.parent.name}: {failure}" for failure in leg_failures]
@@ -1003,13 +1148,14 @@ def analyze(root):
 
 
 def harness_records(path):
-    prefixes = ("mass_dirty_ready", "mass_dirty_paused", "mass_dirty_sent", "mass_dirty_complete", "mass_dirty_exit", "mass_dirty_readiness")
+    prefixes = ("mass_dirty_ready", "mass_dirty_paused", "mass_dirty_sent", "mass_dirty_complete", "mass_dirty_exit",
+                "mass_dirty_feed", "mass_dirty_readiness")
     records = {prefix: [] for prefix in prefixes}
     for line in Path(path).read_text().splitlines():
         prefix, _, body = line.partition(" ")
         require(prefix in records, "unexpected harness record")
         records[prefix].append(json.loads(body))
-    require([len(records[prefix]) for prefix in prefixes[:5]] == [1, 2, 2, 2, 1], "incomplete/duplicate wire records")
+    require([len(records[prefix]) for prefix in prefixes[:6]] == [1, 2, 2, 2, 1, 2], "incomplete/duplicate wire records")
     return records
 
 
@@ -1133,6 +1279,9 @@ def validate_leg(leg, manifest, row):
                     ("announcement_messages", "eor_messages", "origin_cardinality")) and
                 sent["drained_monotonic_seconds"] == row["operations"][index]["drain_monotonic_seconds"],
                 "source churn/drain receipt differs")
+        feed = records["mass_dirty_feed"][index]
+        require(feed["generation"] == generation and feed["writes"] == 2 * manifest["wire_stimulus"]["origin_cardinality"]
+                and row["operations"][index]["source_feed"]["feed"] == feed, "source feed receipt differs")
         validate_held_witness(json.loads((leg / f"neighbors-paused-{generation}.json").read_text()),
                               identities, manifest["correctness_only"], row["operations"][index])
         peers = json.loads((leg / f"neighbors-settled-{generation}.json").read_text())

@@ -1902,19 +1902,32 @@ fn missing_family(open: &OpenMessage, required: &[(Afi, Safi)]) -> Option<(Afi, 
     })
 }
 
+/// Socket options a stub applies before connecting.
+#[derive(Clone, Copy, Default)]
+struct StubSocket {
+    receive_buffer: Option<usize>,
+    /// Clamps the stub's own send segments (`TCP_MAXSEG`).
+    segment_size: Option<u32>,
+}
+
 async fn open_stub_stream(
     daemon: SocketAddr,
     local: Ipv4Addr,
     open: &[u8],
     keepalive: &[u8],
     required: &[(Afi, Safi)],
-    receive_buffer: Option<usize>,
+    options: StubSocket,
 ) -> Result<(TcpStream, Instant), StubOpenError> {
     let sock = TcpSocket::new_v4().map_err(|e| StubOpenError::Fatal(format!("socket: {e}")))?;
-    if let Some(bytes) = receive_buffer {
+    if let Some(bytes) = options.receive_buffer {
         socket2::SockRef::from(&sock)
             .set_recv_buffer_size(bytes)
             .map_err(|e| StubOpenError::Fatal(format!("receive buffer: {e}")))?;
+    }
+    if let Some(mss) = options.segment_size {
+        socket2::SockRef::from(&sock)
+            .set_tcp_mss(mss)
+            .map_err(|e| StubOpenError::Fatal(format!("segment size: {e}")))?;
     }
     if std::env::var("RELOADSTALL_GTSM").as_deref() == Ok("1") {
         socket2::SockRef::from(&sock)
@@ -1999,7 +2012,13 @@ async fn establish_stream_with_retry(
     required: &[(Afi, Safi)],
 ) -> Result<(TcpStream, Instant, u32), String> {
     establish_stream_with_retry_and_receive_buffer(
-        daemon, local, open, keepalive, window, required, None,
+        daemon,
+        local,
+        open,
+        keepalive,
+        window,
+        required,
+        StubSocket::default(),
     )
     .await
 }
@@ -2011,7 +2030,7 @@ async fn establish_stream_with_retry_and_receive_buffer(
     keepalive: &[u8],
     window: Duration,
     required: &[(Afi, Safi)],
-    receive_buffer: Option<usize>,
+    options: StubSocket,
 ) -> Result<(TcpStream, Instant, u32), String> {
     let deadline = Instant::now() + window;
     let mut retries = 0;
@@ -2025,7 +2044,7 @@ async fn establish_stream_with_retry_and_receive_buffer(
         }
         match tokio::time::timeout(
             remaining,
-            open_stub_stream(daemon, local, open, keepalive, required, receive_buffer),
+            open_stub_stream(daemon, local, open, keepalive, required, options),
         )
         .await
         {

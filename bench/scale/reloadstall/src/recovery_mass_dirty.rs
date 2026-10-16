@@ -8,6 +8,10 @@ use tokio::sync::oneshot;
 const LOCAL_AS: u32 = 64512;
 const ORIGIN_BASE: u32 = 4_200_100_000;
 const RECEIVER_BUFFER: usize = 4096;
+/// An Ethernet-sized source MSS. Loopback's 64 KiB segments can exceed the
+/// daemon's whole receive buffer, so silly-window avoidance withholds window
+/// updates and the feed waits on backed-off zero-window probes instead.
+const SOURCE_SEGMENT: u32 = 1448;
 const DENIED: usize = 4;
 const RDS: [RouteDistinguisher; 2] = [
     RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
@@ -238,6 +242,64 @@ fn end_of_rib(shape: Shape, family: usize) -> Result<Message, String> {
 }
 
 type SourceWrite = (Message, Option<oneshot::Sender<Result<(), String>>>);
+
+/// A source write blocked at least this long is retained individually.
+const FEED_STALL: Duration = Duration::from_millis(20);
+/// Bounds the per-generation stall roster; totals still count every write.
+const FEED_STALL_ROSTER: usize = 2048;
+
+/// Source-socket write timing for one churn generation, so a slow ingest can
+/// be attributed to the feeder's writes rather than inferred from the daemon.
+#[derive(Default)]
+struct FeedTiming {
+    first: Option<Instant>,
+    writes: u64,
+    write_seconds: f64,
+    stalls: u64,
+    stall_seconds: f64,
+    roster: Vec<(f64, f64)>,
+}
+
+impl FeedTiming {
+    fn record(&mut self, started: Instant, blocked: Duration) {
+        let first = *self.first.get_or_insert(started);
+        self.writes += 1;
+        self.write_seconds += blocked.as_secs_f64();
+        if blocked >= FEED_STALL {
+            self.stalls += 1;
+            self.stall_seconds += blocked.as_secs_f64();
+            if self.roster.len() < FEED_STALL_ROSTER {
+                self.roster.push((
+                    started.duration_since(first).as_secs_f64(),
+                    blocked.as_secs_f64() * 1e3,
+                ));
+            }
+        }
+    }
+
+    fn record_json(&self, generation: &str, correctness: bool) -> String {
+        let timing = if correctness {
+            "\"write_seconds\":null,\"stalls\":null,\"stall_seconds\":null,\"stall_roster\":null"
+                .to_string()
+        } else {
+            let roster = self
+                .roster
+                .iter()
+                .map(|(offset, blocked)| format!("[{offset},{blocked}]"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "\"write_seconds\":{},\"stalls\":{},\"stall_seconds\":{},\"stall_roster\":[{roster}]",
+                self.write_seconds, self.stalls, self.stall_seconds
+            )
+        };
+        format!(
+            "mass_dirty_feed {{\"generation\":\"{generation}\",\"writes\":{},\"stall_threshold_ms\":{},\"stall_roster_limit\":{FEED_STALL_ROSTER},{timing}}}",
+            self.writes,
+            FEED_STALL.as_millis()
+        )
+    }
+}
 
 async fn feed_generation(
     sender: &mpsc::Sender<SourceWrite>,
@@ -808,9 +870,20 @@ async fn connect(shape: Shape, port: u16, index: u32) -> Result<TcpStream, Strin
         &keepalive,
         CONNECT_WINDOW,
         &shape.families(),
-        (index != 0).then_some(RECEIVER_BUFFER),
+        StubSocket {
+            receive_buffer: (index != 0).then_some(RECEIVER_BUFFER),
+            segment_size: (index == 0).then_some(SOURCE_SEGMENT),
+        },
     )
     .await?;
+    if index == 0
+        && socket2::SockRef::from(&stream)
+            .tcp_mss()
+            .map_err(|error| error.to_string())?
+            > SOURCE_SEGMENT
+    {
+        return Err("source segment size exceeds the fixed Ethernet-sized fixture".into());
+    }
     if index != 0
         && socket2::SockRef::from(&stream)
             .recv_buffer_size()
@@ -1030,6 +1103,8 @@ async fn run(args: &[String]) -> Result<(), String> {
     let (updates, mut outgoing) = mpsc::channel::<SourceWrite>(8);
     let source_live = Arc::new(AtomicBool::new(true));
     let source_write_status = source_live.clone();
+    let feed = Arc::new(Mutex::new(FeedTiming::default()));
+    let feed_writes = feed.clone();
     tokio::spawn(async move {
         let bytes = encode_message(&Message::Keepalive).unwrap();
         let mut tick = tokio::time::interval(Duration::from_secs(30));
@@ -1039,7 +1114,12 @@ async fn run(args: &[String]) -> Result<(), String> {
                 message = outgoing.recv() => {
                     let Some((message, drained)) = message else { return; };
                     let result = match encode_message(&message) {
-                        Ok(bytes) => source_writer.write_all(&bytes).await,
+                        Ok(bytes) => {
+                            let started = Instant::now();
+                            let result = source_writer.write_all(&bytes).await;
+                            feed_writes.lock().unwrap().record(started, started.elapsed());
+                            result
+                        }
                         Err(_) => { source_write_status.store(false, Ordering::Release); return; }
                     };
                     if let Some(drained) = drained {
@@ -1141,10 +1221,15 @@ async fn run(args: &[String]) -> Result<(), String> {
             {
                 return Err("unexpected source churn command".into());
             }
+            *feed.lock().unwrap() = FeedTiming::default();
             feed_generation(&updates, shape, generation == "b", true).await?;
             if !source_live.load(Ordering::Acquire) {
                 return Err("source session ended during churn".into());
             }
+            println!(
+                "{}",
+                feed.lock().unwrap().record_json(generation, correctness)
+            );
             let drained = json_seconds(monotonic_seconds(correctness)?);
             println!("mass_dirty_sent {{\"generation\":\"{generation}\",\"family_keys\":[{},{}],\"announcement_messages\":{},\"eor_messages\":{},\"origin_cardinality\":{},\"writer_drained\":true,\"drained_monotonic_seconds\":{drained}}}", shape.counts[0], shape.counts[1], shape.chunks(), shape.chunks(), shape.chunks());
             let resume = lines
@@ -1398,6 +1483,33 @@ mod tests {
             final_drain.unwrap().send(Ok(())).unwrap();
             feed.await.unwrap().unwrap();
         }
+    }
+
+    #[test]
+    fn recovery_mass_dirty_feed_timing_keeps_blocked_writes_and_null_correctness_clocks() {
+        let mut timing = FeedTiming::default();
+        let first = Instant::now();
+        timing.record(first, Duration::from_millis(1));
+        timing.record(
+            first + Duration::from_millis(500),
+            FEED_STALL - Duration::from_nanos(1),
+        );
+        timing.record(first + Duration::from_secs(2), Duration::from_millis(190));
+        for _ in 0..FEED_STALL_ROSTER {
+            timing.record(first + Duration::from_secs(3), FEED_STALL);
+        }
+        assert_eq!(timing.writes, 3 + FEED_STALL_ROSTER as u64);
+        assert_eq!(timing.stalls, 1 + FEED_STALL_ROSTER as u64);
+        assert_eq!(timing.roster.len(), FEED_STALL_ROSTER);
+        assert_eq!(timing.roster[0], (2.0, 190.0));
+        let measured = timing.record_json("b", false);
+        assert!(measured.starts_with("mass_dirty_feed {\"generation\":\"b\",\"writes\":2051,"));
+        assert!(measured.contains("\"stalls\":2049,"));
+        assert!(measured.contains("\"stall_roster\":[[2,190],"));
+        let correctness = timing.record_json("a", true);
+        assert!(correctness.contains(
+            "\"write_seconds\":null,\"stalls\":null,\"stall_seconds\":null,\"stall_roster\":null"
+        ));
     }
 
     #[test]
