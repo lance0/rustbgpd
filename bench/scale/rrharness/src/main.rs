@@ -35,6 +35,7 @@ use rustbgpd_wire::{
 use tokio::sync::{mpsc, oneshot};
 
 mod recovery_memory;
+mod recovery_retirement;
 mod recovery_scan;
 
 /// The harness runs the daemon's `RibManager` in-process, so its stage/drain
@@ -599,6 +600,10 @@ fn main() {
     }
     if mode == "recovery-scan" {
         recovery_scan::main(&args[2..]);
+        return;
+    }
+    if mode == "recovery-retirement" {
+        recovery_retirement::main(&args[2..]);
         return;
     }
     let rt = tokio::runtime::Builder::new_multi_thread()

@@ -515,6 +515,10 @@ impl RibManager {
     /// replacement-`PeerUp` session reset (a new session for an address
     /// whose previous session was never torn down must not inherit its
     /// predecessor's received routes).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "peer teardown keeps recomputation and exact-identity consumers before the detached retirement and following attribute GC"
+    )]
     fn clear_peer_adj_rib_in(&mut self, peer: IpAddr) {
         // The discarded routes no longer back any session's End-of-RIB; only
         // a later marker on the replayed feed may report it synced again.
@@ -609,8 +613,58 @@ impl RibManager {
         // (after the recomputes above dropped any Loc-RIB selected-route
         // clones) so a departed peer cannot leave stranded attribute sets —
         // the reclaim the per-peer tables used to get for free on drop.
-        drop(rib);
-        self.gc_attr_intern();
+        #[cfg(feature = "bench-internals")]
+        let retirement = super::bench_support::retirement_begin(|| {
+            (
+                rib.len()
+                    + rib.vpn_len()
+                    + rib.evpn_len()
+                    + rib.flowspec_len()
+                    + rib.bgpls_len()
+                    + rib.labeled_len()
+                    + rib.rtc_len(),
+                0,
+            )
+        });
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                let readiness = manager.replacement_readiness.clone();
+                #[cfg(test)]
+                let observer = manager.replacement_readiness_test_hook.clone();
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer("peer_adj_in_retirement_before");
+                }
+                rib.retire_with(&mut || {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "peer_adj_in_retirement",
+                        false,
+                    );
+                });
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer("peer_adj_in_retirement_after");
+                }
+                #[cfg(feature = "bench-internals")]
+                super::bench_support::retirement_end(1, retirement);
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer("peer_attribute_gc_before");
+                }
+                manager.gc_attr_intern_with_checkpoint(&mut || {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "peer_attribute_gc",
+                        false,
+                    );
+                });
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer("peer_attribute_gc_after");
+                }
+            });
+        });
     }
 
     /// Handle a peer *deletion* (the neighbor was removed from the
@@ -667,6 +721,10 @@ impl RibManager {
         self.clear_outbound_peer_state_inner(peer, false);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "outbound teardown keeps per-registration cleanup and detached table retirement in their existing ownership order"
+    )]
     fn clear_outbound_peer_state_inner(&mut self, peer: IpAddr, same_connection_replay: bool) {
         self.invalidate_evpn_feed_completion(peer);
         if !same_connection_replay {
@@ -689,12 +747,29 @@ impl RibManager {
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
         // Any family's removed committed rows end an advertised-view walk.
-        if self
-            .adj_ribs_out
-            .remove(&peer)
-            .is_some_and(|rib| !rib.is_empty_all_families())
-        {
-            self.advance_advertised_pages();
+        if let Some(mut rib) = self.adj_ribs_out.remove(&peer) {
+            if !rib.is_empty_all_families() {
+                self.advance_advertised_pages();
+            }
+            super::with_executor_handoff(|| {
+                self.with_replacement_readiness(|manager| {
+                    #[cfg(test)]
+                    let observer = manager.replacement_readiness_test_hook.clone();
+                    #[cfg(test)]
+                    if let Some(observer) = &observer {
+                        observer("peer_adj_out_retirement_before");
+                    }
+                    rib.retire_with(&mut || {
+                        manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
+                    });
+                    drop(rib);
+                    #[cfg(test)]
+                    if let Some(observer) = &observer {
+                        observer("peer_adj_out_retirement_after");
+                    }
+                    manager.replacement_checkpoint(true);
+                });
+            });
         }
         // The gauge reports the size of the table removed on the line
         // above, so it is zeroed here rather than at the `PeerDown` call
@@ -797,7 +872,27 @@ impl RibManager {
         // monotonic, while a successfully retired identity goes stale and
         // restarts from zero if that exact identity is later installed again.
         self.export_policy_stats.remove(&peer);
-        self.pending_regroup_baseline.remove(&peer);
+        if let Some(mut baseline) = self.pending_regroup_baseline.remove(&peer) {
+            super::with_executor_handoff(|| {
+                self.with_replacement_readiness(|manager| {
+                    #[cfg(test)]
+                    let observer = manager.replacement_readiness_test_hook.clone();
+                    #[cfg(test)]
+                    if let Some(observer) = &observer {
+                        observer("peer_regroup_retirement_before");
+                    }
+                    baseline.retire_with(&mut || {
+                        manager.replacement_checkpoint_at("peer_regroup_retirement", false);
+                    });
+                    drop(baseline);
+                    #[cfg(test)]
+                    if let Some(observer) = &observer {
+                        observer("peer_regroup_retirement_after");
+                    }
+                    manager.replacement_checkpoint(true);
+                });
+            });
+        }
         self.pending_extra_withdraws.remove(&peer);
         self.release_group_admitted_keys(peer);
         self.remove_update_group_member(peer);

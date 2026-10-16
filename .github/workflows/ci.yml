@@ -30,9 +30,9 @@ on:
         default: false
         required: false
       recovery_receipt_mode:
-        description: Select memory, component scan, or daemon mass-dirty qualification
+        description: Select memory, capture scan, retirement attribution or daemon mass-dirty qualification
         type: choice
-        options: [memory, scan, mass-dirty]
+        options: [memory, scan, retirement, mass-dirty]
         default: memory
         required: false
 
@@ -71,9 +71,9 @@ jobs:
                   default: false
                   required: false
                 recovery_receipt_mode:
-                  description: Select memory, component scan, or daemon mass-dirty qualification
+                  description: Select memory, capture scan, retirement attribution or daemon mass-dirty qualification
                   type: choice
-                  options: [memory, scan, mass-dirty]
+                  options: [memory, scan, retirement, mass-dirty]
                   default: memory
                   required: false'
           if [[ "$actual" != "$expected" ]]; then
@@ -780,7 +780,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.recovery_receipt_mode == 'scan' && '[{"profile":"full-uc","cell":"capture-scan","old_order":"sorted"},{"profile":"full-uc","cell":"capture-scan","old_order":"shuffled"},{"profile":"full-vpn","cell":"capture-scan","old_order":"sorted"},{"profile":"full-vpn","cell":"capture-scan","old_order":"shuffled"},{"profile":"evpn-soak","cell":"capture-scan","old_order":"sorted"},{"profile":"evpn-soak","cell":"capture-scan","old_order":"shuffled"}]' || '[{"profile":"ipv4-100k","cell":"dataset-reevaluate"},{"profile":"ipv4-100k","cell":"peer-down"},{"profile":"full-uc","cell":"dataset-reevaluate"},{"profile":"full-uc","cell":"peer-down"},{"profile":"full-vpn","cell":"dataset-reevaluate"},{"profile":"full-vpn","cell":"peer-down"},{"profile":"full-vpn","cell":"widen"},{"profile":"mixed-widen","cell":"widen"},{"profile":"full-uc","cell":"unsynchronized-dirty"},{"profile":"full-vpn","cell":"unsynchronized-dirty"}]') }}
+        include: ${{ fromJSON(inputs.recovery_receipt_mode == 'retirement' && '[{"profile":"full-uc","cell":"retirement"},{"profile":"full-vpn","cell":"retirement"}]' || inputs.recovery_receipt_mode == 'scan' && '[{"profile":"full-uc","cell":"capture-scan","old_order":"sorted"},{"profile":"full-uc","cell":"capture-scan","old_order":"shuffled"},{"profile":"full-vpn","cell":"capture-scan","old_order":"sorted"},{"profile":"full-vpn","cell":"capture-scan","old_order":"shuffled"},{"profile":"evpn-soak","cell":"capture-scan","old_order":"sorted"},{"profile":"evpn-soak","cell":"capture-scan","old_order":"shuffled"}]' || '[{"profile":"ipv4-100k","cell":"dataset-reevaluate"},{"profile":"ipv4-100k","cell":"peer-down"},{"profile":"full-uc","cell":"dataset-reevaluate"},{"profile":"full-uc","cell":"peer-down"},{"profile":"full-vpn","cell":"dataset-reevaluate"},{"profile":"full-vpn","cell":"peer-down"},{"profile":"full-vpn","cell":"widen"},{"profile":"mixed-widen","cell":"widen"},{"profile":"full-uc","cell":"unsynchronized-dirty"},{"profile":"full-vpn","cell":"unsynchronized-dirty"}]') }}
     env:
       CARGO_BUILD_JOBS: "4"
       # Each complete qualified cell runs on its own fresh VM.
@@ -847,6 +847,7 @@ jobs:
             summary_status=0
             summary=(summarize "$evidence/campaign" --failed-driver-exit "$status")
             [[ $RECOVERY_RECEIPT_MODE != scan ]] || summary=(summarize-scan "$evidence/campaign" --failed-driver-exit "$status")
+            [[ $RECOVERY_RECEIPT_MODE != retirement ]] || summary=(summarize-retirement "$evidence/campaign" --failed-driver-exit "$status")
             timeout --signal=TERM --kill-after=5s 30s \
               python3 bench/scale/recovery_memory.py "${summary[@]}" \
               > "$evidence/failure-summary.log" 2>&1 || summary_status=$?

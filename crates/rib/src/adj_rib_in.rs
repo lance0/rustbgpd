@@ -360,6 +360,30 @@ pub struct AdjRibIn {
 }
 
 impl AdjRibIn {
+    /// Retire a detached table after selection and withdrawal consumers finish.
+    pub(crate) fn retire_with(mut self, checkpoint: &mut impl FnMut()) {
+        self.routes.release_with(checkpoint);
+        self.prefix_index.release_with(checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.flowspec_routes.map, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.evpn_routes.map, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.bgpls_routes.map, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.vpn_routes.map, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.vpn_key_index, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.labeled_routes.map, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.labeled_key_index, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.rtc_routes.map, checkpoint);
+        retire_local_tags(&mut self.llgr_stale_local_tags, checkpoint);
+        retire_local_tags(&mut self.flowspec_llgr_stale_local_tags, checkpoint);
+        retire_local_tags(&mut self.evpn_llgr_stale_local_tags, checkpoint);
+        retire_local_tags(&mut self.bgpls_llgr_stale_local_tags, checkpoint);
+        retire_local_tags(&mut self.vpn_llgr_stale_local_tags, checkpoint);
+        retire_local_tags(&mut self.labeled_llgr_stale_local_tags, checkpoint);
+        retire_local_tags(&mut self.rtc_llgr_stale_local_tags, checkpoint);
+        checkpoint();
+        drop(self);
+        checkpoint();
+    }
+
     /// Create a new empty Adj-RIB-In for the given peer.
     #[must_use]
     pub fn new(peer: IpAddr) -> Self {
@@ -2809,6 +2833,18 @@ impl AdjRibIn {
             self.rtc_llgr_stale_local_tags.remove(key);
         }
     }
+}
+
+fn retire_local_tags<T>(tags: &mut HashSet<T>, checkpoint: &mut impl FnMut()) {
+    checkpoint();
+    if std::mem::needs_drop::<T>() {
+        for tag in tags.drain() {
+            drop(tag);
+            checkpoint();
+        }
+    }
+    drop(std::mem::take(tags));
+    checkpoint();
 }
 
 /// Add `LLGR_STALE`, mutating an existing canonical or Partial COMMUNITIES
@@ -5707,6 +5743,51 @@ mod tests {
         fn family_at(index: usize) -> (Afi, Safi) {
             let (_, afi, safi) = rustbgpd_wire::CONFIGURED_FAMILIES[index];
             (afi, safi)
+        }
+
+        #[test]
+        fn detached_retirement_visits_all_family_storage_and_owned_tags() {
+            let peer = Ipv4Addr::new(10, 0, 0, 1).into();
+            let mut empty_visits = 0;
+            AdjRibIn::new(peer).retire_with(&mut || empty_visits += 1);
+            for family in 0..rustbgpd_wire::CONFIGURED_FAMILIES.len() {
+                let mut rib = AdjRibIn::new(peer);
+                for key in 0..16 {
+                    insert_or_withdraw(&mut rib, family, key, Some((1, false)));
+                }
+                let mut intern = crate::attr_intern::AttrInternTable::new();
+                apply(&mut rib, &mut intern, &Op::Promote(family));
+                assert_eq!(rib.retained_stale_count(), 16);
+                let map_rows = rib.flowspec_len()
+                    + rib.evpn_len()
+                    + rib.bgpls_len()
+                    + rib.vpn_len()
+                    + rib.labeled_len()
+                    + rib.rtc_len();
+                let indexes = rib.vpn_key_index.len() + rib.labeled_key_index.len();
+                let owned_tags = if std::mem::needs_drop::<FlowSpecRouteKey>() {
+                    rib.flowspec_llgr_stale_local_tags.len()
+                } else {
+                    0
+                } + if std::mem::needs_drop::<BgpLsRouteKey>() {
+                    rib.bgpls_llgr_stale_local_tags.len()
+                } else {
+                    0
+                };
+                let prefixes =
+                    rib.prefix_index.family_len(Afi::Ipv4) + rib.prefix_index.family_len(Afi::Ipv6);
+                let required = empty_visits
+                    + 2 * (rib.routes.slot_count() + map_rows + indexes)
+                    + 3 * prefixes
+                    + owned_tags;
+                let mut visits = 0;
+                rib.retire_with(&mut || visits += 1);
+                assert!(
+                    visits >= required,
+                    "family {:?} must retire route/index entries and owned tags between checkpoints: {visits} < {required}",
+                    family_at(family)
+                );
+            }
         }
 
         #[derive(Debug, Clone)]

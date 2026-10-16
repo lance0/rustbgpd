@@ -1928,7 +1928,11 @@ fn log_orr_input_transition(
 impl RibManager {
     /// Immediately reclaim unused attributes at teardown and explicit sweep seams.
     fn gc_attr_intern(&mut self) {
-        self.attr_intern.gc();
+        self.gc_attr_intern_with_checkpoint(&mut || {});
+    }
+
+    fn gc_attr_intern_with_checkpoint(&mut self, checkpoint: &mut impl FnMut()) {
+        self.attr_intern.gc_with_checkpoint(checkpoint);
         self.attr_intern_gc_displaced = 0;
         self.attr_intern_gc_deadline = None;
         self.sync_attr_intern_gauge();

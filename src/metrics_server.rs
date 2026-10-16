@@ -30,6 +30,7 @@ const MAX_SCRAPES: usize = MAX_CONNECTIONS - 8;
 /// connection budget requests its eviction. Clients send the request line with
 /// the connection, so this only closes idle or slow-sending clients.
 const IDLE_EVICTION_GRACE: Duration = Duration::from_millis(250);
+const READINESS_WARNING_THRESHOLD: Duration = Duration::from_millis(100);
 
 /// Fixed startup worker inventory: at most FIB, EVPN intent and EVPN kernel.
 /// A missing receiver means a configured worker could not be constructed.
@@ -184,7 +185,8 @@ async fn serve_incoming<S>(
             None => return,
         };
         let (evict, evicted) = oneshot::channel();
-        unclassified.push_back((Instant::now(), evict));
+        let accepted = Instant::now();
+        unclassified.push_back((accepted, evict));
 
         let peer = stream.peer_addr().ok();
         let metrics = metrics.clone();
@@ -194,6 +196,7 @@ async fn serve_incoming<S>(
         tokio::spawn(async move {
             if let Err(e) = handle_connection(
                 stream,
+                accepted,
                 evicted,
                 &metrics,
                 &readiness_probe,
@@ -212,14 +215,20 @@ async fn serve_incoming<S>(
 /// `evicted` resolves when the accept loop requests this connection's
 /// eviction. The request is honoured only while the request line is unread; a
 /// line that is already readable wins and the connection is served.
+#[expect(
+    clippy::too_many_lines,
+    reason = "request parsing, probe diagnostics and the response write share one connection lifetime"
+)]
 async fn handle_connection(
     stream: TcpStream,
+    accepted: Instant,
     evicted: impl std::future::Future,
     metrics: &BgpMetrics,
     readiness_probe: &CoreReadinessProbe,
     dataplane_probe: Option<&[DataplaneWorkerProbe]>,
     scrape_slots: &Semaphore,
 ) -> std::io::Result<()> {
+    let handler_started = Instant::now();
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader.take(MAX_REQUEST_LINE as u64));
 
@@ -243,6 +252,7 @@ async fn handle_connection(
             ));
         }
     }
+    let request_line_completed = Instant::now();
 
     // If the line doesn't end with a newline, we hit the take limit → 400
     if !request_line.ends_with('\n') {
@@ -257,10 +267,23 @@ async fn handle_connection(
 
     // Parse path from "GET /path HTTP/1.x"
     let path = request_line.split_whitespace().nth(1).unwrap_or("");
+    if path == "/readyz"
+        && request_line_completed.duration_since(accepted) > READINESS_WARNING_THRESHOLD
+    {
+        warn!(
+            accept_to_handler_ms = handler_started.duration_since(accepted).as_millis(),
+            handler_to_request_line_ms = request_line_completed
+                .duration_since(handler_started)
+                .as_millis(),
+            accept_to_request_line_ms = request_line_completed.duration_since(accepted).as_millis(),
+            "readiness HTTP request line delayed"
+        );
+    }
 
     // Held until the response is written, so a slow scrape reader also
     // counts against the scrape cap.
     let mut scrape_slot = None;
+    let mut readiness_timing = None;
     let response = match path {
         "/metrics" => match scrape_slots.try_acquire() {
             Ok(slot) => {
@@ -280,16 +303,41 @@ async fn handle_connection(
             // success. Scheduling and response delivery can still delay the
             // HTTP response beyond the deadline.
             let started = std::time::Instant::now();
-            match tokio::time::timeout(CORE_READINESS_DEADLINE, readiness_probe.check()).await {
+            let probe_started = Instant::now();
+            let result =
+                tokio::time::timeout(CORE_READINESS_DEADLINE, readiness_probe.check()).await;
+            let probe_elapsed = probe_started.elapsed();
+            readiness_timing = Some((probe_started, probe_elapsed));
+            match result {
                 Ok(Ok(())) if started.elapsed() <= CORE_READINESS_DEADLINE => {
                     text_response("200 OK", "ready\n")
                 }
                 Ok(Err(error)) => {
-                    warn!(%error, "readiness probe failed");
+                    warn!(
+                        %error,
+                        accept_to_handler_ms = handler_started.duration_since(accepted).as_millis(),
+                        handler_to_request_line_ms = request_line_completed
+                            .duration_since(handler_started)
+                            .as_millis(),
+                        accept_to_request_line_ms = request_line_completed
+                            .duration_since(accepted)
+                            .as_millis(),
+                        probe_ms = probe_elapsed.as_millis(),
+                        "readiness probe failed"
+                    );
                     text_response("503 Service Unavailable", &format!("not ready: {error}\n"))
                 }
                 Ok(Ok(())) | Err(_) => {
-                    warn!("readiness probe deadline exceeded");
+                    warn!(
+                        accept_to_handler_ms = handler_started.duration_since(accepted).as_millis(),
+                        handler_to_request_line_ms = request_line_completed
+                            .duration_since(handler_started)
+                            .as_millis(),
+                        accept_to_request_line_ms =
+                            request_line_completed.duration_since(accepted).as_millis(),
+                        probe_ms = probe_elapsed.as_millis(),
+                        "readiness probe deadline exceeded"
+                    );
                     text_response(
                         "503 Service Unavailable",
                         "not ready: readiness probe deadline exceeded\n",
@@ -301,7 +349,28 @@ async fn handle_connection(
     };
 
     // Write with timeout to prevent slow-client stalls
-    tokio::time::timeout(WRITE_TIMEOUT, writer.write_all(response.as_bytes())).await??;
+    let write_started = Instant::now();
+    let written = tokio::time::timeout(WRITE_TIMEOUT, writer.write_all(response.as_bytes())).await;
+    if let Some((probe_started, probe_elapsed)) = readiness_timing {
+        let write_completed = Instant::now();
+        if write_completed.duration_since(probe_started) > READINESS_WARNING_THRESHOLD {
+            warn!(
+                accept_to_handler_ms = handler_started.duration_since(accepted).as_millis(),
+                handler_to_request_line_ms = request_line_completed
+                    .duration_since(handler_started)
+                    .as_millis(),
+                accept_to_request_line_ms =
+                    request_line_completed.duration_since(accepted).as_millis(),
+                probe_ms = probe_elapsed.as_millis(),
+                write_ms = write_completed.duration_since(write_started).as_millis(),
+                probe_to_write_ms = write_completed.duration_since(probe_started).as_millis(),
+                accept_to_write_ms = write_completed.duration_since(accepted).as_millis(),
+                write_succeeded = matches!(&written, Ok(Ok(()))),
+                "readiness HTTP response delayed"
+            );
+        }
+    }
+    written??;
     drop(scrape_slot);
 
     Ok(())
@@ -741,6 +810,141 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn readyz_warns_for_delayed_start_and_probe_with_separate_phases() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let writer = log.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let accepted = Instant::now();
+        client.write_all(b"GET /readyz HTTP/1.1\r\n").await.unwrap();
+
+        // Advance only the controlled clock before the handler is first polled.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(150)).await;
+        tokio::time::resume();
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let handler = tokio::spawn(async move {
+            handle_connection(
+                stream,
+                accepted,
+                std::future::pending::<()>(),
+                &BgpMetrics::new(),
+                &CoreReadinessProbe::new(peer_tx, rib_tx),
+                None,
+                &Semaphore::new(1),
+            )
+            .await
+        });
+        let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await else {
+            panic!("expected peer-manager readiness probe");
+        };
+        // The actual request/probe handshake pins the second slow phase.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(150)).await;
+        tokio::time::resume();
+        reply.send(()).unwrap();
+        let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv().await else {
+            panic!("expected RIB readiness probe");
+        };
+        reply.send(0).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        handler.await.unwrap().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("ready\n"));
+
+        let output = std::fs::read_to_string(log.path()).unwrap();
+        let rows: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let request = &rows
+            .iter()
+            .find(|row| row["fields"]["message"] == "readiness HTTP request line delayed")
+            .expect("accepted-to-request delay must be visible")["fields"];
+        let elapsed_ms = |row: &serde_json::Value, field: &str| {
+            row[field].as_str().unwrap().parse::<u128>().unwrap()
+        };
+        assert!(elapsed_ms(request, "accept_to_handler_ms") >= 150);
+        assert!(request["handler_to_request_line_ms"].is_string());
+        assert!(elapsed_ms(request, "accept_to_request_line_ms") >= 150);
+        let response = &rows
+            .iter()
+            .find(|row| row["fields"]["message"] == "readiness HTTP response delayed")
+            .expect("probe-to-write delay must be visible")["fields"];
+        assert!(elapsed_ms(response, "probe_ms") >= 150);
+        assert!(response["write_ms"].is_string());
+        assert!(elapsed_ms(response, "probe_to_write_ms") >= 150);
+        assert!(elapsed_ms(response, "accept_to_write_ms") >= 300);
+        assert_eq!(response["write_succeeded"], true);
+    }
+
+    #[tokio::test]
+    async fn readyz_probe_failure_warning_includes_elapsed_context() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let writer = log.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
+        let client = tokio::spawn(request(addr, "/readyz"));
+        let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await else {
+            panic!("expected peer-manager readiness probe");
+        };
+        reply.send(()).unwrap();
+        let Some(RibUpdate::QueryLocRibCount { reply: held }) = rib_rx.recv().await else {
+            panic!("expected RIB readiness probe");
+        };
+        tokio::time::pause();
+        tokio::time::advance(CORE_READINESS_DEADLINE + Duration::from_millis(1)).await;
+        tokio::time::resume();
+        let response = client.await.unwrap();
+        drop(held);
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        let output = std::fs::read_to_string(log.path()).unwrap();
+        let warning: serde_json::Value = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| {
+                matches!(
+                    row["fields"]["message"].as_str(),
+                    Some("readiness probe failed" | "readiness probe deadline exceeded")
+                )
+            })
+            .expect("existing readiness failure warning must include elapsed context");
+        for field in [
+            "accept_to_handler_ms",
+            "handler_to_request_line_ms",
+            "accept_to_request_line_ms",
+        ] {
+            assert!(warning["fields"][field].is_string(), "{warning}");
+        }
+        assert!(
+            warning["fields"]["probe_ms"]
+                .as_str()
+                .unwrap()
+                .parse::<u128>()
+                .unwrap()
+                >= 200
+        );
+    }
+
+    #[tokio::test]
     async fn get_readyz_returns_503_when_peer_manager_drops_reply() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
@@ -857,6 +1061,7 @@ pub(crate) mod tests {
                 let (stream, _) = listener.accept().await.unwrap();
                 let _ = handle_connection(
                     stream,
+                    Instant::now(),
                     std::future::pending::<()>(),
                     &metrics,
                     &probe,
@@ -969,6 +1174,7 @@ pub(crate) mod tests {
                 tokio::spawn(async move {
                     let _ = handle_connection(
                         stream,
+                        Instant::now(),
                         std::future::pending::<()>(),
                         &m,
                         &probe,

@@ -37,13 +37,13 @@ const FAMILIES: [(Afi, Safi); 4] = [
     (Afi::Ipv6, Safi::MplsVpn),
 ];
 #[derive(Clone, Copy, Debug)]
-struct Spec {
-    name: &'static str,
-    seed: [usize; 4],
+pub(super) struct Spec {
+    pub(super) name: &'static str,
+    pub(super) seed: [usize; 4],
     additions: [usize; 4],
 }
 impl Spec {
-    fn named(name: &str) -> Self {
+    pub(super) fn named(name: &str) -> Self {
         let (name, seed, additions) = match name {
             "ipv4-100k" => ("ipv4-100k", [100_000, 0, 0, 0], [0; 4]),
             "full-uc" => ("full-uc", [1_000_000, 230_000, 0, 0], [0; 4]),
@@ -94,13 +94,13 @@ impl Spec {
     }
 }
 #[derive(Default, Clone, Copy, Debug)]
-struct Counts {
-    present: [usize; 4],
-    announces: [u64; 4],
-    withdraws: [u64; 4],
+pub(super) struct Counts {
+    pub(super) present: [usize; 4],
+    pub(super) announces: [u64; 4],
+    pub(super) withdraws: [u64; 4],
 }
 impl Counts {
-    fn json(self) -> String {
+    pub(super) fn json(self) -> String {
         format!(
             "{{{}}}",
             (0..4)
@@ -490,17 +490,17 @@ fn assert_empty_credit(update: &OutboundRouteUpdate) {
     );
 }
 
-struct RecoveryHarness {
-    tx: mpsc::Sender<RibUpdate>,
+pub(super) struct RecoveryHarness {
+    pub(super) tx: mpsc::Sender<RibUpdate>,
     receivers: Vec<Receiver>,
     metrics: BgpMetrics,
-    source: IpAddr,
+    pub(super) source: IpAddr,
     source_receiver: Option<Receiver>,
     _query_tx: mpsc::Sender<RibUpdate>,
 }
 
 impl RecoveryHarness {
-    async fn setup(clients: u32, spec: Spec, limits: [usize; 4]) -> Self {
+    pub(super) async fn setup(clients: u32, spec: Spec, limits: [usize; 4]) -> Self {
         let (tx, rx) = mpsc::channel(1024);
         let (query_tx, query_rx) = mpsc::channel(1);
         let metrics = BgpMetrics::new();
@@ -596,7 +596,7 @@ impl RecoveryHarness {
         result.await.unwrap()
     }
 
-    async fn staged(&self) -> HashMap<IpAddr, [u64; 4]> {
+    pub(super) async fn staged(&self) -> HashMap<IpAddr, [u64; 4]> {
         let (reply, result) = oneshot::channel();
         self.tx
             .send(RibUpdate::QueryBmpPeerStats { reply })
@@ -627,7 +627,7 @@ impl RecoveryHarness {
         counts
     }
 
-    async fn settle(&self, expected: [usize; 4]) -> Vec<Counts> {
+    pub(super) async fn settle(&self, expected: [usize; 4]) -> Vec<Counts> {
         tokio::time::timeout(RECOVERY_CELL_TIMEOUT, async {
             loop {
                 let health = self.health().await;
@@ -710,7 +710,7 @@ impl RecoveryHarness {
         }).await.expect("unsynchronized dirty pass did not preserve actual paused OLD and admitted healthy views")
     }
 
-    async fn verify_group(&self) {
+    pub(super) async fn verify_group(&self) {
         let mut labels = Vec::new();
         for receiver in &self.receivers {
             let (reply, result) = oneshot::channel();
@@ -952,7 +952,7 @@ fn vpn_receipt(source: IpAddr, announced: Vec<VpnRibRoute>) -> RibUpdate {
         withdrawn: Vec::new(),
     }
 }
-async fn populate(harness: &RecoveryHarness, seed: [usize; 4]) {
+pub(super) async fn populate(harness: &RecoveryHarness, seed: [usize; 4]) {
     for (family, n) in seed.into_iter().enumerate() {
         for start in (0..n).step_by(BATCH) {
             let end = (start + BATCH).min(n);
