@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -637,12 +638,13 @@ SOURCE_SESSION = ("(", "src", "127.1.0.1", "and", "dport", "=", ":17986", ")", "
 
 
 def source_sockets(text):
-    """Compact per-end fields from `ss -tinmH` for the source session."""
+    """Compact per-end fields from `ss -tinmoH` for the source session."""
     ends = {}
     lines = text.splitlines()
     for header, info in zip(lines[::2], lines[1::2]):
         _state, recvq, sendq, local = header.split()[:4]
-        fields = {"recvq": int(recvq), "sendq": int(sendq)}
+        timer = re.search(r"\btimer:\((\w+),", header)
+        fields = {"recvq": int(recvq), "sendq": int(sendq), "timer": timer.group(1) if timer else None}
         for name, pattern in (("snd_wnd", r"\bsnd_wnd:(\d+)"), ("backoff", r"\bbackoff:(\d+)"),
                               ("unacked", r"\bunacked:(\d+)"), ("retrans", r"\bretrans:\d+/(\d+)")):
             match = re.search(pattern, info)
@@ -654,24 +656,49 @@ def source_sockets(text):
     return ends
 
 
+def read_source_session():
+    """Both source-session ends, or an error string; a failure is never an empty measurement."""
+    try:
+        run = subprocess.run(["ss", "-tinmoH", *SOURCE_SESSION], capture_output=True, text=True, timeout=5, check=False)
+    except subprocess.TimeoutExpired:
+        return None, "ss timed out"
+    if run.returncode != 0:
+        return None, f"ss exit {run.returncode}: {run.stderr.strip()}"
+    ends = source_sockets(run.stdout)
+    if set(ends) != {"daemon", "feeder"}:
+        return None, "source session ends missing"
+    return ends, None
+
+
 def sample_source_session(path, stop, interval=.1):
     """Both source-session ends every interval until stop, for stall attribution."""
     with path.open("w") as out:
         while not stop.is_set():
-            run = subprocess.run(["ss", "-tinmH", *SOURCE_SESSION], capture_output=True, text=True, timeout=5, check=False)
-            out.write(json.dumps({"monotonic": time.monotonic(), **source_sockets(run.stdout)}) + "\n")
+            ends, error = read_source_session()
+            out.write(json.dumps({"monotonic": time.monotonic(), **(ends or {"error": error})}) + "\n")
             stop.wait(interval)
 
 
-def persist_wait_seconds(path):
-    """Sampled time the feeder held unsent data while the daemon had nothing queued to read."""
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    waiting = 0.0
+def source_socket_timers(path, stopped):
+    """Sampled time the feeder's kernel TCP timer was persist or retransmit.
+
+    Diagnostic only: it attributes a slow ingest and never feeds a bar. Any
+    failed or missing sample makes the whole diagnostic unavailable.
+    """
+    if not stopped:
+        return {"unavailable": "socket sampler did not stop"}
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.is_file() else []
+    failed = [row["error"] for row in rows if "error" in row]
+    if failed:
+        return {"unavailable": f"{len(failed)} of {len(rows)} socket samples failed: {failed[0]}"}
+    if len(rows) < 2:
+        return {"unavailable": "fewer than two socket samples"}
+    timers = {"persist": 0.0, "on": 0.0}
     for row, after in zip(rows, rows[1:]):
-        feeder, daemon = row.get("feeder"), row.get("daemon")
-        if feeder and daemon and feeder["sendq"] > 0 and daemon["recvq"] == 0:
-            waiting += after["monotonic"] - row["monotonic"]
-    return waiting
+        if row["feeder"]["timer"] in timers:
+            timers[row["feeder"]["timer"]] += after["monotonic"] - row["monotonic"]
+    return {"unavailable": None, "samples": len(rows), "persist_timer_seconds": timers["persist"],
+            "retransmit_timer_seconds": timers["on"]}
 
 
 def feed_snapshot(harness_pid):
@@ -683,23 +710,32 @@ def feed_snapshot(harness_pid):
             ticks = [int(value) for value in values[:8]]
             cpus[int(name[3:])] = {"total": sum(ticks), "steal": ticks[7]}
     fields = Path(f"/proc/{harness_pid}/stat").read_text().rsplit(")", 1)[1].split()
-    socket = subprocess.run(["ss", "-tinmH", *SOURCE_SESSION], capture_output=True, text=True, timeout=5, check=False)
+    ends, error = read_source_session()
     return {"monotonic": time.monotonic(), "cpus": cpus, "harness_cpu_ticks": int(fields[11]) + int(fields[12]),
-            "tcp": kernel_tcp_counters(),
-            "source_socket": socket.stdout if socket.returncode == 0 else f"ss failed: {socket.stderr.strip()}"}
+            "tcp": kernel_tcp_counters(), "source_socket": ends, "source_socket_error": error}
 
 
 def source_feed(before, after, feed, cpus):
     ticks = os.sysconf("SC_CLK_TCK")
-    steal = sum(after["cpus"][cpu]["steal"] - before["cpus"][cpu]["steal"] for cpu in cpus) / ticks
-    total = sum(after["cpus"][cpu]["total"] - before["cpus"][cpu]["total"] for cpu in cpus) / ticks
+    steal = sum(after["cpus"][cpu]["steal"] - before["cpus"][cpu]["steal"] for cpu in cpus)
+    total = sum(after["cpus"][cpu]["total"] - before["cpus"][cpu]["total"] for cpu in cpus)
+    # Integer ticks decide the bar; seconds and the float fraction are reporting only.
     return {"window_seconds": after["monotonic"] - before["monotonic"], "cpus": sorted(cpus),
-            "steal_seconds": steal, "cpu_seconds": total, "steal_fraction": steal / total if total else 0.0,
+            "steal_ticks": steal, "cpu_ticks": total, "clock_ticks_per_second": ticks,
+            "steal_seconds": steal / ticks, "cpu_seconds": total / ticks,
+            "steal_fraction": steal / total if total else 0.0,
             "harness_cpu_seconds": (after["harness_cpu_ticks"] - before["harness_cpu_ticks"]) / ticks,
             "tcp_deltas": {name: value - before["tcp"].get(name, 0) for name, value in after["tcp"].items()
                            if value != before["tcp"].get(name, 0)},
             "source_socket_before": before["source_socket"], "source_socket_after": after["source_socket"],
+            "source_socket_errors": [error for error in (before["source_socket_error"], after["source_socket_error"]) if error],
             "feed": feed}
+
+
+def host_steal_exceeds(feed):
+    """Exact tick comparison against the inclusive predeclared steal bar."""
+    return feed["cpu_ticks"] > 0 and (Fraction(feed["steal_ticks"], feed["cpu_ticks"])
+                                      > Fraction(str(LIMITS["source_feed_steal_fraction"])))
 
 
 def start_harness(args, log, errors):
@@ -870,7 +906,7 @@ def run_cell(args):
                     socket_sampler.join(timeout=10)
                 feed = source_feed(feed_before, feed_snapshot(engine_pid), feed,
                                    cpu_set(manifest["daemon_cpus"]) | cpu_set(manifest["harness_cpus"]))
-                feed["persist_wait_seconds"] = persist_wait_seconds(socket_log)
+                feed["source_socket_timers"] = source_socket_timers(socket_log, not socket_sampler.is_alive())
                 require(sent["generation"] == generation and sent["family_keys"] == manifest["family_keys"] and
                         sent["writer_drained"] is True and
                         all(sent[name] == manifest["wire_stimulus"]["origin_cardinality"] for name in
@@ -1073,10 +1109,10 @@ def analyze(root):
         probes = validate_leg(path.parent, manifest, row)
         if not manifest["correctness_only"]:
             for operation in row["operations"]:
-                stolen = operation["source_feed"]["steal_fraction"]
-                require(stolen <= LIMITS["source_feed_steal_fraction"],
+                feed = operation["source_feed"]
+                require(not host_steal_exceeds(feed),
                         f"{path.parent.name} generation {operation['generation']}: host CPU steal "
-                        f"{stolen:.1%} of daemon/harness CPU time during source churn")
+                        f"{feed['steal_fraction']:.1%} of daemon/harness CPU time during source churn")
         rows.append(row)
         readiness[path.parent.name], leg_failures = readiness_summary(probes, row["operations"])
         failures += [f"{path.parent.name}: {failure}" for failure in leg_failures]

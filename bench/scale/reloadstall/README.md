@@ -107,8 +107,10 @@ The manifest fixes these bars before any result:
   are diagnostic and cannot replace the whole-operation bar.
 - Source churn is attributed, not assumed. Each operation retains the harness's
   source-socket write timing (every write that blocked at least 20 ms, with its
-  offset), the harness process CPU, kernel TCP counter deltas, `ss -tinm` for both
-  ends of the source session (also sampled every 100 ms during the churn), and per-CPU host steal on the daemon and harness CPUs. Steal
+  offset), the harness process CPU, kernel TCP counter deltas, `ss -tinmo` for both
+  ends of the source session (also sampled every 100 ms during the churn, with
+  the feeder's sampled persist and retransmit timer time as a diagnostic that
+  never feeds a bar; a failed sample makes it unavailable), and per-CPU host steal on the daemon and harness CPUs. Steal
   above 5% of those CPUs' time during a churn makes the campaign INVALID with the
   leg and generation named; it is never charged to the fold bar.
 - Cap-pressure cells must recover correctly within the fixed 1,800-second
