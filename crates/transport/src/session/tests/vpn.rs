@@ -749,3 +749,231 @@ async fn vpnv4_ipv6_next_hop_receive_does_not_require_peer_receive_capability() 
         assert_eq!(announced[0].link_local_next_hop, link_local);
     }
 }
+
+/// A mixed VPN envelope: shared and separately allocated equal attribute
+/// sets, distinct sets, two families with equal attribute values and a
+/// common next hop, two IPv4 next hops, and one shared `Arc` exported with two source router ids (whose
+/// prepared `ORIGINATOR_ID` differs on a reflector).
+fn mixed_vpn_envelope() -> Vec<rustbgpd_rib::VpnRibRoute> {
+    let set = |asn: u32, med: Option<u32>| {
+        let mut attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![asn])],
+            }),
+        ];
+        attrs.extend(med.map(PathAttribute::Med));
+        AttrSet::new(attrs)
+    };
+    let shared = [set(65010, None), set(65011, None), set(65012, Some(7))];
+    // Equal by value to `shared[0]`, separately allocated.
+    let twin = set(65010, None);
+    (0..3_000u32)
+        .map(|index| {
+            let mut route = make_vpn_rib_route(16 + index);
+            let v6 = index % 5 == 0;
+            route.nlri.route_distinguisher = RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]);
+            route.nlri.prefix = if v6 {
+                VpnPrefix::v6(
+                    Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, u16::try_from(index).unwrap()),
+                    128,
+                )
+                .unwrap()
+            } else {
+                VpnPrefix::v4(Ipv4Addr::from(0x0a00_0000 | index), 32).unwrap()
+            };
+            // RFC 8950 VPNv4 routes share the VPNv6 next hop, so only the
+            // family keeps their equal attribute sets apart.
+            route.next_hop = if v6 || index % 5 == 1 {
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 1))
+            } else if index % 7 == 0 {
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8))
+            } else {
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7))
+            };
+            route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
+            route.peer_router_id = if index % 11 == 0 {
+                Ipv4Addr::new(10, 0, 0, 3)
+            } else {
+                Ipv4Addr::new(10, 0, 0, 2)
+            };
+            route.attributes = match index % 13 {
+                0..=5 => Arc::clone(&shared[0]),
+                6 | 7 => Arc::clone(&twin),
+                8 | 9 => Arc::clone(&shared[1]),
+                10 => Arc::clone(&shared[2]),
+                // Distinct per route; a few repeat a value already seen.
+                _ => set(65100 + index % 97, Some(index % 41)),
+            };
+            route
+        })
+        .collect()
+}
+
+/// Hash-indexed VPN grouping emits exactly the frames of the reference
+/// grouping it replaced: a linear first-match scan by deep equality of
+/// (family, next hop, link-local, freshly prepared attributes), each group
+/// then chunked with the VPN sender's halving rule in first-arrival order.
+#[tokio::test]
+async fn vpn_announce_grouping_matches_linear_reference_bytes() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    session.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 9));
+    let mut negotiated = negotiated_session(65001, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)];
+    negotiated
+        .extended_nexthop_families
+        .insert((Afi::Ipv4, Safi::MplsVpn), Afi::Ipv6);
+    session.negotiated = Some(Arc::new(negotiated));
+    let (bulk, mut frames) = mpsc::channel(100_000);
+    session.writer_bulk_tx = Some(bulk);
+    let routes = mixed_vpn_envelope();
+    let export = session.publish_export_profile();
+
+    #[expect(
+        clippy::type_complexity,
+        reason = "the reference keeps the replaced grouping tuple verbatim"
+    )]
+    let mut groups: Vec<(
+        (Afi, Safi),
+        IpAddr,
+        Option<Ipv6Addr>,
+        Vec<PathAttribute>,
+        Vec<rustbgpd_wire::VpnNlriEntry>,
+    )> = Vec::new();
+    for route in &routes {
+        let prepared = export.prepare_vpn_candidate(route).unwrap();
+        let family = (prepared.afi, prepared.safi);
+        let key = (family, prepared.next_hop, prepared.link_local_next_hop);
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|g| (g.0, g.1, g.2) == key && g.3 == prepared.attrs)
+        {
+            group.4.push(prepared.nlri);
+        } else {
+            groups.push((key.0, key.1, key.2, prepared.attrs, vec![prepared.nlri]));
+        }
+    }
+    assert!(groups.len() > 100, "fixture must exercise many groups");
+    let max_len = export.max_message_len();
+    let mut expected = Vec::new();
+    for ((afi, safi), next_hop, link_local, attrs, entries) in &groups {
+        let mut chunk_size = 1000usize;
+        let mut idx = 0;
+        while idx < entries.len() {
+            let end = (idx + chunk_size).min(entries.len());
+            let msg = export
+                .build_mp_reach(
+                    *afi,
+                    *safi,
+                    *next_hop,
+                    *link_local,
+                    attrs,
+                    export::ReachNlri::Vpn(&entries[idx..end]),
+                    Ipv4UnicastMode::Body,
+                )
+                .unwrap();
+            if msg.encoded_len() > max_len {
+                chunk_size /= 2;
+                continue;
+            }
+            expected.push(Bytes::from(
+                rustbgpd_wire::encode_message_with_limit(
+                    &Message::Update(msg),
+                    session.outbound_max_message_len(),
+                )
+                .unwrap(),
+            ));
+            idx = end;
+        }
+    }
+
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(export),
+        vpn_announce: routes,
+        ..OutboundRouteUpdate::default()
+    });
+    let mut actual = Vec::new();
+    while let Ok(frame) = frames.try_recv() {
+        actual.push(frame);
+    }
+    assert_eq!(actual.len(), expected.len(), "UPDATE count");
+    assert!(
+        actual == expected,
+        "VPN UPDATE bytes diverged from the reference grouping"
+    );
+}
+
+/// One advance encodes at most one slice and releases that slice's routes;
+/// a slice that overruns the time budget halves the next one, and a cheap
+/// slice doubles it back. Slice cost is injected, so the sizes never depend
+/// on host speed.
+#[tokio::test]
+async fn vpn_envelope_advances_in_time_budgeted_slices_and_releases_them() {
+    use super::outbound::SLICE_TIME_BUDGET;
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let (bulk, mut frames) = mpsc::channel(100_000);
+    session.writer_bulk_tx = Some(bulk);
+    let template = make_vpn_rib_route(16);
+    let held = Arc::clone(&template.attributes);
+    let total = 5 * SLICE;
+    let routes: Vec<_> = (0..u32::try_from(total).unwrap())
+        .map(|index| {
+            let mut route = template.clone();
+            route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0a00_0000 | index), 32).unwrap();
+            route
+        })
+        .collect();
+    drop(template);
+    let unsent = |held: &Arc<AttrSet>| Arc::strong_count(held) - 1;
+    assert_eq!(unsent(&held), total);
+
+    session
+        .handle_outbound_route_update(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            vpn_announce: routes,
+            end_of_rib: vec![(Afi::Ipv4, Safi::MplsVpn)],
+            ..OutboundRouteUpdate::default()
+        })
+        .await;
+    assert_eq!(
+        unsent(&held),
+        total - SLICE,
+        "first advance sends one slice"
+    );
+
+    let mut sent = SLICE;
+    let mut advance = |session: &mut PeerSession, cost: Duration| {
+        session.pending_outbound.as_mut().unwrap().test_slice_cost = Some(cost);
+        session.advance_pending_outbound();
+        while frames.try_recv().is_ok() {}
+    };
+    let over = SLICE_TIME_BUDGET * 2;
+    // The overrun is charged after its own full slice; the next one halves.
+    for expected in [SLICE, SLICE / 2, SLICE / 4] {
+        advance(&mut session, over);
+        sent += expected;
+        assert_eq!(
+            unsent(&held),
+            total - sent,
+            "each advance releases its slice"
+        );
+    }
+    // Cheap slices double back toward the shared-group slice size.
+    for expected in [SLICE / 8, SLICE / 4] {
+        advance(&mut session, Duration::ZERO);
+        sent += expected;
+        assert_eq!(unsent(&held), total - sent);
+    }
+    while session.pending_outbound.is_some() {
+        advance(&mut session, Duration::ZERO);
+    }
+    assert_eq!(
+        unsent(&held),
+        0,
+        "every route released by the final advance"
+    );
+}
