@@ -1264,7 +1264,9 @@ test hygiene-then-client {
 ```
 
 The members must be defined or imported in the file under test. A
-plain `expect p` is a one-member chain.
+plain `expect p` is a one-member chain. A chain expectation is held to
+the same `MAX_CHAIN_NODES` chain size cap as a configured chain; exceeding
+it fails the test and names the member that crossed the limit.
 
 Tests run at check time (`rbgp policy check`, CI) with zero daemon
 involvement. Testing a *candidate* policy against a live RIB is

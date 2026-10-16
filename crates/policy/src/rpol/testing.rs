@@ -464,6 +464,10 @@ fn assemble_chain(
 ) -> Result<(CompiledChain, Vec<Arc<CompiledChain>>), String> {
     let mut named = Vec::with_capacity(expect.calls.len());
     let mut members = Vec::with_capacity(expect.calls.len());
+    // The daemon's chain-size cap (ADR-0103 Decision 3), charged per member
+    // before it is retained, so repeating members cannot grow a test chain
+    // past what a configured chain may hold.
+    let mut budget = crate::compile::ChainNodeBudget::default();
     for member in &expect.calls {
         let args: Vec<u32> = member.args.iter().map(|arg| arg.node).collect();
         let compiled =
@@ -477,10 +481,12 @@ fn assemble_chain(
                 missing.join(", "),
             ));
         }
-        named.push(NamedPolicy::from_rpol(
-            render_call(&member.policy.node, &args),
-            Arc::clone(&compiled),
-        ));
+        let call = render_call(&member.policy.node, &args);
+        let member = NamedPolicy::from_rpol(call.clone(), Arc::clone(&compiled));
+        budget
+            .add_named(&member, store)
+            .map_err(|reason| format!("chain member {call}: {reason}"))?;
+        named.push(member);
         members.push(compiled);
     }
     let chain = crate::compile::compile_chain(&PolicyChain::from_named(named), store);

@@ -6651,3 +6651,31 @@ fn new_test_syntax_formats_and_round_trips() {
     let mut store = SetStore::new();
     compile_rpol(&formatted, &mut store).expect("formatted output compiles");
 }
+
+/// A chain expectation charges the daemon's chain node budget per member, so
+/// repeating an individually valid policy cannot build a chain the daemon
+/// would refuse (or exhaust memory before evaluation fuel applies).
+#[test]
+fn chain_expect_charges_the_chain_node_budget() {
+    use std::fmt::Write as _;
+    let mut source = String::from("policy big {\n");
+    for value in 0..20_000 {
+        let _ = writeln!(
+            source,
+            "    term t{value} {{ if route.med == {value} {{ reject }} }}"
+        );
+    }
+    source.push_str("}\n");
+    let fits =
+        format!("{source}test t {{ route {{ med 20001 }} expect chain [big, big] == accept }}");
+    assert_eq!(failures_of(&fits), Vec::<String>::new());
+    let members = ["big"; 12].join(", ");
+    let failures = failures_of(&format!(
+        "{source}test t {{ route {{ med 20001 }} expect chain [{members}] == accept }}"
+    ));
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].contains("chain member big: compiled policy chain exceeds MAX_CHAIN_NODES"),
+        "{failures:?}"
+    );
+}
