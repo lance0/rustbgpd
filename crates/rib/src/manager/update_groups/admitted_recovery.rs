@@ -4,10 +4,11 @@
 //! full old/new overlap during growth. Allocator overhead and RSS need their
 //! separate qualification receipt; a failed proof uses the actor's fallback.
 
+use std::cmp::Ordering;
 use std::mem::size_of;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{Prefix, VpnRouteKey};
+use rustbgpd_wire::{Prefix, VpnPrefix, VpnRouteKey};
 use smallvec::SmallVec;
 
 use crate::adj_rib_out::AdjRibOut;
@@ -17,10 +18,60 @@ use crate::update::ExactExportKey;
 pub(in crate::manager) const PEER_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 pub(in crate::manager) const DAEMON_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::manager) enum Key {
     Unicast(Prefix, u32),
     Vpn(VpnRouteKey, u32),
+}
+
+/// The derived order (variant, then fields), with the VPN arm comparing the
+/// RD and address as integers instead of bytewise. Proof lookups binary
+/// search on this comparison once per admitted key.
+impl Ord for Key {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Unicast(left, left_id), Self::Unicast(right, right_id)) => {
+                left.cmp(right).then(left_id.cmp(right_id))
+            }
+            (Self::Vpn(left, left_id), Self::Vpn(right, right_id)) => {
+                vpn_key_cmp(left, right).then(left_id.cmp(right_id))
+            }
+            (Self::Unicast(..), Self::Vpn(..)) => Ordering::Less,
+            (Self::Vpn(..), Self::Unicast(..)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// `VpnRouteKey::cmp`: big-endian integer order equals bytewise RD and
+/// octet order, and `V4` sorts before `V6`.
+#[inline]
+fn vpn_key_cmp(left: &VpnRouteKey, right: &VpnRouteKey) -> Ordering {
+    u64::from_be_bytes(left.route_distinguisher.0)
+        .cmp(&u64::from_be_bytes(right.route_distinguisher.0))
+        .then_with(|| match (left.prefix, right.prefix) {
+            (
+                VpnPrefix::V4 { addr, len },
+                VpnPrefix::V4 {
+                    addr: right_addr,
+                    len: right_len,
+                },
+            ) => (addr.to_bits(), len).cmp(&(right_addr.to_bits(), right_len)),
+            (
+                VpnPrefix::V6 { addr, len },
+                VpnPrefix::V6 {
+                    addr: right_addr,
+                    len: right_len,
+                },
+            ) => (addr.to_bits(), len).cmp(&(right_addr.to_bits(), right_len)),
+            (VpnPrefix::V4 { .. }, VpnPrefix::V6 { .. }) => Ordering::Less,
+            (VpnPrefix::V6 { .. }, VpnPrefix::V4 { .. }) => Ordering::Greater,
+        })
 }
 
 impl TryFrom<&ExactExportKey> for Key {
@@ -1816,6 +1867,81 @@ mod tests {
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, n), 32)),
             u32::from(n),
         )
+    }
+
+    /// The hand-written `Key` order must equal the derived order it replaced:
+    /// sorted proofs and their binary searches depend on it.
+    #[test]
+    fn key_order_matches_derived_order() {
+        #[derive(PartialEq, Eq, PartialOrd, Ord)]
+        enum Derived {
+            Unicast(Prefix, u32),
+            Vpn(VpnRouteKey, u32),
+        }
+        let derived = |key: &Key| match *key {
+            Key::Unicast(prefix, id) => Derived::Unicast(prefix, id),
+            Key::Vpn(vpn, id) => Derived::Vpn(vpn, id),
+        };
+        let rds = [
+            [0; 8],
+            [0, 0, 0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 0, 0, 0, 0, 0xff],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            [0x80, 0, 0, 0, 0, 0, 0, 0],
+            [0xff; 8],
+        ]
+        .map(RouteDistinguisher);
+        let v4 = |a, b, c, d, len| VpnPrefix::v4(Ipv4Addr::new(a, b, c, d), len).unwrap();
+        let v6 = |addr: u128, len| VpnPrefix::v6(Ipv6Addr::from(addr), len).unwrap();
+        let prefixes = [
+            v4(0, 0, 0, 0, 0),
+            v4(0, 0, 0, 255, 32),
+            v4(1, 0, 0, 0, 8),
+            v4(10, 0, 0, 0, 8),
+            v4(10, 0, 0, 0, 24),
+            v4(10, 0, 1, 0, 24),
+            v4(128, 0, 0, 0, 1),
+            v4(255, 255, 255, 255, 32),
+            v6(0, 0),
+            v6(1, 128),
+            v6(0x2001_0db8 << 96, 32),
+            v6(0x2001_0db8 << 96, 64),
+            v6(0x2001_0db8_0000_0001 << 64, 64),
+            v6(1 << 127, 1),
+            v6(u128::MAX, 128),
+        ];
+        let mut keys = Vec::new();
+        for route_distinguisher in rds {
+            for prefix in prefixes {
+                for path_id in [0, 1, u32::MAX] {
+                    let vpn = VpnRouteKey {
+                        route_distinguisher,
+                        prefix,
+                    };
+                    keys.push(Key::Vpn(vpn, path_id));
+                }
+            }
+        }
+        for (n, path_id) in [(0, 0), (1, 0), (1, 1), (255, u32::MAX)] {
+            keys.push(Key::Unicast(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, n), 32)),
+                path_id,
+            ));
+        }
+        keys.push(Key::Unicast(
+            Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(1), 128)),
+            0,
+        ));
+        for left in &keys {
+            for right in &keys {
+                assert_eq!(
+                    left.cmp(right),
+                    derived(left).cmp(&derived(right)),
+                    "{left:?} vs {right:?}"
+                );
+                assert_eq!(left.partial_cmp(right), Some(left.cmp(right)));
+            }
+        }
     }
 
     fn capture(ledger: &mut AdmittedRecovery, peer: IpAddr, keys: &[Key]) {

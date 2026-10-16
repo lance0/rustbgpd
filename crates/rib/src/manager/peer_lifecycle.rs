@@ -2865,7 +2865,7 @@ impl RibManager {
                     rtc_withdraw,
                     ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
                 },
-                HashSet::new(),
+                crate::fast_hash::FastSet::default(),
                 shared_unicast_precommit,
                 member_of.is_none().then_some(&otc_prefixes),
                 None,

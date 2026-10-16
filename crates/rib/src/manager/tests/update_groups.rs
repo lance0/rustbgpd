@@ -908,13 +908,14 @@ fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
     batch.shared_group_encode = Some(Arc::new(crate::update::SharedGroupEncode::default()));
 
     assert!(
-        manager.try_send_and_commit_outbound_update_with_group_prior(
-            peer,
-            batch,
-            HashSet::new(),
-            None,
-        )
-        .is_ok()
+        manager
+            .try_send_and_commit_outbound_update_with_group_prior(
+                peer,
+                batch,
+                crate::fast_hash::FastSet::default(),
+                None,
+            )
+            .is_ok()
     );
     let update = outbound.try_recv().unwrap();
     assert_eq!(update.announce_source_exclusion, Some(peer));
@@ -10983,7 +10984,7 @@ async fn evpn_refusal_prior_retirement_readiness(
     assert!(!manager.dirty_peers.contains(&peer));
     let empty_credit = manager.pending_group_admitted.bytes();
     assert!(manager.capture_group_admitted_keys(peer));
-    let prior: HashSet<_> = manager
+    let prior: crate::fast_hash::FastSet<_> = manager
         .pending_group_admitted
         .get(&peer)
         .unwrap()

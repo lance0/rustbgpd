@@ -934,7 +934,7 @@ impl FinalTransactionFixture {
                         Arc::new(vec![None]),
                     )
                 },
-                HashSet::new(),
+                crate::fast_hash::FastSet::default(),
                 None,
                 Some(&scope),
                 None,
