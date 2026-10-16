@@ -7,6 +7,8 @@ import fcntl
 import importlib.util
 import io
 import json
+import shutil
+import threading
 import os
 from pathlib import Path
 import subprocess
@@ -942,6 +944,48 @@ class MassDirtyTests(unittest.TestCase):
         row["operations"][1]["source_feed"]["feed"]["writes"] -= 1
         receipt.write_json(path, row)
         self.assertEqual(receipt.finalize(root)["reason"], "source feed receipt differs")
+
+    def test_source_socket_parse_and_persist_wait(self):
+        text = ("ESTAB 0      0      127.0.0.1:17986 127.1.0.1:59409\n"
+                "\t skmem:(r0,rb131072,t0,tb2626560,f1328,w0,o0,bl0,d3) cubic rto:201\n"
+                "ESTAB 0      17259  127.1.0.1:59409 127.0.0.1:17986\n"
+                "\t skmem:(r0,rb131072,t0,tb2626560,f2261,w18219,o0,bl0,d0) cubic rto:203 backoff:4 "
+                "unacked:2 retrans:0/7 snd_wnd:0\n")
+        ends = receipt.source_sockets(text)
+        self.assertEqual(ends["daemon"], {"recvq": 0, "sendq": 0, "snd_wnd": 0, "backoff": 0, "unacked": 0,
+                                          "retrans": 0, "rmem": 0, "rcvbuf": 131072, "drops": 3})
+        self.assertEqual((ends["feeder"]["sendq"], ends["feeder"]["backoff"], ends["feeder"]["retrans"],
+                          ends["feeder"]["snd_wnd"]), (17259, 4, 7, 0))
+        path = self.root / "socket.jsonl"
+        busy = {**ends, "daemon": {**ends["daemon"], "recvq": 5}}
+        path.write_text("".join(json.dumps({"monotonic": t, **row}) + "\n" for t, row in
+                                ((0.0, busy), (0.1, ends), (0.4, ends), (0.5, busy), (0.6, {}))))
+        self.assertAlmostEqual(receipt.persist_wait_seconds(path), 0.4)
+
+    def test_source_session_sampler_sees_both_live_ends(self):
+        if shutil.which("ss") is None:
+            self.skipTest("ss unavailable")
+        with socket.socket() as server, socket.socket() as client:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                server.bind(("127.0.0.1", 17986))
+            except OSError:
+                self.skipTest("port 17986 busy")
+            server.listen()
+            client.bind(("127.1.0.1", 0))
+            client.connect(("127.0.0.1", 17986))
+            accepted, _ = server.accept()
+            with accepted:
+                client.sendall(b"x" * 4096)
+                stop, path = threading.Event(), self.root / "live.jsonl"
+                sampler = threading.Thread(target=receipt.sample_source_session, args=(path, stop, .01))
+                sampler.start()
+                time.sleep(.05)
+                stop.set()
+                sampler.join(timeout=10)
+        row = json.loads(path.read_text().splitlines()[0])
+        self.assertEqual(row["daemon"]["recvq"], 4096)
+        self.assertEqual(row["feeder"]["sendq"], 0)
 
     def test_feed_snapshot_reads_live_host_and_process_counters(self):
         before = receipt.feed_snapshot(os.getpid())

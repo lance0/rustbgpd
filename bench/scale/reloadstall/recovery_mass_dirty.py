@@ -18,6 +18,7 @@ import statistics
 import stat
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.request
@@ -628,6 +629,50 @@ def kernel_tcp_counters():
     return counters
 
 
+# Both ends of the source session: the daemon side's skmem drop count (d)
+# separates receive-queue drops from host-wide counters the receivers share.
+SOURCE_SESSION = ("(", "src", "127.1.0.1", "and", "dport", "=", ":17986", ")", "or",
+                  "(", "dst", "127.1.0.1", "and", "sport", "=", ":17986", ")")
+
+
+def source_sockets(text):
+    """Compact per-end fields from `ss -tinmH` for the source session."""
+    ends = {}
+    lines = text.splitlines()
+    for header, info in zip(lines[::2], lines[1::2]):
+        _state, recvq, sendq, local = header.split()[:4]
+        fields = {"recvq": int(recvq), "sendq": int(sendq)}
+        for name, pattern in (("snd_wnd", r"\bsnd_wnd:(\d+)"), ("backoff", r"\bbackoff:(\d+)"),
+                              ("unacked", r"\bunacked:(\d+)"), ("retrans", r"\bretrans:\d+/(\d+)")):
+            match = re.search(pattern, info)
+            fields[name] = int(match.group(1)) if match else 0
+        memory = re.search(r"skmem:\(r(\d+),rb(\d+),.*?,d(\d+)\)", info)
+        if memory:
+            fields.update(rmem=int(memory.group(1)), rcvbuf=int(memory.group(2)), drops=int(memory.group(3)))
+        ends["daemon" if local.endswith(":17986") else "feeder"] = fields
+    return ends
+
+
+def sample_source_session(path, stop, interval=.1):
+    """Both source-session ends every interval until stop, for stall attribution."""
+    with path.open("w") as out:
+        while not stop.is_set():
+            run = subprocess.run(["ss", "-tinmH", *SOURCE_SESSION], capture_output=True, text=True, timeout=5, check=False)
+            out.write(json.dumps({"monotonic": time.monotonic(), **source_sockets(run.stdout)}) + "\n")
+            stop.wait(interval)
+
+
+def persist_wait_seconds(path):
+    """Sampled time the feeder held unsent data while the daemon had nothing queued to read."""
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    waiting = 0.0
+    for row, after in zip(rows, rows[1:]):
+        feeder, daemon = row.get("feeder"), row.get("daemon")
+        if feeder and daemon and feeder["sendq"] > 0 and daemon["recvq"] == 0:
+            waiting += after["monotonic"] - row["monotonic"]
+    return waiting
+
+
 def feed_snapshot(harness_pid):
     """Host steal, harness CPU, kernel TCP counters and the source socket around a churn."""
     cpus = {}
@@ -637,11 +682,7 @@ def feed_snapshot(harness_pid):
             ticks = [int(value) for value in values[:8]]
             cpus[int(name[3:])] = {"total": sum(ticks), "steal": ticks[7]}
     fields = Path(f"/proc/{harness_pid}/stat").read_text().rsplit(")", 1)[1].split()
-    # Both ends of the source session: the daemon side's skmem drop count (d)
-    # separates receive-queue drops from host-wide counters the receivers share.
-    socket = subprocess.run(["ss", "-tinmH", "(", "src", "127.1.0.1", "and", "dport", "=", ":17986", ")", "or",
-                             "(", "dst", "127.1.0.1", "and", "sport", "=", ":17986", ")"],
-                            capture_output=True, text=True, timeout=5, check=False)
+    socket = subprocess.run(["ss", "-tinmH", *SOURCE_SESSION], capture_output=True, text=True, timeout=5, check=False)
     return {"monotonic": time.monotonic(), "cpus": cpus, "harness_cpu_ticks": int(fields[11]) + int(fields[12]),
             "tcp": kernel_tcp_counters(),
             "source_socket": socket.stdout if socket.returncode == 0 else f"ss failed: {socket.stderr.strip()}"}
@@ -814,13 +855,21 @@ def run_cell(args):
                     require(not any(operation_fallback.values()), "no-refusal cell entered conservative fallback before churn")
                 log_offset = (leg / "daemon.log").stat().st_size
                 feed_before = feed_snapshot(engine_pid)
+                socket_log, socket_stop = leg / f"source-socket-{generation}.jsonl", threading.Event()
+                socket_sampler = threading.Thread(target=sample_source_session, args=(socket_log, socket_stop), daemon=True)
+                socket_sampler.start()
                 triggered = None if correct else time.monotonic()
                 engine.stdin.write(f"churn {generation}\n")
                 engine.stdin.flush()
-                feed = read_record(engine, records, "mass_dirty_feed", deadline)
-                sent = read_record(engine, records, "mass_dirty_sent", deadline)
+                try:
+                    feed = read_record(engine, records, "mass_dirty_feed", deadline)
+                    sent = read_record(engine, records, "mass_dirty_sent", deadline)
+                finally:
+                    socket_stop.set()
+                    socket_sampler.join(timeout=10)
                 feed = source_feed(feed_before, feed_snapshot(engine_pid), feed,
                                    cpu_set(manifest["daemon_cpus"]) | cpu_set(manifest["harness_cpus"]))
+                feed["persist_wait_seconds"] = persist_wait_seconds(socket_log)
                 require(sent["generation"] == generation and sent["family_keys"] == manifest["family_keys"] and
                         sent["writer_drained"] is True and
                         all(sent[name] == manifest["wire_stimulus"]["origin_cardinality"] for name in
