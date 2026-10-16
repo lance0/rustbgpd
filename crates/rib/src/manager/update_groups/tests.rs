@@ -6847,3 +6847,105 @@ fn snapshot_reuse_private_full_table_flat_capture_reserves_exact_cardinality() {
     manager.release_group_admitted_keys(MEMBER);
     assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
 }
+
+/// The full-table VPN resync reserves only the routes the member can
+/// receive: its own-sourced entries are never announced back to it.
+#[test]
+fn vpn_resync_reserve_excludes_own_sourced_routes() {
+    let mut group = empty_group();
+    for n in 0..20 {
+        group.apply_vpn_delta(&vpn_announce_delta(n, MEMBER, None));
+    }
+    for n in 20..25 {
+        group.apply_vpn_delta(&vpn_announce_delta(n, OTHER1, None));
+    }
+    let mut announce = Vec::new();
+    let mut withdraw = Vec::new();
+    RibManager::assemble_group_vpn_resync(
+        &group,
+        MEMBER,
+        None,
+        false,
+        true,
+        None,
+        None,
+        None,
+        &mut announce,
+        &mut withdraw,
+        &mut |_| {},
+    );
+    assert_eq!(announce.len(), 5);
+    assert!(
+        announce.capacity() < 20,
+        "reserved {} slots for 5 receivable routes",
+        announce.capacity()
+    );
+}
+
+/// Full-table VPN resync assembly at the full-VPN shape (1,000,000
+/// `VPNv4` + 230,000 `VPNv6` keys, every key admitted): total time and the
+/// longest gap between readiness checkpoints. Run with
+/// `cargo test --release -p rustbgpd-rib vpn_resync_assembly_timing -- --ignored --nocapture`.
+/// The test binary uses the system allocator; glibc can grow a large `Vec`
+/// by remapping pages, where the daemon's jemalloc copies it, so preload
+/// jemalloc (`LD_PRELOAD`) to see the daemon's reallocation cost.
+#[test]
+#[ignore = "timing diagnostic; run in release with --nocapture"]
+fn vpn_resync_assembly_timing() {
+    use std::time::{Duration, Instant};
+
+    const V4: u32 = 1_000_000;
+    const KEYS: u32 = 1_230_000;
+    let mut group = empty_group();
+    let mut admitted = Vec::with_capacity(KEYS as usize);
+    for i in 0..KEYS {
+        let prefix = if i < V4 {
+            VpnPrefix::v4(Ipv4Addr::from(i << 8), 24)
+        } else {
+            VpnPrefix::v6(Ipv6Addr::from(u128::from(i) << 64), 64)
+        }
+        .unwrap();
+        let mut route = vpn_route(1, OTHER1);
+        route.nlri.prefix = prefix;
+        admitted.push(ExactExportKey::Vpn(route.key()));
+        group.apply_vpn_delta(&VpnGroupDelta {
+            key: route.nlri.key(),
+            new: Some(route),
+            old: None,
+            policy_label: None,
+        });
+    }
+    let admitted: super::admitted_recovery::AdmittedKeys = admitted.into_iter().collect();
+    for _ in 0..5 {
+        let mut announce = Vec::new();
+        let mut withdraw = Vec::new();
+        let mut last = Instant::now();
+        let mut max_gap = Duration::ZERO;
+        let started = last;
+        RibManager::assemble_group_vpn_resync(
+            &group,
+            MEMBER,
+            None,
+            true,
+            false,
+            None,
+            None,
+            Some(admitted.view()),
+            &mut announce,
+            &mut withdraw,
+            &mut |_| {
+                let now = Instant::now();
+                max_gap = max_gap.max(now - last);
+                last = now;
+            },
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(announce.len(), KEYS as usize);
+        assert_eq!(withdraw.len(), 0);
+        println!(
+            "{KEYS} keys: assembly {:.1} ms, longest checkpoint gap {:.2} ms",
+            elapsed.as_secs_f64() * 1e3,
+            max_gap.as_secs_f64() * 1e3
+        );
+    }
+}

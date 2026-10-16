@@ -100,9 +100,9 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "VPN staging mirrors unicast multipath/single-best distribution context for RR/export parity"
     )]
-    pub(in crate::manager) fn stage_vpn_routes_with_checkpoint(
+    pub(in crate::manager) fn stage_vpn_routes_with_checkpoint<S: std::hash::BuildHasher>(
         context: &crate::manager::VpnLabeledStagingContext<'_>,
-        keys: &HashSet<VpnRouteKey>,
+        keys: &HashSet<VpnRouteKey, S>,
         target: &mut super::ExportTarget<'_>,
         rtc_filter: Option<&crate::manager::RtcMembership>,
         vpn_announce: &mut Vec<VpnRibRoute>,

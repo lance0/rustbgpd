@@ -1839,7 +1839,7 @@ impl RibManager {
             && member_of
                 .and_then(|gid| self.group_ribs.get(&gid))
                 .is_some_and(|group| !group.per_client_best);
-        let mut group_prior = HashSet::new();
+        let mut group_prior = crate::fast_hash::FastSet::default();
         if !defer_grouped_refresh_prior
             && member_of.is_some()
             && let Some(routes) = self.grouped_advertised_routes(peer)

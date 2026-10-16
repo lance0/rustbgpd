@@ -460,7 +460,7 @@ fn commit_shared_unicast_with_precommit(
         .try_send_and_commit_outbound_update_with_group_prior(
             peer,
             OutboundCommitBatch::with_unicast(announce, next_hop_override),
-            group_prior,
+            group_prior.into_iter().collect(),
             Some(crate::manager::distribution::SharedUnicastPrecommit {
                 group_id: 7,
                 probe_cache: cache,
@@ -1404,7 +1404,7 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
                         Arc::clone(&stage.shared_nh),
                     )
                 },
-                HashSet::new(),
+                crate::fast_hash::FastSet::default(),
                 Some(crate::manager::distribution::SharedUnicastPrecommit {
                     group_id: gid,
                     probe_cache: &mut cache,

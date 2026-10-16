@@ -1,3 +1,5 @@
+use crate::fast_hash::FastSet;
+
 use super::{
     Afi, ExactExportKey, FastMap, GroupEvalAccumulator, GroupRibOut, HashSet, IpAddr,
     NextHopAction, PolicyAction, PolicyLabel, Prefix, RibManager, Route, RouteQueryKey,
@@ -199,6 +201,16 @@ impl RibManager {
         checkpoint: &mut impl FnMut(bool),
     ) {
         checkpoint(true);
+        // Without Φ or a baseline diff the announce is exactly the table
+        // minus the member's own-sourced entries, which a non-RTC group
+        // counts in O(1). Grow-by-doubling would copy a full-table Vec
+        // several times, each copy one uncheckpointed unit. An RTC
+        // member's maintained count can be stale while it is dirty, so
+        // its buffer grows on demand.
+        if filter.is_none() && (is_force || baseline.is_none()) {
+            vpn_announce.reserve(group.vpn_advertised_count_for(member));
+            checkpoint(true);
+        }
         for route in group.table.iter_vpn() {
             checkpoint(false);
             if route.peer == member || !rt_passes(filter, route) {
@@ -223,7 +235,7 @@ impl RibManager {
                 })
                 .is_some_and(|route| route.peer != member && rt_passes(filter, route))
         };
-        let mut keys: HashSet<VpnRouteKey> = HashSet::new();
+        let mut keys: FastSet<VpnRouteKey> = FastSet::default();
         if let Some(base) = baseline {
             checkpoint(true);
             keys.extend(base.keys().filter(|key| {

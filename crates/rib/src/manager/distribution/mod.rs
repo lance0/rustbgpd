@@ -33,6 +33,7 @@ use super::{
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
+use crate::fast_hash::FastSet;
 use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
@@ -556,7 +557,7 @@ impl RibManager {
 fn materialize_clean_group_prior(
     manager: &RibManager,
     lazy: LazyCleanGroupPrior<'_>,
-) -> HashSet<crate::update::ExactExportKey> {
+) -> FastSet<crate::update::ExactExportKey> {
     lazy.deltas
         .iter()
         .inspect(|_| {
@@ -1065,7 +1066,7 @@ fn reconcile_exact_export_overlay(
     candidate_keys: &[crate::update::ExactExportKey],
     probe_results: &[Result<crate::update::ExactExportResult, crate::update::ExactExportError>],
     source_excluded: &[bool],
-    previously_advertised: &HashSet<crate::update::ExactExportKey>,
+    previously_advertised: &FastSet<crate::update::ExactExportKey>,
     evpn_prior: impl Fn(&rustbgpd_wire::EvpnRouteKey) -> bool,
 ) -> ExactExportOverlayDecision {
     debug_assert_eq!(candidate_keys.len(), source_excluded.len());
@@ -2638,7 +2639,12 @@ impl RibManager {
         peer: IpAddr,
         batch: OutboundCommitBatch,
     ) -> Result<(), OutboundCommitFailure> {
-        self.try_send_and_commit_outbound_update_with_group_prior(peer, batch, HashSet::new(), None)
+        self.try_send_and_commit_outbound_update_with_group_prior(
+            peer,
+            batch,
+            FastSet::default(),
+            None,
+        )
     }
 
     /// Count one failed outbound transaction under its own metric and return
@@ -2907,7 +2913,7 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         batch: OutboundCommitBatch,
-        group_prior: HashSet<crate::update::ExactExportKey>,
+        group_prior: FastSet<crate::update::ExactExportKey>,
         shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
     ) -> Result<(), OutboundCommitFailure> {
         self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
@@ -2930,7 +2936,7 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         mut batch: OutboundCommitBatch,
-        mut group_prior: HashSet<crate::update::ExactExportKey>,
+        mut group_prior: FastSet<crate::update::ExactExportKey>,
         mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
         otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
         group_stage: Option<&super::update_groups::GroupStageOutput>,
@@ -7677,9 +7683,9 @@ impl RibManager {
                     // above. (RTC members' Φ is applied by the resync assembly,
                     // not the enumeration — over-enumeration is harmless.)
                     let vpn_grouped = self.vpn_grouped_member_of(peer);
-                    let mut effective_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = if resync {
+                    let mut effective_l3vpn_keys: FastSet<rustbgpd_wire::VpnRouteKey> = if resync {
                         self.replacement_checkpoint(true);
-                        let mut all: HashSet<rustbgpd_wire::VpnRouteKey> = HashSet::with_capacity(
+                        let mut all = FastSet::with_capacity_and_hasher(
                             self.loc_rib.vpn_len()
                                 + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::vpn_len)
                                 + self
@@ -7705,6 +7711,7 @@ impl RibManager {
                                 } else {
                                     0
                                 },
+                            crate::fast_hash::FastState::default(),
                         );
                         self.replacement_checkpoint(true);
                         all.extend(
@@ -7776,7 +7783,7 @@ impl RibManager {
                         });
                         all
                     } else {
-                        HashSet::new()
+                        FastSet::default()
                     };
 
                     let mut effective_labeled_keys: HashSet<Prefix> = if resync {
@@ -8815,7 +8822,7 @@ impl RibManager {
                         );
                         let defer_clean_group_prior = lazy_group_prior.is_some();
                         let group_prior = if let Some(gid) = member_of {
-                            let mut prior = HashSet::new();
+                            let mut prior = FastSet::default();
                             if is_dirty || is_force {
                                 if let Some(admitted) = self.pending_group_admitted.get(&peer) {
                                     self.replacement_checkpoint(true);
@@ -8880,7 +8887,7 @@ impl RibManager {
                             }
                             prior
                         } else {
-                            HashSet::new()
+                            FastSet::default()
                         };
                         let commit = self
                             .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
