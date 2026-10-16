@@ -1007,7 +1007,8 @@ containers:
       periodSeconds: 10
       timeoutSeconds: 1
       failureThreshold: 30   # about 5 minutes, the unit's WatchdogSec
-terminationGracePeriodSeconds: 1920   # same budget as docker --stop-timeout
+      terminationGracePeriodSeconds: 60   # liveness kills only; Kubernetes 1.25+
+terminationGracePeriodSeconds: 1920   # ordinary stops; same as docker --stop-timeout
 ```
 
 **Readiness** uses `/readyz` with the Kubernetes defaults: a 10 s period, a
@@ -1033,9 +1034,10 @@ session state through its own signals instead, such as the
   shipped systemd unit sets `WatchdogSec=5min`; the daemon sends `WATCHDOG=1`
   every 2.5 minutes while the same core-actor probe passes, and PID 1
   restarts it after five minutes without one (see [systemd](#systemd)). A
-  10 s period with `failureThreshold: 30` restarts the container after about
-  five minutes of continuous `/readyz` failure, a comparable tolerance.
-  It restarts a daemon whose PeerManager or RIB has stopped answering.
+  10 s period with `failureThreshold: 30` detects about five minutes of
+  continuous `/readyz` failure, a comparable tolerance, and then stops a
+  daemon whose PeerManager or RIB has stopped answering. The restart comes
+  after the stop: see the grace period below.
 - **`/livez`**. It returns `200 ok` whenever the HTTP listener accepts a
   connection and checks no actors. It will not restart a deadlocked RIB or
   PeerManager. Choose it only when another mechanism handles a wedged daemon.
@@ -1058,11 +1060,36 @@ systemd unit allows (`TimeoutStartSec=10min`). BGP ingress opens at that
 boundary, so routes from peers, including full tables, load while the probes
 already answer; the startup probe does not need to cover table loading.
 
-Set `terminationGracePeriodSeconds` to at least the stop budget described
-under [systemd](#systemd): an owned runtime-config mutation can take up to
-its 30-minute settlement watchdog plus a five-second grace to finish. During
-coordinated shutdown `/readyz` returns `503 not ready: daemon is shutting
-down`.
+**Grace periods.** Set the pod-level `terminationGracePeriodSeconds` to at
+least the stop budget described under [systemd](#systemd): an owned
+runtime-config mutation can take up to its 30-minute settlement watchdog plus
+a five-second grace to finish. During coordinated shutdown `/readyz` returns
+`503 not ready: daemon is shutting down`.
+
+A failed liveness probe only starts that same termination. Without a
+probe-level override, Kubernetes applies the pod-level grace period to a
+liveness kill too, so the time to restart a wedged daemon is the five-minute
+detection plus up to 32 minutes of shutdown. A wedged daemon usually cannot
+shut down cleanly: coordinated shutdown waits without a deadline for the
+PeerManager to drain its peers, and only a second termination signal skips
+that wait. Kubernetes sends one SIGTERM, then SIGKILL when the grace period
+ends.
+
+The snippet therefore sets a
+[probe-level `terminationGracePeriodSeconds`](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/#probe-level-terminationgraceperiodseconds)
+of 60 seconds on the liveness probe. The Kubernetes documentation supports
+the field from 1.25 and marks it stable since 1.28.
+That covers the shutdown stages that do have deadlines (a five-second
+runtime-config drain, the 30-second warm-checkpoint deadline and the
+five-second GR marker write) if the actors recover, and kills a daemon that
+stays wedged within a minute. Graceful drain is moot by then: the actors
+did not answer for five minutes. The systemd path is no gentler: the shipped
+unit keeps systemd's default watchdog signal, SIGABRT, which the daemon does
+not handle, so a watchdog expiry ends the process without coordinated
+shutdown. In either case a runtime-config mutation that was cut short is
+reverted or adopted from its durable state on the next start (see
+[settlement-watchdog.md](settlement-watchdog.md)). On clusters older than
+1.25, the pod-level value applies to liveness kills as well.
 
 ## Containerlab quick start
 
