@@ -964,17 +964,7 @@ impl Parser<'_> {
                 // parse error before).
                 let arg = match self.peek() {
                     Some(wildcard) if wildcard.kind == Tok::LargeCommunityWildcard => {
-                        self.bump();
-                        let global = self
-                            .text(wildcard)
-                            .split(':')
-                            .next()
-                            .expect("token shape")
-                            .to_owned();
-                        CommunityArg::LargeAdminWildcard(Spanned::new(
-                            self.parse_u32_text(&global, wildcard.span)?,
-                            wildcard.span,
-                        ))
+                        CommunityArg::LargeAdminWildcard(self.large_admin_wildcard()?)
                     }
                     Some(ident)
                         if ident.kind == Tok::Ident && !self.is_well_known_community(ident) =>
@@ -1787,6 +1777,7 @@ impl Parser<'_> {
             _ => return Err(self.error_expected("`accept`, `reject`, or `error`")),
         };
         let mut with = Vec::new();
+        let mut with_only = false;
         if let Some(with_kw) = self.eat(Tok::WithKw) {
             if matches!(verdict, ExpectVerdict::Error(_)) {
                 // An erroring evaluation discards every staged
@@ -1798,6 +1789,13 @@ impl Parser<'_> {
                     "an evaluation error discards all modifications",
                 ));
                 return Err(Fail);
+            }
+            if self
+                .peek()
+                .is_some_and(|t| t.kind == Tok::Ident && self.text(t) == "only")
+            {
+                self.bump();
+                with_only = true;
             }
             loop {
                 with.push(self.with_assertion()?);
@@ -1811,6 +1809,7 @@ impl Parser<'_> {
             calls,
             verdict,
             with,
+            with_only,
         })
     }
 
@@ -1843,6 +1842,12 @@ impl Parser<'_> {
     }
 
     fn with_assertion(&mut self) -> PResult<WithAssertion> {
+        if self
+            .peek()
+            .is_some_and(|t| t.kind == Tok::Ident && self.text(t) == "not")
+        {
+            return self.not_removed_assertion();
+        }
         // `removes` / `without` are contextual: this position held only
         // attribute names before, so no reserved word is added.
         let modifier = self
@@ -1852,7 +1857,15 @@ impl Parser<'_> {
         if let Some(modifier) = modifier {
             self.bump();
             if self.with_community_keyword() {
-                self.bump();
+                let kind = self.bump().expect("peeked community kind");
+                if modifier == "removes"
+                    && self.text(kind) == "large-community"
+                    && self.at(Tok::LargeCommunityWildcard)
+                {
+                    return Ok(WithAssertion::RemovesLargeAdmin(
+                        self.large_admin_wildcard()?.node,
+                    ));
+                }
                 let lit = self.community_lit()?;
                 return Ok(if modifier == "removes" {
                     WithAssertion::Removes(lit)
@@ -1929,6 +1942,33 @@ impl Parser<'_> {
                 Err(Fail)
             }
         }
+    }
+
+    fn not_removed_assertion(&mut self) -> PResult<WithAssertion> {
+        self.bump();
+        let removed = self.expect_ident("`removed` after `not`")?;
+        if removed.node != "removed" {
+            return Err(self.error_expected("`removed` after `not`"));
+        }
+        if !self.with_community_keyword() {
+            return Err(self.error_expected("a community kind after `not removed`"));
+        }
+        self.bump();
+        Ok(WithAssertion::NotRemoved(self.community_lit()?))
+    }
+
+    fn large_admin_wildcard(&mut self) -> PResult<Spanned<u32>> {
+        let wildcard = self.expect(Tok::LargeCommunityWildcard, "`GA:*:*`")?;
+        let global = self
+            .text(wildcard)
+            .split(':')
+            .next()
+            .expect("token shape")
+            .to_owned();
+        Ok(Spanned::new(
+            self.parse_u32_text(&global, wildcard.span)?,
+            wildcard.span,
+        ))
     }
 }
 

@@ -6652,6 +6652,142 @@ fn new_test_syntax_formats_and_round_trips() {
     compile_rpol(&formatted, &mut store).expect("formatted output compiles");
 }
 
+#[test]
+fn wildcard_removes_requires_every_matching_fixture_value() {
+    let tests = r"
+test scrubbed {
+    route { large-communities [65000:1:2, 65000:3:4, 65001:5:6] }
+    expect scrub == accept with only removes large-community 65000:*:*,
+        not removed large-community 65001:5:6
+}
+";
+    let policy = "policy scrub { term t { remove large-community 65000:*:*; accept } }";
+    assert!(failures_of(&format!("{policy}{tests}")).is_empty());
+    for broken in [
+        "policy scrub { term t { accept } }",
+        "policy scrub { term t { remove large-community 65000:1:2; accept } }",
+    ] {
+        let failures = failures_of(&format!("{broken}{tests}"));
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("to be removed"), "{failures:?}");
+    }
+    let empty = format!(
+        "{policy}test empty {{ route {{ }} expect scrub == accept with removes large-community 65000:*:* }}"
+    );
+    assert!(failures_of(&empty)[0].contains("no fixture communities match"));
+}
+
+#[test]
+fn not_removed_requires_a_fixture_value_and_rejects_overmatching_scrubs() {
+    for (kind, literal, field) in [
+        ("community", "65001:5", "communities"),
+        ("large-community", "65001:5:6", "large-communities"),
+        ("ext-community", "RT:65001:5", "ext-communities"),
+        ("ext-community", "OV_VALID", "ext-communities"),
+    ] {
+        let tests = format!(
+            "test retained {{ route {{ {field} [{literal}] }} expect scrub == accept with not removed {kind} {literal} }}"
+        );
+        let clean = "policy scrub { term t { accept } }";
+        assert!(failures_of(&format!("{clean}{tests}")).is_empty());
+        let broken =
+            format!("policy scrub {{ term t {{ remove {kind} {literal}; accept }} }}{tests}");
+        assert!(failures_of(&broken)[0].contains("not to be removed"));
+        let absent = format!(
+            "{clean}test absent {{ route {{ }} expect scrub == accept with not removed {kind} {literal} }}"
+        );
+        assert!(failures_of(&absent)[0].contains("absent from the fixture"));
+    }
+}
+
+#[test]
+fn with_only_rejects_every_unlisted_modification_kind() {
+    let tests = "test exact { route { } expect p == accept with only local-pref 200 }";
+    assert!(
+        failures_of(&format!(
+            "policy p {{ term t {{ set local-pref 200; accept }} }}{tests}"
+        ))
+        .is_empty()
+    );
+    for extra in [
+        "set med 5",
+        "set next-hop self",
+        "prepend as 65000 2",
+        "add community 65000:1",
+        "remove community 65000:1",
+        "add large-community 65000:1:2",
+        "remove large-community 65000:1:2",
+        "add ext-community RT:65000:1",
+        "remove ext-community RT:65000:1",
+    ] {
+        let broken =
+            format!("policy p {{ term t {{ set local-pref 200; {extra}; accept }} }}{tests}");
+        let failures = failures_of(&broken);
+        assert_eq!(failures.len(), 1, "{extra}: {failures:?}");
+        assert!(
+            failures[0].contains("unexpected modifications"),
+            "{extra}: {failures:?}"
+        );
+        assert!(failures_of(&broken.replace("with only", "with")).is_empty());
+    }
+    // Negative assertions do not authorize otherwise unlisted changes.
+    let unexpected = "policy p { term t { remove community 65000:1; accept } }
+        test exact { route { } expect p == accept with only without community 65000:1 }";
+    assert!(failures_of(unexpected)[0].contains("unexpected modifications"));
+}
+
+#[test]
+fn exact_assertions_compile_and_format_without_ordering_community_sets() {
+    let source = r"
+policy p { term t {
+    set local-pref 200; set med 5; set next-hop self; prepend as 65000 2
+    add community 65000:1; add community 65000:2; remove community 65000:3
+    add large-community 65000:1:2; remove large-community 65000:*:*
+    add ext-community RT:65000:1; remove ext-community OV_VALID; accept
+} }
+test exact { route { large-communities [65000:3:4, 65000:5:6, 65001:7:8] }
+    expect p == accept with only community 65000:2, community 65000:1,
+        removes community 65000:3, local-pref 200, med 5, next-hop self,
+        prepend as 65000 2, large-community 65000:1:2,
+        removes large-community 65000:*:*, ext-community RT:65000:1,
+        removes ext-community OV_VALID, not removed large-community 65001:7:8
+}
+";
+    assert!(failures_of(source).is_empty());
+    let formatted = super::format_rpol(source).expect("new assertions format");
+    assert!(formatted.contains("with only community"), "{formatted}");
+    assert!(
+        formatted.contains("removes large-community 65000:*:*"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("not removed large-community 65001:7:8"),
+        "{formatted}"
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+    compile_rpol(&formatted, &mut SetStore::new()).expect("formatted output compiles");
+    assert!(failures_of(&formatted).is_empty());
+}
+
+#[test]
+fn additional_test_assertions_reject_malformed_forms() {
+    for assertion in [
+        "removes community 65000:*:*",
+        "removes ext-community 65000:*:*",
+        "removes large-community 4294967296:*:*",
+        "without large-community 65000:*:*",
+        "not removed",
+        "not added community 65000:1",
+        "not removed med 5",
+        "only",
+    ] {
+        let source = format!(
+            "policy p {{ term t {{ accept }} }} test t {{ route {{ }} expect p == accept with {assertion} }}"
+        );
+        assert!(run_rpol_tests(&source).is_err(), "accepted {assertion}");
+    }
+}
+
 /// A chain expectation charges the daemon's chain node budget per member, so
 /// repeating an individually valid policy cannot build a chain the daemon
 /// would refuse (or exhaust memory before evaluation fuel applies).
