@@ -637,7 +637,10 @@ def feed_snapshot(harness_pid):
             ticks = [int(value) for value in values[:8]]
             cpus[int(name[3:])] = {"total": sum(ticks), "steal": ticks[7]}
     fields = Path(f"/proc/{harness_pid}/stat").read_text().rsplit(")", 1)[1].split()
-    socket = subprocess.run(["ss", "-tinmH", "src", "127.1.0.1", "and", "dport", "=", ":17986"],
+    # Both ends of the source session: the daemon side's skmem drop count (d)
+    # separates receive-queue drops from host-wide counters the receivers share.
+    socket = subprocess.run(["ss", "-tinmH", "(", "src", "127.1.0.1", "and", "dport", "=", ":17986", ")", "or",
+                             "(", "dst", "127.1.0.1", "and", "sport", "=", ":17986", ")"],
                             capture_output=True, text=True, timeout=5, check=False)
     return {"monotonic": time.monotonic(), "cpus": cpus, "harness_cpu_ticks": int(fields[11]) + int(fields[12]),
             "tcp": kernel_tcp_counters(),
