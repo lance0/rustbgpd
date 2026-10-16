@@ -1,0 +1,5483 @@
+{
+  "candidate": "7ff33596cbe70deadb74389c38c6fbb4e8449f9c",
+  "profile": "full-uc",
+  "samples": [
+    {
+      "adj_rib_in": {
+        "calls": 1,
+        "elapsed_ns": 13365,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "old-drop",
+      "cell": "retirement-empty",
+      "initial": {
+        "ipv4_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "keys": 0,
+      "leg": 0,
+      "measured": true,
+      "operation_to_barrier_ns": 112379,
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 3557,
+            "max_eligible_opportunity_gap_ns": 6021,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 60,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 3827,
+            "max_eligible_opportunity_gap_ns": 13706,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 9,
+          "after_barrier_replies": 1,
+          "attempts": 9,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 37390,
+          "max_enqueue_reply_ns": 37280,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4278,
+          "max_reserve_wait_ns": 1072,
+          "replied": 9
+        }
+      },
+      "receivers": 1,
+      "settled": {
+        "ipv4_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 1,
+        "elapsed_ns": 23223,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "candidate",
+      "cell": "retirement-empty",
+      "initial": {
+        "ipv4_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "keys": 0,
+      "leg": 1,
+      "measured": true,
+      "operation_to_barrier_ns": 129470,
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 7804,
+            "max_eligible_opportunity_gap_ns": 7734,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 60,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 5910,
+            "max_eligible_opportunity_gap_ns": 19606,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 7,
+          "after_barrier_replies": 1,
+          "attempts": 7,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 43631,
+          "max_enqueue_reply_ns": 43481,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 5941,
+          "max_reserve_wait_ns": 1152,
+          "replied": 7
+        }
+      },
+      "receivers": 1,
+      "settled": {
+        "ipv4_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 1,
+        "elapsed_ns": 14828,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "candidate",
+      "cell": "retirement-empty",
+      "initial": {
+        "ipv4_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "keys": 0,
+      "leg": 2,
+      "measured": true,
+      "operation_to_barrier_ns": 106959,
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 3346,
+            "max_eligible_opportunity_gap_ns": 3767,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 60,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 3927,
+            "max_eligible_opportunity_gap_ns": 15228,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 8,
+          "after_barrier_replies": 1,
+          "attempts": 8,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 37399,
+          "max_enqueue_reply_ns": 37289,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4137,
+          "max_reserve_wait_ns": 1223,
+          "replied": 8
+        }
+      },
+      "receivers": 1,
+      "settled": {
+        "ipv4_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 1,
+        "elapsed_ns": 19095,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "old-drop",
+      "cell": "retirement-empty",
+      "initial": {
+        "ipv4_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "keys": 0,
+      "leg": 3,
+      "measured": true,
+      "operation_to_barrier_ns": 163944,
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 7463,
+            "max_eligible_opportunity_gap_ns": 7363,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 60,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 4499,
+            "max_eligible_opportunity_gap_ns": 19446,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 8,
+          "after_barrier_replies": 1,
+          "attempts": 8,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 68407,
+          "max_enqueue_reply_ns": 68287,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 6623,
+          "max_reserve_wait_ns": 1312,
+          "replied": 8
+        }
+      },
+      "receivers": 1,
+      "settled": {
+        "ipv4_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 1,
+        "elapsed_ns": 743236993,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "arm": "old-drop",
+      "cell": "retirement-full",
+      "initial": {
+        "ipv4_unicast": {
+          "announces": 1000000,
+          "present": 1000000,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 230000,
+          "present": 230000,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "keys": 1230000,
+      "leg": 0,
+      "measured": true,
+      "operation_to_barrier_ns": 4851706634,
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 2013,
+            "max_eligible_opportunity_gap_ns": 8014,
+            "overlap": false,
+            "owners": 1,
+            "replied": 0,
+            "service_budget_ns": 25000000,
+            "serviced": 0
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 30,
+            "body_callbacks": 6150002,
+            "body_replied": 29,
+            "callbacks": 6150062,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 527240,
+            "max_eligible_opportunity_gap_ns": 25000327,
+            "overlap": true,
+            "owners": 1,
+            "replied": 30,
+            "service_budget_ns": 25000000,
+            "serviced": 31
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 208,
+          "after_barrier_replies": 1,
+          "attempts": 208,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 50701729,
+          "max_enqueue_reply_ns": 50701048,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 5139,
+          "max_reserve_wait_ns": 1583,
+          "replied": 208
+        }
+      },
+      "receivers": 1,
+      "settled": {
+        "ipv4_unicast": {
+          "announces": 1000000,
+          "present": 0,
+          "withdrawals": 1000000
+        },
+        "ipv6_unicast": {
+          "announces": 230000,
+          "present": 0,
+          "withdrawals": 230000
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 1,
+        "elapsed_ns": 757893524,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "arm": "candidate",
+      "cell": "retirement-full",
+      "initial": {
+        "ipv4_unicast": {
+          "announces": 1000000,
+          "present": 1000000,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 230000,
+          "present": 230000,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "keys": 1230000,
+      "leg": 1,
+      "measured": true,
+      "operation_to_barrier_ns": 4941837779,
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 2524,
+            "max_eligible_opportunity_gap_ns": 8135,
+            "overlap": false,
+            "owners": 1,
+            "replied": 0,
+            "service_budget_ns": 25000000,
+            "serviced": 0
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 31,
+            "body_callbacks": 6150002,
+            "body_replied": 30,
+            "callbacks": 6150062,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 514767,
+            "max_eligible_opportunity_gap_ns": 25000315,
+            "overlap": true,
+            "owners": 1,
+            "replied": 31,
+            "service_budget_ns": 25000000,
+            "serviced": 31
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 215,
+          "after_barrier_replies": 1,
+          "attempts": 215,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 49351789,
+          "max_enqueue_reply_ns": 49350756,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4789,
+          "max_reserve_wait_ns": 1984,
+          "replied": 215
+        }
+      },
+      "receivers": 1,
+      "settled": {
+        "ipv4_unicast": {
+          "announces": 1000000,
+          "present": 0,
+          "withdrawals": 1000000
+        },
+        "ipv6_unicast": {
+          "announces": 230000,
+          "present": 0,
+          "withdrawals": 230000
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 1,
+        "elapsed_ns": 749374155,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "arm": "candidate",
+      "cell": "retirement-full",
+      "initial": {
+        "ipv4_unicast": {
+          "announces": 1000000,
+          "present": 1000000,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 230000,
+          "present": 230000,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "keys": 1230000,
+      "leg": 2,
+      "measured": true,
+      "operation_to_barrier_ns": 4834991822,
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1874,
+            "max_eligible_opportunity_gap_ns": 5410,
+            "overlap": false,
+            "owners": 1,
+            "replied": 0,
+            "service_budget_ns": 25000000,
+            "serviced": 0
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 30,
+            "body_callbacks": 6150002,
+            "body_replied": 29,
+            "callbacks": 6150062,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 862874,
+            "max_eligible_opportunity_gap_ns": 25000268,
+            "overlap": true,
+            "owners": 1,
+            "replied": 30,
+            "service_budget_ns": 25000000,
+            "serviced": 30
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 207,
+          "after_barrier_replies": 1,
+          "attempts": 207,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 48679108,
+          "max_enqueue_reply_ns": 48677756,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 5821,
+          "max_reserve_wait_ns": 4018,
+          "replied": 207
+        }
+      },
+      "receivers": 1,
+      "settled": {
+        "ipv4_unicast": {
+          "announces": 1000000,
+          "present": 0,
+          "withdrawals": 1000000
+        },
+        "ipv6_unicast": {
+          "announces": 230000,
+          "present": 0,
+          "withdrawals": 230000
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 1,
+        "elapsed_ns": 742430812,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "arm": "old-drop",
+      "cell": "retirement-full",
+      "initial": {
+        "ipv4_unicast": {
+          "announces": 1000000,
+          "present": 1000000,
+          "withdrawals": 0
+        },
+        "ipv6_unicast": {
+          "announces": 230000,
+          "present": 230000,
+          "withdrawals": 0
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "keys": 1230000,
+      "leg": 3,
+      "measured": true,
+      "operation_to_barrier_ns": 4880972156,
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1793,
+            "max_eligible_opportunity_gap_ns": 5520,
+            "overlap": false,
+            "owners": 1,
+            "replied": 0,
+            "service_budget_ns": 25000000,
+            "serviced": 0
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 30,
+            "body_callbacks": 6150002,
+            "body_replied": 29,
+            "callbacks": 6150062,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 530085,
+            "max_eligible_opportunity_gap_ns": 25000312,
+            "overlap": true,
+            "owners": 1,
+            "replied": 30,
+            "service_budget_ns": 25000000,
+            "serviced": 30
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 215,
+          "after_barrier_replies": 1,
+          "attempts": 215,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 51299327,
+          "max_enqueue_reply_ns": 51298075,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 6222,
+          "max_reserve_wait_ns": 1583,
+          "replied": 215
+        }
+      },
+      "receivers": 1,
+      "settled": {
+        "ipv4_unicast": {
+          "announces": 1000000,
+          "present": 0,
+          "withdrawals": 1000000
+        },
+        "ipv6_unicast": {
+          "announces": 230000,
+          "present": 0,
+          "withdrawals": 230000
+        },
+        "vpnv4": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "vpnv6": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        }
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 20198,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "old-drop",
+      "cell": "retirement-adj-out-empty",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 0,
+      "leg": 0,
+      "measured": true,
+      "operation_to_barrier_ns": 82644,
+      "preparation": {
+        "dirty_peers": 0,
+        "group_dirty_members": 0,
+        "inputs": 0,
+        "regroup_baselines": 0,
+        "target_queue_capacity": 8
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          },
+          "witness": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          },
+          "witness": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 8756,
+            "max_eligible_opportunity_gap_ns": 14998,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 6,
+          "after_barrier_replies": 1,
+          "attempts": 6,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 37420,
+          "max_enqueue_reply_ns": 37310,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 3948,
+          "max_reserve_wait_ns": 1372,
+          "replied": 6
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 9909,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "candidate",
+      "cell": "retirement-adj-out-empty",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 0,
+      "leg": 1,
+      "measured": true,
+      "operation_to_barrier_ns": 63758,
+      "preparation": {
+        "dirty_peers": 0,
+        "group_dirty_members": 0,
+        "inputs": 0,
+        "regroup_baselines": 0,
+        "target_queue_capacity": 8
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          },
+          "witness": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          },
+          "witness": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 5500,
+            "max_eligible_opportunity_gap_ns": 9157,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 6,
+          "after_barrier_replies": 1,
+          "attempts": 6,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 33572,
+          "max_enqueue_reply_ns": 32440,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4098,
+          "max_reserve_wait_ns": 1252,
+          "replied": 6
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 17473,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "candidate",
+      "cell": "retirement-adj-out-empty",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 0,
+      "leg": 2,
+      "measured": true,
+      "operation_to_barrier_ns": 90609,
+      "preparation": {
+        "dirty_peers": 0,
+        "group_dirty_members": 0,
+        "inputs": 0,
+        "regroup_baselines": 0,
+        "target_queue_capacity": 8
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          },
+          "witness": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          },
+          "witness": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 9848,
+            "max_eligible_opportunity_gap_ns": 16391,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 7,
+          "after_barrier_replies": 1,
+          "attempts": 7,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 36497,
+          "max_enqueue_reply_ns": 35325,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 5992,
+          "max_reserve_wait_ns": 1172,
+          "replied": 7
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 14567,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "old-drop",
+      "cell": "retirement-adj-out-empty",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 0,
+      "leg": 3,
+      "measured": true,
+      "operation_to_barrier_ns": 71002,
+      "preparation": {
+        "dirty_peers": 0,
+        "group_dirty_members": 0,
+        "inputs": 0,
+        "regroup_baselines": 0,
+        "target_queue_capacity": 8
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          },
+          "witness": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          },
+          "witness": {
+            "announces": 1,
+            "present": 0,
+            "withdrawals": 1
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 6272,
+            "max_eligible_opportunity_gap_ns": 10529,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 6,
+          "after_barrier_replies": 1,
+          "attempts": 6,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 35557,
+          "max_enqueue_reply_ns": 35456,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4037,
+          "max_reserve_wait_ns": 1112,
+          "replied": 6
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 268480628,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "arm": "old-drop",
+      "cell": "retirement-adj-out-full",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 1230000,
+      "leg": 0,
+      "measured": true,
+      "operation_to_barrier_ns": 268633722,
+      "preparation": {
+        "dirty_peers": 0,
+        "group_dirty_members": 0,
+        "inputs": 0,
+        "regroup_baselines": 0,
+        "target_queue_capacity": 8
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 11,
+            "body_callbacks": 2460000,
+            "body_replied": 10,
+            "callbacks": 2460021,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1623948,
+            "max_eligible_opportunity_gap_ns": 25000056,
+            "overlap": true,
+            "owners": 1,
+            "replied": 11,
+            "service_budget_ns": 25000000,
+            "serviced": 12
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 17,
+          "after_barrier_replies": 1,
+          "attempts": 17,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 25015585,
+          "max_enqueue_reply_ns": 25014893,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4208,
+          "max_reserve_wait_ns": 1292,
+          "replied": 17
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          1230000,
+          1230000
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 259532457,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "arm": "candidate",
+      "cell": "retirement-adj-out-full",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 1230000,
+      "leg": 1,
+      "measured": true,
+      "operation_to_barrier_ns": 259731927,
+      "preparation": {
+        "dirty_peers": 0,
+        "group_dirty_members": 0,
+        "inputs": 0,
+        "regroup_baselines": 0,
+        "target_queue_capacity": 8
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 11,
+            "body_callbacks": 2460000,
+            "body_replied": 10,
+            "callbacks": 2460021,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1644096,
+            "max_eligible_opportunity_gap_ns": 25000217,
+            "overlap": true,
+            "owners": 1,
+            "replied": 11,
+            "service_budget_ns": 25000000,
+            "serviced": 12
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 19,
+          "after_barrier_replies": 1,
+          "attempts": 19,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 25016176,
+          "max_enqueue_reply_ns": 25016006,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 5060,
+          "max_reserve_wait_ns": 1293,
+          "replied": 19
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          1230000,
+          1230000
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 258617105,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "arm": "candidate",
+      "cell": "retirement-adj-out-full",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 1230000,
+      "leg": 2,
+      "measured": true,
+      "operation_to_barrier_ns": 258761734,
+      "preparation": {
+        "dirty_peers": 0,
+        "group_dirty_members": 0,
+        "inputs": 0,
+        "regroup_baselines": 0,
+        "target_queue_capacity": 8
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 11,
+            "body_callbacks": 2460000,
+            "body_replied": 10,
+            "callbacks": 2460021,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1611144,
+            "max_eligible_opportunity_gap_ns": 25000046,
+            "overlap": true,
+            "owners": 1,
+            "replied": 11,
+            "service_budget_ns": 25000000,
+            "serviced": 12
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 17,
+          "after_barrier_replies": 1,
+          "attempts": 17,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 25019923,
+          "max_enqueue_reply_ns": 25019813,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 5640,
+          "max_reserve_wait_ns": 1122,
+          "replied": 17
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          1230000,
+          1230000
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 270768989,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "arm": "old-drop",
+      "cell": "retirement-adj-out-full",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 1230000,
+      "leg": 3,
+      "measured": true,
+      "operation_to_barrier_ns": 270916122,
+      "preparation": {
+        "dirty_peers": 0,
+        "group_dirty_members": 0,
+        "inputs": 0,
+        "regroup_baselines": 0,
+        "target_queue_capacity": 8
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 1230000,
+            "present": 1230000,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 11,
+            "body_callbacks": 2460000,
+            "body_replied": 10,
+            "callbacks": 2460021,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1635338,
+            "max_eligible_opportunity_gap_ns": 25000112,
+            "overlap": true,
+            "owners": 1,
+            "replied": 11,
+            "service_budget_ns": 25000000,
+            "serviced": 12
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          }
+        },
+        "probe": {
+          "admitted": 17,
+          "after_barrier_replies": 1,
+          "attempts": 17,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 25040578,
+          "max_enqueue_reply_ns": 25039826,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4509,
+          "max_reserve_wait_ns": 1343,
+          "replied": 17
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 1,
+            "present": 1,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          1230000,
+          1230000
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 11632,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "old-drop",
+      "cell": "retirement-regroup-empty",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 0,
+      "leg": 0,
+      "measured": true,
+      "operation_to_barrier_ns": 80059,
+      "preparation": {
+        "dirty_peers": 1,
+        "group_dirty_members": 1,
+        "inputs": 8,
+        "regroup_baselines": 1,
+        "target_queue_capacity": 0
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 6412,
+            "max_eligible_opportunity_gap_ns": 10369,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 15,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 4338,
+            "max_eligible_opportunity_gap_ns": 5780,
+            "overlap": false,
+            "owners": 1,
+            "replied": 0,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          }
+        },
+        "probe": {
+          "admitted": 7,
+          "after_barrier_replies": 1,
+          "attempts": 7,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 47007,
+          "max_enqueue_reply_ns": 46817,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4248,
+          "max_reserve_wait_ns": 1242,
+          "replied": 7
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 1,
+        "elapsed_ns": 6271,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 4,
+            "present": 0,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 4,
+            "present": 0,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 9698,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "candidate",
+      "cell": "retirement-regroup-empty",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 0,
+      "leg": 1,
+      "measured": true,
+      "operation_to_barrier_ns": 78446,
+      "preparation": {
+        "dirty_peers": 1,
+        "group_dirty_members": 1,
+        "inputs": 8,
+        "regroup_baselines": 1,
+        "target_queue_capacity": 0
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 5521,
+            "max_eligible_opportunity_gap_ns": 8906,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 15,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 3968,
+            "max_eligible_opportunity_gap_ns": 5059,
+            "overlap": false,
+            "owners": 1,
+            "replied": 0,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          }
+        },
+        "probe": {
+          "admitted": 8,
+          "after_barrier_replies": 1,
+          "attempts": 8,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 36868,
+          "max_enqueue_reply_ns": 32750,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 3998,
+          "max_reserve_wait_ns": 4118,
+          "replied": 8
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 1,
+        "elapsed_ns": 5490,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 4,
+            "present": 0,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 4,
+            "present": 0,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 14057,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "candidate",
+      "cell": "retirement-regroup-empty",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 0,
+      "leg": 2,
+      "measured": true,
+      "operation_to_barrier_ns": 83044,
+      "preparation": {
+        "dirty_peers": 1,
+        "group_dirty_members": 1,
+        "inputs": 8,
+        "regroup_baselines": 1,
+        "target_queue_capacity": 0
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 6152,
+            "max_eligible_opportunity_gap_ns": 9708,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 15,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 4268,
+            "max_eligible_opportunity_gap_ns": 5400,
+            "overlap": false,
+            "owners": 1,
+            "replied": 0,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          }
+        },
+        "probe": {
+          "admitted": 7,
+          "after_barrier_replies": 1,
+          "attempts": 7,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 56535,
+          "max_enqueue_reply_ns": 55043,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4348,
+          "max_reserve_wait_ns": 1492,
+          "replied": 7
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 1,
+        "elapsed_ns": 5811,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 4,
+            "present": 0,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 4,
+            "present": 0,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 13045,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "old-drop",
+      "cell": "retirement-regroup-empty",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 0,
+      "leg": 3,
+      "measured": true,
+      "operation_to_barrier_ns": 101398,
+      "preparation": {
+        "dirty_peers": 1,
+        "group_dirty_members": 1,
+        "inputs": 8,
+        "regroup_baselines": 1,
+        "target_queue_capacity": 0
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 6201,
+            "max_eligible_opportunity_gap_ns": 9287,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 15,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 4217,
+            "max_eligible_opportunity_gap_ns": 5270,
+            "overlap": false,
+            "owners": 1,
+            "replied": 0,
+            "service_budget_ns": 25000000,
+            "serviced": 1
+          }
+        },
+        "probe": {
+          "admitted": 7,
+          "after_barrier_replies": 1,
+          "attempts": 7,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 53089,
+          "max_enqueue_reply_ns": 52979,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 3837,
+          "max_reserve_wait_ns": 1172,
+          "replied": 7
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 1,
+        "elapsed_ns": 5901,
+        "groups": 0,
+        "keys": 0
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 4,
+            "present": 0,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 4,
+            "present": 0,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 21590,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "old-drop",
+      "cell": "retirement-regroup-full",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1000000,
+            "present": 1000000,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1000000,
+            "present": 1000000,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 1230000,
+      "leg": 0,
+      "measured": true,
+      "operation_to_barrier_ns": 260215563,
+      "preparation": {
+        "dirty_peers": 1,
+        "group_dirty_members": 1,
+        "inputs": 8,
+        "regroup_baselines": 1,
+        "target_queue_capacity": 0
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 10349,
+            "max_eligible_opportunity_gap_ns": 15298,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 11,
+            "body_callbacks": 2460000,
+            "body_replied": 10,
+            "callbacks": 2460015,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1075659,
+            "max_eligible_opportunity_gap_ns": 25000036,
+            "overlap": true,
+            "owners": 1,
+            "replied": 11,
+            "service_budget_ns": 25000000,
+            "serviced": 12
+          }
+        },
+        "probe": {
+          "admitted": 19,
+          "after_barrier_replies": 1,
+          "attempts": 19,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 25035772,
+          "max_enqueue_reply_ns": 25035180,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4929,
+          "max_reserve_wait_ns": 1142,
+          "replied": 19
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 1,
+        "elapsed_ns": 259860072,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1000004,
+            "present": 1000000,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1000004,
+            "present": 1000000,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1000000,
+          230000,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 19095,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "candidate",
+      "cell": "retirement-regroup-full",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1000000,
+            "present": 1000000,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1000000,
+            "present": 1000000,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 1230000,
+      "leg": 1,
+      "measured": true,
+      "operation_to_barrier_ns": 263986824,
+      "preparation": {
+        "dirty_peers": 1,
+        "group_dirty_members": 1,
+        "inputs": 8,
+        "regroup_baselines": 1,
+        "target_queue_capacity": 0
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 12013,
+            "max_eligible_opportunity_gap_ns": 17522,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 11,
+            "body_callbacks": 2460000,
+            "body_replied": 10,
+            "callbacks": 2460015,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1052396,
+            "max_eligible_opportunity_gap_ns": 25000036,
+            "overlap": true,
+            "owners": 1,
+            "replied": 11,
+            "service_budget_ns": 25000000,
+            "serviced": 12
+          }
+        },
+        "probe": {
+          "admitted": 18,
+          "after_barrier_replies": 1,
+          "attempts": 18,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 25031053,
+          "max_enqueue_reply_ns": 25030923,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 5942,
+          "max_reserve_wait_ns": 1473,
+          "replied": 18
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 1,
+        "elapsed_ns": 263643837,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1000004,
+            "present": 1000000,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1000004,
+            "present": 1000000,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1000000,
+          230000,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 22872,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "candidate",
+      "cell": "retirement-regroup-full",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1000000,
+            "present": 1000000,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1000000,
+            "present": 1000000,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 1230000,
+      "leg": 2,
+      "measured": true,
+      "operation_to_barrier_ns": 264392418,
+      "preparation": {
+        "dirty_peers": 1,
+        "group_dirty_members": 1,
+        "inputs": 8,
+        "regroup_baselines": 1,
+        "target_queue_capacity": 0
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 14126,
+            "max_eligible_opportunity_gap_ns": 21450,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 11,
+            "body_callbacks": 2460000,
+            "body_replied": 10,
+            "callbacks": 2460015,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1045594,
+            "max_eligible_opportunity_gap_ns": 25000057,
+            "overlap": true,
+            "owners": 1,
+            "replied": 11,
+            "service_budget_ns": 25000000,
+            "serviced": 12
+          }
+        },
+        "probe": {
+          "admitted": 22,
+          "after_barrier_replies": 1,
+          "attempts": 22,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 25024242,
+          "max_enqueue_reply_ns": 25024102,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 5440,
+          "max_reserve_wait_ns": 1212,
+          "replied": 22
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 1,
+        "elapsed_ns": 263994217,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1000004,
+            "present": 1000000,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1000004,
+            "present": 1000000,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1000000,
+          230000,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    },
+    {
+      "adj_rib_in": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      },
+      "adj_rib_out": {
+        "calls": 1,
+        "elapsed_ns": 21730,
+        "groups": 0,
+        "keys": 0
+      },
+      "arm": "old-drop",
+      "cell": "retirement-regroup-full",
+      "initial": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1000000,
+            "present": 1000000,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1000000,
+            "present": 1000000,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "keys": 1230000,
+      "leg": 3,
+      "measured": true,
+      "operation_to_barrier_ns": 260402817,
+      "preparation": {
+        "dirty_peers": 1,
+        "group_dirty_members": 1,
+        "inputs": 8,
+        "regroup_baselines": 1,
+        "target_queue_capacity": 0
+      },
+      "private_evpn": {
+        "initial": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "settled": {
+          "target": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "witness": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "profile": "full-uc",
+      "readiness": {
+        "owners": {
+          "private_outbound_cleanup": {
+            "admitted": 1,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 21,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 11862,
+            "max_eligible_opportunity_gap_ns": 16250,
+            "overlap": false,
+            "owners": 1,
+            "replied": 1,
+            "service_budget_ns": 25000000,
+            "serviced": 2
+          },
+          "received_cleanup_including_gc": {
+            "admitted": 0,
+            "body_callbacks": 0,
+            "body_replied": 0,
+            "callbacks": 0,
+            "eligible": false,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": null,
+            "max_eligible_opportunity_gap_ns": null,
+            "overlap": false,
+            "owners": 0,
+            "replied": 0,
+            "service_budget_ns": null,
+            "serviced": 0
+          },
+          "regroup_baseline_cleanup": {
+            "admitted": 11,
+            "body_callbacks": 2460000,
+            "body_replied": 10,
+            "callbacks": 2460015,
+            "eligible": true,
+            "invalid_owners": 0,
+            "max_checkpoint_interval_ns": 1055934,
+            "max_eligible_opportunity_gap_ns": 25000044,
+            "overlap": true,
+            "owners": 1,
+            "replied": 11,
+            "service_budget_ns": 25000000,
+            "serviced": 12
+          }
+        },
+        "probe": {
+          "admitted": 17,
+          "after_barrier_replies": 1,
+          "attempts": 17,
+          "before_capture_replies": 1,
+          "errors": 0,
+          "max_attempt_reply_ns": 25037212,
+          "max_enqueue_reply_ns": 25036130,
+          "max_inflight": 1,
+          "max_refill_gap_ns": 4959,
+          "max_reserve_wait_ns": 1864,
+          "replied": 17
+        }
+      },
+      "receivers": 2,
+      "regroup_baseline": {
+        "calls": 1,
+        "elapsed_ns": 260087520,
+        "groups": 0,
+        "keys": 1230000
+      },
+      "settled": {
+        "target": {
+          "ipv4_unicast": {
+            "announces": 1000004,
+            "present": 1000000,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "witness": {
+          "ipv4_unicast": {
+            "announces": 1000004,
+            "present": 1000000,
+            "withdrawals": 4
+          },
+          "ipv6_unicast": {
+            "announces": 230000,
+            "present": 230000,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        }
+      },
+      "survivors": {
+        "evpn_received_best": [
+          0,
+          0
+        ],
+        "health": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          1000000,
+          230000,
+          0,
+          0
+        ],
+        "source_evpn_fold": {
+          "announces": 0,
+          "present": 0,
+          "withdrawals": 0
+        },
+        "source_fold": {
+          "ipv4_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "ipv6_unicast": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv4": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          },
+          "vpnv6": {
+            "announces": 0,
+            "present": 0,
+            "withdrawals": 0
+          }
+        },
+        "source_group_after": "group:1",
+        "source_group_before": "group:1",
+        "target_group_after": "",
+        "target_group_before": "group:0",
+        "witness_group_after": "group:0",
+        "witness_group_before": "group:0"
+      },
+      "vpn_stage": {
+        "calls": 0,
+        "elapsed_ns": null,
+        "groups": 0,
+        "keys": 0
+      }
+    }
+  ],
+  "schema": "rustbgpd.retirement-timing.v3",
+  "scope": "instrumented component attribution; no complete HTTP/fleet qualification; receiver cleanup is identical in both arms, with no cleanup improvement comparison; instrumented cleanup callback intervals <=25 ms and one-inflight RIB replies <=200 ms; not complete HTTP readiness qualification",
+  "status": "COMPLETE",
+  "summaries": [
+    {
+      "arm": "old-drop",
+      "eligible": false,
+      "max_ns": null,
+      "median_ns": null,
+      "observations": 0,
+      "phase": "vpn_stage"
+    },
+    {
+      "arm": "candidate",
+      "eligible": false,
+      "max_ns": null,
+      "median_ns": null,
+      "observations": 0,
+      "phase": "vpn_stage"
+    },
+    {
+      "arm": "old-drop",
+      "eligible": true,
+      "max_ns": 743236993,
+      "median_ns": 742833902.5,
+      "observations": 2,
+      "phase": "adj_rib_in"
+    },
+    {
+      "arm": "candidate",
+      "eligible": true,
+      "max_ns": 757893524,
+      "median_ns": 753633839.5,
+      "observations": 2,
+      "phase": "adj_rib_in"
+    },
+    {
+      "arm": "old-drop",
+      "eligible": true,
+      "max_ns": 270768989,
+      "median_ns": 269624808.5,
+      "observations": 2,
+      "phase": "adj_rib_out"
+    },
+    {
+      "arm": "candidate",
+      "eligible": true,
+      "max_ns": 259532457,
+      "median_ns": 259074781.0,
+      "observations": 2,
+      "phase": "adj_rib_out"
+    },
+    {
+      "arm": "old-drop",
+      "eligible": true,
+      "max_ns": 260087520,
+      "median_ns": 259973796.0,
+      "observations": 2,
+      "phase": "regroup_baseline"
+    },
+    {
+      "arm": "candidate",
+      "eligible": true,
+      "max_ns": 263994217,
+      "median_ns": 263819027.0,
+      "observations": 2,
+      "phase": "regroup_baseline"
+    }
+  ]
+}
