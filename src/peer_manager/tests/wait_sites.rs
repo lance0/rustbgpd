@@ -1529,7 +1529,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::DatasetExportCapacity { failed_restore } => manager.reevaluate_dataset_exports(
             peers.to_vec(), false, if failed_restore { OperatorReadAdmission::Fenced {
                 reason: "an earlier failed restoration retains its fence while awaiting capacity",
-            }} else { OperatorReadAdmission::Served }, false, None).await.map_err(|e| e.to_string()),
+            }} else { OperatorReadAdmission::Served }, None).await.map_err(|e| e.to_string()),
         Drive::MaxPrefixRestart => {
             manager.handle_due_max_prefix_restarts().await;
             Ok(())
@@ -2693,65 +2693,50 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
     }
 }
 
+/// A dispatched dataset re-evaluation is uncancellable RIB work. Its reply
+/// is awaited to completion while reads are served, however long the
+/// full-table work takes; no five-second timer may report it ambiguous.
 #[tokio::test(start_paused = true)]
-async fn dataset_reply_preserves_legacy_wall_and_generation_attention_budgets() {
-    for wall_reply_budget in [true, false] {
-        let peer = "10.39.3.2".parse::<IpAddr>().unwrap();
-        let gate = Gate::new();
-        let (mut manager, _) = rfc8212_status_manager();
-        let (rib_tx, mut rib_rx) = mpsc::channel(1);
-        manager.rib_tx = rib_tx;
-        let (operator_tx, operator_rx) = mpsc::channel(4);
-        manager = manager.with_operator_queries(operator_rx);
-        let (handle, _) = spawn_session(peer, true, gate.clone(), stall_state, false);
-        insert_test_managed_peer(&mut manager, peer, handle, false);
-        let transaction = tokio::spawn(async move {
-            let result = manager
-                .reevaluate_dataset_exports(
-                    vec![peer],
-                    false,
-                    OperatorReadAdmission::Served,
-                    wall_reply_budget,
-                    None,
-                )
-                .await;
-            (manager, result)
-        });
-        let RibUpdate::ReevaluatePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
-        else {
-            panic!("expected actual dataset reevaluation dispatch")
-        };
-        let infos = admit_snapshot_across_deadline(&operator_tx, peer).await;
-        assert!(
-            !transaction.is_finished(),
-            "owner waits for the admitted read even after wall expiry"
-        );
-        assert!(
-            tokio::time::timeout(PEER_QUERY_TIMEOUT, infos)
-                .await
-                .unwrap()
-                .is_ok()
-        );
-        for _ in 0..4 {
-            tokio::task::yield_now().await;
-        }
-        if wall_reply_budget {
-            assert!(
-                transaction.is_finished(),
-                "legacy reply expires after five wall seconds"
-            );
-        } else {
-            assert!(
-                !transaction.is_finished(),
-                "generation reply still has attended budget left"
-            );
-            reply.send(Ok(())).unwrap();
-        }
-        let (mut manager, result) = transaction.await.unwrap();
-        assert_eq!(result.is_err(), wall_reply_budget);
-        for (_, managed) in manager.peers.drain() {
-            managed.into_parts().0.shutdown().await.unwrap().unwrap();
-        }
+async fn dataset_reply_waits_for_completion_past_rib_reply_timeout() {
+    let peer = "10.39.3.2".parse::<IpAddr>().unwrap();
+    let gate = Gate::new();
+    let (mut manager, _) = rfc8212_status_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    manager.rib_tx = rib_tx;
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    manager = manager.with_operator_queries(operator_rx);
+    let (handle, _) = spawn_session(peer, true, gate.clone(), stall_state, false);
+    insert_test_managed_peer(&mut manager, peer, handle, false);
+    let transaction = tokio::spawn(async move {
+        let result = manager
+            .reevaluate_dataset_exports(vec![peer], false, OperatorReadAdmission::Served, None)
+            .await;
+        (manager, result)
+    });
+    let RibUpdate::ReevaluatePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap() else {
+        panic!("expected actual dataset reevaluation dispatch")
+    };
+    let infos = admit_snapshot_across_deadline(&operator_tx, peer).await;
+    assert!(
+        tokio::time::timeout(PEER_QUERY_TIMEOUT, infos)
+            .await
+            .unwrap()
+            .is_ok(),
+        "the owner serves an admitted read while the RIB works"
+    );
+    tokio::time::advance(RIB_REPLY_TIMEOUT * 120).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !transaction.is_finished(),
+        "accepted RIB work is awaited to completion, not timed out"
+    );
+    reply.send(Ok(())).unwrap();
+    let (mut manager, result) = transaction.await.unwrap();
+    assert!(result.is_ok(), "accepted re-evaluation completes");
+    for (_, managed) in manager.peers.drain() {
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }
 }
 
