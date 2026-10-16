@@ -126,10 +126,15 @@ def verify_container_membership(proc, cgroup, pid, owner):
     raise ValueError("container daemon must be the sole process in its cgroup")
 
 
+# A /proc file opened before the target exits and read afterwards raises
+# ESRCH (ProcessLookupError); one opened after exit raises ENOENT.
+PROCESS_GONE = (FileNotFoundError, ProcessLookupError)
+
+
 def owned_process_exited(proc, cgroup, pid, owner):
     try:
         return verify_container_membership(proc, cgroup, pid, owner) is False
-    except FileNotFoundError:
+    except PROCESS_GONE:
         if not proc.exists():
             return True
         raise
@@ -215,7 +220,7 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
                             int(thread["nonvoluntary_ctxt_switches"]),
                         )
                         threads_read += 1
-                    except FileNotFoundError:
+                    except PROCESS_GONE:
                         threads_raced += 1
                 writer.writerow([
                     epoch_us, started, (time.monotonic_ns() - started) // 1000,
@@ -225,7 +230,7 @@ def sample(pid, out, interval, expected_pgid=None, owner=None):
                     sum(pair[1] for pair in switches.values()), threads_read, threads_raced,
                 ])
                 stream.flush()
-            except FileNotFoundError:
+            except PROCESS_GONE:
                 if owned_process_exited(proc, cgroup, pid, process_owner):
                     break
                 raise
