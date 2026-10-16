@@ -1024,12 +1024,11 @@ fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
     assert!(manager.mark_outbound_dirty(member));
     let proof = manager.pending_group_admitted.get(&member).unwrap();
     assert_eq!(proof.iter().collect::<HashSet<_>>(), expected);
-    assert_eq!(
+    assert!(
         manager.group_ribs[&gid]
             .recovery_snapshot_for_test()
             .is_some(),
-        !vpn_capable,
-        "full OLD representation follows negotiated VPN capability, not current VPN row count"
+        "full OLD capture shares the group pool for unicast and VPN-negotiated groups"
     );
     let withdrawn = if vpn {
         let key = make_vpn_rib_route(source, 1, 100, 100).key();
@@ -1062,12 +1061,12 @@ fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
 }
 
 #[test]
-fn vpn_capable_unicast_only_full_old_capture_stays_flat_and_keeps_owed_withdrawals() {
+fn vpn_capable_unicast_only_full_old_capture_shares_and_keeps_owed_withdrawals() {
     full_old_capture_keeps_actual_proof(false, true);
 }
 
 #[test]
-fn mixed_uc_vpn_full_old_capture_stays_flat_and_keeps_owed_withdrawals() {
+fn mixed_uc_vpn_full_old_capture_shares_and_keeps_owed_withdrawals() {
     full_old_capture_keeps_actual_proof(true, true);
 }
 

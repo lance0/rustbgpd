@@ -203,15 +203,15 @@ class MassDirtyTests(unittest.TestCase):
         source = self.root / "update_groups.rs"
         before = ("    fn capture_group_admitted_keys_inner(\n"
                   "        let captured = ledger.capture_full_old_with_checkpoint(\n"
-                  "            peer, hint, &group.table, !group.stages_vpn(), uc, vpn, checkpoint,\n"
+                  "            peer, hint, &group.table, true, uc, vpn, checkpoint,\n"
                   "        );\n    }\n"
                   "    pub(in crate::manager) fn prepare_empty_group_recovery_admission() {\n"
-                  "        let still_shared = !group.stages_vpn();\n    }\n")
+                  "        let still_shared = true;\n    }\n")
         source.write_text(before)
         metadata = receipt.derive_flat(source, self.root / "derivation.json")
-        self.assertEqual(source.read_text(), before.replace("&group.table, !group.stages_vpn(),", "&group.table, false,", 1))
-        self.assertTrue(metadata["vpn_full_old_already_flat"])
-        self.assertEqual(metadata["expression_before"], "!group.stages_vpn()")
+        self.assertEqual(source.read_text(), before.replace("&group.table, true,", "&group.table, false,", 1))
+        self.assertFalse(metadata["vpn_full_old_already_flat"])
+        self.assertEqual(metadata["expression_before"], "true")
         with self.assertRaisesRegex(ValueError, "guard anchor drift"):
             receipt.derive_flat(source, self.root / "second.json")
 
@@ -743,7 +743,7 @@ class MassDirtyTests(unittest.TestCase):
         (root / "candidate.sha").write_text(manifest["head"] + "\n")
         source = ("    fn capture_group_admitted_keys_inner(\n"
                   "        let captured = ledger.capture_full_old_with_checkpoint(\n"
-                  "            peer, hint, &group.table, !group.stages_vpn(), uc, vpn, checkpoint,\n"
+                  "            peer, hint, &group.table, true, uc, vpn, checkpoint,\n"
                   "        );\n    }\n"
                   "    pub(in crate::manager) fn prepare_empty_group_recovery_admission() {\n")
         (root / "capture-source.rs").write_text(source)
@@ -762,7 +762,7 @@ class MassDirtyTests(unittest.TestCase):
             (root / f"build-{role}.exit").write_text("0\n")
         (root / "rustc-version.txt").write_text("rustc fixture version\n")
         (root / "cargo-version.txt").write_text("cargo fixture version\n")
-        (root / "flat-control.patch").write_text("-!group.stages_vpn()\n+false\n")
+        (root / "flat-control.patch").write_text("-true\n+false\n")
         receipt.write_json(root / "binary-validation.json", receipt.verified_binaries(root))
         for name in receipt.OWNED_INPUTS:
             path = root / "frozen-instrumentation" / name
@@ -884,7 +884,7 @@ class MassDirtyTests(unittest.TestCase):
                          {"p99_ms": {"flat": 100, "candidate": 100, "limit": 150},
                           "max_ms": {"flat": 100, "candidate": 199, "limit": 200}})
 
-    def test_readiness_verdict_fails_ceiling_in_either_arm_and_compares_only_unicast(self):
+    def test_readiness_verdict_fails_ceiling_in_either_arm_and_compares_both_profiles(self):
         def slow_candidate(arm, _index, probes):
             for probe in probes:
                 if arm == "candidate":
@@ -902,7 +902,7 @@ class MassDirtyTests(unittest.TestCase):
                 probes[3].update(status=503, phase="response_validation")
 
         cases = (("full-vpn", None, "PASS", "all predeclared bars met"),
-                 ("full-vpn", slow_candidate, "PASS", "all predeclared bars met"),
+                 ("full-vpn", slow_candidate, "FAIL", "candidate post-sent /readyz p99 200.0 ms over 37.5 ms bar"),
                  ("full-uc", None, "PASS", "all predeclared bars met"),
                  ("full-uc", slow_candidate, "FAIL", "candidate post-sent /readyz p99 200.0 ms over 37.5 ms bar"),
                  ("full-vpn", three_slow_flat, "FAIL", "leg-0-flat: 3 consecutive /readyz samples over 250 ms"),
@@ -917,10 +917,7 @@ class MassDirtyTests(unittest.TestCase):
                 self.assertEqual(verdict["status"], status, verdict.get("reason"))
                 self.assertIn(reason, verdict["reason"])
                 self.assertEqual(set(verdict["readiness"]), {path.name for path in root.glob("leg-*")})
-                if profile == "full-vpn":
-                    self.assertEqual(verdict["readiness_comparison"], "not_applicable: arms code-identical")
-                else:
-                    self.assertEqual(set(verdict["readiness_comparison"]), {"p99_ms", "max_ms"})
+                self.assertEqual(set(verdict["readiness_comparison"]), {"p99_ms", "max_ms"})
 
     def test_actual_analyze_failure_survives_driver_cleanup_and_finalizer(self):
         root, _ = self.complete_campaign(measured_failure=True)
@@ -1313,6 +1310,32 @@ rm() {
                     self.set_fallback_chain(leg, row, cause, counts)
                     with self.assertRaisesRegex(ValueError, "fallback counter regressed"):
                         receipt.validate_leg(leg, manifest, row)
+
+    def test_cap_pressure_requires_cap_only_on_flat_and_no_fallback_on_either_candidate(self):
+        for profile in ("full-uc", "full-vpn"):
+            with tempfile.TemporaryDirectory(prefix="rmd-pressure-") as directory, \
+                    mock.patch.object(self, "root", Path(directory)):
+                _, manifest = self.manifest(correctness=False, cohort="cap-pressure", profile=profile)
+                # Two receivers keep the synthetic held charge under the daemon cap.
+                self.pressure_arms(dict(manifest, receivers=2), profile)
+
+    def pressure_arms(self, manifest, profile):
+        for arm, capped, error in (("flat", True, None), ("flat", False, "never reached cap"),
+                                   ("candidate", False, None), ("candidate", True, "refused proof")):
+            with self.subTest(profile=profile, arm=arm, capped=capped):
+                leg, row = self.small_leg(manifest)
+                self.measured_leg(leg, row, arm, 0, 2)
+                row["arm"] = arm
+                if capped:
+                    self.set_fallback_chain(leg, row, "daemon_limit", [0, 0, 7, 7, 7, 9, 9])
+                if error is None:
+                    receipt.validate_leg(leg, manifest, row)
+                else:
+                    with self.assertRaisesRegex(ValueError, error):
+                        receipt.validate_leg(leg, manifest, row)
+                for path in leg.rglob("*"):
+                    if path.is_file():
+                        path.unlink()
 
     def test_no_refusal_cannot_hide_fallback_before_churn(self):
         _, manifest = self.manifest()

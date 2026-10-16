@@ -220,30 +220,37 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
     return {name: digest(directory / name) for name in FIXTURE_INPUTS}
 
 
-def derive_flat(source, output):
-    """Wrap only the optional full-OLD attempt; leave flat fallback and all other seams intact."""
-    source = Path(source)
-    text = source.read_text()
+SHARING_GUARD = "true"
+
+
+def sharing_guard(text):
+    """Offset of the full-OLD sharing argument that follows `&group.table,`."""
     begin = text.index("    fn capture_group_admitted_keys_inner(")
     end = text.index("    pub(in crate::manager) fn prepare_empty_group_recovery_admission", begin)
     section = text[begin:end]
     require(section.count(".capture_full_old_with_checkpoint(") == 1, "full-OLD helper anchor drift")
-    anchor = "!group.stages_vpn()"
-    require(section.count(anchor) == 1, "full-OLD sharing guard anchor drift")
     call = section.index(".capture_full_old_with_checkpoint(")
-    guard = section.index(anchor)
-    require(call < guard and section[guard + len(anchor):].lstrip().startswith(","), "sharing guard is not a call argument")
-    start = begin + guard
-    close = start + len(anchor)
-    expression, replacement = anchor, "false"
+    table = section.index("&group.table,", call) + len("&group.table,")
+    guard = table + len(section[table:]) - len(section[table:].lstrip())
+    require(section.startswith(SHARING_GUARD + ",", guard), "full-OLD sharing guard anchor drift")
+    return begin + guard
+
+
+def derive_flat(source, output):
+    """Wrap only the optional full-OLD attempt; leave flat fallback and all other seams intact."""
+    source = Path(source)
+    text = source.read_text()
+    start = sharing_guard(text)
+    close = start + len(SHARING_GUARD)
+    expression, replacement = SHARING_GUARD, "false"
     changed = text[:start] + replacement + text[close:]
     source.write_text(changed)
     metadata = {"schema": "rustbgpd.mass-dirty-derivation.v1", "path": str(source.name),
                 "source_before_sha256": hashlib.sha256(text.encode()).hexdigest(),
                 "source_after_sha256": digest(source), "expression_before": expression,
                 "expression_after": replacement, "scope": "optional full-OLD common sharing only",
-                "vpn_full_old_already_flat": True,
-                "vpn_comparison": "candidate already uses exact flat full-OLD; control changes no VPN strategy"}
+                "vpn_full_old_already_flat": False,
+                "vpn_comparison": "candidate shares unicast and VPN full-OLD; control is exact flat for both"}
     write_json(output, metadata)
     return metadata
 
@@ -838,7 +845,7 @@ def run_cell(args):
                 require(all(settled_charge[key] == initial_charge[key] for key in ("entries", "bytes")),
                         "settled recovery charge did not return to empty baseline")
                 deltas = fallback_delta(operation_fallback, causes)
-                if manifest["cohort"] == "no-refusal" or (not correct and args.arm == "candidate" and manifest["profile"] == "full-uc"):
+                if manifest["cohort"] == "no-refusal" or (not correct and args.arm == "candidate"):
                     require(not any(deltas.values()), "indexed/no-refusal cell entered conservative fallback")
                 result["operations"].append({**receipt, "daemon_log_bytes": log_cursors,
                     "fallback_before": operation_fallback, "fallback_deltas": deltas,
@@ -873,7 +880,7 @@ def run_cell(args):
             coverage = readiness_coverage(raw_records, result["operations"], correct)
             for operation, evidence in zip(result["operations"], coverage, strict=True):
                 operation["readiness_coverage"] = evidence
-            if manifest["cohort"] == "cap-pressure" and not correct and (args.arm == "flat" or manifest["profile"] == "full-vpn"):
+            if manifest["cohort"] == "cap-pressure" and not correct and args.arm == "flat":
                 require(any(operation["fallback_deltas"]["daemon_limit"] for operation in result["operations"]), "pressure control did not exercise daemon cap")
             result["status"] = "CORRECTNESS_ONLY" if correct else "PASS"
             result["snapshot_failure_counts"] = snapshot_failure_counts(snapshot_failures, manifest["receivers"])
@@ -941,15 +948,14 @@ def analyze(root):
     source = (root / "capture-source.rs").read_text()
     source_sha = hashlib.sha256(source.encode()).hexdigest()
     derivation = json.loads((root / "derivation.json").read_text())
-    capture_begin = source.index("    fn capture_group_admitted_keys_inner(")
-    guard = source.index("!group.stages_vpn()", capture_begin)
-    expected_flat = source[:guard] + "false" + source[guard + len("!group.stages_vpn()"):]
+    guard = sharing_guard(source)
+    expected_flat = source[:guard] + "false" + source[guard + len(SHARING_GUARD):]
     require(derivation["source_before_sha256"] == hashlib.sha256(source.encode()).hexdigest()
             and derivation["source_after_sha256"] == digest(root / "flat-control-source.rs")
             and (root / "flat-control-source.rs").read_text() == expected_flat
-            and derivation["expression_before"] == "!group.stages_vpn()"
+            and derivation["expression_before"] == SHARING_GUARD
             and derivation["expression_after"] == "false"
-            and derivation["vpn_full_old_already_flat"] is True, "flat source derivation changed")
+            and derivation["vpn_full_old_already_flat"] is False, "flat source derivation changed")
     rows = []
     failures = []
     readiness = {}
@@ -973,9 +979,6 @@ def analyze(root):
                "release_soak_qualified": False, "readiness": readiness}
     if manifest["correctness_only"]:
         verdict["readiness_comparison"] = "not_applicable: correctness-only timing is null"
-    elif manifest["profile"] == "full-vpn":
-        # The flat derivation is a no-op for VPN staging groups: both arms must clear the ceiling only.
-        verdict["readiness_comparison"] = "not_applicable: arms code-identical"
     else:
         verdict["readiness_comparison"], comparison_failures = readiness_comparison(post_sent)
         failures += comparison_failures
@@ -1157,7 +1160,7 @@ def validate_leg(leg, manifest, row):
             previous_peak = charge["peak_bytes"]
         deltas = fallback_delta(operation_causes, causes)
         require(row["operations"][index]["fallback_deltas"] == deltas, "fallback derivation differs")
-        if manifest["cohort"] == "no-refusal" or (not manifest["correctness_only"] and row["arm"] == "candidate" and manifest["profile"] == "full-uc"):
+        if manifest["cohort"] == "no-refusal" or (not manifest["correctness_only"] and row["arm"] == "candidate"):
             require(not any(deltas.values()), "indexed/no-refusal cohort refused proof")
         if manifest["correctness_only"]:
             require(all(row["operations"][index][name] is None for name in ("trigger_to_fold_seconds", "trigger_to_drain_seconds", "drain_to_resume_seconds", "resume_to_observed_fold_seconds", "resume_to_fold_p50_seconds", "resume_to_fold_max_seconds")), "correctness mode published timing")
@@ -1166,7 +1169,7 @@ def validate_leg(leg, manifest, row):
             parts = [operation[name] for name in ("trigger_to_drain_seconds", "drain_to_resume_seconds", "resume_to_observed_fold_seconds")]
             require(all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 for value in parts), "invalid timing interval")
             require(math.isclose(sum(parts), operation["trigger_to_fold_seconds"], abs_tol=1e-6), "whole capture interval excludes work")
-    if manifest["cohort"] == "cap-pressure" and not manifest["correctness_only"] and (row["arm"] == "flat" or manifest["profile"] == "full-vpn"):
+    if manifest["cohort"] == "cap-pressure" and not manifest["correctness_only"] and row["arm"] == "flat":
         require(any(operation["fallback_deltas"]["daemon_limit"] > 0 for operation in row["operations"]), "pressure control never reached cap")
     if not manifest["correctness_only"]:
         with (leg / "memory.csv").open() as stream:

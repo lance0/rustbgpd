@@ -1739,19 +1739,11 @@ mod tests {
             assert_eq!(gauge("bgp_update_group_recovery_entries"), expected_keys);
             // Logical component credits, not an RSS or timing measurement.
             let retained_bytes = gauge("bgp_update_group_recovery_bytes");
-            if profile == "smoke-uc" {
-                assert!(
-                    retained_bytes < 16 * 1024,
-                    "three small unicast proofs must share their indexed key universe"
-                );
-            } else {
-                // Each VPN-capable receiver retains its own exact flat key set.
-                // Fixed record/slack credits must not hide another route-sized array.
-                let key_payload =
-                    expected_keys * u64::try_from(std::mem::size_of::<VpnRibRouteKey>()).unwrap();
-                assert!(retained_bytes >= healthy_bytes + key_payload);
-                assert!(retained_bytes < healthy_bytes + key_payload + u64::from(CLIENTS) * 1024);
-            }
+            // Three exact flat proofs would charge all 603 keys (about 19 KiB).
+            assert!(
+                retained_bytes < 16 * 1024,
+                "three small {profile} proofs must share their indexed key universe"
+            );
             for resume in release {
                 resume.send(()).unwrap();
             }
