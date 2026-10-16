@@ -7141,7 +7141,7 @@ impl StallMetrics {
         let rib_actor_slice_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_actor_slice_seconds",
-                "Wall-clock duration of synchronous RIB actor slices. `stage=\"actor_poll\"` is one whole poll of the actor task, the time it holds a runtime worker without yielding. The other stages split each poll at every 64th readiness checkpoint and at the poll end, labelling each slice by the most recent checkpoint at or before its end; a gap between two checkpoints is never split.",
+                "Wall-clock duration of RIB actor slices. `stage=\"actor_poll\"` is one whole poll of the actor task, measured in wall-clock time; it includes executor handoffs (block_in_place) during which other tasks run, so it is not uninterrupted worker occupancy. The other stages split each poll at every 64th readiness checkpoint and at the poll end, labelling each slice by the most recent checkpoint at or before its end; a gap between two checkpoints is never split.",
             )
             .buckets(STALL_DURATION_BUCKETS.to_vec()),
             &["stage"],

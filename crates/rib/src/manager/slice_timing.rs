@@ -1,15 +1,17 @@
-//! Direct measurement of synchronous RIB actor slices.
+//! Direct measurement of RIB actor slices in wall-clock time.
 //!
-//! [`TimedActor`] times every poll of the actor future, which is how long the
-//! actor holds a runtime worker without yielding. Within a poll, the
-//! timeline is also cut at every [`SAMPLE_EVERY`]th readiness checkpoint and
-//! at the poll end; each piece is one slice, labelled by the most recent
-//! checkpoint at or before its end. The tail after a cut keeps the cut
-//! checkpoint's label, so work after the last checkpoint is never dropped. Checkpoints fire per item in long loops, so a clock read on
-//! every one measurably slowed full-table work: an unsampled checkpoint costs
-//! one thread-local cell update. A long gap between two checkpoints stays
-//! inside one slice, so a stall is never split. The recorder flushes to the
-//! shared metrics once per poll.
+//! [`TimedActor`] times every poll of the actor future. That is wall-clock
+//! poll duration, including executor handoffs (`with_executor_handoff` uses
+//! `block_in_place`, which lets other tasks run), not uninterrupted worker
+//! occupancy. Within a poll, the timeline is also cut at every
+//! [`SAMPLE_EVERY`]th readiness checkpoint and at the poll end; each piece is
+//! one slice, labelled by the most recent checkpoint at or before its end.
+//! The tail after a cut keeps the cut checkpoint's label, so work after the
+//! last checkpoint is never dropped. Checkpoints fire per item in long loops,
+//! so a clock read on every one measurably slowed full-table work: an
+//! unsampled checkpoint costs one thread-local cell update. A long gap
+//! between two checkpoints stays inside one slice, so a stall is never split.
+//! The recorder flushes to the shared metrics once per poll.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;

@@ -1163,7 +1163,7 @@
       "id": 82,
       "type": "timeseries",
       "title": "RIB actor stalls and scheduler lateness",
-      "description": "Longest synchronous RIB actor slice per stage in each scrape window (actor_poll is a whole poll without yielding), and the p99 delay of a 10 ms tokio probe. High lateness with short actor slices means other tasks saturated the runtime workers.",
+      "description": "Longest wall-clock RIB actor slice per stage over each interval (actor_poll is a whole actor poll, including executor handoffs), and the p99 delay of a 10 ms tokio probe. High lateness with short actor slices means other tasks saturated the runtime workers.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1203,7 +1203,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (instance, stage) (bgp_rib_actor_slice_max_microseconds{instance=~\"$instance\"}) / 1e6",
+          "expr": "max by (instance, stage) (max_over_time(bgp_rib_actor_slice_max_microseconds{instance=~\"$instance\"}[$__rate_interval])) / 1e6",
           "legendFormat": "{{instance}} {{stage}} max slice",
           "refId": "A"
         },

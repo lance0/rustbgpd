@@ -398,8 +398,8 @@ TARGETS = {
         'bgp_rib_outbound_dirty_oldest_seconds{instance=~"$instance"}'
     ),
     ("RIB actor stalls and scheduler lateness", "A"): (
-        "max by (instance, stage) (bgp_rib_actor_slice_max_microseconds"
-        '{instance=~"$instance"}) / 1e6'
+        "max by (instance, stage) (max_over_time(bgp_rib_actor_slice_max_microseconds"
+        '{instance=~"$instance"}[$__rate_interval])) / 1e6'
     ),
     ("RIB actor stalls and scheduler lateness", "B"): (
         "histogram_quantile(0.99, sum by (instance, le) "
