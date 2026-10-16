@@ -444,6 +444,10 @@ trees (e.g., `tests/soak/runs/...`) stay gitignored — they're
 per-machine working directories, not the published record. A
 `README.md` next to the artifacts explains what each file is and
 points back at the postmortem.
+Performance receipts follow the slimmer
+[receipt convention](docs/perf/README.md#writing-a-receipt): a curated
+comparison JSON and an artifacts README with one hash per stored file, not
+raw-file digest rosters or seals.
 
 ## Commit Messages
 
