@@ -1329,6 +1329,7 @@ async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Pa
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
                 peers: vec![harness.receivers[0].peer],
+                swaps: None,
                 reply,
             })
             .await
@@ -1784,6 +1785,7 @@ mod tests {
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
                 peers: vec![harness.receivers[0].peer],
+                swaps: None,
                 reply,
             })
             .await

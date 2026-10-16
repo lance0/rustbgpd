@@ -85,7 +85,7 @@ use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{EvpnRibRoute, Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::{
-    ExactExportKey, RibCommandError, RouteQueryKey, UpdateGroupClassification,
+    DatasetSwap, ExactExportKey, RibCommandError, RouteQueryKey, UpdateGroupClassification,
     UpdateGroupClassifierInput, UpdateGroupComparisonDifference, UpdateGroupComparisonMembership,
     UpdateGroupComparisonVerdict, UpdateGroupPeerComparison, UpdateGroupPeerSnapshot,
     UpdateGroupSnapshot, classify_update_group, route_query_key,
@@ -2159,17 +2159,141 @@ impl RibManager {
     }
 
     /// Dataset updates preserve policy identity, so refresh the shared staged
-    /// verdicts explicitly. Mark members dirty before staging: the existing
-    /// tombstone and source-flip residue then preserves every owed withdrawal.
+    /// verdicts explicitly. A provable bound distributes only the affected
+    /// prefixes to the targets, through the ordinary incremental pass.
+    /// Otherwise mark members dirty before staging: the existing tombstone
+    /// and source-flip residue then preserves every owed withdrawal.
     pub(in crate::manager) fn handle_reevaluate_peer_export_policies(
         &mut self,
         peers: &[IpAddr],
+        swaps: Option<&[DatasetSwap]>,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let result = self.with_replacement_summary_reads("reevaluate", |manager| {
-            manager.reevaluate_peer_export_policies_synchronously(peers)
+            let started = std::time::Instant::now();
+            let bounded = swaps.and_then(|swaps| manager.dataset_swap_bound(peers, swaps));
+            let mode = if bounded.is_some() { "delta" } else { "full" };
+            let affected = bounded.as_ref().map(|(_, affected)| affected.len());
+            let result = match bounded {
+                Some((targets, affected)) => {
+                    if !affected.is_empty() {
+                        manager.distribute_changes_to_targets(&affected, &targets);
+                    }
+                    Ok(())
+                }
+                None => manager.reevaluate_peer_export_policies_synchronously(peers),
+            };
+            info!(
+                peers = peers.len(),
+                mode,
+                affected_prefixes = affected,
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "dataset export re-evaluation complete"
+            );
+            result
         });
         let _ = reply.send(result);
+    }
+
+    /// The re-evaluation targets and the unicast prefixes whose export
+    /// verdict `swaps` can change, or `None` when that set cannot be proved
+    /// complete and the full pass must run.
+    ///
+    /// A target's verdict reads a swapped dataset only through
+    /// `route.prefix in` / `route.origin-as in` guards, which take the
+    /// route's own prefix and origin AS. So a prefix is affected exactly
+    /// when some candidate for it, or its Loc-RIB best, answers differently
+    /// against the prior and current snapshots. Everything else that could
+    /// read the dataset falls back: other probes, a handle the swap does not
+    /// name, an intervening publication, non-unicast families, and
+    /// conditional advertisement.
+    fn dataset_swap_bound(
+        &self,
+        peers: &[IpAddr],
+        swaps: &[DatasetSwap],
+    ) -> Option<(HashSet<IpAddr>, HashSet<Prefix>)> {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        if peers
+            .iter()
+            .any(|peer| !self.outbound_peers.contains_key(peer))
+            || self.has_conditional_advertisements()
+        {
+            return None;
+        }
+        let mut targets: HashSet<IpAddr> = peers.iter().copied().collect();
+        for peer in peers {
+            if let Some(group) = self
+                .grouped_member_of(*peer)
+                .and_then(|gid| self.group_ribs.get(&gid))
+            {
+                targets.extend(group.members.iter().copied());
+            }
+        }
+        let unicast = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        let mut probed = vec![false; swaps.len()];
+        for peer in &targets {
+            checkpoint();
+            if !self
+                .peer_sendable_families
+                .get(peer)
+                .is_some_and(|families| families.iter().all(|family| unicast.contains(family)))
+            {
+                return None;
+            }
+            let Some(chain) = self.export_policy_for(*peer).map(PolicyChain::compiled) else {
+                continue;
+            };
+            for slot in chain.referenced_datasets() {
+                for (index, swap) in swaps.iter().enumerate() {
+                    if Arc::ptr_eq(&slot.handle, &swap.handle) {
+                        if !chain.dataset_probed_by_route_keys_only(&swap.handle) {
+                            return None;
+                        }
+                        probed[index] = true;
+                    } else if slot.name == *swap.handle.name() {
+                        return None;
+                    }
+                }
+            }
+        }
+        let mut changed = Vec::new();
+        for (swap, _) in swaps.iter().zip(probed).filter(|(_, probed)| *probed) {
+            let current = swap.handle.pin();
+            if Arc::ptr_eq(&current, &swap.prior) {
+                continue;
+            }
+            if swap.prior.generation.checked_add(1) != Some(current.generation) {
+                return None;
+            }
+            changed.push((Arc::clone(&swap.prior), current));
+        }
+        let differs = |route: &Route| {
+            checkpoint();
+            let origin = route.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
+            changed.iter().any(|(prior, current)| {
+                prior
+                    .data
+                    .route_key_verdict_differs(&current.data, route.prefix, origin)
+            })
+        };
+        let mut affected = HashSet::new();
+        if !changed.is_empty() {
+            for rib in self.ribs.values() {
+                affected.extend(
+                    rib.iter()
+                        .filter(|route| differs(route))
+                        .map(|route| route.prefix),
+                );
+            }
+            affected.extend(
+                self.loc_rib
+                    .iter()
+                    .filter(|route| differs(route))
+                    .map(|route| route.prefix),
+            );
+        }
+        Some((targets, affected))
     }
 
     #[expect(

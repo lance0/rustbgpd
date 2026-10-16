@@ -393,6 +393,10 @@ impl PeerManager {
         if let Err(error) = self
             .refresh_dataset_generation_dependents(
                 &applied.dataset_dependents,
+                applied
+                    .dataset_prior
+                    .as_ref()
+                    .map(crate::config::DatasetRollback::swaps),
                 OperatorReadAdmission::Served,
             )
             .await
@@ -881,7 +885,7 @@ impl PeerManager {
             failures.push(format!("restore policy chains: {}", error.message));
         }
         if let Err(error) = self
-            .refresh_dataset_generation_dependents(&applied.dataset_dependents,
+            .refresh_dataset_generation_dependents(&applied.dataset_dependents, None,
                 if failures.is_empty() {
                     OperatorReadAdmission::Served
                 } else {

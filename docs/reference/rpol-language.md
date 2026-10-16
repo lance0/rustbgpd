@@ -300,7 +300,14 @@ semantics:
   refresh (the same content-equality discipline chain reinstalls use,
   so a SIGHUP with nothing changed touches nothing).
 - **Changed content swaps atomically** and bumps the generation, then
-  refreshes only the referencing peers.
+  refreshes only the referencing peers. On the export side, when every
+  referencing receiver probes the dataset only with `route.prefix in` or
+  `route.origin-as in` and sends only IPv4/IPv6 unicast, the RIB
+  re-evaluates only the routes whose prefix or origin AS the old and new
+  contents answer differently. Any other probe, family or attached
+  conditional advertisement re-evaluates every route for those peers.
+  The `dataset export re-evaluation complete` log event reports which
+  (`mode`), with `affected_prefixes` and `elapsed_ms`.
 - **A file that fails to load or parse rejects the whole reload.**
   Every declared dataset must load before anything is published, so a
   malformed or unreadable file leaves the prior snapshot serving, the

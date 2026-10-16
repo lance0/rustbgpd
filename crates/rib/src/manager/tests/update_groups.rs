@@ -15660,6 +15660,7 @@ fn batched_authoritative_occupied_dataset_transition_keeps_fallback() {
             .manager
             .handle_update(RibUpdate::ReevaluatePeerExportPolicies {
                 peers: fleet.members.clone(),
+                swaps: None,
                 reply,
             });
         assert_eq!(response.try_recv().unwrap(), Ok(()));
@@ -15883,6 +15884,7 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                     .manager
                     .handle_update(RibUpdate::ReevaluatePeerExportPolicies {
                         peers: fleet.members.clone(),
+                        swaps: None,
                         reply,
                     });
                 assert_eq!(response.try_recv().unwrap(), Ok(()));

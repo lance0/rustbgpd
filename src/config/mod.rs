@@ -228,6 +228,19 @@ impl PreparedDatasetGeneration {
 }
 
 impl DatasetRollback {
+    /// The published content swaps, each with the snapshot it replaced, for
+    /// the RIB to bound export re-evaluation by.
+    pub(crate) fn swaps(&self) -> Vec<rustbgpd_rib::DatasetSwap> {
+        self.priors
+            .iter()
+            .filter(|prior| prior.content_changed)
+            .map(|prior| rustbgpd_rib::DatasetSwap {
+                handle: Arc::clone(&prior.handle),
+                prior: Arc::clone(&prior.snapshot),
+            })
+            .collect()
+    }
+
     /// Restore all content before any asynchronous runtime compensation.
     /// Republish changed data at the next generation rather than rewinding it.
     pub(crate) fn restore(self) {

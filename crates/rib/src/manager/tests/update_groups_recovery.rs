@@ -140,6 +140,7 @@ fn missing_completed_proof_resync_counts_fallback_and_keeps_the_owed_withdrawal(
         &changed,
         &affected,
         &mut crate::manager::distribution::ExportMemo::default(),
+        None,
     );
     assert!(
         stage[&gid]

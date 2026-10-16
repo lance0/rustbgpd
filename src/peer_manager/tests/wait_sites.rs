@@ -1529,7 +1529,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::DatasetExportCapacity { failed_restore } => manager.reevaluate_dataset_exports(
             peers.to_vec(), false, if failed_restore { OperatorReadAdmission::Fenced {
                 reason: "an earlier failed restoration retains its fence while awaiting capacity",
-            }} else { OperatorReadAdmission::Served }).await.map_err(|e| e.to_string()),
+            }} else { OperatorReadAdmission::Served }, None).await.map_err(|e| e.to_string()),
         Drive::MaxPrefixRestart => {
             manager.handle_due_max_prefix_restarts().await;
             Ok(())
@@ -2550,7 +2550,7 @@ async fn legacy_dataset_refresh_bounds_capacity_and_reports_every_export_failure
         let rib = (!full_channel).then(|| {
             let mut receiver = receiver.take().unwrap();
             tokio::spawn(async move {
-                let RibUpdate::ReevaluatePeerExportPolicies { peers, reply } =
+                let RibUpdate::ReevaluatePeerExportPolicies { peers, reply, .. } =
                     receiver.recv().await.unwrap()
                 else {
                     panic!("legacy refresh must use the shared dataset reevaluation command")
@@ -2709,7 +2709,7 @@ async fn dataset_reply_waits_for_completion_past_rib_reply_timeout() {
     insert_test_managed_peer(&mut manager, peer, handle, false);
     let transaction = tokio::spawn(async move {
         let result = manager
-            .reevaluate_dataset_exports(vec![peer], false, OperatorReadAdmission::Served)
+            .reevaluate_dataset_exports(vec![peer], false, OperatorReadAdmission::Served, None)
             .await;
         (manager, result)
     });

@@ -1418,7 +1418,7 @@ fn full_mutable_input_reevaluation_proves_noop_without_reannouncing_owned_routes
     let stamp = manager.group_ribs[&gid].evpn_table_stamp;
     let resets = count_reset_attempts(&mut manager);
     let (reply, mut receipt) = oneshot::channel();
-    manager.handle_reevaluate_peer_export_policies(&[peer], reply);
+    manager.handle_reevaluate_peer_export_policies(&[peer], None, reply);
     assert!(receipt.try_recv().unwrap().is_ok());
     assert_eq!(manager.group_ribs[&gid].evpn_table_stamp, stamp);
     assert!(output.try_recv().is_err());

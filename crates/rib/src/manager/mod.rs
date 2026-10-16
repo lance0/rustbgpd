@@ -4287,8 +4287,12 @@ impl RibManager {
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);
             }
-            RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
-                self.handle_reevaluate_peer_export_policies(&peers, reply);
+            RibUpdate::ReevaluatePeerExportPolicies {
+                peers,
+                swaps,
+                reply,
+            } => {
+                self.handle_reevaluate_peer_export_policies(&peers, swaps.as_deref(), reply);
             }
             RibUpdate::InstallConditionalAdvertisements {
                 set,
