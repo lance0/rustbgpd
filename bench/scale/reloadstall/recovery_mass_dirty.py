@@ -843,7 +843,7 @@ def run_cell(args):
                 require(all(settled_charge[key] == initial_charge[key] for key in ("entries", "bytes")),
                         "settled recovery charge did not return to empty baseline")
                 deltas = fallback_delta(operation_fallback, causes)
-                if manifest["cohort"] == "no-refusal" or (not correct and args.arm == "candidate" and manifest["profile"] == "full-uc"):
+                if manifest["cohort"] == "no-refusal" or (not correct and args.arm == "candidate"):
                     require(not any(deltas.values()), "indexed/no-refusal cell entered conservative fallback")
                 result["operations"].append({**receipt, "daemon_log_bytes": log_cursors,
                     "fallback_before": operation_fallback, "fallback_deltas": deltas,
@@ -878,7 +878,7 @@ def run_cell(args):
             coverage = readiness_coverage(raw_records, result["operations"], correct)
             for operation, evidence in zip(result["operations"], coverage, strict=True):
                 operation["readiness_coverage"] = evidence
-            if manifest["cohort"] == "cap-pressure" and not correct and (args.arm == "flat" or manifest["profile"] == "full-vpn"):
+            if manifest["cohort"] == "cap-pressure" and not correct and args.arm == "flat":
                 require(any(operation["fallback_deltas"]["daemon_limit"] for operation in result["operations"]), "pressure control did not exercise daemon cap")
             result["status"] = "CORRECTNESS_ONLY" if correct else "PASS"
             result["snapshot_failure_counts"] = snapshot_failure_counts(snapshot_failures, manifest["receivers"])
@@ -977,9 +977,6 @@ def analyze(root):
                "release_soak_qualified": False, "readiness": readiness}
     if manifest["correctness_only"]:
         verdict["readiness_comparison"] = "not_applicable: correctness-only timing is null"
-    elif manifest["profile"] == "full-vpn":
-        # The flat derivation is a no-op for VPN staging groups: both arms must clear the ceiling only.
-        verdict["readiness_comparison"] = "not_applicable: arms code-identical"
     else:
         verdict["readiness_comparison"], comparison_failures = readiness_comparison(post_sent)
         failures += comparison_failures
@@ -1161,7 +1158,7 @@ def validate_leg(leg, manifest, row):
             previous_peak = charge["peak_bytes"]
         deltas = fallback_delta(operation_causes, causes)
         require(row["operations"][index]["fallback_deltas"] == deltas, "fallback derivation differs")
-        if manifest["cohort"] == "no-refusal" or (not manifest["correctness_only"] and row["arm"] == "candidate" and manifest["profile"] == "full-uc"):
+        if manifest["cohort"] == "no-refusal" or (not manifest["correctness_only"] and row["arm"] == "candidate"):
             require(not any(deltas.values()), "indexed/no-refusal cohort refused proof")
         if manifest["correctness_only"]:
             require(all(row["operations"][index][name] is None for name in ("trigger_to_fold_seconds", "trigger_to_drain_seconds", "drain_to_resume_seconds", "resume_to_observed_fold_seconds", "resume_to_fold_p50_seconds", "resume_to_fold_max_seconds")), "correctness mode published timing")
@@ -1170,7 +1167,7 @@ def validate_leg(leg, manifest, row):
             parts = [operation[name] for name in ("trigger_to_drain_seconds", "drain_to_resume_seconds", "resume_to_observed_fold_seconds")]
             require(all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 for value in parts), "invalid timing interval")
             require(math.isclose(sum(parts), operation["trigger_to_fold_seconds"], abs_tol=1e-6), "whole capture interval excludes work")
-    if manifest["cohort"] == "cap-pressure" and not manifest["correctness_only"] and (row["arm"] == "flat" or manifest["profile"] == "full-vpn"):
+    if manifest["cohort"] == "cap-pressure" and not manifest["correctness_only"] and row["arm"] == "flat":
         require(any(operation["fallback_deltas"]["daemon_limit"] > 0 for operation in row["operations"]), "pressure control never reached cap")
     if not manifest["correctness_only"]:
         with (leg / "memory.csv").open() as stream:

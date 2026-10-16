@@ -88,13 +88,10 @@ The manifest fixes these bars before any result:
   undrained stdout pipe and stop probing. Correctness-only timing fields remain null.
 - Readiness ceiling, per leg in either arm: any non-200 or failed sample, any
   sample over 1 s, or 3 consecutive samples over 250 ms is a FAIL.
-- Readiness comparison, full-uc only: over samples started between source drain
-  and observed fold, pooled per arm, the candidate p99 must be at most flat
-  p99 × 1.25 + 25 ms and its maximum at most flat maximum × 1.5 + 50 ms. In
-  full-vpn the flat derivation changes nothing, so both arms run identical code;
-  those cells are availability evidence only and report
-  `"readiness_comparison": "not_applicable: arms code-identical"`. The verdict
-  reports per-leg p50/p99/max, the count over 250 ms and the longest run of
+- Readiness comparison, full-uc and full-vpn: over samples started between
+  source drain and observed fold, pooled per arm, the candidate p99 must be at
+  most flat p99 × 1.25 + 25 ms and its maximum at most flat maximum × 1.5 + 50 ms.
+  The verdict reports per-leg p50/p99/max, the count over 250 ms and the longest run of
   consecutive samples over 250 ms. The daemon's 200 ms core readiness probe
   deadline is unchanged.
 - No-refusal cells enter no recovery fallback. Across matched operations and
@@ -107,9 +104,9 @@ The manifest fixes these bars before any result:
   correctness controls, not pure storage performance comparisons. Flat payload
   alone is 472.32 MB for 12 full proofs or 944.64 MB for 24, before headers and
   overlap; the latter exceeds the unchanged 512 MiB recovery budget.
-  Measured flat and already-flat VPN arms must exercise `daemon_limit` during
-  the operations. The indexed UC candidate must have zero fallback deltas in
-  that same window; startup values are disclosed separately.
+  Measured flat arms must exercise `daemon_limit` during the operations. The
+  shared UC and VPN candidates must have zero fallback deltas in that same
+  window; startup values are disclosed separately.
 - Recovery entries, retained capacity charge and peak reservation charge are
   mandatory at the clean baseline and both operation boundaries. Settled entries
   and current charge must return to the actual empty baseline. Peak includes
