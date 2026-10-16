@@ -312,6 +312,26 @@ pub mod settlement_test_control {
         }
     }
 
+    /// Hold the real exit until a process test has observed the fenced daemon.
+    pub fn before_fail_stop() {
+        let Some(path) = std::env::var_os("RUSTBGPD_TEST_FAIL_STOP_HOLD") else {
+            return;
+        };
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(path).expect("connect fail-stop test hold");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("bound fail-stop test hold");
+        stream
+            .write_all(&[1])
+            .expect("report fail-stop exit boundary");
+        let mut release = [0];
+        stream
+            .read_exact(&mut release)
+            .expect("await fail-stop release");
+        assert_eq!(release, [1], "invalid fail-stop test release");
+    }
+
     fn read_required(directory: &Path, name: &str) -> Result<String, String> {
         read_optional(directory, name)?
             .ok_or_else(|| format!("settlement control {name} is missing"))
@@ -2039,6 +2059,8 @@ fn terminate_process() -> ! {
 
 #[cfg(not(test))]
 fn run_terminal_action(_registry: &Registry) -> ! {
+    #[cfg(debug_assertions)]
+    settlement_test_control::before_fail_stop();
     terminate_process()
 }
 
