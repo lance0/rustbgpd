@@ -6367,3 +6367,284 @@ fn chain_splice_remaps_loop_set_ids() {
         );
     }
 }
+
+// ── test assertions: removals, absence, chains, strict fixtures ────
+
+fn failures_of(source: &str) -> Vec<String> {
+    run_rpol_tests(source)
+        .unwrap_or_else(|diags| panic!("{}", diags.render("test.rpol", source, false)))
+        .failures
+        .into_iter()
+        .map(|failure| format!("{}: {}", failure.name, failure.message))
+        .collect()
+}
+
+const SCRUB_TESTS: &str = r"
+test scrubbed {
+    route { communities [65000:1, 65000:7]; large-communities [65000:1:2, 65001:1:2]; ext-communities [RT:65000:9] }
+    expect scrub == accept with removes community 65000:1, removes large-community 65000:1:2,
+        removes ext-community RT:65000:9, without community 65000:1, without local-pref,
+        without med, without next-hop, without prepend
+}
+";
+
+#[test]
+fn removes_and_without_assertions_pin_a_scrub() {
+    let scrub = "policy scrub {
+        term s { remove community 65000:1; remove large-community 65000:*:*; remove ext-community RT:65000:9 }
+        term rest { accept }
+    }";
+    assert_eq!(
+        failures_of(&format!("{scrub}{SCRUB_TESTS}")),
+        Vec::<String>::new()
+    );
+
+    // Deleting the scrub term is the regression these assertions exist
+    // to catch: `expect scrub == accept` alone still passes.
+    let unscrubbed = "policy scrub { term rest { accept } }";
+    let failures = failures_of(&format!("{unscrubbed}{SCRUB_TESTS}"));
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    for expected in [
+        "expected community 65000:1 to be removed",
+        "expected community 65000:1:2 to be removed",
+        "expected community RT:65000:9 to be removed",
+    ] {
+        assert!(failures[0].contains(expected), "{failures:?}");
+    }
+    let plain = "test plain { route { communities [65000:1] } expect scrub == accept }";
+    assert_eq!(
+        failures_of(&format!("{unscrubbed}\n{plain}")),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn without_assertions_fail_on_an_unwanted_modification() {
+    let source = r"
+policy customer-lp {
+    term customer { if route.communities has 65000:100 { set local-pref 200; add community 65000:200 } }
+    term rest { set med 5; set next-hop self; prepend as 65000 2; accept }
+}
+test non-customer-keeps-default-lp {
+    route { communities [65000:999] }
+    expect customer-lp == accept with without local-pref, without community 65000:200
+}
+test everything-is-set {
+    route { communities [65000:100] }
+    expect customer-lp == accept with without local-pref, without med, without next-hop,
+        without prepend, without community 65000:200
+}
+";
+    let failures = failures_of(source);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    for expected in [
+        "everything-is-set: customer-lp: expected no local-pref change, got 200",
+        "expected no med change, got 5",
+        "expected no next-hop change, got self",
+        "expected no prepend change, got as 65000 2",
+        "expected community 65000:200 not to be added",
+    ] {
+        assert!(failures[0].contains(expected), "{failures:?}");
+    }
+}
+
+const CHAIN_POLICIES: &str = r"
+community-set scrub { 65000:5 }
+policy tag { term t { add community 65000:5; set local-pref 120; accept } }
+policy strip {
+    term s { for c in route.communities { if c in scrub { remove community c } } }
+    term lp { set local-pref 150 }
+    term rest { accept }
+}
+policy client(lp: u32) {
+    term bogon { if route.prefix == 10.0.0.0/8 { reject } }
+    term ok { set local-pref lp; accept }
+}
+";
+
+#[test]
+fn chain_expect_runs_the_daemon_chain_merge() {
+    let source = format!(
+        "{CHAIN_POLICIES}{}",
+        r"
+test later-remove-cancels-earlier-add {
+    route { prefix 192.0.2.0/24; communities [65000:5] }
+    expect chain [tag, strip] == accept with removes community 65000:5,
+        without community 65000:5, local-pref 150
+    expect chain [strip, tag] == accept with community 65000:5, local-pref 120
+    expect chain [tag, client(300)] == accept with community 65000:5, local-pref 300
+    expect chain [tag] == accept with community 65000:5
+}
+test a-reject-ends-the-chain {
+    route { prefix 10.0.0.0/8 }
+    expect chain [client(300), tag] == reject
+}
+test chain-is-contextual { route { prefix 192.0.2.0/24 } expect chain == accept }
+policy chain { term t { accept } }
+"
+    );
+    assert_eq!(failures_of(&source), Vec::<String>::new());
+
+    // Cancellation is order-sensitive: asserting the reversed outcome
+    // for `[tag, strip]` must fail on both lists.
+    let wrong = format!(
+        "{CHAIN_POLICIES}{}",
+        r"
+test wrong-merge {
+    route { prefix 192.0.2.0/24; communities [65000:5] }
+    expect chain [tag, strip] == accept with community 65000:5, without community 65000:5
+    expect chain [strip, tag] == accept with removes community 65000:5
+}
+"
+    );
+    let failures = failures_of(&wrong);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].contains("chain [tag, strip]: expected community 65000:5 to be added"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[0].contains("chain [strip, tag]: expected community 65000:5 to be removed"),
+        "{failures:?}"
+    );
+}
+
+#[test]
+fn chain_expect_attributes_coverage_per_member_and_checks_calls() {
+    let source = format!(
+        "{CHAIN_POLICIES}{}",
+        r"
+test only-the-chain {
+    route { prefix 10.0.0.0/8 }
+    expect chain [client(300), tag] == reject
+}
+"
+    );
+    let file = RpolFile::parse(&source).expect("parses");
+    let (report, coverage) = file.run_tests_with_coverage();
+    assert!(report.all_passed(), "{:?}", report.failures);
+    let facts = |policy: &str| {
+        let entry = coverage
+            .policies
+            .iter()
+            .find(|entry| entry.name == policy)
+            .expect("policy in report");
+        entry
+            .terms
+            .iter()
+            .map(|term| (term.name.clone(), term.evaluated, term.matched))
+            .collect::<Vec<_>>()
+    };
+    // The reject in `client` ends the walk: `tag` counts as tested but
+    // its term was never evaluated.
+    assert_eq!(
+        facts("client"),
+        vec![("bogon".into(), 1, 1), ("ok".into(), 0, 0)]
+    );
+    assert_eq!(facts("tag"), vec![("t".into(), 0, 0)]);
+
+    let (_, rendered) = diagnostics_of(&format!(
+        "{CHAIN_POLICIES}test t {{ route {{ prefix 192.0.2.0/24 }} expect chain [tag, nope, client] == accept }}"
+    ));
+    assert!(rendered.contains("unknown policy `nope`"), "{rendered}");
+    assert!(
+        rendered.contains("policy `client` takes 1 argument but 0 were supplied"),
+        "{rendered}"
+    );
+    let (_, rendered) = diagnostics_of(&format!(
+        "{CHAIN_POLICIES}test t {{ route {{ prefix 192.0.2.0/24 }} expect chain [] == accept }}"
+    ));
+    assert!(rendered.contains("empty chain"), "{rendered}");
+}
+
+#[test]
+fn removes_and_without_reject_malformed_assertions() {
+    for (assertion, message) in [
+        ("removes local-pref", "after `removes`"),
+        ("without", "after `without`"),
+        ("without as-path", "after `without`"),
+        ("removes community", "a community literal"),
+    ] {
+        let source = format!(
+            "policy p {{ term t {{ accept }} }}\ntest t {{ route {{ prefix 192.0.2.0/24 }} expect p == accept with {assertion} }}"
+        );
+        let (_, rendered) = diagnostics_of(&source);
+        assert!(rendered.contains(message), "{assertion}: {rendered}");
+    }
+}
+
+#[test]
+fn fixture_as_path_is_strict_and_located() {
+    for (path, column_text, message) in [
+        ("hello world", "h", "unexpected `h`"),
+        ("64501,64500", ",", "unexpected `,` after ASN `64501`"),
+        ("64501 {64502", "{", "unclosed `{`"),
+        ("64501 64502}", "}", "`}` without a matching `{`"),
+        ("64501 {}", "{}", "empty AS_SET"),
+        ("{64501 {64502}}", "{", "AS_SETs do not nest"),
+        ("4294967296", "4294967296", "exceeds 4294967295"),
+        ("64501 AS64502", "A", "unexpected `A`"),
+    ] {
+        let source = format!(
+            "policy p {{ term t {{ accept }} }}\ntest t {{ route {{ as-path \"{path}\" }} expect p == accept }}"
+        );
+        let mut store = SetStore::new();
+        let diags = compile_rpol(&source, &mut store).expect_err(path);
+        let [diag] = diags.0.as_slice() else {
+            panic!("{path}: expected one diagnostic, got {:?}", diags.0);
+        };
+        assert!(diag.message.contains(message), "{path}: {}", diag.message);
+        assert_eq!(&source[diag.labels[0].0.range()], column_text, "{path}");
+    }
+}
+
+#[test]
+fn fixture_as_path_matches_live_rendering_length_and_origin() {
+    let source = r#"
+policy len-cap { term long { if route.as-path.len >= 3 { reject } } term rest { accept } }
+policy canonical { term t { if route.as-path matches "^64500 \\{64501 64502\\}$" { accept } } term rest { reject } }
+policy origin { term t { if route.origin-as == 64500 { accept } } term rest { reject } }
+test as-set-counts-once {
+    route { as-path "64500 {64501 64502}" }
+    expect len-cap == accept
+}
+test sequence-counts-each {
+    route { as-path "64500 64501 64502" }
+    expect len-cap == reject
+}
+test regex-sees-the-canonical-string {
+    route { as-path "  64500   {64501  64502}  " }
+    expect canonical == accept
+}
+test set-only-path-has-no-origin {
+    route { as-path "{64500}" }
+    expect origin == reject
+}
+test origin-is-the-last-sequence-asn {
+    route { as-path "64501 64500 {64502}" }
+    expect origin == accept
+}
+"#;
+    assert_eq!(failures_of(source), Vec::<String>::new());
+}
+
+#[test]
+fn new_test_syntax_formats_and_round_trips() {
+    let source = format!(
+        "{CHAIN_POLICIES}test t{{route{{prefix 192.0.2.0/24;communities [65000:5]}}\n\
+         expect chain[tag,client(300)]==accept with removes community 65000:5,without med,without prepend}}"
+    );
+    let formatted = super::format_rpol(&source).expect("formats");
+    assert!(
+        formatted.contains(
+            "    expect chain [tag, client(300)] == accept with removes community 65000:5, without med, without prepend\n"
+        ),
+        "{formatted}"
+    );
+    assert_eq!(
+        super::format_rpol(&formatted).expect("idempotent"),
+        formatted
+    );
+    let mut store = SetStore::new();
+    compile_rpol(&formatted, &mut store).expect("formatted output compiles");
+}

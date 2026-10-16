@@ -1161,6 +1161,7 @@ test NAME {
     [peer { address IP; asn N; local-as N; group "NAME" }]
     expect POLICY[(args)] == accept|reject [with ASSERTION, ...]
     expect POLICY[(args)] == error [KIND]
+    expect chain [POLICY[(args)], ...] == accept|reject|error ...
     [expect ...]
 }
 ```
@@ -1172,17 +1173,53 @@ Route fixture fields: `prefix`, `communities [..]`,
 attributes (so `local-pref`/`med` comparisons see the implicit 100/0,
 `rpki` defaults to `not-found`, `aspa` to `unknown`; an omitted
 `family` matches no family predicate — it is never derived from the
-fixture's `prefix`). The fixture AS-path length is the
-whitespace-word count of the string form; the fixture origin AS is
-the last plain ASN outside `{...}` AS_SET braces (mirroring the
-typed-path rule), so `as-path "65010 64500"` has origin 64500 and
-`as-path "{64500 64501}"` has none.
+fixture's `prefix`).
+
+The fixture `as-path` is decimal ASNs separated by spaces, with
+`{...}` around an AS_SET: `as-path "64500 {64501 64502}"`. Anything
+else (a comma, a word, an empty, nested, or unbalanced brace, an ASN
+above 4294967295) is a compile diagnostic pointing at the offending
+character, so a typo cannot become a silently absent or shorter path.
+The fixture becomes a typed AS path, and evaluation reads it exactly
+as it reads a received one: `route.as-path matches` sees the canonical
+rendering (single spaces, `{64501 64502}`), `route.as-path.len` is the
+RFC 4271 length (an AS_SET counts as 1, so the example has length 2),
+and the origin AS is the last ASN of the rightmost AS_SEQUENCE
+(`as-path "65010 64500"` has origin 64500; `as-path "{64500 64501}"`
+has none). An empty string is a route without an AS path.
 
 `with` assertions check the evaluation result's **modifications**
-(the frontend has no live route to apply them to): `local-pref N`,
-`med N`, `next-hop IP|self`, `community LIT` (and
-`large-community`/`ext-community`, asserting presence in the add
-lists), `prepend as ASN COUNT`. Computed prepend operands resolve
+(the frontend has no live route to apply them to):
+
+| assertion | passes when |
+|---|---|
+| `local-pref N`, `med N`, `next-hop IP\|self` | the policy sets that value |
+| `prepend as ASN COUNT` | the policy prepends `COUNT` copies of `ASN` |
+| `community LIT` | `LIT` is in the add list (`large-community` / `ext-community` likewise) |
+| `removes community LIT` | `LIT` is in the remove list (any community kind keyword) |
+| `without community LIT` | `LIT` is **not** in the add list (any community kind keyword) |
+| `without local-pref\|med\|next-hop\|prepend` | the policy leaves that attribute unchanged |
+
+`expect p == accept` checks only the verdict, so a scrub or a
+must-not-set guarantee needs its own assertion. Deleting the `remove`
+below fails the test; without the `with` clause it would still pass:
+
+```rpol
+policy scrub {
+    term internal { remove community 65530:4; remove large-community 65500:*:* }
+    term rest { accept }
+}
+test member-cannot-send-internal-tags {
+    route { communities [65530:4]; large-communities [65500:1:2, 64500:1:2] }
+    expect scrub == accept with removes community 65530:4,
+        removes large-community 65500:1:2, without local-pref
+}
+```
+
+A wildcard `remove large-community 65500:*:*` removes the concrete
+values the fixture carries, so assert those values. `removes`,
+`without`, and `chain` are contextual words; a policy named `chain`
+still works as `expect chain == accept`. Computed prepend operands resolve
 during evaluation, so the assertion states the **resolved** ASN:
 `peer { asn 65010 }` + `prepend as peer 3` asserts as
 `with prepend as 65010 3`. `peer { local-as N }` supplies the value
@@ -1208,6 +1245,25 @@ test missing-origin-fails-closed {
     expect origin-pad == error absent-prepend-operand
 }
 ```
+
+**Chains.** `expect chain [p1, p2(300), ...]` evaluates the listed
+policies as one import or export chain, in order, through the same chain
+assembly the daemon uses for `import_policy_chain` / `export_policy_chain`:
+a `reject` in any member ends the walk, a later member wins scalar
+attributes, and a later `remove` cancels an earlier `add` of the same
+community (and vice versa). Name the chain a member is configured in to
+test what its routes actually receive:
+
+```rpol
+test hygiene-then-client {
+    route { prefix 192.0.2.0/24; as-path "64500"; communities [65530:4] }
+    expect chain [rs-hygiene, client-as64500(300)] == accept
+        with removes community 65530:4, local-pref 300
+}
+```
+
+The members must be defined or imported in the file under test. A
+plain `expect p` is a one-member chain.
 
 Tests run at check time (`rbgp policy check`, CI) with zero daemon
 involvement. Testing a *candidate* policy against a live RIB is
@@ -1237,7 +1293,11 @@ never matched" means no fixture satisfies the guard. A term counts as
 unconditional term (`term catch-all { accept }`) matches whenever it
 is reached. Parameterized policies aggregate across instantiations
 (`expect p(200)` and `expect p(300)` both count toward `p`). With
-imports, each policy is attributed to its defining file.
+imports, each policy is attributed to its defining file. An
+`expect chain [...]` walk attributes each member's terms to that
+member's policy, as if the member were expected on its own for the
+part of the walk that reached it: when an earlier member rejects, the
+later members count as tested with their terms never evaluated.
 
 A policy's `default-action` is a fallback, not a source term: it adds no
 term to coverage or hit counters. Explain reports a default verdict without
@@ -1252,8 +1312,9 @@ Two boundaries, both deliberate:
   tested policies is reported as `exercised via apply only (terms not
   attributable)` — its terms stay in the denominator; test it
   directly to cover them. `fn`s inline fully and have no terms.
-- **Chains live in the daemon config**, which a standalone check
-  cannot see. A policy referenced by no test and no `apply` is
+- **Configured chains live in the daemon config**, which a standalone
+  check cannot see; `expect chain [...]` states one explicitly. A
+  policy referenced by no test and no `apply` is
   reported as such (and lint-flagged) *within these files only* — it
   may well be referenced by a config chain.
 
@@ -1443,8 +1504,14 @@ field       := ("route" | "peer") ("." IDENT)+
 u32arg      := INT | IDENT          # parameter reference
 test-def    := "test" IDENT "{" dataset-override* route-block [peer-block] expect+ "}"
 dataset-override := "dataset" IDENT "{" [member ("," member)*] "}"   # content for a declared dataset
-expect      := "expect" IDENT ["(" INT,* ")"] "=="
+expect      := "expect" (call | "chain" "[" call ("," call)* "]") "=="   # contextual `chain`
                (("accept"|"reject") ["with" assertion,*] | "error" [IDENT])   # IDENT: error kind
+call        := IDENT ["(" INT,* ")"]
+assertion   := ("local-pref" | "med") INT | "next-hop" (IP | "self")
+             | "prepend" "as" INT INT
+             | ["removes" | "without"] community-kw COMMUNITY   # contextual `removes`/`without`
+             | "without" ("local-pref" | "med" | "next-hop" | "prepend")
+community-kw := "community" | "large-community" | "ext-community"
 ```
 
 ## Diagnostics

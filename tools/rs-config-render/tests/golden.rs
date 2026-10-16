@@ -101,6 +101,35 @@ fn rtr_options() -> Options {
     }
 }
 
+/// Load-bearing: the rendered hygiene tests pin every scrub term. Deleting any
+/// one leaves `expect rs-hygiene == accept` true, so only the `removes`
+/// assertions of `member-sent-scrubbed-communities-are-removed` can catch it.
+#[test]
+fn hygiene_tests_fail_when_a_scrub_term_is_deleted() {
+    let rendered = render(&to_yaml(&healthy_value()), &rtr_options()).expect("healthy render");
+    let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+    assert!(run_rpol_tests(hygiene).unwrap().all_passed());
+    let scrubs = hygiene
+        .lines()
+        .filter(|line| line.trim_start().starts_with("term scrub-"))
+        .collect::<Vec<_>>();
+    assert_eq!(scrubs.len(), 4, "{hygiene}");
+    for scrub in scrubs {
+        let without = hygiene.replace(&format!("{scrub}\n"), "");
+        let report = run_rpol_tests(&without).unwrap();
+        let names = report
+            .failures
+            .iter()
+            .map(|failure| failure.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["member-sent-scrubbed-communities-are-removed"],
+            "{scrub}"
+        );
+    }
+}
+
 fn refusals(result: Result<rs_config_render::Rendered, RenderError>) -> Vec<String> {
     match result {
         Err(RenderError::Refused(items)) => items,

@@ -2079,6 +2079,34 @@ impl<'a> Checker<'a> {
                     RouteField::ExtCommunities(lits, _) => {
                         self.check_fixture_community_kinds(lits, CommunityKind::Ext);
                     }
+                    RouteField::AsPath(value) => {
+                        if let Err(error) = super::testing::parse_fixture_as_path(&value.node) {
+                            // Point at the offending character when the
+                            // literal has no escapes (string offsets then
+                            // map 1:1 past the opening quote).
+                            let span = if value.node.contains(['\\', '"']) {
+                                value.span
+                            } else {
+                                let start = value.span.start + 1 + error.offset;
+                                Span {
+                                    start,
+                                    end: start + error.len,
+                                    file: value.span.file,
+                                }
+                            };
+                            self.diags.push(
+                                Diagnostic::new(
+                                    span,
+                                    format!("invalid fixture `as-path`: {}", error.message),
+                                    "not an AS path",
+                                )
+                                .with_note(
+                                    "write space-separated ASNs, with `{...}` for an AS_SET \
+                                     (e.g. \"64500 {64501 64502}\")",
+                                ),
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2148,25 +2176,25 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            for expect in &test.expects {
-                let Some(target) = self.policy(&expect.policy.node) else {
+            for call in test.expects.iter().flat_map(|expect| &expect.calls) {
+                let Some(target) = self.policy(&call.policy.node) else {
                     let mut diag = Diagnostic::new(
-                        expect.policy.span,
-                        format!("unknown policy `{}`", expect.policy.node),
+                        call.policy.span,
+                        format!("unknown policy `{}`", call.policy.node),
                         "no policy with this name",
                     );
-                    if let Some((kind, span)) = self.symbol_def_of(&expect.policy.node) {
+                    if let Some((kind, span)) = self.symbol_def_of(&call.policy.node) {
                         diag = diag
                             .with_note(format!(
                                 "`{}` is {} {kind}, not a policy — `expect` runs policies",
-                                expect.policy.node,
+                                call.policy.node,
                                 article(kind)
                             ))
-                            .with_label(span, format!("`{}` is defined here", expect.policy.node));
+                            .with_label(span, format!("`{}` is defined here", call.policy.node));
                     } else {
                         diag = with_suggestion(
                             diag,
-                            &expect.policy.node,
+                            &call.policy.node,
                             self.file
                                 .policies
                                 .iter()
@@ -2176,21 +2204,19 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                     continue;
                 };
-                if target.params.len() != expect.args.len() {
+                if target.params.len() != call.args.len() {
                     self.diags.push(
                         Diagnostic::new(
-                            expect.span,
+                            call.args
+                                .last()
+                                .map_or(call.policy.span, |arg| call.policy.span.to(arg.span)),
                             format!(
                                 "policy `{}` takes {} argument{} but {} {} supplied",
-                                expect.policy.node,
+                                call.policy.node,
                                 target.params.len(),
                                 if target.params.len() == 1 { "" } else { "s" },
-                                expect.args.len(),
-                                if expect.args.len() == 1 {
-                                    "was"
-                                } else {
-                                    "were"
-                                },
+                                call.args.len(),
+                                if call.args.len() == 1 { "was" } else { "were" },
                             ),
                             "wrong number of arguments",
                         )

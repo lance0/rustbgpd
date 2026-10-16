@@ -18,12 +18,15 @@ use rustbgpd_wire::{
 };
 
 use crate::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
-use crate::engine::{NextHopAction, PolicyAction, RouteContext, RouteFamily, RouteType};
+use crate::engine::{
+    NamedPolicy, NextHopAction, PolicyAction, PolicyChain, RouteContext, RouteFamily, RouteType,
+};
+use crate::ir::CompiledChain;
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    CommunityLit, DatasetEntryAst, ExpectVerdict, NextHopArg, PeerField, RouteField, TestDef,
-    WithAssertion,
+    CommunityLit, DatasetEntryAst, ExpectDef, ExpectVerdict, NextHopArg, PeerField, RouteField,
+    ScalarAttr, TestDef, WithAssertion,
 };
 use super::lower::{Lowerer, ext_community_value};
 
@@ -133,13 +136,19 @@ impl Fixture {
                     }
                 }
                 RouteField::AsPath(path) => {
-                    // Fixture AS-path length is the whitespace-word
-                    // count of the string form (AS_SET braces count as
-                    // written) — documented in the language reference.
-                    path.node.clone_into(&mut fixture.as_path_str);
-                    fixture.as_path_len = path.node.split_whitespace().count();
-                    fixture.origin_asn = fixture_origin_asn(&path.node);
-                    fixture.as_path = fixture_as_path(&path.node);
+                    // The string, length, and origin derive from the
+                    // typed path exactly as live evaluation derives them
+                    // from a received AS_PATH: canonical rendering,
+                    // RFC 4271 length (an AS_SET counts 1), and the last
+                    // ASN of the rightmost AS_SEQUENCE.
+                    let typed = parse_fixture_as_path(&path.node)
+                        .expect("typechecked: fixture as-path parses");
+                    if let Some(typed) = &typed {
+                        fixture.as_path_str = typed.to_aspath_string();
+                        fixture.as_path_len = typed.len();
+                        fixture.origin_asn = typed.origin_asn();
+                    }
+                    fixture.as_path = typed;
                 }
                 RouteField::Rpki(state) => {
                     fixture.rpki = match state.node.as_str() {
@@ -210,63 +219,97 @@ impl Fixture {
     }
 }
 
-/// Origin AS of a fixture `as-path` string: the last plain ASN outside
-/// `{...}` `AS_SET` braces — the string-form equivalent of
-/// `AsPath::origin_asn` (last ASN of the rightmost non-empty
-/// `AS_SEQUENCE`; sets never contribute an origin). `None` for empty
-/// and `AS_SET`-only paths, mirroring evaluation semantics.
-fn fixture_origin_asn(path: &str) -> Option<u32> {
-    let mut origin = None;
-    let mut in_set = false;
-    for token in path.split_whitespace() {
-        if token.starts_with('{') {
-            in_set = true;
-        }
-        if !in_set && let Ok(asn) = token.parse::<u32>() {
-            origin = Some(asn);
-        }
-        if token.ends_with('}') {
-            in_set = false;
-        }
-    }
-    origin
+/// Why a fixture `as-path` string is not an AS path: the byte range
+/// within the string, and what is wrong there.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct AsPathFixtureError {
+    pub(super) offset: usize,
+    pub(super) len: usize,
+    pub(super) message: String,
 }
 
-/// Typed `AsPath` of a fixture `as-path` string (LAN-303): plain ASNs
-/// accumulate into `AS_SEQUENCE` segments, `{...}` groups become
-/// `AS_SET` segments, in written order — the string-form equivalent of
-/// the wire representation `for asn in route.as-path` iterates.
-/// Non-numeric tokens are skipped (the fixture format is free-form by
-/// design); an empty/unparseable string yields `None` (no `AS_PATH`
-/// attribute — zero iterations).
-fn fixture_as_path(path: &str) -> Option<AsPath> {
+/// Parse a fixture `as-path` string strictly: decimal ASNs separated by
+/// whitespace, with `{...}` grouping an `AS_SET` (the form
+/// `AsPath::to_aspath_string` renders). Plain ASNs accumulate into
+/// `AS_SEQUENCE` segments in written order. Anything else — a comma, a
+/// word, a nested, empty or unbalanced brace — is an error, so a typo
+/// cannot silently become an absent or shorter path. A blank string is
+/// a route without an `AS_PATH` (`Ok(None)`).
+pub(super) fn parse_fixture_as_path(text: &str) -> Result<Option<AsPath>, AsPathFixtureError> {
+    let error = |offset: usize, len: usize, message: String| AsPathFixtureError {
+        offset,
+        len,
+        message,
+    };
     let mut segments: Vec<AsPathSegment> = Vec::new();
-    let mut in_set = false;
-    for token in path.split_whitespace() {
-        let mut token = token;
-        if let Some(rest) = token.strip_prefix('{') {
-            in_set = true;
-            segments.push(AsPathSegment::AsSet(Vec::new()));
-            token = rest;
-        }
-        let closes = token.ends_with('}');
-        let token = token.trim_end_matches('}');
-        if let Ok(asn) = token.parse::<u32>() {
-            match (in_set, segments.last_mut()) {
-                (true, Some(AsPathSegment::AsSet(asns)))
-                | (false, Some(AsPathSegment::AsSequence(asns))) => asns.push(asn),
-                _ => segments.push(if in_set {
-                    AsPathSegment::AsSet(vec![asn])
-                } else {
-                    AsPathSegment::AsSequence(vec![asn])
-                }),
+    // Byte offset of the open `{`, while inside an AS_SET.
+    let mut open_set: Option<usize> = None;
+    let mut chars = text.char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
+        match ch {
+            c if c.is_whitespace() => {}
+            '{' => {
+                if open_set.is_some() {
+                    return Err(error(offset, 1, "AS_SETs do not nest".into()));
+                }
+                open_set = Some(offset);
+                segments.push(AsPathSegment::AsSet(Vec::new()));
+            }
+            '}' => {
+                let Some(open) = open_set.take() else {
+                    return Err(error(offset, 1, "`}` without a matching `{`".into()));
+                };
+                if matches!(segments.last(), Some(AsPathSegment::AsSet(asns)) if asns.is_empty()) {
+                    return Err(error(open, offset + 1 - open, "empty AS_SET".into()));
+                }
+            }
+            '0'..='9' => {
+                let mut end = offset + 1;
+                while let Some(&(next, digit)) = chars.peek() {
+                    if !digit.is_ascii_digit() {
+                        break;
+                    }
+                    end = next + 1;
+                    chars.next();
+                }
+                let word = &text[offset..end];
+                let asn = word.parse::<u32>().map_err(|_| {
+                    error(
+                        offset,
+                        end - offset,
+                        format!("ASN `{word}` exceeds 4294967295"),
+                    )
+                })?;
+                if let Some(&(next, ch)) = chars.peek()
+                    && !ch.is_whitespace()
+                    && ch != '{'
+                    && ch != '}'
+                {
+                    return Err(error(
+                        next,
+                        ch.len_utf8(),
+                        format!("unexpected `{ch}` after ASN `{word}`; separate ASNs with spaces"),
+                    ));
+                }
+                match (open_set.is_some(), segments.last_mut()) {
+                    (true, Some(AsPathSegment::AsSet(asns)))
+                    | (false, Some(AsPathSegment::AsSequence(asns))) => asns.push(asn),
+                    _ => segments.push(AsPathSegment::AsSequence(vec![asn])),
+                }
+            }
+            other => {
+                return Err(error(
+                    offset,
+                    other.len_utf8(),
+                    format!("unexpected `{other}`; expected an ASN, `{{`, or `}}`"),
+                ));
             }
         }
-        if closes {
-            in_set = false;
-        }
     }
-    (!segments.is_empty()).then_some(AsPath { segments })
+    if let Some(open) = open_set {
+        return Err(error(open, 1, "unclosed `{`".into()));
+    }
+    Ok((!segments.is_empty()).then_some(AsPath { segments }))
 }
 
 /// Execute every `test` block against the lowered policies.
@@ -312,32 +355,32 @@ pub(super) fn run_tests_recording(
             )));
         }
         for expect in &test.expects {
-            let args: Vec<u32> = expect.args.iter().map(|arg| arg.node).collect();
-            let mut chain = lowerer.instantiate_chain(&expect.policy.node, &args, store, &bindings);
-            let missing = lowerer.take_missing_datasets();
-            if !missing.is_empty() {
-                problems.push(format!(
-                    "{}: probes dataset{} {} with no `dataset {{ ... }}` override in this test",
-                    render_call(&expect.policy.node, &args),
-                    if missing.len() == 1 { "" } else { "s" },
-                    missing.join(", "),
-                ));
-                continue;
-            }
+            let call = render_expect(expect);
+            let (mut chain, members) = match assemble_chain(expect, lowerer, store, &bindings) {
+                Ok(assembled) => assembled,
+                Err(problem) => {
+                    problems.push(problem);
+                    continue;
+                }
+            };
             // The fixture's `peer { local-as N }` plays the config
             // resolver's role for `prepend as self` (LAN-296).
             chain.local_asn = fixture.local_asn;
             // LAN-323: attribute this walk's term coverage — a second,
             // decision-identical evaluation, so the assertion path
-            // below stays exactly the shipped runner.
+            // below stays exactly the shipped runner. Each chain member
+            // contributes one policy, in order; its rows attribute to
+            // the member's own source policy (the spliced copy carries
+            // the call name instead).
             if let Some(accum) = coverage.as_deref_mut() {
                 let mut evaluated = chain.zero_term_hits();
                 let mut matched = chain.zero_term_hits();
                 let _ = chain.evaluate_recording_coverage(&ctx, &mut evaluated, &mut matched);
-                accum.record_walk(&chain.policies[0], &evaluated[0], &matched[0]);
+                for (index, member) in members.iter().enumerate() {
+                    accum.record_walk(&member.policies[0], &evaluated[index], &matched[index]);
+                }
             }
             let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
-            let call = render_call(&expect.policy.node, &args);
             // ADR-0103 Decision 4: an erroring evaluation is not a
             // clean verdict. `accept`/`reject` expectations FAIL on an
             // error with the error rendered; `error [KIND]` pins the
@@ -400,6 +443,42 @@ pub(super) fn run_tests_recording(
     report
 }
 
+/// Assemble an expectation's policies into one chain. Every expectation
+/// is a chain — `expect p` has one member — built by the daemon's own
+/// chain compiler, so tests run the same splice and cross-policy merge
+/// the daemon runs. Also returns each member's own compiled policy, for
+/// coverage attribution (the spliced copy carries the call name).
+fn assemble_chain(
+    expect: &ExpectDef,
+    lowerer: &mut Lowerer<'_>,
+    store: &mut SetStore,
+    bindings: &DatasetBindings,
+) -> Result<(CompiledChain, Vec<Arc<CompiledChain>>), String> {
+    let mut named = Vec::with_capacity(expect.calls.len());
+    let mut members = Vec::with_capacity(expect.calls.len());
+    for member in &expect.calls {
+        let args: Vec<u32> = member.args.iter().map(|arg| arg.node).collect();
+        let compiled =
+            Arc::new(lowerer.instantiate_chain(&member.policy.node, &args, store, bindings));
+        let missing = lowerer.take_missing_datasets();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{}: probes dataset{} {} with no `dataset {{ ... }}` override in this test",
+                render_call(&member.policy.node, &args),
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(", "),
+            ));
+        }
+        named.push(NamedPolicy::from_rpol(
+            render_call(&member.policy.node, &args),
+            Arc::clone(&compiled),
+        ));
+        members.push(compiled);
+    }
+    let chain = crate::compile::compile_chain(&PolicyChain::from_named(named), store);
+    Ok((chain, members))
+}
+
 /// Build a test override's [`DatasetData`] from its parsed members.
 /// Kind agreement between members and the declared kind is a
 /// typecheck guarantee; mismatched members are unreachable here and
@@ -442,6 +521,22 @@ fn verdict(accept: bool) -> &'static str {
     if accept { "accept" } else { "reject" }
 }
 
+fn render_expect(expect: &ExpectDef) -> String {
+    let calls = expect
+        .calls
+        .iter()
+        .map(|call| {
+            let args: Vec<u32> = call.args.iter().map(|arg| arg.node).collect();
+            render_call(&call.policy.node, &args)
+        })
+        .collect::<Vec<_>>();
+    if expect.chain {
+        format!("chain [{}]", calls.join(", "))
+    } else {
+        calls.join(", ")
+    }
+}
+
 fn render_call(name: &str, args: &[u32]) -> String {
     if args.is_empty() {
         name.to_string()
@@ -482,26 +577,23 @@ fn check_assertion(
                 )
             })
         }
-        WithAssertion::Community(lit) => {
-            let present = match lit.node {
-                CommunityLit::Standard(value) => mods.communities_add.contains(&value),
-                CommunityLit::Large(lc) => mods.large_communities_add.contains(&lc),
-                CommunityLit::Ext {
-                    route_target,
-                    global,
-                    local,
-                    ipv4_admin,
-                } => mods.extended_communities_add.contains(&ext_community_value(
-                    route_target,
-                    global,
-                    local,
-                    ipv4_admin,
-                )),
-                CommunityLit::ExtRaw(raw) => mods
-                    .extended_communities_add
-                    .contains(&ExtendedCommunity::new(raw)),
+        WithAssertion::Community(lit) => (!community_listed(&lit.node, mods, true))
+            .then(|| format!("expected community {} to be added", lit_text(&lit.node))),
+        WithAssertion::Removes(lit) => (!community_listed(&lit.node, mods, false))
+            .then(|| format!("expected community {} to be removed", lit_text(&lit.node))),
+        WithAssertion::WithoutCommunity(lit) => community_listed(&lit.node, mods, true)
+            .then(|| format!("expected community {} not to be added", lit_text(&lit.node))),
+        WithAssertion::Without(attr) => {
+            let set = match attr {
+                ScalarAttr::LocalPref => mods.set_local_pref.map(|v| v.to_string()),
+                ScalarAttr::Med => mods.set_med.map(|v| v.to_string()),
+                ScalarAttr::NextHop => mods
+                    .set_next_hop
+                    .as_ref()
+                    .map(|action| render_next_hop(Some(action))),
+                ScalarAttr::Prepend => mods.as_path_prepend.map(|(a, c)| format!("as {a} {c}")),
             };
-            (!present).then(|| "expected community was not added".to_string())
+            set.map(|value| format!("expected no {} change, got {value}", attr.keyword()))
         }
         WithAssertion::Prepend(asn, count) => {
             let expected = Some((*asn, u8::try_from(*count).unwrap_or(u8::MAX)));
@@ -513,6 +605,70 @@ fn check_assertion(
                 )
             })
         }
+    }
+}
+
+/// Whether `lit` is in the modification add list (`added`) or remove
+/// list (`!added`) of its kind.
+fn community_listed(
+    lit: &CommunityLit,
+    mods: &crate::engine::RouteModifications,
+    added: bool,
+) -> bool {
+    match *lit {
+        CommunityLit::Standard(value) => if added {
+            &mods.communities_add
+        } else {
+            &mods.communities_remove
+        }
+        .contains(&value),
+        CommunityLit::Large(lc) => if added {
+            &mods.large_communities_add
+        } else {
+            &mods.large_communities_remove
+        }
+        .contains(&lc),
+        CommunityLit::Ext { .. } | CommunityLit::ExtRaw(_) => {
+            let value = match *lit {
+                CommunityLit::Ext {
+                    route_target,
+                    global,
+                    local,
+                    ipv4_admin,
+                } => ext_community_value(route_target, global, local, ipv4_admin),
+                CommunityLit::ExtRaw(raw) => ExtendedCommunity::new(raw),
+                _ => unreachable!("matched above"),
+            };
+            if added {
+                &mods.extended_communities_add
+            } else {
+                &mods.extended_communities_remove
+            }
+            .contains(&value)
+        }
+    }
+}
+
+fn lit_text(lit: &CommunityLit) -> String {
+    match *lit {
+        CommunityLit::Standard(value) => format!("{}:{}", value >> 16, value & 0xffff),
+        CommunityLit::Large(lc) => {
+            format!("{}:{}:{}", lc.global_admin, lc.local_data1, lc.local_data2)
+        }
+        CommunityLit::Ext {
+            route_target,
+            global,
+            local,
+            ipv4_admin,
+        } => {
+            let kind = if route_target { "RT" } else { "RO" };
+            if ipv4_admin {
+                format!("{kind}:{}:{local}", std::net::Ipv4Addr::from(global))
+            } else {
+                format!("{kind}:{global}:{local}")
+            }
+        }
+        CommunityLit::ExtRaw(raw) => format!("0x{raw:016x}"),
     }
 }
 

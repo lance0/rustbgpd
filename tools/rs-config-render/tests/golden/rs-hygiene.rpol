@@ -61,6 +61,10 @@ test as-set-path-is-rejected {
     route { prefix 203.0.113.0/24; as-path "3333 {65010 65011}" }
     expect rs-hygiene == reject
 }
+test member-sent-scrubbed-communities-are-removed {
+    route { communities [65530:4, 65530:31, 65530:100]; large-communities [65500:65530:4, 65500:65530:31, 65500:65521:3] }
+    expect rs-hygiene == accept with removes community 65530:4, removes large-community 65500:65530:4, removes community 65530:31, removes large-community 65500:65530:31, removes large-community 65500:65521:3, removes community 65530:100
+}
 test private-16bit-asn-in-path-is-rejected {
     route { prefix 203.0.113.0/24; as-path "3333 64512" }
     expect rs-hygiene == reject

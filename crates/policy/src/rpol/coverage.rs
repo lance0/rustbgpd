@@ -544,8 +544,8 @@ impl<'a> Refs<'a> {
             refs.value(&def.result);
         }
         for test in &file.tests {
-            for expect in &test.expects {
-                refs.policies.insert(&expect.policy.node);
+            for call in test.expects.iter().flat_map(|expect| &expect.calls) {
+                refs.policies.insert(&call.policy.node);
             }
         }
         refs
