@@ -1007,7 +1007,7 @@ containers:
       periodSeconds: 10
       timeoutSeconds: 1
       failureThreshold: 30   # about 5 minutes, the unit's WatchdogSec
-      terminationGracePeriodSeconds: 60   # liveness kills only; Kubernetes 1.25+
+      terminationGracePeriodSeconds: 90   # liveness kills only; Kubernetes 1.25+
 terminationGracePeriodSeconds: 1920   # ordinary stops; same as docker --stop-timeout
 ```
 
@@ -1077,13 +1077,19 @@ ends.
 
 The snippet therefore sets a
 [probe-level `terminationGracePeriodSeconds`](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/#probe-level-terminationgraceperiodseconds)
-of 60 seconds on the liveness probe. The Kubernetes documentation supports
-the field from 1.25 and marks it stable since 1.28.
-That covers the shutdown stages that do have deadlines (a five-second
-runtime-config drain, the 30-second warm-checkpoint deadline and the
-five-second GR marker write) if the actors recover, and kills a daemon that
-stays wedged within a minute. Graceful drain is moot by then: the actors
-did not answer for five minutes. The systemd path is no gentler: the shipped
+of 90 seconds on the liveness probe. The Kubernetes documentation supports
+the field from 1.25 and marks it stable since 1.28. The shutdown stages that
+have deadlines add up to about 70 seconds: a five-second runtime-config
+drain, then the
+[pre-Cease ceilings](settlement-watchdog.md) of 30 seconds for the warm
+checkpoint, 5 seconds for the restart marker, 10 seconds for the EVPN
+runtime-apply fence and 5 seconds for each of four EVPN actor drains. 90
+seconds covers them with headroom if the actors recover.
+
+The 90 seconds is an intentional cap, not an estimate of a clean stop. A
+daemon that is still wedged when it expires is killed, and the PeerManager
+drain, which has no deadline, is deliberately not waited for. Graceful drain
+is moot by then: the actors did not answer for five minutes. The systemd path is no gentler: the shipped
 unit keeps systemd's default watchdog signal, SIGABRT, which the daemon does
 not handle, so a watchdog expiry ends the process without coordinated
 shutdown. In either case a runtime-config mutation that was cut short is
