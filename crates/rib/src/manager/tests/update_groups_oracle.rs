@@ -3590,10 +3590,11 @@ async fn oracle_vpn_source_flip_withdraw_lost_to_full_channel_recovers() {
     );
 }
 
-/// Passes that stage while the member is ALREADY dirty skip its
-/// emission. Their withdrawals ride the staging tombstones and a source
-/// flip onto the member rides its extra-withdraw residue, so the resync
-/// still folds to the per-peer path's exact state.
+/// Passes that stage while the member is ALREADY dirty and its channel
+/// is still full skip its emission. Their withdrawals ride the staging
+/// tombstones and a source flip onto the member rides its extra-withdraw
+/// residue, so the resync still folds to the per-peer path's exact
+/// state.
 #[tokio::test]
 async fn oracle_vpn_passes_while_already_dirty_fold_exactly() {
     tokio::time::pause();

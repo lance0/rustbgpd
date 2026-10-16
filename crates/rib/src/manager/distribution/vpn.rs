@@ -942,19 +942,43 @@ impl RibManager {
                 // never compared by the oracle).
                 self.apply_group_policy_counters(peer, &stage.evals);
                 let member_filter = self.member_rt_filter(peer);
-                // A member already dirty when this pass staged cannot
-                // take the wire delta: its advertised state is behind
-                // and its pending resync announces the Φ-filtered table.
-                // Staging recorded this pass's withdrawals as VPN
-                // tombstones (its `dirty_members` was non-empty), so
-                // only the member-scoped withdraws, which keep the key
-                // IN the table, need a record. Same shape as the RTC
-                // membership-change path for a dirty member.
-                if self
-                    .group_ribs
-                    .get(&gid)
-                    .is_some_and(|group| group.dirty_members.contains(&peer))
+                // A member already dirty when this pass staged, whose
+                // channel is still full, would only build a send that
+                // fails. Keep that failure's bookkeeping without the
+                // build: no emission, count delta or prior-key set, and
+                // no drop counted (the unicast dirty-and-full deferral).
+                // Staging already recorded this pass's withdrawals as VPN
+                // tombstones (`dirty_members` was non-empty), so only the
+                // member-scoped withdraws, which keep the key IN the
+                // table, need a record. A dirty member with room still
+                // takes the incremental send below, widening its
+                // admitted-key proof with what it actually received.
+                if self.outbound_channel_full(peer)
+                    && self
+                        .group_ribs
+                        .get(&gid)
+                        .is_some_and(|group| group.dirty_members.contains(&peer))
                 {
+                    let member_emits = stage.deltas.iter().any(|delta| {
+                        checkpoint();
+                        [&delta.old, &delta.new].into_iter().flatten().any(|route| {
+                            route.peer != peer
+                                && crate::manager::update_groups::rt_passes(
+                                    member_filter.as_ref(),
+                                    route,
+                                )
+                        })
+                    });
+                    if !member_emits {
+                        continue;
+                    }
+                    if !self.pending_group_admitted.contains_key(&peer) {
+                        self.set_group_recovery_fallback(
+                            peer,
+                            super::super::update_groups::RecoveryFallbackCause::MissingProof,
+                        );
+                    }
+                    self.mark_outbound_dirty_inner(peer, false);
                     let lost: Vec<VpnRouteKey> = stage
                         .member_scoped_withdraws(peer, member_filter.as_ref(), || {
                             super::super::replacement_readiness_checkpoint(&readiness, false);

@@ -4172,9 +4172,11 @@ fn fold_vpn_wire(
 }
 
 /// A VPN member blocked behind a full channel warns once, on the
-/// clean→dirty transition; later passes skip its emission entirely.
-/// Its resync still folds to the exact table: withdrawals made while
-/// it was dirty reach the wire only for identities it had admitted.
+/// clean→dirty transition; later passes skip its emission while the
+/// channel stays full. Once it has room, a dirty member takes the
+/// incremental send again. Its resync still folds to the exact table:
+/// withdrawals made while it was dirty reach the wire only for
+/// identities it had admitted.
 #[test]
 fn blocked_vpn_member_warns_once_and_skips_emission_until_resync() {
     let (mut manager, mut receiver) = capacity_one_vpn_member();
@@ -4206,16 +4208,23 @@ fn blocked_vpn_member_warns_once_and_skips_emission_until_resync() {
     let first = receiver.try_recv().unwrap();
     assert_eq!(first.vpn_announce.len(), 1);
     assert_eq!(first.vpn_announce[0].key(), key(1));
+    // Room again, still dirty: the incremental send goes out.
+    receive_vpn(&mut manager, OTHER1, vec![vpn_route(11, OTHER1)], vec![]);
+    assert_eq!(manager.vpn_group_member_emits, emits + 1);
+    assert_eq!(manager.vpn_member_deferral_warnings, 1);
+    assert!(manager.dirty_peers.contains(&MEMBER));
+    let mut advertised = HashSet::from([key(1).nlri_key]);
+    let mut withdrawn = fold_vpn_wire(&mut receiver, &mut advertised);
+    assert!(advertised.contains(&vpn_key(11)));
     while manager.resync_dirty_peers_bounded() {}
     assert!(!manager.dirty_peers.contains(&MEMBER));
-    let mut advertised = HashSet::from([key(1).nlri_key]);
-    let withdrawn = fold_vpn_wire(&mut receiver, &mut advertised);
+    withdrawn.extend(fold_vpn_wire(&mut receiver, &mut advertised));
     assert_eq!(
         withdrawn,
         HashSet::from([key(1).nlri_key]),
         "only the admitted identity is withdrawn"
     );
-    assert_eq!(advertised, (4..=10).map(vpn_key).collect::<HashSet<_>>());
+    assert_eq!(advertised, (4..=11).map(vpn_key).collect::<HashSet<_>>());
 }
 
 /// Without an admitted-key proof the resync withdraws only recorded
