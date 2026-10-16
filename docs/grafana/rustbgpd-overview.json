@@ -1160,6 +1160,117 @@
       ]
     },
     {
+      "id": 80,
+      "type": "timeseries",
+      "title": "RIB actor stalls and scheduler lateness",
+      "description": "Longest synchronous RIB actor slice per stage in each scrape window (actor_poll is a whole poll without yielding), and the p99 delay of a 10 ms tokio probe. High lateness with short actor slices means other tasks saturated the runtime workers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 46
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (instance, stage) (bgp_rib_actor_slice_max_microseconds{instance=~\"$instance\"}) / 1e6",
+          "legendFormat": "{{instance}} {{stage}} max slice",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (instance, le) (rate(bgp_runtime_scheduler_lateness_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "{{instance}} scheduler lateness p99",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 81,
+      "type": "timeseries",
+      "title": "Runtime worker busy ratio",
+      "description": "Fraction of time each tokio runtime worker was busy rather than parked. Workers pinned near 1 with rising scheduler lateness are saturated.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 46
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (instance, worker) (rate(bgp_runtime_worker_busy_microseconds_total{instance=~\"$instance\"}[$__rate_interval])) / 1e6",
+          "legendFormat": "{{instance}} worker {{worker}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 18,
       "type": "row",
       "title": "Churn and distribution",

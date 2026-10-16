@@ -48,6 +48,7 @@ mod metrics_server;
 mod peer_manager;
 mod policy_admin;
 mod reload;
+mod runtime_probe;
 mod sd_notify;
 #[cfg(test)]
 mod test_support;
@@ -6475,6 +6476,7 @@ async fn run<T>(
         )
         .await;
     });
+    let runtime_probe = runtime_probe::RuntimeProbe::spawn(&metrics);
 
     // systemd `READY=1` shares the readiness boundary above: every configured
     // gRPC listener is bound, the peer roster is installed, and BGP ingress is
@@ -7412,6 +7414,7 @@ async fn run<T>(
         manager.shutdown().await;
     }
 
+    runtime_probe.shutdown().await;
     info!("rustbgpd exiting");
     component_failed
 }

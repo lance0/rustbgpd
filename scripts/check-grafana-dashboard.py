@@ -384,6 +384,19 @@ TARGETS = {
     ("Outbound dirty peers", "B"): (
         'bgp_rib_outbound_dirty_oldest_seconds{instance=~"$instance"}'
     ),
+    ("RIB actor stalls and scheduler lateness", "A"): (
+        "max by (instance, stage) (bgp_rib_actor_slice_max_microseconds"
+        '{instance=~"$instance"}) / 1e6'
+    ),
+    ("RIB actor stalls and scheduler lateness", "B"): (
+        "histogram_quantile(0.99, sum by (instance, le) "
+        "(rate(bgp_runtime_scheduler_lateness_seconds_bucket"
+        '{instance=~"$instance"}[$__rate_interval])))'
+    ),
+    ("Runtime worker busy ratio", "A"): (
+        "sum by (instance, worker) (rate(bgp_runtime_worker_busy_microseconds_total"
+        '{instance=~"$instance"}[$__rate_interval])) / 1e6'
+    ),
     ("Slow peers", "A"): (
         'bgp_peer_slow{instance=~"$instance",peer=~"$peer"}'
     ),

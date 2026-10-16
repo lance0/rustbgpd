@@ -1458,6 +1458,7 @@ mod rs_control;
 mod rtc;
 mod selection_deferral;
 mod session_export_policy;
+mod slice_timing;
 mod timer_cutoffs;
 mod unicast;
 mod unicast_prefix_peers;
