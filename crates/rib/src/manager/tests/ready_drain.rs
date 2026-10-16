@@ -271,19 +271,21 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
     handle.await.unwrap();
 }
 
-/// The ordinary event loop applies one primary update per actor poll, as the
-/// timer drain does. Draining a deep backlog inside one poll, up to Tokio's
-/// whole cooperative budget, holds the worker: a task woken meanwhile, such as
-/// a readiness probe answered mid-backlog, waits behind the rest of that poll.
-async fn assert_event_loop_yields_between_primary_updates(armed_timer: bool) {
+/// The ordinary event loop bounds one actor poll by the flush budget, as the
+/// timer drain bounds its units. Draining a deep backlog inside one poll, up
+/// to Tokio's whole cooperative budget, holds the worker: a task woken
+/// meanwhile, such as a readiness probe answered mid-backlog, waits behind the
+/// rest of that poll. Within the budget, updates still apply back to back.
+async fn applied_in_one_poll(armed_timer: bool, budget: Duration) -> usize {
     const QUEUED: usize = 16;
     let (tx, rx) = mpsc::channel(QUEUED);
     // An armed (not yet due) timer selects the loop's timer-aware wait.
-    let manager = if armed_timer {
+    let mut manager = if armed_timer {
         timer_manager(rx, dummy_query_rx())
     } else {
         RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
     };
+    manager.flush_poll_budget = budget;
     let mut responses = Vec::new();
     for _ in 0..QUEUED {
         let (reply, response) = oneshot::channel();
@@ -301,10 +303,6 @@ async fn assert_event_loop_yields_between_primary_updates(armed_timer: bool) {
         .iter_mut()
         .flat_map(oneshot::Receiver::try_recv)
         .count();
-    assert_eq!(
-        answered, 1,
-        "one actor poll applied {answered} of {QUEUED} queued primary updates"
-    );
     drop(tx);
     actor.await;
     let rest = responses
@@ -312,14 +310,23 @@ async fn assert_event_loop_yields_between_primary_updates(armed_timer: bool) {
         .flat_map(oneshot::Receiver::try_recv)
         .count();
     assert_eq!(answered + rest, QUEUED);
+    answered
 }
 
 #[tokio::test(start_paused = true)]
-async fn event_loop_yields_between_queued_primary_updates() {
-    assert_event_loop_yields_between_primary_updates(false).await;
+async fn event_loop_yields_once_the_poll_budget_is_spent() {
+    assert_eq!(applied_in_one_poll(false, Duration::ZERO).await, 1);
 }
 
 #[tokio::test(start_paused = true)]
-async fn timer_wait_yields_between_queued_primary_updates() {
-    assert_event_loop_yields_between_primary_updates(true).await;
+async fn timer_wait_yields_once_the_poll_budget_is_spent() {
+    assert_eq!(applied_in_one_poll(true, Duration::ZERO).await, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn event_loop_batches_primary_updates_within_the_poll_budget() {
+    assert_eq!(
+        applied_in_one_poll(false, Duration::from_secs(3600)).await,
+        16
+    );
 }
