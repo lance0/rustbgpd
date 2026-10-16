@@ -395,6 +395,11 @@ impl Run {
 
 /// Initial table, member joins, multi-source passes, a source flip and
 /// back, an attribute change and withdrawals in every family.
+///
+/// A distribution window may coalesce messages queued between two settles,
+/// and its time bound makes that run-dependent. Each such group therefore
+/// touches disjoint keys, so coalescing can change packing but never a
+/// key's event sequence.
 async fn scenario(private: bool) -> RunOutput {
     let mut run = Run::start(private);
     run.peer_up(A).await;
@@ -455,7 +460,9 @@ async fn scenario(private: bool) -> RunOutput {
     run.settle().await;
 
     // A's better paths hide B's and C's runner-ups, then one withdrawal
-    // promotes both sources in a single pass.
+    // promotes both sources in a single pass. The runner-ups settle before
+    // A's paths are queued: in one window A's paths would replace them
+    // before distribution, so the per-key history would depend on timing.
     let blocks = || PLAIN_BLOCK.chain(SELF_BLOCK).map(v4_prefix);
     run.routes(
         B,
@@ -473,6 +480,7 @@ async fn scenario(private: bool) -> RunOutput {
         vec![],
     )
     .await;
+    run.settle().await;
     run.routes(
         A,
         blocks()
