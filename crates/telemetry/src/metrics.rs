@@ -651,6 +651,7 @@ struct BgpMetricsInner {
 
     // ── RIB drops ───────────────────────────────────────────────
     outbound_route_drops: IntCounterVec,
+    outbound_eor_deferrals: IntCounterVec,
     outbound_commit_refusals: IntCounterVec,
     inbound_rib_backpressure: IntCounterVec,
     hold_timer_rearmed_pending_input: IntCounterVec,
@@ -1528,6 +1529,15 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_outbound_route_drops_total",
                 "Outbound BGP work of any address family not handed to the peer writer because its channel was full or closed; the RIB marks the peer dirty and resyncs it.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let outbound_eor_deferrals = IntCounterVec::new(
+            Opts::new(
+                "bgp_outbound_eor_deferrals_total",
+                "End-of-RIB markers not handed to the peer writer because its channel was full or closed; the marker stays pending and is retried after the peer's next resync.",
             ),
             &["peer"],
         )
@@ -3204,6 +3214,9 @@ impl BgpMetrics {
             .register(Box::new(outbound_route_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(outbound_eor_deferrals.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(outbound_commit_refusals.clone()))
             .expect("metric not already registered");
         registry
@@ -3768,6 +3781,7 @@ impl BgpMetrics {
             outbound_prefix_blocked,
             orf_capacity_rejections,
             outbound_route_drops,
+            outbound_eor_deferrals,
             outbound_commit_refusals,
             inbound_rib_backpressure,
             hold_timer_rearmed_pending_input,
@@ -4072,6 +4086,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocked, peer);
         Self::reap_peer_series_from_vec(&self.0.orf_capacity_rejections, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_route_drops, peer);
+        Self::reap_peer_series_from_vec(&self.0.outbound_eor_deferrals, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_commit_refusals, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_outbound_registration_replaced, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_stale_peer_down_ignored, peer);
@@ -5147,6 +5162,15 @@ impl BgpMetrics {
     /// not accept (full or closed).
     pub fn record_outbound_route_drop(&self, peer: &str) {
         self.0.outbound_route_drops.with_label_values(&[peer]).inc();
+    }
+
+    /// Record an End-of-RIB marker the peer writer channel did not accept.
+    /// An End-of-RIB is not route work, so it is not counted as a route drop.
+    pub fn record_outbound_eor_deferral(&self, peer: &str) {
+        self.0
+            .outbound_eor_deferrals
+            .with_label_values(&[peer])
+            .inc();
     }
 
     /// Record an outbound transaction refused before the peer writer.
@@ -10031,6 +10055,7 @@ mod tests {
         m.record_orf_capacity_rejection(peer, "ipv4_unicast");
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
+        m.record_outbound_eor_deferral(peer);
         m.record_outbound_commit_refusal(
             peer,
             crate::reason_labels::OutboundCommitRefusal::SelectionGate,
@@ -10107,10 +10132,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 76 peer-labeled series; state transitions and EVPN discard types
+        // 77 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 76);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 77);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -10120,7 +10145,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 76);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 77);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -10406,7 +10431,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 64] = [
+    const PEER_LABELED_FAMILIES: [&str; 65] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -10433,6 +10458,7 @@ mod tests {
         "bgp_orf_capacity_rejections_total",
         "bgp_otc_routes_blocked_total",
         "bgp_outbound_commit_refusals_total",
+        "bgp_outbound_eor_deferrals_total",
         "bgp_outbound_prefix_blocked_total",
         "bgp_outbound_prefix_blocking",
         "bgp_outbound_prefix_headroom",

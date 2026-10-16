@@ -1473,6 +1473,15 @@
           "expr": "sum by (peer, reason) (rate(bgp_outbound_commit_refusals_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval]))",
           "legendFormat": "outbound refused {{peer}} {{reason}}",
           "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (peer) (rate(bgp_outbound_eor_deferrals_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval]))",
+          "legendFormat": "End-of-RIB deferred {{peer}}",
+          "refId": "E"
         }
       ]
     },

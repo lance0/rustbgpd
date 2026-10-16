@@ -374,6 +374,10 @@ TARGETS = {
         "sum by (peer, reason) (rate(bgp_outbound_commit_refusals_total"
         '{instance=~"$instance",peer=~"$peer"}[$__rate_interval]))'
     ),
+    ("RIB ingest pressure", "E"): (
+        "sum by (peer) (rate(bgp_outbound_eor_deferrals_total"
+        '{instance=~"$instance",peer=~"$peer"}[$__rate_interval]))'
+    ),
     ("Update-group recovery", "A"): (
         "sum by (instance, cause) (rate(bgp_update_group_recovery_fallback_total"
         '{instance=~"$instance"}[$__rate_interval]))'
