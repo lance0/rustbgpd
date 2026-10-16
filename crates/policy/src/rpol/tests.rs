@@ -6584,6 +6584,9 @@ fn fixture_as_path_is_strict_and_located() {
         ("{64501 {64502}}", "{", "AS_SETs do not nest"),
         ("4294967296", "4294967296", "exceeds 4294967295"),
         ("64501 AS64502", "A", "unexpected `A`"),
+        ("64500{64501}", "{", "unexpected `{` after ASN `64500`"),
+        ("{64501}64502", "6", "unexpected `6` after `}`"),
+        ("{64501}{64502}", "{", "unexpected `{` after `}`"),
     ] {
         let source = format!(
             "policy p {{ term t {{ accept }} }}\ntest t {{ route {{ as-path \"{path}\" }} expect p == accept }}"

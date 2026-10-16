@@ -262,6 +262,15 @@ pub(super) fn parse_fixture_as_path(text: &str) -> Result<Option<AsPath>, AsPath
                 if matches!(segments.last(), Some(AsPathSegment::AsSet(asns)) if asns.is_empty()) {
                     return Err(error(open, offset + 1 - open, "empty AS_SET".into()));
                 }
+                if let Some(&(next, ch)) = chars.peek()
+                    && !ch.is_whitespace()
+                {
+                    return Err(error(
+                        next,
+                        ch.len_utf8(),
+                        format!("unexpected `{ch}` after `}}`; separate segments with spaces"),
+                    ));
+                }
             }
             '0'..='9' => {
                 let mut end = offset + 1;
@@ -282,7 +291,6 @@ pub(super) fn parse_fixture_as_path(text: &str) -> Result<Option<AsPath>, AsPath
                 })?;
                 if let Some(&(next, ch)) = chars.peek()
                     && !ch.is_whitespace()
-                    && ch != '{'
                     && ch != '}'
                 {
                     return Err(error(
@@ -533,7 +541,7 @@ fn render_expect(expect: &ExpectDef) -> String {
     if expect.chain {
         format!("chain [{}]", calls.join(", "))
     } else {
-        calls.join(", ")
+        calls.concat()
     }
 }
 

@@ -3410,6 +3410,7 @@ fn render_scrub_test(tests: &mut String, mut scrubbed: Vec<(CommunityKind, Strin
     for (kind, field) in [
         (CommunityKind::Standard, "communities"),
         (CommunityKind::Large, "large-communities"),
+        (CommunityKind::Extended, "ext-communities"),
     ] {
         let values = list(kind);
         if !values.is_empty() {
@@ -3964,6 +3965,40 @@ fn format_utc(unix: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every scrubbed kind the test asserts on is also carried by its route
+    /// fixture, so a missing scrub fails the `removes` assertion instead of
+    /// passing against a fixture that never carried the community.
+    #[test]
+    fn scrub_test_fixture_carries_every_asserted_kind() {
+        let mut tests = String::new();
+        render_scrub_test(
+            &mut tests,
+            vec![
+                (CommunityKind::Standard, "65530:4".to_owned()),
+                (CommunityKind::Large, "65500:65530:4".to_owned()),
+                (CommunityKind::Extended, "RT:65500:4".to_owned()),
+            ],
+        );
+        assert!(tests.contains("ext-communities [RT:65500:4]"), "{tests}");
+        let policy = |actions: &str| {
+            format!("policy rs-hygiene {{\n    term scrub {{ {actions} }}\n}}\n{tests}")
+        };
+        let all = "remove community 65530:4; remove large-community 65500:65530:4; \
+                   remove ext-community RT:65500:4";
+        let report = rustbgpd_policy::rpol::run_rpol_tests(&policy(all)).unwrap();
+        assert!(report.all_passed(), "{:?}", report.failures);
+        let no_ext = "remove community 65530:4; remove large-community 65500:65530:4";
+        let report = rustbgpd_policy::rpol::run_rpol_tests(&policy(no_ext)).unwrap();
+        assert_eq!(report.failures.len(), 1, "{tests}");
+        assert!(
+            report.failures[0]
+                .message
+                .contains("expected community RT:65500:4 to be removed"),
+            "{:?}",
+            report.failures
+        );
+    }
 
     #[test]
     fn utc_formatting_matches_known_dates() {

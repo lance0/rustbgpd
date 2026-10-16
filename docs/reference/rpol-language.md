@@ -1177,9 +1177,10 @@ fixture's `prefix`).
 
 The fixture `as-path` is decimal ASNs separated by spaces, with
 `{...}` around an AS_SET: `as-path "64500 {64501 64502}"`. Anything
-else (a comma, a word, an empty, nested, or unbalanced brace, an ASN
-above 4294967295) is a compile diagnostic pointing at the offending
-character, so a typo cannot become a silently absent or shorter path.
+else (a comma, a word, an empty, nested, or unbalanced brace, segments
+run together as in `64500{64501}`, an ASN above 4294967295) is a
+compile diagnostic pointing at the offending character, so a typo
+cannot become a silently absent or shorter path.
 The fixture becomes a typed AS path, and evaluation reads it exactly
 as it reads a received one: `route.as-path matches` sees the canonical
 rendering (single spaces, `{64501 64502}`), `route.as-path.len` is the
