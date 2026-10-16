@@ -19,10 +19,10 @@ use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, check_length_
 
 use super::ast::{
     ActionStmt, AsnSetDef, CmpOp, CommunityArg, CommunityKind, CommunityLit, CommunitySetDef,
-    DatasetDecl, DatasetEntryAst, ExpectDef, ExpectVerdict, Expr, FieldPath, FieldRoot, FnDef,
-    FnLet, ForSource, ForStmt, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst,
-    PrefixSetDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, TermDef, TestDatasetDef,
-    TestDef, U32Arg, ValueExprAst, WithAssertion,
+    DatasetDecl, DatasetEntryAst, ExpectCall, ExpectDef, ExpectVerdict, Expr, FieldPath, FieldRoot,
+    FnDef, FnLet, ForSource, ForStmt, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst,
+    PrefixSetDef, PrependAsArg, Rhs, RouteField, ScalarAttr, SourceFile, Stmt, TermDef,
+    TestDatasetDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
 use super::diag::{Diagnostic, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -83,6 +83,10 @@ impl Parser<'_> {
 
     fn peek(&self) -> Option<Token> {
         self.tokens.get(self.pos).copied()
+    }
+
+    fn peek_nth(&self, n: usize) -> Option<Token> {
+        self.tokens.get(self.pos + n).copied()
     }
 
     fn at(&self, kind: Tok) -> bool {
@@ -1710,18 +1714,36 @@ impl Parser<'_> {
     }
 
     fn expect_def(&mut self) -> PResult<ExpectDef> {
-        let start = self.expect(Tok::ExpectKw, "`expect`")?.span;
-        let policy = self.expect_ident("a policy name")?;
-        let mut args = Vec::new();
-        if self.eat(Tok::LParen).is_some() {
-            while !self.at(Tok::RParen) {
-                let (value, span) = self.expect_u32("a u32 argument")?;
-                args.push(Spanned::new(value, span));
+        self.expect(Tok::ExpectKw, "`expect`")?;
+        // `chain` is contextual: only `chain [` starts a chain, so a
+        // policy named `chain` keeps working.
+        let chain = self
+            .peek()
+            .is_some_and(|t| t.kind == Tok::Ident && self.text(t) == "chain")
+            && self.peek_nth(1).is_some_and(|t| t.kind == Tok::LBracket);
+        let mut calls = Vec::new();
+        if chain {
+            self.bump();
+            let open = self.expect(Tok::LBracket, "`[`")?.span;
+            while !self.at(Tok::RBracket) {
+                calls.push(self.expect_call()?);
                 if self.eat(Tok::Comma).is_none() {
                     break;
                 }
             }
-            self.expect(Tok::RParen, "`)`")?;
+            let close = self
+                .expect(Tok::RBracket, "`]` or `,` and another policy")?
+                .span;
+            if calls.is_empty() {
+                self.diags.push(Diagnostic::new(
+                    open.to(close),
+                    "empty chain",
+                    "a chain names at least one policy",
+                ));
+                return Err(Fail);
+            }
+        } else {
+            calls.push(self.expect_call()?);
         }
         self.expect(Tok::EqEq, "`==`")?;
         let verdict = match self.peek().map(|t| t.kind) {
@@ -1765,7 +1787,6 @@ impl Parser<'_> {
             _ => return Err(self.error_expected("`accept`, `reject`, or `error`")),
         };
         let mut with = Vec::new();
-        let mut end = self.here();
         if let Some(with_kw) = self.eat(Tok::WithKw) {
             if matches!(verdict, ExpectVerdict::Error(_)) {
                 // An erroring evaluation discards every staged
@@ -1784,18 +1805,88 @@ impl Parser<'_> {
                     break;
                 }
             }
-            end = self.here();
         }
         Ok(ExpectDef {
-            policy,
-            args,
+            chain,
+            calls,
             verdict,
             with,
-            span: start.to(end),
+        })
+    }
+
+    fn expect_call(&mut self) -> PResult<ExpectCall> {
+        let policy = self.expect_ident("a policy name")?;
+        let mut args = Vec::new();
+        if self.eat(Tok::LParen).is_some() {
+            while !self.at(Tok::RParen) {
+                let (value, span) = self.expect_u32("a u32 argument")?;
+                args.push(Spanned::new(value, span));
+                if self.eat(Tok::Comma).is_none() {
+                    break;
+                }
+            }
+            self.expect(Tok::RParen, "`)`")?;
+        }
+        Ok(ExpectCall { policy, args })
+    }
+
+    /// The community literal after a `removes`/`without` community
+    /// keyword (`community`, `large-community`, `ext-community`).
+    fn with_community_keyword(&mut self) -> bool {
+        self.peek().is_some_and(|t| {
+            t.kind == Tok::Ident
+                && matches!(
+                    self.text(t),
+                    "community" | "large-community" | "ext-community"
+                )
         })
     }
 
     fn with_assertion(&mut self) -> PResult<WithAssertion> {
+        // `removes` / `without` are contextual: this position held only
+        // attribute names before, so no reserved word is added.
+        let modifier = self
+            .peek()
+            .filter(|t| t.kind == Tok::Ident && matches!(self.text(*t), "removes" | "without"))
+            .map(|t| self.text(t).to_string());
+        if let Some(modifier) = modifier {
+            self.bump();
+            if self.with_community_keyword() {
+                self.bump();
+                let lit = self.community_lit()?;
+                return Ok(if modifier == "removes" {
+                    WithAssertion::Removes(lit)
+                } else {
+                    WithAssertion::WithoutCommunity(lit)
+                });
+            }
+            if modifier == "removes" {
+                return Err(self.error_expected(
+                    "`community`, `large-community`, or `ext-community` after `removes`",
+                ));
+            }
+            if self.eat(Tok::PrependKw).is_some() {
+                return Ok(WithAssertion::Without(ScalarAttr::Prepend));
+            }
+            let attr =
+                self.peek()
+                    .filter(|t| t.kind == Tok::Ident)
+                    .and_then(|t| match self.text(t) {
+                        "local-pref" => Some(ScalarAttr::LocalPref),
+                        "med" => Some(ScalarAttr::Med),
+                        "next-hop" => Some(ScalarAttr::NextHop),
+                        _ => None,
+                    });
+            return match attr {
+                Some(attr) => {
+                    self.bump();
+                    Ok(WithAssertion::Without(attr))
+                }
+                None => Err(self.error_expected(
+                    "`local-pref`, `med`, `next-hop`, `prepend`, or a community after `without`",
+                )),
+            };
+        }
         if self.eat(Tok::PrependKw).is_some() {
             self.expect(Tok::AsKw, "`as`")?;
             let (asn, _) = self.expect_u32("an ASN")?;
@@ -1832,7 +1923,7 @@ impl Parser<'_> {
                         "not an assertable attribute",
                     )
                     .with_note(
-                        "assertable: local-pref, med, next-hop, community, large-community, ext-community, prepend",
+                        "assertable: local-pref, med, next-hop, community, large-community, ext-community, prepend, removes COMMUNITY, without ATTRIBUTE",
                     ),
                 );
                 Err(Fail)

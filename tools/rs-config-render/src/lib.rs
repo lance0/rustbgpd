@@ -1145,7 +1145,7 @@ struct ResolvedBlackhole {
     add_noexport: bool,
     markers: Vec<(CommunityKind, String)>,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum CommunityKind {
     Standard,
     Large,
@@ -3173,9 +3173,12 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
         "test as-set-path-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333 {65010 65011}\" }\n    expect rs-hygiene == reject\n}\n",
     );
 
+    // Every community a scrub term removes, for the test that pins them.
+    let mut scrubbed: Vec<(CommunityKind, String)> = Vec::new();
     for (name, term, label) in VALIDATION_TAGS {
         let tag = configured_tag(ctx, name);
         if !tag.is_empty() {
+            scrubbed.extend(tag.iter().cloned());
             let _ = writeln!(
                 terms,
                 "    # The {label} tag is set by the route server only; members cannot pre-tag.\n\
@@ -3187,6 +3190,7 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
     for (name, term) in RPKI_OV_COMMUNITIES {
         let tag = configured_tag(ctx, name);
         if !tag.is_empty() {
+            scrubbed.extend(tag.iter().cloned());
             let _ = writeln!(
                 terms,
                 "    # arouteserver's internal {name} community; members cannot send it.\n\
@@ -3221,6 +3225,7 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
             .filter(|(kind, value)| seen.insert((community_field(*kind), value.clone())))
             .collect::<Vec<_>>();
         if !tag.is_empty() {
+            scrubbed.extend(tag.iter().cloned());
             let _ = writeln!(
                 terms,
                 "    # {comment}; members cannot send them.\n\
@@ -3229,6 +3234,8 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
             );
         }
     }
+
+    render_scrub_test(&mut tests, scrubbed);
 
     if filtering.reject_invalid_as_in_as_path {
         let _ = write!(
@@ -3380,6 +3387,42 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
         out.push_str(&tests);
     }
     out
+}
+
+/// A member-sent copy of every scrubbed community reaches the shared hygiene
+/// and must leave it removed. The route carries no prefix or AS path, so no
+/// reject term applies and the test does not depend on bogon or path lists.
+fn render_scrub_test(tests: &mut String, mut scrubbed: Vec<(CommunityKind, String)>) {
+    let mut seen = BTreeSet::new();
+    scrubbed.retain(|(kind, value)| seen.insert((community_field(*kind), value.clone())));
+    if scrubbed.is_empty() {
+        return;
+    }
+    let list = |wanted: CommunityKind| {
+        scrubbed
+            .iter()
+            .filter(|(kind, _)| *kind == wanted)
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut fields = Vec::new();
+    for (kind, field) in [
+        (CommunityKind::Standard, "communities"),
+        (CommunityKind::Large, "large-communities"),
+        (CommunityKind::Extended, "ext-communities"),
+    ] {
+        let values = list(kind);
+        if !values.is_empty() {
+            fields.push(format!("{field} [{values}]"));
+        }
+    }
+    let _ = write!(
+        tests,
+        "test member-sent-scrubbed-communities-are-removed {{\n    route {{ {} }}\n    expect rs-hygiene == accept with {}\n}}\n",
+        fields.join("; "),
+        community_actions("removes", &scrubbed).replace("; ", ", ")
+    );
 }
 
 fn render_pref_len_window(
@@ -3922,6 +3965,40 @@ fn format_utc(unix: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every scrubbed kind the test asserts on is also carried by its route
+    /// fixture, so a missing scrub fails the `removes` assertion instead of
+    /// passing against a fixture that never carried the community.
+    #[test]
+    fn scrub_test_fixture_carries_every_asserted_kind() {
+        let mut tests = String::new();
+        render_scrub_test(
+            &mut tests,
+            vec![
+                (CommunityKind::Standard, "65530:4".to_owned()),
+                (CommunityKind::Large, "65500:65530:4".to_owned()),
+                (CommunityKind::Extended, "RT:65500:4".to_owned()),
+            ],
+        );
+        assert!(tests.contains("ext-communities [RT:65500:4]"), "{tests}");
+        let policy = |actions: &str| {
+            format!("policy rs-hygiene {{\n    term scrub {{ {actions} }}\n}}\n{tests}")
+        };
+        let all = "remove community 65530:4; remove large-community 65500:65530:4; \
+                   remove ext-community RT:65500:4";
+        let report = rustbgpd_policy::rpol::run_rpol_tests(&policy(all)).unwrap();
+        assert!(report.all_passed(), "{:?}", report.failures);
+        let no_ext = "remove community 65530:4; remove large-community 65500:65530:4";
+        let report = rustbgpd_policy::rpol::run_rpol_tests(&policy(no_ext)).unwrap();
+        assert_eq!(report.failures.len(), 1, "{tests}");
+        assert!(
+            report.failures[0]
+                .message
+                .contains("expected community RT:65500:4 to be removed"),
+            "{:?}",
+            report.failures
+        );
+    }
 
     #[test]
     fn utc_formatting_matches_known_dates() {

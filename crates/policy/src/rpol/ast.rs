@@ -811,21 +811,31 @@ pub enum PeerField {
     Group(Spanned<String>),
 }
 
-/// `expect policy(args) == accept|reject|error [KIND] [with assertions]`.
+/// One policy instantiation named by an `expect`: `policy(args)`.
 #[derive(Debug)]
-pub struct ExpectDef {
-    /// The policy under test.
+pub struct ExpectCall {
+    /// The policy.
     pub policy: Spanned<String>,
     /// Instantiation arguments (literals only in `expect`).
     pub args: Vec<Spanned<u32>>,
+}
+
+/// `expect policy(args) == accept|reject|error [KIND] [with assertions]`,
+/// or `expect chain [p1, p2(args), ...] == ...` for a configured chain.
+#[derive(Debug)]
+pub struct ExpectDef {
+    /// Written as `chain [...]` — the members evaluate as one daemon
+    /// policy chain. A plain `expect p` is a one-member chain.
+    pub chain: bool,
+    /// The policies under test, in chain order (exactly one unless
+    /// `chain`).
+    pub calls: Vec<ExpectCall>,
     /// The expected verdict.
     pub verdict: ExpectVerdict,
     /// `with` attribute assertions (accept/reject verdicts only —
     /// an error discards modifications, so the parser rejects `with`
     /// after `error`).
     pub with: Vec<WithAssertion>,
-    /// Whole-expect span.
-    pub span: Span,
 }
 
 /// The right-hand side of an `expect ... ==` (LAN-301, ADR-0103
@@ -858,4 +868,37 @@ pub enum WithAssertion {
     Community(Spanned<CommunityLit>),
     /// `prepend as 65001 3`.
     Prepend(u32, u32),
+    /// `removes community 65001:999` (any kind) — present in the
+    /// removes.
+    Removes(Spanned<CommunityLit>),
+    /// `without community 65001:999` (any kind) — absent from the adds.
+    WithoutCommunity(Spanned<CommunityLit>),
+    /// `without local-pref|med|next-hop|prepend` — the scalar is not set.
+    Without(ScalarAttr),
+}
+
+/// A scalar modification a `without` assertion can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarAttr {
+    /// `local-pref`.
+    LocalPref,
+    /// `med`.
+    Med,
+    /// `next-hop`.
+    NextHop,
+    /// `prepend`.
+    Prepend,
+}
+
+impl ScalarAttr {
+    /// The source spelling.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::LocalPref => "local-pref",
+            Self::Med => "med",
+            Self::NextHop => "next-hop",
+            Self::Prepend => "prepend",
+        }
+    }
 }

@@ -206,7 +206,7 @@ fn supported_render_is_deterministic_and_explicit() {
     );
     assert_policy_tests(
         hygiene,
-        "test own-as-scrub-executes { route { large-communities [65501:1:2, 64496:3:4, 65501:5:6] } expect ixp-manager-own-as-export-scrub == accept }",
+        "test own-as-scrub-executes { route { large-communities [65501:1:2, 64496:3:4, 65501:5:6] } expect ixp-manager-own-as-export-scrub == accept with removes large-community 65501:1:2, removes large-community 65501:5:6 }",
     );
     let mut maximum = value();
     maximum["policy"]["minimum_prefix_length"] = 32.into();

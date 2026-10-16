@@ -97,7 +97,7 @@ test customer-in-rejects-transit-aspath {
 
 test customer-in-scrubs-then-continues {
     route { prefix 192.168.1.0/24; communities [65000:100, 65000:666]; med 300 }
-    expect customer-in(300) == accept with local-pref 300, med 0, community 65001:999
+    expect customer-in(300) == accept with local-pref 300, med 0, community 65001:999, removes community 65000:666
 }
 
 test long-prefix-falls-outside-le {
