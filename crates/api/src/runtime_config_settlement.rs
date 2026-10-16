@@ -312,15 +312,35 @@ pub mod settlement_test_control {
         }
     }
 
-    /// Hold the real exit until a process test has observed the fenced daemon.
+    #[cfg(not(test))]
+    static GRACE_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+    /// Let the process test observe 503 before starting the real grace clock.
+    #[cfg(not(test))]
+    pub(super) fn before_fence_grace() -> std::io::Result<()> {
+        fail_stop_hold(0, Duration::ZERO)?;
+        let _ = GRACE_STARTED.set(std::time::Instant::now());
+        Ok(())
+    }
+
+    /// Hold the real exit and report grace elapsed before reaching this hold.
     #[cfg(not(test))]
     pub(super) fn before_fail_stop() -> std::io::Result<()> {
+        let elapsed = GRACE_STARTED
+            .get()
+            .map_or(Duration::ZERO, std::time::Instant::elapsed);
+        fail_stop_hold(1, elapsed)
+    }
+
+    #[cfg(not(test))]
+    fn fail_stop_hold(marker: u8, elapsed: Duration) -> std::io::Result<()> {
         let Some(path) = std::env::var_os("RUSTBGPD_TEST_FAIL_STOP_HOLD") else {
             return Ok(());
         };
         let mut stream = std::os::unix::net::UnixStream::connect(path)?;
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-        stream.write_all(&[1])?;
+        stream.write_all(&[marker])?;
+        stream.write_all(&elapsed.as_nanos().to_le_bytes())?;
         let mut release = [0];
         stream.read_exact(&mut release)?;
         if release != [1] {
@@ -1883,6 +1903,8 @@ fn transition_to_fenced(operation: &OperationInner, reason: RuntimeConfigFenceRe
             Err(actual) => observed = actual,
         }
     }
+    #[cfg(all(debug_assertions, not(test)))]
+    let _ = settlement_test_control::before_fence_grace();
     shorten_fatal_deadline(operation, Instant::now() + operation.registry.grace);
     operation.registry.wake_threads();
     true

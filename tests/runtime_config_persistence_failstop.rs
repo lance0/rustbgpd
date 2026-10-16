@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use rustbgpd_api::runtime_config_settlement::AMBIGUITY_FENCE_GRACE;
 
 use support::{RetainOnPanic, bound_metrics_addr, rbgp_binary};
 
@@ -65,6 +66,33 @@ impl Daemon {
 
     fn wait_until_fenced(&mut self, metrics: SocketAddr) -> UnixStream {
         let deadline = Instant::now() + Duration::from_secs(30);
+        let (mut start, _) = self.wait_for_hold(deadline, 0);
+        let first_503 = loop {
+            if ready_status(metrics) == Some(503) {
+                break Instant::now();
+            }
+            self.assert_running();
+            assert!(
+                Instant::now() < deadline,
+                "daemon never reported readiness 503\n{}",
+                self.log()
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        start.write_all(&[1]).expect("start fail-stop grace");
+        let (hold, elapsed_nanos) = self.wait_for_hold(deadline, 1);
+        // Daemon-side elapsed time excludes delays accepting the terminal hold.
+        assert!(
+            elapsed_nanos >= AMBIGUITY_FENCE_GRACE.as_nanos(),
+            "fail-stop hold reached before configured grace: {elapsed_nanos} ns"
+        );
+        assert!(first_503.elapsed() >= AMBIGUITY_FENCE_GRACE);
+        // constants_and_closed_states_are_exact and executor_loss_shortens_prearmed_fatal_deadline
+        // pin the duration and uninstrumented upper bound at the unit level.
+        hold
+    }
+
+    fn wait_for_hold(&mut self, deadline: Instant, expected: u8) -> (UnixStream, u128) {
         let mut hold = loop {
             match self.fail_stop_hold.as_ref().unwrap().accept() {
                 Ok((stream, _)) => break stream,
@@ -84,20 +112,11 @@ impl Daemon {
         let mut marker = [0];
         hold.read_exact(&mut marker)
             .expect("read fail-stop exit marker");
-        assert_eq!(marker, [1]);
-        // The real grace elapsed before this handshake; observation cannot race exit.
-        loop {
-            if ready_status(metrics) == Some(503) {
-                return hold;
-            }
-            self.assert_running();
-            assert!(
-                Instant::now() < deadline,
-                "daemon never reported readiness 503\n{}",
-                self.log()
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
+        assert_eq!(marker, [expected]);
+        let mut elapsed = [0; 16];
+        hold.read_exact(&mut elapsed)
+            .expect("read fail-stop elapsed grace");
+        (hold, u128::from_le_bytes(elapsed))
     }
 
     fn assert_running(&mut self) {
