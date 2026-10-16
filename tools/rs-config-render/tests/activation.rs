@@ -217,6 +217,7 @@ case "$(cat "$root/activation-mode")" in
     esac ;;
 esac
 printf '{SECRET}\n' >&2
+[ ! -f "$root/activation-fails" ] || exit 9
 exit 0
 "#
             ),
@@ -732,7 +733,7 @@ fn rejection_evidence_lost_after_repointing_requires_recovery() {
 
 /// `recover rollback --apply` with the rollback's own activation command in
 /// `command` (the rig's, unless it is `None`: a path that cannot start).
-fn cli_recover_rollback(rig: &Rig, command: Option<&Path>, settle: &str) -> std::process::Output {
+fn cli_recover_rollback(rig: &Rig, command: Option<&Path>) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
         .args(["recover", "rollback", "--apply", "--state-dir"])
         .arg(&rig.state)
@@ -745,7 +746,9 @@ fn cli_recover_rollback(rig: &Rig, command: Option<&Path>, settle: &str) -> std:
         .arg(&rig.rbgp)
         .arg("--rbgp-addr")
         .arg(rig.binding(&rig.state).rbgp_addr())
-        .args(["--settle-seconds", settle, "--activation-command"])
+        .arg("--settle-seconds")
+        .arg(SETTLE.as_secs().to_string())
+        .arg("--activation-command")
         .arg(command.map_or_else(|| rig.root.join("missing-command"), Path::to_path_buf))
         .output()
         .unwrap()
@@ -793,16 +796,22 @@ fn recover_rollback_reports_a_reload_not_applied_as_nothing_changed() {
         let first = rig.candidate("candidate-a", 140);
         rig.run(&first, true, &rig.activation).unwrap();
         let target = rig.current();
-        // A partial apply: exit 5, `current` on the candidate, fence left.
+        // Complete each fake reload, then fail its command so classification
+        // cannot race a deadline partway through installing its outcome.
+        // Deadline enforcement is covered separately; SETTLE only bounds hangs.
+        rig.set("activation-fails", "");
         rig.set("activation-mode", "partial");
         assert_eq!(
-            rig.run_with_settle(
+            rig.run(
                 &rig.candidate("candidate-partial", 141),
                 false,
-                &rig.activation,
-                DEADLINE_SETTLE
+                &rig.activation
             ),
             Err(Error::RecoveryRequired)
+        );
+        assert_eq!(
+            fs::read(rig.root.join("runtime-toml")).unwrap(),
+            b"partial\n"
         );
         let from = rig.current();
         let receipt = fs::read(rig.state.join("activation-receipt.json")).unwrap();
@@ -811,11 +820,11 @@ fn recover_rollback_reports_a_reload_not_applied_as_nothing_changed() {
         if mode_name == "ok" {
             // A full reload replaces the partially applied runtime.
             fs::remove_file(rig.root.join("runtime-toml")).unwrap();
+            fs::remove_file(rig.root.join("activation-fails")).unwrap();
         }
         let output = cli_recover_rollback(
             &rig,
             (mode_name != "missing-command").then_some(rig.activation.as_path()),
-            if mode_name == "ok" { "30" } else { "2" },
         );
         assert_eq!(output.status.code(), Some(code), "{mode_name}: {output:?}");
         assert_eq!(
