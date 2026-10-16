@@ -976,6 +976,94 @@ systemd's `Restart=on-failure`. If the config moves the socket, set
   runs rustbgpd as a containerlab `kind: linux` node, which is the cleanest
   reference setup for an isolated lab namespace.
 
+## Kubernetes probes
+
+Kubernetes does not run the image's Docker health check; configure
+[probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)
+against the telemetry HTTP listener instead. The probes exist only when
+`prometheus_addr` is set under `[global.telemetry]` (the `edge` profile binds
+`0.0.0.0:9179`). Their status codes and bodies are listed under
+[HTTP probes](../reference/operations.md#http-probes).
+
+```yaml
+containers:
+  - name: rustbgpd
+    image: ghcr.io/lance0/rustbgpd:latest   # pin a release tag in production
+    ports:
+      - name: telemetry
+        containerPort: 9179
+    startupProbe:
+      httpGet: {path: /readyz, port: telemetry}
+      periodSeconds: 10
+      timeoutSeconds: 1
+      failureThreshold: 60   # 10 minutes, the unit's TimeoutStartSec
+    readinessProbe:
+      httpGet: {path: /readyz, port: telemetry}
+      periodSeconds: 10
+      timeoutSeconds: 1
+      failureThreshold: 3
+    livenessProbe:
+      httpGet: {path: /readyz, port: telemetry}
+      periodSeconds: 10
+      timeoutSeconds: 1
+      failureThreshold: 30   # about 5 minutes, the unit's WatchdogSec
+terminationGracePeriodSeconds: 1920   # same budget as docker --stop-timeout
+```
+
+**Readiness** uses `/readyz` with the Kubernetes defaults: a 10 s period, a
+1 s timeout and three failures. `/readyz` answers `200 ready` when the
+PeerManager and RIB actors both respond within one 200 ms deadline. It means
+the control plane is up and admitting work. It does not mean the daemon has
+converged, received any routes, or established any peers; a daemon with zero
+Established peers can be ready.
+
+That is deliberate for a route server or reflector. Peers open BGP sessions
+to a configured speaker address, not through a load-balanced Service, so
+readiness does not steer them toward a healthy replica. If readiness
+waited for Established peers, an outage on the peer side would mark every
+rustbgpd pod unready at once: the failure would appear to be in rustbgpd,
+rolling updates would stall, and restarting the pods could not fix it. Watch
+session state through its own signals instead, such as the
+`BgpSessionNotEstablished` rule in
+[`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml).
+
+**Liveness** has two reasonable choices:
+
+- **`/readyz` with a watchdog-length tolerance** (the snippet above). The
+  shipped systemd unit sets `WatchdogSec=5min`; the daemon sends `WATCHDOG=1`
+  every 2.5 minutes while the same core-actor probe passes, and PID 1
+  restarts it after five minutes without one (see [systemd](#systemd)). A
+  10 s period with `failureThreshold: 30` restarts the container after about
+  five minutes of continuous `/readyz` failure, a comparable tolerance.
+  It restarts a daemon whose PeerManager or RIB has stopped answering.
+- **`/livez`**. It returns `200 ok` whenever the HTTP listener accepts a
+  connection and checks no actors. It will not restart a deadlocked RIB or
+  PeerManager. Choose it only when another mechanism handles a wedged daemon.
+
+Do not point liveness at `/readyz` with the default `failureThreshold: 3`.
+A `/readyz` sample fails whenever either core actor misses the 200 ms
+deadline, and the RIB reports an export-policy transition, selection-deferral
+release or peer teardown as stalled once it has run for 30 seconds. Under
+heavy load those conditions can clear on their own. The Kubernetes
+documentation warns that [liveness probes that fail under load](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/#liveness-probe)
+cause restarts that add to the load and can cascade. A restart of a BGP
+speaker also resets every session it holds, so a 30 s tolerance would turn a
+recoverable stall into a peer-visible outage.
+
+**Startup.** The listener is bound early, but nothing answers HTTP, not even
+`/livez`, until startup wiring has finished and the configured peer roster is
+installed, the same boundary as systemd `READY=1`. Until then, probes connect
+and time out. A startup probe holds liveness off for the 10 minutes the
+systemd unit allows (`TimeoutStartSec=10min`). BGP ingress opens at that
+boundary, so routes from peers, including full tables, load while the probes
+already answer; the startup probe does not need to cover table loading.
+
+Set `terminationGracePeriodSeconds` to at least the stop budget described
+under [systemd](#systemd): an owned runtime-config mutation can take up to
+its 30-minute settlement watchdog plus a five-second grace to finish. During
+coordinated shutdown `/readyz` returns `503 not ready: daemon is shutting
+down`.
+
 ## Containerlab quick start
 
 [Containerlab](https://containerlab.dev/) is the easiest way to get a
