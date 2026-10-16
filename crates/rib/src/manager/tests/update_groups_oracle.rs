@@ -1846,6 +1846,15 @@ impl Oracle {
     /// Return the current Loc-RIB best routes after a FIFO round trip on
     /// the primary channel. The reply is also an ordering barrier for all
     /// prior updates and their resulting outbound sends.
+    pub(super) async fn outbound_convergence(&mut self) -> crate::update::OutboundConvergence {
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::QueryOutboundConvergence { reply })
+            .await
+            .unwrap();
+        response.await.unwrap()
+    }
+
     pub(super) async fn best_routes(&mut self) -> Vec<Route> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -2769,6 +2778,68 @@ async fn dataset_swap_with_intervening_publication_uses_full_pass() {
     let folded = fold(&oracle.finish().await);
     let advertised: BTreeSet<_> = folded[&IpAddr::V4(B)].keys().copied().collect();
     assert_eq!(advertised, BTreeSet::from([(Prefix::V4(pfx(1, 0)), 0)]));
+}
+
+/// A later reload generation that re-marks a member still awaiting the
+/// resync an earlier one left supersedes it: the member stays one pending
+/// episode whose age keeps running, receives one replay, and the RIB then
+/// reports no pending resync.
+#[tokio::test]
+async fn later_generation_supersedes_a_pending_resync() {
+    use crate::update::OutboundConvergence;
+    tokio::time::pause();
+    let (_, chain) = dataset_prefix_policy(Prefix::V4(pfx(1, 0)), true);
+    let mut o = Oracle::spawn(false, None);
+    o.peer_up(A, true, false, None, 64).await;
+    o.peer_up(B, true, false, Some(chain.clone()), 64).await;
+    o.peer_up(C, true, false, Some(chain), 1).await;
+    let eor = o.drain_one(C).await;
+    assert!(eor.announce.is_empty());
+    // p1 fills C's one-slot channel.
+    o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+        .await;
+    let reevaluate = async |o: &mut Oracle| {
+        let (reply, result) = oneshot::channel();
+        o.tx.send(RibUpdate::ReevaluatePeerExportPolicies {
+            peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+            swaps: None,
+            reply,
+        })
+        .await
+        .unwrap();
+        result.await.unwrap().unwrap();
+    };
+    reevaluate(&mut o).await;
+    assert_eq!(
+        o.outbound_convergence().await,
+        OutboundConvergence {
+            pending_peers: 1,
+            oldest_pending_secs: 0
+        }
+    );
+    tokio::time::advance(Duration::from_secs(5)).await;
+    reevaluate(&mut o).await;
+    assert_eq!(
+        o.outbound_convergence().await,
+        OutboundConvergence {
+            pending_peers: 1,
+            oldest_pending_secs: 5
+        },
+        "the later generation joins the pending episode"
+    );
+    o.drain_before_recovery(C, RecoveryPath::QueueDeferral)
+        .await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    o.quiesce().await;
+    let replays = o.drain_peer_available(C).await;
+    o.close_recovery(C);
+    assert_eq!(replays.len(), 1, "one replay for both generations");
+    assert_eq!(
+        o.outbound_convergence().await,
+        OutboundConvergence::default()
+    );
+    let state = fold(&o.finish().await);
+    assert!(state[&IpAddr::V4(C)].contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
 }
 
 pub(super) async fn run_grouped_and_ungrouped<S>(

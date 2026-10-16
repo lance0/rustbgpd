@@ -4784,7 +4784,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            rustbgpd_api::proto::GetLastSighupReloadResponse { record }
+            rustbgpd_api::proto::GetLastSighupReloadResponse {
+                record,
+                convergence: None,
+            }
         })));
         service
             .get_last_sighup_reload(tonic::Request::new(

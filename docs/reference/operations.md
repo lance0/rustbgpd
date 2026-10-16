@@ -863,6 +863,25 @@ ownership remains parked and is not mislabeled `rejected_no_effect`; use the
 settlement metrics and daemon health for that state. Structured
 `bucket` / `target` / `error` logs retain further per-step detail.
 
+For a `complete` reload, the response also carries its RIB-side outbound
+convergence, measured when the request is served. `converging` counts the peers
+with a RIB outbound resync still pending and the age of the oldest;
+`converged` means no RIB outbound resync is pending; `applied` means the reload
+committed its export view but the RIB did not answer within two seconds.
+`converged` does not confirm that peers received the view: transport
+processing and socket writes may still be pending, and
+`bgp_peer_outbound_queue_depth` shows what each peer's writer still holds.
+The count is the RIB's outbound-dirty set, the same state `bgp_rib_outbound_dirty_peers` and
+`bgp_rib_outbound_dirty_oldest_seconds` sample and `rbgp neighbor` shows per
+peer as Outbound Resync. It includes a peer made dirty by anything, because
+each resync hands the transport the current view. A later generation that
+re-marks a peer still pending joins that resync rather than queueing a second
+replay, so the oldest age keeps running. `rbgp doctor` warns when a complete
+reload is still converging after 60 seconds, the per-peer outbound resync
+threshold. The reload acknowledgement is unchanged: it still waits for the
+RIB's re-evaluation reply, so `converging` covers only peers whose update the
+RIB could not hand to the transport, such as one with a full outbound channel.
+
 When a gRPC credential store is configured, an accepted SIGHUP also attempts
 an atomic credential-generation publication, even if the config file is
 unchanged. The receipt counts a successful publication as applied. A failed

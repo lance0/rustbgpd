@@ -141,6 +141,7 @@ pub(crate) struct MockState {
     pub(crate) add_neighbor_calls: AtomicUsize,
     pub(crate) config_status_calls: AtomicUsize,
     pub(crate) last_sighup_record: Mutex<Option<server_proto::SighupReloadRecord>>,
+    pub(crate) last_sighup_convergence: Mutex<Option<server_proto::SighupReloadConvergence>>,
     pub(crate) config_snapshot_read_stall: AtomicBool,
     pub(crate) config_history_calls: AtomicUsize,
     pub(crate) config_rollback_calls: AtomicUsize,
@@ -901,6 +902,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
     ) -> Result<Response<server_proto::GetLastSighupReloadResponse>, Status> {
         Ok(Response::new(server_proto::GetLastSighupReloadResponse {
             record: self.state.last_sighup_record.lock().await.clone(),
+            convergence: self.state.last_sighup_convergence.lock().await.clone(),
         }))
     }
 

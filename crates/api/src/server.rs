@@ -1521,6 +1521,19 @@ impl AuthInterceptor {
     }
 }
 
+/// Wire `GetLastSighupReload`: the recorded receipt and the RIB query its
+/// live convergence needs. Without the query every complete reload would
+/// read `applied`, so both listener kinds register through this one place.
+fn with_sighup_reload_status(
+    service: ConfigService,
+    last_sighup_reload: Option<LastSighupReloadFn>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
+) -> ConfigService {
+    service
+        .with_last_sighup_reload(last_sighup_reload)
+        .with_rib_query(rib_query_tx)
+}
+
 pub(crate) fn read_only_rejection(access_mode: AccessMode) -> Option<Status> {
     if access_mode == AccessMode::ReadOnly {
         Some(Status::permission_denied(
@@ -2247,18 +2260,21 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(access_mode, peer_mgr_tx.clone())
-            .with_transaction_hooks(
-                config_transaction_apply.clone(),
-                config_transaction_confirm.clone(),
-                config_transaction_abort.clone(),
-                config_transaction_status.clone(),
-                config_history_list.clone(),
-                config_rollback.clone(),
-            )
-            .with_last_sighup_reload(last_sighup_reload.clone())
-            .with_rollback_preview(config_rollback_preview.clone())
-            .with_stream_plan(stream_plan, stream_authenticated_transport),
+        with_sighup_reload_status(
+            ConfigService::new(access_mode, peer_mgr_tx.clone()),
+            last_sighup_reload.clone(),
+            rib_query_tx.clone(),
+        )
+        .with_transaction_hooks(
+            config_transaction_apply.clone(),
+            config_transaction_confirm.clone(),
+            config_transaction_abort.clone(),
+            config_transaction_status.clone(),
+            config_history_list.clone(),
+            config_rollback.clone(),
+        )
+        .with_rollback_preview(config_rollback_preview.clone())
+        .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
     ));
     routes.add_service(EvpnServiceServer::with_interceptor(
@@ -2528,18 +2544,21 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(access_mode, peer_mgr_tx.clone())
-            .with_transaction_hooks(
-                config_transaction_apply.clone(),
-                config_transaction_confirm.clone(),
-                config_transaction_abort.clone(),
-                config_transaction_status.clone(),
-                config_history_list.clone(),
-                config_rollback.clone(),
-            )
-            .with_last_sighup_reload(last_sighup_reload.clone())
-            .with_rollback_preview(config_rollback_preview.clone())
-            .with_stream_plan(stream_plan, stream_authenticated_transport),
+        with_sighup_reload_status(
+            ConfigService::new(access_mode, peer_mgr_tx.clone()),
+            last_sighup_reload.clone(),
+            rib_query_tx.clone(),
+        )
+        .with_transaction_hooks(
+            config_transaction_apply.clone(),
+            config_transaction_confirm.clone(),
+            config_transaction_abort.clone(),
+            config_transaction_status.clone(),
+            config_history_list.clone(),
+            config_rollback.clone(),
+        )
+        .with_rollback_preview(config_rollback_preview.clone())
+        .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
     ));
     routes.add_service(EvpnServiceServer::with_interceptor(
@@ -3618,6 +3637,61 @@ mod tests {
         assert_eq!(order_rx.recv().await, Some(0));
         assert_eq!(order_rx.recv().await, Some(1));
         assert_eq!(order_rx.recv().await, Some(2));
+    }
+
+    /// Both listener kinds register `ConfigService` through
+    /// `with_sighup_reload_status`, so a complete reload reports the RIB's
+    /// convergence instead of the `applied` a missing RIB query yields.
+    #[tokio::test]
+    async fn sighup_reload_status_wiring_reports_rib_convergence() {
+        use crate::proto::config_service_server::ConfigService as _;
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let service = with_sighup_reload_status(
+            ConfigService::new(AccessMode::ReadOnly, peer_tx),
+            Some(Arc::new(|| crate::proto::GetLastSighupReloadResponse {
+                record: Some(crate::proto::SighupReloadRecord {
+                    outcome: "complete".to_string(),
+                    ..Default::default()
+                }),
+                convergence: None,
+            })),
+            rib_tx,
+        );
+        let rib = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryOutboundConvergence { reply }) = rib_rx.recv().await {
+                reply
+                    .send(rustbgpd_rib::OutboundConvergence::default())
+                    .unwrap();
+            }
+        });
+        let response = service
+            .get_last_sighup_reload(tonic::Request::new(
+                crate::proto::GetLastSighupReloadRequest {},
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        drop(service);
+        rib.await.unwrap();
+        assert_eq!(
+            response.convergence.map(|convergence| convergence.state),
+            Some("converged".to_string())
+        );
+        let production = include_str!("server.rs")
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .unwrap()
+            .0;
+        assert_eq!(
+            production.matches("with_sighup_reload_status(").count(),
+            3,
+            "the helper plus the TCP and UDS registrations"
+        );
+        assert_eq!(
+            production.matches(".with_last_sighup_reload(").count(),
+            1,
+            "only the helper wires the reload receipt"
+        );
     }
 
     #[test]
