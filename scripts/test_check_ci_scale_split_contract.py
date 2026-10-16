@@ -18,6 +18,7 @@ from scripts.check_ci_scale_split_contract import (
     _jobs,
     aggregate_shell,
     check,
+    step_shell,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,7 +102,7 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_component_scan_mode_is_explicit_and_preserves_memory_matrix(self) -> None:
         for old, new in (
             ("        default: memory\n", "        default: scan\n"),
-            ("        options: [memory, scan, retirement]\n", "        options: [scan]\n"),
+            ("        options: [memory, scan, retirement, mass-dirty]\n", "        options: [scan]\n"),
             ("        type: choice\n", "        type: boolean\n"),
             ("      recovery_receipt_mode:\n", "      ignored_mode:\n"),
             ("inputs.recovery_receipt_mode == 'scan'", "github.event_name == 'workflow_dispatch'"),
@@ -117,7 +118,7 @@ class ScaleSplitContractTests(unittest.TestCase):
         for old, new in (
             ("inputs.recovery_receipt_mode == 'retirement'", "inputs.recovery_receipt_mode == 'memory'"),
             ('{"profile":"full-vpn","cell":"retirement"}', '{"profile":"full-uc","cell":"retirement"}'),
-            ("[memory, scan, retirement]", "[memory, scan]"),
+            ("[memory, scan, retirement, mass-dirty]", "[memory, scan, mass-dirty]"),
         ):
             with self.subTest(old=old):
                 self.mutate(old, new)
@@ -144,6 +145,184 @@ class ScaleSplitContractTests(unittest.TestCase):
         ):
             with self.subTest(seam=old):
                 self.mutate(old, new)
+
+    def test_mass_dirty_mode_uses_only_its_dedicated_job(self) -> None:
+        component = f"    if: {contract.RECOVERY_MEMORY_SELECTOR}\n"
+        dedicated = f"    if: {contract.RECOVERY_MASS_DIRTY_SELECTOR}\n"
+        for old, new in (
+            (component, component.replace(" && inputs.recovery_receipt_mode != 'mass-dirty'", "")),
+            (dedicated, ""),
+            (dedicated, dedicated.replace(" && inputs.recovery_memory_receipt == true", "")),
+            (dedicated, dedicated.replace("'workflow_dispatch'", "'pull_request'")),
+            (dedicated, dedicated.replace("== 'mass-dirty'", "!= 'scan'")),
+            ("  recovery_mass_dirty_receipt:\n", "  renamed_mass_dirty:\n"),
+            ('{"profile":"full-vpn","cohort":"cap-pressure"}', '{"profile":"full-uc","cohort":"cap-pressure"}'),
+            ('{"profile":"full-uc","cohort":"no-refusal"}', '{"profile":"full-uc","cohort":"cap-pressure"}'),
+            ('RECOVERY_MASS_DIRTY_COHORT: ${{ matrix.cohort }}', 'RECOVERY_MASS_DIRTY_COHORT: no-refusal'),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(old, new)
+        for old, new in (
+            ("runs-on: ubuntu-24.04", "runs-on: self-hosted"),
+            ("timeout-minutes: 120", "timeout-minutes: 360"),
+            ("fail-fast: false", "fail-fast: true"),
+            ("ref: ${{ github.sha }}", "ref: main"),
+            ("fetch-depth: 0", "fetch-depth: 1"),
+            ("toolchain: stable", "toolchain: nightly"),
+            ('CARGO_BUILD_JOBS: "4"', 'CARGO_BUILD_JOBS: "8"'),
+            ("uses: ./.github/actions/install-protobuf", "run: true"),
+        ):
+            with self.subTest(mass_dirty_seam=old), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.copy_workflows(root)
+                path = root / WORKFLOW
+                text = path.read_text()
+                job = _jobs(text)["recovery_mass_dirty_receipt"]
+                self.assertIn(old, job)
+                path.write_text(text.replace(job, job.replace(old, new, 1), 1))
+                self.assertTrue(check(root))
+
+    def test_mass_dirty_failures_and_evidence_cannot_be_suppressed(self) -> None:
+        for old, new in (
+            ('timeout --foreground --signal=TERM --kill-after=150s "${remaining}s"',
+             'timeout --signal=TERM --kill-after=150s "${remaining}s"'),
+            ('timeout --foreground --signal=TERM --kill-after=150s "${remaining}s"',
+             'timeout --foreground --signal=TERM --kill-after=30s "${remaining}s"'),
+            ('timeout --foreground --signal=TERM --kill-after=5s 60s',
+             'timeout --signal=TERM --kill-after=5s 60s'),
+            ('timeout --foreground --signal=TERM --kill-after=5s 60s',
+             'timeout --foreground --signal=TERM --kill-after=30s 60s'),
+            ('required = 12 * 1024**3', 'required = 6 * 1024**3'),
+            ('if available < required:', 'if False:'),
+            ('if [[ $status == 0 ]]; then', 'if true; then'),
+            ('RECOVERY_MASS_DIRTY_DRIVER_DEADLINE={time.monotonic() + 110 * 60}',
+             'RECOVERY_MASS_DIRTY_DRIVER_DEADLINE={time.monotonic() + 119 * 60}'),
+            ('--cohort "$RECOVERY_MASS_DIRTY_COHORT"', '--cohort no-refusal'),
+            ('--head "$GITHUB_SHA"', '--head main'),
+            ('> "$evidence/driver.log" 2>&1 || status=$?', '> "$evidence/driver.log" 2>&1 || true'),
+            ('> "$evidence/finalizer.log" 2>&1 || status=$?', '> "$evidence/finalizer.log" 2>&1 || true'),
+            ('Finalize mass-dirty evidence even after failure\n        if: always()',
+             'Finalize mass-dirty evidence even after failure\n        if: success()'),
+            ('Upload mass-dirty evidence even after refusal or failure\n        if: always()',
+             'Upload mass-dirty evidence even after refusal or failure\n        if: success()'),
+            ('python3 bench/scale/reloadstall/recovery_mass_dirty.py finalize "$evidence/campaign"',
+             'python3 bench/scale/reloadstall/recovery_mass_dirty.py finalize "$evidence/other"'),
+            ('if-no-files-found: error', 'if-no-files-found: warn'),
+            ('name: update-group-recovery-mass-dirty-${{ matrix.profile }}-${{ matrix.cohort }}-${{ github.sha }}',
+             'name: update-group-recovery-mass-dirty-${{ matrix.profile }}-${{ github.sha }}'),
+            ('bash bench/scale/reloadstall/run-recovery-mass-dirty.sh',
+             'bash bench/scale/reloadstall/run-recovery-mass-dirty.sh --correctness-only'),
+            ('      - name: Run frozen-source daemon mass-dirty comparison\n',
+             '      - name: Run frozen-source daemon mass-dirty comparison\n        continue-on-error: true\n'),
+            ('python3 -m unittest discover -s bench/scale/reloadstall -p test_recovery_mass_dirty.py -v',
+             'true'),
+        ):
+            with self.subTest(seam=old):
+                # --head also exists in the component job; change only the
+                # dedicated job so one receipt cannot mask another's loss.
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    self.copy_workflows(root)
+                    path = root / WORKFLOW
+                    text = path.read_text()
+                    job = _jobs(text)["recovery_mass_dirty_receipt"]
+                    self.assertIn(old, job)
+                    path.write_text(text.replace(job, job.replace(old, new, 1), 1))
+                    self.assertTrue(check(root), f"mutation stayed green: {old}")
+
+    def test_mass_dirty_driver_and_finalizer_shell_keep_real_exit_codes(self) -> None:
+        job = _jobs((ROOT / WORKFLOW).read_text())["recovery_mass_dirty_receipt"]
+        driver = step_shell(job, "Run frozen-source daemon mass-dirty comparison")
+        finalizer = step_shell(job, "Finalize mass-dirty evidence even after failure")
+        self.assertTrue(driver)
+        self.assertTrue(finalizer)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "bin"
+            binary.mkdir()
+            python = binary / "python3"
+            python.write_text(textwrap.dedent("""\
+                #!/bin/bash
+                if [[ $1 == - ]]; then
+                  source=$(cat)
+                  if [[ $source == *MemAvailable* ]]; then
+                    exit "$TEST_PREFLIGHT"
+                  fi
+                  printf '%s\\n' "$TEST_REMAINING"
+                  exit 0
+                fi
+                printf '%s\\n' "$@" > "$TEST_FINALIZER_ARGS"
+                exit "$TEST_FINALIZER"
+                """))
+            python.chmod(0o755)
+            wrapper = root / "bench/scale/reloadstall/run-recovery-mass-dirty.sh"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text('printf \'%s\\n\' "$@" > "$TEST_DRIVER_ARGS"\nexit "$TEST_DRIVER"\n')
+            env = os.environ | {
+                "PATH": f"{binary}:{os.environ['PATH']}",
+                "GITHUB_SHA": "a" * 40,
+                "RECOVERY_MASS_DIRTY_PROFILE": "full-vpn",
+                "RECOVERY_MASS_DIRTY_COHORT": "cap-pressure",
+                "RECOVERY_MASS_DIRTY_DRIVER_DEADLINE": "999999999999",
+                "TEST_DRIVER_ARGS": str(root / "driver.args"),
+                "TEST_FINALIZER_ARGS": str(root / "finalizer.args"),
+                "TEST_PREFLIGHT": "0", "TEST_DRIVER": "0",
+                "TEST_FINALIZER": "0", "TEST_REMAINING": "3600",
+            }
+            for index, (preflight, remaining, driver_status, expected) in enumerate((
+                (0, 3600, 0, 0), (0, 3600, 1, 1), (0, 3600, 124, 124),
+                (1, 3600, 0, 1), (0, 0, 0, 124),
+            )):
+                with self.subTest(preflight=preflight, remaining=remaining, driver=driver_status):
+                    runner = root / f"driver-{index}"
+                    call_env = env | {
+                        "RUNNER_TEMP": str(runner), "TEST_PREFLIGHT": str(preflight),
+                        "TEST_REMAINING": str(remaining), "TEST_DRIVER": str(driver_status),
+                    }
+                    capture = root / "driver.args"
+                    capture.unlink(missing_ok=True)
+                    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", driver],
+                                            cwd=root, env=call_env, capture_output=True, text=True)
+                    self.assertEqual(expected, result.returncode, result.stderr)
+                    evidence = runner / "update-group-recovery-mass-dirty"
+                    self.assertEqual(f"{expected}\n", (evidence / "driver-invocation.exit").read_text())
+                    self.assertTrue((evidence / "preflight.log").exists())
+                    if not preflight and remaining:
+                        self.assertEqual([
+                            "--head", "a" * 40, "--output-dir", str(evidence / "campaign"),
+                            "--profile", "full-vpn", "--cohort", "cap-pressure",
+                        ], capture.read_text().splitlines())
+                    else:
+                        self.assertFalse(capture.exists())
+            for status in (0, 1, 124):
+                with self.subTest(finalizer=status):
+                    runner = root / f"finalizer-{status}"
+                    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", finalizer],
+                                            cwd=root, env=env | {"RUNNER_TEMP": str(runner),
+                                                              "TEST_FINALIZER": str(status)},
+                                            capture_output=True, text=True)
+                    self.assertEqual(status, result.returncode, result.stderr)
+                    evidence = runner / "update-group-recovery-mass-dirty"
+                    self.assertEqual(f"{status}\n", (evidence / "finalizer.exit").read_text())
+                    self.assertEqual([
+                        "bench/scale/reloadstall/recovery_mass_dirty.py", "finalize", str(evidence / "campaign"),
+                    ], (root / "finalizer.args").read_text().splitlines())
+                    self.assertTrue((evidence / "finalizer.log").exists())
+
+    def test_mass_dirty_preflight_has_a_real_12_gib_boundary(self) -> None:
+        job = _jobs((ROOT / WORKFLOW).read_text())["recovery_mass_dirty_receipt"]
+        driver = step_shell(job, "Run frozen-source daemon mass-dirty comparison")
+        body = re.search(r"<<'PY'[^\n]*\n(.*?)\nPY", driver, re.S)
+        self.assertIsNotNone(body)
+        for available, accepted in ((12 * 1024**2 - 1, False), (12 * 1024**2, True)):
+            with self.subTest(available_kib=available), mock.patch.object(
+                Path, "read_text", return_value=f"MemAvailable: {available} kB\n"
+            ), mock.patch("builtins.print"):
+                if accepted:
+                    exec(compile(body.group(1), "<workflow-memory-preflight>", "exec"), {})
+                else:
+                    with self.assertRaises(SystemExit):
+                        exec(compile(body.group(1), "<workflow-memory-preflight>", "exec"), {})
 
     def test_scale_profile_and_membership_are_required(self) -> None:
         for old, new in (

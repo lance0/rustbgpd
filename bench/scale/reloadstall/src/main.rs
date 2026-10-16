@@ -200,6 +200,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, watch};
 
+mod recovery_mass_dirty;
+
 /// Receivers on every runtime worker reallocate their frame buffers and NLRI
 /// vectors in the same instant when the daemon delivers a coalesced
 /// post-reload burst. Under glibc malloc that contended on the arena lock, so
@@ -366,9 +368,50 @@ async fn fetch_metrics(addr: SocketAddr, deadline: Instant) -> Result<String, St
     fetch_http(addr, "/metrics", deadline).await
 }
 
+const HTTP_TRACE_PREFIX_BYTES: usize = 512;
+
+#[derive(Default)]
+struct HttpFetchTrace {
+    record_clocks: bool,
+    phase: &'static str,
+    connected_at: Option<Instant>,
+    request_written_at: Option<Instant>,
+    read_completed_at: Option<Instant>,
+    response: Vec<u8>,
+}
+
+fn diagnostic_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().min(HTTP_TRACE_PREFIX_BYTES) * 2);
+    for &byte in bytes.iter().take(HTTP_TRACE_PREFIX_BYTES) {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    encoded
+}
+
 async fn fetch_http(addr: SocketAddr, path: &str, deadline: Instant) -> Result<String, String> {
+    fetch_http_traced(addr, path, deadline, None).await
+}
+
+async fn fetch_http_traced(
+    addr: SocketAddr,
+    path: &str,
+    deadline: Instant,
+    trace: Option<&mut HttpFetchTrace>,
+) -> Result<String, String> {
+    // Keep the response outside the timed future: read_to_end updates this
+    // borrowed buffer before returning Pending, so cancellation retains bytes
+    // already read even when the server has not closed the connection.
+    let mut observation = HttpFetchTrace {
+        record_clocks: trace.as_ref().is_some_and(|trace| trace.record_clocks),
+        phase: "connect",
+        ..HttpFetchTrace::default()
+    };
     let work = async {
         let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
+        observation.connected_at = observation.record_clocks.then(Instant::now);
+        observation.phase = "request_write";
         stream
             .write_all(
                 format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -376,17 +419,20 @@ async fn fetch_http(addr: SocketAddr, path: &str, deadline: Instant) -> Result<S
             )
             .await
             .map_err(|e| e.to_string())?;
-        let mut response = Vec::new();
+        observation.request_written_at = observation.record_clocks.then(Instant::now);
+        observation.phase = "response_read_to_eof";
         stream
             .take((METRICS_MAX_BYTES + 1) as u64)
-            .read_to_end(&mut response)
+            .read_to_end(&mut observation.response)
             .await
             .map_err(|e| e.to_string())?;
-        if response.len() > METRICS_MAX_BYTES {
+        observation.read_completed_at = observation.record_clocks.then(Instant::now);
+        observation.phase = "response_validation";
+        if observation.response.len() > METRICS_MAX_BYTES {
             return Err(format!("{path} response exceeds 32 MiB"));
         }
-        let text =
-            std::str::from_utf8(&response).map_err(|_| format!("{path} response is not UTF-8"))?;
+        let text = std::str::from_utf8(&observation.response)
+            .map_err(|_| format!("{path} response is not UTF-8"))?;
         let (head, body) = text
             .split_once("\r\n\r\n")
             .ok_or("malformed HTTP response")?;
@@ -419,15 +465,17 @@ async fn fetch_http(addr: SocketAddr, path: &str, deadline: Instant) -> Result<S
         }
         Ok(body.to_owned())
     };
-    tokio::time::timeout_at(deadline.into(), work)
-        .await
-        .map_err(|_| {
-            if path == "/metrics" {
-                "metrics checkpoint exceeded 5 seconds".to_owned()
-            } else {
-                format!("{path} checkpoint exceeded deadline")
-            }
-        })?
+    let result = tokio::time::timeout_at(deadline.into(), work).await;
+    if let Some(trace) = trace {
+        *trace = observation;
+    }
+    result.map_err(|_| {
+        if path == "/metrics" {
+            "metrics checkpoint exceeded 5 seconds".to_owned()
+        } else {
+            format!("{path} checkpoint exceeded deadline")
+        }
+    })?
 }
 
 async fn watch_readiness(
@@ -1860,8 +1908,14 @@ async fn open_stub_stream(
     open: &[u8],
     keepalive: &[u8],
     required: &[(Afi, Safi)],
+    receive_buffer: Option<usize>,
 ) -> Result<(TcpStream, Instant), StubOpenError> {
     let sock = TcpSocket::new_v4().map_err(|e| StubOpenError::Fatal(format!("socket: {e}")))?;
+    if let Some(bytes) = receive_buffer {
+        socket2::SockRef::from(&sock)
+            .set_recv_buffer_size(bytes)
+            .map_err(|e| StubOpenError::Fatal(format!("receive buffer: {e}")))?;
+    }
     if std::env::var("RELOADSTALL_GTSM").as_deref() == Ok("1") {
         socket2::SockRef::from(&sock)
             .set_ttl_v4(255)
@@ -1944,6 +1998,21 @@ async fn establish_stream_with_retry(
     window: Duration,
     required: &[(Afi, Safi)],
 ) -> Result<(TcpStream, Instant, u32), String> {
+    establish_stream_with_retry_and_receive_buffer(
+        daemon, local, open, keepalive, window, required, None,
+    )
+    .await
+}
+
+async fn establish_stream_with_retry_and_receive_buffer(
+    daemon: SocketAddr,
+    local: Ipv4Addr,
+    open: &[u8],
+    keepalive: &[u8],
+    window: Duration,
+    required: &[(Afi, Safi)],
+    receive_buffer: Option<usize>,
+) -> Result<(TcpStream, Instant, u32), String> {
     let deadline = Instant::now() + window;
     let mut retries = 0;
     loop {
@@ -1956,7 +2025,7 @@ async fn establish_stream_with_retry(
         }
         match tokio::time::timeout(
             remaining,
-            open_stub_stream(daemon, local, open, keepalive, required),
+            open_stub_stream(daemon, local, open, keepalive, required, receive_buffer),
         )
         .await
         {
@@ -3923,6 +3992,10 @@ fn convergence_integrity_valid(
 )]
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
+    if a.get(1).is_some_and(|arg| arg == "--recovery-mass-dirty") {
+        recovery_mass_dirty::main(&a[2..]);
+        return;
+    }
     let convergence_only = take_single_flag(&mut a, "--convergence-only");
     let no_churn = take_single_flag(&mut a, "--no-churn");
     let converged_rejoin = take_single_flag(&mut a, "--converged-rejoin");
@@ -7450,6 +7523,103 @@ mod tests {
             server.abort();
             let _ = server.await;
         }
+    }
+
+    async fn traced_http_fixture(
+        response: Option<&'static [u8]>,
+        hold_eof: bool,
+    ) -> (Result<String, String>, HttpFetchTrace) {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (received, request_received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut chunk = [0; 128];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0 && request.len() + read <= 1024);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            if let Some(bytes) = response {
+                socket.write_all(bytes).await.unwrap();
+            }
+            received.send(()).unwrap();
+            if hold_eof {
+                released.await.unwrap();
+            }
+        });
+        let client = tokio::spawn(async move {
+            let mut trace = HttpFetchTrace::default();
+            let result = fetch_http_traced(
+                addr,
+                "/readyz",
+                Instant::now() + Duration::from_secs(5),
+                Some(&mut trace),
+            )
+            .await;
+            (result, trace)
+        });
+        tokio::time::timeout(Duration::from_secs(2), request_received)
+            .await
+            .unwrap()
+            .unwrap();
+        let result = client.await.unwrap();
+        let _ = release.send(());
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn http_trace_retains_200_while_waiting_for_eof() {
+        const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let (result, trace) = traced_http_fixture(Some(RESPONSE), true).await;
+        assert_eq!(result.unwrap_err(), "/readyz checkpoint exceeded deadline");
+        assert_eq!(trace.response, RESPONSE);
+        assert_eq!(trace.phase, "response_read_to_eof");
+        assert!(trace.read_completed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_trace_silent_server_retains_zero_response_bytes() {
+        let (result, trace) = traced_http_fixture(None, true).await;
+        assert_eq!(result.unwrap_err(), "/readyz checkpoint exceeded deadline");
+        assert_eq!(trace.phase, "response_read_to_eof");
+        assert!(trace.response.is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_trace_preserves_503_status_error() {
+        const RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+        let (result, trace) = traced_http_fixture(Some(RESPONSE), false).await;
+        assert_eq!(
+            result.unwrap_err(),
+            "/readyz HTTP status is not 200: HTTP/1.1 503 Service Unavailable"
+        );
+        assert_eq!(trace.phase, "response_validation");
+        assert_eq!(trace.response, RESPONSE);
+    }
+
+    #[tokio::test]
+    async fn http_trace_preserves_success_and_correctness_clock_nulls() {
+        const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let (result, trace) = traced_http_fixture(Some(RESPONSE), false).await;
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(trace.phase, "response_validation");
+        assert_eq!(trace.response, RESPONSE);
+        assert!(trace.connected_at.is_none());
+        assert!(trace.request_written_at.is_none());
+        assert!(trace.read_completed_at.is_none());
+    }
+
+    #[test]
+    fn http_trace_hex_prefix_is_bounded_and_encodes_control_bytes() {
+        assert_eq!(diagnostic_hex(b"\0\r\n\"\\"), "000d0a225c");
+        let bytes = vec![255; HTTP_TRACE_PREFIX_BYTES + 17];
+        assert_eq!(diagnostic_hex(&bytes), "ff".repeat(HTTP_TRACE_PREFIX_BYTES));
     }
 
     #[test]

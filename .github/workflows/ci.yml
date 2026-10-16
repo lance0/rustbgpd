@@ -30,9 +30,9 @@ on:
         default: false
         required: false
       recovery_receipt_mode:
-        description: Select memory, capture scan or retirement attribution
+        description: Select memory, capture scan, retirement attribution or daemon mass-dirty qualification
         type: choice
-        options: [memory, scan, retirement]
+        options: [memory, scan, retirement, mass-dirty]
         default: memory
         required: false
 
@@ -71,9 +71,9 @@ jobs:
                   default: false
                   required: false
                 recovery_receipt_mode:
-                  description: Select memory, capture scan or retirement attribution
+                  description: Select memory, capture scan, retirement attribution or daemon mass-dirty qualification
                   type: choice
-                  options: [memory, scan, retirement]
+                  options: [memory, scan, retirement, mass-dirty]
                   default: memory
                   required: false'
           if [[ "$actual" != "$expected" ]]; then
@@ -774,7 +774,7 @@ jobs:
   recovery_memory_receipt:
     # Bounded, operator-dispatched qualification; never part of push/PR,
     # ordinary main/release re-tests, or the reserved self-hosted soak runner.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode != 'mass-dirty' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -861,4 +861,100 @@ jobs:
           name: update-group-recovery-memory-${{ matrix.profile }}-${{ matrix.cell }}${{ matrix.old_order && format('-{0}', matrix.old_order) || '' }}-${{ github.sha }}
           path: ${{ runner.temp }}/update-group-recovery-memory
           if-no-files-found: warn
+          retention-days: 30
+
+  recovery_mass_dirty_receipt:
+    # Separate fresh-VM daemon qualification; never run the component campaign
+    # for this mode. The controller fixes cohort sizes and cgroup limits.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode == 'mass-dirty' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # no-refusal has 12 receivers; cap-pressure has 24, without resizing.
+        include: ${{ fromJSON('[{"profile":"full-uc","cohort":"no-refusal"},{"profile":"full-uc","cohort":"cap-pressure"},{"profile":"full-vpn","cohort":"no-refusal"},{"profile":"full-vpn","cohort":"cap-pressure"}]') }}
+    env:
+      CARGO_BUILD_JOBS: "4"
+      RECOVERY_MASS_DIRTY_PROFILE: ${{ matrix.profile }}
+      RECOVERY_MASS_DIRTY_COHORT: ${{ matrix.cohort }}
+    steps:
+      - name: Reserve time for mass-dirty evidence finalization
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/update-group-recovery-mass-dirty"
+          python3 - <<'PY'
+          import os
+          import time
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"RECOVERY_MASS_DIRTY_DRIVER_DEADLINE={time.monotonic() + 110 * 60}\n")
+          PY
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1 # stable
+        with:
+          toolchain: stable
+      - uses: ./.github/actions/install-protobuf
+      - name: Check mass-dirty receipt negative fixtures
+        run: |
+          bash -n bench/scale/reloadstall/run-recovery-mass-dirty.sh
+          python3 -m unittest discover -s bench/scale/reloadstall -p test_recovery_mass_dirty.py -v
+      - name: Run frozen-source daemon mass-dirty comparison
+        shell: bash
+        run: |
+          evidence="$RUNNER_TEMP/update-group-recovery-mass-dirty"
+          mkdir -p "$evidence"
+          status=0
+          python3 - <<'PY' > "$evidence/preflight.log" 2>&1 || status=$?
+          from pathlib import Path
+          values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+          available = int(values["MemAvailable"].split()[0]) * 1024
+          required = 12 * 1024**3
+          print(f"MemAvailable={available}; minimum={required}; daemon=10GiB; harness=2GiB; cgroup_swap=0")
+          if available < required:
+              raise SystemExit("fresh runner has less than 12 GiB available; refusing qualification")
+          PY
+          if [[ $status == 0 ]]; then
+            remaining=$(python3 - <<'PY'
+          import os
+          import time
+          print(max(0, int(float(os.environ["RECOVERY_MASS_DIRTY_DRIVER_DEADLINE"]) - time.monotonic())))
+          PY
+            )
+            if [[ $remaining -gt 0 ]]; then
+              timeout --foreground --signal=TERM --kill-after=150s "${remaining}s" \
+                bash bench/scale/reloadstall/run-recovery-mass-dirty.sh \
+                --head "$GITHUB_SHA" \
+                --output-dir "$evidence/campaign" \
+                --profile "$RECOVERY_MASS_DIRTY_PROFILE" \
+                --cohort "$RECOVERY_MASS_DIRTY_COHORT" \
+                > "$evidence/driver.log" 2>&1 || status=$?
+            else
+              status=124
+              printf '%s\n' 'aggregate driver deadline expired during setup' > "$evidence/driver.log"
+            fi
+          fi
+          printf '%s\n' "$status" > "$evidence/driver-invocation.exit"
+          exit "$status"
+      - name: Finalize mass-dirty evidence even after failure
+        if: always()
+        shell: bash
+        run: |
+          evidence="$RUNNER_TEMP/update-group-recovery-mass-dirty"
+          mkdir -p "$evidence"
+          status=0
+          timeout --foreground --signal=TERM --kill-after=5s 60s \
+            python3 bench/scale/reloadstall/recovery_mass_dirty.py finalize "$evidence/campaign" \
+            > "$evidence/finalizer.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$evidence/finalizer.exit"
+          exit "$status"
+      - name: Upload mass-dirty evidence even after refusal or failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-group-recovery-mass-dirty-${{ matrix.profile }}-${{ matrix.cohort }}-${{ github.sha }}
+          path: ${{ runner.temp }}/update-group-recovery-mass-dirty
+          if-no-files-found: error
           retention-days: 30
