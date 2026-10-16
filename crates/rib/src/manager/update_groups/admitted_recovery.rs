@@ -11,6 +11,7 @@ use rustbgpd_wire::{Prefix, VpnRouteKey};
 use smallvec::SmallVec;
 
 use crate::adj_rib_out::AdjRibOut;
+use crate::fast_hash::FastState;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::ExactExportKey;
 
@@ -135,7 +136,10 @@ struct Snapshot {
     handle: SnapshotHandle,
     references: usize,
     keys: Keys,
+    /// Unicast slab slot -> key position for `..vpn_base`, then open-addressed
+    /// VPN key buckets: VPN rows have no slab slot to index.
     slot_positions: SlotPositions,
+    vpn_base: usize,
     indexed: bool,
 }
 
@@ -404,6 +408,55 @@ impl AdmittedRecovery {
                 .map_or(0, |index| self.snapshots[index].charge())
     }
 
+    /// Unicast slots plus VPN buckets for a pool of `count` keys over `table`.
+    /// The VPN buckets stay at most two-thirds full and never full, so every
+    /// probe ends.
+    fn index_len(table: &AdjRibOut, count: usize) -> usize {
+        let vpn = count.saturating_sub(table.len());
+        let buckets = if vpn == 0 {
+            0
+        } else {
+            vpn.saturating_add(vpn / 2).saturating_add(1)
+        };
+        table.unicast_slot_count().saturating_add(buckets)
+    }
+
+    fn vpn_bucket(key: &VpnRouteKey, path_id: u32, buckets: usize) -> usize {
+        use std::hash::BuildHasher;
+
+        let hash = FastState::default().hash_one((key, path_id));
+        usize::try_from(hash % buckets as u64).expect("bucket is below a usize length")
+    }
+
+    /// Exact O(1) VPN membership: each bucket hit compares the pool key.
+    fn vpn_position(
+        snapshot: &Snapshot,
+        key: Key,
+        comparisons: &mut usize,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Option<usize> {
+        let Key::Vpn(vpn, path_id) = key else {
+            return None;
+        };
+        let buckets = snapshot.slot_positions.get(snapshot.vpn_base..)?;
+        if buckets.is_empty() {
+            return None;
+        }
+        let mut bucket = Self::vpn_bucket(&vpn, path_id, buckets.len());
+        loop {
+            checkpoint(false);
+            let position = buckets[bucket];
+            if position == EMPTY_SLOT {
+                return None;
+            }
+            *comparisons += 1;
+            if snapshot.keys.get(position as usize) == Some(&key) {
+                return Some(position as usize);
+            }
+            bucket = (bucket + 1) % buckets.len();
+        }
+    }
+
     fn shared_words(count: usize) -> Result<usize, Failure> {
         count
             .checked_add(63)
@@ -431,7 +484,8 @@ impl AdmittedRecovery {
             .checked_mul(size_of::<Key>())
             .ok_or_else(Self::overflow)?;
         let slot_count = slot_source.map_or(0, AdjRibOut::unicast_slot_count);
-        let slot_bytes = slot_count
+        let index_len = slot_source.map_or(0, |table| Self::index_len(table, count));
+        let slot_bytes = index_len
             .checked_mul(size_of::<u32>())
             .ok_or_else(Self::overflow)?;
         let temporary = key_bytes
@@ -472,7 +526,7 @@ impl AdmittedRecovery {
         if slot_source.is_some() {
             checkpoint(true);
             let failed =
-                !self.allocation_permitted() || slot_positions.try_grow(slot_count).is_err();
+                !self.allocation_permitted() || slot_positions.try_grow(index_len).is_err();
             checkpoint(true);
             if failed {
                 checkpoint(true);
@@ -523,6 +577,40 @@ impl AdmittedRecovery {
                     return Err(self.missing_proof(peer));
                 };
                 slot_positions.push(position);
+            }
+            let buckets = index_len - slot_count;
+            for _ in 0..buckets {
+                checkpoint(false);
+                slot_positions.push(EMPTY_SLOT);
+            }
+            let mut indexed_vpn = 0_usize;
+            let mut unindexable = false;
+            for (position, key) in owned.iter().enumerate() {
+                checkpoint(false);
+                let Key::Vpn(vpn, path_id) = key else {
+                    continue;
+                };
+                indexed_vpn += 1;
+                let Some(position) = u32::try_from(position)
+                    .ok()
+                    .filter(|position| *position != EMPTY_SLOT && indexed_vpn < buckets)
+                else {
+                    unindexable = true;
+                    break;
+                };
+                let mut bucket = Self::vpn_bucket(vpn, *path_id, buckets);
+                while slot_positions[slot_count + bucket] != EMPTY_SLOT {
+                    checkpoint(false);
+                    bucket = (bucket + 1) % buckets;
+                }
+                slot_positions[slot_count + bucket] = position;
+            }
+            if unindexable {
+                checkpoint(true);
+                drop((owned, slot_positions));
+                checkpoint(true);
+                self.used -= temporary;
+                return Err(self.missing_proof(peer));
             }
         }
 
@@ -619,6 +707,7 @@ impl AdmittedRecovery {
             references: 0,
             keys: owned,
             slot_positions,
+            vpn_base: slot_count,
             indexed: slot_source.is_some(),
         });
         checkpoint(true);
@@ -653,6 +742,7 @@ impl AdmittedRecovery {
 
     /// Reserve immediate sparse additions before optional snapshot publication.
     /// A refused empty representation leaves authoritative flat capture available.
+    #[cfg(test)]
     pub(in crate::manager) fn share_capture_with_checkpoint<A: Iterator<Item = Key>>(
         &mut self,
         peer: IpAddr,
@@ -665,7 +755,8 @@ impl AdmittedRecovery {
         self.share_capture_inner(peer, hint, count, keys, shape, None, checkpoint)
     }
 
-    /// Pure-unicast group pools receive their immutable slot index before publication.
+    /// Group pools receive their immutable unicast slot and VPN bucket index
+    /// before publication.
     pub(in crate::manager) fn share_group_capture_with_checkpoint(
         &mut self,
         peer: IpAddr,
@@ -677,10 +768,14 @@ impl AdmittedRecovery {
         self.share_capture_inner(
             peer,
             hint,
-            table.len(),
+            table.len().saturating_add(table.vpn_len()),
             table
                 .iter()
-                .map(|route| Key::Unicast(route.prefix, route.path_id)),
+                .map(|route| Key::Unicast(route.prefix, route.path_id))
+                .chain(table.iter_vpn().map(|route| {
+                    let key = route.key();
+                    Key::Vpn(key.nlri_key, key.path_id)
+                })),
             shape,
             Some(table),
             checkpoint,
@@ -788,7 +883,7 @@ impl AdmittedRecovery {
                     .and_then(|n| {
                         n.checked_add(
                             slot_source
-                                .map_or(0, AdjRibOut::unicast_slot_count)
+                                .map_or(0, |table| Self::index_len(table, count))
                                 .checked_mul(size_of::<u32>())?,
                         )
                     })
@@ -900,8 +995,11 @@ impl AdmittedRecovery {
         comparisons: &mut usize,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<usize>, ()> {
-        if let Some(position) = slot
-            .and_then(|slot| snapshot.slot_positions.get(slot))
+        let Some(slot) = slot else {
+            return Ok(Self::vpn_position(snapshot, key, comparisons, checkpoint));
+        };
+        if let Some(position) = snapshot.slot_positions[..snapshot.vpn_base]
+            .get(slot)
             .copied()
             .filter(|position| *position != EMPTY_SLOT)
             .map(|position| position as usize)

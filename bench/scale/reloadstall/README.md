@@ -8,11 +8,10 @@ Route-server-scale policy-reload UPDATE-stall driver.
 
 `run-recovery-mass-dirty.sh` compares the exact candidate daemon against a
 control derived from that same source by changing only the full-OLD capture
-sharing argument from `!group.stages_vpn()` to `false`. Grouping, projection,
-empty/incremental admission, eligibility and the 64 MiB peer / 512 MiB daemon
-recovery limits stay identical. A candidate that already captures full VPN OLD
-flat is identified explicitly: its VPN arm compares the same selected strategy,
-and is no evidence of a shared-VPN speedup. Source-anchor drift fails the run.
+sharing argument after `&group.table,` from `true` to `false`. Grouping,
+projection, empty/incremental admission, eligibility and the 64 MiB peer /
+512 MiB daemon recovery limits stay identical. Both unicast and VPN arms compare
+shared against exact flat full-OLD capture. Source-anchor drift fails the run.
 
 The instrument opens one real iBGP source and 12 receiver clients for a
 no-refusal cell, or 24 for a separate cap-pressure cell. Each receiver gets

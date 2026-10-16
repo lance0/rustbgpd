@@ -202,15 +202,15 @@ class MassDirtyTests(unittest.TestCase):
         source = self.root / "update_groups.rs"
         before = ("    fn capture_group_admitted_keys_inner(\n"
                   "        let captured = ledger.capture_full_old_with_checkpoint(\n"
-                  "            peer, hint, &group.table, !group.stages_vpn(), uc, vpn, checkpoint,\n"
+                  "            peer, hint, &group.table, true, uc, vpn, checkpoint,\n"
                   "        );\n    }\n"
                   "    pub(in crate::manager) fn prepare_empty_group_recovery_admission() {\n"
-                  "        let still_shared = !group.stages_vpn();\n    }\n")
+                  "        let still_shared = true;\n    }\n")
         source.write_text(before)
         metadata = receipt.derive_flat(source, self.root / "derivation.json")
-        self.assertEqual(source.read_text(), before.replace("&group.table, !group.stages_vpn(),", "&group.table, false,", 1))
-        self.assertTrue(metadata["vpn_full_old_already_flat"])
-        self.assertEqual(metadata["expression_before"], "!group.stages_vpn()")
+        self.assertEqual(source.read_text(), before.replace("&group.table, true,", "&group.table, false,", 1))
+        self.assertFalse(metadata["vpn_full_old_already_flat"])
+        self.assertEqual(metadata["expression_before"], "true")
         with self.assertRaisesRegex(ValueError, "guard anchor drift"):
             receipt.derive_flat(source, self.root / "second.json")
 
@@ -742,7 +742,7 @@ class MassDirtyTests(unittest.TestCase):
         (root / "candidate.sha").write_text(manifest["head"] + "\n")
         source = ("    fn capture_group_admitted_keys_inner(\n"
                   "        let captured = ledger.capture_full_old_with_checkpoint(\n"
-                  "            peer, hint, &group.table, !group.stages_vpn(), uc, vpn, checkpoint,\n"
+                  "            peer, hint, &group.table, true, uc, vpn, checkpoint,\n"
                   "        );\n    }\n"
                   "    pub(in crate::manager) fn prepare_empty_group_recovery_admission() {\n")
         (root / "capture-source.rs").write_text(source)
@@ -761,7 +761,7 @@ class MassDirtyTests(unittest.TestCase):
             (root / f"build-{role}.exit").write_text("0\n")
         (root / "rustc-version.txt").write_text("rustc fixture version\n")
         (root / "cargo-version.txt").write_text("cargo fixture version\n")
-        (root / "flat-control.patch").write_text("-!group.stages_vpn()\n+false\n")
+        (root / "flat-control.patch").write_text("-true\n+false\n")
         receipt.write_json(root / "binary-validation.json", receipt.verified_binaries(root))
         for name in receipt.OWNED_INPUTS:
             path = root / "frozen-instrumentation" / name

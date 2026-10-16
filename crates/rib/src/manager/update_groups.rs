@@ -1960,7 +1960,7 @@ impl RibManager {
                     peer,
                     group.recovery_snapshot,
                     &group.table,
-                    !group.stages_vpn(),
+                    true,
                     project_uc,
                     project_vpn,
                     &mut checkpoint,
@@ -2029,45 +2029,16 @@ impl RibManager {
                 });
             (count + 1, additions + usize::from(!present))
         });
-        let count = group.table.len().saturating_add(if group.stages_vpn() {
-            group.table.vpn_len()
-        } else {
-            0
-        });
-        let raw = group
-            .table
-            .iter()
-            .map(|route| Key::Unicast(route.prefix, route.path_id))
-            .chain(
-                group
-                    .table
-                    .iter_vpn()
-                    .filter(|_| group.stages_vpn())
-                    .map(|route| {
-                        let key = route.key();
-                        Key::Vpn(key.nlri_key, key.path_id)
-                    }),
-            );
-        let shared = if group.stages_vpn() {
-            self.pending_group_admitted.share_capture_with_checkpoint(
+        if let Ok(Some(handle)) = self
+            .pending_group_admitted
+            .share_group_capture_with_checkpoint(
                 peer,
                 group.recovery_snapshot,
-                count,
-                raw,
+                &group.table,
                 shape,
                 &mut checkpoint,
             )
-        } else {
-            self.pending_group_admitted
-                .share_group_capture_with_checkpoint(
-                    peer,
-                    group.recovery_snapshot,
-                    &group.table,
-                    shape,
-                    &mut checkpoint,
-                )
-        };
-        if let Ok(Some(handle)) = shared {
+        {
             group.recovery_snapshot = Some(handle);
         }
     }

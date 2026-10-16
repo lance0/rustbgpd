@@ -218,30 +218,37 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
     return {name: digest(directory / name) for name in FIXTURE_INPUTS}
 
 
-def derive_flat(source, output):
-    """Wrap only the optional full-OLD attempt; leave flat fallback and all other seams intact."""
-    source = Path(source)
-    text = source.read_text()
+SHARING_GUARD = "true"
+
+
+def sharing_guard(text):
+    """Offset of the full-OLD sharing argument that follows `&group.table,`."""
     begin = text.index("    fn capture_group_admitted_keys_inner(")
     end = text.index("    pub(in crate::manager) fn prepare_empty_group_recovery_admission", begin)
     section = text[begin:end]
     require(section.count(".capture_full_old_with_checkpoint(") == 1, "full-OLD helper anchor drift")
-    anchor = "!group.stages_vpn()"
-    require(section.count(anchor) == 1, "full-OLD sharing guard anchor drift")
     call = section.index(".capture_full_old_with_checkpoint(")
-    guard = section.index(anchor)
-    require(call < guard and section[guard + len(anchor):].lstrip().startswith(","), "sharing guard is not a call argument")
-    start = begin + guard
-    close = start + len(anchor)
-    expression, replacement = anchor, "false"
+    table = section.index("&group.table,", call) + len("&group.table,")
+    guard = table + len(section[table:]) - len(section[table:].lstrip())
+    require(section.startswith(SHARING_GUARD + ",", guard), "full-OLD sharing guard anchor drift")
+    return begin + guard
+
+
+def derive_flat(source, output):
+    """Wrap only the optional full-OLD attempt; leave flat fallback and all other seams intact."""
+    source = Path(source)
+    text = source.read_text()
+    start = sharing_guard(text)
+    close = start + len(SHARING_GUARD)
+    expression, replacement = SHARING_GUARD, "false"
     changed = text[:start] + replacement + text[close:]
     source.write_text(changed)
     metadata = {"schema": "rustbgpd.mass-dirty-derivation.v1", "path": str(source.name),
                 "source_before_sha256": hashlib.sha256(text.encode()).hexdigest(),
                 "source_after_sha256": digest(source), "expression_before": expression,
                 "expression_after": replacement, "scope": "optional full-OLD common sharing only",
-                "vpn_full_old_already_flat": True,
-                "vpn_comparison": "candidate already uses exact flat full-OLD; control changes no VPN strategy"}
+                "vpn_full_old_already_flat": False,
+                "vpn_comparison": "candidate shares unicast and VPN full-OLD; control is exact flat for both"}
     write_json(output, metadata)
     return metadata
 
@@ -939,15 +946,14 @@ def analyze(root):
     source = (root / "capture-source.rs").read_text()
     source_sha = hashlib.sha256(source.encode()).hexdigest()
     derivation = json.loads((root / "derivation.json").read_text())
-    capture_begin = source.index("    fn capture_group_admitted_keys_inner(")
-    guard = source.index("!group.stages_vpn()", capture_begin)
-    expected_flat = source[:guard] + "false" + source[guard + len("!group.stages_vpn()"):]
+    guard = sharing_guard(source)
+    expected_flat = source[:guard] + "false" + source[guard + len(SHARING_GUARD):]
     require(derivation["source_before_sha256"] == hashlib.sha256(source.encode()).hexdigest()
             and derivation["source_after_sha256"] == digest(root / "flat-control-source.rs")
             and (root / "flat-control-source.rs").read_text() == expected_flat
-            and derivation["expression_before"] == "!group.stages_vpn()"
+            and derivation["expression_before"] == SHARING_GUARD
             and derivation["expression_after"] == "false"
-            and derivation["vpn_full_old_already_flat"] is True, "flat source derivation changed")
+            and derivation["vpn_full_old_already_flat"] is False, "flat source derivation changed")
     rows = []
     failures = []
     readiness = {}

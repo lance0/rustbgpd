@@ -1026,3 +1026,29 @@ match historical main `f95dd04df0eca75b1ccaefae060e68c557771d56`, not literal tr
 or RC measurement equivalence. Local controls remain at their actual `123847d7` source.
 All earlier dated amendments and evidence, including the four-attempt failed
 receipt and `a1854eee` single-cell pass, remain unchanged and unpooled.
+
+## Amendment (2026-10-16): shared VPN full-OLD capture
+
+Exact flat full-OLD proofs for VPN-negotiated groups do not fit the unchanged
+caps at full-table scale. A 1.23M-key flat proof charges about 39 MB, so the
+512 MiB daemon limit holds about thirteen. In the full-VPN recovery-memory
+cells the remaining members took the counted `daemon_limit` fallback, which
+disqualifies the shape.
+
+VPN-negotiated groups now use the same immutable group pool as pure-unicast
+groups. The pool universe holds the group table's unicast and VPN keys. Its
+`u32` index keeps the slab-slot section for unicast rows and appends an
+open-addressed VPN section, at most two-thirds full and never full. A VPN row
+hashes its exact route key and path ID, probes linearly, and accepts a position
+only when the pool key at that position equals the row key; a miss is a sparse
+addition. VPN rows therefore need no slot, binary search or slot-churn budget.
+The index is built once with the pool and charged before allocation under the
+unchanged 64 MiB per-peer and 512 MiB daemon limits. At 1.23M VPN keys it adds
+about 7.4 MB to the shared pool. Empty and incremental admission for these
+groups creates the same indexed pool.
+
+The probe uses the RIB's documented FxHash tradeoff for peer-fed route keys.
+The capture-scan harness still measures VPN as an explicit flat control, so
+this amendment records no shared-VPN capture-cost result. Flat fallback,
+conservative withdrawal and the receipt's disqualification rule are unchanged.
+Private and regroup captures stay flat.

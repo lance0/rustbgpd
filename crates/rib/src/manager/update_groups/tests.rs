@@ -6457,7 +6457,7 @@ fn snapshot_capture_channel(
 }
 
 #[test]
-fn flat_full_capture_preserves_unsynchronized_uc_vpn_old_views() {
+fn shared_full_capture_preserves_unsynchronized_uc_vpn_old_views() {
     const GID: usize = 2207;
     let mut manager = staging_manager();
     let healthy_charge = manager.pending_group_admitted.bytes();
@@ -6474,7 +6474,11 @@ fn flat_full_capture_preserves_unsynchronized_uc_vpn_old_views() {
         .map(|peer| snapshot_capture_channel(&mut manager, *peer, Some(GID)))
         .collect();
     assert!(manager.capture_group_admitted_keys(peers[0]));
-    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
+    let pool = manager.group_ribs[&GID].recovery_snapshot;
+    assert!(
+        pool.is_some(),
+        "a VPN-negotiated group shares its full OLD pool"
+    );
     let first = manager
         .pending_group_admitted
         .owned_proof(&peers[0])
@@ -6490,7 +6494,7 @@ fn flat_full_capture_preserves_unsynchronized_uc_vpn_old_views() {
         .unwrap()
         .apply_delta(&announce_delta(prefix(100), OTHER1, None));
     assert!(manager.capture_group_admitted_keys(peers[1]));
-    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
+    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, pool);
     let second = manager.pending_group_admitted.get(&peers[1]).unwrap();
     assert!(!second.contains(&ExactExportKey::Unicast(prefix(1), 0)));
     assert!(second.contains(&ExactExportKey::Unicast(prefix(100), 0)));
@@ -6517,7 +6521,7 @@ fn flat_full_capture_preserves_unsynchronized_uc_vpn_old_views() {
         .unwrap()
         .apply_vpn_delta(&vpn_announce_delta(2, OTHER1, None));
     assert!(manager.capture_group_admitted_keys(peers[2]));
-    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
+    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, pool);
     let third = manager.pending_group_admitted.get(&peers[2]).unwrap();
     assert!(!third.contains(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())));
     assert!(third.contains(&ExactExportKey::Vpn(vpn_route(2, OTHER1).key())));
@@ -6534,14 +6538,14 @@ fn flat_full_capture_preserves_unsynchronized_uc_vpn_old_views() {
         manager.release_group_admitted_keys(peer);
     }
     assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
-    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
     manager
         .group_ribs
         .get_mut(&GID)
         .unwrap()
         .apply_delta(&announce_delta(prefix(101), OTHER1, None));
     assert!(manager.capture_group_admitted_keys(peers[0]));
-    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
+    let recreated = manager.group_ribs[&GID].recovery_snapshot;
+    assert!(recreated.is_some() && recreated != pool);
     let recaptured = manager.pending_group_admitted.get(&peers[0]).unwrap();
     assert_eq!(recaptured.len(), 18);
     assert!(!recaptured.contains(&ExactExportKey::Unicast(prefix(1), 0)));
@@ -6617,7 +6621,8 @@ fn flat_full_capture_preserves_disjoint_old_views_within_the_peer_cap() {
     let _first = snapshot_capture_channel(&mut manager, MEMBER, Some(GID));
     let _second = snapshot_capture_channel(&mut manager, OTHER2, Some(GID));
     assert!(manager.capture_group_admitted_keys(MEMBER));
-    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
+    let pool = manager.group_ribs[&GID].recovery_snapshot;
+    assert!(pool.is_some());
     let first = manager.pending_group_admitted.owned_proof(&MEMBER).unwrap();
     let group = manager.group_ribs.get_mut(&GID).unwrap();
     for n in 1..=128 {
@@ -6631,7 +6636,7 @@ fn flat_full_capture_preserves_disjoint_old_views_within_the_peer_cap() {
         manager.capture_group_admitted_keys(OTHER2),
         "each exact flat OLD proof must fit 8 KiB independently of a disjoint retained proof"
     );
-    assert!(manager.group_ribs[&GID].recovery_snapshot.is_none());
+    assert_eq!(manager.group_ribs[&GID].recovery_snapshot, pool);
     assert_eq!(
         manager.pending_group_admitted.owned_proof(&MEMBER).unwrap(),
         first
@@ -6814,6 +6819,63 @@ fn snapshot_reuse_grouped_full_table_flat_capture_reserves_exact_cardinality() {
     assert_eq!(manager.group_recovery_fallback(MEMBER), None);
     assert_eq!(snapshot_capture_fallback_total(&manager), 0.0);
     manager.release_group_admitted_keys(MEMBER);
+    assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
+}
+
+#[test]
+fn full_table_vpn_members_share_one_recovery_pool_within_production_caps() {
+    use admitted_recovery::Key;
+
+    const GID: usize = 2258;
+    const COUNT: u32 = 1_230_000;
+    let mut manager = staging_manager();
+    let healthy_charge = manager.pending_group_admitted.bytes();
+    let mut group = empty_group();
+    group.sendable.push((Afi::Ipv4, Safi::MplsVpn));
+    let template = vpn_route(0, OTHER1);
+    let key = |index: u32| {
+        let mut route = template.clone();
+        route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(index), 32).unwrap();
+        route
+    };
+    for index in 0..COUNT {
+        group.table.insert_vpn(key(index));
+    }
+    manager.group_ribs.insert(GID, group);
+    // Thirteen exact flat 1.23M-key proofs fill the 512 MiB daemon cap; the
+    // fourteenth member would fall back to conservative withdrawal.
+    let members: Vec<IpAddr> = (1..=14)
+        .map(|n| IpAddr::V4(Ipv4Addr::new(10, 22, 58, n)))
+        .collect();
+    let _receivers: Vec<_> = members
+        .iter()
+        .map(|peer| snapshot_capture_channel(&mut manager, *peer, Some(GID)))
+        .collect();
+    for peer in &members {
+        assert!(
+            manager.capture_group_admitted_keys(*peer),
+            "full-table VPN members must share one pool instead of exhausting the daemon cap"
+        );
+        assert_eq!(manager.group_recovery_fallback(*peer), None);
+    }
+    assert!(manager.group_ribs[&GID].recovery_snapshot.is_some());
+    let flat = COUNT as usize * std::mem::size_of::<Key>();
+    assert!(
+        manager.pending_group_admitted.bytes() < 2 * flat,
+        "fourteen members must retain one shared universe, not fourteen flat proofs"
+    );
+    assert_eq!(snapshot_capture_fallback_total(&manager), 0.0);
+    for peer in &members {
+        let proof = manager.pending_group_admitted.get(peer).unwrap();
+        assert_eq!(proof.len(), COUNT as usize);
+        for index in [0, COUNT / 2, COUNT - 1] {
+            assert!(proof.contains(&ExactExportKey::Vpn(key(index).key())));
+        }
+        assert!(!proof.contains(&ExactExportKey::Vpn(key(COUNT).key())));
+    }
+    for peer in members {
+        manager.release_group_admitted_keys(peer);
+    }
     assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
 }
 
