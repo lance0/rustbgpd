@@ -16545,3 +16545,93 @@ fn grouped_refresh_repairs_residue_like_ungrouped_oracle_during_churn() {
         );
     }
 }
+
+/// One dirty VPN resync for a direct peer: `routes` VPN routes are
+/// delivered, the peer goes dirty, and with `withdraw_while_dirty` they
+/// are all withdrawn before the resync. Returns the resync's update, if
+/// any, and the per-peer VPN key-set inserts it made.
+fn vpn_dirty_resync_case(
+    grouped: bool,
+    routes: u8,
+    withdraw_while_dirty: bool,
+) -> (Option<OutboundRouteUpdate>, usize) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = !grouped;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 5));
+    let mut outbound = register_direct_peer_with_families(&mut manager, peer, vpn_sendable());
+    while outbound.try_recv().is_ok() {}
+    let routes: Vec<VpnRibRoute> = (0..routes)
+        .map(|n| {
+            let mut route = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 7), n, 100, 100);
+            route.origin_type = crate::route::RouteOrigin::Ebgp;
+            route
+        })
+        .collect();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        session_id: 0,
+        announced: routes.clone(),
+        withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    while outbound.try_recv().is_ok() {}
+    assert_eq!(manager.vpn_grouped_member_of(peer).is_some(), grouped);
+    if withdraw_while_dirty {
+        // Hold every free slot so the withdrawal send fails and the peer
+        // goes dirty on the production path, leaving only residue.
+        let sender = manager.outbound_peers[&peer].clone();
+        let held: Vec<_> = (0..sender.capacity())
+            .map(|_| sender.clone().try_reserve_owned().unwrap())
+            .collect();
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: routes.iter().map(VpnRibRoute::key).collect(),
+        });
+        while manager.process_next_route_chunk() {}
+        assert_eq!(manager.loc_rib.vpn_len(), 0);
+        assert!(manager.dirty_peers.contains(&peer));
+        drop(held);
+    } else {
+        assert!(manager.mark_outbound_dirty(peer));
+    }
+    assert!(outbound.try_recv().is_err());
+    let inserts = manager.adj_rib_out_commit_stats.vpn_resync_key_inserts;
+    manager.resync_dirty_peers_bounded();
+    assert!(!manager.dirty_peers.contains(&peer), "the resync completes");
+    let inserts = manager.adj_rib_out_commit_stats.vpn_resync_key_inserts - inserts;
+    (outbound.try_recv().ok(), inserts)
+}
+
+/// A grouped VPN member's dirty resync assembles its VPN state from the
+/// group table and builds no per-peer VPN key set; the set's emptiness
+/// check still sees every source: an empty member sends nothing, and a
+/// member whose routes were all withdrawn while dirty still withdraws
+/// them from tombstone and admitted-proof residue alone.
+#[test]
+fn grouped_vpn_dirty_resync_skips_per_peer_key_enumeration() {
+    for grouped in [true, false] {
+        let (update, inserts) = vpn_dirty_resync_case(grouped, 0, false);
+        assert!(
+            update.is_none(),
+            "grouped={grouped}: empty resync sends nothing"
+        );
+        assert_eq!(inserts, 0, "grouped={grouped}");
+
+        let (update, inserts) = vpn_dirty_resync_case(grouped, 16, false);
+        if grouped {
+            assert_eq!(inserts, 0, "grouped member builds no per-peer key set");
+            assert_eq!(update.expect("grouped replay").vpn_announce.len(), 16);
+        } else {
+            assert_eq!(inserts, 16, "ungrouped peer enumerates its VPN keys");
+        }
+
+        let (update, inserts) = vpn_dirty_resync_case(grouped, 16, true);
+        let update = update.unwrap_or_else(|| panic!("grouped={grouped}: owed withdrawals"));
+        assert_eq!(update.vpn_withdraw.len(), 16, "grouped={grouped}");
+        assert_eq!(update.vpn_announce.len(), 0, "grouped={grouped}");
+        assert_eq!(inserts, if grouped { 0 } else { 16 }, "grouped={grouped}");
+    }
+}

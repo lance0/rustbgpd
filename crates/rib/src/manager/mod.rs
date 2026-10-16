@@ -253,6 +253,9 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
+    /// Distinct keys collected into per-peer VPN resync enumerations.
+    #[cfg(test)]
+    vpn_resync_key_inserts: usize,
     /// Controlled refusal at the actual post-admission completeness seam.
     #[cfg(test)]
     fail_evpn_feed_completion: bool,
