@@ -453,6 +453,47 @@ class RecoveryReceiptTests(unittest.TestCase):
             path.write_text(header + indent + "#[cfg(test)]\n" + anchor + "\n", encoding="utf-8")
         return self.root
 
+    def control_api_tree(self, swaps: bool) -> tuple[Path, Path]:
+        update = self.root / "crates/rib/src/update.rs"
+        update.parent.mkdir(parents=True, exist_ok=True)
+        field = "        swaps: Option<Vec<DatasetSwap>>,\n" if swaps else ""
+        update.write_text(
+            "pub enum RibUpdate {\n    ReevaluatePeerExportPolicies {\n"
+            "        peers: Vec<IpAddr>,\n" + field
+            + "        reply: oneshot::Sender<()>,\n    },\n    ConditionalSwaps {\n"
+            "        swaps: (),\n    },\n}\n",
+            encoding="utf-8",
+        )
+        harness = self.root / "bench/scale/rrharness/src/recovery_memory.rs"
+        harness.parent.mkdir(parents=True, exist_ok=True)
+        request = ("            .send(RibUpdate::ReevaluatePeerExportPolicies {\n"
+                   "                peers: vec![peer],\n" + receipt.HARNESS_SWAPS
+                   + "                reply,\n            })\n")
+        harness.write_text(request + "\n" + request, encoding="utf-8")
+        return self.root, harness
+
+    def test_control_api_drops_default_swaps_only_for_historical_requests(self) -> None:
+        tree, harness = self.control_api_tree(swaps=True)
+        original = harness.read_text(encoding="utf-8")
+        receipt.derive_control_api(tree)
+        self.assertEqual(harness.read_text(encoding="utf-8"), original)
+        tree, harness = self.control_api_tree(swaps=False)
+        receipt.derive_control_api(tree)
+        derived = harness.read_text(encoding="utf-8")
+        self.assertEqual(derived, original.replace(receipt.HARNESS_SWAPS, ""))
+        self.assertNotIn("swaps", derived)
+
+    def test_control_api_refuses_non_default_swaps_for_historical_requests(self) -> None:
+        tree, harness = self.control_api_tree(swaps=False)
+        harness.write_text(
+            harness.read_text(encoding="utf-8").replace("swaps: None", "swaps: Some(vec![])", 1),
+            encoding="utf-8",
+        )
+        original = harness.read_bytes()
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "non-default dataset swaps"):
+            receipt.derive_control_api(tree)
+        self.assertEqual(harness.read_bytes(), original)
+
     def test_observer_transformation_is_minimal_and_idempotent(self) -> None:
         tree = self.observer_tree()
         receipt.instrument_observer(tree)

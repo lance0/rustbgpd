@@ -338,6 +338,12 @@ validates the unchanged observer bodies and atomic-credit seam, retains both
 patches, preserves manifests/lockfiles/pins, and builds serially with locked
 `scale` settings, four jobs and separate targets. Each selected profile/cell
 runs A/B/B/A separately against each historical control.
+A historical control whose `RibUpdate::ReevaluatePeerExportPolicies` predates
+dataset swaps receives the frozen harness without its `swaps: None` arguments;
+`None` selects the full re-evaluation that control performs anyway, and any
+other value refuses the derivation. Ordinary CI runs
+`compare-recovery-memory.sh --check-controls`, which compiles the derived
+harness against both controls, so harness API drift fails before a dispatch.
 
 The default `--phase pilot` uses **four full-table receivers** for feasibility
 only; it makes no 100-member qualification claim. An explicit

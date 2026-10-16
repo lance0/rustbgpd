@@ -15,6 +15,60 @@ intermediate=bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00
 
 fail() { echo "recovery-memory: $*" >&2; exit 1; }
 
+# Freeze this checkout's memory harness into frozen/, as every role builds it.
+freeze_memory_harness() {
+    local frozen=$1 derivation=$2 path
+    for path in bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_memory.rs; do
+        mkdir -p -- "$frozen/$(dirname -- "$path")"
+        cp -- "$repository/$path" "$frozen/$path"
+    done
+    # Historical controls lack the component-only RIB API. Freeze the
+    # identical memory entrypoint for every role, without porting runtime.
+    python3 "$checker" normalize-memory-entrypoint "$frozen/bench/scale/rrharness/src/main.rs" "$derivation"
+}
+
+# Install the frozen harness in one role tree and derive its bench-only seams.
+prepare_role_tree() {
+    local tree=$1 frozen=$2 path
+    # Preserve each source's manifests, dependency pins and lockfile. The
+    # harness manifest must already agree before freezing only its source.
+    cmp "$repository/bench/scale/rrharness/Cargo.toml" "$tree/bench/scale/rrharness/Cargo.toml" ||
+        fail 'harness manifest drift would confound the frozen instrumentation'
+    for path in bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_memory.rs; do
+        cp -- "$frozen/$path" "$tree/$path"
+        provenance_require_sha256 "$tree/$path" "$(provenance_sha256_file "$frozen/$path")"
+    done
+    python3 "$checker" instrument-observer "$tree"
+    python3 "$checker" derive-control-api "$tree"
+}
+
+# Compile the frozen memory harness against both fixed controls (ordinary CI).
+if [[ ${1:-} == --check-controls ]]; then
+    [[ $# == 1 ]] || fail 'usage: compare-recovery-memory.sh --check-controls'
+    repository=$(git -C "$script_dir" rev-parse --show-toplevel)
+    work_root=$(mktemp -d "${TMPDIR:-/tmp}/recovery-memory-controls.XXXXXXXX")
+    # shellcheck disable=SC2317 # Invoked indirectly by the trap below.
+    cleanup_controls() {
+        local role
+        for role in baseline intermediate; do
+            git -C "$repository" worktree remove --force "$work_root/$role" >/dev/null 2>&1 || true
+        done
+        rm -rf -- "$work_root"
+    }
+    trap cleanup_controls EXIT
+    freeze_memory_harness "$work_root/frozen" "$work_root/memory-entrypoint-derivation.json"
+    for role in baseline intermediate; do
+        revision=$baseline
+        [[ $role != intermediate ]] || revision=$intermediate
+        git -C "$repository" worktree add --detach "$work_root/$role" "$revision" >/dev/null
+        prepare_role_tree "$work_root/$role" "$work_root/frozen"
+        (cd -- "$work_root/$role" && CARGO_TARGET_DIR="$work_root/target" \
+            cargo check --locked -p rrharness --features rustbgpd-rib/bench-internals) ||
+            fail "frozen memory harness does not build against the $role control $revision"
+    done
+    exit 0
+fi
+
 # These are scoped child commands, never a fallback to the caller's cgroup.
 if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-scan || ${1:-} == --scope-retirement ]]; then
     mode=$1
@@ -162,9 +216,7 @@ for path in "${inputs[@]}"; do
     mkdir -p -- "$output/frozen-instrumentation/$(dirname -- "$path")"
     cp -- "$repository/$path" "$output/frozen-instrumentation/$path"
     if [[ $receipt_mode == memory && $path == bench/scale/rrharness/src/main.rs ]]; then
-        # Historical controls lack the component-only RIB API. Freeze the
-        # identical memory entrypoint for every role, without porting runtime.
-        python3 "$checker" normalize-memory-entrypoint "$output/frozen-instrumentation/$path" "$output/memory-entrypoint-derivation.json"
+        freeze_memory_harness "$output/frozen-instrumentation" "$output/memory-entrypoint-derivation.json"
     fi
     printf '%s  %s\n' "$(provenance_sha256_file "$output/frozen-instrumentation/$path")" "$path" >> "$output/instrumentation.sha256"
 done
@@ -317,16 +369,9 @@ for role in baseline intermediate candidate; do
     tree=$work_root/$role
     record_command git worktree add --detach "$tree" "$revision"
     git -C "$repository" worktree add --detach "$tree" "$revision" > "$output/$role-worktree.log" 2>&1
-    # Preserve each source's manifests, dependency pins and lockfile. The
-    # harness manifest must already agree before freezing only its source.
-    cmp "$repository/bench/scale/rrharness/Cargo.toml" "$tree/bench/scale/rrharness/Cargo.toml" ||
-        fail 'harness manifest drift would confound the frozen instrumentation'
-    for path in bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_memory.rs; do
-        cp -- "$output/frozen-instrumentation/$path" "$tree/$path"
-        provenance_require_sha256 "$tree/$path" "$(provenance_sha256_file "$output/frozen-instrumentation/$path")"
-    done
     record_command python3 "$checker" instrument-observer "$tree"
-    python3 "$checker" instrument-observer "$tree"
+    record_command python3 "$checker" derive-control-api "$tree"
+    prepare_role_tree "$tree" "$output/frozen-instrumentation"
     git -C "$tree" diff --binary > "$output/$role-instrumentation.patch"
     git -C "$tree" diff --binary -- crates/rib/src/update.rs crates/rib/src/manager/mod.rs > "$output/$role-observer.patch"
     for path in Cargo.toml Cargo.lock bench/scale/rrharness/Cargo.toml; do

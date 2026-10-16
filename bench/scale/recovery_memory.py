@@ -290,6 +290,29 @@ def instrument_observer(tree: Path) -> None:
         path.write_text(text, encoding="utf-8")
 
 
+REEVALUATE_VARIANT = "    ReevaluatePeerExportPolicies {\n"
+HARNESS_SWAPS = "                swaps: None,\n"
+
+
+def derive_control_api(tree: Path) -> None:
+    """Drop `swaps: None` for a control whose RibUpdate predates dataset swaps.
+
+    `None` selects full re-evaluation, which is all such a control can do, so
+    every role still runs the same operation.
+    """
+    update = (tree / "crates/rib/src/update.rs").read_text(encoding="utf-8")
+    require(update.count(REEVALUATE_VARIANT) == 1, "unexpected export re-evaluation request")
+    start = update.index(REEVALUATE_VARIANT)
+    variant = update[start:update.index("\n    },\n", start)]
+    if "        swaps: " in variant:
+        return
+    harness = tree / "bench/scale/rrharness/src/recovery_memory.rs"
+    text = harness.read_text(encoding="utf-8")
+    require(text.count("swaps:") == text.count(HARNESS_SWAPS),
+            "a historical control cannot drop non-default dataset swaps")
+    harness.write_text(text.replace(HARNESS_SWAPS, ""), encoding="utf-8")
+
+
 def key_values(text: str, name: str) -> dict[str, int]:
     result = {}
     for line in text.splitlines():
@@ -1779,6 +1802,8 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     observer = sub.add_parser("instrument-observer")
     observer.add_argument("tree", type=Path)
+    control_api = sub.add_parser("derive-control-api")
+    control_api.add_argument("tree", type=Path)
     normalize = sub.add_parser("normalize-memory-entrypoint")
     normalize.add_argument("path", type=Path)
     normalize.add_argument("output", type=Path)
@@ -1818,6 +1843,8 @@ def main() -> None:
     try:
         if args.command == "instrument-observer":
             instrument_observer(args.tree)
+        elif args.command == "derive-control-api":
+            derive_control_api(args.tree)
         elif args.command == "normalize-memory-entrypoint":
             normalize_memory_entrypoint(args.path, args.output)
         elif args.command == "snapshot-build-inputs":
