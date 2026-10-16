@@ -207,6 +207,40 @@ checks that its input is the canonical baseline and reports the expected
 withdrawal and announcement counts. Serving and measuring the RTR delta
 requires a separate driver; the existing A/B cell remains IPv4-only.
 
+## Writing a receipt
+
+A new receipt keeps the evidence that can catch a defect and leaves out the
+rest. The page stays under about 100 lines and covers:
+
+- the shape: workload, versions, host class, and the exact source commit of
+  each arm;
+- the bars, written down before the run and frozen in the campaign's manifest
+  or limits file;
+- a results table that includes every failed and `INVALID` run, since a failed
+  run is retained rather than rerun until it passes;
+- scope caveats, stating what the measurement does not establish;
+- a link to the CI run or campaign that produced it;
+- the curated comparison JSON.
+
+Its directory under `artifacts/` commits that comparison JSON and a short
+`README.md` listing each stored file with one SHA-256 hash. It does not commit
+raw-file digest rosters, multi-hundred-KB provenance files, seals over the
+receipt's own files, or audit and disposition JSONs. Raw logs and samples stay
+in the CI artifact or campaign directory named by the run link; the commit SHA
+and the artifact digest identify what ran. The deterministic summarizer is the
+audit: when it is wrong, fix it rather than adding a second audit pass.
+
+Verdicts are `PASS`, `FAIL` or `INVALID`, each with a one-line reason. `FAIL`
+means a predeclared bar was missed. `INVALID` means the evidence cannot answer
+the question: a missing or malformed leg, swap, OOM, or a failed driver
+invocation. A harness keeps the controls that catch real defects: separately
+built control and candidate binaries checked to differ, bars frozen before the
+run, seeded-defect tests that make the summarizer fail on broken input, and the
+exact source commit.
+
+Receipts published before this convention keep their artifacts and wording as
+history.
+
 ## Reading the archive
 
 This directory is a historical evidence archive. Each row reports only the

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import difflib
 import json
 import os
 from pathlib import Path
@@ -30,13 +29,6 @@ RETIREMENT_DISPATCH = (
 )
 COMPONENT_DISPATCH = (*SCAN_DISPATCH, *RETIREMENT_DISPATCH)
 RETIREMENT_SOURCE = "crates/rib/src/manager/distribution/vpn.rs"
-RETIREMENT_INPUTS = (
-    "bench/scale/rrharness/src/recovery_retirement.rs",
-    "crates/rib/src/manager/bench_support.rs",
-    RETIREMENT_SOURCE,
-    "crates/rib/src/manager/peer_lifecycle.rs",
-)
-RETIREMENT_READINESS_INPUT = "crates/rib/src/manager/mod.rs"
 RETIREMENT_LIMIT = 12 * 1024**3
 RETIREMENT_ORDER = ("old-drop", "candidate", "candidate", "old-drop")
 RETIREMENT_CELLS = (
@@ -111,15 +103,6 @@ SCALARS = (
     "memory.swap.peak",
 )
 FILES = (*SCALARS, "memory.max", "memory.stat", "memory.events")
-INSTRUMENT_INPUTS = (
-    "bench/scale/rrharness/src/main.rs",
-    "bench/scale/rrharness/src/recovery_memory.rs",
-    "bench/scale/rrharness/Cargo.toml",
-    "bench/scale/compare-recovery-memory.sh",
-    "bench/scale/recovery_memory.py",
-    "bench/scale/cgroup-memory.sh",
-    "bench/scale/provenance.sh",
-)
 VARIANT = """    TestQueryOutboundHealth {
         /// Response channel: dirty peers, forced peers, group-dirty members,
         /// group tombstones, regroup baselines, and carried extra-withdraw
@@ -218,6 +201,16 @@ def uint(value: object, name: str) -> int:
     return value
 
 
+def read_object(path: Path) -> dict:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    require(isinstance(value, dict), f"{path.name} is not a JSON object")
+    return value
+
+
+def is_sha(value: object, length: int = 40) -> bool:
+    return isinstance(value, str) and re.fullmatch(f"[0-9a-f]{{{length}}}", value) is not None
+
+
 def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -230,26 +223,6 @@ def retirement_control(source: str) -> str:
     require(start < stop and source[start:stop].count("stage.retire_with(") == 1,
             "VPN retirement control does not replace exactly one stage retirement")
     return source[:start] + "        drop(vpn_group_stage);\n" + source[stop:]
-
-
-def snapshot_build_inputs(tree: Path, output: Path) -> None:
-    names = subprocess.check_output(["git", "-C", str(tree), "ls-files", "-z"]).decode().split("\0")
-    inputs = {}
-    for name in filter(None, names):
-        path = tree / name
-        data = b"symlink:" + os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
-        inputs[name] = hashlib.sha256(data).hexdigest()
-    require(bool(inputs), "empty tracked build input roster")
-    write_json(output, inputs)
-
-
-def retirement_raw_hashes(directory: Path) -> dict[str, str]:
-    hashes = {}
-    for path in directory.rglob("*"):
-        require(not path.is_symlink(), "symlink in retirement evidence")
-        if path.is_file() and path.name != "raw-sha256.json":
-            hashes[str(path.relative_to(directory))] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return hashes
 
 
 def instrument_observer(tree: Path) -> None:
@@ -363,11 +336,6 @@ def snapshot_scope(path: Path, output: Path) -> dict[str, int]:
     return values
 
 
-def file_digest(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
 def proc_identity(pid: int, *, executable_digest: bool = False) -> dict[str, object]:
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     fields = stat.rsplit(")", 1)[1].split()
@@ -379,7 +347,10 @@ def proc_identity(pid: int, *, executable_digest: bool = False) -> dict[str, obj
         "executable": os.readlink(f"/proc/{pid}/exe"),
     }
     if executable_digest:
-        identity["exe_sha256"] = file_digest(Path(f"/proc/{pid}/exe"))
+        # Ties each leg to the binary it actually executed. Streamed so the
+        # checker does not charge a whole executable to the measured scope.
+        with open(f"/proc/{pid}/exe", "rb") as executable:
+            identity["exe_sha256"] = hashlib.file_digest(executable, "sha256").hexdigest()
     return identity
 
 
@@ -508,7 +479,6 @@ def run_scope(
     output: Path,
     cell: str,
     cgroup: Path,
-    expected_digest: str,
     profile: str,
     clients: int,
     scan: bool = False,
@@ -517,9 +487,8 @@ def run_scope(
 ) -> None:
     """Run inside the already fenced scope; capture before its owner exits."""
     output.mkdir(parents=True, exist_ok=True)
-    require(bool(re.fullmatch(r"[0-9a-f]{64}", expected_digest)), "invalid expected binary digest")
-    checker = proc_identity(os.getpid(), executable_digest=True)
-    launcher = proc_identity(os.getppid(), executable_digest=True)
+    checker = proc_identity(os.getpid())
+    launcher = proc_identity(os.getppid())
     require(
         launcher["executable"] == str(Path(shutil.which("bash")).resolve()),
         "scoped launcher is not Bash",
@@ -560,9 +529,6 @@ def run_scope(
                 try:
                     workload = proc_identity(child.pid, executable_digest=True)
                     write_json(output / "binary-process.json", workload)
-                    require(
-                        workload["exe_sha256"] == expected_digest, "executed binary digest mismatch"
-                    )
                     require(
                         workload["parent_pid"] == checker["pid"], "workload has a foreign parent"
                     )
@@ -646,9 +612,8 @@ def validate_log(
         "workload is not in a scope",
     )
     require(
-        bool(re.fullmatch(r"[0-9a-f]{40}", identity.get("source_sha", "")))
-        and bool(re.fullmatch(r"[0-9a-f]{64}", identity.get("instrumentation_sha256", ""))),
-        "missing compiled source/instrumentation identity",
+        is_sha(identity.get("source_sha")),
+        "missing compiled source identity",
     )
     require(profile in PROFILES and cell in CELLS and clients > 0, "unknown receipt shape")
     seed, additions = PROFILES[profile]
@@ -897,8 +862,8 @@ def check_peak_coverage(before: dict, samples: list[dict], after: dict) -> None:
 
 
 def validate_ownership_log(directory: Path, cgroup: str, workload: dict) -> None:
-    checker = json.loads((directory / "scope-process.json").read_text(encoding="utf-8"))
-    launcher = json.loads((directory / "launcher-process.json").read_text(encoding="utf-8"))
+    checker = read_object(directory / "scope-process.json")
+    launcher = read_object(directory / "launcher-process.json")
     require(
         checker["parent_pid"] == launcher["pid"] and workload["parent_pid"] == checker["pid"],
         "foreign scoped parent chain",
@@ -907,11 +872,7 @@ def validate_ownership_log(directory: Path, cgroup: str, workload: dict) -> None
         len({launcher["pid"], checker["pid"], workload["pid"]}) == 3, "reused process role identity"
     )
     for row in (launcher, checker, workload):
-        require(
-            uint(row["start_ticks"], "process start time") > 0
-            and bool(re.fullmatch(r"[0-9a-f]{64}", row["exe_sha256"])),
-            "invalid scoped executable/start identity",
-        )
+        require(uint(row["start_ticks"], "process start time") > 0, "invalid scoped start identity")
     require(Path(launcher["executable"]).name == "bash", "launcher is not Bash")
     require(Path(checker["executable"]).name.startswith("python"), "checker is not Python")
     owned = {row["pid"]: row for row in (launcher, checker)}
@@ -936,8 +897,8 @@ def validate_ownership_log(directory: Path, cgroup: str, workload: dict) -> None
         ended = ended or row["phase"] == "after"
 
 
-def summarize(root: Path) -> None:
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+def summarize(root: Path) -> dict:
+    manifest = read_object(root / "manifest.json")
     require(
         manifest.get("schema") == "rustbgpd.recovery-memory.campaign.v2", "wrong campaign schema"
     )
@@ -946,7 +907,7 @@ def summarize(root: Path) -> None:
         "wrong historical controls",
     )
     require(
-        bool(re.fullmatch(r"[0-9a-f]{40}", manifest["candidate"]))
+        is_sha(manifest.get("candidate"))
         and manifest["candidate"] not in (BASELINE, INTERMEDIATE),
         "candidate is not a distinct source SHA",
     )
@@ -958,28 +919,6 @@ def summarize(root: Path) -> None:
         and manifest.get("order_per_cell") == ["control", "candidate", "candidate", "control"],
         "campaign shape or build/order fence differs",
     )
-    inputs = root / "instrumentation.sha256"
-    require(
-        hashlib.sha256(inputs.read_bytes()).hexdigest()
-        == manifest.get("instrumentation_manifest_sha256"),
-        "instrumentation manifest hash mismatch",
-    )
-    entries = {}
-    for line in inputs.read_text(encoding="utf-8").splitlines():
-        digest, name = line.split("  ", 1)
-        require(
-            name in INSTRUMENT_INPUTS and name not in entries, "unknown or duplicate frozen input"
-        )
-        require(
-            hashlib.sha256((root / "frozen-instrumentation" / name).read_bytes()).hexdigest()
-            == digest,
-            "frozen instrumentation hash mismatch",
-        )
-        entries[name] = digest
-    require(set(entries) == set(INSTRUMENT_INPUTS), "incomplete frozen instrumentation")
-    if "memory_entrypoint_derivation_sha256" in manifest:
-        validate_memory_derivation(root, manifest["memory_entrypoint_derivation_sha256"])
-    binary_hashes = {}
     for role in ("baseline", "intermediate", "candidate"):
         require(
             (root / f"{role}.sha").read_text(encoding="utf-8").strip() == manifest[role],
@@ -988,18 +927,6 @@ def summarize(root: Path) -> None:
         require(
             (root / f"{role}-build.exit").read_text(encoding="utf-8").strip() == "0", "build failed"
         )
-        require(
-            bool(
-                re.fullmatch(
-                    r"[0-9a-f]{64}",
-                    (root / f"{role}-binary.sha256").read_text(encoding="utf-8").strip(),
-                )
-            ),
-            "missing binary hash",
-        )
-        binary_hashes[role] = (root / f"{role}-binary.sha256").read_text(encoding="utf-8").strip()
-        for name in ("build.log", "build-inputs.sha256", "instrumentation.patch", "observer.patch"):
-            require((root / f"{role}-{name}").is_file(), f"missing {role} {name}")
     before_oom = (root / "host-oom.before").read_text(encoding="utf-8").strip()
     after_oom = (root / "host-oom.after").read_text(encoding="utf-8").strip()
     require(before_oom.isdigit() and before_oom == after_oom, "host OOM invalidates the receipt")
@@ -1015,7 +942,7 @@ def summarize(root: Path) -> None:
     for case, comparator, index, role in legs:
         cell, profile, clients = case["cell"], case["profile"], case["clients"]
         directory = root / f"{profile}-{cell}-{comparator}-{index + 1}-{role}"
-        status = json.loads((directory / "status.json").read_text(encoding="utf-8"))
+        status = read_object(directory / "status.json")
         require(
             set(status) == {"exit", "timeout", "cgroup_valid", "ownership_valid"}
             and status["timeout"] is False
@@ -1052,13 +979,8 @@ def summarize(root: Path) -> None:
                 candidate_failures.append(f"{directory.name}: {error}")
         result["strict_validation"] = {"passed": strict_error is None, "error": strict_error}
         identity = result["workload_identity"]
-        process = json.loads((directory / "binary-process.json").read_text(encoding="utf-8"))
-        require(
-            identity["source_sha"] == manifest[role]
-            and identity["instrumentation_sha256"] == manifest["instrumentation_manifest_sha256"],
-            "compiled role source/instrumentation identity mismatch",
-        )
-        require(process["exe_sha256"] == binary_hashes[role], "executed binary digest mismatch")
+        process = read_object(directory / "binary-process.json")
+        require(identity["source_sha"] == manifest[role], "compiled role source identity mismatch")
         require(
             (identity["pid"], identity["start_ticks"]) == (process["pid"], process["start_ticks"]),
             "workload identity differs from the launched binary",
@@ -1097,7 +1019,6 @@ def summarize(root: Path) -> None:
                 "scope_memory_current_bytes": end["memory.current"],
             }
         )
-        write_json(directory / "validated.json", result)
         rows.append(result)
     summaries = []
     for case in cases:
@@ -1117,70 +1038,60 @@ def summarize(root: Path) -> None:
                 all(value > 0 for values in peaks.values() for value in values),
                 "missing positive scope peaks",
             )
+            passed = all(row["strict_validation"]["passed"] for row in selected)
             summaries.append(
                 {
                     **case,
                     "comparator": comparator,
                     "peaks_bytes": peaks,
+                    # A failed control suppresses its ratio rather than promoting it.
                     "candidate_to_control_mean_peak_ratio": sum(peaks["candidate"])
                     / sum(peaks[comparator])
-                    if all(row["strict_validation"]["passed"] for row in selected)
+                    if passed
                     else None,
-                    "all_strict_checks_passed": all(
-                        row["strict_validation"]["passed"] for row in selected
-                    ),
-                    "verdict": "feasibility only"
-                    if manifest["phase"] == "pilot"
-                    else "measured memory only; strict candidate qualification required",
+                    "all_strict_checks_passed": passed,
                 }
             )
-    write_json(
-        root / "comparison.json",
-        {
-            "schema": "rustbgpd.recovery-memory.comparison.v2",
-            "phase": manifest["phase"],
-            "primary": "scope memory.peak bytes",
-            "scope": "manager-direct RIB, production exact-export preflight, harness consumers; no final wire/TCP",
-            "rows": rows,
-            "summaries": summaries,
-            "candidate_failures": candidate_failures,
-        },
-    )
-    require(
-        not candidate_failures, "candidate qualification failed: " + "; ".join(candidate_failures)
-    )
-
-
-def summarize_failed(root: Path, driver_exit: int, *, scan: bool = False) -> None:
-    """Retain an explicitly unqualified envelope after an aborted invocation."""
-    require(1 <= driver_exit <= 255, "failure finalization requires a nonzero driver exit")
-    root.mkdir(parents=True, exist_ok=True)
-    error = f"driver invocation failed with exit {driver_exit}; raw evidence is unqualified"
-    # Do not validate partial legs or preserve ratios from an earlier summary.
-    # Failure finalization is evidence retention, never a qualification fallback.
-    comparison = {
-        "schema": "rustbgpd.recovery-memory.comparison.v2",
-        "phase": None,
+    return {
+        "phase": manifest["phase"],
         "primary": "scope memory.peak bytes",
         "scope": "manager-direct RIB, production exact-export preflight, harness consumers; no final wire/TCP",
-        "rows": [],
-        "summaries": [],
-        "candidate_failures": [error],
-        "qualification_passed": False,
-        "driver_invocation_exit": driver_exit,
+        "rows": rows,
+        "summaries": summaries,
+        "verdict": "FAIL" if candidate_failures else "PASS",
+        "reason": "candidate qualification failed: " + "; ".join(candidate_failures)
+        if candidate_failures
+        else f"all {len(rows) // 2} candidate legs passed strict recovery checks",
     }
-    if scan:
-        comparison = {
-            "schema": SCAN_SCHEMA,
-            "scope": "component scans/capture only; no daemon, fleet, readiness or wire qualification",
-            "samples": [],
-            "comparisons": [],
-            "candidate_failures": [error],
-            "qualification_passed": False,
-            "driver_invocation_exit": driver_exit,
-        }
-    write_json(root / "comparison.json", comparison)
-    raise InvalidReceipt(error)
+
+
+def conclude(root: Path, schema: str, summary, driver_exit: int | None = None) -> bool:
+    """Write PASS, FAIL or INVALID with a one-line reason; only PASS exits zero."""
+    try:
+        if driver_exit is None:
+            result = summary(root)
+        else:
+            require(driver_exit != 0, "failure finalization requires a nonzero driver exit")
+            # A failed invocation keeps the summarizer's own red verdict; partial
+            # legs are never validated, and no earlier PASS survives.
+            prior = root / "comparison.json"
+            result = read_object(prior) if prior.is_file() else {}
+            require(
+                isinstance(result, dict) and result.get("verdict") in ("FAIL", "INVALID"),
+                f"driver invocation failed with exit {driver_exit}; raw evidence is unqualified",
+            )
+    except (InvalidReceipt, OSError, ValueError, KeyError) as error:
+        result = {"verdict": "INVALID", "reason": str(error)}
+    except (TypeError, AttributeError, IndexError) as error:
+        # Every summarizer input is untrusted evidence: a wrong JSON type fails closed.
+        result = {"verdict": "INVALID", "reason": f"malformed evidence: {type(error).__name__}: {error}"}
+    if driver_exit:
+        result["driver_invocation_exit"] = driver_exit
+    root.mkdir(parents=True, exist_ok=True)
+    write_json(root / "comparison.json", {**result, "schema": schema})
+    stream = sys.stdout if result["verdict"] == "PASS" else sys.stderr
+    print(f"{result['verdict']}: {result.get('reason')}", file=stream)
+    return result["verdict"] == "PASS"
 
 
 def memory_dispatch_snippets(source: str) -> tuple[str, ...]:
@@ -1191,45 +1102,12 @@ def memory_dispatch_snippets(source: str) -> tuple[str, ...]:
     return COMPONENT_DISPATCH if retirement == (1, 1) else SCAN_DISPATCH
 
 
-def normalize_memory_entrypoint(path: Path, output: Path) -> None:
+def normalize_memory_entrypoint(path: Path) -> None:
     """Derive the same memory-only main for all historical/candidate roles."""
-    original = path.read_text()
-    derived = original
-    snippets = memory_dispatch_snippets(original)
-    for block in snippets:
-        require(derived.count(block) == 1, "component dispatch anchor drift")
-        derived = derived.replace(block, "", 1)
-    patch = "".join(difflib.unified_diff(original.splitlines(True), derived.splitlines(True),
-                                       fromfile="committed/main.rs", tofile="memory/main.rs"))
-    path.write_text(derived)
-    output.with_suffix(".source.rs").write_text(original)
-    output.with_suffix(".patch").write_text(patch)
-    write_json(output, {"source_sha256": hashlib.sha256(original.encode()).hexdigest(),
-                        "derived_sha256": hashlib.sha256(derived.encode()).hexdigest(),
-                        "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
-                        "removed_exact_snippets": list(snippets)})
-
-
-def validate_memory_derivation(root: Path, digest: str) -> None:
-    metadata = root / "memory-entrypoint-derivation.json"
-    require(hashlib.sha256(metadata.read_bytes()).hexdigest() == digest,
-            "memory entrypoint derivation metadata mismatch")
-    details = json.loads(metadata.read_text())
-    original = metadata.with_suffix(".source.rs").read_text()
-    derived = original
-    snippets = memory_dispatch_snippets(original)
-    for block in snippets:
-        require(derived.count(block) == 1, "memory derivation source anchor drift")
-        derived = derived.replace(block, "", 1)
-    actual = (root / "frozen-instrumentation/bench/scale/rrharness/src/main.rs").read_text()
-    patch = "".join(difflib.unified_diff(original.splitlines(True), derived.splitlines(True),
-                                       fromfile="committed/main.rs", tofile="memory/main.rs"))
-    require(actual == derived and metadata.with_suffix(".patch").read_text() == patch
-            and details == {"source_sha256": hashlib.sha256(original.encode()).hexdigest(),
-                            "derived_sha256": hashlib.sha256(derived.encode()).hexdigest(),
-                            "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
-                            "removed_exact_snippets": list(snippets)},
-            "memory entrypoint is not the exact recorded derivation")
+    source = path.read_text()
+    for block in memory_dispatch_snippets(source):
+        source = source.replace(block, "", 1)
+    path.write_text(source)
 
 
 def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> dict:
@@ -1376,43 +1254,26 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
             "scope": "component scans/capture only; no daemon, fleet, readiness or wire qualification"}
 
 
-def summarize_scan(root: Path) -> None:
-    manifest = json.loads((root / "manifest.json").read_text())
+def summarize_scan(root: Path) -> dict:
+    manifest = read_object(root / "manifest.json")
     require(manifest.get("schema") == "rustbgpd.recovery-scan.campaign.v3", "wrong scan manifest")
     require(manifest.get("profile") in SCAN_PROFILES and manifest.get("build_jobs") == 4,
             "wrong scan profile/build")
     require(manifest.get("old_order") in ("sorted", "shuffled"), "wrong scan OLD order")
     require(manifest.get("order_per_cell") == ["flat", "candidate", "candidate", "flat"],
             "wrong scan comparison order")
-    require(bool(re.fullmatch(r"[0-9a-f]{40}", manifest.get("candidate", ""))), "wrong scan source")
-    inputs = root / "instrumentation.sha256"
-    require(hashlib.sha256(inputs.read_bytes()).hexdigest() == manifest["instrumentation_manifest_sha256"],
-            "scan instrumentation manifest mismatch")
-    names = set()
-    for line in inputs.read_text().splitlines():
-        digest, name = line.split("  ", 1)
-        require(name in (*INSTRUMENT_INPUTS, "bench/scale/rrharness/src/recovery_scan.rs")
-                and name not in names, "unexpected scan instrumentation")
-        require(hashlib.sha256((root / "frozen-instrumentation" / name).read_bytes()).hexdigest() == digest,
-                "scan frozen source mismatch")
-        names.add(name)
-    require(names == {*INSTRUMENT_INPUTS, "bench/scale/rrharness/src/recovery_scan.rs"},
-            "missing scan instrumentation")
+    require(is_sha(manifest.get("candidate")), "wrong scan source")
     require((root / "candidate-build.exit").read_text().strip() == "0", "scan build failed")
     require((root / "candidate.sha").read_text().strip() == manifest["candidate"], "scan source mismatch")
     directory = root / "scan"
     require((directory / "launcher.exit").read_text().strip() == "0", "scan launcher failed")
-    status = json.loads((directory / "status.json").read_text())
+    status = read_object(directory / "status.json")
     require(status == {"exit": 0, "timeout": False, "cgroup_valid": True, "ownership_valid": True},
             "scan workload/scope failed")
     result = validate_scan_log(directory / "harness.log", manifest["profile"], manifest["old_order"])
     identity = result["workload_identity"]
-    process = json.loads((directory / "binary-process.json").read_text())
-    digest = (root / "candidate-binary.sha256").read_text().strip()
-    require(bool(re.fullmatch(r"[0-9a-f]{64}", digest)) and process["exe_sha256"] == digest,
-            "scan executed binary mismatch")
+    process = read_object(directory / "binary-process.json")
     require(identity["source_sha"] == manifest["candidate"]
-            and identity["instrumentation_sha256"] == manifest["instrumentation_manifest_sha256"]
             and (identity["pid"], identity["start_ticks"]) == (process["pid"], process["start_ticks"]),
             "scan compiled/process identity mismatch")
     cgroup = (directory / "cgroup-path.txt").read_text().strip()
@@ -1425,19 +1286,12 @@ def summarize_scan(root: Path) -> None:
     require(before.isdigit() and before == (root / "host-oom.after").read_text().strip(),
             "host OOM invalidates scan receipt")
     refused_legs = sum(row["refusal"] is not None for row in result["samples"])
-    result["qualification_passed"] = (
-        len(result["samples"]) == 24 and len(result["comparisons"]) == 6
-        and refused_legs == 0 and all(cell["eligible"] for cell in result["comparisons"])
-    )
-    if not result["qualification_passed"]:
-        write_json(root / "unqualified-comparison.json", result)
-    write_json(root / "comparison.json", result)
-    require(result["qualification_passed"],
-            "all 6 scan cells must have complete, proof-checked non-refused comparisons")
-    print(json.dumps({"schema": SCAN_SCHEMA, "profile": manifest["profile"],
-                      "old_order": manifest["old_order"],
-                      "component_cells": 6, "timed_legs": 24, "refused_legs": refused_legs,
-                      "qualification_passed": result["qualification_passed"]}))
+    passed = refused_legs == 0 and all(cell["eligible"] for cell in result["comparisons"])
+    result["verdict"] = "PASS" if passed else "FAIL"
+    result["reason"] = (
+        "all 6 scan cells have complete, proof-checked non-refused comparisons" if passed else
+        f"all 6 scan cells must have complete, proof-checked non-refused comparisons; {refused_legs} refused legs")
+    return result
 
 
 def validate_receiver_retirement(row: dict, profile: str, cell: str, measured: bool) -> None:
@@ -1530,10 +1384,10 @@ def validate_receiver_retirement(row: dict, profile: str, cell: str, measured: b
         require(row.get("operation_to_barrier_ns") is None, "correctness receiver clock must be null")
 
 
-def validate_retirement_readiness(row: dict, measured: bool, required: bool) -> None:
+def validate_retirement_readiness(row: dict, measured: bool) -> list[str]:
+    """Raise for malformed evidence; return predeclared readiness bar breaches."""
+    breaches = []
     data = row.get("readiness")
-    if data is None and not required:
-        return  # Historical v1/v2 archives predate this evidence.
     require(isinstance(data, dict) and set(data) == {"probe", "owners"}, "missing retirement readiness evidence")
     probe = data["probe"]
     require(isinstance(probe, dict) and isinstance(data["owners"], dict), "invalid readiness objects")
@@ -1548,9 +1402,11 @@ def validate_retirement_readiness(row: dict, measured: bool, required: bool) -> 
             "readiness probe errors, missing coverage or unbounded concurrency")
     if measured:
         timing = {name: uint(probe[name], name) for name in clocks}
-        require(timing["max_enqueue_reply_ns"] <= timing["max_attempt_reply_ns"] <= 200_000_000
+        require(timing["max_enqueue_reply_ns"] <= timing["max_attempt_reply_ns"]
                 and timing["max_reserve_wait_ns"] <= timing["max_attempt_reply_ns"],
-                "RIB readiness component exceeded unchanged 200 ms deadline")
+                "inconsistent readiness reply intervals")
+        if timing["max_attempt_reply_ns"] > 200_000_000:
+            breaches.append("RIB readiness component exceeded unchanged 200 ms deadline")
     else:
         require(all(probe[name] is None for name in clocks), "correctness readiness clocks must be null")
     target = ("private_outbound_cleanup" if row["cell"].startswith("retirement-adj-out-") else
@@ -1584,8 +1440,9 @@ def validate_retirement_readiness(row: dict, measured: bool, required: bool) -> 
             actual = {field: uint(owner[field], field) for field in owner_clocks}
             require(actual["service_budget_ns"] == 25_000_000, "readiness service budget changed")
             if owner["eligible"]:
-                require(0 < actual["max_checkpoint_interval_ns"] <= 25_000_000,
-                        "uninterrupted instrumented cleanup exceeded 25 ms budget")
+                require(actual["max_checkpoint_interval_ns"] > 0, "empty cleanup checkpoint interval")
+                if actual["max_checkpoint_interval_ns"] > 25_000_000:
+                    breaches.append(f"{name} uninterrupted instrumented cleanup exceeded 25 ms budget")
             # Eligible-opportunity gaps include the service budget plus overshoot;
             # they are evidence, not a second strict 25 ms assertion.
         else:
@@ -1599,10 +1456,10 @@ def validate_retirement_readiness(row: dict, measured: bool, required: bool) -> 
             "owner replies exceed interior producer replies")
     require(owner_admissions <= values["admitted"] - boundary_replies,
             "owner admissions exceed interior producer admissions")
+    return breaches
 
 
-def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bool = True,
-                            readiness_required: bool = False) -> dict:
+def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bool = True) -> dict:
     require(profile in ("full-uc", "full-vpn") or
             (not measured and profile in ("smoke-uc", "smoke-vpn")), "unknown retirement profile")
     require(cell in RETIREMENT_CELLS, "unknown retirement cell")
@@ -1614,10 +1471,11 @@ def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bo
             identities.append(json.loads(line.removeprefix("recovery_identity ")))
     require(len(rows) == 1 and len(identities) == int(measured), "missing or duplicate retirement completion/identity")
     row = rows[0]
-    validate_retirement_readiness(row, measured, readiness_required)
+    result = {"sample": row, "identity": identities[0] if measured else None,
+              "breaches": validate_retirement_readiness(row, measured)}
     if cell not in RETIREMENT_CELLS[:2]:
         validate_receiver_retirement(row, profile, cell, measured)
-        return {"sample": row, "identity": identities[0] if measured else None}
+        return result
     seed = PROFILES[profile][0] if cell == "retirement-full" else (0, 0, 0, 0)
     keys = sum(seed)
     require(row.get("profile") == profile and row.get("cell") == cell
@@ -1653,98 +1511,52 @@ def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bo
                 "retirement phases exceed their containing actor operation")
     else:
         require(row.get("operation_to_barrier_ns") is None, "correctness operation clock must be null")
-    return {"sample": row, "identity": identities[0] if measured else None}
+    return result
 
 
-def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> None:
-    if failed_driver_exit is not None:
-        require(type(failed_driver_exit) is int and failed_driver_exit != 0, "failure exit must be nonzero")
-        root.mkdir(parents=True, exist_ok=True)
-        write_json(root / "comparison.json", {"schema": "rustbgpd.retirement-timing.v1", "status": "INVALID",
-                   "driver_invocation_exit": failed_driver_exit, "samples": [],
-                   "scope": "component attribution only; no daemon/fleet/readiness qualification"})
-        return
-    manifest = json.loads((root / "manifest.json").read_text())
-    version = {"rustbgpd.retirement-timing.campaign.v1": 1,
-               "rustbgpd.retirement-timing.campaign.v2": 2,
-               "rustbgpd.retirement-timing.campaign.v3": 3}.get(manifest.get("schema"))
-    cells = RETIREMENT_CELLS[:2] if version == 1 else RETIREMENT_CELLS
-    require(version is not None and manifest.get("profile") in ("full-uc", "full-vpn")
+def summarize_retirement(root: Path) -> dict:
+    manifest = read_object(root / "manifest.json")
+    require(manifest.get("schema") == "rustbgpd.retirement-timing.campaign.v3"
+            and manifest.get("profile") in ("full-uc", "full-vpn")
             and manifest.get("order") == list(RETIREMENT_ORDER)
-            and manifest.get("cells") == list(cells)
+            and manifest.get("cells") == list(RETIREMENT_CELLS)
             and manifest.get("memory_max") == RETIREMENT_LIMIT, "retirement manifest differs")
-    require(re.fullmatch(r"[0-9a-f]{40}", manifest.get("candidate", "")) is not None,
-            "retirement source is not exact")
+    require(is_sha(manifest.get("candidate")), "retirement source is not exact")
     require((root / "driver.exit").read_text().strip() == "0", "retirement driver/cleanup failed")
-    cleanup = json.loads((root / "cleanup-proof.json").read_text())
-    require(cleanup == {"candidate_worktree_exit": 0, "old_drop_worktree_exit": 0,
-                       "scratch_remove_exit": 0}, "retirement cleanup proof incomplete")
-    expected_inputs = {*INSTRUMENT_INPUTS, *RETIREMENT_INPUTS}
-    if version == 3:
-        expected_inputs.add(RETIREMENT_READINESS_INPUT)
-    inputs = root / "instrumentation.sha256"
-    require(hashlib.sha256(inputs.read_bytes()).hexdigest() == manifest.get("instrumentation_manifest_sha256"),
-            "retirement instrumentation manifest changed")
-    seen = set()
-    for line in inputs.read_text().splitlines():
-        digest, name = line.split("  ", 1)
-        require(name in expected_inputs and name not in seen, "retirement instrumentation roster differs")
-        require(hashlib.sha256((root / "frozen-instrumentation" / name).read_bytes()).hexdigest() == digest,
-                "retirement frozen source changed")
-        seen.add(name)
-    require(seen == expected_inputs, "missing retirement frozen source")
-    maps = {role: json.loads((root / f"{role}-inputs.json").read_text()) for role in ("candidate", "old-drop")}
-    require(maps["candidate"] == json.loads((root / "committed-inputs.json").read_text())
-            and {"Cargo.toml", "Cargo.lock", "crates/rib/Cargo.toml"} <= maps["candidate"].keys(),
-            "retirement candidate differs from committed build inputs")
-    require(bool(maps["candidate"]) and maps["candidate"].keys() == maps["old-drop"].keys(),
-            "retirement tracked source roster differs")
-    require([name for name in maps["candidate"] if maps["candidate"][name] != maps["old-drop"][name]]
-            == [RETIREMENT_SOURCE], "retirement control changed unrelated build inputs")
-    original = (root / "frozen-instrumentation" / RETIREMENT_SOURCE).read_text()
-    control = (root / "old-drop-source.rs").read_text()
-    require(control == retirement_control(original), "retirement old-drop derivation differs")
-    for role, source in (("candidate", original), ("old-drop", control)):
-        require(maps[role] == json.loads((root / f"{role}-inputs-after.json").read_text()),
-                "retirement build inputs changed during compilation")
-        require(maps[role][RETIREMENT_SOURCE] == hashlib.sha256(source.encode()).hexdigest(),
-                "retirement built stage source differs")
-        require((root / f"{role}-build.exit").read_text().strip() == "0"
-                and re.search(
-                    r"(?m)^[ \t]*Compiling[ \t]+rustbgpd-rib[ \t]+",
-                    re.sub(r"\x1b\[[0-9;]*m", "", (root / f"{role}-build.log").read_text()),
-                ) is not None,
-                "retirement RIB build missing or failed")
-    for name in expected_inputs:
-        require(maps["candidate"].get(name) == hashlib.sha256((root / "frozen-instrumentation" / name).read_bytes()).hexdigest(),
-                "retirement candidate build/source mismatch")
+    # The control is the candidate tree plus one derived stage-retirement change.
+    require((root / "candidate-source.patch").read_text() == "",
+            "retirement candidate differs from the committed source")
+    require(re.findall(r"(?m)^diff --git a/(\S+) b/", (root / "old-drop-source.patch").read_text())
+            == [RETIREMENT_SOURCE], "retirement control changed unrelated sources")
+    binary_hashes = {}
+    for role in ("candidate", "old-drop"):
+        require((root / f"{role}-build.exit").read_text().strip() == "0", "retirement build failed")
+        binary_hashes[role] = (root / f"{role}-binary.sha256").read_text().strip()
+        require(is_sha(binary_hashes[role], 64), "missing retirement binary hash")
+    require(binary_hashes["candidate"] != binary_hashes["old-drop"],
+            "retirement source controls used the same binary")
     expected_dirs = {f"{cell}-{leg}-{role}" for cell in manifest["cells"]
                      for leg, role in enumerate(RETIREMENT_ORDER)}
     require({path.name for path in root.glob("retirement-*") if path.is_dir()} == expected_dirs,
             "retirement cell/leg roster differs")
-    samples = []
+    samples, breaches = [], []
     scopes, workloads = set(), set()
-    binary_hashes = {role: (root / f"{role}-binary.sha256").read_text().strip()
-                     for role in ("candidate", "old-drop")}
     for cell in manifest["cells"]:
         for leg, role in enumerate(RETIREMENT_ORDER):
             directory = root / f"{cell}-{leg}-{role}"
-            require(json.loads((directory / "raw-sha256.json").read_text()) == retirement_raw_hashes(directory),
-                    "retirement raw evidence roster/hash differs")
             require((directory / "launcher.exit").read_text().strip() == "0", "retirement launcher failed")
-            require(json.loads((directory / "status.json").read_text()) ==
+            require(read_object(directory / "status.json") ==
                     {"exit": 0, "timeout": False, "cgroup_valid": True, "ownership_valid": True},
                     "retirement workload/scope failed")
-            result = validate_retirement_log(directory / "harness.log", manifest["profile"], cell,
-                                             readiness_required=version == 3)
+            result = validate_retirement_log(directory / "harness.log", manifest["profile"], cell)
             identity, sample = result["identity"], result["sample"]
-            process = json.loads((directory / "binary-process.json").read_text())
-            binary_hash = binary_hashes[role]
-            require(re.fullmatch(r"[0-9a-f]{64}", binary_hash) is not None
-                    and hashlib.sha256((root / "bin" / role).read_bytes()).hexdigest() == binary_hash
-                    and process["exe_sha256"] == binary_hash, "retirement executed binary differs")
+            breaches += [f"{directory.name}: {breach}" for breach in result["breaches"]]
+            process = read_object(directory / "binary-process.json")
+            # Both arms embed the candidate SHA, so only the executed binary
+            # proves that this leg ran its own arm.
+            require(process.get("exe_sha256") == binary_hashes[role],
+                    "retirement leg did not execute its arm's binary")
             require(identity["source_sha"] == manifest["candidate"]
-                    and identity["instrumentation_sha256"] == manifest["instrumentation_manifest_sha256"]
                     and (identity["pid"], identity["start_ticks"]) == (process["pid"], process["start_ticks"]),
                     "retirement compiled/process identity differs")
             cgroup = (directory / "cgroup-path.txt").read_text().strip()
@@ -1760,23 +1572,16 @@ def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> N
                 require((directory / boundary / "memory.max").read_text().strip() == str(RETIREMENT_LIMIT),
                         "retirement memory limit differs")
             check_peak_coverage(scope_values(directory / "before"), [], scope_values(directory / "after"))
-            require(json.loads((directory / "command.json").read_text()) ==
-                    [process["executable"], "recovery-retirement", cell, manifest["profile"]],
+            require(json.loads((directory / "command.json").read_text())[1:] ==
+                    ["recovery-retirement", cell, manifest["profile"]],
                     "retirement actual command differs")
             samples.append({"arm": role, "leg": leg, **sample})
-    require(binary_hashes["candidate"] != binary_hashes["old-drop"],
-            "retirement source controls used the same binary")
     before = (root / "host-oom.before").read_text().strip()
     require(before.isdigit() and before == (root / "host-oom.after").read_text().strip(),
             "host OOM invalidates retirement receipt")
-    preflight = json.loads((root / "retirement-preflight.json").read_text())
-    require(uint(preflight.get("available_bytes"), "available memory") >= RETIREMENT_LIMIT
-            and preflight.get("minimum_bytes") == preflight.get("memory_max") == RETIREMENT_LIMIT
-            and preflight.get("swap_max") == 0, "retirement resource preflight differs")
     summaries = []
-    phases = {"vpn_stage": "retirement-full", "adj_rib_in": "retirement-full"}
-    if version >= 2:
-        phases.update(adj_rib_out="retirement-adj-out-full", regroup_baseline="retirement-regroup-full")
+    phases = {"vpn_stage": "retirement-full", "adj_rib_in": "retirement-full",
+              "adj_rib_out": "retirement-adj-out-full", "regroup_baseline": "retirement-regroup-full"}
     for phase, full_cell in phases.items():
         for role in ("old-drop", "candidate"):
             values = [row[phase]["elapsed_ns"] for row in samples
@@ -1786,15 +1591,22 @@ def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> N
                               "observations": len(values),
                               "median_ns": statistics.median(values) if values else None,
                               "max_ns": max(values) if values else None})
-    write_json(root / "comparison.json", {"schema": f"rustbgpd.retirement-timing.v{version}", "status": "COMPLETE",
-               "candidate": manifest["candidate"], "profile": manifest["profile"],
-               "scope": ("instrumented component attribution; no complete HTTP/fleet qualification" if version == 3 else
-                         "component attribution only; no daemon/fleet/readiness qualification or timing pass bar")
-                        + ("; receiver cleanup is identical in both arms, with no cleanup improvement comparison"
-                           if version >= 2 else "")
-                        + ("; instrumented cleanup callback intervals <=25 ms and one-inflight RIB replies <=200 ms; "
-                           "not complete HTTP readiness qualification" if version == 3 else ""),
-               "samples": samples, "summaries": summaries})
+    return {"candidate": manifest["candidate"], "profile": manifest["profile"],
+            "scope": "instrumented component attribution; no complete HTTP/fleet qualification; "
+                     "receiver cleanup is identical in both arms, with no cleanup improvement comparison; "
+                     "instrumented cleanup callback intervals <=25 ms and one-inflight RIB replies <=200 ms",
+            "samples": samples, "summaries": summaries,
+            "verdict": "FAIL" if breaches else "PASS",
+            "reason": "readiness bar exceeded: " + "; ".join(breaches) if breaches else
+                      f"all {len(samples)} retirement legs passed inventory, phase and readiness checks; "
+                      "no timing pass bar"}
+
+
+SUMMARIES = {
+    "summarize": ("rustbgpd.recovery-memory.comparison.v2", summarize),
+    "summarize-scan": (SCAN_SCHEMA, summarize_scan),
+    "summarize-retirement": ("rustbgpd.retirement-timing.v3", summarize_retirement),
+}
 
 
 def main() -> None:
@@ -1806,14 +1618,8 @@ def main() -> None:
     control_api.add_argument("tree", type=Path)
     normalize = sub.add_parser("normalize-memory-entrypoint")
     normalize.add_argument("path", type=Path)
-    normalize.add_argument("output", type=Path)
-    build_inputs = sub.add_parser("snapshot-build-inputs")
-    build_inputs.add_argument("tree", type=Path)
-    build_inputs.add_argument("output", type=Path)
     old_drop = sub.add_parser("derive-retirement-control")
     old_drop.add_argument("path", type=Path)
-    seal = sub.add_parser("seal-retirement-raw")
-    seal.add_argument("directory", type=Path)
     scope = sub.add_parser("scope-check")
     scope.add_argument("path", type=Path)
     snapshot = sub.add_parser("scope-snapshot")
@@ -1824,64 +1630,44 @@ def main() -> None:
     run.add_argument("output", type=Path)
     run.add_argument("cell", choices=(*CELLS, "capture-scan", *RETIREMENT_CELLS))
     run.add_argument("cgroup", type=Path)
-    run.add_argument("expected_digest")
     run.add_argument("profile", choices=(*PROFILES, "evpn-soak"))
     run.add_argument("clients", type=int)
     run.add_argument("--scan", action="store_true")
     run.add_argument("--retirement", action="store_true")
     run.add_argument("--shuffled-old", action="store_true")
-    scan = sub.add_parser("summarize-scan")
-    scan.add_argument("root", type=Path)
-    scan.add_argument("--failed-driver-exit", type=int)
-    retirement = sub.add_parser("summarize-retirement")
-    retirement.add_argument("root", type=Path)
-    retirement.add_argument("--failed-driver-exit", type=int)
-    compare = sub.add_parser("summarize")
-    compare.add_argument("root", type=Path)
-    compare.add_argument("--failed-driver-exit", type=int)
+    for name in SUMMARIES:
+        summary = sub.add_parser(name)
+        summary.add_argument("root", type=Path)
+        summary.add_argument("--failed-driver-exit", type=int)
     args = parser.parse_args()
+    if args.command in SUMMARIES:
+        schema, summary = SUMMARIES[args.command]
+        sys.exit(0 if conclude(args.root, schema, summary, args.failed_driver_exit) else 1)
     try:
         if args.command == "instrument-observer":
             instrument_observer(args.tree)
         elif args.command == "derive-control-api":
             derive_control_api(args.tree)
         elif args.command == "normalize-memory-entrypoint":
-            normalize_memory_entrypoint(args.path, args.output)
-        elif args.command == "snapshot-build-inputs":
-            snapshot_build_inputs(args.tree, args.output)
+            normalize_memory_entrypoint(args.path)
         elif args.command == "derive-retirement-control":
             args.path.write_text(retirement_control(args.path.read_text()))
-        elif args.command == "seal-retirement-raw":
-            write_json(args.directory / "raw-sha256.json", retirement_raw_hashes(args.directory))
         elif args.command == "scope-check":
             print(json.dumps(scope_values(args.path), sort_keys=True))
         elif args.command == "scope-snapshot":
             snapshot_scope(args.path, args.output)
-        elif args.command == "run-scope":
+        else:
             run_scope(
                 args.binary,
                 args.output,
                 args.cell,
                 args.cgroup,
-                args.expected_digest,
                 args.profile,
                 args.clients,
                 scan=args.scan,
                 shuffled_old=args.shuffled_old,
                 retirement=args.retirement,
             )
-        elif args.command == "summarize-retirement":
-            summarize_retirement(args.root, args.failed_driver_exit)
-        elif args.command == "summarize-scan":
-            if args.failed_driver_exit is not None:
-                summarize_failed(args.root, args.failed_driver_exit, scan=True)
-            else:
-                summarize_scan(args.root)
-        else:
-            if args.failed_driver_exit is not None:
-                summarize_failed(args.root, args.failed_driver_exit)
-            else:
-                summarize(args.root)
     except (InvalidReceipt, OSError, ValueError, KeyError) as error:
         print(f"invalid recovery receipt: {error}", file=sys.stderr)
         sys.exit(1)
