@@ -156,7 +156,7 @@ inputs=(bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_mem
 [[ $receipt_mode != retirement ]] || inputs+=(
     bench/scale/rrharness/src/recovery_retirement.rs
     crates/rib/src/manager/bench_support.rs crates/rib/src/manager/distribution/vpn.rs
-    crates/rib/src/manager/peer_lifecycle.rs)
+    crates/rib/src/manager/peer_lifecycle.rs crates/rib/src/manager/mod.rs)
 mkdir "$output/frozen-instrumentation"
 for path in "${inputs[@]}"; do
     mkdir -p -- "$output/frozen-instrumentation/$(dirname -- "$path")"
@@ -189,12 +189,14 @@ import json
 from pathlib import Path
 import sys
 Path(sys.argv[1]).write_text(json.dumps({
-    "schema": "rustbgpd.retirement-timing.campaign.v1", "candidate": sys.argv[2],
+    "schema": "rustbgpd.retirement-timing.campaign.v3", "candidate": sys.argv[2],
     "instrumentation_manifest_sha256": sys.argv[3], "profile": sys.argv[4],
-    "cells": ["retirement-empty", "retirement-full"],
+    "cells": ["retirement-empty", "retirement-full",
+              "retirement-adj-out-empty", "retirement-adj-out-full",
+              "retirement-regroup-empty", "retirement-regroup-full"],
     "order": ["old-drop", "candidate", "candidate", "old-drop"],
     "memory_max": 12 * 1024**3, "build_jobs": 4,
-    "scope": "component attribution only; no daemon/fleet/readiness qualification or timing pass bar",
+    "scope": "instrumented component attribution and cleanup checkpoint/RIB-query bounds only; no full HTTP/fleet qualification; receiver cleanup is identical in both arms, with no cleanup improvement comparison",
 }, indent=2, sort_keys=True) + "\n")
 PYCODE
     mkdir "$output/bin"
@@ -223,7 +225,9 @@ PYCODE
         provenance_sha256_file "$output/bin/$role" > "$output/$role-binary.sha256"
     done
     ordinal=0
-    for cell in retirement-empty retirement-full; do
+    for cell in retirement-empty retirement-full retirement-adj-out-empty retirement-adj-out-full retirement-regroup-empty retirement-regroup-full; do
+        clients=2
+        [[ $cell != retirement-empty && $cell != retirement-full ]] || clients=1
         leg=0
         for role in old-drop candidate candidate old-drop; do
             directory=$output/$cell-$leg-$role
@@ -232,7 +236,7 @@ PYCODE
             launch_scope "recovery-retirement-$$-$ordinal.scope" env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
                 RECOVERY_MEMORY_RUNNER_ENVIRONMENT="${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}}" \
                 bash "$driver" --scope-retirement "$output/bin/$role" "$directory" "$cell" \
-                "$(cat "$output/$role-binary.sha256")" "$profile" 1 \
+                "$(cat "$output/$role-binary.sha256")" "$profile" "$clients" \
                 > "$directory/launcher.log" 2>&1 || status=$?
             printf '%s\n' "$status" > "$directory/launcher.exit"
             python3 "$checker" seal-retirement-raw "$directory"

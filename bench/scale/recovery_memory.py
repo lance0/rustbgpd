@@ -36,8 +36,14 @@ RETIREMENT_INPUTS = (
     RETIREMENT_SOURCE,
     "crates/rib/src/manager/peer_lifecycle.rs",
 )
+RETIREMENT_READINESS_INPUT = "crates/rib/src/manager/mod.rs"
 RETIREMENT_LIMIT = 12 * 1024**3
 RETIREMENT_ORDER = ("old-drop", "candidate", "candidate", "old-drop")
+RETIREMENT_CELLS = (
+    "retirement-empty", "retirement-full",
+    "retirement-adj-out-empty", "retirement-adj-out-full",
+    "retirement-regroup-empty", "retirement-regroup-full",
+)
 CELLS = ("dataset-reevaluate", "peer-down", "widen", "unsynchronized-dirty")
 FAMILIES = ("ipv4_unicast", "ipv6_unicast", "vpnv4", "vpnv6")
 PROFILES = {
@@ -506,8 +512,9 @@ def run_scope(
     capture_ownership(cgroup, output, owned, "before")
     require(not (scan and retirement), "conflicting component receipt modes")
     if retirement:
-        require(not shuffled_old and clients == 1 and profile in ("full-uc", "full-vpn")
-                and cell in ("retirement-empty", "retirement-full"), "invalid retirement cell")
+        require(not shuffled_old and cell in RETIREMENT_CELLS
+                and clients == (1 if cell in RETIREMENT_CELLS[:2] else 2)
+                and profile in ("full-uc", "full-vpn"), "invalid retirement cell")
         require((cgroup / "memory.max").read_text().strip() == str(RETIREMENT_LIMIT),
                 "retirement cgroup memory limit differs")
         command = [str(binary), "recovery-retirement", cell, profile]
@@ -1410,10 +1417,172 @@ def summarize_scan(root: Path) -> None:
                       "qualification_passed": result["qualification_passed"]}))
 
 
-def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bool = True) -> dict:
+def validate_receiver_retirement(row: dict, profile: str, cell: str, measured: bool) -> None:
+    """Receiver-owned frees keep source, selected routes and witness alive."""
+    full = cell.endswith("-full")
+    private = cell.startswith("retirement-adj-out-")
+    original = PROFILES[profile][0]
+    keys = sum(original) if full else 0
+    seed = tuple(int(count > 0) for count in original) if private else (original if full else (0,) * 4)
+    require(row.get("profile") == profile and row.get("cell") == cell
+            and row.get("measured") is measured and uint(row.get("receivers"), "receivers") == 2
+            and uint(row.get("keys"), "retired keys") == keys, "receiver retirement shape differs")
+    first = next(index for index, count in enumerate(original) if count)
+    zero = {"present": 0, "announces": 0, "withdrawals": 0}
+    for boundary in ("initial", "settled"):
+        require(set(row.get(boundary, {})) == {"target", "witness"}, "receiver fold roster differs")
+        for receiver in ("target", "witness"):
+            actual = row[boundary][receiver]
+            require(set(actual) == set(FAMILIES), "receiver family roster differs")
+            for index, (family, count) in enumerate(zip(FAMILIES, seed, strict=True)):
+                churn = 4 if not private and boundary == "settled" and index == first else 0
+                expected = {"present": count, "announces": count + churn, "withdrawals": churn}
+                require(set(actual[family]) == set(expected)
+                        and {name: uint(value, name) for name, value in actual[family].items()} == expected,
+                        "receiver initial/folded wire inventory differs")
+    evpn = row.get("private_evpn", {})
+    require(set(evpn) == {"initial", "settled"}, "private EVPN boundary roster differs")
+    for boundary in ("initial", "settled"):
+        require(set(evpn[boundary]) == {"target", "witness"}, "private EVPN receiver roster differs")
+        for receiver in ("target", "witness"):
+            actual = evpn[boundary][receiver]
+            expected = ({"present": keys, "announces": max(keys, 1), "withdrawals": int(not full)}
+                        if private else zero)
+            require(set(actual) == set(expected)
+                    and {name: uint(value, name) for name, value in actual.items()} == expected,
+                    "private EVPN exact fold differs")
+    prep = row.get("preparation", {})
+    expected = {"inputs": 0 if private else 8, "target_queue_capacity": 8 if private else 0,
+                "dirty_peers": int(not private), "group_dirty_members": int(not private),
+                "regroup_baselines": int(not private)}
+    require(set(prep) == set(expected)
+            and {name: uint(value, name) for name, value in prep.items()} == expected,
+            "real queue/regroup preparation differs")
+    survivors = row.get("survivors", {})
+    require(set(survivors) == {"target_group_before", "witness_group_before", "target_group_after",
+            "witness_group_after", "source_group_before", "source_group_after", "source_fold",
+            "source_evpn_fold", "selected", "evpn_received_best", "health"},
+            "receiver survivor proof roster differs")
+    group = survivors["target_group_before"]
+    require(isinstance(group, str) and re.fullmatch(r"group:[0-9]+", group) is not None
+            and survivors["witness_group_before"] == survivors["witness_group_after"] == group
+            and survivors["target_group_after"] == ""
+            and isinstance(survivors["source_group_after"], str)
+            and survivors["source_group_before"] == survivors["source_group_after"]
+            and re.fullmatch(r"group:[0-9]+", survivors["source_group_after"]) is not None,
+            "receiver departure changed surviving registration/group identity")
+    require(set(survivors["source_fold"]) == set(FAMILIES)
+            and all(set(fold) == set(zero) and {name: uint(value, name) for name, value in fold.items()} == zero
+                    for fold in survivors["source_fold"].values())
+            and set(survivors["source_evpn_fold"]) == set(zero)
+            and {name: uint(value, name) for name, value in survivors["source_evpn_fold"].items()} == zero
+            and isinstance(survivors["selected"], list)
+            and [uint(value, "selected") for value in survivors["selected"]] == list(seed)
+            and isinstance(survivors["evpn_received_best"], list)
+            and [uint(value, "EVPN received/best") for value in survivors["evpn_received_best"]]
+                == [keys if private else 0] * 2
+            and isinstance(survivors["health"], list)
+            and [uint(value, "health") for value in survivors["health"]] == [0] * 6,
+            "receiver departure lost selected/source state or retained dirty work")
+    active_ns = 0
+    for phase in ("vpn_stage", "adj_rib_in", "adj_rib_out", "regroup_baseline"):
+        actual = row.get(phase, {})
+        require(set(actual) == {"calls", "keys", "groups", "elapsed_ns"}, "missing receiver retirement phase")
+        eligible = phase == "adj_rib_out" or (phase == "regroup_baseline" and not private)
+        retired = keys if phase == ("adj_rib_out" if private else "regroup_baseline") else 0
+        require(uint(actual["calls"], "calls") == int(eligible)
+                and uint(actual["keys"], "keys") == retired
+                and uint(actual["groups"], "groups") == 0,
+                "receiver retirement phase missing or wrong cardinality")
+        if measured and eligible:
+            elapsed = uint(actual["elapsed_ns"], "elapsed_ns")
+            require(elapsed > 0, "zero receiver retirement duration is not a measurement")
+            active_ns += elapsed
+        else:
+            require(actual["elapsed_ns"] is None, "unmeasured receiver clock must be null")
+    if measured:
+        require(uint(row.get("operation_to_barrier_ns"), "operation duration") >= active_ns > 0,
+                "receiver phases exceed their containing actor operation")
+    else:
+        require(row.get("operation_to_barrier_ns") is None, "correctness receiver clock must be null")
+
+
+def validate_retirement_readiness(row: dict, measured: bool, required: bool) -> None:
+    data = row.get("readiness")
+    if data is None and not required:
+        return  # Historical v1/v2 archives predate this evidence.
+    require(isinstance(data, dict) and set(data) == {"probe", "owners"}, "missing retirement readiness evidence")
+    probe = data["probe"]
+    require(isinstance(probe, dict) and isinstance(data["owners"], dict), "invalid readiness objects")
+    counts = {"attempts", "admitted", "replied", "errors", "max_inflight",
+              "before_capture_replies", "after_barrier_replies"}
+    clocks = {"max_reserve_wait_ns", "max_enqueue_reply_ns", "max_attempt_reply_ns", "max_refill_gap_ns"}
+    require(set(probe) == counts | clocks, "readiness probe roster differs")
+    values = {name: uint(probe[name], name) for name in counts}
+    require(values["attempts"] == values["admitted"] == values["replied"] >= 2
+            and values["errors"] == 0 and values["max_inflight"] == 1
+            and values["before_capture_replies"] == values["after_barrier_replies"] == 1,
+            "readiness probe errors, missing coverage or unbounded concurrency")
+    if measured:
+        timing = {name: uint(probe[name], name) for name in clocks}
+        require(timing["max_enqueue_reply_ns"] <= timing["max_attempt_reply_ns"] <= 200_000_000
+                and timing["max_reserve_wait_ns"] <= timing["max_attempt_reply_ns"],
+                "RIB readiness component exceeded unchanged 200 ms deadline")
+    else:
+        require(all(probe[name] is None for name in clocks), "correctness readiness clocks must be null")
+    target = ("private_outbound_cleanup" if row["cell"].startswith("retirement-adj-out-") else
+              "regroup_baseline_cleanup" if row["cell"].startswith("retirement-regroup-") else
+              "received_cleanup_including_gc")
+    names = {"received_cleanup_including_gc", "private_outbound_cleanup", "regroup_baseline_cleanup"}
+    require(set(data["owners"]) == names, "readiness owner roster differs")
+    counters = {"owners", "invalid_owners", "callbacks", "body_callbacks", "admitted", "serviced", "replied", "body_replied"}
+    owner_clocks = {"max_checkpoint_interval_ns", "max_eligible_opportunity_gap_ns", "service_budget_ns"}
+    owner_replies = owner_admissions = 0
+    for name, owner in data["owners"].items():
+        require(set(owner) == counters | owner_clocks | {"overlap", "eligible"}, "readiness owner fields differ")
+        v = {field: uint(owner[field], field) for field in counters}
+        require(v["owners"] <= 1 and v["invalid_owners"] == 0
+                and v["body_replied"] <= v["replied"] <= v["admitted"] <= v["serviced"],
+                "mixed/cross-boundary or invalid owner replies")
+        owner_replies += v["replied"]
+        owner_admissions += v["admitted"]
+        require((v["callbacks"] >= v["body_callbacks"] + 2) if v["owners"] else
+                all(value == 0 for value in v.values()), "missing owner entry/body/exit coverage")
+        keys = row["keys"] if name == target else 0
+        if name == target:
+            require(v["owners"] == 1 and v["body_callbacks"] >= keys, "missing productive cleanup callbacks")
+        overlap = (keys > 0 and v["owners"] == 1 and v["body_callbacks"] >= keys
+                   and v["admitted"] > 0 and v["replied"] == v["admitted"] and v["body_replied"] > 0)
+        require(owner["overlap"] is overlap and owner["eligible"] is (measured and overlap),
+                "false readiness overlap or eligibility")
+        if measured and name == target and keys > 0:
+            require(overlap, "full cleanup lacks real in-owner admission/reply overlap at a nonforced cleanup callback")
+        if measured and v["owners"]:
+            actual = {field: uint(owner[field], field) for field in owner_clocks}
+            require(actual["service_budget_ns"] == 25_000_000, "readiness service budget changed")
+            if owner["eligible"]:
+                require(0 < actual["max_checkpoint_interval_ns"] <= 25_000_000,
+                        "uninterrupted instrumented cleanup exceeded 25 ms budget")
+            # Eligible-opportunity gaps include the service budget plus overshoot;
+            # they are evidence, not a second strict 25 ms assertion.
+        else:
+            require(all(owner[field] is None for field in owner_clocks), "unmeasured owner clocks must be null")
+    # The sole producer completes one request before capture and starts its
+    # final request after the FIFO barrier. Neither can belong to an owner.
+    # Other interior requests may be served outside owners, so these are bounds,
+    # not equalities. Serviced also includes requests queued before owner entry.
+    boundary_replies = values["before_capture_replies"] + values["after_barrier_replies"]
+    require(owner_replies <= values["replied"] - boundary_replies,
+            "owner replies exceed interior producer replies")
+    require(owner_admissions <= values["admitted"] - boundary_replies,
+            "owner admissions exceed interior producer admissions")
+
+
+def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bool = True,
+                            readiness_required: bool = False) -> dict:
     require(profile in ("full-uc", "full-vpn") or
             (not measured and profile in ("smoke-uc", "smoke-vpn")), "unknown retirement profile")
-    require(cell in ("retirement-empty", "retirement-full"), "unknown retirement cell")
+    require(cell in RETIREMENT_CELLS, "unknown retirement cell")
     rows, identities = [], []
     for line in path.read_text().splitlines():
         if line.startswith("retirement_receipt "):
@@ -1422,6 +1591,10 @@ def validate_retirement_log(path: Path, profile: str, cell: str, *, measured: bo
             identities.append(json.loads(line.removeprefix("recovery_identity ")))
     require(len(rows) == 1 and len(identities) == int(measured), "missing or duplicate retirement completion/identity")
     row = rows[0]
+    validate_retirement_readiness(row, measured, readiness_required)
+    if cell not in RETIREMENT_CELLS[:2]:
+        validate_receiver_retirement(row, profile, cell, measured)
+        return {"sample": row, "identity": identities[0] if measured else None}
     seed = PROFILES[profile][0] if cell == "retirement-full" else (0, 0, 0, 0)
     keys = sum(seed)
     require(row.get("profile") == profile and row.get("cell") == cell
@@ -1469,10 +1642,13 @@ def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> N
                    "scope": "component attribution only; no daemon/fleet/readiness qualification"})
         return
     manifest = json.loads((root / "manifest.json").read_text())
-    require(manifest.get("schema") == "rustbgpd.retirement-timing.campaign.v1"
-            and manifest.get("profile") in ("full-uc", "full-vpn")
+    version = {"rustbgpd.retirement-timing.campaign.v1": 1,
+               "rustbgpd.retirement-timing.campaign.v2": 2,
+               "rustbgpd.retirement-timing.campaign.v3": 3}.get(manifest.get("schema"))
+    cells = RETIREMENT_CELLS[:2] if version == 1 else RETIREMENT_CELLS
+    require(version is not None and manifest.get("profile") in ("full-uc", "full-vpn")
             and manifest.get("order") == list(RETIREMENT_ORDER)
-            and manifest.get("cells") == ["retirement-empty", "retirement-full"]
+            and manifest.get("cells") == list(cells)
             and manifest.get("memory_max") == RETIREMENT_LIMIT, "retirement manifest differs")
     require(re.fullmatch(r"[0-9a-f]{40}", manifest.get("candidate", "")) is not None,
             "retirement source is not exact")
@@ -1481,6 +1657,8 @@ def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> N
     require(cleanup == {"candidate_worktree_exit": 0, "old_drop_worktree_exit": 0,
                        "scratch_remove_exit": 0}, "retirement cleanup proof incomplete")
     expected_inputs = {*INSTRUMENT_INPUTS, *RETIREMENT_INPUTS}
+    if version == 3:
+        expected_inputs.add(RETIREMENT_READINESS_INPUT)
     inputs = root / "instrumentation.sha256"
     require(hashlib.sha256(inputs.read_bytes()).hexdigest() == manifest.get("instrumentation_manifest_sha256"),
             "retirement instrumentation manifest changed")
@@ -1534,7 +1712,8 @@ def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> N
             require(json.loads((directory / "status.json").read_text()) ==
                     {"exit": 0, "timeout": False, "cgroup_valid": True, "ownership_valid": True},
                     "retirement workload/scope failed")
-            result = validate_retirement_log(directory / "harness.log", manifest["profile"], cell)
+            result = validate_retirement_log(directory / "harness.log", manifest["profile"], cell,
+                                             readiness_required=version == 3)
             identity, sample = result["identity"], result["sample"]
             process = json.loads((directory / "binary-process.json").read_text())
             binary_hash = binary_hashes[role]
@@ -1572,18 +1751,26 @@ def summarize_retirement(root: Path, failed_driver_exit: int | None = None) -> N
             and preflight.get("minimum_bytes") == preflight.get("memory_max") == RETIREMENT_LIMIT
             and preflight.get("swap_max") == 0, "retirement resource preflight differs")
     summaries = []
-    for phase in ("vpn_stage", "adj_rib_in"):
+    phases = {"vpn_stage": "retirement-full", "adj_rib_in": "retirement-full"}
+    if version >= 2:
+        phases.update(adj_rib_out="retirement-adj-out-full", regroup_baseline="retirement-regroup-full")
+    for phase, full_cell in phases.items():
         for role in ("old-drop", "candidate"):
             values = [row[phase]["elapsed_ns"] for row in samples
-                      if row["cell"] == "retirement-full" and row["arm"] == role
+                      if row["cell"] == full_cell and row["arm"] == role
                       and row[phase]["elapsed_ns"] is not None]
             summaries.append({"phase": phase, "arm": role, "eligible": bool(values),
                               "observations": len(values),
                               "median_ns": statistics.median(values) if values else None,
                               "max_ns": max(values) if values else None})
-    write_json(root / "comparison.json", {"schema": "rustbgpd.retirement-timing.v1", "status": "COMPLETE",
+    write_json(root / "comparison.json", {"schema": f"rustbgpd.retirement-timing.v{version}", "status": "COMPLETE",
                "candidate": manifest["candidate"], "profile": manifest["profile"],
-               "scope": "component attribution only; no daemon/fleet/readiness qualification or timing pass bar",
+               "scope": ("instrumented component attribution; no complete HTTP/fleet qualification" if version == 3 else
+                         "component attribution only; no daemon/fleet/readiness qualification or timing pass bar")
+                        + ("; receiver cleanup is identical in both arms, with no cleanup improvement comparison"
+                           if version >= 2 else "")
+                        + ("; instrumented cleanup callback intervals <=25 ms and one-inflight RIB replies <=200 ms; "
+                           "not complete HTTP readiness qualification" if version == 3 else ""),
                "samples": samples, "summaries": summaries})
 
 
@@ -1610,7 +1797,7 @@ def main() -> None:
     run = sub.add_parser("run-scope")
     run.add_argument("binary", type=Path)
     run.add_argument("output", type=Path)
-    run.add_argument("cell", choices=(*CELLS, "capture-scan", "retirement-empty", "retirement-full"))
+    run.add_argument("cell", choices=(*CELLS, "capture-scan", *RETIREMENT_CELLS))
     run.add_argument("cgroup", type=Path)
     run.add_argument("expected_digest")
     run.add_argument("profile", choices=(*PROFILES, "evpn-soak"))

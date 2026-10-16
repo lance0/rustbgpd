@@ -1290,6 +1290,13 @@ struct ReplacementReadinessContext {
     state: Mutex<ReplacementReadiness>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadinessOwnerKind {
+    Replacement,
+    SelectionRelease,
+    PeerTeardown,
+}
+
 /// Register the checkpoint wake when empty, without charging the synchronous
 /// owner's Tokio task budget. The caller retains the existing per-lane cap.
 fn poll_readiness_query<T>(rx: &mut mpsc::Receiver<T>, cx: &mut Context<'_>) -> Poll<Option<T>> {
@@ -1305,8 +1312,9 @@ struct ReplacementReadiness {
     rx: Option<mpsc::Receiver<RibReadinessQuery>>,
     metrics: BgpMetrics,
     count: usize,
-    /// Only selection release changes Loc-RIB while this owner is held.
-    selection_release: bool,
+    /// Selection release and source teardown publish completed prefix changes;
+    /// replacement ownership always keeps its original frozen count.
+    kind: ReadinessOwnerKind,
     started: tokio::time::Instant,
     /// Tokio's clock, so a test can hold the service budget still with a
     /// paused clock; outside a paused runtime it reads the system clock.
@@ -1318,11 +1326,14 @@ struct ReplacementReadiness {
     max_gap: std::time::Duration,
     #[cfg(any(test, feature = "bench-internals"))]
     serviced: usize,
+    #[cfg(feature = "bench-internals")]
+    retirement: bench_support::RetirementReadiness,
 }
 
 #[cfg(test)]
 #[derive(Debug)]
 struct ReplacementReadinessReceipt {
+    kind: ReadinessOwnerKind,
     count: usize,
     elapsed: std::time::Duration,
     max_gap: std::time::Duration,
@@ -1350,14 +1361,51 @@ fn replacement_readiness_checkpoint_at(
             observer(stage);
         }
     }
-    #[cfg(not(test))]
+    #[cfg(all(not(test), not(feature = "bench-internals")))]
     let _ = stage;
+    #[cfg(feature = "bench-internals")]
+    replacement_readiness_checkpoint_tagged(readiness, force, Some(stage), false);
+    #[cfg(not(feature = "bench-internals"))]
     replacement_readiness_checkpoint(readiness, force);
+}
+
+/// Classify only the current helper callback, never a remembered stage or ordinal.
+#[expect(clippy::ref_option, reason = "cleanup borrows its existing owner")]
+fn replacement_readiness_cleanup_checkpoint(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    stage: &'static str,
+    progress: crate::adj_rib_out::RetirementProgress,
+) {
+    #[cfg(all(test, feature = "bench-internals"))]
+    if let Some(context) = readiness {
+        let observer = context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observer
+            .clone();
+        if let Some(observer) = observer {
+            observer(stage);
+        }
+    }
+    #[cfg(feature = "bench-internals")]
+    replacement_readiness_checkpoint_tagged(
+        readiness,
+        false,
+        Some(stage),
+        progress == crate::adj_rib_out::RetirementProgress::Progress,
+    );
+    #[cfg(not(feature = "bench-internals"))]
+    {
+        let _ = progress;
+        replacement_readiness_checkpoint_at(readiness, stage, false);
+    }
 }
 
 /// Call only on the actor while its synchronous readiness owner is held.
 /// The shared handle exposes readiness and frozen values; canonical RIB
 /// state remains exclusively owned by the actor.
+#[cfg(not(feature = "bench-internals"))]
 #[expect(
     clippy::ref_option,
     reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
@@ -1369,10 +1417,7 @@ fn replacement_readiness_checkpoint(
     let Some(context) = readiness else {
         return;
     };
-    // Instrumented builds still measure every eligible opportunity, including
-    // idle checkpoints. Once armed, production idle dispatch needs no mutex
-    // or clock. A capped drain retains its hint until it can rearm below.
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     {
         let mut readiness = context
             .state
@@ -1389,7 +1434,73 @@ fn replacement_readiness_checkpoint(
     service_replacement_readiness(context, force);
 }
 
+#[cfg(feature = "bench-internals")]
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+fn replacement_readiness_checkpoint(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    force: bool,
+) {
+    replacement_readiness_checkpoint_tagged(readiness, force, None, false);
+}
+
+#[cfg(feature = "bench-internals")]
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+fn replacement_readiness_checkpoint_tagged(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    force: bool,
+    stage: Option<&'static str>,
+    progress: bool,
+) {
+    let Some(context) = readiness else {
+        return;
+    };
+    // Instrumented builds still measure every eligible opportunity, including
+    // idle checkpoints. Once armed, production idle dispatch needs no mutex
+    // or clock. A capped drain retains its hint until it can rearm below.
+    {
+        let mut readiness = context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = tokio::time::Instant::now();
+        readiness
+            .retirement
+            .checkpoint(now, stage, force || !progress);
+        if force || now.duration_since(readiness.last_service) >= readiness.budget {
+            readiness.max_gap = readiness
+                .max_gap
+                .max(now.duration_since(readiness.last_opportunity));
+            readiness.last_opportunity = now;
+        }
+    }
+    service_replacement_readiness_with_origin(
+        context,
+        force,
+        !force && progress && bench_support::retirement_body_stage(stage),
+    );
+}
+
+#[cfg(not(feature = "bench-internals"))]
+use self::service_replacement_readiness_with_origin as service_replacement_readiness;
+
+// Existing unit controls invoke the untagged service seam directly. It cannot
+// supply evidence of service at a productive cleanup checkpoint.
+#[cfg(all(test, feature = "bench-internals"))]
 fn service_replacement_readiness(context: &ReplacementReadinessContext, force: bool) {
+    service_replacement_readiness_with_origin(context, force, false);
+}
+
+fn service_replacement_readiness_with_origin(
+    context: &ReplacementReadinessContext,
+    force: bool,
+    #[cfg(feature = "bench-internals")] cleanup_body: bool,
+) {
     if !force && !context.wake.pending.load(Ordering::Acquire) {
         return;
     }
@@ -1421,18 +1532,19 @@ fn service_replacement_readiness(context: &ReplacementReadinessContext, force: b
         };
         received += 1;
         let RibReadinessQuery::LocRibCount { reply, enqueued } = query;
-        // Selection release shares the owner and its healthy bound, but an
-        // operator reading `/readyz` must learn which mechanism is running.
-        let (seam, stalled) = if readiness.selection_release {
-            (
+        // Each mechanism shares the healthy bound but reports its own cause.
+        let (seam, stalled) = match readiness.kind {
+            ReadinessOwnerKind::SelectionRelease => (
                 "selection_release",
                 RibReadinessError::SelectionReleaseStalled,
-            )
-        } else {
-            (
+            ),
+            ReadinessOwnerKind::PeerTeardown => {
+                ("peer_teardown", RibReadinessError::PeerTeardownStalled)
+            }
+            ReadinessOwnerKind::Replacement => (
                 "policy_transition_fence",
                 RibReadinessError::PolicyTransitionStalled,
-            )
+            ),
         };
         readiness
             .metrics
@@ -1442,6 +1554,16 @@ fn service_replacement_readiness(context: &ReplacementReadinessContext, force: b
         } else {
             Ok(readiness.count)
         };
+        #[cfg(feature = "bench-internals")]
+        {
+            let in_owner = enqueued >= readiness.retirement.entered().into_std();
+            let healthy = result.is_ok();
+            let delivered = reply.send(result).is_ok();
+            readiness
+                .retirement
+                .reply(in_owner, delivered && healthy, cleanup_body);
+        }
+        #[cfg(not(feature = "bench-internals"))]
         let _ = reply.send(result);
         #[cfg(any(test, feature = "bench-internals"))]
         {
@@ -1931,7 +2053,10 @@ impl RibManager {
         self.gc_attr_intern_with_checkpoint(&mut || {});
     }
 
-    fn gc_attr_intern_with_checkpoint(&mut self, checkpoint: &mut impl FnMut()) {
+    fn gc_attr_intern_with_checkpoint(
+        &mut self,
+        checkpoint: &mut impl crate::adj_rib_out::RetirementCheckpoint,
+    ) {
         self.attr_intern.gc_with_checkpoint(checkpoint);
         self.attr_intern_gc_displaced = 0;
         self.attr_intern_gc_deadline = None;
@@ -2311,6 +2436,20 @@ impl RibManager {
         with_executor_handoff(|| self.with_readiness_owner(std::time::Duration::ZERO, true, work))
     }
 
+    /// End changing-count teardown before detached-table and attribute cleanup.
+    fn with_peer_teardown_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        let age = self.pending_clean_policy_transition.as_ref().map_or(
+            std::time::Duration::ZERO,
+            distribution::PendingCleanPolicyTransition::elapsed,
+        );
+        with_executor_handoff(|| {
+            let installed = self.begin_readiness_owner_kind(age, ReadinessOwnerKind::PeerTeardown);
+            let result = work(self);
+            self.finish_readiness_owner(installed);
+            result
+        })
+    }
+
     fn with_readiness_owner<T>(
         &mut self,
         age: std::time::Duration,
@@ -2325,10 +2464,26 @@ impl RibManager {
 
     /// Nested work retains the existing owner's exact identity and age.
     fn begin_readiness_owner(&mut self, age: std::time::Duration, selection_release: bool) -> bool {
+        self.begin_readiness_owner_kind(
+            age,
+            if selection_release {
+                ReadinessOwnerKind::SelectionRelease
+            } else {
+                ReadinessOwnerKind::Replacement
+            },
+        )
+    }
+
+    fn begin_readiness_owner_kind(
+        &mut self,
+        age: std::time::Duration,
+        kind: ReadinessOwnerKind,
+    ) -> bool {
         if self.replacement_readiness.is_some() {
             return false;
         }
-        let started = tokio::time::Instant::now() - age;
+        let entered = tokio::time::Instant::now();
+        let started = entered - age;
         self.replacement_readiness = Some(Arc::new(ReplacementReadinessContext {
             wake: Arc::new(ReadinessWake {
                 pending: AtomicBool::new(true),
@@ -2342,7 +2497,7 @@ impl RibManager {
                 rx: self.readiness_rx.take(),
                 metrics: self.metrics.clone(),
                 count: self.loc_rib.len(),
-                selection_release,
+                kind,
                 started,
                 last_service: tokio::time::Instant::now(),
                 budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
@@ -2352,6 +2507,8 @@ impl RibManager {
                 max_gap: std::time::Duration::ZERO,
                 #[cfg(any(test, feature = "bench-internals"))]
                 serviced: 0,
+                #[cfg(feature = "bench-internals")]
+                retirement: bench_support::RetirementReadiness::new(entered),
             }),
         }));
         self.replacement_checkpoint(true);
@@ -2381,6 +2538,10 @@ impl RibManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         debug_assert_eq!(readiness.count, self.loc_rib.len());
         self.readiness_rx = readiness.rx.take();
+        #[cfg(feature = "bench-internals")]
+        readiness
+            .retirement
+            .finish(readiness.max_gap, readiness.budget);
         #[cfg(all(feature = "bench-internals", not(test)))]
         info!(target: "replacement_readiness", count = readiness.count,
             elapsed_us = readiness.started.elapsed().as_micros(),
@@ -2395,6 +2556,7 @@ impl RibManager {
         {
             self.replacement_readiness_receipts
                 .push(ReplacementReadinessReceipt {
+                    kind: readiness.kind,
                     count: readiness.count,
                     elapsed: readiness.started.elapsed(),
                     max_gap: readiness.max_gap,
@@ -2411,7 +2573,7 @@ impl RibManager {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !context.selection_release {
+            if context.kind == ReadinessOwnerKind::Replacement {
                 return;
             }
             context.count = self.loc_rib.len();
@@ -4599,22 +4761,35 @@ impl RibManager {
             .collect()
     }
 
-    fn exact_export_nlri_is_live(&self, key: &ExactExportKey) -> bool {
+    fn exact_export_nlri_is_live(
+        &self,
+        key: &ExactExportKey,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
         match key {
-            ExactExportKey::Unicast(prefix, _) => {
-                self.unicast_prefix_peers.peers(prefix).any(|peer| {
+            ExactExportKey::Unicast(prefix, _) => self
+                .unicast_prefix_peers
+                .peers(prefix)
+                .inspect(|_| checkpoint())
+                .any(|peer| {
                     self.ribs
                         .get(&peer)
                         .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
-                })
-            }
+                }),
             ExactExportKey::FlowSpec(key) => self.ribs.values().any(|rib| {
+                checkpoint();
                 rib.iter_flowspec()
+                    .inspect(|_| checkpoint())
                     .any(|route| route.selection_key() == *key)
             }),
-            ExactExportKey::Evpn(key) => self.ribs.values().any(|rib| rib.get_evpn(key).is_some()),
+            ExactExportKey::Evpn(key) => self
+                .ribs
+                .values()
+                .inspect(|_| checkpoint())
+                .any(|rib| rib.get_evpn(key).is_some()),
             ExactExportKey::BgpLs(key) => self.ribs.values().any(|rib| {
-                rib.iter_bgpls().any(|route| {
+                checkpoint();
+                rib.iter_bgpls().inspect(|_| checkpoint()).any(|route| {
                     ExactExportKey::BgpLs(route.key()).nlri_identity()
                         == ExactExportKey::BgpLs(key.clone()).nlri_identity()
                 })
@@ -4622,13 +4797,16 @@ impl RibManager {
             ExactExportKey::Vpn(key) => self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .any(|rib| rib.iter_vpn_for_nlri(&key.nlri_key).next().is_some()),
             ExactExportKey::Labeled(key) => self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .any(|rib| rib.iter_labeled_for_prefix(&key.prefix).next().is_some()),
             ExactExportKey::Rtc(key) => self.ribs.values().any(|rib| {
-                rib.iter_rtc().any(|route| {
+                checkpoint();
+                rib.iter_rtc().inspect(|_| checkpoint()).any(|route| {
                     ExactExportKey::Rtc(route.key()).nlri_identity()
                         == ExactExportKey::Rtc(key.clone()).nlri_identity()
                 })
@@ -4647,34 +4825,56 @@ impl RibManager {
         if self.peer_unexportable.is_empty() {
             return;
         }
-        let withdrawn = withdrawn
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            replacement_readiness_checkpoint_at(&readiness, "exact_rejection_retirement", false);
+        };
+        let mut withdrawn = withdrawn
             .into_iter()
-            .map(|key| key.nlri_identity())
+            .map(|key| {
+                checkpoint();
+                key.nlri_identity()
+            })
             .collect::<HashSet<_>>();
         if withdrawn.is_empty() {
             return;
         }
-        let rejected_withdrawn = self
-            .peer_unexportable
-            .values()
-            .flat_map(|rejected| rejected.iter().map(ExactExportKey::nlri_identity))
-            .filter(|identity| withdrawn.contains(identity))
-            .collect::<HashSet<_>>();
+        let mut rejected_withdrawn = HashSet::new();
+        for rejected in self.peer_unexportable.values() {
+            checkpoint();
+            for key in rejected {
+                checkpoint();
+                let identity = key.nlri_identity();
+                if withdrawn.contains(&identity) {
+                    rejected_withdrawn.insert(identity);
+                }
+            }
+        }
         if rejected_withdrawn.is_empty() {
+            retire_hash_set(&mut withdrawn, &mut checkpoint);
+            retire_hash_set(&mut rejected_withdrawn, &mut checkpoint);
             return;
         }
-        let live = rejected_withdrawn
+        let mut live = rejected_withdrawn
             .iter()
-            .filter(|key| self.exact_export_nlri_is_live(key))
+            .filter(|key| {
+                checkpoint();
+                self.exact_export_nlri_is_live(key, &mut checkpoint)
+            })
             .cloned()
             .collect::<HashSet<_>>();
         self.peer_unexportable.retain(|_, rejected| {
+            checkpoint();
             rejected.retain(|key| {
+                checkpoint();
                 let identity = key.nlri_identity();
                 !rejected_withdrawn.contains(&identity) || live.contains(&identity)
             });
             !rejected.is_empty()
         });
+        retire_hash_set(&mut live, &mut checkpoint);
+        retire_hash_set(&mut rejected_withdrawn, &mut checkpoint);
+        retire_hash_set(&mut withdrawn, &mut checkpoint);
     }
 
     fn publish_route_event(&mut self, mut event: RouteEvent) {

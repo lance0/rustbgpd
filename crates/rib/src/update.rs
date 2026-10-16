@@ -62,6 +62,9 @@ pub enum RibReadinessError {
     /// healthy ownership age while recomputing and distributing released
     /// families, so ordinary RIB work may be wedged behind that release.
     SelectionReleaseStalled,
+    /// Source-peer teardown exceeded the maximum healthy ownership age while
+    /// collecting affected keys, recomputing selection and distributing changes.
+    PeerTeardownStalled,
 }
 
 /// Type-narrow readiness queries serviced independently of the general RIB

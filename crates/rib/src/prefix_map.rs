@@ -13,6 +13,8 @@
 //! `HashMap` because the trie regressed its lookup-hot recompute (see
 //! `docs/benchmarks.md`).
 
+use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
+
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix};
@@ -109,39 +111,39 @@ impl<V> FamilyPrefixMap<V> {
     /// Remove prefixes one at a time so the trie prunes each retired branch.
     /// Collect a small stack batch first to amortize iterator startup, without
     /// leaving a whole table's structural cleanup to its final destructor.
-    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         loop {
             let mut prefixes = [None; 32];
             for (slot, (prefix, _)) in prefixes.iter_mut().zip(self.iter_from(None)) {
                 *slot = Some(prefix);
-                checkpoint();
+                checkpoint.checkpoint(RetirementProgress::Progress);
             }
             if prefixes[0].is_none() {
                 break;
             }
             for prefix in prefixes.into_iter().flatten() {
-                checkpoint();
+                checkpoint.checkpoint(RetirementProgress::Progress);
                 let retired = self.remove(&prefix);
                 debug_assert!(retired.is_some(), "iterated prefix must still be present");
                 drop(retired);
-                checkpoint();
+                checkpoint.checkpoint(RetirementProgress::Progress);
             }
         }
     }
 
     /// Retire every prefix, then release the empty trie roots.
-    pub(crate) fn release_with(&mut self, checkpoint: &mut impl FnMut()) {
+    pub(crate) fn release_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.retire_with(checkpoint);
 
         let v4 = std::mem::replace(&mut self.v4, PrefixMap::new());
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
         drop(v4);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
 
         let v6 = std::mem::replace(&mut self.v6, PrefixMap::new());
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
         drop(v6);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
     }
 
     /// Iterate from `prefix` (inclusive) in [`Prefix`]'s derived order.

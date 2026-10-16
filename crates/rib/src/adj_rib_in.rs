@@ -2,6 +2,8 @@
 //! before best-path selection. Unicast routes are keyed by
 //! `(Prefix, path_id)` for Add-Path, and LLGR stale tagging is tracked here.
 
+use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
+
 use std::net::IpAddr;
 
 // Route-bearing maps use FxHash (rustc-hash) rather than the default SipHash
@@ -361,7 +363,7 @@ pub struct AdjRibIn {
 
 impl AdjRibIn {
     /// Retire a detached table after selection and withdrawal consumers finish.
-    pub(crate) fn retire_with(mut self, checkpoint: &mut impl FnMut()) {
+    pub(crate) fn retire_with(mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.routes.release_with(checkpoint);
         self.prefix_index.release_with(checkpoint);
         crate::adj_rib_out::release_hash_map(&mut self.flowspec_routes.map, checkpoint);
@@ -379,9 +381,9 @@ impl AdjRibIn {
         retire_local_tags(&mut self.vpn_llgr_stale_local_tags, checkpoint);
         retire_local_tags(&mut self.labeled_llgr_stale_local_tags, checkpoint);
         retire_local_tags(&mut self.rtc_llgr_stale_local_tags, checkpoint);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
         drop(self);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
     }
 
     /// Create a new empty Adj-RIB-In for the given peer.
@@ -2835,16 +2837,16 @@ impl AdjRibIn {
     }
 }
 
-fn retire_local_tags<T>(tags: &mut HashSet<T>, checkpoint: &mut impl FnMut()) {
-    checkpoint();
+fn retire_local_tags<T>(tags: &mut HashSet<T>, checkpoint: &mut impl RetirementCheckpoint) {
+    checkpoint.checkpoint(RetirementProgress::Boundary);
     if std::mem::needs_drop::<T>() {
         for tag in tags.drain() {
             drop(tag);
-            checkpoint();
+            checkpoint.checkpoint(RetirementProgress::Progress);
         }
     }
     drop(std::mem::take(tags));
-    checkpoint();
+    checkpoint.checkpoint(RetirementProgress::Boundary);
 }
 
 /// Add `LLGR_STALE`, mutating an existing canonical or Partial COMMUNITIES

@@ -269,6 +269,9 @@ impl CoreReadinessProbe {
                         RibReadinessError::SelectionReleaseStalled => {
                             CoreReadinessError::RibSelectionReleaseStalled
                         }
+                        RibReadinessError::PeerTeardownStalled => {
+                            CoreReadinessError::RibPeerTeardownStalled
+                        }
                     })
             } else {
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -321,6 +324,8 @@ pub enum CoreReadinessError {
     RibPolicyTransitionStalled,
     /// The RIB actor's selection-deferral release exceeded 30 seconds.
     RibSelectionReleaseStalled,
+    /// The RIB actor's source-peer teardown exceeded 30 seconds.
+    RibPeerTeardownStalled,
     /// The daemon recorded a fatal availability fault ([`DaemonGate`]):
     /// BGP listener bind failure or coordinated shutdown in progress.
     DaemonUnavailable(&'static str),
@@ -344,6 +349,7 @@ impl fmt::Display for CoreReadinessError {
             Self::RibSelectionReleaseStalled => {
                 f.write_str("RIB selection-deferral release stalled")
             }
+            Self::RibPeerTeardownStalled => f.write_str("RIB peer teardown stalled"),
             Self::DaemonUnavailable(reason) => f.write_str(reason),
         }
     }
@@ -632,6 +638,30 @@ mod tests {
         assert!(
             rib_query_rx.try_recv().is_err(),
             "ordinary RIB query lane must remain untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_maps_stalled_peer_teardown_to_its_own_readiness_error() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_query_tx, mut rib_query_rx) = mpsc::channel(1);
+        let (rib_readiness_tx, mut rib_readiness_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            let RibReadinessQuery::LocRibCount { reply, .. } =
+                rib_readiness_rx.recv().await.unwrap();
+            reply
+                .send(Err(RibReadinessError::PeerTeardownStalled))
+                .unwrap();
+        });
+        let error = result.expect_err("stalled source teardown must fail readiness");
+        assert_eq!(error, CoreReadinessError::RibPeerTeardownStalled);
+        assert_eq!(error.to_string(), "RIB peer teardown stalled");
+        assert!(
+            rib_query_rx.try_recv().is_err(),
+            "ordinary RIB query lane remains untouched"
         );
     }
 
