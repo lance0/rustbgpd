@@ -8,6 +8,10 @@ use tokio::sync::oneshot;
 const LOCAL_AS: u32 = 64512;
 const ORIGIN_BASE: u32 = 4_200_100_000;
 const RECEIVER_BUFFER: usize = 4096;
+/// An Ethernet-sized source MSS. Loopback's 64 KiB segments can exceed the
+/// daemon's whole receive buffer, so silly-window avoidance withholds window
+/// updates and the feed waits on backed-off zero-window probes instead.
+const SOURCE_SEGMENT: u32 = 1448;
 const DENIED: usize = 4;
 const RDS: [RouteDistinguisher; 2] = [
     RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
@@ -866,9 +870,20 @@ async fn connect(shape: Shape, port: u16, index: u32) -> Result<TcpStream, Strin
         &keepalive,
         CONNECT_WINDOW,
         &shape.families(),
-        (index != 0).then_some(RECEIVER_BUFFER),
+        StubSocket {
+            receive_buffer: (index != 0).then_some(RECEIVER_BUFFER),
+            segment_size: (index == 0).then_some(SOURCE_SEGMENT),
+        },
     )
     .await?;
+    if index == 0
+        && socket2::SockRef::from(&stream)
+            .tcp_mss()
+            .map_err(|error| error.to_string())?
+            > SOURCE_SEGMENT
+    {
+        return Err("source segment size exceeds the fixed Ethernet-sized fixture".into());
+    }
     if index != 0
         && socket2::SockRef::from(&stream)
             .recv_buffer_size()
