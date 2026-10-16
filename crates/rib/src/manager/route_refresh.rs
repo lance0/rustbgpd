@@ -2073,6 +2073,7 @@ impl RibManager {
         };
         if tx.try_send(eor).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
+            self.metrics.record_outbound_eor_deferral(&peer.to_string());
             self.pending_eor.entry(peer).or_default().extend(ready);
             if !marker_only {
                 self.mark_outbound_dirty(peer);
