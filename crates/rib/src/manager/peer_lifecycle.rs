@@ -529,85 +529,139 @@ impl RibManager {
         let Some(rib) = self.ribs.remove(&peer) else {
             return;
         };
-        let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
-        let count = rib.len();
-        let fs_affected: HashSet<crate::route::FlowSpecKey> = rib
-            .iter_flowspec()
-            .map(crate::route::FlowSpecRoute::selection_key)
-            .collect();
-        let evpn_affected: HashSet<EvpnRouteKey> = rib
-            .iter_evpn()
-            .map(crate::route::EvpnRibRoute::key)
-            .collect();
-        let bgpls_affected: HashSet<crate::route::BgpLsRouteKey> = rib
-            .iter_bgpls()
-            .map(crate::route::BgpLsRibRoute::key)
-            .collect();
-        let vpn_affected: HashSet<crate::route::VpnRibRouteKey> =
-            rib.iter_vpn().map(crate::route::VpnRibRoute::key).collect();
-        let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = rib
-            .iter_labeled()
-            .map(crate::route::LabeledRibRoute::key)
-            .collect();
-        let rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
-            rib.iter_rtc().map(crate::route::RtcRibRoute::key).collect();
-        debug!(%peer, cleared = count, "peer adj-rib-in cleared");
-        self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
-        self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
-        self.metrics
-            .set_rib_prefixes(&peer.to_string(), "flowspec", 0);
-        let changed = self.recompute_best(&affected);
-        self.distribute_changes(&changed, &affected);
-        if !fs_affected.is_empty() {
-            self.recompute_and_distribute_flowspec(&fs_affected);
-        }
-        if !evpn_affected.is_empty() {
-            self.recompute_and_distribute_evpn(&evpn_affected);
-        }
-        // A departed peer's BGP-LS routes must fall back to the next-best
-        // remaining candidate or be removed from the Loc-RIB (and withdrawn
-        // downstream by the distribution step). Without this the entries
-        // would strand in `loc_rib.bgpls_routes` until process restart and
-        // surface through `ListBgpLsRoutes` as if still live.
-        if !bgpls_affected.is_empty() {
-            self.recompute_bgpls_keys(&bgpls_affected);
-        }
-        // Same fallback/withdraw obligation for the departed peer's
-        // VPNv4/VPNv6 routes — same stranding hazard as BGP-LS above.
-        if !vpn_affected.is_empty() {
-            self.recompute_vpn_keys(&vpn_affected);
-        }
-        // Same fallback/withdraw obligation for the departed peer's
-        // labeled-unicast routes.
-        if !labeled_affected.is_empty() {
-            self.recompute_labeled_keys(&labeled_affected);
-        }
-        // And for the departed peer's RT-Constrain routes.
-        if !rtc_affected.is_empty() {
-            self.recompute_rtc_keys(&rtc_affected);
-        }
-        self.retire_exact_export_rejections(
-            rib.iter()
-                .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
-                .chain(
-                    rib.iter_flowspec()
-                        .map(|route| ExactExportKey::FlowSpec(route.selection_key())),
-                )
-                .chain(
-                    rib.iter_evpn()
-                        .map(|route| ExactExportKey::Evpn(route.key())),
-                )
-                .chain(
-                    rib.iter_bgpls()
-                        .map(|route| ExactExportKey::BgpLs(route.key())),
-                )
-                .chain(rib.iter_vpn().map(|route| ExactExportKey::Vpn(route.key())))
-                .chain(
-                    rib.iter_labeled()
-                        .map(|route| ExactExportKey::Labeled(route.key())),
-                )
-                .chain(rib.iter_rtc().map(|route| ExactExportKey::Rtc(route.key()))),
-        );
+        self.with_peer_teardown_readiness(|manager| {
+            let readiness = manager.replacement_readiness.clone();
+            #[cfg(test)]
+            let observer = manager.replacement_readiness_test_hook.clone();
+            let checkpoint = |stage| {
+                // This observer also runs without an owner so the regression
+                // reaches the real collection boundary on the unfixed path.
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer(stage);
+                }
+                #[cfg(not(test))]
+                let _ = stage;
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "peer_down_key_collection",
+                    false,
+                );
+            };
+            let mut affected: HashSet<Prefix> = rib
+                .iter()
+                .inspect(|_| checkpoint("peer_down_collect_unicast"))
+                .map(|r| r.prefix)
+                .collect();
+            let count = rib.len();
+            let mut fs_affected: HashSet<crate::route::FlowSpecKey> = rib
+                .iter_flowspec()
+                .inspect(|_| checkpoint("peer_down_collect_flowspec"))
+                .map(crate::route::FlowSpecRoute::selection_key)
+                .collect();
+            let mut evpn_affected: HashSet<EvpnRouteKey> = rib
+                .iter_evpn()
+                .inspect(|_| checkpoint("peer_down_collect_evpn"))
+                .map(crate::route::EvpnRibRoute::key)
+                .collect();
+            let mut bgpls_affected: HashSet<crate::route::BgpLsRouteKey> = rib
+                .iter_bgpls()
+                .inspect(|_| checkpoint("peer_down_collect_bgpls"))
+                .map(crate::route::BgpLsRibRoute::key)
+                .collect();
+            let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = rib
+                .iter_vpn()
+                .inspect(|_| checkpoint("peer_down_collect_vpn"))
+                .map(crate::route::VpnRibRoute::key)
+                .collect();
+            let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = rib
+                .iter_labeled()
+                .inspect(|_| checkpoint("peer_down_collect_labeled"))
+                .map(crate::route::LabeledRibRoute::key)
+                .collect();
+            let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = rib
+                .iter_rtc()
+                .inspect(|_| checkpoint("peer_down_collect_rtc"))
+                .map(crate::route::RtcRibRoute::key)
+                .collect();
+            debug!(%peer, cleared = count, "peer adj-rib-in cleared");
+            manager
+                .metrics
+                .set_rib_prefixes(&peer.to_string(), "all", 0);
+            manager
+                .metrics
+                .set_rib_prefixes(&peer.to_string(), "evpn", 0);
+            manager
+                .metrics
+                .set_rib_prefixes(&peer.to_string(), "flowspec", 0);
+            let mut changed = manager.recompute_best(&affected);
+            manager.distribute_changes(&changed, &affected);
+            if !fs_affected.is_empty() {
+                manager.recompute_and_distribute_flowspec(&fs_affected);
+            }
+            if !evpn_affected.is_empty() {
+                manager.recompute_and_distribute_evpn(&evpn_affected);
+            }
+            // A departed peer's BGP-LS routes must fall back to the next-best
+            // remaining candidate or be removed from the Loc-RIB (and withdrawn
+            // downstream by the distribution step). Without this the entries
+            // would strand in `loc_rib.bgpls_routes` until process restart and
+            // surface through `ListBgpLsRoutes` as if still live.
+            if !bgpls_affected.is_empty() {
+                manager.recompute_bgpls_keys(&bgpls_affected);
+            }
+            // Same fallback/withdraw obligation for the departed peer's
+            // VPNv4/VPNv6 routes — same stranding hazard as BGP-LS above.
+            if !vpn_affected.is_empty() {
+                manager.recompute_vpn_keys(&vpn_affected);
+            }
+            // Same fallback/withdraw obligation for the departed peer's
+            // labeled-unicast routes.
+            if !labeled_affected.is_empty() {
+                manager.recompute_labeled_keys(&labeled_affected);
+            }
+            // And for the departed peer's RT-Constrain routes.
+            if !rtc_affected.is_empty() {
+                manager.recompute_rtc_keys(&rtc_affected);
+            }
+            manager.retire_exact_export_rejections(
+                rib.iter()
+                    .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
+                    .chain(
+                        rib.iter_flowspec()
+                            .map(|route| ExactExportKey::FlowSpec(route.selection_key())),
+                    )
+                    .chain(
+                        rib.iter_evpn()
+                            .map(|route| ExactExportKey::Evpn(route.key())),
+                    )
+                    .chain(
+                        rib.iter_bgpls()
+                            .map(|route| ExactExportKey::BgpLs(route.key())),
+                    )
+                    .chain(rib.iter_vpn().map(|route| ExactExportKey::Vpn(route.key())))
+                    .chain(
+                        rib.iter_labeled()
+                            .map(|route| ExactExportKey::Labeled(route.key())),
+                    )
+                    .chain(rib.iter_rtc().map(|route| ExactExportKey::Rtc(route.key()))),
+            );
+            let mut retire = || {
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "peer_down_affected_retirement",
+                    false,
+                );
+            };
+            super::retire_hash_set(&mut changed, &mut retire);
+            super::retire_hash_set(&mut affected, &mut retire);
+            super::retire_hash_set(&mut fs_affected, &mut retire);
+            super::retire_hash_set(&mut evpn_affected, &mut retire);
+            super::retire_hash_set(&mut bgpls_affected, &mut retire);
+            super::retire_hash_set(&mut vpn_affected, &mut retire);
+            super::retire_hash_set(&mut labeled_affected, &mut retire);
+            super::retire_hash_set(&mut rtc_affected, &mut retire);
+        });
         // The removed Adj-RIB-In held the peer's route bodies; dropping it
         // releases their attribute Arcs. Sweep the global intern table now
         // (after the recomputes above dropped any Loc-RIB selected-route

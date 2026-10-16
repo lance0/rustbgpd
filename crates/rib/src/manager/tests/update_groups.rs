@@ -9781,6 +9781,380 @@ async fn peer_down_retirement_preserves_nested_owner_identity_and_age() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_peer_down_key_collection_services_readiness() {
+    Box::pin(assert_source_peer_down_readiness(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_peer_down_recompute_services_completed_prefix_counts() {
+    Box::pin(assert_source_peer_down_readiness(true)).await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actual source teardown control keeps seven typed inventories, query handshakes, wire folds and ordinary-lane fences in one scenario"
+)]
+async fn assert_source_peer_down_readiness(recompute: bool) {
+    const STAGES: [&str; 7] = [
+        "peer_down_collect_unicast",
+        "peer_down_collect_flowspec",
+        "peer_down_collect_evpn",
+        "peer_down_collect_bgpls",
+        "peer_down_collect_vpn",
+        "peer_down_collect_labeled",
+        "peer_down_collect_rtc",
+    ];
+    let stages: &'static [&'static str] = if recompute {
+        &["selection_recompute"]
+    } else {
+        &STAGES
+    };
+    let (tx, rx) = mpsc::channel(8);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    manager.flush_poll_budget = Duration::ZERO;
+    let source = Ipv4Addr::new(192, 0, 2, 35);
+    let survivor = Ipv4Addr::new(192, 0, 2, 36);
+    let peer: IpAddr = Ipv4Addr::new(10, 223, 5, 1).into();
+    let (outbound_tx, mut output) = mpsc::channel(64);
+    let mut registration = super::update_groups_recovery::peer_up(peer, outbound_tx, None);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        route_reflector_client,
+        ..
+    } = &mut registration
+    {
+        // RTC is still populated and selected, without turning this receiver
+        // into an RT-Constrain filter for the VPN withdrawal witness.
+        sendable_families.extend([
+            (Afi::Ipv4, Safi::FlowSpec),
+            (Afi::L2Vpn, Safi::Evpn),
+            (Afi::BgpLs, Safi::BgpLs),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv4, Safi::LabeledUnicast),
+        ]);
+        *route_reflector_client = true;
+    }
+    manager.handle_update(registration);
+    manager.peer_export_encoders.insert(
+        peer,
+        super::exportability::MockExactExportEncoder::accepting(1),
+    );
+    while output.try_recv().is_ok() {}
+    let received = |peer, announced| RibUpdate::RoutesReceived {
+        peer,
+        session_id: 0,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    manager.handle_update(received(
+        source.into(),
+        (0..8)
+            .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
+            .collect(),
+    ));
+    while manager.process_next_route_chunk() {}
+    let retained = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32),
+        survivor,
+    );
+    let retained_prefix = retained.prefix;
+    manager.handle_update(received(survivor.into(), vec![retained]));
+    while manager.process_next_route_chunk() {}
+    for safi in [
+        Safi::FlowSpec,
+        Safi::Evpn,
+        Safi::BgpLs,
+        Safi::MplsVpn,
+        Safi::LabeledUnicast,
+        Safi::RtConstrain,
+    ] {
+        for index in 1..=2 {
+            announce_family_route(&mut manager, source, safi, index);
+        }
+    }
+    let rib = &manager.ribs[&IpAddr::V4(source)];
+    assert_eq!(
+        [
+            rib.len(),
+            rib.flowspec_len(),
+            rib.evpn_len(),
+            rib.bgpls_len(),
+            rib.vpn_len(),
+            rib.labeled_len(),
+            rib.rtc_len()
+        ],
+        [8, 2, 2, 2, 2, 2, 2]
+    );
+    assert_eq!(manager.loc_rib.len(), 9);
+    let mut initial = [0; 6];
+    while let Ok(update) = output.try_recv() {
+        for (total, count) in initial.iter_mut().zip([
+            update.announce.len(),
+            update.flowspec_announce.len(),
+            update.evpn_announce.len(),
+            update.bgpls_announce.len(),
+            update.vpn_announce.len(),
+            update.labeled_announce.len(),
+        ]) {
+            *total += count;
+        }
+        assert!(update.withdraw.is_empty() && update.vpn_withdraw.is_empty());
+    }
+    assert_eq!(initial[0], 9);
+    assert_eq!(initial[4], 2);
+    let (readiness_tx, readiness_rx) = mpsc::channel(16);
+    manager.readiness_rx = Some(readiness_rx);
+    manager.replacement_readiness_receipts.clear();
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let calls = Mutex::new(HashMap::new());
+    manager.replacement_readiness_test_hook = Some(Arc::new(move |stage| {
+        if !stages.contains(&stage) {
+            return;
+        }
+        let call = {
+            let mut calls = calls.lock().unwrap();
+            let call = calls.entry(stage).or_insert(0);
+            let current = *call;
+            *call += 1;
+            current
+        };
+        if call < 2 {
+            entered_tx.send((stage, call)).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }
+    }));
+    let actor = tokio::spawn(async move {
+        let update = manager.rx.recv().await.unwrap();
+        manager.handle_update(update);
+        manager
+    });
+    tx.send(RibUpdate::PeerDown {
+        peer: source.into(),
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    let mut interior = Vec::new();
+    let mut pending = Vec::new();
+    let mut second_prefix = None;
+    let (reply, mut ordinary) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    for (index, &stage) in stages.iter().enumerate() {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+                .await
+                .unwrap(),
+            Some((stage, 0))
+        );
+        if index == 0 {
+            tx.try_send(RibUpdate::PeerDown {
+                peer,
+                session_id: 0,
+            })
+            .unwrap();
+        }
+        let mut response = queue_replacement_readiness(&readiness_tx);
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+                .await
+                .unwrap(),
+            Some((stage, 1))
+        );
+        interior.push((stage, response.try_recv()));
+        pending.push(response);
+        if recompute {
+            second_prefix = Some(queue_replacement_readiness(&readiness_tx));
+        }
+        assert!(matches!(
+            ordinary.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(tx.capacity(), 7, "primary mutations remain queued");
+        release_tx.send(()).unwrap();
+    }
+    let mut manager = actor.await.unwrap();
+    manager.replacement_readiness_test_hook = None;
+    assert!(!manager.ribs.contains_key(&IpAddr::V4(source)));
+    assert_eq!(manager.loc_rib.len(), 1);
+    assert_eq!(
+        manager.loc_rib.get(&retained_prefix).unwrap().peer,
+        IpAddr::V4(survivor)
+    );
+    assert_eq!(
+        [
+            manager.loc_rib.flowspec_len(),
+            manager.loc_rib.evpn_len(),
+            manager.loc_rib.bgpls_len(),
+            manager.loc_rib.vpn_len(),
+            manager.loc_rib.labeled_len(),
+            manager.loc_rib.rtc_len()
+        ],
+        [0; 6]
+    );
+    assert!(manager.grouped_member_of(peer).is_some());
+    assert!(manager.evpn_grouped_member_of(peer).is_none());
+    let mut withdrawn = [0; 6];
+    while let Ok(update) = output.try_recv() {
+        for (total, count) in withdrawn.iter_mut().zip([
+            update.withdraw.len(),
+            update.flowspec_withdraw.len(),
+            update.evpn_withdraw.len(),
+            update.bgpls_withdraw.len(),
+            update.vpn_withdraw.len(),
+            update.labeled_withdraw.len(),
+        ]) {
+            *total += count;
+        }
+        assert!(update.announce.is_empty() && update.vpn_announce.is_empty());
+    }
+    initial[0] -= 1; // The unrelated surviving source is never withdrawn.
+    assert_eq!(withdrawn, initial);
+    let group = manager.grouped_member_of(peer).unwrap();
+    assert_eq!(manager.group_ribs[&group].table.len(), 1);
+    assert!(manager.replacement_readiness.is_none() && manager.readiness_rx.is_some());
+    assert!(matches!(
+        ordinary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let query = manager.query_rx.try_recv().unwrap();
+    manager.handle_update(query);
+    assert_eq!(ordinary.await.unwrap(), 1);
+    assert!(
+        matches!(manager.rx.try_recv().unwrap(), RibUpdate::PeerDown { peer: queued, .. } if queued == peer)
+    );
+    // Keep the old-path observations until every wire/count/fence check above
+    // has completed. Forced entry into the later detached owner is too late.
+    for (stage, reply) in interior {
+        assert_eq!(
+            reply,
+            Ok(Ok(if recompute { 8 } else { 9 })),
+            "{stage} must service the completed canonical count inside the source teardown"
+        );
+    }
+    if let Some(response) = second_prefix {
+        assert_eq!(
+            response.await.unwrap(),
+            Ok(7),
+            "the next completed prefix publishes the next count"
+        );
+    }
+    assert_eq!(
+        manager
+            .replacement_readiness_receipts
+            .iter()
+            .map(|r| r.kind)
+            .collect::<Vec<_>>(),
+        [
+            super::super::ReadinessOwnerKind::PeerTeardown,
+            super::super::ReadinessOwnerKind::Replacement,
+        ],
+        "changing-count teardown ends before detached retirement begins"
+    );
+    assert_eq!(
+        histogram_sample_counts_by_label(
+            &manager.metrics,
+            "bgp_rib_readiness_query_wait_seconds",
+            "seam"
+        )["peer_teardown"],
+        if recompute { 2 } else { 7 }
+    );
+}
+
+#[test]
+fn source_peer_down_preserves_nested_owner_kind_identity_and_age() {
+    use super::super::ReadinessOwnerKind;
+    use crate::update::RibReadinessError;
+    for (kind, expected) in [
+        (
+            ReadinessOwnerKind::Replacement,
+            RibReadinessError::PolicyTransitionStalled,
+        ),
+        (
+            ReadinessOwnerKind::SelectionRelease,
+            RibReadinessError::SelectionReleaseStalled,
+        ),
+        (
+            ReadinessOwnerKind::PeerTeardown,
+            RibReadinessError::PeerTeardownStalled,
+        ),
+    ] {
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        manager.flush_poll_budget = Duration::ZERO;
+        let source = Ipv4Addr::new(192, 0, 2, 37);
+        for index in 1..=2 {
+            announce_family_route(&mut manager, source, Safi::MplsVpn, index);
+        }
+        assert_eq!(manager.loc_rib.vpn_len(), 2);
+        assert_eq!(manager.loc_rib.len(), 0);
+        let (tx, rx) = mpsc::channel(8);
+        manager.readiness_rx = Some(rx);
+        let response = Arc::new(Mutex::new(
+            None::<oneshot::Receiver<Result<usize, RibReadinessError>>>,
+        ));
+        let observed = Arc::new(Mutex::new(None));
+        manager.replacement_readiness_test_hook = Some(Arc::new({
+            let response = Arc::clone(&response);
+            let observed = Arc::clone(&observed);
+            move |stage| {
+                if stage != "peer_down_collect_vpn" {
+                    return;
+                }
+                let mut response = response.lock().unwrap();
+                if let Some(reply) = response.as_mut() {
+                    *observed.lock().unwrap() = Some(reply.try_recv());
+                } else {
+                    *response = Some(queue_replacement_readiness(&tx));
+                }
+            }
+        }));
+        super::super::with_executor_handoff(|| {
+            assert!(manager.begin_readiness_owner_kind(Duration::from_secs(31), kind));
+            let original = manager.replacement_readiness.clone().unwrap();
+            let started = original.state.lock().unwrap().started;
+            manager.handle_update(RibUpdate::PeerDown {
+                peer: source.into(),
+                session_id: 0,
+            });
+            assert!(Arc::ptr_eq(
+                &original,
+                manager.replacement_readiness.as_ref().unwrap()
+            ));
+            let state = original.state.lock().unwrap();
+            assert_eq!((state.kind, state.started, state.count), (kind, started, 0));
+            drop(state);
+            assert_eq!(manager.loc_rib.vpn_len(), 0);
+            assert!(!manager.ribs.contains_key(&IpAddr::V4(source)));
+            assert_eq!(*observed.lock().unwrap(), Some(Ok(Err(expected))));
+            assert!(
+                manager
+                    .replacement_readiness_receipts
+                    .iter()
+                    .all(|receipt| receipt.kind == kind)
+            );
+            drop(original);
+            manager.finish_readiness_owner(true);
+        });
+        assert!(manager.replacement_readiness.is_none() && manager.readiness_rx.is_some());
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the actual peer-down control keeps admission, detached retirement progress, readiness fences and terminal ownership assertions in one ordered scenario"
@@ -12183,11 +12557,11 @@ fn readiness_wait_records_elapsed_time_at_both_serving_seams() {
         .into_iter()
         .find(|family| family.name() == "bgp_rib_readiness_query_wait_seconds")
         .unwrap();
-    assert_eq!(family.get_metric().len(), 3);
+    assert_eq!(family.get_metric().len(), 4);
     for metric in family.get_metric() {
         let histogram = metric.get_histogram();
         let seam = metric.get_label()[0].value();
-        if seam == "selection_release" {
+        if matches!(seam, "selection_release" | "peer_teardown") {
             assert_eq!(histogram.get_sample_count(), 0, "no selection release ran");
             continue;
         }
@@ -12272,6 +12646,7 @@ fn replacement_readiness_nested_rollback_keeps_original_age_and_restores_receive
         ),
         BTreeMap::from([
             ("actor_loop".to_owned(), 1),
+            ("peer_teardown".to_owned(), 0),
             ("policy_transition_fence".to_owned(), 2),
             ("selection_release".to_owned(), 0),
         ])
@@ -12315,6 +12690,7 @@ fn selection_release_past_bound_reports_its_own_reason_and_seam() {
         histogram_sample_counts_by_label(&metrics, "bgp_rib_readiness_query_wait_seconds", "seam"),
         BTreeMap::from([
             ("actor_loop".to_owned(), 0),
+            ("peer_teardown".to_owned(), 0),
             ("policy_transition_fence".to_owned(), 0),
             ("selection_release".to_owned(), 2),
         ])
