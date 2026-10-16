@@ -1,15 +1,25 @@
 use super::export::{
-    ExportProbeError, ExportWithdrawal, PreparedAttrCache, PreparedUnicastCandidate,
-    PreparedWithdrawal, ReachNlri, SessionExportProfile, UnreachNlri, has_otc,
+    ExportProbeError, ExportWithdrawal, MpAttrCache, PreparedAttrCache, PreparedMpCandidate,
+    PreparedUnicastCandidate, PreparedWithdrawal, ReachNlri, SessionExportProfile, UnreachNlri,
+    has_otc,
 };
 use super::{
     Afi, BgpRole, EvpnRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
     Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix, Route,
     RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, debug, info, warn,
 };
+use super::{EvpnRibRoute, LabeledRibRoute, VpnRibRoute};
 #[cfg(test)]
-use super::{FlowSpecRoute, LabeledRibRoute, RtcRibRoute, VpnRibRoute};
+use super::{FlowSpecRoute, RtcRibRoute};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Worker time one ordinary slice may take, encode and release included,
+/// before the next slice is cut smaller. The session shares tokio workers
+/// with the readiness endpoint and every other session.
+pub(super) const SLICE_TIME_BUDGET: Duration = Duration::from_millis(4);
+/// Floor for a shrunken slice, so per-slice overhead stays amortized.
+const MIN_SLICE_ROUTES: usize = 64;
 
 /// One envelope remains owned until its final marker is admitted. Slices
 /// reuse the exact export snapshot, without growing the bounded writer queue.
@@ -20,6 +30,21 @@ pub(super) struct PendingOutbound {
     phase: usize,
     offset: usize,
     capacity_blocked: bool,
+    /// Route budget for the next ordinary slice. It halves after a slice
+    /// overruns [`SLICE_TIME_BUDGET`] and doubles back after a cheap one, so
+    /// a slow encode yields sooner. A slice within budget keeps the
+    /// shared-group slice size; UPDATE packing is not part of the export
+    /// contract (ADR-0099), only per-key order is.
+    slice_routes: usize,
+    /// EVPN, VPN and labeled announcements, moved out a slice at a time:
+    /// a slice owns its routes without cloning them, and each slice releases
+    /// its share of the envelope instead of the final advance dropping it
+    /// whole.
+    evpn_announce: std::vec::IntoIter<EvpnRibRoute>,
+    vpn_announce: std::vec::IntoIter<VpnRibRoute>,
+    labeled_announce: std::vec::IntoIter<LabeledRibRoute>,
+    #[cfg(test)]
+    pub(super) test_slice_cost: Option<Duration>,
 }
 
 #[derive(Clone, Copy)]
@@ -128,10 +153,10 @@ impl PendingOutbound {
                 OutboundPhase::VpnWithdraw => self.update.vpn_withdraw.len(),
                 OutboundPhase::LabeledWithdraw => self.update.labeled_withdraw.len(),
                 OutboundPhase::RtcWithdraw => self.update.rtc_withdraw.len(),
-                OutboundPhase::EvpnAnnounce => self.update.evpn_announce.len(),
+                OutboundPhase::EvpnAnnounce => self.offset + self.evpn_announce.len(),
                 OutboundPhase::BgplsAnnounce => self.update.bgpls_announce.len(),
-                OutboundPhase::VpnAnnounce => self.update.vpn_announce.len(),
-                OutboundPhase::LabeledAnnounce => self.update.labeled_announce.len(),
+                OutboundPhase::VpnAnnounce => self.offset + self.vpn_announce.len(),
+                OutboundPhase::LabeledAnnounce => self.offset + self.labeled_announce.len(),
                 OutboundPhase::RtcAnnounce => self.update.rtc_announce.len(),
                 OutboundPhase::FlowspecAnnounce => self.update.flowspec_announce.len(),
                 OutboundPhase::Eor => self.update.end_of_rib.len(),
@@ -157,6 +182,12 @@ impl PendingOutbound {
                     let end = (self.offset + budget).min(self.update.$field.len());
                     slice.$field = self.update.$field[self.offset..end].to_vec().into();
                     end
+                }};
+            }
+            macro_rules! moved {
+                ($field:ident) => {{
+                    slice.$field = self.$field.by_ref().take(budget).collect();
+                    self.offset + slice.$field.len()
                 }};
             }
             let end = match phase {
@@ -197,10 +228,10 @@ impl PendingOutbound {
                 OutboundPhase::VpnWithdraw => payload!(vpn_withdraw),
                 OutboundPhase::LabeledWithdraw => payload!(labeled_withdraw),
                 OutboundPhase::RtcWithdraw => payload!(rtc_withdraw),
-                OutboundPhase::EvpnAnnounce => payload!(evpn_announce),
+                OutboundPhase::EvpnAnnounce => moved!(evpn_announce),
                 OutboundPhase::BgplsAnnounce => payload!(bgpls_announce),
-                OutboundPhase::VpnAnnounce => payload!(vpn_announce),
-                OutboundPhase::LabeledAnnounce => payload!(labeled_announce),
+                OutboundPhase::VpnAnnounce => moved!(vpn_announce),
+                OutboundPhase::LabeledAnnounce => moved!(labeled_announce),
                 OutboundPhase::RtcAnnounce => payload!(rtc_announce),
                 OutboundPhase::FlowspecAnnounce => payload!(flowspec_announce),
                 OutboundPhase::Eor => payload!(end_of_rib),
@@ -214,6 +245,16 @@ impl PendingOutbound {
             }
         }
         None
+    }
+
+    /// Size the next ordinary slice from what this one cost.
+    fn charge_slice(&mut self, cost: Duration) {
+        if cost > SLICE_TIME_BUDGET {
+            self.slice_routes = (self.slice_routes / 2).max(MIN_SLICE_ROUTES);
+        } else if cost < SLICE_TIME_BUDGET / 4 {
+            self.slice_routes =
+                (self.slice_routes * 2).min(super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+        }
     }
 }
 
@@ -261,12 +302,18 @@ impl PeerSession {
             }
         }
         self.pending_outbound = Some(PendingOutbound {
+            evpn_announce: std::mem::take(&mut update.evpn_announce).into_iter(),
+            vpn_announce: std::mem::take(&mut update.vpn_announce).into_iter(),
+            labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
             update,
             shared,
             requests,
             phase: 0,
             offset: 0,
             capacity_blocked: false,
+            slice_routes: super::shared_group::PROGRESSIVE_SLICE_ROUTES,
+            #[cfg(test)]
+            test_slice_cost: None,
         });
         self.advance_pending_outbound();
     }
@@ -375,8 +422,17 @@ impl PeerSession {
                     pending.phase = 1;
                     pending.offset = 0;
                 }
-                if let Some(slice) = pending.next_slice(budget) {
+                if let Some(slice) = pending.next_slice(budget.min(pending.slice_routes)) {
+                    let started = Instant::now();
                     self.send_route_update(slice);
+                    let cost = started.elapsed();
+                    // Tests pin the cost so slice sizes never follow host speed.
+                    #[cfg(test)]
+                    let cost = {
+                        let _ = cost;
+                        pending.test_slice_cost.unwrap_or_default()
+                    };
+                    pending.charge_slice(cost);
                 } else {
                     finished = true;
                 }
@@ -605,6 +661,43 @@ struct MpGroup {
     next_hop: IpAddr,
     link_local_next_hop: Option<Ipv6Addr>,
     prefixes: Vec<NlriEntry>,
+}
+
+/// One VPN or labeled UPDATE group: family, next hop, link-local companion,
+/// prepared attributes, and its routes in arrival order.
+type MpRouteGroup<T> = (
+    (Afi, Safi),
+    IpAddr,
+    Option<Ipv6Addr>,
+    Arc<Vec<PathAttribute>>,
+    Vec<T>,
+);
+
+/// [`AttrGroupIndex`] per family. Equal attribute values in different
+/// families must not share a group, and every family's index registers
+/// positions in one shared group vector so groups keep first-arrival order.
+#[derive(Default)]
+struct MpGroupIndex(HashMap<(Afi, Safi), AttrGroupIndex>);
+
+impl MpGroupIndex {
+    fn push<T>(
+        &mut self,
+        groups: &mut Vec<MpRouteGroup<T>>,
+        family: (Afi, Safi),
+        prepared: PreparedMpCandidate<T, Arc<Vec<PathAttribute>>>,
+    ) {
+        let nh = prepared.next_hop;
+        let ll = prepared.link_local_next_hop;
+        match self
+            .0
+            .entry(family)
+            .or_default()
+            .group(&prepared.attrs, Some(nh), ll, groups.len())
+        {
+            Ok(idx) => groups[idx].4.push(prepared.nlri),
+            Err(_) => groups.push((family, nh, ll, prepared.attrs, vec![prepared.nlri])),
+        }
+    }
 }
 impl PeerSession {
     pub(super) fn otc_egress_blocks_unicast(&self, route: &Route) -> bool {
@@ -1341,22 +1434,25 @@ impl PeerSession {
         // Send EVPN announcements via MP_REACH_NLRI, grouped by (next-hop, attributes)
         // and chunked so each UPDATE fits the negotiated maximum message length.
         if !update.evpn_announce.is_empty() {
-            #[allow(
-                clippy::type_complexity,
-                reason = "EVPN UPDATE grouping keeps next-hop, attributes, and route batch identity explicit"
-            )]
-            let mut evpn_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<EvpnRoute>)> = Vec::new();
+            let mut attr_cache = MpAttrCache::default();
+            let mut index = AttrGroupIndex::default();
+            let mut evpn_groups: Vec<(IpAddr, Arc<Vec<PathAttribute>>, Vec<EvpnRoute>)> =
+                Vec::new();
             for evpn_route in &update.evpn_announce {
-                let prepared = export.prepare_evpn_candidate(evpn_route);
-                let attrs = prepared.attrs;
+                let prepared =
+                    SessionExportProfile::prepare_evpn_candidate_with(evpn_route, || {
+                        export.prepare_mp_attributes_cached(
+                            &mut attr_cache,
+                            &evpn_route.attributes,
+                            evpn_route.origin_type,
+                            evpn_route.peer_router_id,
+                            (Afi::L2Vpn, Safi::Evpn),
+                        )
+                    });
                 let nh = prepared.next_hop;
-                if let Some(group) = evpn_groups
-                    .iter_mut()
-                    .find(|(g_nh, g_attrs, _)| *g_nh == nh && *g_attrs == attrs)
-                {
-                    group.2.push(prepared.nlri);
-                } else {
-                    evpn_groups.push((nh, attrs, vec![prepared.nlri]));
+                match index.group(&prepared.attrs, Some(nh), None, evpn_groups.len()) {
+                    Ok(idx) => evpn_groups[idx].2.push(prepared.nlri),
+                    Err(_) => evpn_groups.push((nh, prepared.attrs, vec![prepared.nlri])),
                 }
             }
             let max_len = export.max_message_len();
@@ -1414,23 +1510,23 @@ impl PeerSession {
         // original NLRI (RD + MPLS label stack) and the stored VPN next-hop
         // pass through reflection verbatim.
         if !update.vpn_announce.is_empty() {
-            #[allow(
-                clippy::type_complexity,
-                reason = "VPN UPDATE grouping keeps family, next-hop, attributes, and route batch identity explicit"
-            )]
-            let mut vpn_groups: Vec<(
-                (Afi, Safi),
-                IpAddr,
-                Option<Ipv6Addr>,
-                Vec<PathAttribute>,
-                Vec<rustbgpd_wire::VpnNlriEntry>,
-            )> = Vec::new();
+            let mut attr_cache = MpAttrCache::default();
+            let mut index = MpGroupIndex::default();
+            let mut vpn_groups: Vec<MpRouteGroup<rustbgpd_wire::VpnNlriEntry>> = Vec::new();
             for vpn_route in &update.vpn_announce {
                 let family = vpn_route.afi_safi();
                 if !self.negotiated_families().contains(&family) {
                     continue;
                 }
-                let prepared = match export.prepare_vpn_candidate(vpn_route) {
+                let prepared = match export.prepare_vpn_candidate_with(vpn_route, || {
+                    export.prepare_mp_attributes_cached(
+                        &mut attr_cache,
+                        &vpn_route.attributes,
+                        vpn_route.origin_type,
+                        vpn_route.peer_router_id,
+                        family,
+                    )
+                }) {
                     Ok(prepared) => prepared,
                     Err(error) => {
                         warn!(
@@ -1441,21 +1537,7 @@ impl PeerSession {
                         continue;
                     }
                 };
-                let attrs = prepared.attrs;
-                let nh = prepared.next_hop;
-                let ll = prepared.link_local_next_hop;
-                let entry = prepared.nlri;
-                if let Some(group) =
-                    vpn_groups
-                        .iter_mut()
-                        .find(|(g_family, g_nh, g_ll, g_attrs, _)| {
-                            *g_family == family && *g_nh == nh && *g_ll == ll && *g_attrs == attrs
-                        })
-                {
-                    group.4.push(entry);
-                } else {
-                    vpn_groups.push((family, nh, ll, attrs, vec![entry]));
-                }
+                index.push(&mut vpn_groups, family, prepared);
             }
             let max_len = export.max_message_len();
             for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in vpn_groups {
@@ -1477,23 +1559,23 @@ impl PeerSession {
         // stored MPLS label stack and next-hop pass through reflection
         // verbatim — transport never rewrites either.
         if !update.labeled_announce.is_empty() {
-            #[allow(
-                clippy::type_complexity,
-                reason = "labeled UPDATE grouping keeps family, next-hop, attributes, and route batch identity explicit"
-            )]
-            let mut labeled_groups: Vec<(
-                (Afi, Safi),
-                IpAddr,
-                Option<Ipv6Addr>,
-                Vec<PathAttribute>,
-                Vec<rustbgpd_wire::LabeledNlriEntry>,
-            )> = Vec::new();
+            let mut attr_cache = MpAttrCache::default();
+            let mut index = MpGroupIndex::default();
+            let mut labeled_groups: Vec<MpRouteGroup<rustbgpd_wire::LabeledNlriEntry>> = Vec::new();
             for labeled_route in &update.labeled_announce {
                 let family = labeled_route.afi_safi();
                 if !self.negotiated_families().contains(&family) {
                     continue;
                 }
-                let prepared = match export.prepare_labeled_candidate(labeled_route) {
+                let prepared = match export.prepare_labeled_candidate_with(labeled_route, || {
+                    export.prepare_mp_attributes_cached(
+                        &mut attr_cache,
+                        &labeled_route.attributes,
+                        labeled_route.origin_type,
+                        labeled_route.peer_router_id,
+                        family,
+                    )
+                }) {
                     Ok(prepared) => prepared,
                     Err(error) => {
                         warn!(
@@ -1504,21 +1586,7 @@ impl PeerSession {
                         continue;
                     }
                 };
-                let attrs = prepared.attrs;
-                let nh = prepared.next_hop;
-                let ll = prepared.link_local_next_hop;
-                let entry = prepared.nlri;
-                if let Some(group) =
-                    labeled_groups
-                        .iter_mut()
-                        .find(|(g_family, g_nh, g_ll, g_attrs, _)| {
-                            *g_family == family && *g_nh == nh && *g_ll == ll && *g_attrs == attrs
-                        })
-                {
-                    group.4.push(entry);
-                } else {
-                    labeled_groups.push((family, nh, ll, attrs, vec![entry]));
-                }
+                index.push(&mut labeled_groups, family, prepared);
             }
             let max_len = export.max_message_len();
             for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in labeled_groups {
