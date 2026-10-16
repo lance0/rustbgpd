@@ -662,6 +662,8 @@ def read_source_session():
         run = subprocess.run(["ss", "-tinmoH", *SOURCE_SESSION], capture_output=True, text=True, timeout=5, check=False)
     except subprocess.TimeoutExpired:
         return None, "ss timed out"
+    except OSError as error:  # missing or non-executable ss is a diagnostic, not a driver failure
+        return None, f"ss could not run: {error}"
     if run.returncode != 0:
         return None, f"ss exit {run.returncode}: {run.stderr.strip()}"
     ends = source_sockets(run.stdout)

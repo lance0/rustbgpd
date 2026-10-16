@@ -998,6 +998,17 @@ class MassDirtyTests(unittest.TestCase):
                 timers = receipt.source_socket_timers(path, True)
                 self.assertEqual(set(timers), {"unavailable"})
                 self.assertIn("socket samples failed", timers["unavailable"])
+        real_run = subprocess.run
+
+        def missing_ss(args, **kwargs):
+            return real_run([str(self.root / "no-such-ss"), *args[1:]], **kwargs)
+
+        with mock.patch.object(receipt.subprocess, "run", side_effect=missing_ss):
+            ends, error = receipt.read_source_session()
+            self.assertIsNone(ends)
+            self.assertIn("ss could not run", error)
+            snapshot = receipt.feed_snapshot(os.getpid())
+        self.assertEqual((snapshot["source_socket"], snapshot["source_socket_error"][:16]), (None, "ss could not run"))
         self.assertEqual(receipt.source_socket_timers(path, False), {"unavailable": "socket sampler did not stop"})
         self.assertEqual(receipt.source_socket_timers(self.root / "absent.jsonl", True),
                          {"unavailable": "fewer than two socket samples"})
