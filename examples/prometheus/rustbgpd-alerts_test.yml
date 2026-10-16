@@ -754,8 +754,9 @@ tests:
 
   # ── BgpInboundNotificationBackoffDrops ─────────────────────────
   # Only reason="notification_backoff" counts: the unconfigured drops never
-  # fire. Two drops at 10m fire at 20m and have aged out of the 15m window
-  # at 26m.
+  # fire. The daemon exports every reason at 0 from startup, so the zero
+  # baseline matches real exposition. Two drops at 10m fire at 20m and have
+  # aged out of the 15m window at 26m.
   - interval: 1m
     input_series:
       - series: 'bgp_inbound_connections_dropped_total{reason="notification_backoff", instance="edge1:9179"}'

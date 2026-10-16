@@ -1094,6 +1094,11 @@ impl BgpMetrics {
             &["reason"],
         )
         .expect("valid metric definition");
+        // Zero baseline per reason, so `increase()` sees the first drop even
+        // when a burst ends before the series would otherwise be scraped.
+        for reason in crate::reason_labels::InboundConnectionDropReason::ALL {
+            inbound_connections_dropped.with_label_values(&[reason.as_str()]);
+        }
 
         let notifications_sent = IntCounterVec::new(
             Opts::new(
@@ -8641,6 +8646,28 @@ mod tests {
                 outcome.as_str()
             )));
         }
+    }
+
+    #[test]
+    fn inbound_connection_drops_preinitialize_every_reason() {
+        use crate::reason_labels::InboundConnectionDropReason;
+        let m = BgpMetrics::new();
+        let initial = gather_text(&m);
+        for reason in InboundConnectionDropReason::ALL {
+            assert!(
+                initial.contains(&format!(
+                    "bgp_inbound_connections_dropped_total{{reason=\"{}\"}} 0",
+                    reason.as_str()
+                )),
+                "missing zero baseline for {reason}"
+            );
+        }
+        m.record_inbound_connection_drop(InboundConnectionDropReason::NotificationBackoff);
+        assert!(
+            gather_text(&m).contains(
+                "bgp_inbound_connections_dropped_total{reason=\"notification_backoff\"} 1"
+            )
+        );
     }
 
     #[test]

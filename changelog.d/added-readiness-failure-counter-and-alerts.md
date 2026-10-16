@@ -5,6 +5,8 @@
   `peer_manager_unavailable`, `peer_manager_timeout`, `rib_unavailable`,
   `rib_timeout`, `rib_stalled` or `daemon_unavailable`. Readiness status,
   response bodies and deadlines are unchanged.
+  `bgp_inbound_connections_dropped_total{reason}` now exports every reason at 0
+  from startup, so a first drop is visible to `increase()`.
   **Operator-visible:** the alert pack adds `BgpPolicyTransitionFallback`
   (warning, a `fallback_handoff` or `fallback_cleanup_error` export-policy
   transition in the last 15 minutes), `BgpInboundNotificationBackoffDrops`
