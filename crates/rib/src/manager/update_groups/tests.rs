@@ -6671,6 +6671,40 @@ fn snapshot_reuse_private_full_table_flat_capture_reserves_exact_cardinality() {
     assert_eq!(manager.pending_group_admitted.bytes(), healthy_charge);
 }
 
+/// The full-table VPN resync reserves only the routes the member can
+/// receive: its own-sourced entries are never announced back to it.
+#[test]
+fn vpn_resync_reserve_excludes_own_sourced_routes() {
+    let mut group = empty_group();
+    for n in 0..20 {
+        group.apply_vpn_delta(&vpn_announce_delta(n, MEMBER, None));
+    }
+    for n in 20..25 {
+        group.apply_vpn_delta(&vpn_announce_delta(n, OTHER1, None));
+    }
+    let mut announce = Vec::new();
+    let mut withdraw = Vec::new();
+    RibManager::assemble_group_vpn_resync(
+        &group,
+        MEMBER,
+        None,
+        false,
+        true,
+        None,
+        None,
+        None,
+        &mut announce,
+        &mut withdraw,
+        &mut |_| {},
+    );
+    assert_eq!(announce.len(), 5);
+    assert!(
+        announce.capacity() < 20,
+        "reserved {} slots for 5 receivable routes",
+        announce.capacity()
+    );
+}
+
 /// Full-table VPN resync assembly at the full-VPN shape (1,000,000
 /// `VPNv4` + 230,000 `VPNv6` keys, every key admitted): total time and the
 /// longest gap between readiness checkpoints. Run with

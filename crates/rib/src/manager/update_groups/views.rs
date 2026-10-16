@@ -201,11 +201,14 @@ impl RibManager {
         checkpoint: &mut impl FnMut(bool),
     ) {
         checkpoint(true);
-        // Without Φ or a baseline diff the announce is nearly the whole
-        // table. Grow-by-doubling would copy a full-table Vec several
-        // times, each copy one uncheckpointed unit.
+        // Without Φ or a baseline diff the announce is exactly the table
+        // minus the member's own-sourced entries, which a non-RTC group
+        // counts in O(1). Grow-by-doubling would copy a full-table Vec
+        // several times, each copy one uncheckpointed unit. An RTC
+        // member's maintained count can be stale while it is dirty, so
+        // its buffer grows on demand.
         if filter.is_none() && (is_force || baseline.is_none()) {
-            vpn_announce.reserve(group.table.vpn_len());
+            vpn_announce.reserve(group.vpn_advertised_count_for(member));
             checkpoint(true);
         }
         for route in group.table.iter_vpn() {
