@@ -1741,7 +1741,157 @@ class RetirementReceiptTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.root = self.fixture.root
 
+    def with_readiness(self, row):
+        measured, keys = row["measured"], row["keys"]
+        target = ("private_outbound_cleanup" if row["cell"].startswith("retirement-adj-out-") else
+                  "regroup_baseline_cleanup" if row["cell"].startswith("retirement-regroup-") else
+                  "received_cleanup_including_gc")
+        owners = {}
+        for name in ("received_cleanup_including_gc", "private_outbound_cleanup", "regroup_baseline_cleanup"):
+            active, overlap = name == target, name == target and keys > 0
+            owners[name] = {"owners": int(active), "invalid_owners": 0,
+                            "callbacks": keys + 2 if active else 0, "body_callbacks": keys if active else 0,
+                            "admitted": int(overlap), "serviced": int(overlap), "replied": int(overlap),
+                            "body_replied": int(overlap),
+                            "overlap": overlap, "eligible": measured and overlap,
+                            "max_checkpoint_interval_ns": 20_000_000 if measured and active else None,
+                            "max_eligible_opportunity_gap_ns": 40_000_000 if measured and active else None,
+                            "service_budget_ns": 25_000_000 if measured and active else None}
+        row["readiness"] = {"probe": {"attempts": 3, "admitted": 3, "replied": 3, "errors": 0,
+                                      "max_inflight": 1, "before_capture_replies": 1, "after_barrier_replies": 1,
+                                      "max_reserve_wait_ns": 1 if measured else None,
+                                      "max_enqueue_reply_ns": 100 if measured else None,
+                                      "max_attempt_reply_ns": 101 if measured else None,
+                                      "max_refill_gap_ns": 10 if measured else None}, "owners": owners}
+        return row
+
+    def test_retirement_readiness_distinguishes_callback_gap_opportunity_and_reply_latency(self):
+        for cell in receipt.RETIREMENT_CELLS:
+            for measured in (False, True):
+                with self.subTest(cell=cell, measured=measured):
+                    row = self.with_readiness(self.row(cell=cell, measured=measured))
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", cell, measured=measured,
+                                                     readiness_required=True)
+        # A legitimate 40 ms eligible-opportunity gap is not the 25 ms callback bar.
+
+    def test_retirement_readiness_rejects_missing_evidence_and_probe_failures(self):
+        row = self.row()
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "missing retirement readiness"):
+            receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full", readiness_required=True)
+        for field, value in (("errors", 1), ("max_inflight", 2), ("before_capture_replies", 0),
+                             ("after_barrier_replies", 0), ("admitted", 2), ("replied", 2),
+                             ("max_enqueue_reply_ns", 102), ("max_attempt_reply_ns", 200_000_001)):
+            with self.subTest(field=field):
+                row = self.with_readiness(self.row())
+                row["readiness"]["probe"][field] = value
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+
+    def test_retirement_readiness_rejects_false_owner_or_body_and_missing_real_overlap(self):
+        for field, value in (("owners", 0), ("owners", 2), ("invalid_owners", 1),
+                             ("body_callbacks", 1_229_999), ("callbacks", 1_230_001),
+                             ("admitted", 0), ("replied", 0), ("serviced", 0), ("body_replied", 0),
+                             ("overlap", False), ("eligible", False),
+                             ("max_checkpoint_interval_ns", 25_000_001), ("service_budget_ns", 26_000_000)):
+            with self.subTest(field=field):
+                row = self.with_readiness(self.row())
+                row["readiness"]["owners"]["received_cleanup_including_gc"][field] = value
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+        row = self.with_readiness(self.row())
+        owner = row["readiness"]["owners"]["received_cleanup_including_gc"]
+        owner.update(admitted=0, serviced=0, replied=0, body_replied=0, overlap=False, eligible=False)
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "lacks real in-owner"):
+            receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+
+    def test_retirement_readiness_boundary_only_replies_cannot_qualify_full_cleanup(self):
+        row = self.with_readiness(self.row())
+        owner = row["readiness"]["owners"]["received_cleanup_including_gc"]
+        # Preserve the full real body count and healthy boundary admissions/
+        # replies. Neither forced entry nor final-exit service proves body overlap.
+        owner.update(admitted=2, serviced=2, replied=2, body_replied=0, overlap=False, eligible=False)
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "nonforced cleanup callback"):
+            receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+
+    def test_retirement_readiness_rejects_owner_replies_without_interior_probe(self):
+        for measured in (False, True):
+            with self.subTest(measured=measured):
+                row = self.with_readiness(self.row(measured=measured))
+                # Both producer replies are the required before/after probes;
+                # neither can also prove a reply inside the cleanup owner.
+                row["readiness"]["probe"].update(attempts=2, admitted=2, replied=2)
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "owner replies exceed interior"):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full",
+                                                     measured=measured)
+
+    def test_retirement_readiness_sums_replies_across_owners(self):
+        row = self.with_readiness(self.row())
+        owners = row["readiness"]["owners"]
+        # A separate, empty cleanup owner can answer a request too. Its reply
+        # still consumes a distinct producer request outside the two sentinels.
+        owners["private_outbound_cleanup"].update(
+            owners=1, callbacks=2, admitted=1, serviced=1, replied=1,
+            max_checkpoint_interval_ns=20_000_000,
+            max_eligible_opportunity_gap_ns=40_000_000, service_budget_ns=25_000_000)
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "owner replies exceed interior"):
+            receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+        row["readiness"]["probe"].update(attempts=4, admitted=4, replied=4)
+        receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full")
+
+    def test_retirement_readiness_rejects_owner_admissions_without_interior_probe(self):
+        for count in (1, 2):
+            with self.subTest(owners=count):
+                row = self.with_readiness(self.row(cell="retirement-empty"))
+                total = count + 1  # One fewer interior request than claimed admissions.
+                row["readiness"]["probe"].update(attempts=total, admitted=total, replied=total)
+                names = ("received_cleanup_including_gc", "private_outbound_cleanup")
+                for name in names[:count]:
+                    row["readiness"]["owners"][name].update(
+                        owners=1, callbacks=2, admitted=1, serviced=1,
+                        max_checkpoint_interval_ns=20_000_000,
+                        max_eligible_opportunity_gap_ns=40_000_000, service_budget_ns=25_000_000)
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "owner admissions exceed interior"):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-empty")
+
+    def test_retirement_readiness_accepts_empty_boundaries_and_preowner_service(self):
+        row = self.with_readiness(self.row(cell="retirement-empty"))
+        row["readiness"]["probe"].update(attempts=2, admitted=2, replied=2)
+        receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-empty")
+        # An interior request queued before owner entry counts as serviced,
+        # without claiming in-owner admission or delivery.
+        row["readiness"]["probe"].update(attempts=3, admitted=3, replied=3)
+        row["readiness"]["owners"]["received_cleanup_including_gc"]["serviced"] = 1
+        receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-empty")
+
+    def test_retirement_readiness_correctness_requires_null_all_clocks_and_never_qualifies(self):
+        for section, field in (("probe", "max_refill_gap_ns"), ("probe", "max_enqueue_reply_ns"),
+                               ("received_cleanup_including_gc", "max_checkpoint_interval_ns"),
+                               ("received_cleanup_including_gc", "max_eligible_opportunity_gap_ns"),
+                               ("received_cleanup_including_gc", "service_budget_ns")):
+            with self.subTest(section=section, field=field):
+                row = self.with_readiness(self.row(measured=False))
+                destination = row["readiness"]["probe"] if section == "probe" else row["readiness"]["owners"][section]
+                destination[field] = 1
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", "retirement-full", measured=False)
+
+    def test_retirement_v3_campaign_requires_readiness_and_preserves_v1_v2(self):
+        root = self.campaign(receiver_cases=True, readiness=True)
+        receipt.summarize_retirement(root)
+        self.assertEqual(json.loads((root / "comparison.json").read_text())["schema"], "rustbgpd.retirement-timing.v3")
+        directory = root / "retirement-regroup-full-1-candidate"
+        lines = (directory / "harness.log").read_text().splitlines()
+        row = json.loads(lines[-1].removeprefix("retirement_receipt "))
+        del row["readiness"]
+        lines[-1] = "retirement_receipt " + json.dumps(row)
+        (directory / "harness.log").write_text("\n".join(lines) + "\n")
+        receipt.write_json(directory / "raw-sha256.json", receipt.retirement_raw_hashes(directory))
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "missing retirement readiness"):
+            receipt.summarize_retirement(root)
+
     def row(self, profile="full-vpn", cell="retirement-full", measured=True):
+        if cell not in receipt.RETIREMENT_CELLS[:2]:
+            return self.receiver_row(profile, cell, measured)
         seed = receipt.PROFILES[profile][0] if cell == "retirement-full" else (0, 0, 0, 0)
         keys = sum(seed)
         families = lambda settled: {name: {"present": 0 if settled else n, "announces": n,
@@ -1756,6 +1906,41 @@ class RetirementReceiptTests(unittest.TestCase):
                                "elapsed_ns": 200 if measured else None},
                 "operation_to_barrier_ns": 500 if measured else None}
 
+    def receiver_row(self, profile, cell, measured=True):
+        private = cell.startswith("retirement-adj-out-")
+        full = cell.endswith("-full")
+        original = receipt.PROFILES[profile][0]
+        seed = tuple(int(count > 0) for count in original) if private else (original if full else (0,) * 4)
+        keys = sum(original) if full else 0
+        first = next(index for index, count in enumerate(original) if count)
+        def families(settled):
+            return {family: {"present": count, "announces": count + (4 if settled and not private and index == first else 0),
+                             "withdrawals": 4 if settled and not private and index == first else 0}
+                    for index, (family, count) in enumerate(zip(receipt.FAMILIES, seed, strict=True))}
+        zero = {"present": 0, "announces": 0, "withdrawals": 0}
+        evpn = {"present": keys, "announces": max(keys, 1), "withdrawals": int(not full)} if private else zero
+        def phase(active, retired):
+            return {"calls": int(active), "keys": retired, "groups": 0,
+                    "elapsed_ns": 100 if measured and active else None}
+        return {"profile": profile, "cell": cell, "measured": measured, "receivers": 2, "keys": keys,
+                "initial": {name: families(False) for name in ("target", "witness")},
+                "settled": {name: families(True) for name in ("target", "witness")},
+                "private_evpn": {boundary: {name: evpn.copy() for name in ("target", "witness")}
+                                 for boundary in ("initial", "settled")},
+                "preparation": {"inputs": 0 if private else 8, "target_queue_capacity": 8 if private else 0,
+                                "dirty_peers": int(not private), "group_dirty_members": int(not private),
+                                "regroup_baselines": int(not private)},
+                "survivors": {"target_group_before": "group:0", "witness_group_before": "group:0",
+                              "target_group_after": "", "witness_group_after": "group:0",
+                              "source_group_before": "group:1", "source_group_after": "group:1",
+                              "source_fold": dict.fromkeys(receipt.FAMILIES, zero), "source_evpn_fold": zero,
+                              "selected": list(seed), "evpn_received_best": [keys if private else 0] * 2,
+                              "health": [0] * 6},
+                "vpn_stage": phase(False, 0), "adj_rib_in": phase(False, 0),
+                "adj_rib_out": phase(True, keys if private else 0),
+                "regroup_baseline": phase(not private, keys if not private else 0),
+                "operation_to_barrier_ns": 500 if measured else None}
+
     def log(self, row, path=None, identity=None):
         path = path or self.root / "retirement.log"
         prefix = ""
@@ -1764,10 +1949,12 @@ class RetirementReceiptTests(unittest.TestCase):
         path.write_text(prefix + "retirement_receipt " + json.dumps(row) + "\n")
         return path
 
-    def campaign(self, profile="full-vpn"):
+    def campaign(self, profile="full-vpn", receiver_cases=False, readiness=False):
         root = self.fixture.campaign(selected_cell="peer-down")
         template = root / "ipv4-100k-peer-down-baseline-2-candidate"
         names = {*receipt.INSTRUMENT_INPUTS, *receipt.RETIREMENT_INPUTS}
+        if readiness:
+            names.add(receipt.RETIREMENT_READINESS_INPUT)
         maps = {}
         inputs = []
         repository = Path(receipt.__file__).resolve().parents[2]
@@ -1780,10 +1967,11 @@ class RetirementReceiptTests(unittest.TestCase):
         maps.update({name: "d" * 64 for name in ("Cargo.toml", "Cargo.lock", "crates/rib/Cargo.toml")})
         (root / "instrumentation.sha256").write_text("".join(inputs))
         instrumentation = receipt.file_digest(root / "instrumentation.sha256")
-        manifest = {"schema": "rustbgpd.retirement-timing.campaign.v1", "candidate": "a" * 40,
+        manifest = {"schema": "rustbgpd.retirement-timing.campaign.v3" if readiness else "rustbgpd.retirement-timing.campaign.v2" if receiver_cases else "rustbgpd.retirement-timing.campaign.v1", "candidate": "a" * 40,
                     "instrumentation_manifest_sha256": instrumentation, "profile": profile,
                     "order": list(receipt.RETIREMENT_ORDER),
-                    "cells": ["retirement-empty", "retirement-full"], "memory_max": receipt.RETIREMENT_LIMIT}
+                    "cells": list(receipt.RETIREMENT_CELLS if receiver_cases else receipt.RETIREMENT_CELLS[:2]),
+                    "memory_max": receipt.RETIREMENT_LIMIT}
         receipt.write_json(root / "manifest.json", manifest)
         receipt.write_json(root / "committed-inputs.json", maps)
         receipt.write_json(root / "cleanup-proof.json", {"candidate_worktree_exit": 0,
@@ -1838,7 +2026,10 @@ class RetirementReceiptTests(unittest.TestCase):
                 identity = {"pid": process["pid"], "start_ticks": process["start_ticks"],
                             "cgroup": (directory / "cgroup-path.txt").read_text().strip(),
                             "source_sha": manifest["candidate"], "instrumentation_sha256": instrumentation}
-                self.log(self.row(profile, cell), directory / "harness.log", identity)
+                row = self.row(profile, cell)
+                if readiness:
+                    self.with_readiness(row)
+                self.log(row, directory / "harness.log", identity)
                 receipt.write_json(directory / "command.json", [process["executable"], "recovery-retirement", cell, profile])
                 for boundary in ("before", "after"):
                     (directory / boundary / "memory.max").write_text(str(receipt.RETIREMENT_LIMIT))
@@ -1895,6 +2086,103 @@ class RetirementReceiptTests(unittest.TestCase):
         self.assertEqual(len(result["samples"]), 8)
         self.assertEqual(len(result["summaries"]), 4)
         self.assertNotIn("qualification_passed", result)
+
+    def test_receiver_retirement_full_empty_folds_and_null_correctness_clocks(self):
+        for profile in ("full-uc", "full-vpn", "smoke-uc", "smoke-vpn"):
+            for cell in receipt.RETIREMENT_CELLS[2:]:
+                for measured in (False, True):
+                    if measured and profile.startswith("smoke-"):
+                        continue
+                    with self.subTest(profile=profile, cell=cell, measured=measured):
+                        row = self.row(profile, cell, measured)
+                        result = receipt.validate_retirement_log(self.log(row), profile, cell, measured=measured)
+                        self.assertEqual(result["sample"], row)
+
+    def test_receiver_retirement_rejects_header_only_full_inventory_and_clock_leaks(self):
+        for cell, phase in (("retirement-adj-out-full", "adj_rib_out"),
+                            ("retirement-regroup-full", "regroup_baseline")):
+            for field, value in (("calls", 0), ("keys", 0), ("keys", 1_229_999),
+                                 ("keys", True), ("groups", 1), ("elapsed_ns", 0), ("elapsed_ns", None)):
+                with self.subTest(cell=cell, field=field, value=value):
+                    row = self.row(cell=cell)
+                    row[phase][field] = value
+                    with self.assertRaises(receipt.InvalidReceipt):
+                        receipt.validate_retirement_log(self.log(row), "full-vpn", cell)
+            row = self.row(cell=cell, measured=False)
+            row[phase]["elapsed_ns"] = 100
+            with self.assertRaisesRegex(receipt.InvalidReceipt, "clock"):
+                receipt.validate_retirement_log(self.log(row), "full-vpn", cell, measured=False)
+
+    def test_receiver_retirement_requires_actual_eight_message_dirty_baseline(self):
+        for field, value in (("inputs", 7), ("target_queue_capacity", 1), ("dirty_peers", 0),
+                             ("group_dirty_members", 0), ("regroup_baselines", 0)):
+            with self.subTest(field=field):
+                row = self.row(cell="retirement-regroup-full")
+                row["preparation"][field] = value
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "preparation"):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", row["cell"])
+
+    def test_receiver_retirement_preserves_sources_witnesses_and_exact_preparation_fold(self):
+        for field, value in (("target_group_after", "group:0"), ("witness_group_after", "group:2"),
+                             ("source_group_after", ""), ("source_group_after", "group:2"),
+                             ("health", [1, 0, 0, 0, 0, 0]),
+                             ("selected", [0, 0, 0, 0])):
+            with self.subTest(field=field):
+                row = self.row(cell="retirement-regroup-full")
+                row["survivors"][field] = value
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", row["cell"])
+        for receiver in ("target", "witness"):
+            row = self.row(cell="retirement-regroup-full")
+            row["settled"][receiver]["vpnv4"]["withdrawals"] -= 1
+            with self.assertRaisesRegex(receipt.InvalidReceipt, "wire inventory"):
+                receipt.validate_retirement_log(self.log(row), "full-vpn", row["cell"])
+
+    def test_private_evpn_receipt_cannot_masquerade_as_full_uc_or_vpn(self):
+        for profile in ("full-uc", "full-vpn"):
+            row = self.row(profile, "retirement-adj-out-full")
+            self.assertEqual(sum(part["present"] for part in row["initial"]["target"].values()), 2)
+            first = next(family for family, n in zip(receipt.FAMILIES, receipt.PROFILES[profile][0], strict=True) if n)
+            row["initial"]["target"][first]["present"] = 1_000_000
+            with self.assertRaisesRegex(receipt.InvalidReceipt, "wire inventory"):
+                receipt.validate_retirement_log(self.log(row), profile, row["cell"])
+        for boundary in ("initial", "settled"):
+            for receiver in ("target", "witness"):
+                row = self.row(cell="retirement-adj-out-empty")
+                row["private_evpn"][boundary][receiver]["announces"] = 0
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "EVPN exact fold"):
+                    receipt.validate_retirement_log(self.log(row), "full-vpn", row["cell"])
+        row = self.row(cell="retirement-adj-out-full")
+        row["survivors"]["evpn_received_best"] = [0, 0]
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "selected/source"):
+            receipt.validate_retirement_log(self.log(row), "full-vpn", row["cell"])
+
+    def test_retirement_v2_campaign_requires_all_twenty_four_actual_shape_legs(self):
+        root = self.campaign(receiver_cases=True)
+        receipt.summarize_retirement(root)
+        result = json.loads((root / "comparison.json").read_text())
+        self.assertEqual(result["schema"], "rustbgpd.retirement-timing.v2")
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(len(result["samples"]), 24)
+        self.assertEqual(len(result["summaries"]), 8)
+        self.assertTrue(all(item["observations"] == 2 for item in result["summaries"]))
+        self.assertIn("receiver cleanup is identical in both arms", result["scope"])
+        shutil.rmtree(root / "retirement-adj-out-full-1-candidate")
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "roster"):
+            receipt.summarize_retirement(root)
+
+    def test_retirement_v2_rejects_resealed_false_regroup_cardinality(self):
+        root = self.campaign(receiver_cases=True)
+        directory = root / "retirement-regroup-full-1-candidate"
+        path = directory / "harness.log"
+        lines = path.read_text().splitlines()
+        row = json.loads(lines[-1].removeprefix("retirement_receipt "))
+        row["regroup_baseline"].update(calls=0, keys=0)
+        lines[-1] = "retirement_receipt " + json.dumps(row)
+        path.write_text("\n".join(lines) + "\n")
+        receipt.write_json(directory / "raw-sha256.json", receipt.retirement_raw_hashes(directory))
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "cardinality"):
+            receipt.summarize_retirement(root)
 
     def test_retirement_accepts_ansi_cargo_compile_logs_without_rewriting_them(self):
         root = self.campaign()

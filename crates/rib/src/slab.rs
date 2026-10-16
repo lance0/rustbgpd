@@ -13,6 +13,8 @@
 //! Freed slots are pushed onto a free list and reused by later inserts, so
 //! sustained insert/withdraw churn does not grow the slot vector.
 
+use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
+
 /// Dense storage for route bodies addressed by `u32` handles.
 ///
 /// Not a general-purpose slab: handles are only valid until `remove` or
@@ -136,28 +138,33 @@ impl<T> RouteSlab<T> {
 
     /// Drop every slot, including vacancies, while retaining both backing
     /// allocations for later reuse.
-    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.free.clear();
         while let Some(slot) = self.slots.pop() {
-            checkpoint();
+            let progress = if slot.is_some() {
+                RetirementProgress::Progress
+            } else {
+                RetirementProgress::Boundary
+            };
+            checkpoint.checkpoint(progress);
             drop(slot);
-            checkpoint();
+            checkpoint.checkpoint(progress);
         }
     }
 
     /// Retire every slot, then release the empty backing allocations.
-    pub(crate) fn release_with(&mut self, checkpoint: &mut impl FnMut()) {
+    pub(crate) fn release_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.retire_with(checkpoint);
 
         let slots = std::mem::take(&mut self.slots);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
         drop(slots);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
 
         let free = std::mem::take(&mut self.free);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
         drop(free);
-        checkpoint();
+        checkpoint.checkpoint(RetirementProgress::Boundary);
     }
 
     /// Release only unused tail capacity while preserving logical slot

@@ -689,13 +689,13 @@ impl RibManager {
                 if let Some(observer) = &observer {
                     observer("peer_adj_in_retirement_before");
                 }
-                rib.retire_with(&mut || {
-                    super::replacement_readiness_checkpoint_at(
+                rib.retire_with(&mut crate::adj_rib_out::ClassifiedCheckpoint(|progress| {
+                    super::replacement_readiness_cleanup_checkpoint(
                         &readiness,
                         "peer_adj_in_retirement",
-                        false,
+                        progress,
                     );
-                });
+                }));
                 #[cfg(test)]
                 if let Some(observer) = &observer {
                     observer("peer_adj_in_retirement_after");
@@ -706,13 +706,15 @@ impl RibManager {
                 if let Some(observer) = &observer {
                     observer("peer_attribute_gc_before");
                 }
-                manager.gc_attr_intern_with_checkpoint(&mut || {
-                    super::replacement_readiness_checkpoint_at(
-                        &readiness,
-                        "peer_attribute_gc",
-                        false,
-                    );
-                });
+                manager.gc_attr_intern_with_checkpoint(
+                    &mut crate::adj_rib_out::ClassifiedCheckpoint(|progress| {
+                        super::replacement_readiness_cleanup_checkpoint(
+                            &readiness,
+                            "peer_attribute_gc",
+                            progress,
+                        );
+                    }),
+                );
                 #[cfg(test)]
                 if let Some(observer) = &observer {
                     observer("peer_attribute_gc_after");
@@ -805,6 +807,19 @@ impl RibManager {
             if !rib.is_empty_all_families() {
                 self.advance_advertised_pages();
             }
+            #[cfg(feature = "bench-internals")]
+            let retirement = super::bench_support::retirement_begin(|| {
+                (
+                    rib.len()
+                        + rib.vpn_len()
+                        + rib.evpn_len()
+                        + rib.flowspec_len()
+                        + rib.bgpls_len()
+                        + rib.labeled_len()
+                        + rib.rtc_len(),
+                    0,
+                )
+            });
             super::with_executor_handoff(|| {
                 self.with_replacement_readiness(|manager| {
                     #[cfg(test)]
@@ -813,10 +828,16 @@ impl RibManager {
                     if let Some(observer) = &observer {
                         observer("peer_adj_out_retirement_before");
                     }
-                    rib.retire_with(&mut || {
-                        manager.replacement_checkpoint_at("peer_adj_out_retirement", false);
-                    });
+                    rib.retire_with(&mut crate::adj_rib_out::ClassifiedCheckpoint(|progress| {
+                        super::replacement_readiness_cleanup_checkpoint(
+                            &manager.replacement_readiness,
+                            "peer_adj_out_retirement",
+                            progress,
+                        );
+                    }));
                     drop(rib);
+                    #[cfg(feature = "bench-internals")]
+                    super::bench_support::retirement_end(2, retirement);
                     #[cfg(test)]
                     if let Some(observer) = &observer {
                         observer("peer_adj_out_retirement_after");
@@ -927,6 +948,10 @@ impl RibManager {
         // restarts from zero if that exact identity is later installed again.
         self.export_policy_stats.remove(&peer);
         if let Some(mut baseline) = self.pending_regroup_baseline.remove(&peer) {
+            #[cfg(feature = "bench-internals")]
+            let retirement = super::bench_support::retirement_begin(|| {
+                (baseline.unicast.len() + baseline.vpn.len(), 0)
+            });
             super::with_executor_handoff(|| {
                 self.with_replacement_readiness(|manager| {
                     #[cfg(test)]
@@ -935,10 +960,18 @@ impl RibManager {
                     if let Some(observer) = &observer {
                         observer("peer_regroup_retirement_before");
                     }
-                    baseline.retire_with(&mut || {
-                        manager.replacement_checkpoint_at("peer_regroup_retirement", false);
-                    });
+                    baseline.retire_with(&mut crate::adj_rib_out::ClassifiedCheckpoint(
+                        |progress| {
+                            super::replacement_readiness_cleanup_checkpoint(
+                                &manager.replacement_readiness,
+                                "peer_regroup_retirement",
+                                progress,
+                            );
+                        },
+                    ));
                     drop(baseline);
+                    #[cfg(feature = "bench-internals")]
+                    super::bench_support::retirement_end(3, retirement);
                     #[cfg(test)]
                     if let Some(observer) = &observer {
                         observer("peer_regroup_retirement_after");

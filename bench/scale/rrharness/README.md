@@ -45,33 +45,110 @@ compiling against `crates/rib`, `crates/wire`, and `crates/telemetry` on `main`.
 ## Hosted retirement attribution
 
 The optional `CI` dispatch with `recovery_memory_receipt=true` and
-`recovery_receipt_mode=retirement` measures two actual actor boundaries:
+`recovery_receipt_mode=retirement` measures four actual actor boundaries:
 VPN stage-map retirement, and the detached Adj-RIB-In destructor after
-peer-down recomputation and before attribute-intern garbage collection.
-The containing peer-down-to-query-barrier duration is reported separately.
+peer-down recomputation and before attribute-intern garbage collection;
+private all-family Adj-RIB-Out retirement; and retained regroup-baseline
+retirement. The last two include the emptied collection's backing allocations.
+The containing peer-down-to-query-barrier duration is reported separately;
+it is not a bound on the complete peer-down operation or garbage collection.
 
 Each fresh hosted VM runs one full-table profile: one million IPv4 plus
-230,000 IPv6 routes, either unicast or VPN, with one receiver. Empty and full
-controls each run in old-drop, current, current, old-drop order. The old-drop
+230,000 IPv6 routes, either unicast or VPN. Six cases each run in old-drop,
+current, current, old-drop order: the original empty/full source departure,
+empty/full private Adj-RIB-Out departure, and empty/full pending-regroup
+departure. That is 24 actor invocations per VM, 48 across the two profiles.
+The old-drop
 binary differs only by restoring the former VPN stage-map drop. Both arms
 use the current source, locked dependencies, scale profile and jemalloc.
+The receiver-cleanup implementations are identical in both arms; those phases
+are cost observations, not a cleanup improvement comparison.
 Every leg must finish exact announced/withdrawn receiver inventories, actor
 barriers and the required full-size retirement phases. Missing or empty
 eligible work is invalid; absent VPN work in the unicast profile is reported
-as ineligible rather than a zero-cost observation.
+as ineligible rather than a zero-cost observation. The original source cases
+retain their one-receiver topology and phase boundaries. The v2 campaign
+adds the four receiver-departure cases; v3 appends bounded readiness evidence.
+The consumer preserves v1 and v2 archive replay without inventing evidence
+that those older runs did not capture.
+
+The private Adj-RIB-Out cases use two grouped receivers with only two
+unicast or VPN anchor routes, plus 1,230,000 private EVPN IMET routes in the
+full case. EVPN group ownership remains disabled. These are private EVPN
+rows, not 1,230,000 unicast or VPN rows. The empty control first announces and
+withdraws a real IMET. Exact finite bitmaps validate EVPN keys, payloads,
+attributes and folds before and after the target receiver departs.
+
+The regroup cases first advertise the profile's full inventory privately to
+a slow target while a grouped witness receives the same routes. The target
+then pauses, and eight actual alternating one-key withdrawals/announcements
+(announcements/withdrawals for the empty case) fill its queue. Each input
+must reach the witness's exact fold and consume one target queue credit
+before the next input is admitted, preventing ingest coalescing from creating
+a false full-queue fixture. Clearing the slow flag must create a real retained
+baseline with the full inventory while the target is dirty and its queue is
+full. Only then does capture start and the target depart.
+
+Both receiver cases keep the source and witness registered, preserve the
+witness's group identity, selected unicast/VPN routes and exact receiver
+folds, and clear the departed target's registration, dirty state and baseline.
+The existing bounded EVPN page query also verifies received and best-route
+totals outside the capture window, without copying the full table.
+Receiver teardown does not fabricate withdrawals to the disconnected target;
+its eight already-queued preparation messages drain after the measured barrier.
+Source bodies and their shared attributes stay live, so the samples describe
+receiver-owned collections rather than total route or attribute reclamation.
 
 The in-process actor and harness share one 12 GiB cgroup with swap disabled.
 The receipt retains complete build-input maps, the control source patch,
 binary/process identity, commands, raw evidence hashes, resource readouts and
 cleanup outcomes. Raw observations and descriptive medians/maxima do not
 constitute a daemon readiness, fleet, throughput or memory qualification.
-There is no timing pass threshold or automatic chunking decision.
+Phase costs have no speedup pass threshold or automatic chunking decision.
+
+The v3 receipt separately reports three readiness observations. For each
+unmixed cleanup owner, the maximum interval between all checkpoint callbacks
+covers entry, productive cleanup, and the final callback after backing storage
+is released. Received-row cleanup includes attribute-intern garbage collection,
+although the historical Adj-RIB-In phase timer still ends before that sweep.
+The fixture uses at most four shared attribute sets, so this does not measure
+attribute cleanup at real-table diversity or its full-table cost.
+An eligible full cleanup must have productive callbacks for its real inventory,
+successful in-owner queries delivered at a nonforced tagged cleanup callback,
+and a maximum
+instrumented callback interval of at most the existing 25 ms service budget.
+Mixed owners, owners crossing capture boundaries, missing work or absent query
+overlap cannot qualify. Empty controls report their actual work and overlap
+without claiming a full-cleanup qualification.
+
+The existing maximum gap between eligible service opportunities is a separate
+counter. Its 25 ms target is not a strict 25 ms bound: eligibility includes the
+budget and any overshoot. A third observation comes from one real readiness
+query at a time on the existing dedicated lane, whose capacity remains 64.
+An independent observer retains each admitted reply through the primary FIFO
+barrier and a final post-barrier probe. Counts, actual owner overlap and the
+maximum refill gap are retained; a single producer does not imply a permanently
+nonempty queue. Every probe must succeed, and its measured reservation-to-reply
+interval must stay within the existing 200 ms RIB-component deadline. This does
+not qualify the complete shared peer-manager/RIB HTTP probe or its unchanged
+250 ms external watcher deadline.
+
+All these costs come from an instrumented `bench-internals` build. Its
+checkpoint callbacks take the instrumentation lock and read the clock, so
+phase and containing-operation costs include that overhead. Callback intervals
+also include probe service and instrumentation overhead; they are not client
+query latency. These instrumented observations must not be directly compared
+with historical pre-checkpoint costs without a same-build control. Normal
+daemon builds without `bench-internals` contain none of these capture fields
+or callback clocks; a real-daemon receipt must retain its actual build features.
 
 For correctness checks, `rrharness recovery-retirement
-retirement-full|retirement-empty full-uc|full-vpn|smoke-uc|smoke-vpn
---correctness-only` uses the same actor boundaries without sampling durations;
-all duration fields are null. Measured execution requires the hosted receipt
-launcher. This mode does not chunk lifecycle collections or change deadlines.
+retirement-{full,empty,adj-out-full,adj-out-empty,regroup-full,regroup-empty}
+full-uc|full-vpn|smoke-uc|smoke-vpn
+--correctness-only` uses the same actor boundaries without reporting durations;
+all duration fields, including readiness clocks, are null and no timing
+qualification is made. Measured execution requires the hosted receipt
+launcher. Capture instrumentation does not change readiness deadlines.
 
 ## Allocator
 
