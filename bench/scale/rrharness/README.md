@@ -67,10 +67,9 @@ Every leg must finish exact announced/withdrawn receiver inventories, actor
 barriers and the required full-size retirement phases. Missing or empty
 eligible work is invalid; absent VPN work in the unicast profile is reported
 as ineligible rather than a zero-cost observation. The original source cases
-retain their one-receiver topology and phase boundaries. The v2 campaign
-adds the four receiver-departure cases; v3 appends bounded readiness evidence.
-The consumer preserves v1 and v2 archive replay without inventing evidence
-that those older runs did not capture.
+retain their one-receiver topology and phase boundaries. The summarizer
+accepts only the current v3 campaign: all six cases with bounded readiness
+evidence. Earlier v1 and v2 archives remain as published.
 
 The private Adj-RIB-Out cases use two grouped receivers with only two
 unicast or VPN anchor routes, plus 1,230,000 private EVPN IMET routes in the
@@ -100,9 +99,10 @@ Source bodies and their shared attributes stay live, so the samples describe
 receiver-owned collections rather than total route or attribute reclamation.
 
 The in-process actor and harness share one 12 GiB cgroup with swap disabled.
-The receipt retains complete build-input maps, the control source patch,
-binary/process identity, commands, raw evidence hashes, resource readouts and
-cleanup outcomes. Raw observations and descriptive medians/maxima do not
+The receipt retains both source patches, one hash per built binary, process
+identity, commands, resource readouts and the driver exit, which covers
+cleanup. The candidate patch must be empty, the control patch must touch only
+the VPN distribution source, and the two binaries must differ. Raw observations and descriptive medians/maxima do not
 constitute a daemon readiness, fleet, throughput or memory qualification.
 Phase costs have no speedup pass threshold or automatic chunking decision.
 
@@ -330,12 +330,12 @@ is a failure bound, not a timing result; query and drain barriers establish
 completion.
 
 The hosted-only driver
-[`../compare-recovery-memory.sh`](../compare-recovery-memory.sh) freezes the
-committed harness and feature-only instrumentation on three source revisions:
+[`../compare-recovery-memory.sh`](../compare-recovery-memory.sh) builds the
+candidate commit's harness and feature-only instrumentation on three source revisions:
 `c862af9338aa828b7462f3cf85781f63b0e79fe8`, the intermediate refusal control
 `bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00`, and the exact candidate SHA. It
-validates the unchanged observer bodies and atomic-credit seam, retains both
-patches, preserves manifests/lockfiles/pins, and builds serially with locked
+validates the unchanged observer bodies and atomic-credit seam, retains each
+role's instrumentation patch, preserves manifests/lockfiles/pins, and builds serially with locked
 `scale` settings, four jobs and separate targets. Each selected profile/cell
 runs A/B/B/A separately against each historical control.
 
@@ -356,8 +356,8 @@ The driver refuses dev/self-hosted environments and fails before building if
 cgroup v2 peak accounting or the zero-swap fence is unavailable. Each leg uses
 a fresh root-owned transient systemd scope. Measured mode verifies its own
 unified cgroup membership before allocating inventory, records PID/start-time,
-and embeds its original revision plus instrumentation digest. The checker binds
-those values and the running `/proc/PID/exe` digest to the recorded build. Raw
+and embeds its original revision. The checker binds those values to the
+recorded role source and the launched process. Raw
 ownership samples cover only the Bash launcher, Python checker and Rust workload
 before, during and after execution; foreign members, populated descendants and
 reused scope/workload identities are refused. Actual swap must stay zero and
@@ -370,13 +370,15 @@ all logical proofs at the selected shape and zero budget/proof fallbacks. The
 old baseline has no recovery gauges; the intermediate full-table control must
 show an actual refusal. Historical route/contract failures remain failed evidence
 and do not stop later matched candidate legs. They suppress a comparison ratio;
-no incomplete control is promoted to a valid memory comparison. Every candidate
-failure makes the final checker fail, after writing the comparison artifact.
-Missing accounting, bad identity, swap or OOM always fails independently of the
-route verdict.
+no incomplete control is promoted to a valid memory comparison. Every
+summarizer writes `comparison.json` with a `PASS`, `FAIL` or `INVALID` verdict
+and a one-line reason; only `PASS` exits zero. A candidate failure is `FAIL`.
+Missing accounting, bad identity, swap, OOM or a failed driver invocation is
+`INVALID`, independently of the route checks; finalizing a failed invocation
+keeps an existing `FAIL` reason and never keeps a `PASS`.
 
-Artifacts contain source/binary hashes, frozen source and patches, build inputs,
-commands, exits, logs and raw ownership/cgroup samples, including failed legs.
+Artifacts contain source SHAs, instrumentation patches, commands, exits, logs
+and raw ownership/cgroup samples, including failed legs.
 Host memory is recorded after builds and before each leg; pre-build free memory
 is not used as a workload headroom claim. Any available EVPN exhaustion counter
 must stay zero; EVPN remains inactive here. Common proof fallback is not described

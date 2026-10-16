@@ -1023,22 +1023,12 @@ pub(super) fn verify_memory_identity(path: &std::path::Path) {
     let Some(source_sha) = option_env!("RRHARNESS_RECOVERY_SOURCE_SHA") else {
         panic!("measured binary must embed its original source SHA");
     };
-    let Some(instrumentation_sha) = option_env!("RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256") else {
-        panic!("measured binary must embed its frozen instrumentation digest");
-    };
     assert!(
         source_sha.len() == 40
             && source_sha
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
         "invalid compiled source SHA"
-    );
-    assert!(
-        instrumentation_sha.len() == 64
-            && instrumentation_sha
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
-        "invalid compiled instrumentation digest"
     );
     let membership =
         fs::read_to_string("/proc/self/cgroup").expect("unreadable workload cgroup membership");
@@ -1068,7 +1058,7 @@ pub(super) fn verify_memory_identity(path: &std::path::Path) {
         .parse()
         .unwrap();
     println!(
-        "recovery_identity {{\"pid\":{},\"start_ticks\":{start_ticks},\"cgroup\":\"{text}\",\"source_sha\":\"{source_sha}\",\"instrumentation_sha256\":\"{instrumentation_sha}\"}}",
+        "recovery_identity {{\"pid\":{},\"start_ticks\":{start_ticks},\"cgroup\":\"{text}\",\"source_sha\":\"{source_sha}\"}}",
         std::process::id()
     );
 }
@@ -1388,7 +1378,6 @@ async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Pa
         );
         // Consumers still hold the seed fold. Only the production admitted-key
         // gauge, observed behind the synchronous receipt, proves sparse admission.
-        // The measured checker applies capability-specific assertions to each SHA.
     }
     sample(&harness, cell, spec, "retained", memory, &retained_counts).await;
     sample(

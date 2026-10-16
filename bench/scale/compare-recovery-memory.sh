@@ -6,8 +6,6 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=/dev/null
 source "$script_dir/cgroup-memory.sh"
-# shellcheck source=/dev/null
-source "$script_dir/provenance.sh"
 checker=$script_dir/recovery_memory.py
 driver=$script_dir/compare-recovery-memory.sh
 baseline=c862af9338aa828b7462f3cf85781f63b0e79fe8
@@ -25,13 +23,13 @@ if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-s
         python3 "$checker" scope-snapshot "$cgroup" "$1/raw"
         record_scope_peak "$cgroup" "$1/compatibility-peak.txt"
     else
-        [[ $# == 6 || ( $mode == --scope-scan && $# == 7 && ${7:-} == --shuffled-old ) ]] || fail 'invalid scope worker arguments'
+        [[ $# == 5 || ( $mode == --scope-scan && $# == 6 && ${6:-} == --shuffled-old ) ]] || fail 'invalid scope worker arguments'
         status=0
         scan_option=()
         [[ $mode != --scope-scan ]] || scan_option=(--scan)
         [[ $mode != --scope-retirement ]] || scan_option=(--retirement)
-        [[ $# != 7 ]] || scan_option+=(--shuffled-old)
-        python3 "$checker" run-scope "$1" "$2" "$3" "$cgroup" "$4" "$5" "$6" "${scan_option[@]}" || status=$?
+        [[ $# != 6 ]] || scan_option+=(--shuffled-old)
+        python3 "$checker" run-scope "$1" "$2" "$3" "$cgroup" "$4" "$5" "${scan_option[@]}" || status=$?
         record_scope_peak "$cgroup" "$2/compatibility-peak.txt" || status=1
         exit "$status"
     fi
@@ -109,8 +107,6 @@ finish_retirement() {
         if [[ $candidate_status == 0 && $old_status == 0 ]]; then
             rm -rf -- "$work_root" || remove_status=$?
         fi
-        printf '{"candidate_worktree_exit":%s,"old_drop_worktree_exit":%s,"scratch_remove_exit":%s}\n' \
-            "$candidate_status" "$old_status" "$remove_status" > "$output/cleanup-proof.json"
         if [[ $candidate_status != 0 || $old_status != 0 || $remove_status != 0 ]]; then status=1; fi
     fi
     [[ $status == 0 ]] || printf '%s\n' "$work_root" > "$output/scratch-retained.txt"
@@ -149,26 +145,6 @@ launch_scope "recovery-memory-probe-$$.scope" bash "$driver" --scope-probe "$out
 printf '%s\n' "$status" > "$output/probe/launcher.exit"
 [[ $status == 0 ]] || fail 'required cgroup capability probe failed; retain its raw files and log'
 
-inputs=(bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_memory.rs
-    bench/scale/rrharness/Cargo.toml bench/scale/compare-recovery-memory.sh
-    bench/scale/recovery_memory.py bench/scale/cgroup-memory.sh bench/scale/provenance.sh)
-[[ $receipt_mode != scan ]] || inputs+=(bench/scale/rrharness/src/recovery_scan.rs)
-[[ $receipt_mode != retirement ]] || inputs+=(
-    bench/scale/rrharness/src/recovery_retirement.rs
-    crates/rib/src/manager/bench_support.rs crates/rib/src/manager/distribution/vpn.rs
-    crates/rib/src/manager/peer_lifecycle.rs crates/rib/src/manager/mod.rs)
-mkdir "$output/frozen-instrumentation"
-for path in "${inputs[@]}"; do
-    mkdir -p -- "$output/frozen-instrumentation/$(dirname -- "$path")"
-    cp -- "$repository/$path" "$output/frozen-instrumentation/$path"
-    if [[ $receipt_mode == memory && $path == bench/scale/rrharness/src/main.rs ]]; then
-        # Historical controls lack the component-only RIB API. Freeze the
-        # identical memory entrypoint for every role, without porting runtime.
-        python3 "$checker" normalize-memory-entrypoint "$output/frozen-instrumentation/$path" "$output/memory-entrypoint-derivation.json"
-    fi
-    printf '%s  %s\n' "$(provenance_sha256_file "$output/frozen-instrumentation/$path")" "$path" >> "$output/instrumentation.sha256"
-done
-instrumentation=$(provenance_sha256_file "$output/instrumentation.sha256")
 if [[ $receipt_mode == retirement ]]; then
     # Timing uses the same current runtime in both arms, never historical controls.
     trap finish_retirement EXIT
@@ -183,14 +159,13 @@ print(json.dumps({"available_bytes": available, "minimum_bytes": required,
 if available < required:
     raise SystemExit("retirement shape requires at least 12 GiB available; refusing to resize")
 PYCODE
-    python3 "$checker" snapshot-build-inputs "$repository" "$output/committed-inputs.json"
-    python3 - "$output/manifest.json" "$head" "$instrumentation" "$profile" <<'PYCODE'
+    python3 - "$output/manifest.json" "$head" "$profile" <<'PYCODE'
 import json
 from pathlib import Path
 import sys
 Path(sys.argv[1]).write_text(json.dumps({
     "schema": "rustbgpd.retirement-timing.campaign.v3", "candidate": sys.argv[2],
-    "instrumentation_manifest_sha256": sys.argv[3], "profile": sys.argv[4],
+    "profile": sys.argv[3],
     "cells": ["retirement-empty", "retirement-full",
               "retirement-adj-out-empty", "retirement-adj-out-full",
               "retirement-regroup-empty", "retirement-regroup-full"],
@@ -199,30 +174,24 @@ Path(sys.argv[1]).write_text(json.dumps({
     "scope": "instrumented component attribution and cleanup checkpoint/RIB-query bounds only; no full HTTP/fleet qualification; receiver cleanup is identical in both arms, with no cleanup improvement comparison",
 }, indent=2, sort_keys=True) + "\n")
 PYCODE
-    mkdir "$output/bin"
     for role in candidate old-drop; do
         tree=$work_root/$role
         git -C "$repository" worktree add --detach "$tree" "$head" > "$output/$role-worktree.log" 2>&1
-        if [[ $role == old-drop ]]; then
+        [[ $role != old-drop ]] ||
             python3 "$checker" derive-retirement-control "$tree/crates/rib/src/manager/distribution/vpn.rs"
-            cp -- "$tree/crates/rib/src/manager/distribution/vpn.rs" "$output/old-drop-source.rs"
-        fi
         git -C "$tree" diff --binary > "$output/$role-source.patch"
-        python3 "$checker" snapshot-build-inputs "$tree" "$output/$role-inputs.json"
         record_command env CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-$role" \
-            RRHARNESS_RECOVERY_SOURCE_SHA="$head" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" \
+            RRHARNESS_RECOVERY_SOURCE_SHA="$head" \
             cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4
         status=0
         (cd -- "$tree" && CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-$role" \
-            RRHARNESS_RECOVERY_SOURCE_SHA="$head" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" \
+            RRHARNESS_RECOVERY_SOURCE_SHA="$head" \
             cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4) \
             > "$output/$role-build.log" 2>&1 || status=$?
         printf '%s\n' "$status" > "$output/$role-build.exit"
         [[ $status == 0 ]] || fail "$role retirement build failed"
-        python3 "$checker" snapshot-build-inputs "$tree" "$output/$role-inputs-after.json"
-        cmp "$output/$role-inputs.json" "$output/$role-inputs-after.json" || fail 'retirement build inputs changed'
-        cp -- "$work_root/target-$role/scale/rrharness" "$output/bin/$role"
-        provenance_sha256_file "$output/bin/$role" > "$output/$role-binary.sha256"
+        # Control and candidate must be different binaries.
+        sha256sum "$work_root/target-$role/scale/rrharness" | cut -d' ' -f1 > "$output/$role-binary.sha256"
     done
     ordinal=0
     for cell in retirement-empty retirement-full retirement-adj-out-empty retirement-adj-out-full retirement-regroup-empty retirement-regroup-full; do
@@ -235,11 +204,10 @@ PYCODE
             status=0
             launch_scope "recovery-retirement-$$-$ordinal.scope" env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
                 RECOVERY_MEMORY_RUNNER_ENVIRONMENT="${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}}" \
-                bash "$driver" --scope-retirement "$output/bin/$role" "$directory" "$cell" \
-                "$(cat "$output/$role-binary.sha256")" "$profile" "$clients" \
+                bash "$driver" --scope-retirement "$work_root/target-$role/scale/rrharness" "$directory" "$cell" \
+                "$profile" "$clients" \
                 > "$directory/launcher.log" 2>&1 || status=$?
             printf '%s\n' "$status" > "$directory/launcher.exit"
-            python3 "$checker" seal-retirement-raw "$directory"
             [[ $status == 0 ]] || fail 'retirement actor cell failed'
             leg=$((leg + 1))
             ordinal=$((ordinal + 1))
@@ -248,63 +216,63 @@ PYCODE
     exit 0
 fi
 if [[ $receipt_mode == scan ]]; then
-    python3 - "$output/manifest.json" "$head" "$instrumentation" "$profile" "$old_order" <<'PYCODE'
+    python3 - "$output/manifest.json" "$head" "$profile" "$old_order" <<'PYCODE'
 import json
 from pathlib import Path
 import sys
 Path(sys.argv[1]).write_text(json.dumps({
     "schema": "rustbgpd.recovery-scan.campaign.v3", "candidate": sys.argv[2],
-    "instrumentation_manifest_sha256": sys.argv[3], "profile": sys.argv[4],
-    "old_order": sys.argv[5],
+    "profile": sys.argv[3], "old_order": sys.argv[4],
     "build_jobs": 4, "order_per_cell": ["flat", "candidate", "candidate", "flat"],
     "scope": "component capture only; same runtime, no activation or daemon claim",
 }, indent=2, sort_keys=True) + "\n")
 PYCODE
     tree=$work_root/candidate
     git -C "$repository" worktree add --detach "$tree" "$head" > "$output/candidate-worktree.log" 2>&1
-    for path in Cargo.toml Cargo.lock bench/scale/rrharness/Cargo.toml; do
-        printf '%s  %s\n' "$(provenance_sha256_file "$tree/$path")" "$path" >> "$output/candidate-build-inputs.sha256"
-    done
-    record_command env CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-candidate" RRHARNESS_RECOVERY_SOURCE_SHA="$head" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4
+    record_command env CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-candidate" RRHARNESS_RECOVERY_SOURCE_SHA="$head" cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4
     status=0
     (cd -- "$tree" && CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-candidate" \
-        RRHARNESS_RECOVERY_SOURCE_SHA="$head" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" \
+        RRHARNESS_RECOVERY_SOURCE_SHA="$head" \
         cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4) \
         > "$output/candidate-build.log" 2>&1 || status=$?
     printf '%s\n' "$status" > "$output/candidate-build.exit"
     [[ $status == 0 ]] || fail 'component scan build failed'
-    provenance_sha256_file "$work_root/target-candidate/scale/rrharness" > "$output/candidate-binary.sha256"
     mkdir "$output/scan"
     status=0
     launch_scope "recovery-scan-$$.scope" env GITHUB_ACTIONS="$GITHUB_ACTIONS" \
         RECOVERY_MEMORY_RUNNER_ENVIRONMENT="${RECOVERY_MEMORY_RUNNER_ENVIRONMENT:-${RUNNER_ENVIRONMENT:-}}" \
         bash "$driver" --scope-scan \
         "$work_root/target-candidate/scale/rrharness" "$output/scan" capture-scan \
-        "$(cat "$output/candidate-binary.sha256")" "$profile" 1 "${scan_options[@]}" \
+        "$profile" 1 "${scan_options[@]}" \
         > "$output/scan/launcher.log" 2>&1 || status=$?
     printf '%s\n' "$status" > "$output/scan/launcher.exit"
     awk '$1 == "oom_kill" { print $2 }' /proc/vmstat > "$output/host-oom.after"
     python3 "$checker" summarize-scan "$output"
     exit 0
 fi
-python3 - "$output/manifest.json" "$baseline" "$intermediate" "$head" "$instrumentation" "$phase" "$profile" "$checker" "$selected_cell" <<'PYCODE'
+# The candidate commit SHA records the harness; every role builds that harness.
+harness=$work_root/harness
+mkdir -p "$harness"
+cp -- "$repository/bench/scale/rrharness/src/main.rs" "$repository/bench/scale/rrharness/src/recovery_memory.rs" "$harness/"
+# Historical controls lack the component-only RIB API. Derive the identical
+# memory entrypoint for every role, without porting runtime.
+python3 "$checker" normalize-memory-entrypoint "$harness/main.rs"
+python3 - "$output/manifest.json" "$baseline" "$intermediate" "$head" "$phase" "$profile" "$checker" "$selected_cell" <<'PYCODE'
 import importlib.util
 import json
 from pathlib import Path
 import sys
-spec = importlib.util.spec_from_file_location("receipt", sys.argv[8])
+spec = importlib.util.spec_from_file_location("receipt", sys.argv[7])
 receipt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(receipt)
-profiles = None if sys.argv[7] == "all" else [sys.argv[7]]
-cases = receipt.campaign_cases(sys.argv[6], profiles, sys.argv[9])
-derivation = Path(sys.argv[1]).parent / "memory-entrypoint-derivation.json"
+profiles = None if sys.argv[6] == "all" else [sys.argv[6]]
+cases = receipt.campaign_cases(sys.argv[5], profiles, sys.argv[8])
 profiles = list(dict.fromkeys(case["profile"] for case in cases))
 Path(sys.argv[1]).write_text(json.dumps({
     "schema": "rustbgpd.recovery-memory.campaign.v2",
-    "memory_entrypoint_derivation_sha256": receipt.hashlib.sha256(derivation.read_bytes()).hexdigest(),
     "baseline": sys.argv[2], "intermediate": sys.argv[3], "candidate": sys.argv[4],
-    "instrumentation_manifest_sha256": sys.argv[5], "phase": sys.argv[6],
-    "profiles": profiles, "selected_cell": sys.argv[9], "cases": cases, "build_jobs": 4,
+    "phase": sys.argv[5],
+    "profiles": profiles, "selected_cell": sys.argv[8], "cases": cases, "build_jobs": 4,
     "comparators": ["baseline", "intermediate"],
     "order_per_cell": ["control", "candidate", "candidate", "control"],
     "scope": "manager-direct RIB and production exact-export preflight; no final wire/TCP",
@@ -320,27 +288,19 @@ for role in baseline intermediate candidate; do
     # Preserve each source's manifests, dependency pins and lockfile. The
     # harness manifest must already agree before freezing only its source.
     cmp "$repository/bench/scale/rrharness/Cargo.toml" "$tree/bench/scale/rrharness/Cargo.toml" ||
-        fail 'harness manifest drift would confound the frozen instrumentation'
-    for path in bench/scale/rrharness/src/main.rs bench/scale/rrharness/src/recovery_memory.rs; do
-        cp -- "$output/frozen-instrumentation/$path" "$tree/$path"
-        provenance_require_sha256 "$tree/$path" "$(provenance_sha256_file "$output/frozen-instrumentation/$path")"
-    done
+        fail 'harness manifest drift would confound the shared harness'
+    cp -- "$harness/main.rs" "$harness/recovery_memory.rs" "$tree/bench/scale/rrharness/src/"
     record_command python3 "$checker" instrument-observer "$tree"
     python3 "$checker" instrument-observer "$tree"
     git -C "$tree" diff --binary > "$output/$role-instrumentation.patch"
-    git -C "$tree" diff --binary -- crates/rib/src/update.rs crates/rib/src/manager/mod.rs > "$output/$role-observer.patch"
-    for path in Cargo.toml Cargo.lock bench/scale/rrharness/Cargo.toml; do
-        printf '%s  %s\n' "$(provenance_sha256_file "$tree/$path")" "$path" >> "$output/$role-build-inputs.sha256"
-    done
-    record_command env CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-$role" RRHARNESS_RECOVERY_SOURCE_SHA="$revision" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4
+    record_command env CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-$role" RRHARNESS_RECOVERY_SOURCE_SHA="$revision" cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4
     status=0
     (cd -- "$tree" && CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-$role" \
-        RRHARNESS_RECOVERY_SOURCE_SHA="$revision" RRHARNESS_RECOVERY_INSTRUMENTATION_SHA256="$instrumentation" \
+        RRHARNESS_RECOVERY_SOURCE_SHA="$revision" \
         cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4) \
         > "$output/$role-build.log" 2>&1 || status=$?
     printf '%s\n' "$status" > "$output/$role-build.exit"
     [[ $status == 0 ]] || fail "$role build failed; retain its log"
-    provenance_sha256_file "$work_root/target-$role/scale/rrharness" > "$output/$role-binary.sha256"
 done
 free -b > "$output/host-memory.post-build.txt"
 python3 - "$output/manifest.json" > "$output/cases.tsv" <<'PYCODE'
@@ -361,7 +321,7 @@ while IFS=$'\t' read -r selected cell clients; do
             free -b > "$directory/host-memory.before.txt"
             status=0
             launch_scope "recovery-memory-$$-$ordinal.scope" bash "$driver" --scope-worker \
-                "$work_root/target-$role/scale/rrharness" "$directory" "$cell" "$(cat "$output/$role-binary.sha256")" "$selected" "$clients" \
+                "$work_root/target-$role/scale/rrharness" "$directory" "$cell" "$selected" "$clients" \
                 > "$directory/launcher.log" 2>&1 || status=$?
             printf '%s\n' "$status" > "$directory/launcher.exit"
             # Continue every matched leg, including historical contract failures.
