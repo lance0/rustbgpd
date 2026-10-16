@@ -1753,3 +1753,70 @@ fn vpn_peer_down_during_refresh_clears_stale_state() {
 }
 
 // --- RFC 9107 VPN-ORR: per-vantage best selection for SAFI 128 ---
+
+/// Answers to readiness queries already queued when one VPN UPDATE is applied
+/// directly, without the actor loop. Its per-peer distribution loop is the
+/// only seam on this path that can serve the dedicated readiness lane.
+fn readiness_answered_during_vpn_distribution(receivers: u8) -> bool {
+    let (_tx, rx) = mpsc::channel(8);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx);
+    let mut outbound = Vec::new();
+    for index in 0..receivers {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 1, index + 2)),
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vpn_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        outbound.push(outbound_rx);
+    }
+    let (reply, mut response) = oneshot::channel();
+    readiness_tx
+        .try_send(RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: Instant::now(),
+        })
+        .unwrap();
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 1, 1), 31, 100, 100);
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+        announced: vec![route],
+        withdrawn: vec![],
+    });
+    for outbound_rx in &mut outbound {
+        let (announced, _) = drain_vpn_delta(outbound_rx);
+        assert_eq!(
+            announced.len(),
+            1,
+            "every receiver got the distributed route"
+        );
+    }
+    response.try_recv().is_ok()
+}
+
+/// One VPN UPDATE is applied without a readiness owner, and one member's
+/// distribution work can be large. A readiness query queued before it must
+/// be answered at a peer boundary of that loop, not after the whole pass.
+/// With no receiver the loop never runs and nothing else on this path can
+/// answer, which pins the per-peer loop as the serving seam.
+#[tokio::test]
+async fn vpn_distribution_serves_readiness_at_each_peer_boundary() {
+    assert!(readiness_answered_during_vpn_distribution(3));
+    assert!(!readiness_answered_during_vpn_distribution(0));
+}

@@ -924,6 +924,16 @@ impl RibManager {
             .collect();
         for peer in peers {
             checkpoint();
+            // VPN ingest applies each UPDATE here without a readiness owner,
+            // and one member's work can be large (a dirty member's recovery
+            // bookkeeping). Service the dedicated read-only lane at each peer
+            // boundary, as unicast cold ingest does; while an owner holds the
+            // lane this is a no-op and its checkpoints serve instead.
+            let transition_elapsed = self
+                .pending_clean_policy_transition
+                .as_ref()
+                .map(super::PendingCleanPolicyTransition::elapsed);
+            self.drain_readiness_queries(transition_elapsed);
             if self.outbound_channel_gone(peer) {
                 self.drop_gone_dirty_peer(peer);
                 continue;
