@@ -356,6 +356,14 @@ impl LazyRibBudget {
             .0
             .get_or_insert_with(|| tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT)
     }
+
+    /// Do not charge this proof budget for other work that ran since
+    /// `since`: an anchored deadline moves later by that elapsed time.
+    fn exclude_since(&mut self, since: tokio::time::Instant) {
+        if let Some(deadline) = &mut self.0 {
+            *deadline += since.elapsed();
+        }
+    }
 }
 
 /// Per-transaction state of one resolved policy snapshot: the RIB budgets its
@@ -3405,6 +3413,9 @@ impl PeerManager {
         let mut window = CleanStateQueryWindow::default();
         // One budget for this whole settlement's RIB proofs, for the same
         // reason the policy walk has one: they are serial and per dependent.
+        // It covers the proofs only: the export and import legs between them
+        // are bounded by the owner's settlement budget, and an export may
+        // legitimately take longer than this whole proof budget.
         let mut rib_budget = LazyRibBudget::default();
         let mut established = Vec::with_capacity(dependents.len());
         for dependent in dependents {
@@ -3425,12 +3436,14 @@ impl PeerManager {
                 if *is_established {
                     exports.push(dependent.peer.address);
                 } else {
+                    let export_started = tokio::time::Instant::now();
                     self.reevaluate_dataset_exports(
                         vec![dependent.peer.address],
                         true,
                         operator_reads,
                     )
                     .await?;
+                    rib_budget.exclude_since(export_started);
                     // A missing outbound registration is safe only while this
                     // exact managed session still positively reports down.
                     if self
@@ -3451,6 +3464,7 @@ impl PeerManager {
                 }
             }
         }
+        let refresh_started = tokio::time::Instant::now();
         self.reevaluate_dataset_exports(exports, false, operator_reads)
             .await?;
         for (dependent, is_established) in dependents.iter().zip(&established) {
@@ -3471,6 +3485,7 @@ impl PeerManager {
                 });
             }
         }
+        rib_budget.exclude_since(refresh_started);
         for (dependent, was_established) in dependents.iter().zip(&established) {
             let now_established = self
                 .qualify_dataset_dependent(dependent, &mut window, &mut rib_budget, operator_reads)

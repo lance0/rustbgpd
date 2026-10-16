@@ -3957,6 +3957,82 @@ async fn dataset_generation_clean_down_missing_export_is_vacuous_only_for_that_p
     relay.await.unwrap();
 }
 
+/// A dataset export re-evaluation may legitimately outlive the two-minute
+/// retained-stale proof budget: only the settlement budget bounds it. A clean
+/// down dependent's later qualification must still get its proof query
+/// instead of failing the completed operation on a budget the export spent.
+async fn assert_slow_export_keeps_down_dependent_proof(slow_singleton: bool) {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let mut harness = GenerationHarness::new(&prior);
+    let down = "10.0.0.2".parse::<IpAddr>().unwrap();
+    harness.counters[&down]
+        .states
+        .lock()
+        .unwrap()
+        .push_back(SessionState::Idle);
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let proofs = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&proofs);
+    let relay = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                RibUpdate::QueryPeerRetainedStale { reply, .. } => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(0);
+                }
+                RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
+                    if (peers == vec![down]) == slow_singleton {
+                        tokio::time::sleep(RIB_BATCH_REPLY_TIMEOUT + Duration::from_secs(60)).await;
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                other => {
+                    if downstream.send(other).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(live.pin().generation, 2);
+    // Preflight, initial, post-singleton and final qualification each prove
+    // the RIB retains nothing for the down dependent.
+    assert_eq!(proofs.load(Ordering::SeqCst), 4);
+    assert!(
+        harness
+            .mgr
+            .peers
+            .values()
+            .all(|managed| !managed.pending_export_apply && !managed.pending_refresh)
+    );
+    harness.shutdown().await;
+    relay.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn dataset_generation_slow_batch_export_keeps_down_dependent_proof_budget() {
+    assert_slow_export_keeps_down_dependent_proof(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn dataset_generation_slow_down_peer_export_keeps_its_proof_budget() {
+    assert_slow_export_keeps_down_dependent_proof(true).await;
+}
+
 #[tokio::test]
 async fn dataset_generation_down_peer_with_gr_retention_rejects_before_publication() {
     let fixture = dataset_generation_fixture();
