@@ -1159,7 +1159,7 @@ type 0x02, otherwise type 0x00 (subtype 0x02 RT / 0x03 RO).
 test NAME {
     route { FIELD VALUE; ... }
     [peer { address IP; asn N; local-as N; group "NAME" }]
-    expect POLICY[(args)] == accept|reject [with ASSERTION, ...]
+    expect POLICY[(args)] == accept|reject [with [only] ASSERTION, ...]
     expect POLICY[(args)] == error [KIND]
     expect chain [POLICY[(args)], ...] == accept|reject|error ...
     [expect ...]
@@ -1198,6 +1198,8 @@ has none). An empty string is a route without an AS path.
 | `prepend as ASN COUNT` | the policy prepends `COUNT` copies of `ASN` |
 | `community LIT` | `LIT` is in the add list (`large-community` / `ext-community` likewise) |
 | `removes community LIT` | `LIT` is in the remove list (any community kind keyword) |
+| `removes large-community GA:*:*` | every matching fixture value is in the remove list; the fixture must contain at least one match |
+| `not removed community LIT` | `LIT` is present in the fixture and absent from the remove list (any community kind keyword) |
 | `without community LIT` | `LIT` is **not** in the add list (any community kind keyword) |
 | `without local-pref\|med\|next-hop\|prepend` | the policy leaves that attribute unchanged |
 
@@ -1217,10 +1219,25 @@ test member-cannot-send-internal-tags {
 }
 ```
 
-A wildcard `remove large-community 65500:*:*` removes the concrete
-values the fixture carries, so assert those values. `removes`,
-`without`, and `chain` are contextual words; a policy named `chain`
-still works as `expect chain == accept`. Computed prepend operands resolve
+A wildcard scrub can be pinned with `removes large-community 65500:*:*`.
+It checks the concrete matching values in the fixture. With `with only`, it does
+not authorize removals outside that fixture. Pair it with
+`not removed large-community 65501:1:2` and a fixture containing that value to
+catch an overmatching scrub.
+
+Extended-community removal assertions use the policy engine's decoded RT/RO
+identity across encodings. Other extended communities match by their raw bytes.
+
+`with only ASSERTION, ...` also rejects any unlisted modification, including
+an extra scalar assignment, prepend, or community addition or removal. Community
+lists are compared as sets, so their order and repeated assertions do not matter.
+`without` and `not removed` constrain changes but do not authorize modifications
+in an exact set. At least one assertion is required after `with only`; for an
+empty set, use a negative assertion such as `with only without local-pref`.
+
+`removes`, `without`, `not removed`, `only`, and `chain` are contextual words;
+a policy named `chain` still works as `expect chain == accept`.
+Computed prepend operands resolve
 during evaluation, so the assertion states the **resolved** ASN:
 `peer { asn 65010 }` + `prepend as peer 3` asserts as
 `with prepend as 65010 3`. `peer { local-as N }` supplies the value

@@ -19,7 +19,8 @@ use rustbgpd_wire::{
 
 use crate::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
 use crate::engine::{
-    NamedPolicy, NextHopAction, PolicyAction, PolicyChain, RouteContext, RouteFamily, RouteType,
+    NamedPolicy, NextHopAction, PolicyAction, PolicyChain, RouteContext, RouteFamily,
+    RouteModifications, RouteType,
 };
 use crate::ir::CompiledChain;
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
@@ -436,9 +437,14 @@ pub(super) fn run_tests_recording(
                 continue;
             }
             for assertion in &expect.with {
-                if let Some(problem) = check_assertion(assertion, &result.modifications) {
+                if let Some(problem) = check_assertion(assertion, &result.modifications, &fixture) {
                     problems.push(format!("{call}: {problem}"));
                 }
+            }
+            if expect.with_only
+                && let Some(problem) = check_only(expect, &fixture, &result.modifications)
+            {
+                problems.push(format!("{call}: {problem}"));
             }
         }
         if !problems.is_empty() {
@@ -567,7 +573,8 @@ fn render_call(name: &str, args: &[u32]) -> String {
 
 fn check_assertion(
     assertion: &WithAssertion,
-    mods: &crate::engine::RouteModifications,
+    mods: &RouteModifications,
+    fixture: &Fixture,
 ) -> Option<String> {
     match assertion {
         WithAssertion::LocalPref(expected) => (mods.set_local_pref != Some(*expected)).then(|| {
@@ -595,6 +602,46 @@ fn check_assertion(
             .then(|| format!("expected community {} to be added", lit_text(&lit.node))),
         WithAssertion::Removes(lit) => (!community_listed(&lit.node, mods, false))
             .then(|| format!("expected community {} to be removed", lit_text(&lit.node))),
+        WithAssertion::RemovesLargeAdmin(global) => {
+            let matching = fixture
+                .large_communities
+                .iter()
+                .filter(|lc| lc.global_admin == *global)
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                Some(format!("no fixture communities match {global}:*:*"))
+            } else {
+                matching
+                    .into_iter()
+                    .find(|lc| !mods.large_communities_remove.contains(lc))
+                    .map(|lc| {
+                        format!("expected community {lc} to be removed (matching {global}:*:*)")
+                    })
+            }
+        }
+        WithAssertion::NotRemoved(lit) => {
+            let present = match lit.node {
+                CommunityLit::Standard(value) => fixture.communities.contains(&value),
+                CommunityLit::Large(value) => fixture.large_communities.contains(&value),
+                CommunityLit::Ext { .. } | CommunityLit::ExtRaw(_) => fixture
+                    .extended_communities
+                    .iter()
+                    .any(|ec| lit.node.to_match().matches_ec(ec)),
+            };
+            if present {
+                community_listed(&lit.node, mods, false).then(|| {
+                    format!(
+                        "expected community {} not to be removed",
+                        lit_text(&lit.node)
+                    )
+                })
+            } else {
+                Some(format!(
+                    "community {} is absent from the fixture",
+                    lit_text(&lit.node)
+                ))
+            }
+        }
         WithAssertion::WithoutCommunity(lit) => community_listed(&lit.node, mods, true)
             .then(|| format!("expected community {} not to be added", lit_text(&lit.node))),
         WithAssertion::Without(attr) => {
@@ -622,6 +669,73 @@ fn check_assertion(
     }
 }
 
+fn check_only(expect: &ExpectDef, fixture: &Fixture, mods: &RouteModifications) -> Option<String> {
+    let mut unlisted = mods.clone();
+    for assertion in &expect.with {
+        discard_asserted(assertion, fixture, &mut unlisted);
+    }
+    (unlisted != RouteModifications::default())
+        .then(|| format!("unexpected modifications: {unlisted:?}"))
+}
+
+/// Remove the asserted changes; any remainder violates `with only`.
+fn discard_asserted(assertion: &WithAssertion, fixture: &Fixture, mods: &mut RouteModifications) {
+    match assertion {
+        WithAssertion::LocalPref(_) => mods.set_local_pref = None,
+        WithAssertion::Med(_) => mods.set_med = None,
+        WithAssertion::NextHop(_) => mods.set_next_hop = None,
+        WithAssertion::Prepend(_, _) => mods.as_path_prepend = None,
+        WithAssertion::RemovesLargeAdmin(global) => mods
+            .large_communities_remove
+            .retain(|lc| lc.global_admin != *global || !fixture.large_communities.contains(lc)),
+        WithAssertion::Community(lit) | WithAssertion::Removes(lit) => {
+            let add = matches!(assertion, WithAssertion::Community(_));
+            match lit.node {
+                CommunityLit::Standard(value) => if add {
+                    &mut mods.communities_add
+                } else {
+                    &mut mods.communities_remove
+                }
+                .retain(|v| *v != value),
+                CommunityLit::Large(value) => if add {
+                    &mut mods.large_communities_add
+                } else {
+                    &mut mods.large_communities_remove
+                }
+                .retain(|v| *v != value),
+                CommunityLit::Ext { .. } | CommunityLit::ExtRaw(_) => if add {
+                    &mut mods.extended_communities_add
+                } else {
+                    &mut mods.extended_communities_remove
+                }
+                .retain(|v| {
+                    if add {
+                        *v != ext_value(&lit.node)
+                    } else {
+                        !lit.node.to_match().matches_ec(v)
+                    }
+                }),
+            }
+        }
+        WithAssertion::NotRemoved(_)
+        | WithAssertion::WithoutCommunity(_)
+        | WithAssertion::Without(_) => {}
+    }
+}
+
+fn ext_value(lit: &CommunityLit) -> ExtendedCommunity {
+    match *lit {
+        CommunityLit::Ext {
+            route_target,
+            global,
+            local,
+            ipv4_admin,
+        } => ext_community_value(route_target, global, local, ipv4_admin),
+        CommunityLit::ExtRaw(raw) => ExtendedCommunity::new(raw),
+        _ => unreachable!("extended community literal"),
+    }
+}
+
 /// Whether `lit` is in the modification add list (`added`) or remove
 /// list (`!added`) of its kind.
 fn community_listed(
@@ -643,22 +757,13 @@ fn community_listed(
         }
         .contains(&lc),
         CommunityLit::Ext { .. } | CommunityLit::ExtRaw(_) => {
-            let value = match *lit {
-                CommunityLit::Ext {
-                    route_target,
-                    global,
-                    local,
-                    ipv4_admin,
-                } => ext_community_value(route_target, global, local, ipv4_admin),
-                CommunityLit::ExtRaw(raw) => ExtendedCommunity::new(raw),
-                _ => unreachable!("matched above"),
-            };
             if added {
-                &mods.extended_communities_add
+                mods.extended_communities_add.contains(&ext_value(lit))
             } else {
-                &mods.extended_communities_remove
+                mods.extended_communities_remove
+                    .iter()
+                    .any(|ec| lit.to_match().matches_ec(ec))
             }
-            .contains(&value)
         }
     }
 }

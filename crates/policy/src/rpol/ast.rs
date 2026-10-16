@@ -836,6 +836,8 @@ pub struct ExpectDef {
     /// an error discards modifications, so the parser rejects `with`
     /// after `error`).
     pub with: Vec<WithAssertion>,
+    /// `with only` rejects every modification not named by an assertion.
+    pub with_only: bool,
 }
 
 /// The right-hand side of an `expect ... ==` (LAN-301, ADR-0103
@@ -871,6 +873,10 @@ pub enum WithAssertion {
     /// `removes community 65001:999` (any kind) — present in the
     /// removes.
     Removes(Spanned<CommunityLit>),
+    /// `removes large-community 65001:*:*` — remove every matching fixture value.
+    RemovesLargeAdmin(u32),
+    /// `not removed community 65001:999` — a fixture value is not removed.
+    NotRemoved(Spanned<CommunityLit>),
     /// `without community 65001:999` (any kind) — absent from the adds.
     WithoutCommunity(Spanned<CommunityLit>),
     /// `without local-pref|med|next-hop|prepend` — the scalar is not set.

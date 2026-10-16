@@ -204,10 +204,14 @@ fn supported_render_is_deterministic_and_explicit() {
         "ixp-manager-own-as-export-scrub",
         &["remove-own-as-large-communities", "accept-unmatched"],
     );
-    assert_policy_tests(
-        hygiene,
-        "test own-as-scrub-executes { route { large-communities [65501:1:2, 64496:3:4, 65501:5:6] } expect ixp-manager-own-as-export-scrub == accept with removes large-community 65501:1:2, removes large-community 65501:5:6 }",
-    );
+    let scrub_test = "test own-as-scrub-executes { route { large-communities [65501:1:2, 64496:3:4, 65501:5:6] } expect ixp-manager-own-as-export-scrub == accept with only removes large-community 65501:*:*, not removed large-community 64496:3:4 }";
+    assert_policy_tests(hygiene, scrub_test);
+    let broken = hygiene.replace("remove large-community 65501:*:*", "");
+    let failures = run_rpol_tests(&format!("{broken}\n{scrub_test}"))
+        .unwrap()
+        .failures;
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("to be removed"));
     let mut maximum = value();
     maximum["policy"]["minimum_prefix_length"] = 32.into();
     assert!(
