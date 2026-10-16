@@ -27,18 +27,14 @@ struct ProbeReceipt {
 }
 
 impl ProbeReceipt {
-    fn assert_valid(&self, measured: bool) {
+    /// Structural checks only. The 200 ms reply and 25 ms callback bars are
+    /// judged by the summarizer, so a breach is a FAIL with its measurements.
+    fn assert_valid(&self) {
         assert_eq!(self.errors, 0, "real readiness query failed");
         assert_eq!(self.attempts, self.admitted);
         assert_eq!(self.admitted, self.replied);
         assert_eq!((self.before_capture, self.after_barrier), (1, 1));
         assert_eq!((self.inflight, self.max_inflight), (0, 1));
-        if measured {
-            assert!(
-                self.max_attempt_reply_ns <= 200_000_000,
-                "RIB readiness component exceeded its unchanged 200 ms deadline"
-            );
-        }
     }
 
     fn json(&self, measured: bool) -> String {
@@ -223,23 +219,10 @@ fn readiness_json_to(
         owner_json(&owners[22..], measured, phases[13])
     );
     // Capture and the observer have finished. Retain their actual observations
-    // before a bound rejects this cell; this is not a completion receipt.
+    // before a structural check rejects this cell; this is not a completion receipt.
     writeln!(output, "retirement_readiness_observation {observation}")
         .expect("failed to retain retirement readiness observation");
-    probes.assert_valid(measured);
-    for (values, keys) in owners
-        .as_chunks::<11>()
-        .0
-        .iter()
-        .zip([phases[5], phases[9], phases[13]])
-    {
-        if measured && owner_overlap(values, keys) {
-            assert!(
-                values[8] <= 25_000_000,
-                "instrumented cleanup callback interval exceeded the existing 25 ms budget"
-            );
-        }
-    }
+    probes.assert_valid();
     observation
 }
 
@@ -777,7 +760,7 @@ mod tests {
         assert_eq!((receipt.attempts, receipt.replied), (3, 3));
         assert_eq!((receipt.max_inflight, receipt.inflight), (1, 0));
         assert_eq!((receipt.before_capture, receipt.after_barrier), (1, 1));
-        receipt.assert_valid(false);
+        receipt.assert_valid();
         assert!(receipt
             .json(false)
             .contains("\"max_enqueue_reply_ns\":null"));
@@ -817,33 +800,32 @@ mod tests {
     }
 
     #[test]
-    fn readiness_observations_survive_each_bound_failure() {
-        for (attempt_ns, interval_ns, expected) in [
-            (
-                200_000_001,
-                1,
-                "RIB readiness component exceeded its unchanged 200 ms deadline",
-            ),
-            (
-                1,
-                25_000_001,
-                "instrumented cleanup callback interval exceeded the existing 25 ms budget",
-            ),
-        ] {
-            let (probes, phases, owners) = completed_observation(attempt_ns, interval_ns);
-            let mut output = Vec::new();
-            let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                super::readiness_json_to(&mut output, &probes, true, &phases, &owners)
-            }))
-            .expect_err("a failed bound must still reject the native cell");
-            assert_eq!(failure.downcast_ref::<&str>(), Some(&expected));
-            let retained = String::from_utf8(output).unwrap();
-            assert!(retained.starts_with("retirement_readiness_observation {"));
-            assert_eq!(retained.lines().count(), 1);
-            assert!(retained.contains(&format!("\"max_attempt_reply_ns\":{attempt_ns}")));
-            assert!(retained.contains(&format!("\"max_checkpoint_interval_ns\":{interval_ns}")));
-            assert!(!retained.contains("retirement_receipt "));
-        }
+    fn readiness_bar_breaches_reach_the_receipt_for_the_summarizer() {
+        // Timing bars are not native assertions: the measurement completes.
+        let (probes, phases, owners) = completed_observation(200_000_001, 25_000_001);
+        let mut output = Vec::new();
+        let receipt = super::readiness_json_to(&mut output, &probes, true, &phases, &owners);
+        assert!(receipt.contains("\"max_attempt_reply_ns\":200000001"));
+        assert!(receipt.contains("\"max_checkpoint_interval_ns\":25000001"));
+        assert!(receipt.contains("\"eligible\":true"));
+    }
+
+    #[test]
+    fn readiness_observation_survives_a_structural_failure() {
+        let (mut probes, phases, owners) = completed_observation(1, 1);
+        probes.errors = 1;
+        let mut output = Vec::new();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::readiness_json_to(&mut output, &probes, true, &phases, &owners)
+        }))
+        .expect_err("a structural failure must still reject the native cell");
+        assert!(failure
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("real readiness query failed")));
+        let retained = String::from_utf8(output).unwrap();
+        assert!(retained.starts_with("retirement_readiness_observation {"));
+        assert_eq!(retained.lines().count(), 1);
+        assert!(retained.contains("\"errors\":1"));
     }
 
     #[test]

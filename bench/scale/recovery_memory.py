@@ -324,8 +324,10 @@ def proc_identity(pid: int, *, executable_digest: bool = False) -> dict[str, obj
         "executable": os.readlink(f"/proc/{pid}/exe"),
     }
     if executable_digest:
-        # Ties each leg to the binary it actually executed.
-        identity["exe_sha256"] = hashlib.sha256(Path(f"/proc/{pid}/exe").read_bytes()).hexdigest()
+        # Ties each leg to the binary it actually executed. Streamed so the
+        # checker does not charge a whole executable to the measured scope.
+        with open(f"/proc/{pid}/exe", "rb") as executable:
+            identity["exe_sha256"] = hashlib.file_digest(executable, "sha256").hexdigest()
     return identity
 
 

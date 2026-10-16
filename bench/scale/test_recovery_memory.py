@@ -2337,6 +2337,37 @@ class RetirementReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(receipt.InvalidReceipt, "cardinality"):
             receipt.summarize_retirement(root)
 
+    def test_native_bar_breach_through_the_driver_finishes_as_fail_with_measurements(self):
+        # The harness now emits a completed receipt over a bar; the driver's
+        # exit handler and the workflow's failure finalization must keep FAIL.
+        root = self.campaign()
+        path = root / "retirement-regroup-full-3-old-drop/harness.log"
+        lines = path.read_text().splitlines()
+        row = self.readiness_breach(json.loads(lines[-1].removeprefix("retirement_receipt ")), "reply")
+        lines[-1] = "retirement_receipt " + json.dumps(row)
+        path.write_text("\n".join(lines) + "\n")
+        wrapper = Path(receipt.__file__).with_name("compare-recovery-memory.sh").read_text()
+        handler = wrapper[wrapper.index("finish_retirement() {\n"):wrapper.index("trap finish EXIT\n")]
+        setup = 'set -euo pipefail\ngit() { return 0; }\nrm() { return 0; }\nawk() { printf "0\\n"; }\n'
+        scratch = self.root / "scratch"
+        scratch.mkdir()
+        result = subprocess.run(["bash", "-c", setup + handler + "\ntrap finish_retirement EXIT\nexit 0\n"],
+                                env=os.environ | {"output": str(root), "work_root": str(scratch),
+                                                  "repository": "unused", "checker": receipt.__file__},
+                                text=True, capture_output=True, timeout=30, check=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((root / "driver.exit").read_text(), "1\n")
+        self.assertIn("FAIL: readiness bar exceeded: retirement-regroup-full-3-old-drop", result.stderr)
+        finalized = subprocess.run([sys.executable, receipt.__file__, "summarize-retirement", str(root),
+                                    "--failed-driver-exit", "1"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(finalized.returncode, 1)
+        kept = json.loads((root / "comparison.json").read_text())
+        self.assertEqual((kept["verdict"], kept["driver_invocation_exit"]), ("FAIL", 1))
+        self.assertEqual(len(kept["samples"]), 24)
+        breached = [sample for sample in kept["samples"]
+                    if (sample["cell"], sample["leg"], sample["arm"]) == ("retirement-regroup-full", 3, "old-drop")]
+        self.assertEqual(breached[0]["readiness"]["probe"]["max_attempt_reply_ns"], 200_000_001)
+
     def test_actual_retirement_exit_handler_preserves_failure_and_checks_cleanup(self):
         wrapper = Path(receipt.__file__).with_name("compare-recovery-memory.sh").read_text()
         begin = wrapper.index("finish_retirement() {\n")

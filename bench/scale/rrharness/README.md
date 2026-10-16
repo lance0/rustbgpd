@@ -104,8 +104,10 @@ identity, commands, resource readouts and the driver exit, which covers
 cleanup. The candidate patch must be empty, the control patch must touch only
 the VPN distribution source, and the two binaries must differ. Both arms embed
 the candidate SHA, so each leg records the hash of the binary it executed and
-must match its own arm. A readiness bar breach is a `FAIL` that keeps every
-measurement; malformed or missing evidence is `INVALID`. Raw observations and descriptive medians/maxima do not
+must match its own arm. The harness asserts only structural readiness
+evidence; the summarizer judges the 25 ms and 200 ms bars, so a breach is a
+`FAIL` that keeps every measurement, while malformed or missing evidence is
+`INVALID`. Raw observations and descriptive medians/maxima do not
 constitute a daemon readiness, fleet, throughput or memory qualification.
 Phase costs have no speedup pass threshold or automatic chunking decision.
 
