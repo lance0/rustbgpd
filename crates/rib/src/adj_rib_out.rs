@@ -2,6 +2,7 @@
 //! family, keyed by `(Prefix, path_id)` for unicast so Add-Path and
 //! single-best export share one table.
 
+use std::collections::hash_map::Entry;
 use std::net::IpAddr;
 
 use rustbgpd_policy::NextHopAction;
@@ -517,6 +518,20 @@ impl AdjRibOut {
         release_hash_map(&mut self.evpn_routes, checkpoint);
     }
 
+    /// Whether a known batch could outgrow either VPN advertised-route index.
+    pub(crate) fn vpn_needs_reserve(&self, additional: usize) -> bool {
+        additional
+            > self
+                .vpn_routes
+                .capacity()
+                .saturating_sub(self.vpn_routes.len())
+            || additional
+                > self
+                    .vpn_key_path_ids
+                    .capacity()
+                    .saturating_sub(self.vpn_key_path_ids.len())
+    }
+
     /// Reserve both VPN advertised-route indexes for a known outbound batch.
     pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
         reserve_hash_map(&mut self.vpn_routes, additional, checkpoint);
@@ -742,11 +757,18 @@ impl AdjRibOut {
     /// Insert or replace an advertised VPN route.
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
         let key = route.key();
-        if self.vpn_routes.insert(key.clone(), route).is_none() {
-            self.vpn_keys.bump();
-            let ids = self.vpn_key_path_ids.entry(key.nlri_key).or_default();
-            if !ids.contains(&key.path_id) {
-                ids.push(key.path_id);
+        // Occupied entries need no insertion headroom when the map is full.
+        match self.vpn_routes.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                entry.insert(route);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(route);
+                self.vpn_keys.bump();
+                let ids = self.vpn_key_path_ids.entry(key.nlri_key).or_default();
+                if !ids.contains(&key.path_id) {
+                    ids.push(key.path_id);
+                }
             }
         }
     }

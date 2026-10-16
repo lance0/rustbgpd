@@ -555,6 +555,15 @@ impl RibManager {
         gid: usize,
         keys: &HashSet<VpnRouteKey>,
     ) -> VpnGroupStageOutput {
+        let growth = self
+            .group_ribs
+            .get(&gid)
+            .is_some_and(|group| group.table.vpn_needs_reserve(keys.len()));
+        if growth && self.replacement_readiness.is_none() {
+            return crate::manager::with_executor_handoff(|| {
+                self.with_replacement_readiness(|manager| manager.stage_group_vpn_keys(gid, keys))
+            });
+        }
         // Shared VPN tables move even when every member's outbound send defers.
         if !keys.is_empty() {
             self.advance_advertised_pages();
@@ -675,6 +684,21 @@ impl RibManager {
         let readiness = &self.replacement_readiness;
         let checkpoint = || replacement_readiness_checkpoint(readiness, false);
         let group = Self::staged_group_mut(&mut self.group_ribs, gid);
+        if group.table.vpn_needs_reserve(keys.len()) {
+            let additional = out
+                .deltas
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|delta| delta.new.is_some() && delta.old.is_none())
+                .count();
+            group.table.reserve_vpn_with(additional, &mut || {
+                crate::manager::replacement_readiness_checkpoint_at(
+                    readiness,
+                    "staging_vpn_growth",
+                    false,
+                );
+            });
+        }
         for delta in &out.deltas {
             checkpoint();
             group.apply_vpn_delta(delta);

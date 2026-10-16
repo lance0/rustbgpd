@@ -4,6 +4,7 @@
 
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 
+use std::collections::hash_map::Entry;
 use std::net::IpAddr;
 
 // Route-bearing maps use FxHash (rustc-hash) rather than the default SipHash
@@ -242,7 +243,14 @@ impl<K: Eq + std::hash::Hash, V: RetainedRoute> StaleTracked<K, V> {
 
     fn insert(&mut self, key: K, route: V) -> Option<V> {
         let after = route.retention();
-        let previous = self.map.insert(key, route);
+        // Occupied entries need no insertion headroom when the map is full.
+        let previous = match self.map.entry(key) {
+            Entry::Occupied(mut entry) => Some(entry.insert(route)),
+            Entry::Vacant(entry) => {
+                entry.insert(route);
+                None
+            }
+        };
         self.counts
             .shift(previous.as_ref().and_then(RetainedRoute::retention), after);
         previous
@@ -1701,6 +1709,26 @@ impl AdjRibIn {
             }
         });
         self.clear_local_llgr_stale_bgpls_community(&clear_local_llgr);
+    }
+
+    /// Whether a known batch could outgrow either VPN index.
+    pub(crate) fn vpn_needs_reserve(&self, additional: usize) -> bool {
+        additional
+            > self
+                .vpn_routes
+                .capacity()
+                .saturating_sub(self.vpn_routes.len())
+            || additional
+                > self
+                    .vpn_key_index
+                    .capacity()
+                    .saturating_sub(self.vpn_key_index.len())
+    }
+
+    /// Grow both VPN indexes without changing routes or maintained stale counts.
+    pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
+        crate::adj_rib_out::reserve_hash_map(&mut self.vpn_routes.map, additional, checkpoint);
+        crate::adj_rib_out::reserve_hash_map(&mut self.vpn_key_index, additional, checkpoint);
     }
 
     /// Insert or replace a VPNv4/VPNv6 route.
@@ -3168,6 +3196,50 @@ mod tests {
         assert!(rib.withdraw_vpn(&key));
         assert_eq!(rib.vpn_len(), 0);
         assert!(!rib.withdraw_vpn(&key));
+    }
+
+    #[test]
+    fn vpn_growth_preserves_stale_counters_and_add_path_index() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        for path_id in [7, 9, 11] {
+            let mut route = make_vpn_route(nlri.clone(), 1);
+            route.path_id = path_id;
+            route.is_stale = true;
+            route.is_llgr_stale = path_id == 9;
+            rib.insert_vpn(route);
+        }
+        let capacities = (rib.vpn_routes.capacity(), rib.vpn_key_index.capacity());
+        let mut replacement = make_vpn_route(nlri.clone(), 2);
+        replacement.path_id = 7;
+        assert!(rib.insert_vpn(replacement));
+        assert_eq!(
+            (rib.vpn_routes.capacity(), rib.vpn_key_index.capacity()),
+            capacities
+        );
+        let stale = rib.maintained_stale_route_counts();
+        assert!(rib.vpn_needs_reserve(64));
+        let mut checkpoints = 0;
+        rib.reserve_vpn_with(64, &mut || checkpoints += 1);
+        assert!(checkpoints > 2, "entries move through interior checkpoints");
+        assert!(!rib.vpn_needs_reserve(64));
+        assert_eq!(rib.maintained_stale_route_counts(), stale);
+        assert_eq!(
+            rib.maintained_stale_route_counts(),
+            rib.scanned_stale_route_counts()
+        );
+        assert_eq!(rib.iter_vpn_for_nlri(&nlri.key()).count(), 3);
+        for path_id in [7, 9, 11] {
+            let route = rib
+                .get_vpn(&VpnRibRouteKey {
+                    nlri_key: nlri.key(),
+                    path_id,
+                })
+                .unwrap();
+            assert_eq!(route.is_stale, path_id != 7);
+            assert_eq!(route.is_llgr_stale, path_id == 9);
+        }
     }
 
     #[test]

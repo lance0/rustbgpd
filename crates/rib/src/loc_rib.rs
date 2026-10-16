@@ -599,6 +599,20 @@ impl LocRib {
         self.bgpls_routes.remove(key).is_some()
     }
 
+    /// Whether a known batch could outgrow the selected VPN map.
+    pub(crate) fn vpn_needs_reserve(&self, additional: usize) -> bool {
+        additional
+            > self
+                .vpn_routes
+                .capacity()
+                .saturating_sub(self.vpn_routes.len())
+    }
+
+    /// Keep selected routes and their install times intact while growing the map.
+    pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
+        crate::adj_rib_out::reserve_hash_map(&mut self.vpn_routes, additional, checkpoint);
+    }
+
     /// Recompute the best VPNv4/VPNv6 route for `key` from the candidates.
     ///
     /// Selection uses the preference chain in `vpn_cmp_chain` (no ORR costs):
@@ -632,7 +646,10 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.vpn_routes.insert(key, (new_best, SystemTime::now()));
+                    // Occupied entries need no insertion headroom when the map is full.
+                    self.vpn_routes
+                        .entry(key)
+                        .insert_entry((new_best, SystemTime::now()));
                 }
                 changed
             }
@@ -643,7 +660,8 @@ impl LocRib {
     /// Insert or replace the selected VPN route for a key.
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
         self.vpn_routes
-            .insert(route.nlri.key(), (route, SystemTime::now()));
+            .entry(route.nlri.key())
+            .insert_entry((route, SystemTime::now()));
     }
 
     /// Look up the selected VPN route for an RD+prefix identity.

@@ -1755,8 +1755,8 @@ fn vpn_peer_down_during_refresh_clears_stale_state() {
 // --- RFC 9107 VPN-ORR: per-vantage best selection for SAFI 128 ---
 
 /// Answers to readiness queries already queued when one VPN UPDATE is applied
-/// directly, without the actor loop. Its per-peer distribution loop is the
-/// only seam on this path that can serve the dedicated readiness lane.
+/// directly, without the actor loop. Spare map capacity keeps growth ownership
+/// inactive, isolating the per-peer distribution loop's readiness seam.
 fn readiness_answered_during_vpn_distribution(receivers: u8) -> bool {
     let (_tx, rx) = mpsc::channel(8);
     let (readiness_tx, readiness_rx) = mpsc::channel(1);
@@ -1785,6 +1785,17 @@ fn readiness_answered_during_vpn_distribution(receivers: u8) -> bool {
         });
         outbound.push(outbound_rx);
     }
+    let source = Ipv4Addr::new(10, 0, 1, 1);
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source.into(),
+        announced: vec![make_vpn_rib_route(source, 30, 100, 100)],
+        withdrawn: vec![],
+    });
+    for outbound_rx in &mut outbound {
+        drain_vpn_delta(outbound_rx);
+    }
+    manager.replacement_readiness_receipts.clear();
     let (reply, mut response) = oneshot::channel();
     readiness_tx
         .try_send(RibReadinessQuery::LocRibCount {
@@ -1807,6 +1818,7 @@ fn readiness_answered_during_vpn_distribution(receivers: u8) -> bool {
             "every receiver got the distributed route"
         );
     }
+    assert!(manager.replacement_readiness_receipts.is_empty());
     response.try_recv().is_ok()
 }
 
@@ -1819,4 +1831,361 @@ fn readiness_answered_during_vpn_distribution(receivers: u8) -> bool {
 async fn vpn_distribution_serves_readiness_at_each_peer_boundary() {
     assert!(readiness_answered_during_vpn_distribution(3));
     assert!(!readiness_answered_during_vpn_distribution(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the growth regression holds each real map rebuild while checking lane fences and exact route/index preservation"
+)]
+async fn vpn_growth_services_readiness_inside_each_table_reservation() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    for (stage, nested) in [
+        ("vpn_ingest_growth", false),
+        ("selection_vpn_growth", false),
+        ("staging_vpn_growth", false),
+        ("vpn_ingest_growth", true),
+    ] {
+        let (tx, rx) = mpsc::channel(8);
+        let (query_tx, query_rx) = mpsc::channel(8);
+        let (readiness_tx, readiness_rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new())
+            .with_readiness_queries(readiness_rx);
+        manager.flush_poll_budget = Duration::ZERO;
+        let expected_count = usize::from(nested);
+        if nested {
+            let route = crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+                Ipv4Addr::new(10, 0, 2, 100),
+            );
+            manager
+                .loc_rib
+                .recompute(route.prefix, [&route].into_iter());
+        }
+        let source = Ipv4Addr::new(10, 0, 2, 1);
+        let target: IpAddr = "10.0.2.2".parse().unwrap();
+        let (outbound_tx, mut outbound) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: target,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vpn_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        let routes: Vec<_> = (1..=7)
+            .map(|index| make_vpn_rib_route(source, index, 100, 100))
+            .collect();
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: source.into(),
+            announced: routes.clone(),
+            withdrawn: vec![],
+        });
+        drain_vpn_delta(&mut outbound);
+        let gid = manager.vpn_grouped_member_of(target).unwrap();
+        let installed: Vec<_> = routes
+            .iter()
+            .map(|route| manager.loc_rib.vpn_install_time(&route.nlri.key()))
+            .collect();
+        assert!(manager.ribs[&source.into()].vpn_needs_reserve(1));
+        assert!(manager.loc_rib.vpn_needs_reserve(1));
+        assert!(manager.group_ribs[&gid].table.vpn_needs_reserve(1));
+        if stage != "vpn_ingest_growth" {
+            manager
+                .ribs
+                .get_mut(&source.into())
+                .unwrap()
+                .reserve_vpn_with(1, &mut || {});
+        }
+        if stage != "selection_vpn_growth" {
+            manager.loc_rib.reserve_vpn_with(1, &mut || {});
+        }
+        if stage != "staging_vpn_growth" {
+            manager
+                .group_ribs
+                .get_mut(&gid)
+                .unwrap()
+                .table
+                .reserve_vpn_with(1, &mut || {});
+        }
+        manager.replacement_readiness_receipts.clear();
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let calls = AtomicUsize::new(0);
+        manager.replacement_readiness_test_hook = Some(Arc::new(move |site| {
+            if site == stage {
+                let call = calls.fetch_add(1, Ordering::Relaxed);
+                if call < 2 {
+                    entered_tx.send(call).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                }
+            }
+        }));
+        let next = make_vpn_rib_route(source, 8, 100, 100);
+        let actor = tokio::spawn(async move {
+            let update = RibUpdate::VpnRoutesReceived {
+                session_id: 0,
+                peer: source.into(),
+                announced: vec![next],
+                withdrawn: vec![],
+            };
+            if nested {
+                manager.with_selection_readiness(|manager| {
+                    let owner = manager.replacement_readiness.clone().unwrap();
+                    let (kind, started) = {
+                        let state = owner.state.lock().unwrap();
+                        (state.kind, state.started)
+                    };
+                    manager.handle_update(update);
+                    assert!(Arc::ptr_eq(
+                        manager.replacement_readiness.as_ref().unwrap(),
+                        &owner
+                    ));
+                    let state = owner.state.lock().unwrap();
+                    assert_eq!((state.kind, state.started), (kind, started));
+                });
+            } else {
+                manager.handle_update(update);
+            }
+            manager
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+                .await
+                .expect("growth must reach its first interior checkpoint"),
+            Some(0),
+            "{stage}: growth was not entered"
+        );
+        let (reply, mut readiness) = oneshot::channel();
+        readiness_tx
+            .try_send(RibReadinessQuery::LocRibCount {
+                reply,
+                enqueued: Instant::now(),
+            })
+            .unwrap();
+        let (reply, mut ordinary) = oneshot::channel();
+        query_tx
+            .try_send(RibUpdate::QueryLocRibCount { reply })
+            .unwrap();
+        tx.try_send(RibUpdate::PeerDown {
+            peer: target,
+            session_id: 0,
+        })
+        .unwrap();
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+                .await
+                .expect("growth must advance to its next interior checkpoint"),
+            Some(1)
+        );
+        let interior = readiness.try_recv();
+        let ordinary_held = matches!(
+            ordinary.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        let mutation_held = tx.capacity() == 7;
+        release_tx.send(()).unwrap();
+        let mut manager = actor.await.unwrap();
+        assert_eq!(
+            interior.unwrap().unwrap(),
+            expected_count,
+            "VPN growth preserves the public unicast count"
+        );
+        assert!(
+            ordinary_held && mutation_held,
+            "{stage}: ordinary lanes escaped growth ownership"
+        );
+        assert!(manager.replacement_readiness.is_none());
+        assert_eq!(manager.replacement_readiness_receipts.len(), 1);
+        assert_eq!(manager.primary_backlog(), 1);
+        assert_eq!(manager.ribs[&source.into()].vpn_len(), 8);
+        assert_eq!(manager.loc_rib.vpn_len(), 8);
+        assert_eq!(manager.group_ribs[&gid].table.vpn_len(), 8);
+        for (route, installed) in routes.iter().zip(installed) {
+            let key = route.key();
+            assert_eq!(
+                manager.ribs[&source.into()]
+                    .iter_vpn_for_nlri(&key.nlri_key)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                manager.ribs[&source.into()]
+                    .get_vpn(&key)
+                    .unwrap()
+                    .attributes,
+                route.attributes
+            );
+            assert_eq!(manager.loc_rib.vpn_install_time(&key.nlri_key), installed);
+            assert_eq!(
+                manager.group_ribs[&gid]
+                    .table
+                    .vpn_path_ids_for_key(&key.nlri_key),
+                [0]
+            );
+        }
+        let (announced, withdrawn) = drain_vpn_delta(&mut outbound);
+        assert_eq!(announced.len(), 1);
+        assert_eq!(withdrawn, []);
+        manager.drain_queries(1);
+        assert_eq!(ordinary.try_recv().unwrap(), expected_count);
+        manager.replacement_readiness_test_hook = None;
+
+        // Fill the new capacity: replacing or withdrawing existing keys must
+        // not allocate a larger table merely because the batch is large.
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: source.into(),
+            announced: (9..=14)
+                .map(|index| make_vpn_rib_route(source, index, 100, 100))
+                .collect(),
+            withdrawn: vec![],
+        });
+        let affected: HashSet<_> = manager.ribs[&source.into()]
+            .iter_vpn()
+            .map(VpnRibRoute::key)
+            .collect();
+        let advertised_capacities = manager.group_ribs[&gid].table.bench_vpn_capacities();
+        manager.recompute_vpn_keys(&affected);
+        assert!(manager.loc_rib.vpn_needs_reserve(1));
+        let replacement = make_vpn_rib_route(source, 8, 100, 200);
+        let removed = replacement.key();
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: source.into(),
+            announced: vec![replacement],
+            withdrawn: vec![],
+        });
+        assert!(manager.ribs[&source.into()].vpn_needs_reserve(1));
+        assert!(manager.loc_rib.vpn_needs_reserve(1));
+        assert!(manager.group_ribs[&gid].table.vpn_needs_reserve(1));
+        assert_eq!(
+            manager.group_ribs[&gid].table.bench_vpn_capacities(),
+            advertised_capacities
+        );
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: source.into(),
+            announced: vec![],
+            withdrawn: vec![removed],
+        });
+        assert!(manager.ribs[&source.into()].vpn_needs_reserve(2));
+        assert!(manager.loc_rib.vpn_needs_reserve(2));
+        assert!(manager.group_ribs[&gid].table.vpn_needs_reserve(2));
+        assert_eq!(
+            manager.group_ribs[&gid].table.bench_vpn_capacities(),
+            advertised_capacities
+        );
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: source.into(),
+            session_id: 0,
+        });
+        assert_eq!(manager.loc_rib.vpn_len(), 0);
+        assert_eq!(manager.group_ribs[&gid].table.vpn_len(), 0);
+        assert!(manager.loc_rib.vpn_needs_reserve(15));
+        assert!(manager.group_ribs[&gid].table.vpn_needs_reserve(15));
+        assert_eq!(
+            manager.group_ribs[&gid].table.bench_vpn_capacities(),
+            advertised_capacities
+        );
+    }
+}
+
+#[test]
+fn vpn_growth_private_add_path_uses_actual_staged_batch() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target: IpAddr = "10.0.3.10".parse().unwrap();
+    let (outbound_tx, mut outbound) = mpsc::channel(8);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vpn_sendable(),
+        add_path_send_max: 1,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    for index in 1..=3 {
+        let source = Ipv4Addr::new(10, 0, 3, index);
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: source.into(),
+            announced: (1..=2)
+                .map(|key| make_vpn_rib_route(source, key, 100, 100 + u32::from(index) * 10))
+                .collect(),
+            withdrawn: vec![],
+        });
+        drain_vpn_delta(&mut outbound);
+    }
+    assert!(manager.vpn_grouped_member_of(target).is_none());
+    assert_eq!(manager.adj_ribs_out[&target].vpn_len(), 2);
+    assert!(!manager.adj_ribs_out[&target].vpn_needs_reserve(1));
+    assert!(manager.adj_ribs_out[&target].vpn_needs_reserve(3));
+    manager.replacement_readiness_receipts.clear();
+    let source = Ipv4Addr::new(10, 0, 3, 1);
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source.into(),
+        announced: vec![make_vpn_rib_route(source, 1, 100, 110)],
+        withdrawn: vec![],
+    });
+    assert!(
+        manager.replacement_readiness_receipts.is_empty(),
+        "ordinary headroom keeps the fast path"
+    );
+    manager.peer_add_path_send_max.insert(target, 3);
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source.into(),
+        announced: vec![make_vpn_rib_route(source, 1, 100, 500)],
+        withdrawn: vec![],
+    });
+    let (announced, withdrawn) = drain_vpn_delta(&mut outbound);
+    assert_eq!(
+        announced.len(),
+        3,
+        "one input can rerank three exported paths"
+    );
+    assert_eq!(withdrawn, []);
+    assert_eq!(manager.replacement_readiness_receipts.len(), 1);
+    let first = make_vpn_rib_route(source, 1, 100, 500).nlri.key();
+    let second = make_vpn_rib_route(source, 2, 100, 110).nlri.key();
+    assert_eq!(manager.adj_ribs_out[&target].vpn_len(), 4);
+    assert_eq!(
+        manager.adj_ribs_out[&target].vpn_path_ids_for_key(&first),
+        [1, 2, 3]
+    );
+    assert_eq!(
+        manager.adj_ribs_out[&target].vpn_path_ids_for_key(&second),
+        [1]
+    );
 }

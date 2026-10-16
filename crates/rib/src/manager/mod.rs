@@ -2435,9 +2435,9 @@ impl RibManager {
         self
     }
 
-    /// Outbound export/replacement does not change Loc-RIB cardinality. Keep that exact
-    /// actor-owned invariant while readiness acknowledgements and optional
-    /// frozen operator summaries interleave.
+    /// Export/replacement and VPN-only changes preserve the unicast count
+    /// returned by readiness. Keep that actor-owned invariant while readiness
+    /// acknowledgements and optional frozen operator summaries interleave.
     fn with_replacement_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
         let installed = self.begin_replacement_readiness();
         let result = work(self);
@@ -5096,6 +5096,18 @@ impl RibManager {
         announced: Vec<crate::route::VpnRibRoute>,
         withdrawn: Vec<crate::route::VpnRibRouteKey>,
     ) {
+        let growth = self.ribs.get(&peer).map_or(!announced.is_empty(), |rib| {
+            rib.vpn_needs_reserve(announced.len())
+        });
+        if growth && self.replacement_readiness.is_none() {
+            with_executor_handoff(|| {
+                self.with_replacement_readiness(|manager| {
+                    manager.handle_vpn_routes_received(peer, announced, withdrawn);
+                });
+            });
+            return;
+        }
+        let readiness = self.replacement_readiness.clone();
         let active_refresh = self
             .refresh_in_progress
             .get(&peer)
@@ -5107,6 +5119,16 @@ impl RibManager {
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+            if rib.vpn_needs_reserve(announced.len()) {
+                let additional = announced
+                    .iter()
+                    .inspect(|_| replacement_readiness_checkpoint(&readiness, false))
+                    .filter(|route| rib.get_vpn(&route.key()).is_none())
+                    .count();
+                rib.reserve_vpn_with(additional, &mut || {
+                    replacement_readiness_checkpoint_at(&readiness, "vpn_ingest_growth", false);
+                });
+            }
             for key in withdrawn {
                 let family = key.afi_safi();
                 if rib.withdraw_vpn(&key) {
