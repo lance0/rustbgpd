@@ -8,9 +8,18 @@ use super::{
     Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix, Route,
     RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, debug, info, warn,
 };
+use super::{EvpnRibRoute, LabeledRibRoute, VpnRibRoute};
 #[cfg(test)]
-use super::{FlowSpecRoute, LabeledRibRoute, RtcRibRoute, VpnRibRoute};
+use super::{FlowSpecRoute, RtcRibRoute};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Worker time one ordinary slice may take, encode and release included,
+/// before the next slice is cut smaller. The session shares tokio workers
+/// with the readiness endpoint and every other session.
+pub(super) const SLICE_TIME_BUDGET: Duration = Duration::from_millis(4);
+/// Floor for a shrunken slice, so per-slice overhead stays amortized.
+const MIN_SLICE_ROUTES: usize = 64;
 
 /// One envelope remains owned until its final marker is admitted. Slices
 /// reuse the exact export snapshot, without growing the bounded writer queue.
@@ -21,6 +30,21 @@ pub(super) struct PendingOutbound {
     phase: usize,
     offset: usize,
     capacity_blocked: bool,
+    /// Route budget for the next ordinary slice. It halves after a slice
+    /// overruns [`SLICE_TIME_BUDGET`] and doubles back after a cheap one, so
+    /// a slow encode yields sooner. A slice within budget keeps the
+    /// shared-group slice size; UPDATE packing is not part of the export
+    /// contract (ADR-0099), only per-key order is.
+    slice_routes: usize,
+    /// EVPN, VPN and labeled announcements, moved out a slice at a time:
+    /// a slice owns its routes without cloning them, and each slice releases
+    /// its share of the envelope instead of the final advance dropping it
+    /// whole.
+    evpn_announce: std::vec::IntoIter<EvpnRibRoute>,
+    vpn_announce: std::vec::IntoIter<VpnRibRoute>,
+    labeled_announce: std::vec::IntoIter<LabeledRibRoute>,
+    #[cfg(test)]
+    pub(super) test_slice_cost: Option<Duration>,
 }
 
 #[derive(Clone, Copy)]
@@ -129,10 +153,10 @@ impl PendingOutbound {
                 OutboundPhase::VpnWithdraw => self.update.vpn_withdraw.len(),
                 OutboundPhase::LabeledWithdraw => self.update.labeled_withdraw.len(),
                 OutboundPhase::RtcWithdraw => self.update.rtc_withdraw.len(),
-                OutboundPhase::EvpnAnnounce => self.update.evpn_announce.len(),
+                OutboundPhase::EvpnAnnounce => self.offset + self.evpn_announce.len(),
                 OutboundPhase::BgplsAnnounce => self.update.bgpls_announce.len(),
-                OutboundPhase::VpnAnnounce => self.update.vpn_announce.len(),
-                OutboundPhase::LabeledAnnounce => self.update.labeled_announce.len(),
+                OutboundPhase::VpnAnnounce => self.offset + self.vpn_announce.len(),
+                OutboundPhase::LabeledAnnounce => self.offset + self.labeled_announce.len(),
                 OutboundPhase::RtcAnnounce => self.update.rtc_announce.len(),
                 OutboundPhase::FlowspecAnnounce => self.update.flowspec_announce.len(),
                 OutboundPhase::Eor => self.update.end_of_rib.len(),
@@ -158,6 +182,12 @@ impl PendingOutbound {
                     let end = (self.offset + budget).min(self.update.$field.len());
                     slice.$field = self.update.$field[self.offset..end].to_vec().into();
                     end
+                }};
+            }
+            macro_rules! moved {
+                ($field:ident) => {{
+                    slice.$field = self.$field.by_ref().take(budget).collect();
+                    self.offset + slice.$field.len()
                 }};
             }
             let end = match phase {
@@ -198,10 +228,10 @@ impl PendingOutbound {
                 OutboundPhase::VpnWithdraw => payload!(vpn_withdraw),
                 OutboundPhase::LabeledWithdraw => payload!(labeled_withdraw),
                 OutboundPhase::RtcWithdraw => payload!(rtc_withdraw),
-                OutboundPhase::EvpnAnnounce => payload!(evpn_announce),
+                OutboundPhase::EvpnAnnounce => moved!(evpn_announce),
                 OutboundPhase::BgplsAnnounce => payload!(bgpls_announce),
-                OutboundPhase::VpnAnnounce => payload!(vpn_announce),
-                OutboundPhase::LabeledAnnounce => payload!(labeled_announce),
+                OutboundPhase::VpnAnnounce => moved!(vpn_announce),
+                OutboundPhase::LabeledAnnounce => moved!(labeled_announce),
                 OutboundPhase::RtcAnnounce => payload!(rtc_announce),
                 OutboundPhase::FlowspecAnnounce => payload!(flowspec_announce),
                 OutboundPhase::Eor => payload!(end_of_rib),
@@ -215,6 +245,16 @@ impl PendingOutbound {
             }
         }
         None
+    }
+
+    /// Size the next ordinary slice from what this one cost.
+    fn charge_slice(&mut self, cost: Duration) {
+        if cost > SLICE_TIME_BUDGET {
+            self.slice_routes = (self.slice_routes / 2).max(MIN_SLICE_ROUTES);
+        } else if cost < SLICE_TIME_BUDGET / 4 {
+            self.slice_routes =
+                (self.slice_routes * 2).min(super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+        }
     }
 }
 
@@ -262,12 +302,18 @@ impl PeerSession {
             }
         }
         self.pending_outbound = Some(PendingOutbound {
+            evpn_announce: std::mem::take(&mut update.evpn_announce).into_iter(),
+            vpn_announce: std::mem::take(&mut update.vpn_announce).into_iter(),
+            labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
             update,
             shared,
             requests,
             phase: 0,
             offset: 0,
             capacity_blocked: false,
+            slice_routes: super::shared_group::PROGRESSIVE_SLICE_ROUTES,
+            #[cfg(test)]
+            test_slice_cost: None,
         });
         self.advance_pending_outbound();
     }
@@ -376,8 +422,17 @@ impl PeerSession {
                     pending.phase = 1;
                     pending.offset = 0;
                 }
-                if let Some(slice) = pending.next_slice(budget) {
+                if let Some(slice) = pending.next_slice(budget.min(pending.slice_routes)) {
+                    let started = Instant::now();
                     self.send_route_update(slice);
+                    let cost = started.elapsed();
+                    // Tests pin the cost so slice sizes never follow host speed.
+                    #[cfg(test)]
+                    let cost = {
+                        let _ = cost;
+                        pending.test_slice_cost.unwrap_or_default()
+                    };
+                    pending.charge_slice(cost);
                 } else {
                     finished = true;
                 }

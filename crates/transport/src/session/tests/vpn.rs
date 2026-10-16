@@ -902,3 +902,78 @@ async fn vpn_announce_grouping_matches_linear_reference_bytes() {
         "VPN UPDATE bytes diverged from the reference grouping"
     );
 }
+
+/// One advance encodes at most one slice and releases that slice's routes;
+/// a slice that overruns the time budget halves the next one, and a cheap
+/// slice doubles it back. Slice cost is injected, so the sizes never depend
+/// on host speed.
+#[tokio::test]
+async fn vpn_envelope_advances_in_time_budgeted_slices_and_releases_them() {
+    use super::outbound::SLICE_TIME_BUDGET;
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let (bulk, mut frames) = mpsc::channel(100_000);
+    session.writer_bulk_tx = Some(bulk);
+    let template = make_vpn_rib_route(16);
+    let held = Arc::clone(&template.attributes);
+    let total = 5 * SLICE;
+    let routes: Vec<_> = (0..u32::try_from(total).unwrap())
+        .map(|index| {
+            let mut route = template.clone();
+            route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0a00_0000 | index), 32).unwrap();
+            route
+        })
+        .collect();
+    drop(template);
+    let unsent = |held: &Arc<AttrSet>| Arc::strong_count(held) - 1;
+    assert_eq!(unsent(&held), total);
+
+    session
+        .handle_outbound_route_update(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            vpn_announce: routes,
+            end_of_rib: vec![(Afi::Ipv4, Safi::MplsVpn)],
+            ..OutboundRouteUpdate::default()
+        })
+        .await;
+    assert_eq!(
+        unsent(&held),
+        total - SLICE,
+        "first advance sends one slice"
+    );
+
+    let mut sent = SLICE;
+    let mut advance = |session: &mut PeerSession, cost: Duration| {
+        session.pending_outbound.as_mut().unwrap().test_slice_cost = Some(cost);
+        session.advance_pending_outbound();
+        while frames.try_recv().is_ok() {}
+    };
+    let over = SLICE_TIME_BUDGET * 2;
+    // The overrun is charged after its own full slice; the next one halves.
+    for expected in [SLICE, SLICE / 2, SLICE / 4] {
+        advance(&mut session, over);
+        sent += expected;
+        assert_eq!(
+            unsent(&held),
+            total - sent,
+            "each advance releases its slice"
+        );
+    }
+    // Cheap slices double back toward the shared-group slice size.
+    for expected in [SLICE / 8, SLICE / 4] {
+        advance(&mut session, Duration::ZERO);
+        sent += expected;
+        assert_eq!(unsent(&held), total - sent);
+    }
+    while session.pending_outbound.is_some() {
+        advance(&mut session, Duration::ZERO);
+    }
+    assert_eq!(
+        unsent(&held),
+        0,
+        "every route released by the final advance"
+    );
+}
