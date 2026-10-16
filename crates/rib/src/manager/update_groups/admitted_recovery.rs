@@ -160,6 +160,8 @@ pub(in crate::manager) struct FullCaptureShape {
     pub(in crate::manager) fallback: Option<FullCaptureFallback>,
     /// Projected VPN rows; all of them are pool keys when the pool is current.
     pub(in crate::manager) vpn: usize,
+    /// Every projected VPN key was its row's own key.
+    pub(in crate::manager) vpn_identity: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1030,7 +1032,7 @@ impl AdmittedRecovery {
         project_uc: &U,
         project_vpn: &V,
         checkpoint: &mut C,
-        mut visit: impl FnMut(Option<usize>, Key, &mut C) -> Result<(), Failure>,
+        mut visit: impl FnMut(Option<usize>, Key, Option<&VpnRibRoute>, &mut C) -> Result<(), Failure>,
     ) -> Result<(), Failure>
     where
         U: Fn(&Route) -> Option<Key>,
@@ -1040,13 +1042,13 @@ impl AdmittedRecovery {
         for slot in 0..table.unicast_slot_count() {
             checkpoint(false);
             if let Some(key) = table.unicast_slot(slot).and_then(project_uc) {
-                visit(Some(slot), key, checkpoint)?;
+                visit(Some(slot), key, None, checkpoint)?;
             }
         }
         for route in table.iter_vpn() {
             checkpoint(false);
             if let Some(key) = project_vpn(route) {
-                visit(None, key, checkpoint)?;
+                visit(None, key, Some(route), checkpoint)?;
             }
         }
         Ok(())
@@ -1091,6 +1093,9 @@ impl AdmittedRecovery {
             .ok())
     }
 
+    /// `project_vpn` normally returns the row's own key or `None`. The probe-free
+    /// path for a current pool relies on that; any other key disqualifies it for
+    /// this capture, and every VPN row then takes the exact probe.
     pub(in crate::manager) fn full_old_shape_with_checkpoint<U, V>(
         &self,
         hint: Option<SnapshotHandle>,
@@ -1120,6 +1125,7 @@ impl AdmittedRecovery {
                 None
             },
             vpn: 0,
+            vpn_identity: true,
         };
         let current_vpn = snapshot.is_some_and(|snapshot| snapshot.current_vpn(table).is_some());
         Self::walk_full_old(
@@ -1127,12 +1133,24 @@ impl AdmittedRecovery {
             &project_uc,
             &project_vpn,
             checkpoint,
-            |slot, key, checkpoint| {
+            |slot, key, row, checkpoint| {
                 shape.count = shape.count.checked_add(1).ok_or_else(Self::overflow)?;
                 if slot.is_none() {
                     shape.vpn += 1;
+                    // Only a shared capture reads identity. Population's pool may be
+                    // new, so check it regardless; a new pool holds only row keys.
+                    if shape.fallback.is_none() && (shape.vpn_identity || snapshot.is_none()) {
+                        let own = row.map(VpnRibRoute::key);
+                        let identity =
+                            own.is_some_and(|own| key == Key::Vpn(own.nlri_key, own.path_id));
+                        shape.vpn_identity &= identity;
+                        if snapshot.is_none() && !identity {
+                            shape.additions =
+                                shape.additions.checked_add(1).ok_or_else(Self::overflow)?;
+                        }
+                    }
                     // A current pool holds every VPN key of this table: no addition.
-                    if current_vpn {
+                    if current_vpn && shape.vpn_identity {
                         return Ok(());
                     }
                 }
@@ -1162,6 +1180,7 @@ impl AdmittedRecovery {
     }
 
     /// Two actual projections: count/classify, then populate. No member sort or scratch.
+    /// See [`Self::full_old_shape_with_checkpoint`] for the `project_vpn` contract.
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
@@ -1226,7 +1245,7 @@ impl AdmittedRecovery {
         // pool VPN keys means all of them: admit the whole range, no probe.
         let all_vpn = snapshot
             .and_then(|snapshot| snapshot.current_vpn(table))
-            .filter(|range| range.len() == shape.vpn);
+            .filter(|range| shape.vpn_identity && range.len() == shape.vpn);
         let record = &mut self.records[index];
         let mut count = 0_usize;
         let mut mismatches = 0;
@@ -1236,7 +1255,7 @@ impl AdmittedRecovery {
             &project_uc,
             &project_vpn,
             checkpoint,
-            |slot, key, checkpoint| {
+            |slot, key, _, checkpoint| {
                 count = count.checked_add(1).ok_or_else(Self::overflow)?;
                 if count > shape.count {
                     return Err(invalid);
@@ -3433,6 +3452,51 @@ mod tests {
         assert_eq!(proof.len(), 199);
         assert!(!proof.contains(&vpn_exact(5)));
         assert!(proof.contains(&vpn_exact(6)));
+    }
+
+    #[test]
+    fn non_identity_vpn_projection_on_a_current_pool_keeps_an_exact_proof() {
+        let table = vpn_table(200);
+        let shifted = VpnRibRouteKey {
+            path_id: 1,
+            ..vpn_route(5).key()
+        };
+        let shift = |route: &VpnRibRoute| {
+            let key = route.key();
+            let path_id = key.path_id + u32::from(key == vpn_route(5).key());
+            Some(Key::Vpn(key.nlri_key, path_id))
+        };
+        let mut ledger = AdmittedRecovery::new();
+        // Cold: the pool is built during this capture. Warm: it is current.
+        let mut hint = None;
+        for member in [peer(1), peer(2)] {
+            ledger.begin_capture(member).unwrap();
+            let outcome = ledger
+                .capture_full_old_with_checkpoint(
+                    member,
+                    hint,
+                    &table,
+                    true,
+                    |_| None,
+                    shift,
+                    &mut |_| {},
+                )
+                .unwrap();
+            ledger.seal_capture(member).unwrap();
+            assert!(outcome.handle.is_some());
+            hint = outcome.handle;
+            let proof = ledger.get(&member).unwrap();
+            assert!(
+                proof.contains(&ExactExportKey::Vpn(shifted.clone())),
+                "the projected key is admitted"
+            );
+            assert!(
+                !proof.contains(&vpn_exact(5)),
+                "the row's own key was never projected"
+            );
+            assert!(proof.contains(&vpn_exact(4)) && proof.contains(&vpn_exact(6)));
+            assert_eq!(proof.len(), 200);
+        }
     }
 
     #[test]
