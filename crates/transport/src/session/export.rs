@@ -843,14 +843,42 @@ impl SessionExportProfile {
         &self,
         route: &EvpnRibRoute,
     ) -> PreparedMpCandidate<EvpnRoute> {
+        Self::prepare_evpn_candidate_with(route, || self.prepare_evpn_attributes(route))
+    }
+
+    pub(super) fn prepare_evpn_candidate_with<A>(
+        route: &EvpnRibRoute,
+        attrs: impl FnOnce() -> A,
+    ) -> PreparedMpCandidate<EvpnRoute, A> {
         PreparedMpCandidate {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: route.next_hop,
             link_local_next_hop: None,
-            attrs: self.prepare_evpn_attributes(route),
+            attrs: attrs(),
             nlri: route.route.clone(),
         }
+    }
+
+    /// [`Self::prepare_mp_attributes`] memoized per source attribute `Arc`
+    /// within one envelope (see [`MpAttrCache`]).
+    pub(super) fn prepare_mp_attributes_cached(
+        &self,
+        cache: &mut MpAttrCache,
+        attributes: &Arc<rustbgpd_rib::AttrSet>,
+        origin_type: rustbgpd_rib::RouteOrigin,
+        peer_router_id: Ipv4Addr,
+        family: (Afi, Safi),
+    ) -> Arc<Vec<PathAttribute>> {
+        let key = MpAttrCacheKey {
+            attrs_ptr: Arc::as_ptr(attributes) as usize,
+            origin_type: Self::route_origin_key(origin_type),
+            peer_router_id,
+            family,
+        };
+        Arc::clone(cache.0.entry(key).or_insert_with(|| {
+            Arc::new(self.prepare_mp_attributes(attributes, origin_type, peer_router_id, family))
+        }))
     }
 
     pub(super) fn prepare_bgpls_candidate(
@@ -872,6 +900,14 @@ impl SessionExportProfile {
         &self,
         route: &VpnRibRoute,
     ) -> Result<PreparedMpCandidate<rustbgpd_wire::VpnNlriEntry>, ExportProbeError> {
+        self.prepare_vpn_candidate_with(route, || self.prepare_vpn_attributes(route))
+    }
+
+    pub(super) fn prepare_vpn_candidate_with<A>(
+        &self,
+        route: &VpnRibRoute,
+        attrs: impl FnOnce() -> A,
+    ) -> Result<PreparedMpCandidate<rustbgpd_wire::VpnNlriEntry, A>, ExportProbeError> {
         let (afi, safi) = route.afi_safi();
         refuse_multiple_labels(&route.nlri.labels)?;
         // RFC 8950 §5: reflect the received next-hop encoding unchanged,
@@ -892,7 +928,7 @@ impl SessionExportProfile {
                 route.link_local_next_hop,
                 route.next_hop_scope.as_deref(),
             ),
-            attrs: self.prepare_vpn_attributes(route),
+            attrs: attrs(),
             nlri: rustbgpd_wire::VpnNlriEntry {
                 path_id: route.path_id,
                 nlri: route.nlri.clone(),
@@ -904,6 +940,14 @@ impl SessionExportProfile {
         &self,
         route: &LabeledRibRoute,
     ) -> Result<PreparedMpCandidate<rustbgpd_wire::LabeledNlriEntry>, ExportProbeError> {
+        self.prepare_labeled_candidate_with(route, || self.prepare_labeled_attributes(route))
+    }
+
+    pub(super) fn prepare_labeled_candidate_with<A>(
+        &self,
+        route: &LabeledRibRoute,
+        attrs: impl FnOnce() -> A,
+    ) -> Result<PreparedMpCandidate<rustbgpd_wire::LabeledNlriEntry, A>, ExportProbeError> {
         let (afi, safi) = route.afi_safi();
         refuse_multiple_labels(&route.nlri.labels)?;
         // RFC 8277 / RFC 2545 §3: a labeled-IPv6 next hop is 16 or 32
@@ -924,7 +968,7 @@ impl SessionExportProfile {
                 route.link_local_next_hop,
                 route.next_hop_scope.as_deref(),
             ),
-            attrs: self.prepare_labeled_attributes(route),
+            attrs: attrs(),
             nlri: rustbgpd_wire::LabeledNlriEntry {
                 path_id: route.path_id,
                 nlri: route.nlri.clone(),
@@ -1774,14 +1818,30 @@ fn refuse_multiple_labels(
     Ok(())
 }
 
-pub(super) struct PreparedMpCandidate<T> {
+pub(super) struct PreparedMpCandidate<T, A = Vec<PathAttribute>> {
     pub(super) afi: Afi,
     pub(super) safi: Safi,
     pub(super) next_hop: IpAddr,
     pub(super) link_local_next_hop: Option<Ipv6Addr>,
-    pub(super) attrs: Vec<PathAttribute>,
+    pub(super) attrs: A,
     pub(super) nlri: T,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct MpAttrCacheKey {
+    attrs_ptr: usize,
+    origin_type: u8,
+    peer_router_id: Ipv4Addr,
+    family: (Afi, Safi),
+}
+
+/// Prepared multiprotocol attributes for one envelope, keyed by the source
+/// attribute `Arc`. Routes sharing a source allocation share one prepared
+/// vector, so grouping hashes and compares it once rather than per route.
+/// Pointer keys are sound only while the envelope that owns the source
+/// `Arc`s is borrowed, so a cache must not outlive one `send_route_update`.
+#[derive(Default)]
+pub(super) struct MpAttrCache(FastMap<MpAttrCacheKey, Arc<Vec<PathAttribute>>>);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ExportProbeError {
