@@ -813,6 +813,8 @@ fn recover_rollback_reports_a_reload_not_applied_as_nothing_changed() {
             fs::read(rig.root.join("runtime-toml")).unwrap(),
             b"partial\n"
         );
+        // A no-effect rollback keeps the actual partial runtime, not the last diff.
+        fs::copy(rig.root.join("runtime-toml"), rig.root.join("last-diff")).unwrap();
         let from = rig.current();
         let receipt = fs::read(rig.state.join("activation-receipt.json")).unwrap();
         let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
