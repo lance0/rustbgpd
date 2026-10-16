@@ -31,10 +31,19 @@ impl RuntimeProbe {
         Self { shutdown, handle }
     }
 
-    pub(crate) async fn shutdown(self) {
+    /// Stop the probe and join it, unless a further termination signal
+    /// cancels `stop_waiting` first.
+    pub(crate) async fn shutdown(self, stop_waiting: &CancellationToken) {
         self.shutdown.cancel();
-        if let Err(error) = self.handle.await {
-            warn!(%error, "runtime probe task failed");
+        match crate::shutdown_wait(None, stop_waiting, self.handle).await {
+            crate::ShutdownWait::Completed(Ok(())) => {}
+            crate::ShutdownWait::Completed(Err(error)) => {
+                warn!(%error, "runtime probe task failed");
+            }
+            abandoned => warn!(
+                reason = abandoned.abandoned(),
+                "stopped waiting for the runtime probe"
+            ),
         }
     }
 }
@@ -116,6 +125,25 @@ mod tests {
             worker_busy_seconds(&after) - busy_before >= 0.1,
             "the blocked worker's busy time must include the 120 ms block"
         );
-        probe.shutdown().await;
+        probe.shutdown(&CancellationToken::new()).await;
+    }
+
+    /// A probe join that cannot complete must not hold shutdown once a
+    /// further signal cancels the waits.
+    #[tokio::test]
+    async fn second_signal_skips_a_probe_join_that_cannot_finish() {
+        let probe = RuntimeProbe {
+            shutdown: CancellationToken::new(),
+            handle: tokio::spawn(std::future::pending()),
+        };
+        let stop_waiting = CancellationToken::new();
+        let second_signal = stop_waiting.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            second_signal.cancel();
+        });
+        tokio::time::timeout(Duration::from_secs(10), probe.shutdown(&stop_waiting))
+            .await
+            .expect("a second signal did not end the runtime probe join");
     }
 }

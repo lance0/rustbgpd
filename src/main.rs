@@ -7414,7 +7414,7 @@ async fn run<T>(
         manager.shutdown().await;
     }
 
-    runtime_probe.shutdown().await;
+    runtime_probe.shutdown(&stop_waiting).await;
     info!("rustbgpd exiting");
     component_failed
 }
