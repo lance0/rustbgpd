@@ -697,7 +697,7 @@ fn last_reload_response_to_json(response: &GetLastSighupReloadResponse) -> serde
 fn convergence_human(convergence: &SighupReloadConvergence) -> String {
     match convergence.state.as_str() {
         "converging" => format!(
-            "Convergence: converging ({} {} awaiting outbound resync, oldest {})",
+            "Convergence: converging ({} {} with a RIB outbound resync pending, oldest {})",
             convergence.pending_peers,
             if convergence.pending_peers == 1 {
                 "peer"
@@ -709,6 +709,7 @@ fn convergence_human(convergence: &SighupReloadConvergence) -> String {
         "applied" => {
             "Convergence: applied (the RIB has not reported outbound state yet)".to_string()
         }
+        "converged" => "Convergence: converged (no RIB outbound resync pending)".to_string(),
         state => format!("Convergence: {state}"),
     }
 }
@@ -1483,7 +1484,7 @@ mod tests {
         };
         let rendered = last_reload_human(Some(&record), Some(&converging));
         assert!(rendered.ends_with(
-            "Convergence: converging (2 peers awaiting outbound resync, oldest 00:01:15)\n"
+            "Convergence: converging (2 peers with a RIB outbound resync pending, oldest 00:01:15)\n"
         ));
         assert_eq!(
             last_reload_response_to_json(&GetLastSighupReloadResponse {
@@ -1493,7 +1494,10 @@ mod tests {
             serde_json::json!({"state": "converging", "pending_peers": 2, "oldest_pending_seconds": 75})
         );
         for (state, line) in [
-            ("converged", "Convergence: converged\n"),
+            (
+                "converged",
+                "Convergence: converged (no RIB outbound resync pending)\n",
+            ),
             (
                 "applied",
                 "Convergence: applied (the RIB has not reported outbound state yet)\n",

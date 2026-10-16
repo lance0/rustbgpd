@@ -137,8 +137,8 @@ impl ConfigService {
     }
 
     /// `applied` until the RIB answers within the deadline, then
-    /// `converging` while any peer awaits an outbound resync, else
-    /// `converged`.
+    /// `converging` while any peer has a RIB outbound resync pending, else
+    /// `converged`. Neither confirms that peers received the view.
     async fn reload_convergence(&self) -> proto::SighupReloadConvergence {
         let answer = match &self.rib_query_tx {
             Some(tx) => tokio::time::timeout(

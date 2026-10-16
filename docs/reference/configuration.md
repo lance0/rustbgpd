@@ -5538,9 +5538,11 @@ credential, listener, session, or catalog effect. `rustbgpd --diff` and
 the [operations guide](operations.md#configuration-reload-sighup) the
 settlement detail. After a signal, `rbgp config last-reload` shows the latest
 recorded outcome, route, and bounded applied/unapplied effect receipt, and
-for a complete reload whether every peer has received the new export view
-(`converged`) or how many still await an outbound resync (`converging`);
-`--json` exposes the same record for automation.
+for a complete reload how many peers still have a RIB outbound resync
+pending (`converging`) or that none does (`converged`). `converged` does not
+confirm that peers received the new export view, because transport processing
+and socket writes may still be pending. `--json` exposes the same record for
+automation.
 
 1. **Generation** — changes to static `[[neighbors]]`, `[peer_groups]`,
    BFD member attachments, inline policy definitions, neighbor sets, global chains,

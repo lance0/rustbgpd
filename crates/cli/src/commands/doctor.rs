@@ -2679,7 +2679,7 @@ fn last_sighup_reload_check(response: &GetLastSighupReloadResponse) -> Check {
                 (
                     CheckStatus::Warn,
                     format!(
-                        "latest SIGHUP {} is still converging: {} peer(s) await outbound resync, oldest for {}s (retried every second); find them with `rbgp neighbor` (Outbound Resync) and inspect bgp_rib_outbound_dirty_peers",
+                        "latest SIGHUP {} is still converging: {} peer(s) have a RIB outbound resync pending, oldest for {}s (retried every second); find them with `rbgp neighbor` (Outbound Resync) and inspect bgp_rib_outbound_dirty_peers",
                         record.outcome,
                         convergence.pending_peers,
                         convergence.oldest_pending_seconds
@@ -4305,7 +4305,11 @@ mod tests {
         };
         let stalled = check("converging", 3, OUTBOUND_RESYNC_WARN_SECS);
         assert_eq!(stalled.status, CheckStatus::Warn);
-        assert!(stalled.detail.contains("3 peer(s) await outbound resync"));
+        assert!(
+            stalled
+                .detail
+                .contains("3 peer(s) have a RIB outbound resync pending")
+        );
         assert!(stalled.detail.contains("bgp_rib_outbound_dirty_peers"));
         let fresh = check("converging", 3, OUTBOUND_RESYNC_WARN_SECS - 1);
         assert_eq!(fresh.status, CheckStatus::Ok);

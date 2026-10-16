@@ -508,16 +508,17 @@ message SighupReloadRecord {
   uint64 unapplied_omitted = 13;
 }
 
-// Outbound convergence of the export view the latest SIGHUP committed,
-// measured when the request is served. It counts every peer awaiting an
-// outbound resync, whatever marked it dirty: each resync sends the current
-// view, so a later generation joins a pending resync instead of queueing a
-// second one.
+// RIB-side outbound convergence of the export view the latest SIGHUP
+// committed, measured when the request is served. It counts every peer with
+// a RIB outbound resync pending, whatever marked it dirty: each resync hands
+// the transport the current view, so a later generation joins a pending
+// resync instead of queueing a second one. It does not confirm receipt:
+// transport processing and socket writes may still be pending.
 message SighupReloadConvergence {
   // applied: the reload committed its export view, and the RIB has not
   // reported outbound state within the read deadline.
-  // converging: pending_peers peers still await an outbound resync.
-  // converged: no peer awaits an outbound resync.
+  // converging: pending_peers peers still have a RIB outbound resync pending.
+  // converged: no RIB outbound resync is pending.
   string state = 1;
   uint64 pending_peers = 2;
   // Whole seconds since the oldest pending resync began; 0 unless converging.
