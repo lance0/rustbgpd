@@ -3903,7 +3903,7 @@ fn intercept_dataset_rib(
                 RibUpdate::QueryPeerRetainedStale { reply, .. } => {
                     let _ = reply.send(retained);
                 }
-                RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
+                RibUpdate::ReevaluatePeerExportPolicies { peers, reply, .. } => {
                     recorded.lock().unwrap().push(peers.clone());
                     let outcome = if missing.is_some_and(|peer| peers.contains(&peer)) {
                         Err(rustbgpd_rib::RibCommandError::not_found(
@@ -3923,6 +3923,62 @@ fn intercept_dataset_rib(
         }
     });
     (exports, task)
+}
+
+/// The generation hands the RIB every published swap with the snapshot it
+/// replaced, so the export side can bound re-evaluation to affected routes.
+#[tokio::test]
+async fn dataset_generation_sends_published_swaps_to_export_reevaluation() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let before = live.pin();
+    let mut harness = GenerationHarness::new(&prior);
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&sent);
+    let relay = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                RibUpdate::QueryPeerRetainedStale { reply, .. } => {
+                    let _ = reply.send(0);
+                }
+                RibUpdate::ReevaluatePeerExportPolicies { swaps, reply, .. } => {
+                    recorded.lock().unwrap().push(swaps);
+                    let _ = reply.send(Ok(()));
+                }
+                other => {
+                    if downstream.send(other).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let sent = sent.lock().unwrap().clone();
+    let [Some(swaps)] = sent.as_slice() else {
+        panic!("one bounded export batch expected: {sent:?}");
+    };
+    let [swap] = swaps.as_slice() else {
+        panic!("one swapped dataset expected: {swaps:?}");
+    };
+    assert!(Arc::ptr_eq(&swap.handle, &live));
+    assert!(Arc::ptr_eq(&swap.prior, &before));
+    assert_eq!(live.pin().generation, before.generation + 1);
+    harness.shutdown().await;
+    relay.await.unwrap();
 }
 
 #[tokio::test]

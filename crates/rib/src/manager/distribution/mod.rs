@@ -7058,7 +7058,14 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
     ) {
-        self.distribute_changes_inner(best_changed, all_affected, true, false, HashMap::new());
+        self.distribute_changes_inner(
+            best_changed,
+            all_affected,
+            true,
+            false,
+            HashMap::new(),
+            None,
+        );
     }
 
     pub(super) fn distribute_changes(
@@ -7066,7 +7073,33 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
     ) {
-        self.distribute_changes_inner(best_changed, all_affected, false, false, HashMap::new());
+        self.distribute_changes_inner(
+            best_changed,
+            all_affected,
+            false,
+            false,
+            HashMap::new(),
+            None,
+        );
+    }
+
+    /// [`Self::distribute_changes`] restricted to `targets`: other clean
+    /// peers and groups without a target member are neither evaluated nor
+    /// staged. Dirty and forced peers still resync. Exact only when no
+    /// other peer's export verdict can have changed.
+    pub(in crate::manager) fn distribute_changes_to_targets(
+        &mut self,
+        changed: &HashSet<Prefix>,
+        targets: &HashSet<IpAddr>,
+    ) {
+        self.distribute_changes_inner(
+            changed,
+            changed,
+            false,
+            false,
+            HashMap::new(),
+            Some(targets),
+        );
     }
 
     pub(super) fn distribute_changes_after_advertised_page_advance(
@@ -7074,7 +7107,14 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
     ) {
-        self.distribute_changes_inner(best_changed, all_affected, false, true, HashMap::new());
+        self.distribute_changes_inner(
+            best_changed,
+            all_affected,
+            false,
+            true,
+            HashMap::new(),
+            None,
+        );
     }
 
     pub(in crate::manager) fn distribute_changes_with_evpn_feeds(
@@ -7088,6 +7128,7 @@ impl RibManager {
             false,
             advertised_generation_already_advanced,
             feeds,
+            None,
         );
     }
 
@@ -7115,6 +7156,7 @@ impl RibManager {
         service_ingest_readiness: bool,
         advertised_generation_already_advanced: bool,
         mut evpn_feeds: HashMap<IpAddr, super::evpn_recovery::EvpnCompleteFeed>,
+        targets: Option<&HashSet<IpAddr>>,
     ) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -7175,7 +7217,16 @@ impl RibManager {
             self.advance_advertised_pages();
         }
 
-        let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        let peers: Vec<IpAddr> = self
+            .outbound_peers
+            .keys()
+            .filter(|peer| {
+                targets.is_none_or(|targets| targets.contains(*peer))
+                    || self.dirty_peers.contains(*peer)
+                    || self.force_outbound_peers.contains(*peer)
+            })
+            .copied()
+            .collect();
         // Pass-scoped export memo: shares post-modification attribute
         // sets and AS_PATH match strings across the whole peer fanout —
         // this outlives the per-peer iteration deliberately, since the
@@ -7199,7 +7250,7 @@ impl RibManager {
             }
         }
         let mut group_stage =
-            self.stage_update_groups(&best_changed, &all_affected, &mut export_memo);
+            self.stage_update_groups(&best_changed, &all_affected, &mut export_memo, targets);
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
         let mut shared_group_encodes: HashMap<usize, Arc<crate::update::SharedGroupEncode>> =
             HashMap::new();

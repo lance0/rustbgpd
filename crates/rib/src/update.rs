@@ -125,6 +125,16 @@ impl From<RibSummaryQuery> for RibUpdate {
     }
 }
 
+/// One published dataset content swap: the live handle and the snapshot it
+/// held immediately before the swap.
+#[derive(Clone, Debug)]
+pub struct DatasetSwap {
+    /// The handle installed chains share.
+    pub handle: Arc<rustbgpd_policy::datasets::DatasetHandle>,
+    /// The content the targets' exports were settled against.
+    pub prior: Arc<rustbgpd_policy::datasets::DatasetSnapshot>,
+}
+
 /// Canonical, side-effect-free input to update-group eligibility.
 #[expect(
     clippy::struct_excessive_bools,
@@ -3074,6 +3084,12 @@ pub enum RibUpdate {
     ReevaluatePeerExportPolicies {
         /// Peers whose installed export policies must be re-evaluated.
         peers: Vec<IpAddr>,
+        /// Every dataset content swap since the targets' exports were last
+        /// settled. With `Some`, the RIB re-evaluates only routes whose
+        /// prefix or origin AS the swaps answer differently, when it can
+        /// prove that bound; otherwise, or with `None`, it re-evaluates
+        /// every route.
+        swaps: Option<Vec<DatasetSwap>>,
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
     },

@@ -39,11 +39,14 @@ impl RibManager {
     /// per-client-best enumeration. The union is built once, and only
     /// when such a group exists; winner-equality and lane suppression
     /// make the widened pass a no-op wherever neither slot moved.
+    ///
+    /// With `targets`, groups with no member in it are skipped.
     pub(in crate::manager) fn stage_update_groups(
         &mut self,
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
         memo: &mut crate::manager::distribution::ExportMemo,
+        targets: Option<&HashSet<IpAddr>>,
     ) -> HashMap<usize, GroupStageOutput> {
         let mut staged = HashMap::new();
         if self.group_ribs.is_empty() || (best_changed.is_empty() && all_affected.is_empty()) {
@@ -67,8 +70,16 @@ impl RibManager {
         self.replacement_checkpoint(true);
         let gids: Vec<usize> = self
             .group_ribs
-            .keys()
-            .map(|gid| {
+            .iter()
+            .filter(|(_, group)| {
+                targets.is_none_or(|targets| {
+                    group.members.iter().any(|member| {
+                        self.replacement_checkpoint(false);
+                        targets.contains(member)
+                    })
+                })
+            })
+            .map(|(gid, _)| {
                 self.replacement_checkpoint(false);
                 *gid
             })

@@ -778,7 +778,10 @@ async fn dataset_export_refresh_batches_only_dependent_peers_for_reevaluation() 
     let rib = tokio::spawn(async move {
         let mut batches = Vec::new();
         while let Some(command) = rib_rx.recv().await {
-            let RibUpdate::ReevaluatePeerExportPolicies { mut peers, reply } = command else {
+            let RibUpdate::ReevaluatePeerExportPolicies {
+                mut peers, reply, ..
+            } = command
+            else {
                 panic!(
                     "dataset refresh must recompute export policy, not replay its cached output"
                 );
@@ -860,7 +863,7 @@ async fn dataset_refresh_discovers_conditional_advertisement_predicates() {
         let mut seen = Vec::new();
         while let Some(command) = rib_rx.recv().await {
             match command {
-                RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
+                RibUpdate::ReevaluatePeerExportPolicies { peers, reply, .. } => {
                     seen.push(format!("reevaluate {peers:?}"));
                     reply.send(Ok(())).unwrap();
                 }

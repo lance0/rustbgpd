@@ -1170,6 +1170,11 @@ impl RibManager {
         }
     }
 
+    /// Whether any conditional-advertisement definition is installed.
+    pub(super) fn has_conditional_advertisements(&self) -> bool {
+        !self.conditional_advertisements.definitions.is_empty()
+    }
+
     /// Whether `peer` has any conditional advertisement attached.
     pub(super) fn peer_has_conditional_advertisements(&self, peer: IpAddr) -> bool {
         self.conditional_advertisements

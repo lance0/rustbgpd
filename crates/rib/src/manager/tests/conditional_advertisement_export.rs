@@ -1014,6 +1014,7 @@ async fn dataset_swap_reaches_both_predicates() {
     let (reply, _result) = oneshot::channel();
     manager.handle_update(RibUpdate::ReevaluatePeerExportPolicies {
         peers: vec![ip(TARGET)],
+        swaps: None,
         reply,
     });
     resync(&mut manager);

@@ -4851,6 +4851,7 @@ fn plain_best_source_flip_keeps_old_source_on_shared_encoding() {
         &changed,
         &HashSet::from([p]),
         &mut super::super::distribution::ExportMemo::default(),
+        None,
     );
     unseed(&mut manager, OTHER1, p);
     let changed = manager.recompute_best(&HashSet::from([p]));
@@ -4858,6 +4859,7 @@ fn plain_best_source_flip_keeps_old_source_on_shared_encoding() {
         &changed,
         &HashSet::from([p]),
         &mut super::super::distribution::ExportMemo::default(),
+        None,
     );
     let stage = &stages[&PCB_GID];
     assert!(stage.deltas.iter().all(|delta| delta.prior.is_none()));
@@ -4928,7 +4930,7 @@ fn pcb_widened_pass_with_unchanged_winner_and_lane_is_noop() {
     // lane; the prefix arrives via `all_affected` alone.
     unseed(&mut m, OTHER3, p);
     let mut memo = super::super::distribution::ExportMemo::default();
-    let staged = m.stage_update_groups(&HashSet::new(), &HashSet::from([p]), &mut memo);
+    let staged = m.stage_update_groups(&HashSet::new(), &HashSet::from([p]), &mut memo, None);
     let out = staged.get(&PCB_GID).expect("per-client-best group staged");
     assert!(out.deltas.is_empty(), "unchanged winner stays suppressed");
     assert!(
@@ -4953,12 +4955,13 @@ fn plain_group_staging_keeps_best_changed_exactly() {
     let _ = m.recompute_best(&HashSet::from([p, q]));
     m.group_ribs.insert(PLAIN_GID, empty_group());
     let mut memo = super::super::distribution::ExportMemo::default();
-    let staged = m.stage_update_groups(&HashSet::new(), &HashSet::from([p]), &mut memo);
+    let staged = m.stage_update_groups(&HashSet::new(), &HashSet::from([p]), &mut memo, None);
     assert!(
         staged.is_empty(),
         "an all-affected-only pass stages no plain group"
     );
-    let staged = m.stage_update_groups(&HashSet::from([p]), &HashSet::from([p, q]), &mut memo);
+    let staged =
+        m.stage_update_groups(&HashSet::from([p]), &HashSet::from([p, q]), &mut memo, None);
     let out = staged
         .get(&PLAIN_GID)
         .expect("plain group staged over best_changed");

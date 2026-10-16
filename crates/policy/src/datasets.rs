@@ -119,6 +119,29 @@ impl DatasetData {
         }
     }
 
+    /// Whether `route.prefix in` / `route.origin-as in` answer
+    /// differently against `self` and `next` for a route with `prefix`
+    /// and `origin` — the same probes evaluation runs (`crate::eval`).
+    /// Community data, or a kind change, conservatively differs: their
+    /// probes are not bounded by these keys.
+    #[must_use]
+    pub fn route_key_verdict_differs(
+        &self,
+        next: &Self,
+        prefix: rustbgpd_wire::Prefix,
+        origin: Option<u32>,
+    ) -> bool {
+        match (self, next) {
+            (DatasetData::Prefix(old), DatasetData::Prefix(new)) => {
+                old.matches(prefix) != new.matches(prefix)
+            }
+            (DatasetData::Asn(old), DatasetData::Asn(new)) => {
+                origin.is_some_and(|asn| old.contains(asn) != new.contains(asn))
+            }
+            _ => true,
+        }
+    }
+
     /// Number of (canonicalized) records.
     #[must_use]
     pub fn records(&self) -> usize {

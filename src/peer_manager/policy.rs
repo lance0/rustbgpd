@@ -3146,6 +3146,7 @@ impl PeerManager {
                     false,
                     OperatorReadAdmission::Served,
                     true,
+                    None,
                 )
                 .await;
             if let Err(error) = outcome {
@@ -3322,6 +3323,7 @@ impl PeerManager {
         known_down: bool,
         operator_reads: OperatorReadAdmission,
         wall_reply_budget: bool,
+        swaps: Option<Vec<rustbgpd_rib::DatasetSwap>>,
     ) -> Result<(), DatasetRefreshFailure> {
         if peers.is_empty() {
             return Ok(());
@@ -3353,7 +3355,11 @@ impl PeerManager {
             ));
         }
         let (reply, response) = oneshot::channel();
-        permit.send(RibUpdate::ReevaluatePeerExportPolicies { peers, reply });
+        permit.send(RibUpdate::ReevaluatePeerExportPolicies {
+            peers,
+            swaps,
+            reply,
+        });
         // Legacy refresh charged wall time; generation settlement excludes
         // read servicing from its acknowledgement budget. Keep both contracts.
         let response = async {
@@ -3395,6 +3401,7 @@ impl PeerManager {
     pub(super) async fn refresh_dataset_generation_dependents(
         &mut self,
         dependents: &[DatasetDependent],
+        swaps: Option<Vec<rustbgpd_rib::DatasetSwap>>,
         operator_reads: OperatorReadAdmission,
     ) -> Result<(), DatasetRefreshFailure> {
         // Publication (or restoration) has already happened. Record the
@@ -3438,6 +3445,7 @@ impl PeerManager {
                         true,
                         operator_reads,
                         false,
+                        None,
                     )
                     .await?;
                     // A missing outbound registration is safe only while this
@@ -3460,7 +3468,7 @@ impl PeerManager {
                 }
             }
         }
-        self.reevaluate_dataset_exports(exports, false, operator_reads, false)
+        self.reevaluate_dataset_exports(exports, false, operator_reads, false, swaps)
             .await?;
         for (dependent, is_established) in dependents.iter().zip(&established) {
             if dependent.import

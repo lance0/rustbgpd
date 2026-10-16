@@ -2103,6 +2103,7 @@ async fn check_dataset_export_refresh(per_client_best: bool) {
                 .tx
                 .send(RibUpdate::ReevaluatePeerExportPolicies {
                     peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                    swaps: None,
                     reply,
                 })
                 .await
@@ -2168,6 +2169,7 @@ async fn dataset_content_refresh_missing_target_has_no_effects() {
         .tx
         .send(RibUpdate::ReevaluatePeerExportPolicies {
             peers: vec![IpAddr::V4(B), IpAddr::V4(F)],
+            swaps: None,
             reply,
         })
         .await
@@ -2213,6 +2215,7 @@ async fn dataset_content_refresh_rechecks_grouped_vpn_export_verdicts() {
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
                 peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                swaps: None,
                 reply,
             })
             .await
@@ -2226,6 +2229,546 @@ async fn dataset_content_refresh_rechecks_grouped_vpn_export_verdicts() {
             );
         }
     }
+}
+
+/// Contents of the three datasets the swap oracle's export chain reads.
+#[derive(Clone)]
+struct SwapData {
+    allowed: Vec<rustbgpd_policy::sets::PrefixSetEntry>,
+    blocked: Vec<u32>,
+    tagged: Vec<u32>,
+}
+
+impl SwapData {
+    fn handles(&self) -> [Arc<rustbgpd_policy::datasets::DatasetHandle>; 3] {
+        use rustbgpd_policy::datasets::{DatasetHandle, DatasetKind};
+        let [allowed, blocked, tagged] = self.data();
+        [
+            Arc::new(DatasetHandle::new("allowed", DatasetKind::Prefix, allowed)),
+            Arc::new(DatasetHandle::new("blocked", DatasetKind::Asn, blocked)),
+            Arc::new(DatasetHandle::new("tagged", DatasetKind::Community, tagged)),
+        ]
+    }
+
+    fn data(&self) -> [rustbgpd_policy::datasets::DatasetData; 3] {
+        use rustbgpd_policy::datasets::DatasetData;
+        use rustbgpd_policy::sets::{AsnSet, CommunitySet, PrefixSet};
+        [
+            DatasetData::Prefix(PrefixSet::new(self.allowed.iter().copied())),
+            DatasetData::Asn(AsnSet::new(self.blocked.iter().copied())),
+            DatasetData::Community(CommunitySet::new(
+                self.tagged
+                    .iter()
+                    .map(|&value| CommunityMatch::Standard { value }),
+            )),
+        ]
+    }
+}
+
+fn swap_entry(prefix: Ipv4Prefix, le: Option<u8>) -> rustbgpd_policy::sets::PrefixSetEntry {
+    rustbgpd_policy::sets::PrefixSetEntry {
+        prefix: Prefix::V4(prefix),
+        ge: None,
+        le,
+    }
+}
+
+/// Every oracle route: 10.200.0.0/16 up to /24.
+fn swap_all() -> Vec<rustbgpd_policy::sets::PrefixSetEntry> {
+    vec![swap_entry(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 200, 0, 0), 16),
+        Some(24),
+    )]
+}
+
+fn swap_some(indexes: &[u8]) -> Vec<rustbgpd_policy::sets::PrefixSetEntry> {
+    indexes
+        .iter()
+        .map(|&n| swap_entry(pfx(n, 0), None))
+        .collect()
+}
+
+fn swap_chain(handles: &[Arc<rustbgpd_policy::datasets::DatasetHandle>; 3]) -> PolicyChain {
+    use rustbgpd_policy::datasets::DatasetBindings;
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+    let mut bindings = DatasetBindings::new();
+    for handle in handles {
+        bindings.insert(Arc::clone(handle));
+    }
+    let compiled = RpolFile::parse(
+        "dataset prefix-set allowed\ndataset asn-set blocked\ndataset community-set tagged\n\
+         policy p { term t { if (route.prefix in allowed || route.communities in tagged) \
+         && !(route.origin-as in blocked) { accept } reject } }",
+    )
+    .expect("dataset policy parses")
+    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+    .expect("policy compiles")
+    .expect("dataset binding is complete");
+    PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )])
+}
+
+/// A route with `origin` as its `AS_PATH` origin (none: empty path).
+fn swap_route(
+    n: u8,
+    src: Ipv4Addr,
+    local_pref: u32,
+    origin: Option<u32>,
+    community: bool,
+) -> Route {
+    let mut route = ibgp_route(pfx(n, 0), src, local_pref, vec![]);
+    let mut attributes = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: origin
+                .map(|origin| vec![AsPathSegment::AsSequence(vec![65100, origin])])
+                .unwrap_or_default(),
+        }),
+        PathAttribute::LocalPref(local_pref),
+    ];
+    if community {
+        attributes.push(PathAttribute::Communities(vec![0xFDE8_0007]));
+    }
+    route.attributes = AttrSet::new(attributes);
+    route
+}
+
+#[derive(Clone, Copy, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent oracle dimensions, each a receiver feature"
+)]
+struct SwapMode {
+    ungrouped: bool,
+    per_client_best: bool,
+    add_path: bool,
+    /// C's channel is full when the re-evaluation arrives, so C is dirty.
+    jam: bool,
+}
+
+/// Run the oracle topology. `next` swaps every dataset to that content
+/// after the initial exchange and re-evaluates B and C, sending the swaps
+/// when `with_swaps`; `None` starts from `initial` and never swaps (the
+/// reference). Returns the final advertised state and B's export
+/// evaluations during the re-evaluation command.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one oracle topology: sessions, routes, swap and recovery in order"
+)]
+async fn run_swap_case(
+    initial: &SwapData,
+    next: Option<&SwapData>,
+    mode: SwapMode,
+    with_swaps: bool,
+) -> (FoldedState, u64) {
+    let handles = initial.handles();
+    let chain = swap_chain(&handles);
+    let mut oracle = Oracle::spawn(mode.ungrouped, None);
+    oracle.peer_up(A, true, false, None, 64).await;
+    oracle.peer_up(E, true, false, None, 64).await;
+    for (peer, capacity) in [(B, 64), (C, if mode.jam { 1 } else { 64 })] {
+        oracle
+            .peer_up_families_generation_with_features(
+                peer,
+                SESSION,
+                true,
+                false,
+                Some(chain.clone()),
+                capacity,
+                ipv4_sendable(),
+                OraclePeerFeatures {
+                    per_client_best: mode.per_client_best,
+                    add_path_send_max: if mode.add_path { 4 } else { 0 },
+                    ..OraclePeerFeatures::default()
+                },
+            )
+            .await;
+    }
+    oracle
+        .peer_up(
+            D,
+            true,
+            false,
+            Some(permit_all_with(RouteModifications::default())),
+            64,
+        )
+        .await;
+    if mode.jam {
+        let eor = oracle.drain_one(C).await;
+        assert!(eor.announce.is_empty());
+    }
+    let origins = [
+        Some(64501),
+        Some(64502),
+        Some(64503),
+        None,
+        Some(64501),
+        Some(64502),
+        Some(64503),
+        Some(64504),
+    ];
+    let from_a = (1..=8)
+        .zip(origins)
+        .map(|(n, origin)| swap_route(n, A, 200, origin, n == 7))
+        .collect();
+    oracle.routes(A, from_a, vec![]).await;
+    // Runner-up candidates with other origins: per-client-best and Add-Path
+    // receivers read them, so an origin swap must reach non-best paths.
+    oracle
+        .routes(
+            E,
+            vec![
+                swap_route(5, E, 100, Some(64509), false),
+                swap_route(6, E, 100, Some(64501), false),
+            ],
+            vec![],
+        )
+        .await;
+    if !mode.jam {
+        oracle.drain_available();
+    }
+    let mut evals = 0;
+    if let Some(next) = next {
+        let mut swaps = Vec::new();
+        for (handle, data) in handles.iter().zip(next.data()) {
+            let prior = handle.pin();
+            if handle.refresh(data).is_some() {
+                swaps.push(crate::update::DatasetSwap {
+                    handle: Arc::clone(handle),
+                    prior,
+                });
+            }
+        }
+        let before = oracle.export_policy_evals_for(B).await;
+        let bystander = oracle.export_policy_evals_for(D).await;
+        let (reply, result) = oneshot::channel();
+        oracle
+            .tx
+            .send(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                swaps: with_swaps.then_some(swaps),
+                reply,
+            })
+            .await
+            .unwrap();
+        result.await.unwrap().unwrap();
+        evals = oracle.export_policy_evals_for(B).await - before;
+        assert_eq!(
+            oracle.export_policy_evals_for(D).await,
+            bystander,
+            "bystander re-evaluated"
+        );
+    }
+    if mode.jam {
+        oracle
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        oracle.quiesce().await;
+        oracle.end_recovery(C).await;
+    }
+    (fold(&oracle.finish().await), evals)
+}
+
+/// How the re-evaluation must have run for a swap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwapPath {
+    /// Bounded, and fewer evaluations than the full pass.
+    Narrow,
+    /// Bounded, and no route affected: nothing evaluated.
+    Empty,
+    /// Bounded, every route affected.
+    Every,
+    /// Not boundable: the full pass ran.
+    Full,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the swap case table reads best as one list"
+)]
+async fn check_swap_cases(mode: SwapMode) {
+    let base = SwapData {
+        allowed: swap_some(&[1, 2]),
+        blocked: vec![],
+        tagged: vec![],
+    };
+    let cases = [
+        (
+            "prefix add",
+            base.clone(),
+            SwapData {
+                allowed: swap_some(&[1, 2, 3, 5]),
+                ..base.clone()
+            },
+            SwapPath::Narrow,
+        ),
+        (
+            "prefix remove",
+            SwapData {
+                allowed: swap_some(&[1, 2, 3, 4, 5, 6, 7, 8]),
+                ..base.clone()
+            },
+            base.clone(),
+            SwapPath::Narrow,
+        ),
+        (
+            "origin add and remove",
+            SwapData {
+                allowed: swap_all(),
+                blocked: vec![64501],
+                tagged: vec![],
+            },
+            SwapData {
+                allowed: swap_all(),
+                blocked: vec![64502, 64509],
+                tagged: vec![],
+            },
+            SwapPath::Narrow,
+        ),
+        (
+            // p6's best (64502) stays blocked; only its runner-up from E
+            // (64501) changes verdict.
+            "runner-up origin",
+            SwapData {
+                allowed: swap_all(),
+                blocked: vec![64502],
+                tagged: vec![],
+            },
+            SwapData {
+                allowed: swap_all(),
+                blocked: vec![64502, 64501],
+                tagged: vec![],
+            },
+            SwapPath::Narrow,
+        ),
+        (
+            "prefix and origin together",
+            base.clone(),
+            SwapData {
+                allowed: swap_some(&[2, 4, 6]),
+                blocked: vec![64504, 64502],
+                tagged: vec![],
+            },
+            SwapPath::Narrow,
+        ),
+        (
+            "no route affected",
+            base.clone(),
+            SwapData {
+                allowed: {
+                    let mut allowed = swap_some(&[1, 2]);
+                    allowed.push(swap_entry(
+                        Ipv4Prefix::new(Ipv4Addr::new(10, 99, 0, 0), 24),
+                        None,
+                    ));
+                    allowed
+                },
+                blocked: vec![64999],
+                tagged: vec![],
+            },
+            SwapPath::Empty,
+        ),
+        (
+            "every route affected",
+            SwapData {
+                allowed: vec![],
+                ..base.clone()
+            },
+            SwapData {
+                allowed: swap_all(),
+                ..base.clone()
+            },
+            SwapPath::Every,
+        ),
+        (
+            "community set",
+            base.clone(),
+            SwapData {
+                tagged: vec![0xFDE8_0007],
+                ..base.clone()
+            },
+            SwapPath::Full,
+        ),
+    ];
+    for (name, initial, next, path) in cases {
+        let (bounded, bounded_evals) = run_swap_case(&initial, Some(&next), mode, true).await;
+        let (full, full_evals) = run_swap_case(&initial, Some(&next), mode, false).await;
+        let (reference, _) = run_swap_case(&next, None, mode, false).await;
+        assert_eq!(
+            bounded, full,
+            "{name} {mode:?}: bounded and full re-evaluation differ"
+        );
+        assert_eq!(
+            full, reference,
+            "{name} {mode:?}: full re-evaluation is not exact"
+        );
+        if mode.jam {
+            continue;
+        }
+        match path {
+            SwapPath::Narrow => assert!(
+                bounded_evals < full_evals,
+                "{name} {mode:?}: {bounded_evals} bounded vs {full_evals} full evaluations"
+            ),
+            SwapPath::Empty => assert_eq!(bounded_evals, 0, "{name} {mode:?}"),
+            SwapPath::Every => assert!(bounded_evals > 0, "{name} {mode:?}"),
+            SwapPath::Full => assert_eq!(bounded_evals, full_evals, "{name} {mode:?}"),
+        }
+    }
+}
+
+/// Re-evaluating only the routes a dataset swap affects leaves every
+/// receiver with exactly the Adj-RIB-Out the full pass produces, which is
+/// in turn the state of a run that started with the new contents.
+#[tokio::test]
+async fn dataset_swap_bounded_reevaluation_matches_full_pass() {
+    for (ungrouped, per_client_best, add_path) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        check_swap_cases(SwapMode {
+            ungrouped,
+            per_client_best,
+            add_path,
+            jam: false,
+        })
+        .await;
+    }
+}
+
+/// A member whose channel is full when the swap arrives recovers to the
+/// same state on both paths.
+#[tokio::test]
+async fn dataset_swap_bounded_reevaluation_matches_full_pass_with_dirty_member() {
+    tokio::time::pause();
+    for ungrouped in [false, true] {
+        check_swap_cases(SwapMode {
+            ungrouped,
+            per_client_best: false,
+            add_path: false,
+            jam: true,
+        })
+        .await;
+    }
+}
+
+/// VPN receivers are outside the bounded path: the swap falls back to the
+/// full pass and stays exact.
+#[tokio::test]
+async fn dataset_swap_with_vpn_receivers_uses_full_pass() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 210, 1, 0), 24));
+    let run = async |with_swaps: bool| {
+        let (handle, chain) = dataset_prefix_policy(prefix, true);
+        let mut oracle = Oracle::spawn(false, Some(Ipv4Addr::new(192, 0, 2, 1)));
+        oracle
+            .peer_up_families(A, false, true, None, 64, vpn_sendable())
+            .await;
+        for peer in [B, C] {
+            oracle
+                .peer_up_families(peer, false, true, Some(chain.clone()), 64, vpn_sendable())
+                .await;
+        }
+        oracle
+            .vpn_routes(A, vec![vpn_route(vpn_nlri(1, 100), A, 100, vec![])], vec![])
+            .await;
+        oracle
+            .routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        oracle.drain_available();
+        let prior = handle.pin();
+        handle.refresh(dataset_prefix_data(prefix, false)).unwrap();
+        let (reply, result) = oneshot::channel();
+        oracle
+            .tx
+            .send(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                swaps: with_swaps.then(|| {
+                    vec![crate::update::DatasetSwap {
+                        handle: Arc::clone(&handle),
+                        prior,
+                    }]
+                }),
+                reply,
+            })
+            .await
+            .unwrap();
+        result.await.unwrap().unwrap();
+        let streams = oracle.finish().await;
+        (fold(&streams), fold_vpn(&streams))
+    };
+    let (unicast, vpn) = run(true).await;
+    assert_eq!((unicast, vpn.clone()), run(false).await);
+    for peer in [B, C] {
+        assert!(vpn[&IpAddr::V4(peer)].is_empty(), "VPN verdict refreshed");
+    }
+}
+
+/// A swap whose prior is not the handle's immediate predecessor cannot
+/// bound the change: exports may reflect an intermediate publication the
+/// prior does not show. The full pass runs.
+#[tokio::test]
+async fn dataset_swap_with_intervening_publication_uses_full_pass() {
+    let data = |indexes: &[u8]| {
+        SwapData {
+            allowed: swap_some(indexes),
+            blocked: vec![],
+            tagged: vec![],
+        }
+        .data()
+        .into_iter()
+        .next()
+        .unwrap()
+    };
+    let handles = SwapData {
+        allowed: swap_some(&[1]),
+        blocked: vec![],
+        tagged: vec![],
+    }
+    .handles();
+    let mut oracle = Oracle::spawn(false, None);
+    oracle.peer_up(A, true, false, None, 64).await;
+    oracle
+        .peer_up(B, true, false, Some(swap_chain(&handles)), 64)
+        .await;
+    let routes = (1..=2)
+        .map(|n| swap_route(n, A, 100, None, false))
+        .collect();
+    oracle.routes(A, routes, vec![]).await;
+    let allowed = &handles[0];
+    let stale = allowed.pin();
+    let reevaluate = async |oracle: &mut Oracle, swaps| {
+        let (reply, result) = oneshot::channel();
+        oracle
+            .tx
+            .send(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![IpAddr::V4(B)],
+                swaps,
+                reply,
+            })
+            .await
+            .unwrap();
+        result.await.unwrap().unwrap();
+    };
+    // An intermediate publication B already exports.
+    allowed.refresh(data(&[1, 2])).unwrap();
+    reevaluate(&mut oracle, None).await;
+    // Back to the stale prior's content: a diff against it is empty.
+    allowed.refresh(data(&[1])).unwrap();
+    let swap = crate::update::DatasetSwap {
+        handle: Arc::clone(allowed),
+        prior: stale,
+    };
+    reevaluate(&mut oracle, Some(vec![swap])).await;
+    let folded = fold(&oracle.finish().await);
+    let advertised: BTreeSet<_> = folded[&IpAddr::V4(B)].keys().copied().collect();
+    assert_eq!(advertised, BTreeSet::from([(Prefix::V4(pfx(1, 0)), 0)]));
 }
 
 pub(super) async fn run_grouped_and_ungrouped<S>(

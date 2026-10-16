@@ -5544,6 +5544,31 @@ policy peer-guard {
         assert!(!chain.references_dataset("bogons"));
     }
 
+    /// A swap of a handle is bounded by route keys only while every probe
+    /// of it reads `route.prefix` or `route.origin-as`; a peer-ASN or
+    /// community probe of the same handle is not.
+    #[test]
+    fn only_route_key_probes_bound_a_dataset_swap() {
+        let file = RpolFile::parse(DATASET_POLICY).expect("clean rpol");
+        let (customers, bindings) = full_bindings();
+        let bogons = Arc::clone(bindings.get("bogons").expect("bound"));
+        let tags = Arc::clone(bindings.get("scrub-tags").expect("bound"));
+        let mut store = SetStore::new();
+        let mut compile = |name: &str| {
+            file.compile_policy_bound(name, &[], &mut store, &bindings)
+                .expect("policy exists")
+                .expect("bindings complete")
+        };
+        let origin = compile("origin-guard");
+        let peer = compile("peer-guard");
+        assert!(origin.dataset_probed_by_route_keys_only(&customers));
+        assert!(compile("bogon-guard").dataset_probed_by_route_keys_only(&bogons));
+        assert!(!peer.dataset_probed_by_route_keys_only(&customers));
+        assert!(!compile("tag-guard").dataset_probed_by_route_keys_only(&tags));
+        // A chain that never probes the handle cannot change with it.
+        assert!(peer.dataset_probed_by_route_keys_only(&bogons));
+    }
+
     /// Torn-generation proof at the walk level: one evaluation pins
     /// each dataset once, so a guard set of `in D` / `!(in D)` terms
     /// resolves consistently even while another thread swaps the

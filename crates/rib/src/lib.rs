@@ -96,7 +96,7 @@ pub use route::{
 };
 pub use update::{
     AdjRibInRpkiCounts, AdjRibOutCounts, BestPathCandidate, BestRoutesPage, BgpLsRouteQueryKey,
-    BmpPeerStats, DataplaneExactQueryError, DataplanePageError, DataplaneVersions,
+    BmpPeerStats, DataplaneExactQueryError, DataplanePageError, DataplaneVersions, DatasetSwap,
     EffectiveDistributionMode, EvpnDataplaneRoutesResponse, EvpnEsSnapshot,
     EvpnRecoveryExhaustionCause, EvpnRecoveryReset, EvpnRecoveryResetFn, EvpnRecoveryResetOutcome,
     EvpnRoutePage, EvpnRouteQueryKey, EvpnSessionsSync, ExactBestRoutes, ExactExportCandidate,

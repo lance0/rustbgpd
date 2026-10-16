@@ -1034,6 +1034,28 @@ impl CompiledChain {
         self.datasets.iter()
     }
 
+    /// Whether every guard that probes `handle` reads only
+    /// `route.prefix` or `route.origin-as`. A content swap of such a
+    /// dataset can change this chain's verdict only for routes whose
+    /// prefix or origin AS the two snapshots answer differently for
+    /// ([`DatasetData::route_key_verdict_differs`]). Peer-ASN, binding,
+    /// constant and community probes are not bounded that way.
+    ///
+    /// [`DatasetData::route_key_verdict_differs`]: crate::datasets::DatasetData::route_key_verdict_differs
+    #[must_use]
+    pub fn dataset_probed_by_route_keys_only(&self, handle: &Arc<DatasetHandle>) -> bool {
+        !self.any_guard_node(&|expr| match expr {
+            MatchExpr::InDataset { probe, id } => {
+                !matches!(probe, DatasetProbe::Prefix | DatasetProbe::OriginAs)
+                    && self
+                        .datasets
+                        .get(id.0 as usize)
+                        .is_none_or(|slot| Arc::ptr_eq(&slot.handle, handle))
+            }
+            _ => false,
+        })
+    }
+
     /// Whether evaluating this chain needs the rendered `AS_PATH`
     /// string — true iff some guard contains an
     /// [`MatchExpr::AsPathMatches`] node ([`MatchExpr::AsPathLen`] uses

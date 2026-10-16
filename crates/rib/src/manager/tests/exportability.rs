@@ -1294,7 +1294,7 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
         .loc_rib
         .recompute(route.prefix, std::iter::once(&route));
     let deltas = manager
-        .stage_update_groups(&prefixes, &prefixes, &mut memo)
+        .stage_update_groups(&prefixes, &prefixes, &mut memo, None)
         .remove(&7)
         .unwrap()
         .deltas;
@@ -1385,6 +1385,7 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
             &prefixes,
             &prefixes,
             &mut crate::manager::distribution::ExportMemo::default(),
+            None,
         )
         .remove(&gid)
         .unwrap();
