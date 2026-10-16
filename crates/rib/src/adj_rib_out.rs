@@ -250,6 +250,19 @@ impl AdjRibOut {
         }
     }
 
+    /// Clear every VPN key and free the log's storage with the released maps.
+    fn vpn_keys_released(&mut self) {
+        self.vpn_keys_changed(None);
+        if let Some(log) = &mut self.vpn_key_log {
+            log.entries = Vec::new();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn vpn_key_log_capacity(&self) -> Option<usize> {
+        self.vpn_key_log.as_ref().map(|log| log.entries.capacity())
+    }
+
     /// Every VPN key-set change since `version` of this table, if all are known.
     pub(crate) fn vpn_key_changes_since(
         &self,
@@ -553,14 +566,14 @@ impl AdjRibOut {
     /// Remove only the VPN routes and their secondary key index, releasing
     /// their backing allocations while leaving every other family untouched.
     pub fn release_vpn(&mut self) {
-        self.vpn_keys_changed(None);
+        self.vpn_keys_released();
         self.vpn_routes = HashMap::default();
         self.vpn_key_path_ids = HashMap::default();
     }
 
     /// Retire and release VPN state while leaving every other family intact.
     pub(crate) fn release_vpn_with(&mut self, checkpoint: &mut impl FnMut()) {
-        self.vpn_keys_changed(None);
+        self.vpn_keys_released();
         release_hash_map(&mut self.vpn_routes, checkpoint);
         release_hash_map(&mut self.vpn_key_path_ids, checkpoint);
     }
@@ -610,7 +623,7 @@ impl AdjRibOut {
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
         retire_hash_map(&mut self.evpn_routes, checkpoint);
         retire_hash_map(&mut self.bgpls_routes, checkpoint);
-        self.vpn_keys_changed(None);
+        self.vpn_keys_released();
         retire_hash_map(&mut self.vpn_routes, checkpoint);
         retire_hash_map(&mut self.vpn_key_path_ids, checkpoint);
         retire_hash_map(&mut self.labeled_routes, checkpoint);

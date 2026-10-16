@@ -3595,6 +3595,96 @@ mod tests {
         assert!(!proof.contains(&vpn_exact(500)) && !proof.contains(&vpn_exact(3)));
     }
 
+    fn logged_vpn_table(count: u32) -> AdjRibOut {
+        let mut table = vpn_table(0).with_vpn_key_log();
+        for n in 0..count {
+            table.insert_vpn(vpn_route(n));
+        }
+        table
+    }
+
+    #[test]
+    fn every_vpn_clearing_writer_restarts_the_log_so_older_pools_probe() {
+        type Writer = fn(&mut AdjRibOut);
+        let writers: [(&str, Writer); 5] = [
+            ("clear_vpn", AdjRibOut::clear_vpn),
+            ("release_vpn", AdjRibOut::release_vpn),
+            ("release_vpn_with", |table| {
+                table.release_vpn_with(&mut || {});
+            }),
+            ("clear", AdjRibOut::clear),
+            ("retire_with", |table| table.retire_with(&mut || {})),
+        ];
+        for (name, writer) in writers {
+            // Re-inserting the same keys, or all but one plus a new key, after
+            // a clear must never reuse the pre-clear view through the log.
+            for replaced in [false, true] {
+                let mut table = logged_vpn_table(200);
+                let mut ledger = AdmittedRecovery::new();
+                let hint = capture_vpn(&mut ledger, peer(1), None, &table, true).handle;
+                writer(&mut table);
+                for n in (0..200).filter(|n| !replaced || *n != 5) {
+                    table.insert_vpn(vpn_route(n));
+                }
+                if replaced {
+                    table.insert_vpn(vpn_route(900));
+                }
+                let shape = vpn_shape(&ledger, hint, &table);
+                assert!(
+                    shape.comparisons >= 199,
+                    "{name}: the restarted log covers no older pool"
+                );
+                let warm = capture_vpn(&mut ledger, peer(2), hint, &table, true);
+                assert_eq!(warm.handle, hint, "{name}");
+                let proof = ledger.get(&peer(2)).unwrap();
+                assert_eq!(proof.len(), 200, "{name}");
+                assert_eq!(proof.contains(&vpn_exact(5)), !replaced, "{name}");
+                assert_eq!(proof.contains(&vpn_exact(900)), replaced, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn released_vpn_tables_free_their_key_log() {
+        let writers: [fn(&mut AdjRibOut); 3] = [
+            AdjRibOut::release_vpn,
+            |table| table.release_vpn_with(&mut || {}),
+            |table| table.retire_with(&mut || {}),
+        ];
+        for writer in writers {
+            let mut table = logged_vpn_table(0);
+            for n in 0..64 {
+                table.insert_vpn(vpn_route(n));
+            }
+            assert!(table.vpn_key_log_capacity().unwrap() >= 64);
+            writer(&mut table);
+            assert_eq!(table.vpn_key_log_capacity(), Some(0));
+        }
+    }
+
+    #[test]
+    fn a_key_logged_in_twice_after_the_pool_dedups_into_an_exact_proof() {
+        let mut table = logged_vpn_table(200);
+        let mut ledger = AdmittedRecovery::new();
+        let hint = capture_vpn(&mut ledger, peer(1), None, &table, true).handle;
+        table.insert_vpn(vpn_route(700));
+        assert!(table.remove_vpn(&vpn_route(700).key()));
+        table.insert_vpn(vpn_route(700));
+        let shape = vpn_shape(&ledger, hint, &table);
+        assert_eq!(
+            (shape.count, shape.additions),
+            (201, 3),
+            "every log entry of a present, unpooled key reserves sparse capacity"
+        );
+        let warm = capture_vpn(&mut ledger, peer(2), hint, &table, true);
+        assert_eq!(warm.handle, hint);
+        let proof = ledger.get(&peer(2)).unwrap();
+        assert_eq!(proof.len(), 201, "the duplicate sparse key dedups at seal");
+        assert!(proof.contains(&vpn_exact(700)));
+        assert!((0..200).all(|n| proof.contains(&vpn_exact(n))));
+        assert_retained_credit(&ledger);
+    }
+
     #[test]
     fn a_full_vpn_key_log_restarts_and_older_pools_probe_exactly() {
         let mut table = vpn_table(0).with_vpn_key_log();
