@@ -12,10 +12,11 @@ use crate::proto::{
     ConfigTransactionPlanStatus, ConfigTransactionStatusResponse, ConfirmConfigTransactionRequest,
     ConfirmConfigTransactionResponse, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
     GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, GetLastSighupReloadRequest,
-    ListConfigHistoryRequest, ListConfigHistoryResponse, PlanConfigTransactionRequest,
-    RollbackConfigTransactionRequest, SighupReloadRecord, StreamApplyConfigMetadata,
-    StreamApplyConfigTransactionRequest, StreamPlanConfigEnd, StreamPlanConfigMetadata,
-    StreamPlanConfigTransactionRequest, UpdateGroupImpactPlan,
+    GetLastSighupReloadResponse, ListConfigHistoryRequest, ListConfigHistoryResponse,
+    PlanConfigTransactionRequest, RollbackConfigTransactionRequest, SighupReloadConvergence,
+    SighupReloadRecord, StreamApplyConfigMetadata, StreamApplyConfigTransactionRequest,
+    StreamPlanConfigEnd, StreamPlanConfigMetadata, StreamPlanConfigTransactionRequest,
+    UpdateGroupImpactPlan,
 };
 use prost::Message;
 use sha2::{Digest as _, Sha256};
@@ -672,16 +673,50 @@ pub async fn last_reload(connection: Connection, json: bool) -> Result<(), CliEr
     .await?
     .into_inner();
     if json {
-        print_json(serde_json::json!({
-            "record": response.record.as_ref().map(last_reload_to_json),
-        }))?;
+        print_json(last_reload_response_to_json(&response))?;
     } else {
-        output::print_text(&last_reload_human(response.record.as_ref()))?;
+        output::print_text(&last_reload_human(
+            response.record.as_ref(),
+            response.convergence.as_ref(),
+        ))?;
     }
     Ok(())
 }
 
-fn last_reload_human(record: Option<&SighupReloadRecord>) -> String {
+fn last_reload_response_to_json(response: &GetLastSighupReloadResponse) -> serde_json::Value {
+    serde_json::json!({
+        "record": response.record.as_ref().map(last_reload_to_json),
+        "convergence": response.convergence.as_ref().map(|convergence| serde_json::json!({
+            "state": convergence.state,
+            "pending_peers": convergence.pending_peers,
+            "oldest_pending_seconds": convergence.oldest_pending_seconds,
+        })),
+    })
+}
+
+fn convergence_human(convergence: &SighupReloadConvergence) -> String {
+    match convergence.state.as_str() {
+        "converging" => format!(
+            "Convergence: converging ({} {} awaiting outbound resync, oldest {})",
+            convergence.pending_peers,
+            if convergence.pending_peers == 1 {
+                "peer"
+            } else {
+                "peers"
+            },
+            output::format_duration(convergence.oldest_pending_seconds),
+        ),
+        "applied" => {
+            "Convergence: applied (the RIB has not reported outbound state yet)".to_string()
+        }
+        state => format!("Convergence: {state}"),
+    }
+}
+
+fn last_reload_human(
+    record: Option<&SighupReloadRecord>,
+    convergence: Option<&SighupReloadConvergence>,
+) -> String {
     let Some(record) = record else {
         return "No SIGHUP reload has completed in this daemon process.\n".to_string();
     };
@@ -726,6 +761,7 @@ fn last_reload_human(record: Option<&SighupReloadRecord>) -> String {
     for effect in &record.unapplied {
         lines.push(format!("  unapplied {} {}", effect.bucket, effect.target));
     }
+    lines.extend(convergence.map(convergence_human));
     format!("{}\n", lines.join("\n"))
 }
 
@@ -1423,16 +1459,60 @@ mod tests {
             }],
             ..Default::default()
         };
-        let rendered = last_reload_human(Some(&record));
+        let rendered = last_reload_human(Some(&record), None);
         assert!(rendered.contains("Finished: 1970-01-01T00:00:00Z\nReason: "));
         assert!(rendered.contains("Applied operations: 1 (0 omitted)\nUnapplied operations: 1"));
         assert!(rendered.contains("  applied policy.add edge\n  unapplied neighbors.reconcile"));
         assert!(rendered.ends_with('\n'));
         assert_eq!(
-            last_reload_human(None),
+            last_reload_human(None, None),
             "No SIGHUP reload has completed in this daemon process.\n"
         );
     }
+    #[test]
+    fn last_reload_reports_convergence_in_text_and_json() {
+        let record = SighupReloadRecord {
+            outcome: "complete".to_string(),
+            route: "generation".to_string(),
+            ..Default::default()
+        };
+        let converging = SighupReloadConvergence {
+            state: "converging".to_string(),
+            pending_peers: 2,
+            oldest_pending_seconds: 75,
+        };
+        let rendered = last_reload_human(Some(&record), Some(&converging));
+        assert!(rendered.ends_with(
+            "Convergence: converging (2 peers awaiting outbound resync, oldest 00:01:15)\n"
+        ));
+        assert_eq!(
+            last_reload_response_to_json(&GetLastSighupReloadResponse {
+                record: Some(record.clone()),
+                convergence: Some(converging),
+            })["convergence"],
+            serde_json::json!({"state": "converging", "pending_peers": 2, "oldest_pending_seconds": 75})
+        );
+        for (state, line) in [
+            ("converged", "Convergence: converged\n"),
+            (
+                "applied",
+                "Convergence: applied (the RIB has not reported outbound state yet)\n",
+            ),
+        ] {
+            let convergence = SighupReloadConvergence {
+                state: state.to_string(),
+                ..Default::default()
+            };
+            assert!(last_reload_human(Some(&record), Some(&convergence)).ends_with(line));
+        }
+        let unmeasured = GetLastSighupReloadResponse {
+            record: Some(record.clone()),
+            convergence: None,
+        };
+        assert!(last_reload_response_to_json(&unmeasured)["convergence"].is_null());
+        assert!(!last_reload_human(Some(&record), None).contains("Convergence"));
+    }
+
     // Field 1's one-byte tag plus the four-byte length varint used by a
     // candidate whose encoded request reaches the 4 MiB boundary.
     const PROTOBUF_STRING_FIELD_OVERHEAD_AT_LIMIT: usize = 5;

@@ -853,7 +853,23 @@ and a sanitized target. The read-only outside-v1 `GetLastSighupReload` RPC
 retains one record in memory; restart clears it. An `ignored_in_flight`
 signal appears immediately, then the active reload's settled result replaces
 it. `rbgp doctor` warns when the latest outcome is `rejected_no_effect`,
-`known_partial`, or `task_failed`. A preflight rejection has no selected route.
+`known_partial`, or `task_failed`.
+
+For a `complete` reload, the response also carries its outbound convergence,
+measured when the request is served. `converging` counts the peers still
+awaiting an outbound resync and the age of the oldest; `converged` means none
+remain; `applied` means the reload committed its export view but the RIB did
+not answer within two seconds. The count is the RIB's outbound-dirty set, the
+same state `bgp_rib_outbound_dirty_peers` and
+`bgp_rib_outbound_dirty_oldest_seconds` sample and `rbgp neighbor` shows per
+peer as Outbound Resync. It includes a peer made dirty by anything, because
+each resync sends the current view. A later generation that re-marks a peer
+still pending joins that resync rather than queueing a second replay, so the
+oldest age keeps running. `rbgp doctor` warns when a complete reload is still
+converging after 60 seconds, the per-peer outbound resync threshold. The
+reload acknowledgement is unchanged: it still waits for the RIB's
+re-evaluation reply, so `converging` covers only peers whose delivery was
+deferred, such as a full outbound channel. A preflight rejection has no selected route.
 For `known_partial`, applied identities come from acknowledged reload operations,
 and unapplied identities are planned operations that failed or were not reached.
 One aggregate generation apply is one operation; startup-pinned fields and

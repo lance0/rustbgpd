@@ -6129,6 +6129,7 @@ async fn run<T>(
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             rustbgpd_api::proto::GetLastSighupReloadResponse {
                 record: state.clone(),
+                convergence: None,
             }
         })),
         config_history_list: Some(config_transaction_controller.history_fn()),

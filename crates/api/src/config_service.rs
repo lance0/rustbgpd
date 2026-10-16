@@ -29,6 +29,11 @@ use crate::server::{
 
 pub(super) const CONFIG_OPERATION_TIMEOUT: Duration = Duration::from_mins(30);
 
+/// Deadline for the RIB's outbound-convergence answer to
+/// `GetLastSighupReload`, the class of the neighbor service's RIB snapshot
+/// read. A RIB still busy past it reports the reload as `applied`.
+const RELOAD_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Longest `confirm_id` (in characters) the daemon accepts on a
 /// confirmed config transaction.
 pub const MAX_CONFIRM_ID_CHARS: usize = 128;
@@ -63,6 +68,7 @@ pub struct ConfigService {
     transaction_abort: Option<ConfigTransactionAbortFn>,
     transaction_status: Option<ConfigTransactionStatusFn>,
     last_sighup_reload: Option<LastSighupReloadFn>,
+    rib_query_tx: Option<mpsc::Sender<rustbgpd_rib::RibUpdate>>,
     history_list: Option<ConfigHistoryListFn>,
     rollback: Option<ConfigRollbackFn>,
     rollback_preview: Option<ConfigRollbackPreviewFn>,
@@ -81,6 +87,7 @@ impl ConfigService {
             transaction_abort: None,
             transaction_status: None,
             last_sighup_reload: None,
+            rib_query_tx: None,
             history_list: None,
             rollback: None,
             rollback_preview: None,
@@ -119,6 +126,47 @@ impl ConfigService {
     pub fn with_last_sighup_reload(mut self, read: Option<LastSighupReloadFn>) -> Self {
         self.last_sighup_reload = read;
         self
+    }
+
+    /// RIB query channel for the live outbound convergence of the latest
+    /// completed SIGHUP reload.
+    #[must_use]
+    pub fn with_rib_query(mut self, rib_query_tx: mpsc::Sender<rustbgpd_rib::RibUpdate>) -> Self {
+        self.rib_query_tx = Some(rib_query_tx);
+        self
+    }
+
+    /// `applied` until the RIB answers within the deadline, then
+    /// `converging` while any peer awaits an outbound resync, else
+    /// `converged`.
+    async fn reload_convergence(&self) -> proto::SighupReloadConvergence {
+        let answer = match &self.rib_query_tx {
+            Some(tx) => tokio::time::timeout(
+                RELOAD_CONVERGENCE_TIMEOUT,
+                crate::actor_read::rib_manager_read(tx, |reply| {
+                    rustbgpd_rib::RibUpdate::QueryOutboundConvergence { reply }
+                }),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok),
+            None => None,
+        };
+        match answer {
+            None => proto::SighupReloadConvergence {
+                state: "applied".to_string(),
+                ..Default::default()
+            },
+            Some(answer) if answer.pending_peers == 0 => proto::SighupReloadConvergence {
+                state: "converged".to_string(),
+                ..Default::default()
+            },
+            Some(answer) => proto::SighupReloadConvergence {
+                state: "converging".to_string(),
+                pending_peers: u64::try_from(answer.pending_peers).unwrap_or(u64::MAX),
+                oldest_pending_seconds: answer.oldest_pending_secs,
+            },
+        }
     }
 
     pub(crate) fn with_stream_plan(
@@ -429,7 +477,15 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 "ConfigService.GetLastSighupReload executor is unavailable",
             ));
         };
-        Ok(Response::new(read()))
+        let mut response = read();
+        if response
+            .record
+            .as_ref()
+            .is_some_and(|record| record.outcome == "complete")
+        {
+            response.convergence = Some(self.reload_convergence().await);
+        }
+        Ok(Response::new(response))
     }
 
     async fn list_config_history(
@@ -596,6 +652,85 @@ mod tests {
         source_sha256: String,
         #[prost(enumeration = "proto::ConfigHistoryProvenanceStatus", tag = "6")]
         provenance_status: i32,
+    }
+
+    /// A completed reload reports `converging` with the RIB's pending peers
+    /// and oldest age, `converged` once none remain, and `applied` while the
+    /// RIB has not answered within the deadline. Other outcomes carry no
+    /// convergence and send no RIB query.
+    #[tokio::test(start_paused = true)]
+    async fn last_sighup_reload_reports_live_outbound_convergence() {
+        async fn status(
+            outcome: &str,
+            answer: Option<rustbgpd_rib::OutboundConvergence>,
+        ) -> (Option<proto::SighupReloadConvergence>, bool) {
+            let (peer_tx, _peer_rx) = mpsc::channel(1);
+            let (rib_tx, mut rib_rx) = mpsc::channel(1);
+            let record = proto::SighupReloadRecord {
+                outcome: outcome.to_string(),
+                ..Default::default()
+            };
+            let svc = ConfigService::new(AccessMode::ReadOnly, peer_tx)
+                .with_last_sighup_reload(Some(Arc::new(move || {
+                    proto::GetLastSighupReloadResponse {
+                        record: Some(record.clone()),
+                        convergence: None,
+                    }
+                })))
+                .with_rib_query(rib_tx);
+            let rib = tokio::spawn(async move {
+                let Some(rustbgpd_rib::RibUpdate::QueryOutboundConvergence { reply }) =
+                    rib_rx.recv().await
+                else {
+                    return false;
+                };
+                match answer {
+                    Some(answer) => reply.send(answer).unwrap(),
+                    // A RIB still busy: hold the reply past the deadline.
+                    None => tokio::time::sleep(RELOAD_CONVERGENCE_TIMEOUT * 2).await,
+                }
+                true
+            });
+            let response = svc
+                .get_last_sighup_reload(Request::new(proto::GetLastSighupReloadRequest {}))
+                .await
+                .unwrap()
+                .into_inner();
+            drop(svc);
+            (response.convergence, rib.await.unwrap())
+        }
+        let converging = status(
+            "complete",
+            Some(rustbgpd_rib::OutboundConvergence {
+                pending_peers: 2,
+                oldest_pending_secs: 9,
+            }),
+        )
+        .await;
+        assert_eq!(
+            converging,
+            (
+                Some(proto::SighupReloadConvergence {
+                    state: "converging".to_string(),
+                    pending_peers: 2,
+                    oldest_pending_seconds: 9,
+                }),
+                true
+            )
+        );
+        let converged = status(
+            "complete",
+            Some(rustbgpd_rib::OutboundConvergence::default()),
+        )
+        .await;
+        assert_eq!(converged.0.unwrap().state, "converged");
+        let started = tokio::time::Instant::now();
+        let applied = status("complete", None).await;
+        assert_eq!(applied.0.unwrap().state, "applied");
+        assert!(started.elapsed() >= RELOAD_CONVERGENCE_TIMEOUT);
+        for outcome in ["known_partial", "rejected_no_effect", "task_failed"] {
+            assert_eq!(status(outcome, None).await, (None, false));
+        }
     }
 
     #[tokio::test(start_paused = true)]

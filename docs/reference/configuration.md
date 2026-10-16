@@ -5537,7 +5537,9 @@ credential, listener, session, or catalog effect. `rustbgpd --diff` and
 [reload matrix](reload-matrix.md#sighup-reload-routes) has the full table and
 the [operations guide](operations.md#configuration-reload-sighup) the
 settlement detail. After a signal, `rbgp config last-reload` shows the latest
-recorded outcome, route, and bounded applied/unapplied effect receipt;
+recorded outcome, route, and bounded applied/unapplied effect receipt, and
+for a complete reload whether every peer has received the new export view
+(`converged`) or how many still await an outbound resync (`converging`);
 `--json` exposes the same record for automation.
 
 1. **Generation** — changes to static `[[neighbors]]`, `[peer_groups]`,

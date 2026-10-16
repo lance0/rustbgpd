@@ -2671,13 +2671,36 @@ fn last_sighup_reload_check(response: &GetLastSighupReloadResponse) -> Check {
                 ),
             )
         }
-        Some(record) => (
-            CheckStatus::Ok,
-            format!(
-                "latest SIGHUP {}; inspect `rbgp config last-reload`",
-                record.outcome
+        Some(record) => match response.convergence.as_ref() {
+            Some(convergence)
+                if convergence.state == "converging"
+                    && convergence.oldest_pending_seconds >= OUTBOUND_RESYNC_WARN_SECS =>
+            {
+                (
+                    CheckStatus::Warn,
+                    format!(
+                        "latest SIGHUP {} is still converging: {} peer(s) await outbound resync, oldest for {}s (retried every second); find them with `rbgp neighbor` (Outbound Resync) and inspect bgp_rib_outbound_dirty_peers",
+                        record.outcome,
+                        convergence.pending_peers,
+                        convergence.oldest_pending_seconds
+                    ),
+                )
+            }
+            Some(convergence) => (
+                CheckStatus::Ok,
+                format!(
+                    "latest SIGHUP {}, {}; inspect `rbgp config last-reload`",
+                    record.outcome, convergence.state
+                ),
             ),
-        ),
+            None => (
+                CheckStatus::Ok,
+                format!(
+                    "latest SIGHUP {}; inspect `rbgp config last-reload`",
+                    record.outcome
+                ),
+            ),
+        },
     };
     Check {
         name: "daemon.last_sighup_reload".to_string(),
@@ -4246,6 +4269,7 @@ mod tests {
                     failure_target: "[[dynamic_neighbors]]".to_string(),
                     ..Default::default()
                 }),
+                convergence: None,
             });
             assert_eq!(check.status, CheckStatus::Warn);
             assert!(check.detail.contains(reason_code));
@@ -4256,8 +4280,41 @@ mod tests {
                 outcome: "complete".to_string(),
                 ..Default::default()
             }),
+            convergence: None,
         });
         assert_eq!(complete.status, CheckStatus::Ok);
+    }
+
+    /// A completed reload whose export view is still not on the wire for some
+    /// peer past the dirty-resync threshold warns; a fresh or finished
+    /// convergence does not.
+    #[test]
+    fn last_sighup_reload_warns_on_stalled_convergence() {
+        let check = |state: &str, pending_peers, oldest_pending_seconds| {
+            last_sighup_reload_check(&GetLastSighupReloadResponse {
+                record: Some(crate::proto::SighupReloadRecord {
+                    outcome: "complete".to_string(),
+                    ..Default::default()
+                }),
+                convergence: Some(crate::proto::SighupReloadConvergence {
+                    state: state.to_string(),
+                    pending_peers,
+                    oldest_pending_seconds,
+                }),
+            })
+        };
+        let stalled = check("converging", 3, OUTBOUND_RESYNC_WARN_SECS);
+        assert_eq!(stalled.status, CheckStatus::Warn);
+        assert!(stalled.detail.contains("3 peer(s) await outbound resync"));
+        assert!(stalled.detail.contains("bgp_rib_outbound_dirty_peers"));
+        let fresh = check("converging", 3, OUTBOUND_RESYNC_WARN_SECS - 1);
+        assert_eq!(fresh.status, CheckStatus::Ok);
+        assert!(fresh.detail.contains("complete, converging"));
+        for state in ["converged", "applied"] {
+            let settled = check(state, 0, 0);
+            assert_eq!(settled.status, CheckStatus::Ok);
+            assert!(settled.detail.contains(state));
+        }
     }
     fn gtsm_record(address: &str, interface: &str) -> NeighborDoctorRecord {
         NeighborDoctorRecord {

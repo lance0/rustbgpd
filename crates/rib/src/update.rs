@@ -1946,6 +1946,18 @@ pub struct NeighborRibSnapshot {
     pub outbound_resync: OutboundResyncState,
 }
 
+/// Every peer's pending outbound resync, in one actor turn: the values the
+/// `bgp_rib_outbound_dirty_peers` and `bgp_rib_outbound_dirty_oldest_seconds`
+/// gauges sample.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutboundConvergence {
+    /// Peers marked dirty and awaiting an outbound resync.
+    pub pending_peers: usize,
+    /// Whole seconds since the oldest current dirty episode began; 0 when
+    /// no peer is dirty.
+    pub oldest_pending_secs: u64,
+}
+
 /// A peer's outbound resync state, read in the same actor turn as its
 /// advertised count.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2887,6 +2899,13 @@ pub enum RibUpdate {
         include_retained: bool,
         /// Response channel.
         reply: oneshot::Sender<NeighborRibSnapshotResponse>,
+    },
+    /// Query: how many peers await an outbound resync, and since when.
+    /// A peer marked dirty again before its resync keeps one episode, so a
+    /// later generation never queues a second replay.
+    QueryOutboundConvergence {
+        /// Response channel.
+        reply: oneshot::Sender<OutboundConvergence>,
     },
     /// Side-effect-free snapshot used by config impact planning.
     QueryUpdateGroupSnapshot {

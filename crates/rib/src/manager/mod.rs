@@ -3218,19 +3218,27 @@ impl RibManager {
     /// `dirty_since` is stamped when a peer enters the set and outlives it,
     /// so only peers still dirty count.
     fn sample_outbound_dirty_gauges(&self) {
-        let now = tokio::time::Instant::now();
-        let oldest = self
-            .dirty_peers
-            .iter()
-            .filter_map(|peer| self.dirty_since.get(peer))
-            .map(|since| now.saturating_duration_since(*since).as_secs())
-            .max()
-            .unwrap_or(0);
+        let convergence = self.outbound_convergence();
         self.metrics.set_rib_outbound_dirty_peers(
-            i64::try_from(self.dirty_peers.len()).unwrap_or(i64::MAX),
+            i64::try_from(convergence.pending_peers).unwrap_or(i64::MAX),
         );
-        self.metrics
-            .set_rib_outbound_dirty_oldest_seconds(i64::try_from(oldest).unwrap_or(i64::MAX));
+        self.metrics.set_rib_outbound_dirty_oldest_seconds(
+            i64::try_from(convergence.oldest_pending_secs).unwrap_or(i64::MAX),
+        );
+    }
+
+    fn outbound_convergence(&self) -> crate::update::OutboundConvergence {
+        let now = tokio::time::Instant::now();
+        crate::update::OutboundConvergence {
+            pending_peers: self.dirty_peers.len(),
+            oldest_pending_secs: self
+                .dirty_peers
+                .iter()
+                .filter_map(|peer| self.dirty_since.get(peer))
+                .map(|since| now.saturating_duration_since(*since).as_secs())
+                .max()
+                .unwrap_or(0),
+        }
     }
 
     /// Whether the resync timer still has runnable work: failed outbound
@@ -4142,6 +4150,9 @@ impl RibManager {
                     include_retained,
                     reply,
                 );
+            }
+            RibUpdate::QueryOutboundConvergence { reply } => {
+                let _ = reply.send(self.outbound_convergence());
             }
             RibUpdate::QueryUpdateGroupSnapshot { reply } => {
                 self.handle_query_update_group_snapshot(reply);

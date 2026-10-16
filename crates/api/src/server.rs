@@ -2257,6 +2257,7 @@ async fn run_tcp_listener(
                 config_rollback.clone(),
             )
             .with_last_sighup_reload(last_sighup_reload.clone())
+            .with_rib_query(rib_query_tx.clone())
             .with_rollback_preview(config_rollback_preview.clone())
             .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
@@ -2538,6 +2539,7 @@ async fn run_uds_listener(
                 config_rollback.clone(),
             )
             .with_last_sighup_reload(last_sighup_reload.clone())
+            .with_rib_query(rib_query_tx.clone())
             .with_rollback_preview(config_rollback_preview.clone())
             .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
