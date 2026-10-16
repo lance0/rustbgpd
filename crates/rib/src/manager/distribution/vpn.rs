@@ -942,6 +942,62 @@ impl RibManager {
                 // never compared by the oracle).
                 self.apply_group_policy_counters(peer, &stage.evals);
                 let member_filter = self.member_rt_filter(peer);
+                // A member already dirty when this pass staged, whose
+                // channel is still full, would only build a send that
+                // fails. Keep that failure's bookkeeping without the
+                // build: no emission, count delta or prior-key set, and
+                // no drop counted (the unicast dirty-and-full deferral).
+                // Staging already recorded this pass's withdrawals as VPN
+                // tombstones (`dirty_members` was non-empty), so only the
+                // member-scoped withdraws, which keep the key IN the
+                // table, need a record. A dirty member with room still
+                // takes the incremental send below, widening its
+                // admitted-key proof with what it actually received.
+                if self.outbound_channel_full(peer)
+                    && self
+                        .group_ribs
+                        .get(&gid)
+                        .is_some_and(|group| group.dirty_members.contains(&peer))
+                {
+                    let member_emits = stage.deltas.iter().any(|delta| {
+                        checkpoint();
+                        [&delta.old, &delta.new].into_iter().flatten().any(|route| {
+                            route.peer != peer
+                                && crate::manager::update_groups::rt_passes(
+                                    member_filter.as_ref(),
+                                    route,
+                                )
+                        })
+                    });
+                    if !member_emits {
+                        continue;
+                    }
+                    if !self.pending_group_admitted.contains_key(&peer) {
+                        self.set_group_recovery_fallback(
+                            peer,
+                            super::super::update_groups::RecoveryFallbackCause::MissingProof,
+                        );
+                    }
+                    self.mark_outbound_dirty_inner(peer, false);
+                    let lost: Vec<VpnRouteKey> = stage
+                        .member_scoped_withdraws(peer, member_filter.as_ref(), || {
+                            super::super::replacement_readiness_checkpoint(&readiness, false);
+                        })
+                        .collect();
+                    if !lost.is_empty() {
+                        self.pending_extra_withdraws
+                            .entry(peer)
+                            .or_default()
+                            .vpn
+                            .extend(lost);
+                        self.refresh_group_residue_gauge();
+                    }
+                    continue;
+                }
+                #[cfg(test)]
+                {
+                    self.vpn_group_member_emits += 1;
+                }
                 let mut vpn_announce = Vec::new();
                 let mut vpn_withdraw = Vec::new();
                 let count_delta =
@@ -1003,7 +1059,14 @@ impl RibManager {
                             super::super::update_groups::RecoveryFallbackCause::MissingProof,
                         );
                     }
-                    if self.mark_outbound_dirty_inner(peer, false) {
+                    // Warn on the clean→dirty transition only: a member
+                    // that stays blocked would otherwise warn every pass.
+                    let newly_dirty = !self.dirty_peers.contains(&peer);
+                    if self.mark_outbound_dirty_inner(peer, false) && newly_dirty {
+                        #[cfg(test)]
+                        {
+                            self.vpn_member_deferral_warnings += 1;
+                        }
                         warn!(%peer, "outbound VPN update deferred without admission");
                     }
                     // The member missed this pass's withdrawals: record
