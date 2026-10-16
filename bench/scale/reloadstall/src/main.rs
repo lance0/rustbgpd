@@ -7430,7 +7430,15 @@ mod tests {
                     std::future::pending::<()>().await;
                 }
             });
-            let error = fetch_http(addr, "/readyz", Instant::now() + Duration::from_millis(20))
+            // The 503 response is written immediately, so a generous deadline
+            // keeps that control from racing the scheduler; only the silent
+            // server needs the short deadline to prove timeout enforcement.
+            let budget = if response.is_some() {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(20)
+            };
+            let error = fetch_http(addr, "/readyz", Instant::now() + budget)
                 .await
                 .unwrap_err();
             let expected = if response.is_some() {
