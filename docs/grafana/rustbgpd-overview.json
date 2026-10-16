@@ -1160,7 +1160,7 @@
       ]
     },
     {
-      "id": 80,
+      "id": 82,
       "type": "timeseries",
       "title": "RIB actor stalls and scheduler lateness",
       "description": "Longest synchronous RIB actor slice per stage in each scrape window (actor_poll is a whole poll without yielding), and the p99 delay of a 10 ms tokio probe. High lateness with short actor slices means other tasks saturated the runtime workers.",
@@ -1219,7 +1219,7 @@
       ]
     },
     {
-      "id": 81,
+      "id": 83,
       "type": "timeseries",
       "title": "Runtime worker busy ratio",
       "description": "Fraction of time each tokio runtime worker was busy rather than parked. Workers pinned near 1 with rising scheduler lateness are saturated.",
