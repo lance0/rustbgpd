@@ -19,6 +19,8 @@ BASELINE = "c862af9338aa828b7462f3cf85781f63b0e79fe8"
 INTERMEDIATE = "bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00"
 SCAN_SCHEMA = "rustbgpd.recovery-scan.v3"
 SCAN_PROFILES = {"full-uc": 1_230_000, "full-vpn": 1_230_000, "evpn-soak": 37_500}
+SHARED_STRATEGY = {"full-uc": "uc-slab-shared", "full-vpn": "vpn-pool-shared",
+                   "evpn-soak": "evpn-sort-shared"}
 SCAN_DISPATCH = (
     "mod recovery_scan;\n",
     '    if mode == "recovery-scan" {\n        recovery_scan::main(&args[2..]);\n        return;\n    }\n',
@@ -1174,13 +1176,12 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                     continue
                 keys = SCAN_PROFILES[profile]
                 require(row["old_keys"] == row["proof_keys"] == keys, "incomplete scan proof")
-                expected_shared = arm == "candidate" and profile != "full-vpn"
-                expected_strategy = ("uc-slab-shared" if profile == "full-uc" else "evpn-sort-shared") if expected_shared else "exact-flat"
-                expected_reason = "explicit-flat-control" if arm == "flat" else (
-                    "vpn-negotiated" if profile == "full-vpn" else "eligible")
-                require(row.get("selected_strategy") in ("uc-slab-shared", "evpn-sort-shared", "exact-flat")
+                expected_shared = arm == "candidate"
+                expected_strategy = SHARED_STRATEGY[profile] if expected_shared else "exact-flat"
+                expected_reason = "explicit-flat-control" if arm == "flat" else "eligible"
+                require(row.get("selected_strategy") in (*SHARED_STRATEGY.values(), "exact-flat")
                         and row.get("selection_reason") in (
-                            "explicit-flat-control", "vpn-negotiated", "eligible", "sharing-disabled",
+                            "explicit-flat-control", "eligible", "sharing-disabled",
                             "missing-index", "slot-churn", "representation", "share-refused"),
                         "unknown capture selection")
                 selection_ok = row["selected_strategy"] == expected_strategy and row["selection_reason"] == expected_reason
@@ -1200,6 +1201,19 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                         require(row["mismatches"] == sparse
                                 and keys - sparse <= row["comparisons"] <= keys + sparse * (keys.bit_length() + 3),
                                 "missing slot validation or excessive lookup work")
+                elif profile == "full-vpn":
+                    require(row["source_slots"] == 0 and row["mismatches"] == 0,
+                            "VPN pool path reported slot work")
+                    # Each sparse miss reads one empty bucket besides its comparisons.
+                    require(row["shape_callbacks"] == keys + row["comparisons"] + row["additions"],
+                            "bucket visits and exact-key comparisons disagree")
+                    if selection_ok and expected_shared:
+                        if layout == "dense":
+                            require(row["comparisons"] == 0,
+                                    "a current VPN pool must admit its keys without probing")
+                        else:
+                            require(row["comparisons"] <= 8 * sparse,
+                                    "VPN key churn must look up only the logged keys")
                 else:
                     require(row["source_slots"] == 0 and row["mismatches"] == 0,
                             "non-slab path reported slot work")
@@ -1226,7 +1240,7 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                             "unavailable cold phase must be explicit null")
                 else:
                     require(phases["cold_anchor_capture"] is not None
-                            and row.get("cold_anchor_strategy") == ("uc-slab-shared" if profile == "full-uc" else "exact-flat")
+                            and row.get("cold_anchor_strategy") == SHARED_STRATEGY[profile]
                             and row.get("cold_anchor_unavailable_reason") is None,
                             "common cold anchor policy differs between warm arms")
                 for phase in phases.values():

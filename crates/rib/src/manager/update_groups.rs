@@ -770,7 +770,8 @@ impl GroupRibOut {
             .filter(|chain| !chain.policies.is_empty())
             .map(|_| chain_default_permit_label());
         Self {
-            table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity),
+            table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity)
+                .with_vpn_key_log(),
             recovery_snapshot: None,
             evpn_inputs: FastMap::default(),
             evpn_recovery_universe: None,

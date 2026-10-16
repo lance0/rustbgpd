@@ -280,7 +280,7 @@ mod tests {
                         );
                         assert_eq!(receipt.refusal, None);
                         assert_eq!(receipt.proof_keys, 64);
-                        let expected_shared = shared && family != "full-vpn";
+                        let expected_shared = shared;
                         assert_eq!(receipt.shared, expected_shared);
                         assert_eq!(
                             receipt.additions,
@@ -292,7 +292,16 @@ mod tests {
                             assert_eq!(receipt.source_slots, if sparse { 66 } else { 64 });
                             assert_eq!(receipt.mismatches, if shared && sparse { 4 } else { 0 });
                         }
-                        if expected_shared {
+                        if expected_shared && family == "full-vpn" {
+                            // A current pool admits without probing; logged churn
+                            // looks up only changed keys, one empty bucket per addition.
+                            if sparse {
+                                assert!(counted.comparisons <= 8 * 4);
+                                assert_eq!(counted.shape_callbacks, 64 + counted.comparisons + 4);
+                            } else {
+                                assert_eq!((counted.comparisons, counted.shape_callbacks), (0, 64));
+                            }
+                        } else if expected_shared {
                             assert!(counted.shape_callbacks > 64);
                             if family == "evpn-soak" && !sparse {
                                 assert!(counted.comparisons >= 127 && counted.comparisons <= 137);

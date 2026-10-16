@@ -1356,20 +1356,23 @@ class RecoveryScanTests(unittest.TestCase):
             for layout in ("dense", "older-sparse"):
                 sparse = records if layout == "older-sparse" else 0
                 for leg, arm in enumerate(("flat", "candidate", "candidate", "flat")):
-                    shared = arm == "candidate" and profile != "full-vpn"
-                    comparisons = (keys if profile == "full-uc" else 2 * keys) if shared else 0
+                    shared = arm == "candidate"
+                    comparisons = {"full-uc": keys, "evpn-soak": 2 * keys,
+                                   "full-vpn": 2 * sparse}[profile] if shared else 0
+                    additions = sparse if shared else 0
                     slots = keys + sparse // 2 if profile == "full-uc" else 0
                     rows.append(dict(
                         schema=receipt.SCAN_SCHEMA, profile=profile, old_order=old_order,
                         vpn_negotiated=profile == "full-vpn", keys=keys, records=records, layout=layout, arm=arm, leg=leg,
-                        measured=True, old_keys=keys, additions=sparse if shared else 0,
-                        shape_callbacks=(slots if profile == "full-uc" else keys) + comparisons,
+                        measured=True, old_keys=keys, additions=additions,
+                        shape_callbacks=(slots if profile == "full-uc" else keys) + comparisons
+                        + (additions if profile == "full-vpn" else 0),
                         comparison_counter_scope="ordered-evpn-checkpoints-minus-old-visits" if profile == "evpn-soak" else "typed-full-old-shape",
                         comparisons=comparisons, mismatches=sparse if shared and profile == "full-uc" else 0,
                         source_slots=slots,
-                        selected_strategy=("uc-slab-shared" if profile == "full-uc" else "evpn-sort-shared") if shared else "exact-flat",
-                        selection_reason="explicit-flat-control" if arm == "flat" else ("vpn-negotiated" if profile == "full-vpn" else "eligible"),
-                        cold_anchor_strategy="not-measured" if profile == "evpn-soak" else ("uc-slab-shared" if profile == "full-uc" else "exact-flat"),
+                        selected_strategy=receipt.SHARED_STRATEGY[profile] if shared else "exact-flat",
+                        selection_reason="explicit-flat-control" if arm == "flat" else "eligible",
+                        cold_anchor_strategy="not-measured" if profile == "evpn-soak" else receipt.SHARED_STRATEGY[profile],
                         cold_anchor_unavailable_reason="evpn-not-production-cold-path" if profile == "evpn-soak" else None,
                         proof_keys=keys, shared=shared, retained_bytes=8192, peak_bytes=9000,
                         empty_bytes=56, settled_bytes=56, refusal=None,
@@ -1480,15 +1483,13 @@ class RecoveryScanTests(unittest.TestCase):
 
     def test_scan_v3_requires_the_actual_selected_production_strategy(self):
         for profile, reason in (("full-uc", "missing-index"), ("full-uc", "slot-churn"),
-                                ("full-vpn", "eligible")):
+                                ("full-vpn", "representation"), ("full-vpn", "share-refused")):
             with self.subTest(profile=profile, reason=reason):
                 rows = self.rows(profile)
                 row = rows[1]
-                if profile == "full-uc":
-                    row.update(selected_strategy="exact-flat", selection_reason=reason, shared=False,
-                               additions=0, comparisons=0, shape_callbacks=row["source_slots"])
-                else:
-                    row.update(selected_strategy="uc-slab-shared", selection_reason=reason, shared=True)
+                row.update(selected_strategy="exact-flat", selection_reason=reason, shared=False,
+                           additions=0, comparisons=0,
+                           shape_callbacks=row["source_slots"] or row["keys"])
                 root = self.campaign(rows)
                 completed = self.summarize_campaign(root)
                 self.assertEqual(completed.returncode, 1, completed.stderr)
@@ -1497,31 +1498,46 @@ class RecoveryScanTests(unittest.TestCase):
                 self.assertIsNone(result["comparisons"][0]["candidate_over_flat"])
                 self.assertIsNone(result["samples"][1]["refusal"])
 
-    def test_scan_v3_reports_flat_vpn_and_separates_common_cold_anchor_policy(self):
+    def test_scan_v3_reports_shared_vpn_and_separates_common_cold_anchor_policy(self):
         for profile in receipt.SCAN_PROFILES:
             with self.subTest(profile=profile):
                 rows = self.rows(profile)
                 result = receipt.validate_scan_log(self.log(rows), profile)
                 for cell in result["comparisons"]:
                     self.assertEqual(set(cell["candidate_over_flat"]), {"shape", "capture"})
-                if profile == "full-vpn":
-                    self.assertTrue(all(not row["shared"] and row["selected_strategy"] == "exact-flat"
-                                        for row in rows))
-                else:
-                    for bad in ("cold-policy", "unavailable-zero", "unavailable-fabricated", "slab-lineage"):
-                        if bad == "unavailable-fabricated" and profile != "evpn-soak":
-                            continue
-                        broken = self.rows(profile)
-                        if bad == "cold-policy":
-                            broken[1]["cold_anchor_strategy"] = "exact-flat"
-                        elif bad.startswith("unavailable"):
-                            broken[1]["phases"]["cold_anchor_capture"] = {
-                                "wall_ns": 0 if bad == "unavailable-zero" else 1, "cpu_ticks": 0}
-                        else:
-                            broken[5]["source_slots"] += 1
-                            broken[5]["shape_callbacks"] += 1
-                        with self.assertRaises(receipt.InvalidReceipt):
-                            receipt.validate_scan_log(self.log(broken), profile)
+                self.assertTrue(all(row["shared"] == (row["arm"] == "candidate") for row in rows))
+                for bad in ("cold-policy", "unavailable-zero", "unavailable-fabricated", "slab-lineage"):
+                    if bad == "unavailable-fabricated" and profile != "evpn-soak":
+                        continue
+                    broken = self.rows(profile)
+                    if bad == "cold-policy":
+                        broken[1]["cold_anchor_strategy"] = "exact-flat"
+                    elif bad.startswith("unavailable"):
+                        broken[1]["phases"]["cold_anchor_capture"] = {
+                            "wall_ns": 0 if bad == "unavailable-zero" else 1, "cpu_ticks": 0}
+                    else:
+                        broken[5]["source_slots"] += 1
+                        broken[5]["shape_callbacks"] += 1
+                    with self.assertRaises(receipt.InvalidReceipt):
+                        receipt.validate_scan_log(self.log(broken), profile)
+
+    def test_scan_v3_rejects_flat_vpn_candidates_and_unbounded_vpn_lookups(self):
+        keys = receipt.SCAN_PROFILES["full-vpn"]
+        cases = {
+            # The former VPN-negotiated flat candidate is no longer a valid selection.
+            "vpn-negotiated-flat": (1, dict(selected_strategy="exact-flat", selection_reason="vpn-negotiated",
+                                            shared=False, comparisons=0, shape_callbacks=keys)),
+            "dense-current-pool-probed": (1, dict(comparisons=1, shape_callbacks=keys + 1)),
+            "sparse-row-probes": (5, dict(comparisons=keys, shape_callbacks=keys + keys + 2)),
+            "bucket-visits-disagree": (5, dict(shape_callbacks=keys + 4)),
+            "flat-cold-anchor": (1, dict(cold_anchor_strategy="exact-flat")),
+        }
+        for name, (index, change) in cases.items():
+            with self.subTest(name=name):
+                rows = self.rows("full-vpn")
+                rows[index].update(change)
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_scan_log(self.log(rows), "full-vpn")
 
     def test_scan_summary_rejects_incomplete_matrix_or_proof(self):
         for failure in ("missing-leg", "wrong-proof"):
