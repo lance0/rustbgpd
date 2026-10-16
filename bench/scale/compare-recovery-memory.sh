@@ -13,6 +13,55 @@ intermediate=bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00
 
 fail() { echo "recovery-memory: $*" >&2; exit 1; }
 
+# Copy this checkout's memory harness into $1, as every role builds it.
+# Historical controls lack the component-only RIB API. Derive the identical
+# memory entrypoint for every role, without porting runtime.
+derive_memory_harness() {
+    local harness=$1
+    mkdir -p "$harness"
+    cp -- "$repository/bench/scale/rrharness/src/main.rs" "$repository/bench/scale/rrharness/src/recovery_memory.rs" "$harness/"
+    python3 "$checker" normalize-memory-entrypoint "$harness/main.rs"
+}
+
+# Install the shared harness in one role tree and derive its bench-only seams.
+prepare_role_tree() {
+    local tree=$1 harness=$2
+    # Preserve each source's manifests, dependency pins and lockfile. The
+    # harness manifest must already agree before freezing only its source.
+    cmp "$repository/bench/scale/rrharness/Cargo.toml" "$tree/bench/scale/rrharness/Cargo.toml" ||
+        fail 'harness manifest drift would confound the shared harness'
+    cp -- "$harness/main.rs" "$harness/recovery_memory.rs" "$tree/bench/scale/rrharness/src/"
+    python3 "$checker" instrument-observer "$tree"
+    python3 "$checker" derive-control-api "$tree"
+}
+
+# Compile the shared memory harness against both fixed controls (ordinary CI).
+if [[ ${1:-} == --check-controls ]]; then
+    [[ $# == 1 ]] || fail 'usage: compare-recovery-memory.sh --check-controls'
+    repository=$(git -C "$script_dir" rev-parse --show-toplevel)
+    work_root=$(mktemp -d "${TMPDIR:-/tmp}/recovery-memory-controls.XXXXXXXX")
+    # shellcheck disable=SC2317 # Invoked indirectly by the trap below.
+    cleanup_controls() {
+        local role
+        for role in baseline intermediate; do
+            git -C "$repository" worktree remove --force "$work_root/$role" >/dev/null 2>&1 || true
+        done
+        rm -rf -- "$work_root"
+    }
+    trap cleanup_controls EXIT
+    derive_memory_harness "$work_root/harness"
+    for role in baseline intermediate; do
+        revision=$baseline
+        [[ $role != intermediate ]] || revision=$intermediate
+        git -C "$repository" worktree add --detach "$work_root/$role" "$revision" >/dev/null
+        prepare_role_tree "$work_root/$role" "$work_root/harness"
+        (cd -- "$work_root/$role" && CARGO_TARGET_DIR="$work_root/target" \
+            cargo check --locked -p rrharness --features rustbgpd-rib/bench-internals) ||
+            fail "shared memory harness does not build against the $role control $revision"
+    done
+    exit 0
+fi
+
 # These are scoped child commands, never a fallback to the caller's cgroup.
 if [[ ${1:-} == --scope-worker || ${1:-} == --scope-probe || ${1:-} == --scope-scan || ${1:-} == --scope-retirement ]]; then
     mode=$1
@@ -253,11 +302,7 @@ PYCODE
 fi
 # The candidate commit SHA records the harness; every role builds that harness.
 harness=$work_root/harness
-mkdir -p "$harness"
-cp -- "$repository/bench/scale/rrharness/src/main.rs" "$repository/bench/scale/rrharness/src/recovery_memory.rs" "$harness/"
-# Historical controls lack the component-only RIB API. Derive the identical
-# memory entrypoint for every role, without porting runtime.
-python3 "$checker" normalize-memory-entrypoint "$harness/main.rs"
+derive_memory_harness "$harness"
 python3 - "$output/manifest.json" "$baseline" "$intermediate" "$head" "$phase" "$profile" "$checker" "$selected_cell" <<'PYCODE'
 import importlib.util
 import json
@@ -286,13 +331,9 @@ for role in baseline intermediate candidate; do
     tree=$work_root/$role
     record_command git worktree add --detach "$tree" "$revision"
     git -C "$repository" worktree add --detach "$tree" "$revision" > "$output/$role-worktree.log" 2>&1
-    # Preserve each source's manifests, dependency pins and lockfile. The
-    # harness manifest must already agree before freezing only its source.
-    cmp "$repository/bench/scale/rrharness/Cargo.toml" "$tree/bench/scale/rrharness/Cargo.toml" ||
-        fail 'harness manifest drift would confound the shared harness'
-    cp -- "$harness/main.rs" "$harness/recovery_memory.rs" "$tree/bench/scale/rrharness/src/"
     record_command python3 "$checker" instrument-observer "$tree"
-    python3 "$checker" instrument-observer "$tree"
+    record_command python3 "$checker" derive-control-api "$tree"
+    prepare_role_tree "$tree" "$harness"
     git -C "$tree" diff --binary > "$output/$role-instrumentation.patch"
     record_command env CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR="$work_root/target-$role" RRHARNESS_RECOVERY_SOURCE_SHA="$revision" cargo build --profile scale --locked -p rrharness --features rustbgpd-rib/bench-internals -j 4
     status=0

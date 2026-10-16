@@ -523,6 +523,8 @@ jobs:
           set -euo pipefail
           cargo fmt --all -- --check
           cargo test --locked -p enhanced-route-refresh-receipt -p reloadstall -p rrharness -p rrtransport
+          # The manual memory receipt builds this harness against fixed controls.
+          bash bench/scale/compare-recovery-memory.sh --check-controls
           cargo clippy --locked -p rrtransport --all-targets -- -D warnings
           cargo run --locked -p rrtransport -- smoke
           rrtransport_receipt=$(mktemp -d)
