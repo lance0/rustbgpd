@@ -216,7 +216,10 @@ async fn inbound_admission_disabled_by_default_admits_rapid_dynamic_reaccepts() 
             "cycle {cycle}: peer should be removed"
         );
     }
-    assert_eq!(inbound_drop_metric(&metrics_view, "rate_limited"), None);
+    assert_eq!(
+        inbound_drop_metric(&metrics_view, "rate_limited"),
+        Some(0.0)
+    );
     drop(client_streams);
 }
 
@@ -1164,7 +1167,7 @@ async fn inbound_outside_escalated_backoff_is_accepted_and_keeps_the_streak() {
         assert_eq!(replacement.notification_idle_failures, failures);
         assert_eq!(
             inbound_drop_metric(&mgr.metrics, "notification_backoff"),
-            None
+            Some(0.0)
         );
     }
 }

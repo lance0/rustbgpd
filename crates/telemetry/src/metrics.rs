@@ -671,6 +671,7 @@ struct BgpMetricsInner {
     rib_policy_transition_last_duration_milliseconds: IntGauge,
     rib_policy_transition_actor_poll_duration_seconds: HistogramVec,
     rib_policy_transition_outcomes: IntCounterVec,
+    readiness_probe_failures: IntCounterVec,
     rib_outbound_prefix_limit_actor_duration_seconds: HistogramVec,
     rib_route_refresh_actor_duration_seconds: HistogramVec,
     rib_actor_work_duration_seconds: HistogramVec,
@@ -1095,6 +1096,11 @@ impl BgpMetrics {
             &["reason"],
         )
         .expect("valid metric definition");
+        // Zero baseline per reason, so `increase()` sees the first drop even
+        // when a burst ends before the series would otherwise be scraped.
+        for reason in crate::reason_labels::InboundConnectionDropReason::ALL {
+            inbound_connections_dropped.with_label_values(&[reason.as_str()]);
+        }
 
         let notifications_sent = IntCounterVec::new(
             Opts::new(
@@ -1730,6 +1736,17 @@ impl BgpMetrics {
         .expect("valid metric definition");
         for outcome in RibPolicyTransitionOutcome::ALL {
             rib_policy_transition_outcomes.with_label_values(&[outcome.as_str()]);
+        }
+        let readiness_probe_failures = IntCounterVec::new(
+            Opts::new(
+                "bgp_readiness_probe_failures_total",
+                "Failed /readyz probes, one per 503 response, by bounded reason: deadline, peer_manager_unavailable, peer_manager_timeout, rib_unavailable, rib_timeout, rib_stalled or daemon_unavailable.",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric definition");
+        for reason in crate::reason_labels::ReadinessProbeFailureReason::ALL {
+            readiness_probe_failures.with_label_values(&[reason.as_str()]);
         }
 
         let rib_outbound_prefix_limit_actor_duration_seconds = HistogramVec::new(
@@ -3256,6 +3273,9 @@ impl BgpMetrics {
             .register(Box::new(rib_policy_transition_outcomes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(readiness_probe_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(
                 rib_outbound_prefix_limit_actor_duration_seconds.clone(),
             ))
@@ -3781,6 +3801,7 @@ impl BgpMetrics {
             rib_policy_transition_last_duration_milliseconds,
             rib_policy_transition_actor_poll_duration_seconds,
             rib_policy_transition_outcomes,
+            readiness_probe_failures,
             rib_outbound_prefix_limit_actor_duration_seconds,
             rib_route_refresh_actor_duration_seconds,
             rib_actor_work_duration_seconds,
@@ -5452,6 +5473,17 @@ impl BgpMetrics {
         self.0
             .rib_policy_transition_outcomes
             .with_label_values(&[outcome.as_str()])
+            .inc();
+    }
+
+    /// Record one failed `/readyz` probe.
+    pub fn record_readiness_probe_failure(
+        &self,
+        reason: crate::reason_labels::ReadinessProbeFailureReason,
+    ) {
+        self.0
+            .readiness_probe_failures
+            .with_label_values(&[reason.as_str()])
             .inc();
     }
 
@@ -8845,6 +8877,49 @@ mod tests {
             assert!(incremented.contains(&format!(
                 "bgp_rib_policy_transition_total{{outcome=\"{}\"}} 1",
                 outcome.as_str()
+            )));
+        }
+    }
+
+    #[test]
+    fn inbound_connection_drops_preinitialize_every_reason() {
+        use crate::reason_labels::InboundConnectionDropReason;
+        let m = BgpMetrics::new();
+        let initial = gather_text(&m);
+        for reason in InboundConnectionDropReason::ALL {
+            assert!(
+                initial.contains(&format!(
+                    "bgp_inbound_connections_dropped_total{{reason=\"{}\"}} 0",
+                    reason.as_str()
+                )),
+                "missing zero baseline for {reason}"
+            );
+        }
+        m.record_inbound_connection_drop(InboundConnectionDropReason::NotificationBackoff);
+        assert!(
+            gather_text(&m).contains(
+                "bgp_inbound_connections_dropped_total{reason=\"notification_backoff\"} 1"
+            )
+        );
+    }
+
+    #[test]
+    fn readiness_probe_failures_preinitialize_and_increment_exact_rows() {
+        use crate::reason_labels::ReadinessProbeFailureReason;
+        let m = BgpMetrics::new();
+        let initial = gather_text(&m);
+        for reason in ReadinessProbeFailureReason::ALL {
+            assert!(initial.contains(&format!(
+                "bgp_readiness_probe_failures_total{{reason=\"{}\"}} 0",
+                reason.as_str()
+            )));
+            m.record_readiness_probe_failure(reason);
+        }
+        let incremented = gather_text(&m);
+        for reason in ReadinessProbeFailureReason::ALL {
+            assert!(incremented.contains(&format!(
+                "bgp_readiness_probe_failures_total{{reason=\"{}\"}} 1",
+                reason.as_str()
             )));
         }
     }

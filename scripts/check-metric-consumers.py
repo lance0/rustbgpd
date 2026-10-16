@@ -223,6 +223,21 @@ CLOSED_LABEL_SOURCES = (
         (("fn", TELEMETRY, None, "evpn_es_auto_esi_states"),),
     ),
     (
+        ("evpn_es_core_isolation_state",),
+        "state",
+        (("fn", TELEMETRY, None, "evpn_es_core_isolation_states"),),
+    ),
+    (
+        ("bgp_rib_policy_transition_total",),
+        "outcome",
+        (("fn", TELEMETRY, "RibPolicyTransitionOutcome", "as_str"),),
+    ),
+    (
+        ("bgp_inbound_connections_dropped_total",),
+        "reason",
+        (("fn", REASON_LABELS, "InboundConnectionDropReason", "as_str"),),
+    ),
+    (
         ("bgp_rib_policy_transition_actor_poll_duration_seconds",),
         "le",
         (("buckets", TELEMETRY, "RIB_ACTOR_DURATION_BUCKETS"),),
