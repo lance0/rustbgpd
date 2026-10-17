@@ -220,6 +220,7 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     doctor               0 all checks green / 1 error / 2 red checks found\n  \
     policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below a threshold\n  \
     policy test          0 ran / 1 compile diagnostics\n  \
+    policy compare       0 ran / 1 compile diagnostics\n  \
     policy fmt           0 clean or formatted / 1 needs formatting (--check) or error";
 
 const ROOT_EXAMPLES: &str = "Examples:
@@ -5938,7 +5939,7 @@ mod tests {
         const DOCUMENTS: &[(&str, usize)] = &[
             ("README.md", 4),
             ("docs/tutorials/quickstart.md", 5),
-            ("docs/cookbook/route-server.md", 3),
+            ("docs/cookbook/route-server.md", 4),
             ("docs/how-to/explain.md", 7),
             ("docs/reference/operations.md", 4),
         ];
@@ -6647,7 +6648,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         paths.sort();
         assert_eq!(
             paths.join("|"),
-            "config apply|config diff|config import|config plan|diff snapshot from-bmp|diff snapshot from-mrt|diff snapshots|diff snapshots|policy check|policy fmt|policy test"
+            "config apply|config diff|config import|config plan|diff snapshot from-bmp|diff snapshot from-mrt|diff snapshots|diff snapshots|policy check|policy compare|policy fmt|policy test"
         );
         assert!(
             found

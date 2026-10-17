@@ -286,8 +286,7 @@ attributes, with up to 10 samples per class by default:
 
 <!-- rbgp-cli-conformance -->
 ```console
-$ rbgp policy compare candidate.rpol --neighbor 198.51.100.3 \
-    --policy rs-member-export --replace rs-transparent-export
+$ rbgp policy compare candidate.rpol --neighbor 198.51.100.3 --policy rs-member-export --replace rs-transparent-export
 ```
 
 `--replace` keeps every other member of the installed chain in place. The

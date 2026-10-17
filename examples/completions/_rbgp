@@ -3691,6 +3691,34 @@ _arguments "${_arguments_options[@]}" : \
 ':file -- Path to the `.rpol` file:_files' \
 && ret=0
 ;;
+(compare)
+_arguments "${_arguments_options[@]}" : \
+'*--policy=[Candidate policy, a name or call form such as "customer-in(200)"; repeat in chain order to compare a whole candidate chain]:POLICIES:_default' \
+'--replace=[Installed chain member that the single --policy replaces; every other installed member stays in place]:MEMBER:_default' \
+'--neighbor=[Export target whose installed chain is the baseline]:NEIGHBOR:_default' \
+'--peer=[Export target whose installed chain is the baseline]:NEIGHBOR:_default' \
+'-a+[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
+'--family=[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
+'--limit=[Maximum routes to evaluate (default\: every route in the snapshot)]:LIMIT:_default' \
+'--max-samples=[Maximum sample routes to show per class (up to 1000)]:MAX_SAMPLES:_default' \
+'*--dataset=[Candidate dataset binding NAME=PATH (repeat for each declared dataset)]:DATASETS:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'(--limit)--all[Evaluate every route in the snapshot (the default)]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':file -- Path to the candidate `.rpol` file:_files' \
+&& ret=0
+;;
 (get)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -4047,6 +4075,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (test)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(compare)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -5364,6 +5396,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (test)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(compare)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -7257,6 +7293,7 @@ _rbgp__subcmd__help__subcmd__policy_commands() {
 'check:Check an \`.rpol\` policy file locally (parse, typecheck, tests)' \
 'fmt:Format \`.rpol\` files in the one canonical style' \
 'test:Dry-run a candidate \`.rpol\` policy against the live RIB' \
+'compare:Compare a candidate export chain with the one installed for a peer' \
 'get:Show one policy by name' \
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
@@ -7307,6 +7344,11 @@ _rbgp__subcmd__help__subcmd__policy__subcmd__chain__subcmd__show_commands() {
 _rbgp__subcmd__help__subcmd__policy__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help policy check commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__compare_commands] )) ||
+_rbgp__subcmd__help__subcmd__policy__subcmd__compare_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help policy compare commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__conditional-advertisements_commands] )) ||
 _rbgp__subcmd__help__subcmd__policy__subcmd__conditional-advertisements_commands() {
@@ -7827,6 +7869,7 @@ _rbgp__subcmd__policy_commands() {
 'check:Check an \`.rpol\` policy file locally (parse, typecheck, tests)' \
 'fmt:Format \`.rpol\` files in the one canonical style' \
 'test:Dry-run a candidate \`.rpol\` policy against the live RIB' \
+'compare:Compare a candidate export chain with the one installed for a peer' \
 'get:Show one policy by name' \
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
@@ -7924,6 +7967,11 @@ _rbgp__subcmd__policy__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy check commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__policy__subcmd__compare_commands] )) ||
+_rbgp__subcmd__policy__subcmd__compare_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy compare commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__policy__subcmd__conditional-advertisements_commands] )) ||
 _rbgp__subcmd__policy__subcmd__conditional-advertisements_commands() {
     local commands; commands=()
@@ -7956,6 +8004,7 @@ _rbgp__subcmd__policy__subcmd__help_commands() {
 'check:Check an \`.rpol\` policy file locally (parse, typecheck, tests)' \
 'fmt:Format \`.rpol\` files in the one canonical style' \
 'test:Dry-run a candidate \`.rpol\` policy against the live RIB' \
+'compare:Compare a candidate export chain with the one installed for a peer' \
 'get:Show one policy by name' \
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
@@ -8007,6 +8056,11 @@ _rbgp__subcmd__policy__subcmd__help__subcmd__chain__subcmd__show_commands() {
 _rbgp__subcmd__policy__subcmd__help__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy help check commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__compare_commands] )) ||
+_rbgp__subcmd__policy__subcmd__help__subcmd__compare_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy help compare commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__conditional-advertisements_commands] )) ||
 _rbgp__subcmd__policy__subcmd__help__subcmd__conditional-advertisements_commands() {
