@@ -677,3 +677,55 @@ fn check_tls_expiry_warnings_are_opt_in_and_strict_sensitive() {
         }
     }
 }
+
+/// `--check` runs every `.rpol` unit's in-language tests whether or not
+/// `[policy] require_passing_tests` is set, so a pre-deploy check matches
+/// what the daemon enforces with the knob on. A passing unit stays clean.
+#[test]
+fn check_runs_rpol_tests_with_and_without_the_knob() {
+    let source = |guard: &str| {
+        format!(
+            "policy edge-in {{ term bogons {{ if route.prefix == {guard} {{ reject }} }} }}\n\
+             test edge-in-drops-loopback {{\n\
+                 route {{ prefix 127.0.0.0/8 }}\n\
+                 expect edge-in == reject\n\
+             }}\n"
+        )
+    };
+    for require in [false, true] {
+        for (guard, passes) in [("127.0.0.0/8", true), ("192.0.2.0/24", false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("edge.rpol"), source(guard)).expect("write rpol");
+            let config = dir.path().join("config.toml");
+            std::fs::write(
+                &config,
+                CLEAN.replace(
+                    "[policy.definitions.from-peer]",
+                    &format!(
+                        "[policy]\nrpol_files = [\"edge.rpol\"]\n\
+                         require_passing_tests = {require}\n\n[policy.definitions.from-peer]"
+                    ),
+                ),
+            )
+            .expect("write config");
+            let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+                .args(["--check", "--strict"])
+                .arg(&config)
+                .env("NO_COLOR", "1")
+                .output()
+                .expect("run rustbgpd");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let context = format!("require={require} guard={guard}: {stdout}\n{stderr}");
+            if passes {
+                assert_eq!(output.status.code(), Some(0), "{context}");
+                assert!(stdout.contains("config OK"), "{context}");
+            } else {
+                assert_eq!(output.status.code(), Some(1), "{context}");
+                assert!(stderr.contains("edge.rpol"), "{context}");
+                assert!(stderr.contains("test edge-in-drops-loopback"), "{context}");
+                assert!(stderr.contains("expected reject, got accept"), "{context}");
+            }
+        }
+    }
+}

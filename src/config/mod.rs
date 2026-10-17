@@ -370,6 +370,13 @@ impl Config {
             });
         }
         let rpol_load_ms = elapsed_ms(phase_started);
+        let phase_started = std::time::Instant::now();
+        if config.policy.require_passing_tests
+            && let Err(error) = config.policy.verify_rpol_tests()
+        {
+            return Err(format!("error: {error}"));
+        }
+        let rpol_test_ms = elapsed_ms(phase_started);
         // Bind dataset declarations to their snapshot files (LAN-305)
         // before validation: chain references probe datasets, so the
         // resolver needs the handles. With `prior_datasets` (the
@@ -405,6 +412,7 @@ impl Config {
             elapsed_ms = elapsed_ms(load_started),
             toml_parse_ms,
             rpol_load_ms,
+            rpol_test_ms,
             dataset_bind_ms,
             validate_ms,
             dataset_hashed = dataset_summary.hashed,
@@ -2386,8 +2394,8 @@ pub struct PolicyDiff {
     pub conditional_advertisements_changed: Vec<String>,
     /// Disabled-only alpha dampening schema changed; no route behavior changes.
     pub route_flap_dampening_changed: bool,
-    /// The `[policy] rpol_files` / `rpol_roots` / `rpol_max_graph_bytes`
-    /// settings or any referenced `.rpol` file's compiled graph changed
+    /// The `[policy] rpol_files` / `rpol_roots` / `rpol_max_graph_bytes` /
+    /// `require_passing_tests` settings or any referenced `.rpol` file's compiled graph changed
     /// (ADR-0096). Reload-applied: chains referencing rpol policies
     /// re-resolve and hot-swap through the same live-policy path as
     /// `[policy.definitions]` edits.
@@ -4654,7 +4662,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             if p.rpol_changed {
                 let _ = writeln!(
                     out,
-                    "    {} rpol_files / rpol_roots / rpol_max_graph_bytes / .rpol graph",
+                    "    {} rpol_files / rpol_roots / rpol_max_graph_bytes / require_passing_tests / .rpol graph",
                     style.change_marker
                 );
             }
@@ -6744,6 +6752,7 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
         rpol_changed: old.rpol_files != new.rpol_files
             || old.rpol_roots != new.rpol_roots
             || old.rpol_max_graph_bytes != new.rpol_max_graph_bytes
+            || old.require_passing_tests != new.require_passing_tests
             || old.rpol != new.rpol,
         datasets_changed: old.datasets != new.datasets,
         declared_datasets_count: new.datasets.len(),

@@ -1288,9 +1288,12 @@ plain `expect p` is a one-member chain. A chain expectation is held to
 the same `MAX_CHAIN_NODES` chain size cap as a configured chain; exceeding
 it fails the test and names the member that crossed the limit.
 
-Tests run at check time (`rbgp policy check`, CI) with zero daemon
-involvement. Testing a *candidate* policy against a live RIB is
-`rbgp policy test` (below).
+Tests run at check time (`rbgp policy check`, CI, and
+`rustbgpd --check`) without a running daemon. A daemon with
+`[policy] require_passing_tests = true` also runs them on every config load
+and refuses a startup or SIGHUP reload whose `.rpol` units fail their own
+tests; see [the configuration reference](configuration.md). Testing a
+*candidate* policy against a live RIB is `rbgp policy test` (below).
 
 ### Coverage and lints
 
