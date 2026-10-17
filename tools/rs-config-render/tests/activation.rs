@@ -662,7 +662,9 @@ fn cli_activate(rig: &Rig, candidate: &Path, initial: bool) -> std::process::Out
         .arg(&rig.rbgp)
         .arg("--rbgp-addr")
         .arg(rig.binding(&rig.state).rbgp_addr())
-        .args(["--settle-seconds", "5", "--activation-command"])
+        .arg("--settle-seconds")
+        .arg(SETTLE.as_secs().to_string())
+        .arg("--activation-command")
         .arg(&rig.activation);
     if initial {
         command.arg("--initial");
@@ -678,6 +680,10 @@ fn rejected_reload_without_effect_rolls_back_to_the_previous_generation() {
     rig.run(&first, true, &rig.activation).unwrap();
     let prior = rig.current();
     let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
+    // Complete the fake reload, then fail its command: classification reads
+    // the installed outcome instead of racing a deadline that could kill the
+    // command first. SETTLE only bounds a hang.
+    rig.set("activation-fails", "");
     rig.set("activation-mode", "no-effect-rejected");
     let output = cli_activate(&rig, &rig.candidate("candidate-rejected", 121), false);
     assert_eq!(output.status.code(), Some(7), "{output:?}");
@@ -717,6 +723,8 @@ fn rejection_evidence_lost_after_repointing_requires_recovery() {
         let first = rig.candidate("candidate-a", 130);
         rig.run(&first, true, &rig.activation).unwrap();
         let prior = rig.current();
+        // As above: the outcome is installed before the command fails.
+        rig.set("activation-fails", "");
         rig.set("activation-mode", mode_name);
         let output = cli_activate(&rig, &rig.candidate("candidate-raced", 131), false);
         assert_eq!(output.status.code(), Some(5), "{mode_name}: {output:?}");
