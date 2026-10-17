@@ -11,15 +11,18 @@ pub(crate) type FastSet<T> = std::collections::HashSet<T, FastState>;
 
 /// Entries a [`ShardedMap`] holds in one table before it splits.
 pub(crate) const SHARD_SPLIT_AT: usize = 1 << 14;
-/// Tables in a split [`ShardedMap`].
-const SHARDS: usize = 64;
+/// Tables in a split [`ShardedMap`]. At a million VPN routes 16 shards keep
+/// each grown shard large enough that the allocator returns the replaced
+/// table at once; 64 shards held about 330 MB of replaced tables at the peak
+/// of a 1.23M-key load.
+const SHARDS: usize = 16;
 
 /// A [`FastMap`] that splits into fixed hash shards once it is large.
 ///
 /// A plain map doubles by rehashing every entry inside one insert: about
 /// 180 ms for a 1M-entry VPN route map, and several such maps can grow in
 /// one UPDATE. A split map grows one shard at a time, so an insert rehashes
-/// at most about 1/64 of the entries and the total rehash work is unchanged.
+/// at most about 1/16 of the entries and the total rehash work is unchanged.
 /// Iteration order is unspecified, as for any hash map.
 #[derive(Debug)]
 pub(crate) enum ShardedMap<K, V> {
@@ -102,8 +105,8 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
         let mixed = FastState::default()
             .hash_one(key)
             .wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        // The top six bits select one of 64 shards.
-        usize::try_from(mixed >> 58).expect("six bits fit usize")
+        // The top four bits select one of 16 shards.
+        usize::try_from(mixed >> 60).expect("four bits fit usize")
     }
 
     fn shard<Q>(&self, key: &Q) -> &FastMap<K, V>
@@ -468,7 +471,7 @@ mod tests {
         assert!(
             map.shards()
                 .iter()
-                .all(|shard| shard.len() < SHARD_SPLIT_AT / 8)
+                .all(|shard| shard.len() < SHARD_SPLIT_AT / 2)
         );
         for i in 0..total {
             assert_eq!(map.get(&vpnv4_key(i)), Some(&i));
@@ -493,7 +496,7 @@ mod tests {
                 map.insert(key, ());
             }
             for shard in map.shards() {
-                let expected = KEYS / 64;
+                let expected = KEYS / u64::try_from(SHARDS).unwrap();
                 let len = u64::try_from(shard.len()).unwrap();
                 assert!(
                     len.abs_diff(expected) < expected / 8,

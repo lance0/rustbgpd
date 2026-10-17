@@ -1846,7 +1846,7 @@ fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
     }
     let before = manager.ribs[&peer].vpn_shard_capacities();
     assert!(
-        before.iter().all(|shards| shards.len() == 64),
+        before.iter().all(|shards| shards.len() == 16),
         "large table is sharded"
     );
 
