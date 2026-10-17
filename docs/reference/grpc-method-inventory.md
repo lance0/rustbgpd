@@ -128,7 +128,7 @@ shape itself does not raise the tier.
 | `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts only — established dynamic peers keep running and drain when they next return to Idle. Deleting a range whose peer group carries `md5_password` or a `ttl_security` policy (including `ttl_security_hops`) is rejected `FAILED_PRECONDITION`, matching TCP-AO: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
 | `SetGracefulShutdown` | `operator_only` | Network-wide when `address` is empty; listed here because the proto puts it in `NeighborService`. |
 
-### PolicyService (24 RPCs)
+### PolicyService (25 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|

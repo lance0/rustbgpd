@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 125,
+  "method_count": 126,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 78,
+    "sensitive_read": 79,
     "mutating": 22,
     "operator_only": 24
   },
