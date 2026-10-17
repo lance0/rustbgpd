@@ -1820,3 +1820,53 @@ async fn vpn_distribution_serves_readiness_at_each_peer_boundary() {
     assert!(readiness_answered_during_vpn_distribution(3));
     assert!(!readiness_answered_during_vpn_distribution(0));
 }
+
+/// A withdrawal can leave a tombstone that returns no insertion headroom, so
+/// re-announcing withdrawn keys on a full table can force a rehash inside the
+/// UPDATE. A large VPN table is sharded, so that rehash is one shard's.
+#[test]
+fn vpn_withdraw_and_reannounce_on_a_full_table_grows_at_most_one_shard_each() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let source = Ipv4Addr::new(10, 0, 4, 1);
+    let peer = IpAddr::V4(source);
+    let route = |n: u32, local_pref| {
+        let mut route = make_vpn_rib_route(source, 0, 100, local_pref);
+        route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0a40_0000 + n), 32).unwrap();
+        route
+    };
+    let total = 20_480;
+    for batch in (0..total).collect::<Vec<u32>>().chunks(80) {
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: batch.iter().map(|&n| route(n, 100)).collect(),
+            withdrawn: vec![],
+        });
+    }
+    let before = manager.ribs[&peer].vpn_shard_capacities();
+    assert!(
+        before.iter().all(|shards| shards.len() == 16),
+        "large table is sharded"
+    );
+
+    let churn: Vec<u32> = (0..total).step_by(8).collect();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: churn.iter().map(|&n| route(n, 200)).collect(),
+        withdrawn: churn.iter().map(|&n| route(n, 100).key()).collect(),
+    });
+    let after = manager.ribs[&peer].vpn_shard_capacities();
+    for (before, after) in before.iter().flatten().zip(after.iter().flatten()) {
+        assert!(after <= &(before * 2), "a shard grew more than once");
+    }
+    assert_eq!(
+        manager.ribs[&peer].vpn_len(),
+        usize::try_from(total).unwrap()
+    );
+    for n in churn {
+        let selected = manager.loc_rib.get_vpn(&route(n, 200).nlri.key()).unwrap();
+        assert_eq!(selected.local_pref_attr(), Some(200));
+    }
+}

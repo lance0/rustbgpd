@@ -33,7 +33,7 @@ use rustbgpd_wire::{
 use smallvec::SmallVec;
 
 use crate::attr_set::AttrSet;
-use crate::fast_hash::{FastMap as HashMap, FastSet as HashSet, FastState};
+use crate::fast_hash::{FastMap as HashMap, FastSet as HashSet, ShardedMap};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -219,14 +219,14 @@ fn for_each_counted<'a, K: 'a, R: RetainedRoute + 'a>(
 /// no caller can change a route's stale flags without the counters seeing it.
 #[derive(Debug)]
 struct StaleTracked<K, V> {
-    map: HashMap<K, V>,
+    map: ShardedMap<K, V>,
     counts: StaleCounters,
 }
 
 impl<K, V> Default for StaleTracked<K, V> {
     fn default() -> Self {
         Self {
-            map: HashMap::default(),
+            map: ShardedMap::default(),
             counts: StaleCounters::default(),
         }
     }
@@ -235,7 +235,7 @@ impl<K, V> Default for StaleTracked<K, V> {
 impl<K: Eq + std::hash::Hash, V: RetainedRoute> StaleTracked<K, V> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            map: HashMap::with_capacity_and_hasher(capacity, FastState::default()),
+            map: ShardedMap::with_capacity(capacity),
             counts: StaleCounters::default(),
         }
     }
@@ -277,7 +277,7 @@ impl<K: Eq + std::hash::Hash, V: RetainedRoute> StaleTracked<K, V> {
 }
 
 impl<K, V> std::ops::Deref for StaleTracked<K, V> {
-    type Target = HashMap<K, V>;
+    type Target = ShardedMap<K, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.map
@@ -333,7 +333,7 @@ pub struct AdjRibIn {
     /// Secondary index: VPN RD+prefix identity → Add-Path path IDs stored for
     /// it (the SAFI 128 analog of `prefix_index`). `SmallVec<[u32; 1]>`
     /// inlines the non-Add-Path case (`path_id=0`) without heap allocation.
-    vpn_key_index: HashMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
+    vpn_key_index: ShardedMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
     /// Labeled-unicast routes keyed by RFC 8277 prefix + path-id identity.
     /// Deliberately separate from the unicast `routes` map (ADR-0077 §2).
     labeled_routes: StaleTracked<LabeledRibRouteKey, LabeledRibRoute>,
@@ -366,14 +366,14 @@ impl AdjRibIn {
     pub(crate) fn retire_with(mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.routes.release_with(checkpoint);
         self.prefix_index.release_with(checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.flowspec_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.evpn_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.bgpls_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.vpn_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.vpn_key_index, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.labeled_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.flowspec_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.evpn_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.bgpls_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.vpn_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.vpn_key_index, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.labeled_routes.map, checkpoint);
         crate::adj_rib_out::release_hash_map(&mut self.labeled_key_index, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.rtc_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.rtc_routes.map, checkpoint);
         retire_local_tags(&mut self.llgr_stale_local_tags, checkpoint);
         retire_local_tags(&mut self.flowspec_llgr_stale_local_tags, checkpoint);
         retire_local_tags(&mut self.evpn_llgr_stale_local_tags, checkpoint);
@@ -410,7 +410,7 @@ impl AdjRibIn {
             evpn_routes: StaleTracked::default(),
             bgpls_routes: StaleTracked::default(),
             vpn_routes: StaleTracked::default(),
-            vpn_key_index: HashMap::default(),
+            vpn_key_index: ShardedMap::default(),
             labeled_routes: StaleTracked::default(),
             labeled_key_index: HashMap::default(),
             rtc_routes: StaleTracked::default(),
@@ -1701,6 +1701,23 @@ impl AdjRibIn {
             }
         });
         self.clear_local_llgr_stale_bgpls_community(&clear_local_llgr);
+    }
+
+    /// Per-shard capacities of the VPN route map and its key index.
+    #[cfg(test)]
+    pub(crate) fn vpn_shard_capacities(&self) -> [Vec<usize>; 2] {
+        [
+            self.vpn_routes
+                .shards()
+                .iter()
+                .map(HashMap::capacity)
+                .collect(),
+            self.vpn_key_index
+                .shards()
+                .iter()
+                .map(HashMap::capacity)
+                .collect(),
+        ]
     }
 
     /// Insert or replace a VPNv4/VPNv6 route.

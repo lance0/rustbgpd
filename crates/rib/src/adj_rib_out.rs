@@ -11,7 +11,7 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 // Aliased to the std name so the storage types read unchanged.
 use smallvec::SmallVec;
 
-use crate::fast_hash::{FastMap as HashMap, FastState};
+use crate::fast_hash::{FastMap as HashMap, FastState, ShardedMap};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute,
@@ -56,11 +56,11 @@ pub struct AdjRibOut {
     /// BGP-LS routes advertised to this peer, keyed by opaque RFC 9552 identity.
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes advertised to this peer, keyed by RD + prefix identity.
-    vpn_routes: HashMap<VpnRibRouteKey, VpnRibRoute>,
+    vpn_routes: ShardedMap<VpnRibRouteKey, VpnRibRoute>,
     /// Secondary index: VPN RD+prefix identity → advertised Add-Path path IDs
     /// (the SAFI 128 analog of `prefix_path_ids`). `SmallVec<[u32; 1]>` inlines
     /// the single-best case (`path_id=0`) without heap allocation.
-    vpn_key_path_ids: HashMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
+    vpn_key_path_ids: ShardedMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
     /// Labeled-unicast routes advertised to this peer, keyed by prefix +
     /// path-id identity. Deliberately separate from the unicast `routes` map
     /// (ADR-0077 §2).
@@ -188,6 +188,61 @@ pub(crate) fn reserve_hash_map<K: Eq + std::hash::Hash, V>(
     *map = replacement;
 }
 
+/// [`retire_hash_map`] for each shard of a [`ShardedMap`].
+pub(crate) fn retire_sharded_map<K, V>(
+    map: &mut ShardedMap<K, V>,
+    checkpoint: &mut impl RetirementCheckpoint,
+) {
+    for shard in map.shards_mut() {
+        retire_hash_map(shard, checkpoint);
+    }
+}
+
+/// [`release_hash_map`] for a [`ShardedMap`]: retire every shard, then drop
+/// the shard tables.
+pub(crate) fn release_sharded_map<K, V>(
+    map: &mut ShardedMap<K, V>,
+    checkpoint: &mut impl RetirementCheckpoint,
+) {
+    retire_sharded_map(map, checkpoint);
+    let retired = std::mem::take(map);
+    checkpoint.checkpoint(RetirementProgress::Boundary);
+    drop(retired);
+    checkpoint.checkpoint(RetirementProgress::Boundary);
+}
+
+/// [`reserve_hash_map`] for a [`ShardedMap`] and the keys a batch inserts.
+/// Missing keys are counted per destination shard, so a skewed batch gets
+/// headroom where it lands and no other shard over-reserves. A batch that
+/// takes the map past one table splits it first; no rebuild moves more
+/// than one shard's entries.
+pub(crate) fn reserve_sharded_map<K: Eq + std::hash::Hash, V>(
+    map: &mut ShardedMap<K, V>,
+    keys: impl IntoIterator<Item = K>,
+    checkpoint: &mut impl FnMut(),
+) {
+    let mut missing = [0_usize; crate::fast_hash::SHARDS];
+    for key in keys {
+        checkpoint();
+        if map.get(&key).is_none() {
+            missing[crate::fast_hash::shard_index(&key)] += 1;
+        }
+    }
+    let total: usize = missing.iter().sum();
+    if map.len().saturating_add(total) >= crate::fast_hash::SHARD_SPLIT_AT {
+        map.split();
+        checkpoint();
+    }
+    match map.shards_mut() {
+        [single] => reserve_hash_map(single, total, checkpoint),
+        shards => {
+            for (shard, additional) in shards.iter_mut().zip(missing) {
+                reserve_hash_map(shard, additional, checkpoint);
+            }
+        }
+    }
+}
+
 impl AdjRibOut {
     /// Create a new empty Adj-RIB-Out for the given peer.
     #[must_use]
@@ -215,8 +270,8 @@ impl AdjRibOut {
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
-            vpn_routes: HashMap::default(),
-            vpn_key_path_ids: HashMap::default(),
+            vpn_routes: ShardedMap::default(),
+            vpn_key_path_ids: ShardedMap::default(),
             labeled_routes: HashMap::default(),
             labeled_key_path_ids: HashMap::default(),
             rtc_routes: HashMap::default(),
@@ -567,15 +622,15 @@ impl AdjRibOut {
     /// their backing allocations while leaving every other family untouched.
     pub fn release_vpn(&mut self) {
         self.vpn_keys_released();
-        self.vpn_routes = HashMap::default();
-        self.vpn_key_path_ids = HashMap::default();
+        self.vpn_routes = ShardedMap::default();
+        self.vpn_key_path_ids = ShardedMap::default();
     }
 
     /// Retire and release VPN state while leaving every other family intact.
     pub(crate) fn release_vpn_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.vpn_keys_released();
-        release_hash_map(&mut self.vpn_routes, checkpoint);
-        release_hash_map(&mut self.vpn_key_path_ids, checkpoint);
+        release_sharded_map(&mut self.vpn_routes, checkpoint);
+        release_sharded_map(&mut self.vpn_key_path_ids, checkpoint);
     }
 
     /// Release actual private EVPN state after complete group admission.
@@ -584,9 +639,21 @@ impl AdjRibOut {
     }
 
     /// Reserve both VPN advertised-route indexes for a known outbound batch.
-    pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
-        reserve_hash_map(&mut self.vpn_routes, additional, checkpoint);
-        reserve_hash_map(&mut self.vpn_key_path_ids, additional, checkpoint);
+    /// Each index counts its own missing keys, which hash to different shards.
+    pub(crate) fn reserve_vpn_with<'a>(
+        &mut self,
+        routes: impl IntoIterator<Item = &'a VpnRibRoute> + Clone,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let keys = routes.clone().into_iter().map(VpnRibRoute::key);
+        reserve_sharded_map(&mut self.vpn_routes, keys, checkpoint);
+        let nlri_keys = routes.into_iter().map(|route| route.nlri.key());
+        reserve_sharded_map(&mut self.vpn_key_path_ids, nlri_keys, checkpoint);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn vpn_shard_count(&self) -> usize {
+        self.vpn_routes.shards().len()
     }
 
     #[cfg(test)]
@@ -624,8 +691,8 @@ impl AdjRibOut {
         retire_hash_map(&mut self.evpn_routes, checkpoint);
         retire_hash_map(&mut self.bgpls_routes, checkpoint);
         self.vpn_keys_released();
-        retire_hash_map(&mut self.vpn_routes, checkpoint);
-        retire_hash_map(&mut self.vpn_key_path_ids, checkpoint);
+        retire_sharded_map(&mut self.vpn_routes, checkpoint);
+        retire_sharded_map(&mut self.vpn_key_path_ids, checkpoint);
         retire_hash_map(&mut self.labeled_routes, checkpoint);
         retire_hash_map(&mut self.labeled_key_path_ids, checkpoint);
         retire_hash_map(&mut self.rtc_routes, checkpoint);
@@ -1176,6 +1243,48 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
         }
+    }
+
+    /// A batch whose keys all land in one nearly full shard must reserve
+    /// that shard's headroom, so committing it never rehashes a shard.
+    #[test]
+    fn vpn_reservation_covers_a_batch_skewed_into_one_shard() {
+        use crate::fast_hash::{SHARD_SPLIT_AT, shard_index};
+        let route = |n: u32| make_vpn_route(vpn_nlri((0x0a00_0000 + n).to_be_bytes(), 32, 100), 1);
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let split = u32::try_from(SHARD_SPLIT_AT).unwrap() + 1;
+        for n in 0..split {
+            rib.insert_vpn(route(n));
+        }
+        assert_eq!(rib.vpn_shard_count(), crate::fast_hash::SHARDS);
+        let target = shard_index(&route(0).key());
+        let mut fresh = (split..).filter(|&n| shard_index(&route(n).key()) == target);
+        let headroom = |rib: &AdjRibOut| {
+            let shard = &rib.vpn_routes.shards()[target];
+            shard.capacity() - shard.len()
+        };
+        while headroom(&rib) > 1 {
+            rib.insert_vpn(route(fresh.next().unwrap()));
+        }
+        let batch: Vec<_> = fresh.take(2).map(route).collect();
+        rib.reserve_vpn_with(&batch, &mut || {});
+        let capacities = |rib: &AdjRibOut| {
+            let routes: Vec<_> = rib
+                .vpn_routes
+                .shards()
+                .iter()
+                .map(HashMap::capacity)
+                .collect();
+            let index: Vec<_> = (rib.vpn_key_path_ids.shards().iter())
+                .map(HashMap::capacity)
+                .collect();
+            (routes, index)
+        };
+        let reserved = capacities(&rib);
+        for route in batch {
+            rib.insert_vpn(route);
+        }
+        assert_eq!(capacities(&rib), reserved, "commit grew a reserved shard");
     }
 
     #[test]

@@ -83,7 +83,7 @@ pub struct LocRib {
     /// selection collapses Add-Path path IDs — the winning route's own
     /// `path_id` records which received path won. Paired with the
     /// wall-clock install time, like `routes`.
-    vpn_routes: HashMap<rustbgpd_wire::VpnRouteKey, (VpnRibRoute, SystemTime)>,
+    vpn_routes: crate::fast_hash::ShardedMap<rustbgpd_wire::VpnRouteKey, (VpnRibRoute, SystemTime)>,
     /// Labeled-unicast Loc-RIB: best route per prefix identity, collapsing
     /// Add-Path path IDs like `vpn_routes` — the winning route's own
     /// `path_id` records which received path won. Deliberately separate from
@@ -115,7 +115,7 @@ impl LocRib {
             evpn_routes: HashMap::default(),
             evpn_es_keys: std::collections::BTreeSet::new(),
             bgpls_routes: HashMap::default(),
-            vpn_routes: HashMap::default(),
+            vpn_routes: crate::fast_hash::ShardedMap::default(),
             labeled_routes: HashMap::default(),
             rtc_routes: HashMap::default(),
         }

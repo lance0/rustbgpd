@@ -3591,6 +3591,33 @@ mod tests {
         assert!(!proof.contains(&vpn_exact(500)) && !proof.contains(&vpn_exact(3)));
     }
 
+    #[test]
+    fn checkpointed_vpn_growth_keeps_an_older_pool_on_the_key_log() {
+        let mut table = logged_vpn_table(200);
+        let mut ledger = AdmittedRecovery::new();
+        let hint = capture_vpn(&mut ledger, peer(1), None, &table, true).handle;
+        // A batch past the split threshold splits the table, then rebuilds
+        // each shard through checkpoints, without changing the key set.
+        let batch: Vec<_> = (200..20_000).map(vpn_route).collect();
+        assert_eq!(table.vpn_shard_count(), 1);
+        let mut checkpoints = 0;
+        table.reserve_vpn_with(&batch, &mut || checkpoints += 1);
+        assert_eq!(table.vpn_shard_count(), crate::fast_hash::SHARDS);
+        assert!(checkpoints > 400, "every row moved through the reservation");
+        let mut replaced = vpn_route(7);
+        replaced.next_hop = peer(9);
+        table.insert_vpn(replaced);
+        table.insert_vpn(vpn_route(500));
+        let shape = vpn_shape(&ledger, hint, &table);
+        assert_eq!((shape.count, shape.vpn, shape.additions), (201, 201, 1));
+        assert!(shape.comparisons < 20, "only logged keys are looked up");
+        let warm = capture_vpn(&mut ledger, peer(2), hint, &table, true);
+        assert_eq!(warm.handle, hint);
+        let proof = ledger.get(&peer(2)).unwrap();
+        assert_eq!(proof.len(), 201);
+        assert!(proof.contains(&vpn_exact(500)) && proof.contains(&vpn_exact(7)));
+    }
+
     fn logged_vpn_table(count: u32) -> AdjRibOut {
         let mut table = vpn_table(0).with_vpn_key_log();
         for n in 0..count {
