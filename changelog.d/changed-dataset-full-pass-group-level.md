@@ -3,7 +3,8 @@
 - A SIGHUP dataset swap that cannot be bounded to the affected routes, such
   as a change to a community set read through `route.communities in`, now
   re-evaluates each update group once and sends members only the routes
-  whose export changed, sharing one encoding per group. Previously every
+  whose export changed. Changed unicast announcements are encoded once per
+  group; changed VPN routes are still encoded per session. Previously every
   member re-sent its whole table through a dirty resync, which on a full
   table held the RIB long enough for readiness to report a stalled
   export-policy transition. Receivers that also send EVPN, labeled

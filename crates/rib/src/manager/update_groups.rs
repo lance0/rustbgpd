@@ -2343,9 +2343,10 @@ impl RibManager {
 
     /// The full re-evaluation as one incremental pass over every key the
     /// targets can hold: each update group re-evaluates its table once and
-    /// its clean members share the resulting delta (one announce payload
-    /// and encode cell per group), instead of every member re-sending its
-    /// whole table through a dirty resync. Ungrouped targets re-evaluate
+    /// its clean members receive only the resulting delta, instead of every
+    /// member re-sending its whole table through a dirty resync. Eligible
+    /// unicast announcements ride one shared payload and encode cell per
+    /// group; VPN deltas are emitted and encoded per member. Ungrouped targets re-evaluate
     /// against their own Adj-RIB-Out; dirty and channel-full members keep
     /// their ordinary resync and deferral handling.
     fn reevaluate_full_pass_by_group(&mut self, targets: &HashSet<IpAddr>) {

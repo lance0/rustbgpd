@@ -309,8 +309,10 @@ semantics:
   best-path selection still held by graceful-restart deferral
   re-evaluates every route for those peers. That full re-evaluation runs
   once per update group and sends each member only the routes whose
-  export changed, with one shared encoding per group; peers outside a
-  group re-evaluate against their own Adj-RIB-Out. Receivers that also
+  export changed. Changed unicast announcements are encoded once per
+  group and shared by its members; changed VPN routes are evaluated once
+  per group but still encoded per session. Peers outside a group
+  re-evaluate against their own Adj-RIB-Out. Receivers that also
   send another family (EVPN, labeled unicast, FlowSpec, BGP-LS or
   RT-Constrain), and every receiver while a VPN selection is held by
   deferral or a conditional advertisement is installed, instead get a
