@@ -47,7 +47,8 @@ GitHub's GHSA-to-CVE assignment flow.
 ### Attack Surface
 
 The wire decoder is the primary attack surface. It processes untrusted
-input from the network. It runs under continuous fuzzing in CI.
+input from the network. Its fuzz targets run in a nightly CI campaign,
+with on-demand ClusterFuzzLite campaigns (see [Fuzzing](#fuzzing)).
 
 ### Design Principles
 

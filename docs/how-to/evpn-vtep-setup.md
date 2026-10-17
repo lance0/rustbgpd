@@ -356,7 +356,7 @@ predicate table below is the contract rustbgpd checks.
 | 2 | `vrf_device` `IFLA_VRF_TABLE` == `table_id` | `type vrf table ${TABLE}` |
 | 3 | `l3vxlan_device` exists + UP | `ip link add … type vxlan` + `set up` |
 | 4 | `l3vxlan_device` `IFLA_VXLAN_ID` == L3VNI | `id ${L3VNI}` |
-| 5 | `IFLA_VXLAN_LOCAL`(`6`) == `local_vtep_ip` | `local ${LOCAL_IP}` |
+| 5 | `IFLA_VXLAN_LOCAL` (`4`) or `IFLA_VXLAN_LOCAL6` (`17`) == `local_vtep_ip` | `local ${LOCAL_IP}` |
 | 6 | `IFLA_MASTER` == `vrf_device` | `set master ${VRF}` |
 | 7 | link-layer addr == `router_mac` | `set address ${RMAC}` |
 

@@ -4201,10 +4201,19 @@ rbgp policy chain set-import --global import-from-transit
 rbgp policy chain set-import import-from-transit --neighbor 10.0.0.2
 rbgp policy chain show --neighbor 10.0.0.2
 
+# Before changing an export chain, compare a candidate with the installed
+# one over the live Loc-RIB (read-only)
+rbgp policy compare edge.rpol --neighbor 10.0.0.2 --policy edge-out
+rbgp policy compare edge.rpol --neighbor 10.0.0.2 --policy edge-out-v2 --replace edge-out
+
 # Bind / unbind neighbors to a peer-group
 rbgp peer-group attach 10.0.0.5 --group transit
 rbgp peer-group detach 10.0.0.5
 ```
+
+`rbgp policy compare` reports the routes the candidate would newly reject,
+newly accept or send with different attributes; see
+[comparing a candidate with the installed export chain](rpol-language.md#comparing-a-candidate-with-the-installed-export-chain).
 
 `--from-file` accepts JSON whose shape mirrors the proto message
 (`PolicyDefinition` / `NeighborSetDefinition` / `PeerGroupDefinition`);

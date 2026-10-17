@@ -40,8 +40,8 @@ silently rerun — when any of the following occurs:
 |---------------|-----------|
 | Daemon process restart mid-soak | Counter monotonicity break (e.g. `bgp_messages_sent_total` decreases between samples), or the harness's own restart detection. A restart flattens the slope regression and would hide a leak, so the run is invalid as a *pass* but preserved as evidence of the crash. |
 | Harness step fails closed | The runners are `set -euo pipefail` and (since the fail-closed hardening) exit non-zero when required evidence is missing (e.g. GR active/stale not observed, apply cycle fails, injection RPC errors). |
-| Metrics endpoint unreachable for > 5 consecutive samples | `curl` scrape failures in the sampler — a blind sampler cannot certify anything. |
-| Host disk < 5 GB free | Daemon logs grow multi-GB over multi-day windows; running the disk to zero corrupts the evidence it was collecting. |
+| Metrics endpoint unreachable for 5 consecutive samples | `curl` scrape failures in the sampler — a blind sampler cannot certify anything. |
+| Host disk < 5 GiB free | Daemon logs grow multi-GB over multi-day windows; running the disk to zero corrupts the evidence it was collecting. |
 | Competing workload appears | Host-lock contention, an unexpected clab topology, or a bench dispatch. The bench/soak `flock` mutex makes this structural, but a manual discovery also aborts. |
 
 **On abort, evidence is preserved, in this order:**

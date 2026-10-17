@@ -984,7 +984,7 @@ demand.
 
 Hosted coverage: the `kernel-dataplane` workflow runs the EVPN dataplane smokes
 M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M47 / M48 / M60 / M61 / M65 /
-M66 / M67 / M68 / M69 / M70 / M71 / M72 / M109 / M110. The
+M66 / M67 / M68 / M69 / M70 / M71 / M72 / M109 / M110 / M117 / M121 / M123. The
 [kernel dataplane runner guide](../how-to/kernel-dataplane-runner.md) lists every
 hosted leg, including the non-EVPN dataplane, BFD, and TCP-AO legs, and the
 [interop matrix](../interop.md) records each topology and its assertions.

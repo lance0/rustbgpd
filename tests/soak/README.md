@@ -126,7 +126,7 @@ CLEANUP=1 bash tests/soak/run-m33-soak.sh
 ```
 
 The runner expects to be invoked from the repo root (the shared
-`test-lib.sh` preflight checks for `proto/rustbgpd.proto` relative
+`tests/interop/scripts/test-lib.sh` preflight checks for `proto/rustbgpd.proto` relative
 to the current working directory).
 
 ## Output

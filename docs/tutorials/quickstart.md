@@ -285,7 +285,7 @@ grants operator-tier `local-operator`; use its dedicated authenticated
 
 ```bash
 # Add static peers at runtime. These are persisted back to the config file,
-# which is rewritten in canonical form — see CONFIGURATION.md.
+# which is rewritten in canonical form — see docs/reference/configuration.md.
 rbgp neighbor 10.0.0.5 add --remote-asn 65005
 rbgp neighbor 203.0.113.2 add --remote-asn 65002 --role provider --strict-role
 # A link-local peer carries its interface as a zone. Placeholder: replace

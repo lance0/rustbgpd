@@ -116,11 +116,14 @@ $ rbgp rib vpn                          # VPNv4/VPNv6: RD, prefix, label, RTs
 $ rbgp rib vpn -a vpnv6                 # VPNv6 only
 $ rbgp rib rtc                          # RT-Constrain NLRIs per peer
 $ rbgp rib rtc --neighbor 10.0.0.11     # what pe-1 says it imports
+$ rbgp rib vpn advertised 10.0.0.12 -a vpnv4   # committed VPNv4 export toward pe-2
 ```
 
-There is no per-peer VPN advertised-route listing: `rbgp rib advertised`
-does not accept a VPN family. Check what a PE gets one route at a time with
-the VPN export ladder, which includes the RT-membership gate:
+The committed VPN export toward a PE is `rbgp rib vpn advertised PEER`
+(narrow it with `-a vpnv4|vpnv6` and `--rd`); the unicast
+`rbgp rib advertised` does not accept a VPN family. To see why one route
+was or was not exported, use the VPN export ladder, which includes the
+RT-membership gate:
 
 ```console
 $ rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.12 --explain --rd 65000:1

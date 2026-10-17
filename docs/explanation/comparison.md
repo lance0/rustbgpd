@@ -205,7 +205,7 @@ IPv4/IPv6 `Prefix` routes.
 | In-language policy unit tests | Yes | No | No | No | No |
 | Policy dry-run against the live RIB | Yes | No | No | No | No |
 | Live per-term policy hit counters | Yes | No | No | No | No |
-| RFC 8212 default eBGP policy | Opt-in | Profile-dependent[^rfc8212-frr] | Yes[^rfc8212-bird] | No[^rfc8212-gobgp] | Yes[^rfc8212-openbgpd] |
+| RFC 8212 default eBGP policy | Opt-in (secure default under `config_epoch = 2`) | Profile-dependent[^rfc8212-frr] | Yes[^rfc8212-bird] | No[^rfc8212-gobgp] | Yes[^rfc8212-openbgpd] |
 | Conditional advertisement (if present / if absent) | Alpha[^condadv] | Yes | No | No | No |
 
 [^condadv]: rustbgpd's opt-in IPv4/IPv6 unicast conditional advertisement
