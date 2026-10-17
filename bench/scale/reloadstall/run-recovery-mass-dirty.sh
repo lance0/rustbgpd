@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fresh-hosted, exact-source actual-daemon shared/flat recovery qualification.
+# Fresh-hosted, exact-source actual-daemon shared/flat recovery qualification,
+# or (dataset-* cohorts) the single-daemon full-table dataset-reload qualification.
 set -euo pipefail
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -21,8 +22,8 @@ while [[ $# -gt 0 ]]; do
     esac
     shift 2
 done
-[[ $head =~ ^[0-9a-f]{40}$ && -n $output && ( $profile == full-uc || $profile == full-vpn ) && ( $cohort == no-refusal || $cohort == cap-pressure ) ]] || {
-    echo 'usage: run-recovery-mass-dirty.sh --head SHA --output-dir NEW_DIR --profile full-uc|full-vpn --cohort no-refusal|cap-pressure [--daemon-cpus LIST --harness-cpus LIST] [--correctness-only]' >&2
+[[ $head =~ ^[0-9a-f]{40}$ && -n $output && ( $profile == full-uc || $profile == full-vpn ) && ( $cohort == no-refusal || $cohort == cap-pressure || $cohort == dataset-delta || $cohort == dataset-full ) ]] || {
+    echo 'usage: run-recovery-mass-dirty.sh --head SHA --output-dir NEW_DIR --profile full-uc|full-vpn --cohort no-refusal|cap-pressure|dataset-delta|dataset-full [--daemon-cpus LIST --harness-cpus LIST] [--correctness-only]' >&2
     exit 1
 }
 if [[ ${#correctness[@]} == 0 ]]; then
@@ -33,6 +34,9 @@ fi
 [[ $(git -C "$repository" rev-parse HEAD) == "$head" ]] || { echo 'source SHA mismatch' >&2; exit 1; }
 [[ -z $(git -C "$repository" status --porcelain --untracked-files=normal) ]] || { echo 'source/instrument must be committed and clean' >&2; exit 1; }
 [[ ! -e $output ]] || { echo 'output must be new' >&2; exit 1; }
+# Dataset reload judges one daemon against absolute bars; it builds no control.
+roles=(candidate flat)
+[[ $cohort != dataset-* ]] || roles=(candidate)
 if [[ -z $daemon_cpus && -z $harness_cpus ]]; then
     read -r daemon_cpus harness_cpus < <(python3 - <<'PY'
 import os
@@ -119,18 +123,22 @@ for path in bench/scale/reloadstall/sample-daemon-cgroup.py bench/scale/provenan
     mkdir -p "$output/frozen-support/$(dirname "$path")"
     cp -- "$repository/$path" "$output/frozen-support/$path"
 done
-for role in candidate flat; do
+for role in "${roles[@]}"; do
     git -C "$repository" worktree add --detach "$scratch/$role" "$head"
 done
-cp -- "$scratch/candidate/crates/rib/src/manager/update_groups.rs" "$output/capture-source.rs"
-python3 "$checker" derive-flat "$scratch/flat/crates/rib/src/manager/update_groups.rs" "$output/derivation.json"
-cp -- "$scratch/flat/crates/rib/src/manager/update_groups.rs" "$output/flat-control-source.rs"
-git -C "$scratch/flat" diff --binary >"$output/flat-control.patch"
+if [[ ${#roles[@]} == 2 ]]; then
+    cp -- "$scratch/candidate/crates/rib/src/manager/update_groups.rs" "$output/capture-source.rs"
+    python3 "$checker" derive-flat "$scratch/flat/crates/rib/src/manager/update_groups.rs" "$output/derivation.json"
+    cp -- "$scratch/flat/crates/rib/src/manager/update_groups.rs" "$output/flat-control-source.rs"
+    git -C "$scratch/flat" diff --binary >"$output/flat-control.patch"
+fi
 rustc -Vv >"$output/rustc-version.txt"
 cargo --version >"$output/cargo-version.txt"
 jobs=${CARGO_BUILD_JOBS:-2}
 [[ $jobs =~ ^[1-4]$ ]] || { echo 'build jobs must be 1..=4' >&2; exit 1; }
 for role in candidate flat; do
+    # Dataset reload adds no flat worktree and so builds no control daemon.
+    [[ -d $scratch/$role ]] || continue
     # Source worktrees must not reuse a role's cached RIB fingerprint. The
     # off-source mutation predates both builds, so one shared target is unsafe.
     target=$scratch/target-$role

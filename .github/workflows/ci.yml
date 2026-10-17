@@ -30,9 +30,9 @@ on:
         default: false
         required: false
       recovery_receipt_mode:
-        description: Select memory, capture scan, retirement attribution or daemon mass-dirty qualification
+        description: Select memory, capture scan, retirement attribution, daemon mass-dirty or dataset-reload qualification
         type: choice
-        options: [memory, scan, retirement, mass-dirty]
+        options: [memory, scan, retirement, mass-dirty, dataset-reload]
         default: memory
         required: false
 
@@ -71,9 +71,9 @@ jobs:
                   default: false
                   required: false
                 recovery_receipt_mode:
-                  description: Select memory, capture scan, retirement attribution or daemon mass-dirty qualification
+                  description: Select memory, capture scan, retirement attribution, daemon mass-dirty or dataset-reload qualification
                   type: choice
-                  options: [memory, scan, retirement, mass-dirty]
+                  options: [memory, scan, retirement, mass-dirty, dataset-reload]
                   default: memory
                   required: false'
           if [[ "$actual" != "$expected" ]]; then
@@ -776,7 +776,7 @@ jobs:
   recovery_memory_receipt:
     # Bounded, operator-dispatched qualification; never part of push/PR,
     # ordinary main/release re-tests, or the reserved self-hosted soak runner.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode != 'mass-dirty' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode != 'mass-dirty' && inputs.recovery_receipt_mode != 'dataset-reload' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -867,15 +867,18 @@ jobs:
 
   recovery_mass_dirty_receipt:
     # Separate fresh-VM daemon qualification; never run the component campaign
-    # for this mode. The controller fixes cohort sizes and cgroup limits.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode == 'mass-dirty' }}
+    # for these modes. The controller fixes cohort sizes and cgroup limits.
+    # dataset-reload reuses this driver for SIGHUP dataset swaps on one daemon.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_memory_receipt == true && (inputs.recovery_receipt_mode == 'mass-dirty' || inputs.recovery_receipt_mode == 'dataset-reload') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         # no-refusal has 12 receivers; cap-pressure has 24, without resizing.
-        include: ${{ fromJSON('[{"profile":"full-uc","cohort":"no-refusal"},{"profile":"full-uc","cohort":"cap-pressure"},{"profile":"full-vpn","cohort":"no-refusal"},{"profile":"full-vpn","cohort":"cap-pressure"}]') }}
+        # Dataset reload: both families on the affected-keys path, plus one
+        # unicast cell whose swap forces the full re-evaluation pass.
+        include: ${{ fromJSON(inputs.recovery_receipt_mode == 'dataset-reload' && '[{"profile":"full-uc","cohort":"dataset-delta"},{"profile":"full-vpn","cohort":"dataset-delta"},{"profile":"full-uc","cohort":"dataset-full"}]' || '[{"profile":"full-uc","cohort":"no-refusal"},{"profile":"full-uc","cohort":"cap-pressure"},{"profile":"full-vpn","cohort":"no-refusal"},{"profile":"full-vpn","cohort":"cap-pressure"}]') }}
     env:
       CARGO_BUILD_JOBS: "4"
       RECOVERY_MASS_DIRTY_PROFILE: ${{ matrix.profile }}
