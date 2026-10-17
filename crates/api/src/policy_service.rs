@@ -1427,7 +1427,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         };
         let (base, args) = candidate_call(&file, &req.policy)?;
         let bindings = bind_candidate_datasets(&file, &req.datasets)?;
-        let chain = compile_candidate(&file, base, &args, &mut SetStore::new(), &bindings)?;
+        let chain = compile_candidate(&file, base, &args, &mut SetStore::new(), &bindings, false)?;
 
         // Start the version-fenced route walk before reading peer context.
         // Import evaluates Adj-RIB-In (optionally one peer's); export
@@ -1568,12 +1568,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 .add_policy(policy)
                 .map_err(|reason| Status::invalid_argument(format!("candidate chain: {reason}")))
         };
-        let mut compiled = Vec::with_capacity(calls.len());
-        for (base, args) in &calls {
-            let chain = compile_candidate(&file, base, args, &mut store, &bindings)?;
-            chain.policies.iter().try_for_each(&mut charge)?;
-            compiled.push(chain);
-        }
+        let mut compiled =
+            compile_compare_candidates(&file, &calls, &bindings, &mut store, &mut charge)?;
 
         // The baseline is the chain the live distribution path evaluates
         // for this peer, read before the walk starts.
@@ -2041,15 +2037,23 @@ fn bind_candidate_datasets(
     Ok(bindings)
 }
 
-/// Compile one resolved candidate policy reference.
+/// Compile one resolved candidate policy reference. `cached_tables` reuses
+/// the file's literal set tables, built once per file, for a caller that
+/// compiles several policies from one submitted source.
 fn compile_candidate(
     file: &rustbgpd_policy::rpol::RpolFile,
     base: &str,
     args: &[u32],
     store: &mut rustbgpd_policy::sets::SetStore,
     bindings: &rustbgpd_policy::datasets::DatasetBindings,
+    cached_tables: bool,
 ) -> Result<rustbgpd_policy::ir::CompiledChain, Status> {
-    file.compile_policy_bound(base, args, store, bindings)
+    let compiled = if cached_tables {
+        file.compile_policy_bound_cached_tables(base, args, store, bindings)
+    } else {
+        file.compile_policy_bound(base, args, store, bindings)
+    };
+    compiled
         .expect("candidate_call checked existence")
         .map_err(|missing| {
             Status::invalid_argument(format!(
@@ -2235,6 +2239,26 @@ fn dry_run_route_context<'a>(
     }
 }
 
+/// Compile every candidate member of one comparison from the submitted file,
+/// charging each against the chain budget as it is retained. The file's
+/// literal set tables are built once and shared by every member; candidate
+/// dataset bindings stay per request.
+fn compile_compare_candidates(
+    file: &rustbgpd_policy::rpol::RpolFile,
+    calls: &[(&str, Vec<u32>)],
+    bindings: &rustbgpd_policy::datasets::DatasetBindings,
+    store: &mut rustbgpd_policy::sets::SetStore,
+    charge: &mut impl FnMut(&rustbgpd_policy::ir::CompiledPolicy) -> Result<(), Status>,
+) -> Result<Vec<rustbgpd_policy::ir::CompiledChain>, Status> {
+    let mut compiled = Vec::with_capacity(calls.len());
+    for (base, args) in calls {
+        let chain = compile_candidate(file, base, args, store, bindings, true)?;
+        chain.policies.iter().try_for_each(&mut *charge)?;
+        compiled.push(chain);
+    }
+    Ok(compiled)
+}
+
 /// Route selection scope for one `ComparePolicy` run.
 struct ComparePolicyScope {
     /// Export target: its address and peer context are the evaluation context.
@@ -2309,8 +2333,9 @@ struct ComparePolicyFrames {
 
 /// Evaluate the installed and candidate chains over one page and count the
 /// routes they treat differently. Both run through the dry-run evaluator
-/// with scratch hit grids, so no live counter moves and no evaluation-error
-/// WARN is logged, and read datasets from `frames`, pinned once per run.
+/// without coverage grids, so no live counter moves, no evaluation-error
+/// WARN is logged and nothing is allocated per route for coverage; both
+/// read datasets from `frames`, pinned once per run.
 fn run_compare_policy_page(
     installed: &rustbgpd_policy::ir::CompiledChain,
     candidate: &rustbgpd_policy::ir::CompiledChain,
@@ -2324,8 +2349,6 @@ fn run_compare_policy_page(
 
     let needs_as_path_string =
         installed.requires_as_path_string() || candidate.requires_as_path_string();
-    let mut installed_hits = installed.zero_term_hits();
-    let mut candidate_hits = candidate.zero_term_hits();
     let remaining = if scope.limit == 0 {
         usize::MAX
     } else {
@@ -2344,10 +2367,8 @@ fn run_compare_policy_page(
         let as_path_str = dry_run_as_path_string(route, needs_as_path_string);
         let ctx = dry_run_route_context(route, &as_path_str, Some(scope.target), peer_context);
         response.routes_evaluated += 1;
-        let before =
-            installed.evaluate_recording_hits_pinned(&ctx, &mut installed_hits, &frames.installed);
-        let after =
-            candidate.evaluate_recording_hits_pinned(&ctx, &mut candidate_hits, &frames.candidate);
+        let before = installed.evaluate_pinned(&ctx, &frames.installed);
+        let after = candidate.evaluate_pinned(&ctx, &frames.candidate);
         let (count, samples) = match (before.action, after.action) {
             (PolicyAction::Permit, PolicyAction::Deny) => (
                 &mut response.newly_rejected,
@@ -4854,6 +4875,7 @@ policy client-x {
             &[],
             &mut rustbgpd_policy::sets::SetStore::new(),
             &bindings,
+            true,
         )
         .unwrap();
         let candidate = rustbgpd_policy::compile::splice_compiled(&[
@@ -4894,6 +4916,31 @@ policy client-x {
             &mut response,
         );
         assert_eq!(compare_counts(&response), (4, 0, 0, 0));
+    }
+
+    /// Comparison members compile from the submitted file's literal tables,
+    /// built once for the file, and match a per-member table build exactly.
+    #[test]
+    fn compare_candidates_share_the_files_literal_tables() {
+        let file = rustbgpd_policy::rpol::RpolFile::parse(COMPARE_INSTALLED_RPOL).unwrap();
+        let calls = [("rs-hygiene", Vec::new()), ("client-x", Vec::new())];
+        let bindings = rustbgpd_policy::datasets::DatasetBindings::new();
+        assert!(!file.literal_tables_built());
+        let mut budget = rustbgpd_policy::compile::ChainNodeBudget::default();
+        let compiled = compile_compare_candidates(
+            &file,
+            &calls,
+            &bindings,
+            &mut rustbgpd_policy::sets::SetStore::new(),
+            &mut |policy| budget.add_policy(policy).map_err(Status::invalid_argument),
+        )
+        .unwrap();
+        assert!(file.literal_tables_built());
+        let fresh = rustbgpd_policy::rpol::RpolFile::parse(COMPARE_INSTALLED_RPOL).unwrap();
+        let mut store = rustbgpd_policy::sets::SetStore::new();
+        for ((name, _), chain) in calls.iter().zip(&compiled) {
+            assert_eq!(chain, &fresh.compile_policy(name, &[], &mut store).unwrap());
+        }
     }
 
     /// A composed chain whose dataset table exceeds the per-walk pin frame is
