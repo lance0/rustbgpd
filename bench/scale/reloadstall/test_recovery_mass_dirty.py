@@ -1707,5 +1707,270 @@ rm() {
 
 
 
+
+class DatasetReloadTests(unittest.TestCase):
+    """Dataset-reload controls: every bar has a seeded input that must not pass."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="rds-test-")
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def manifest(self, cohort="dataset-delta", profile="full-uc", correctness=False):
+        cpus = sorted(os.sched_getaffinity(0))
+        if len(cpus) < 2:
+            self.skipTest("requires two assigned CPUs")
+        root = self.root / "campaign"
+        args = argparse.Namespace(output=str(root), head="a" * 40, profile=profile, cohort=cohort,
+                                  daemon_cpus=str(cpus[0]), harness_cpus=str(cpus[1]), correctness_only=correctness)
+        return root, receipt.init(args)
+
+    def test_manifest_freezes_bars_shape_and_path_before_results(self):
+        for cohort, mode in (("dataset-delta", "delta"), ("dataset-full", "full")):
+            with self.subTest(cohort=cohort):
+                root, manifest = self.manifest(cohort=cohort)
+                self.assertEqual(receipt.load_manifest(root), manifest)
+                self.assertEqual((manifest["receivers"], manifest["schedule"]), (12, ["candidate"]))
+                stimulus = manifest["dataset_stimulus"]
+                self.assertEqual((stimulus["selected_chunks"], stimulus["selected_keys"]), (154, [10_000, 2_320]))
+                self.assertEqual((stimulus["reevaluation_mode"], manifest["bars"]), (mode, receipt.DATASET_BARS))
+                for change in ({"bars": {}}, {"receivers": 2}, {"dataset_stimulus": {**stimulus, "selected_chunk_stride": 50}}):
+                    receipt.write_json(root / "campaign.json", {**manifest, **change})
+                    (root / "campaign.sha256").write_text(receipt.digest(root / "campaign.json") + "\n")
+                    with self.assertRaisesRegex(ValueError, "dataset-reload campaign"):
+                        receipt.load_manifest(root)
+                shutil.rmtree(root)
+
+    def test_fixture_swaps_only_selected_origins_and_full_cell_adds_unboundable_probe(self):
+        for cohort in receipt.DATASET_COHORTS:
+            with self.subTest(cohort=cohort):
+                scenario = self.root / cohort
+                hashes = receipt.generate(scenario, "full-vpn", 12, 1, 2, dataset=cohort)
+                full = cohort == "dataset-full"
+                self.assertEqual(set(hashes), set(receipt.DATASET_FULL_FIXTURE_INPUTS if full else receipt.DATASET_FIXTURE_INPUTS))
+                base = set((scenario / "generation-base.list").read_text().split())
+                swapped = set((scenario / "generation-swapped.list").read_text().split())
+                self.assertTrue(base < swapped)
+                self.assertEqual(swapped - base, {str(4_200_100_000 + 2 * chunk) for chunk in range(0, 15_375, 100)})
+                self.assertEqual((scenario / "generation.list").read_text(), (scenario / "generation-base.list").read_text())
+                policy, config = (scenario / "member.rpol").read_text(), (scenario / "config.toml").read_text()
+                self.assertEqual("route.communities in fullpass" in policy, full)
+                self.assertEqual("[policy.datasets.fullpass]" in config, full)
+                self.assertNotIn("slow_peer_duration", config)
+                self.assertIn("l3vpn_ipv4_unicast", config)
+                receipt.swap_dataset(scenario, "b", full)
+                self.assertEqual((scenario / "generation.list").read_text(), (scenario / "generation-swapped.list").read_text())
+                receipt.swap_dataset(scenario, "a", full)
+                receipt.validate_fixture(scenario, hashes, receipt.DATASET_FULL_FIXTURE_INPUTS if full else receipt.DATASET_FIXTURE_INPUTS)
+
+    @staticmethod
+    def outcomes(complete, **others):
+        return "".join(f'bgp_sighup_reload_outcomes_total{{outcome="{outcome}"}} '
+                       f'{complete if outcome == "complete" else others.get(outcome, 0)}\n'
+                       for outcome in receipt.RELOAD_OUTCOMES)
+
+    def campaign(self, cohort="dataset-delta", mode=None, statuses=(), bar_failure=None):
+        """A complete synthetic measured campaign; no daemon, harness or clock runs."""
+        root, manifest = self.manifest(cohort=cohort)
+        (root / "candidate.sha").write_text(manifest["head"] + "\n")
+        binaries = root / "bin"
+        binaries.mkdir()
+        for name in ("rustbgpd-candidate", "reloadstall", "rbgp"):
+            (binaries / name).write_text(name + "\n")
+        (root / "binaries.sha256").write_text("".join(
+            f"{receipt.digest(path)}  {path}\n" for path in sorted(binaries.iterdir())))
+        for role in receipt.DATASET_BUILD_ROLES:
+            (root / f"build-{role}.log").write_text(f"fixture build {role}\n")
+            (root / f"build-{role}.exit").write_text("0\n")
+        (root / "rustc-version.txt").write_text("rustc fixture\n")
+        (root / "cargo-version.txt").write_text("cargo fixture\n")
+        receipt.write_json(root / "binary-validation.json", receipt.verified_binaries(root))
+        for name in receipt.OWNED_INPUTS:
+            path = root / "frozen-instrumentation" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((receipt.HERE / name).read_bytes())
+        for name in receipt.SUPPORT_INPUTS:
+            path = root / "frozen-support" / os.path.normpath("bench/scale/reloadstall/" + name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((receipt.HERE / name).read_bytes())
+        receipt.seal_build(root)
+        leg = root / "leg-0-candidate"
+        leg.mkdir()
+        hashes = receipt.generate(leg / "fixture", "full-uc", 12, 1, 2, dataset=cohort)
+        receipt.write_json(leg / "fixture.sha256.json", hashes)
+        (leg / "config-check.log").write_text("ok\n")
+        stimulus = manifest["dataset_stimulus"]
+        mode = mode or stimulus["reevaluation_mode"]
+        records = [("dataset_reload_ready", {"receivers": 12, "family_keys": manifest["family_keys"],
+                                             "selected_keys": stimulus["selected_keys"], "selected_chunk_stride": 100,
+                                             "batch_size": 80, "origin_cardinality": 15_375, "correctness_only": False})]
+        log, operations = b"", []
+        for index, generation in enumerate(("b", "a")):
+            trigger = 110.0 + 20 * index
+            fold = {"generation": generation, "receivers": 12, "fold_monotonic_seconds": trigger + 1.5,
+                    "receiver_fold_p50_monotonic_seconds": trigger + 1.2, "receiver_fold_max_monotonic_seconds": trigger + 1.4,
+                    "announcements": 147_840, "unchanged_announcements": 0, "prior_replays": 0,
+                    "exact_fold": True, "sessions_continuous": True}
+            records += [("dataset_reload_armed", {"generation": generation, "receivers": 12}),
+                        ("dataset_reload_fold", fold)]
+            (leg / f"metrics-before-{generation}.prom").write_text(self.outcomes(index))
+            (leg / f"metrics-after-{generation}.prom").write_text(self.outcomes(index + 1))
+            last = {"record": {"outcome": "complete", "unapplied_count": 0, "failure_bucket": None, "applied_count": 1},
+                    "convergence": {"state": "converged"}}
+            (leg / f"last-reload-{generation}.json").write_text(json.dumps(last))
+            line = json.dumps({"fields": {"message": receipt.REEVALUATION_MESSAGE, "mode": mode, "peers": 12,
+                                          "affected_prefixes": 12_320, "affected_vpn_keys": 0, "elapsed_ms": 80}}).encode() + b"\n"
+            start = len(log)
+            log += b'{"fields":{"message":"reload staged"}}\n' + line
+            (leg / f"daemon-operation-{generation}.jsonl").write_bytes(log[start:])
+            operations.append({"generation": generation, "trigger_monotonic_seconds": trigger,
+                               "complete_monotonic_seconds": trigger + 1, "fold": fold,
+                               "outcome_deltas": {outcome: int(outcome == "complete") for outcome in receipt.RELOAD_OUTCOMES},
+                               "last_reload": last, "daemon_log_bytes": {"start": start, "end": len(log)},
+                               "reevaluations": receipt.reevaluations(log[start:].decode()),
+                               "sighup_to_complete_seconds": 1.0, "sighup_to_fold_seconds": 1.5,
+                               "receiver_fold_p50_seconds": 1.2, "receiver_fold_max_seconds": 1.4})
+        (leg / "daemon.log").write_bytes(log)
+        statuses = dict(statuses)
+        for index in range(200):
+            status = statuses.get(index, 200)
+            records.append(("mass_dirty_readiness", {
+                "sequence": index + 1, "status": status, "phase": None if status == 200 else "response_validation",
+                "request_deadline_ms": 1000, "elapsed_seconds": .002, "started_monotonic_seconds": 100 + index * .25,
+                "finished_monotonic_seconds": 100.002 + index * .25}))
+        records.append(("dataset_reload_exit", {"readiness_samples": 200, "readiness_interval_ms": 250,
+                                                "readiness_request_deadline_ms": 1000, "status": "PASS"}))
+        row = {"arm": "candidate", "index": 0, "source": manifest["head"], "operations": operations,
+               "bar_failures": [], "status": "PASS", "correctness_only": False, "config_check_exit": 0,
+               "daemon_exit": 0, "harness_exit": 0,
+               "binary_sha256": receipt.digest(binaries / "rustbgpd-candidate"),
+               "harness_sha256": receipt.digest(binaries / "reloadstall"), "rbgp_sha256": receipt.digest(binaries / "rbgp"),
+               "memory_after": {"memory.peak": 1 << 30}}
+        if bar_failure is not None:
+            # The leg stopped at the first operation: no fold, no completion.
+            reason, daemon_exit = bar_failure
+            operations[1:] = []
+            for name in ("last_reload", "daemon_log_bytes", "reevaluations", "sighup_to_complete_seconds",
+                         "sighup_to_fold_seconds", "receiver_fold_p50_seconds", "receiver_fold_max_seconds"):
+                operations[0].pop(name)
+            operations[0].update(fold=None, complete_monotonic_seconds=None)
+            records = [record for record in records if record[0] not in ("dataset_reload_fold", "dataset_reload_exit")
+                       and record[1].get("generation") != "a"]
+            for generation in ("a",):
+                for name in (f"metrics-before-{generation}.prom", f"metrics-after-{generation}.prom",
+                             f"last-reload-{generation}.json", f"daemon-operation-{generation}.jsonl"):
+                    (leg / name).unlink()
+            for name in ("metrics-after-b.prom", "last-reload-b.json", "daemon-operation-b.jsonl"):
+                (leg / name).unlink()
+            row.update(bar_failures=[reason], status="FAIL", daemon_exit=daemon_exit, harness_exit=1)
+            row.pop("memory_after")
+        (leg / "harness.log").write_text("".join(f"{prefix} {json.dumps(body)}\n" for prefix, body in records))
+        row["raw_sha256"] = {path.name: receipt.digest(path) for path in leg.iterdir() if path.is_file()}
+        receipt.write_json(leg / "result.json", row)
+        (root / "execution.exit").write_text("0\n")
+        return root
+
+    def finalize(self, root, expected_driver_exit):
+        (root / "driver.exit").write_text(f"{expected_driver_exit}\n")
+        return receipt.finalize(root)
+
+    def test_complete_reloads_pass_and_report_unbarred_timings(self):
+        for cohort in receipt.DATASET_COHORTS:
+            with self.subTest(cohort=cohort):
+                verdict = self.finalize(self.campaign(cohort=cohort), 0)
+                self.assertEqual(verdict["status"], "PASS", verdict.get("reason"))
+                self.assertEqual([op["sighup_to_fold_seconds"] for op in verdict["operations"]], [1.5, 1.5])
+                self.assertEqual(verdict["readiness"]["non_200_or_failed"], 0)
+                shutil.rmtree(self.root / "campaign")
+
+    def test_seeded_fail_stop_exit_70_is_a_fail(self):
+        failure = receipt.daemon_exit_failure(70)
+        self.assertEqual(failure, "daemon exited with status 70 (fail-stop)")
+        verdict = self.finalize(self.campaign(bar_failure=(failure, 70)), 1)
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertIn("exited with status 70 (fail-stop)", verdict["reason"])
+        # The driver must report the same red: a green driver exit is INVALID.
+        self.assertEqual(self.finalize(self.root / "campaign", 0)["status"], "INVALID")
+
+    def test_seeded_readiness_503_window_is_a_fail_with_its_duration(self):
+        verdict = self.finalize(self.campaign(statuses={60: 503, 61: 503, 62: 503}), 1)
+        self.assertEqual(verdict["status"], "FAIL")
+        window, = verdict["readiness"]["windows"]
+        self.assertEqual((window["samples"], window["statuses"], window["closed"]), (3, {"503": 3}, True))
+        self.assertAlmostEqual(window["duration_seconds"], .75)
+        self.assertIn("3 non-200 or failed /readyz samples in 1 window(s), longest 0.75 s", verdict["reason"])
+
+    def test_seeded_fold_mismatch_is_a_fail(self):
+        failure = "exact fold or session continuity failed: harness exited 1"
+        verdict = self.finalize(self.campaign(bar_failure=(failure, 0)), 1)
+        self.assertEqual((verdict["status"], verdict["reason"].split(";")[0]), ("FAIL", failure))
+
+    def test_tampered_fold_receipt_cannot_pass(self):
+        root = self.campaign()
+        leg = root / "leg-0-candidate"
+        text = (leg / "harness.log").read_text().replace('"exact_fold": true', '"exact_fold": false', 1)
+        (leg / "harness.log").write_text(text)
+        row = json.loads((leg / "result.json").read_text())
+        # A consistent receipt pair: only the exact-fold check can reject it.
+        row["operations"][0]["fold"]["exact_fold"] = False
+        row["raw_sha256"]["harness.log"] = receipt.digest(leg / "harness.log")
+        receipt.write_json(leg / "result.json", row)
+        verdict = self.finalize(root, 0)
+        self.assertEqual((verdict["status"], verdict["reason"]), ("INVALID", "fold receipt differs"))
+
+    def test_cell_that_takes_the_wrong_path_is_invalid(self):
+        for cohort, mode in (("dataset-delta", "full"), ("dataset-full", "delta")):
+            with self.subTest(cohort=cohort):
+                verdict = self.finalize(self.campaign(cohort=cohort, mode=mode), 0)
+                self.assertEqual(verdict["status"], "INVALID")
+                self.assertIn(f"re-evaluation mode ['{mode}']", verdict["reason"])
+                shutil.rmtree(self.root / "campaign")
+
+    def test_reload_outcome_and_applied_bars(self):
+        before = {outcome: 3 for outcome in receipt.RELOAD_OUTCOMES}
+        self.assertEqual(receipt.outcome_failure(before, before)[1], None)
+        self.assertEqual(receipt.outcome_failure(before, {**before, "complete": 4})[1], None)
+        self.assertEqual(receipt.outcome_failure(before, {**before, "known_partial": 4})[1],
+                         "SIGHUP reload outcome known_partial +1")
+        self.assertIn("completed 2 reloads", receipt.outcome_failure(before, {**before, "complete": 5})[1])
+        with self.assertRaisesRegex(ValueError, "regressed"):
+            receipt.outcome_failure(before, {**before, "task_failed": 2})
+        applied = {"record": {"outcome": "complete", "unapplied_count": 0, "failure_bucket": None}}
+        self.assertIsNone(receipt.last_reload_failure(applied))
+        self.assertIn("not applied", receipt.last_reload_failure(
+            {"record": {**applied["record"], "unapplied_count": 1}}))
+        self.assertIn("no completed", receipt.last_reload_failure({"record": None}))
+
+    def test_await_reload_reports_exit_70_bad_outcome_and_broken_fold(self):
+        with (self.root / "records").open("w+") as records:
+            fail_stop = subprocess.Popen(["sh", "-c", "exit 70"])
+            fail_stop.wait()
+            alive = subprocess.Popen(["sleep", "30"])
+            ended = subprocess.Popen(["sh", "-c", "exit 1"])
+            ended.wait()
+            try:
+                before = {outcome: 0 for outcome in receipt.RELOAD_OUTCOMES}
+                deadline = time.monotonic() + 30
+                self.assertEqual(receipt.await_reload(fail_stop, alive, records, 1, before, deadline, False)["failure"],
+                                 "daemon exited with status 70 (fail-stop)")
+                with mock.patch.object(receipt, "http_metrics", return_value=self.outcomes(0, known_partial=1)):
+                    self.assertEqual(receipt.await_reload(alive, alive, records, 1, before, deadline, False)["failure"],
+                                     "SIGHUP reload outcome known_partial +1")
+                with mock.patch.object(receipt, "http_metrics", return_value=self.outcomes(1)):
+                    self.assertEqual(receipt.await_reload(alive, ended, records, 1, before, deadline, False)["failure"],
+                                     "exact fold or session continuity failed: harness exited 1")
+                    fold = {"generation": "b", "exact_fold": True}
+                    records.write("mass_dirty_readiness {}\ndataset_reload_fold " + json.dumps(fold) + "\n")
+                    records.flush()
+                    records.seek(0)
+                    observed = receipt.await_reload(alive, alive, records, 1, before, deadline, False)
+                    self.assertEqual((observed["failure"], observed["fold"]), (None, fold))
+            finally:
+                alive.kill()
+                alive.wait()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -164,6 +164,67 @@ performance. A separate soak on the actual release candidate
 remains required and is owned by the soak operator; this driver does not touch
 the soak host.
 
+## Full-table dataset-reload qualification
+
+The `dataset-delta` and `dataset-full` cohorts of the same driver qualify the
+operator path that a scheduled IRR or origin-list refresh takes: change a
+dataset file, send SIGHUP, and expect every receiver to converge while the
+daemon stays ready. The instrument, build, CPU pinning, cgroup scopes,
+readiness probe, exact receiver bitmaps and evidence layout are the mass-dirty
+ones above. Differences:
+
+- One candidate daemon, no derived control: the bars are absolute.
+- The source announces the full 1,000,000 IPv4 + 230,000 IPv6 table (unicast
+  or VPN) once and never changes it. Twelve receivers use kernel-default
+  receive buffers and the daemon's default slow-peer and send-hold timers.
+- `generation_b` starts with the 15,375 unused B origins. Operation `b` adds
+  the origin of every hundredth 80-key chunk (154 chunks, 10,000 IPv4 + 2,320
+  IPv6 keys, about 1%); those keys must change from community 65400:1000 to
+  65400:2000. Operation `a` restores the base file. Each swap is an atomic
+  rename followed by one SIGHUP.
+- `dataset-delta` expects the affected-keys path. `dataset-full` adds a
+  community-set dataset read through `route.communities in` (it never matches
+  the source routes) and changes it in the same SIGHUP. That probe cannot be
+  bounded, so the daemon must take its full re-evaluation pass.
+
+The manifest freezes these bars before any result:
+
+- **Fail-stop:** the daemon runs through both reloads. Any exit, including
+  fail-stop exit 70, is FAIL.
+- **Applied:** each SIGHUP adds exactly one `complete` to
+  `bgp_sighup_reload_outcomes_total` and nothing to any other outcome, and
+  `rbgp config last-reload` reports outcome `complete` with nothing unapplied.
+  Otherwise FAIL.
+- **Exact fold:** every receiver reaches the table a fresh start with the new
+  dataset would send. A wrong verdict, a return to the prior value after the
+  new one, a withdrawal or a session loss is FAIL. A prior-value replay before
+  a key's first new value is allowed and counted.
+- **Readiness:** every `/readyz` sample (4 Hz, 1 s deadline) is 200. Any
+  non-200 or failed sample is FAIL, and each contiguous non-200 window is
+  reported with its duration. Broken sampling coverage (a gap over 1.25 s, or
+  no sample before SIGHUP and after the fold) is INVALID.
+- **Path:** every `dataset export re-evaluation complete` log record for an
+  operation must carry the cell's mode (`delta` or `full`); otherwise the cell
+  did not measure its path and is INVALID. A breach of the bars above remains
+  a FAIL.
+
+SIGHUP→reload complete, SIGHUP→exact fold, receiver fold p50/max, the logged
+re-evaluation `elapsed_ms` and affected keys, unchanged re-announcements,
+`/readyz` latency and the daemon cgroup peak are reported, not gated. One leg
+covers one swap and its revert; repeat by dispatching again.
+
+```sh
+bash bench/scale/reloadstall/run-recovery-mass-dirty.sh \
+  --head FULL_SOURCE_SHA --output-dir NEW_DIRECTORY \
+  --profile full-uc --cohort dataset-delta
+python3 bench/scale/reloadstall/recovery_mass_dirty.py finalize NEW_DIRECTORY
+```
+
+Hosted, select `recovery_receipt_mode=dataset-reload` with
+`recovery_memory_receipt=true`; it runs full-uc and full-vpn `dataset-delta`
+and full-uc `dataset-full` on fresh runners. `--correctness-only` keeps the full
+table with two receivers and null clocks, for pipeline checks only.
+
 ## Unsent-data threshold experiment
 
 The experimental Linux socket hook is compiled only with

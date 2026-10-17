@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frozen real-daemon mass-dirty recovery qualification; never a component receipt."""
+"""Frozen real-daemon mass-dirty recovery and full-table dataset-reload qualification."""
 
 from __future__ import annotations
 
@@ -44,12 +44,43 @@ OWNED_INPUTS = ("src/main.rs", "src/recovery_mass_dirty.rs", "recovery_mass_dirt
 SUPPORT_INPUTS = ("sample-daemon-cgroup.py", "../provenance.sh", "../cgroup-memory.sh",
                   "../../../tests/soak/host-lock.sh")
 FIXTURE_INPUTS = ("config.toml", "member.rpol", "generation.list")
+MASS_DIRTY_COHORTS = ("no-refusal", "cap-pressure")
+# Dataset reload swaps origin-AS content and sends SIGHUP; the source never
+# changes. The full cell also swaps a community dataset the policy reads
+# through `route.communities in`, which the affected-keys bound cannot prove,
+# so the daemon must take its full re-evaluation pass.
+DATASET_COHORTS = ("dataset-delta", "dataset-full")
+DATASET_STRIDE = 100
+DATASET_FIXTURE_INPUTS = ("config.toml", "member.rpol", "generation-base.list", "generation-swapped.list")
+DATASET_FULL_FIXTURE_INPUTS = (*DATASET_FIXTURE_INPUTS, "fullpass-base.list", "fullpass-swapped.list")
+RELOAD_OUTCOMES = ("complete", "ignored_in_flight", "known_partial", "rejected_no_effect", "task_failed")
+REEVALUATION_MESSAGE = "dataset export re-evaluation complete"
+DATASET_BARS = {
+    "fail_stop": "the daemon runs through both reloads; any exit, including fail-stop exit 70, is FAIL",
+    "reload_applied": "each SIGHUP adds exactly one complete outcome and no other outcome, and "
+                      "last-reload reports outcome complete with nothing unapplied; otherwise FAIL",
+    "exact_fold": "every receiver reaches the exact table a fresh start with the new dataset would send, "
+                  "with no withdrawal, no wrong verdict, no reversal and continuous sessions; otherwise FAIL",
+    "readiness": "every /readyz sample is 200; any non-200 or failed sample is FAIL and each contiguous "
+                 "non-200 window is reported with its duration",
+    "path": "every re-evaluation logged for an operation takes the cell's mode (delta or full); otherwise INVALID",
+    "reported_not_gated": ["SIGHUP to reload complete", "SIGHUP to exact fold", "re-evaluation elapsed_ms",
+                           "affected keys", "unchanged re-announcements", "/readyz latency", "daemon cgroup peak"],
+}
 BUILD_ROLES = ("candidate", "flat", "harness", "rbgp")
+DATASET_BUILD_ROLES = ("candidate", "harness", "rbgp")
 BUILD_EVIDENCE_FILES = ("campaign.json", "campaign.sha256", "candidate.sha", "capture-source.rs",
                         "flat-control-source.rs", "flat-control.patch", "derivation.json",
                         "rustc-version.txt", "cargo-version.txt", "binaries.sha256", "binary-validation.json",
                         *(f"build-{role}.{suffix}" for role in BUILD_ROLES for suffix in ("log", "exit")))
+DATASET_BUILD_EVIDENCE_FILES = ("campaign.json", "campaign.sha256", "candidate.sha",
+                                "rustc-version.txt", "cargo-version.txt", "binaries.sha256", "binary-validation.json",
+                                *(f"build-{role}.{suffix}" for role in DATASET_BUILD_ROLES for suffix in ("log", "exit")))
 BUILD_EVIDENCE_SEAL = "campaign-build-evidence.json"
+
+
+def dataset_cell(manifest):
+    return manifest["cohort"] in DATASET_COHORTS
 
 
 def require(condition, message):
@@ -62,9 +93,9 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def validate_fixture(directory, hashes):
-    require(isinstance(hashes, dict) and set(hashes) == set(FIXTURE_INPUTS), "fixture input roster differs")
-    for name in FIXTURE_INPUTS:
+def validate_fixture(directory, hashes, names=FIXTURE_INPUTS):
+    require(isinstance(hashes, dict) and set(hashes) == set(names), "fixture input roster differs")
+    for name in names:
         require(digest(Path(directory) / name) == hashes[name], f"retained fixture input changed: {name}")
 
 
@@ -186,11 +217,13 @@ def peer(index):
     return f"127.1.{index // 200}.{index % 200 + 1}"
 
 
-def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=False):
+def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=False, dataset=None):
     directory = Path(directory).resolve()
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     require(len(str(directory / "grpc.sock").encode()) <= 100, "UDS path exceeds safe length")
     vpn = profile == "full-vpn"
+    if dataset is not None:
+        return generate_dataset(directory, vpn, receivers, bgp_port, metrics_port, dataset)
     denied = [fixture_prefix(f, n) for f in range(2) for n in range(2 if vpn else 4)] if pressure else []
     policy = ("dataset asn-set generation_b\n" +
               (f"prefix-set denied {{ {', '.join(denied)} }}\n" if pressure else "") +
@@ -205,6 +238,11 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
     stimulus = wire_stimulus()
     (directory / "generation.list").write_text("".join(
         f"{stimulus['origin_base'] + 2 * chunk + 1}\n" for chunk in range(stimulus["origin_cardinality"])))
+    write_config(directory, vpn, receivers, bgp_port, metrics_port, held=True)
+    return {name: digest(directory / name) for name in FIXTURE_INPUTS}
+
+
+def write_config(directory, vpn, receivers, bgp_port, metrics_port, held, datasets=("generation_b",)):
     families = '["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"]' if vpn else '["ipv4_unicast", "ipv6_unicast"]'
     lines = ["config_epoch = 2", "", "[global]", "asn = 64512", 'router_id = "10.0.0.1"',
              "ebgp_requires_policy = true",
@@ -213,17 +251,89 @@ def generate(directory, profile, receivers, bgp_port, metrics_port, pressure=Fal
              "[global.telemetry]", 'log_format = "json"',
              f'prometheus_addr = "127.0.0.1:{metrics_port}"', "",
              "[global.telemetry.grpc_uds]", f"path = {json.dumps(str(directory / 'grpc.sock'))}", "",
-             "[policy]", 'rpol_files = ["member.rpol"]', 'export_chain = ["member-out"]', "",
-             "[policy.datasets.generation_b]", 'path = "generation.list"', ""]
-    # Receivers are held paused with full queues on purpose; neither the daemon's
-    # 30 s slow-peer timer nor its RFC 9687 send hold timer (default 480 s) is
-    # under test, and neither may flag or drop the held cohort.
+             "[policy]", 'rpol_files = ["member.rpol"]', 'export_chain = ["member-out"]', ""]
+    for name in datasets:
+        list_name = "generation.list" if name == "generation_b" else f"{name}.list"
+        lines.extend([f"[policy.datasets.{name}]", f'path = "{list_name}"', ""])
+    # Mass-dirty receivers are held paused with full queues on purpose; neither
+    # the daemon's 30 s slow-peer timer nor its RFC 9687 send hold timer
+    # (default 480 s) is under test, and neither may flag or drop the held
+    # cohort. Dataset-reload receivers keep reading and keep both defaults.
+    timers = ["slow_peer_duration = 0", "send_hold_time = 0"] if held else []
     for index in range(receivers + 1):
         lines.extend(["[[neighbors]]", f'address = "{peer(index)}"', "remote_asn = 64512",
-                      f"families = {families}", "hold_time = 180", "slow_peer_duration = 0", "send_hold_time = 0",
+                      f"families = {families}", "hold_time = 180", *timers,
                       f"route_reflector_client = {'true' if index else 'false'}", ""])
     (directory / "config.toml").write_text("\n".join(lines))
-    return {name: digest(directory / name) for name in FIXTURE_INPUTS}
+
+
+def dataset_selected_chunks():
+    return [chunk for chunk in range(wire_stimulus()["origin_cardinality"]) if chunk % DATASET_STRIDE == 0]
+
+
+def dataset_stimulus(profile, cohort):
+    counts, batch = profile_shape(profile), 80
+    first_v6 = (counts[0] + batch - 1) // batch
+    selected = dataset_selected_chunks()
+    keys = [0, 0]
+    for chunk in selected:
+        family = int(chunk >= first_v6)
+        start = (chunk - (first_v6 if family else 0)) * batch
+        keys[family] += min(batch, counts[family] - start)
+    full = cohort == "dataset-full"
+    return {"kind": "dataset-swap-sighup", "batch_size": batch, "origin_base": wire_stimulus()["origin_base"],
+            "origin_cardinality": wire_stimulus()["origin_cardinality"],
+            "selected_chunk_stride": DATASET_STRIDE, "selected_chunks": len(selected), "selected_keys": keys,
+            "operations": ["b", "a"],
+            "swap": "b adds the unchanged source origin of every selected chunk to generation_b; a restores the base content",
+            "reevaluation_mode": "full" if full else "delta",
+            "fallback_trigger": ("the same SIGHUP also changes a community-set dataset that the export policy reads "
+                                 "through route.communities in; that probe cannot be bounded") if full else None,
+            "receiver_receive_buffer": "kernel default", "receiver_timers": "daemon defaults"}
+
+
+def dataset_manifest(head, profile, cohort, correct, daemon_cpus, harness_cpus):
+    require(profile in ("full-uc", "full-vpn") and cohort in DATASET_COHORTS, "invalid dataset-reload cell")
+    return {"schema": "rustbgpd.dataset-reload-campaign.v1", "head": head, "mode": "dataset-reload",
+            "readiness_clock": "CLOCK_MONOTONIC", "profile": profile, "cohort": cohort,
+            "receivers": 2 if correct else 12, "family_keys": profile_shape(profile), "correctness_only": correct,
+            "dataset_stimulus": dataset_stimulus(profile, cohort), "repetitions": 1, "schedule": ["candidate"],
+            "limits": LIMITS, "bars": DATASET_BARS, "daemon_cpus": daemon_cpus, "harness_cpus": harness_cpus,
+            "scope": "actual daemon, TCP, exact wire receivers and public readiness across two SIGHUP dataset "
+                     "swaps; no release-soak or other-shape claim",
+            "inputs": {name: digest(HERE / name) for name in OWNED_INPUTS},
+            "support_inputs": {name: digest(HERE / name) for name in SUPPORT_INPUTS}}
+
+
+def generate_dataset(directory, vpn, receivers, bgp_port, metrics_port, cohort):
+    full = cohort == "dataset-full"
+    policy = ("dataset asn-set generation_b\n" +
+              ("dataset community-set fullpass\n" if full else "") +
+              "policy member-out {\n" +
+              # Source routes carry no community, so this term never matches;
+              # it only makes the community swap unprovable by the bound.
+              ("    term fullpass { if route.communities in fullpass { reject } }\n" if full else "") +
+              "    term b { if route.origin-as in generation_b {\n"
+              "        add community 65400:2000; accept\n"
+              "    } }\n"
+              "    term a { add community 65400:1000; accept }\n"
+              "}\n")
+    (directory / "member.rpol").write_text(policy)
+    stimulus = wire_stimulus()
+    base = [stimulus["origin_base"] + 2 * chunk + 1 for chunk in range(stimulus["origin_cardinality"])]
+    added = [stimulus["origin_base"] + 2 * chunk for chunk in dataset_selected_chunks()]
+    (directory / "generation-base.list").write_text("".join(f"{value}\n" for value in base))
+    (directory / "generation-swapped.list").write_text("".join(f"{value}\n" for value in sorted(base + added)))
+    shutil.copyfile(directory / "generation-base.list", directory / "generation.list")
+    names = DATASET_FIXTURE_INPUTS
+    if full:
+        (directory / "fullpass-base.list").write_text("65400:9001\n")
+        (directory / "fullpass-swapped.list").write_text("65400:9002\n")
+        shutil.copyfile(directory / "fullpass-base.list", directory / "fullpass.list")
+        names = DATASET_FULL_FIXTURE_INPUTS
+    write_config(directory, vpn, receivers, bgp_port, metrics_port, held=False,
+                 datasets=("generation_b", "fullpass") if full else ("generation_b",))
+    return {name: digest(directory / name) for name in names}
 
 
 SHARING_GUARD = "true"
@@ -265,15 +375,21 @@ def init(args):
     root = Path(args.output)
     require(not root.exists(), "output directory must be fresh")
     require(re.fullmatch(r"[0-9a-f]{40}", args.head), "head must be exact SHA")
-    require(args.cohort in ("no-refusal", "cap-pressure"), "unknown cohort")
+    require(args.cohort in MASS_DIRTY_COHORTS + DATASET_COHORTS, "unknown cohort")
     daemon, harness = cpu_set(args.daemon_cpus), cpu_set(args.harness_cpus)
     require(not daemon & harness, "daemon and harness CPUs overlap")
     require(daemon | harness <= os.sched_getaffinity(0), "unavailable CPU assignment")
     root.mkdir(parents=True)
     correct = args.correctness_only
-    receivers = 2 if correct else 12 if args.cohort == "no-refusal" else 24
     require(time.get_clock_info("monotonic").implementation == "clock_gettime(CLOCK_MONOTONIC)",
             "qualification requires the native CLOCK_MONOTONIC clock")
+    if args.cohort in DATASET_COHORTS:
+        manifest = dataset_manifest(args.head, args.profile, args.cohort, correct,
+                                    args.daemon_cpus, args.harness_cpus)
+        write_json(root / "campaign.json", manifest)
+        (root / "campaign.sha256").write_text(digest(root / "campaign.json") + "\n")
+        return manifest
+    receivers = 2 if correct else 12 if args.cohort == "no-refusal" else 24
     manifest = {"schema": "rustbgpd.mass-dirty-campaign.v3", "head": args.head,
                 "readiness_clock": "CLOCK_MONOTONIC",
                 "wire_stimulus": wire_stimulus(),
@@ -298,13 +414,25 @@ def load_manifest(root):
     root = Path(root)
     require(digest(root / "campaign.json") == (root / "campaign.sha256").read_text().strip(), "campaign changed")
     manifest = json.loads((root / "campaign.json").read_text())
+    if manifest.get("cohort") in DATASET_COHORTS:
+        require(time.get_clock_info("monotonic").implementation == "clock_gettime(CLOCK_MONOTONIC)",
+                "readiness clock changed")
+        require(type(manifest.get("correctness_only")) is bool and
+                re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("head"))), "invalid campaign source or mode")
+        require(manifest == dataset_manifest(manifest["head"], manifest["profile"], manifest["cohort"],
+                                             manifest["correctness_only"], manifest["daemon_cpus"],
+                                             manifest["harness_cpus"]),
+                "dataset-reload campaign, bars or instrument changed")
+        daemon, harness = cpu_set(manifest["daemon_cpus"]), cpu_set(manifest["harness_cpus"])
+        require(not daemon & harness, "daemon and harness CPUs overlap")
+        return manifest
     require(manifest["schema"] == "rustbgpd.mass-dirty-campaign.v3", "campaign schema changed")
     require(manifest["readiness_clock"] == "CLOCK_MONOTONIC" and
             time.get_clock_info("monotonic").implementation == "clock_gettime(CLOCK_MONOTONIC)",
             "readiness clock changed")
     require(type(manifest["correctness_only"]) is bool, "invalid campaign mode")
-    require(manifest["wire_stimulus"] == wire_stimulus(), "wire stimulus changed")
     require(re.fullmatch(r"[0-9a-f]{40}", manifest["head"]), "invalid campaign source")
+    require(manifest["wire_stimulus"] == wire_stimulus(), "wire stimulus changed")
     require(manifest["profile"] in ("full-uc", "full-vpn") and manifest["cohort"] in ("no-refusal", "cap-pressure"), "invalid campaign cell")
     repeats = 1 if manifest["correctness_only"] else 3
     schedule = [arm for repeat in range(repeats)
@@ -343,13 +471,14 @@ def campaign_build_evidence(root, manifest):
                 actual.add(path.relative_to(root).as_posix())
         require(actual == {name for name in archived if name.startswith(directory + "/")},
                 f"build archive roster differs: {directory}")
-    names = set(BUILD_EVIDENCE_FILES) | archived.keys()
+    dataset = dataset_cell(manifest)
+    names = set(DATASET_BUILD_EVIDENCE_FILES if dataset else BUILD_EVIDENCE_FILES) | archived.keys()
     for name in names:
         require(stat.S_ISREG((root / name).lstat().st_mode), f"non-regular campaign build evidence: {name}")
     hashes = {name: digest(root / name) for name in sorted(names)}
     for name, expected in archived.items():
         require(hashes[name] == expected, f"archived campaign input changed: {name}")
-    for role in BUILD_ROLES:
+    for role in DATASET_BUILD_ROLES if dataset else BUILD_ROLES:
         require((root / f"build-{role}.exit").read_text() == "0\n", f"campaign build did not succeed: {role}")
         require((root / f"build-{role}.log").stat().st_size > 0, f"empty campaign build log: {role}")
     for name in ("rustc-version.txt", "cargo-version.txt"):
@@ -793,6 +922,8 @@ def copy_fixture(source, destination):
 def run_cell(args):
     root = Path(args.output).resolve()
     manifest = load_manifest(root)
+    if dataset_cell(manifest):
+        return run_dataset_cell(args, root, manifest)
     require(args.arm in ("candidate", "flat"), "unknown arm")
     require(0 <= args.index < len(manifest["schedule"]) and manifest["schedule"][args.index] == args.arm, "arm order changed")
     binary, harness_binary, rbgp = [Path(path).resolve(strict=True) for path in (args.daemon, args.harness, args.rbgp)]
@@ -1064,14 +1195,467 @@ def run_cell(args):
         shutil.rmtree(scenario)
 
 
+def reload_outcomes(text):
+    return {outcome: integer_metric(text, "bgp_sighup_reload_outcomes_total", f'{{outcome="{outcome}"}}')
+            for outcome in RELOAD_OUTCOMES}
+
+
+def outcome_failure(before, after):
+    """The reload-outcome bar: one complete outcome and nothing else, or None while in flight."""
+    deltas = {outcome: after[outcome] - before[outcome] for outcome in RELOAD_OUTCOMES}
+    require(all(value >= 0 for value in deltas.values()), "reload outcome counter regressed")
+    bad = [f"{outcome} +{value}" for outcome, value in deltas.items() if outcome != "complete" and value]
+    if bad:
+        return deltas, "SIGHUP reload outcome " + ", ".join(bad)
+    if deltas["complete"] > 1:
+        return deltas, f"one SIGHUP completed {deltas['complete']} reloads"
+    return deltas, None
+
+
+def last_reload_failure(record):
+    """Applied means outcome complete with nothing unapplied and no failure bucket."""
+    reload = record.get("record") if isinstance(record, dict) else None
+    if not isinstance(reload, dict):
+        return "last-reload has no completed SIGHUP record"
+    if reload.get("outcome") != "complete" or reload.get("unapplied_count") != 0 or reload.get("failure_bucket") is not None:
+        return (f"last-reload not applied: outcome {reload.get('outcome')}, unapplied {reload.get('unapplied_count')}, "
+                f"failure {reload.get('failure_bucket')}")
+    return None
+
+
+def reevaluations(text):
+    rows = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        fields = json.loads(line).get("fields", {})
+        if fields.get("message") == REEVALUATION_MESSAGE:
+            rows.append({key: fields.get(key) for key in
+                         ("mode", "peers", "affected_prefixes", "affected_vpn_keys", "elapsed_ms")})
+    return rows
+
+
+def daemon_exit_failure(returncode):
+    reason = f"daemon exited with status {returncode}"
+    return reason + " (fail-stop)" if returncode == 70 else reason
+
+
+def swap_dataset(scenario, generation, full):
+    content = "swapped" if generation == "b" else "base"
+    for name in ("generation", "fullpass") if full else ("generation",):
+        temporary = scenario / f".{name}.list.next"
+        shutil.copyfile(scenario / f"{name}-{content}.list", temporary)
+        os.replace(temporary, scenario / f"{name}.list")
+
+
+def poll_record(records, prefix, pending):
+    """The next complete record with this prefix, or None; a partial line stays pending."""
+    while True:
+        chunk = records.readline()
+        if not chunk:
+            return None
+        pending[0] += chunk
+        if not pending[0].endswith("\n"):
+            continue
+        line, pending[0] = pending[0], ""
+        if line.startswith(prefix + " "):
+            return json.loads(line[len(prefix) + 1:])
+
+
+def await_reload(daemon, engine, records, port, before, deadline, correct):
+    """Wait for SIGHUP completion and the exact fold, or the first breached bar."""
+    pending, fold, completed, deltas = [""], None, None, None
+    while True:
+        if daemon.poll() is not None:
+            return {"failure": daemon_exit_failure(daemon.returncode), "fold": fold, "completed": completed, "deltas": deltas}
+        fold = fold or poll_record(records, "dataset_reload_fold", pending)
+        if fold is None and engine.poll() is not None:
+            # A receiver error is the daemon's wire behaviour; settle the daemon first.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                daemon.wait(timeout=2)
+            failure = (daemon_exit_failure(daemon.returncode) if daemon.returncode is not None
+                       else f"exact fold or session continuity failed: harness exited {engine.returncode}")
+            return {"failure": failure, "fold": None, "completed": completed, "deltas": deltas}
+        try:
+            current = reload_outcomes(http_metrics(port))
+        except (OSError, ValueError):
+            current = None
+        if current is not None:
+            deltas, failure = outcome_failure(before, current)
+            if failure:
+                return {"failure": failure, "fold": fold, "completed": completed, "deltas": deltas}
+            if deltas["complete"] == 1 and completed is None:
+                completed = 0.0 if correct else time.monotonic()
+        if fold is not None and completed is not None:
+            return {"failure": None, "fold": fold, "completed": None if correct else completed, "deltas": deltas}
+        if time.monotonic() >= deadline:
+            return {"failure": "reload completion or exact fold not observed within the fixed leg deadline",
+                    "fold": fold, "completed": completed, "deltas": deltas}
+        time.sleep(.1)
+
+
+def run_dataset_cell(args, root, manifest):
+    require(args.arm == "candidate" and args.index == 0, "dataset reload runs one candidate leg")
+    binary, harness_binary, rbgp = [Path(path).resolve(strict=True) for path in (args.daemon, args.harness, args.rbgp)]
+    binaries = verified_build_evidence(root, manifest)
+    require(digest(binary) == binaries["rustbgpd-candidate"] and digest(harness_binary) == binaries["reloadstall"]
+            and digest(rbgp) == binaries["rbgp"], "run-cell binary identity differs")
+    leg = root / "leg-0-candidate"
+    leg.mkdir()
+    correct = manifest["correctness_only"]
+    full = manifest["cohort"] == "dataset-full"
+    names = DATASET_FULL_FIXTURE_INPUTS if full else DATASET_FIXTURE_INPUTS
+    if not correct:
+        require(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "measurement requires fresh hosted runner")
+        available = int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemAvailable:"))) * 1024
+        require(available >= LIMITS["minimum_available_bytes"], "runner capacity insufficient; shape must not shrink")
+    import tempfile
+    scenario = Path(tempfile.mkdtemp(prefix="rds-", dir="/tmp"))
+    scenario.rmdir()
+    hashes = generate(scenario, manifest["profile"], manifest["receivers"], 17986, 19186, dataset=manifest["cohort"])
+    write_json(leg / "fixture.sha256.json", hashes)
+    daemon = engine = sampler = None
+    failure = None
+    result = {"arm": "candidate", "index": 0, "source": manifest["head"], "operations": [], "bar_failures": [],
+              "binary_sha256": digest(binary), "harness_sha256": digest(harness_binary), "rbgp_sha256": digest(rbgp),
+              "correctness_only": correct}
+    deadline = time.monotonic() + LIMITS["leg_deadline_seconds"]
+    addr = "unix://" + str(scenario / "grpc.sock")
+    try:
+        with (leg / "daemon.log").open("w") as daemon_log, (leg / "harness.stderr").open("w") as errors, (leg / "harness.log").open("w") as log, (leg / "harness.log").open() as records:
+            with (leg / "config-check.log").open("w") as check_log:
+                checked = subprocess.run([str(binary), "--check", "--strict", str(scenario / "config.toml")],
+                                         stdout=check_log, stderr=subprocess.STDOUT, timeout=30, check=True)
+            result["config_check_exit"] = checked.returncode
+            daemon_command = ["taskset", "-c", manifest["daemon_cpus"], str(binary), str(scenario / "config.toml")]
+            if not correct:
+                daemon_command = ["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={LIMITS['daemon_bytes']}", "-p", "MemorySwapMax=0", "--", *daemon_command]
+            daemon = own_child(subprocess.Popen(daemon_command, stdout=daemon_log, stderr=subprocess.STDOUT, start_new_session=True))
+            pid = daemon_pid(binary, min(deadline, time.monotonic() + 120))
+            require(pid == daemon.pid, "daemon scope launcher did not retain the owned PID")
+            owner = process_identity(pid, binary)
+            write_json(leg / "daemon-owner.json", owner)
+            while True:
+                require(daemon.poll() is None and time.monotonic() < deadline, "daemon startup failed")
+                try:
+                    http_metrics(19186)
+                    break
+                except (OSError, ValueError):
+                    time.sleep(0.05)
+            if not correct:
+                result["memory_before"] = snapshot_cgroup(pid, LIMITS["daemon_bytes"])
+                sampler_log = (leg / "sampler.log").open("w")
+                sampler = own_child(subprocess.Popen([sys.executable, str(HERE / "sample-daemon-cgroup.py"), "--exe", str(binary), "--out", str(leg / "memory.csv"), "--expected-pgid", str(daemon.pid)], stdout=sampler_log, stderr=subprocess.STDOUT, start_new_session=True))
+            engine_command = ["taskset", "-c", manifest["harness_cpus"], str(harness_binary), "--recovery-mass-dirty", "--profile", manifest["profile"], "--cohort", manifest["cohort"], "--receivers", str(manifest["receivers"]), "--bgp-port", "17986", "--metrics-addr", "127.0.0.1:19186"]
+            if correct:
+                engine_command.append("--correctness-only")
+            else:
+                engine_command = ["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={LIMITS['harness_bytes']}", "-p", "MemorySwapMax=0", "--", *engine_command]
+            engine = start_harness(engine_command, log, errors)
+            engine_pid = daemon_pid(harness_binary, min(deadline, time.monotonic() + 120))
+            require(engine_pid == engine.pid, "harness scope launcher did not retain the owned PID")
+            result["harness_owner"] = process_identity(engine_pid, harness_binary)
+            write_json(leg / "harness-owner.json", result["harness_owner"])
+            ready = read_record(engine, records, "dataset_reload_ready", deadline)
+            stimulus = manifest["dataset_stimulus"]
+            require(ready["family_keys"] == manifest["family_keys"] and ready["receivers"] == manifest["receivers"]
+                    and ready["selected_keys"] == stimulus["selected_keys"]
+                    and ready["selected_chunk_stride"] == DATASET_STRIDE, "wire population or swap shape changed")
+            (leg / "metrics-initial.prom").write_text(http_metrics(19186))
+            read_record(engine, records, "mass_dirty_readiness", deadline)
+            previous_end = 0
+            for generation in stimulus["operations"]:
+                engine.stdin.write(f"arm {generation}\n")
+                engine.stdin.flush()
+                armed = read_record(engine, records, "dataset_reload_armed", deadline)
+                require(armed == {"generation": generation, "receivers": manifest["receivers"]}, "arm handshake incomplete")
+                validate_fixture(scenario, hashes, names)
+                before_text = http_metrics(19186)
+                (leg / f"metrics-before-{generation}.prom").write_text(before_text)
+                before = reload_outcomes(before_text)
+                log_start = (leg / "daemon.log").stat().st_size
+                swap_dataset(scenario, generation, full)
+                triggered = None if correct else time.monotonic()
+                os.kill(pid, signal.SIGHUP)
+                observed = await_reload(daemon, engine, records, 19186, before, deadline, correct)
+                operation = {"generation": generation, "trigger_monotonic_seconds": triggered,
+                             "complete_monotonic_seconds": observed["completed"], "fold": observed["fold"],
+                             "outcome_deltas": observed["deltas"]}
+                result["operations"].append(operation)
+                if observed["failure"]:
+                    failure = observed["failure"]
+                    break
+                after_text = http_metrics(19186)
+                (leg / f"metrics-after-{generation}.prom").write_text(after_text)
+                completed = subprocess.run([str(rbgp), "--addr", addr, "--json", "config", "last-reload"],
+                                           text=True, capture_output=True, timeout=30, check=True)
+                (leg / f"last-reload-{generation}.json").write_text(completed.stdout)
+                operation["last_reload"] = json.loads(completed.stdout)
+                failure = last_reload_failure(operation["last_reload"])
+                # The RIB logs its re-evaluation before acknowledging the
+                # reload; allow the log writer a bounded flush.
+                flushed = min(deadline, time.monotonic() + 30)
+                while True:
+                    log_bytes = (leg / "daemon.log").read_bytes()
+                    log_end = log_bytes.rfind(b"\n") + 1
+                    rows = reevaluations(log_bytes[log_start:log_end].decode())
+                    if rows or time.monotonic() >= flushed:
+                        break
+                    time.sleep(.05)
+                require(previous_end <= log_start < log_end, "daemon log cursors out of order")
+                previous_end = log_end
+                (leg / f"daemon-operation-{generation}.jsonl").write_bytes(log_bytes[log_start:log_end])
+                operation.update(daemon_log_bytes={"start": log_start, "end": log_end}, reevaluations=rows)
+                if not correct:
+                    fold = observed["fold"]
+                    operation.update(
+                        sighup_to_complete_seconds=observed["completed"] - triggered,
+                        sighup_to_fold_seconds=fold["fold_monotonic_seconds"] - triggered,
+                        receiver_fold_p50_seconds=fold["receiver_fold_p50_monotonic_seconds"] - triggered,
+                        receiver_fold_max_seconds=fold["receiver_fold_max_monotonic_seconds"] - triggered)
+                if failure:
+                    break
+            if failure is None:
+                require(digest(scenario / "generation.list") == hashes["generation-base.list"], "dataset was not restored")
+                require(process_identity(pid, binary) == owner, "daemon identity changed")
+                if not correct:
+                    result["memory_after"] = snapshot_cgroup(pid, LIMITS["daemon_bytes"])
+                    harness_pid = daemon_pid(harness_binary, deadline)
+                    result["harness_owner"] = process_identity(harness_pid, harness_binary)
+                    result["harness_memory_after"] = snapshot_cgroup(harness_pid, LIMITS["harness_bytes"])
+                    require(sampler.poll() is None, "memory sampler ended before measurement boundary")
+                # Retain a readiness probe after the final observed fold.
+                while True:
+                    probe = read_record(engine, records, "mass_dirty_readiness", deadline)
+                    if correct or probe["started_monotonic_seconds"] >= result["operations"][-1]["fold"]["fold_monotonic_seconds"]:
+                        break
+                engine.stdin.write("finish\n")
+                engine.stdin.flush()
+                final = read_record(engine, records, "dataset_reload_exit", deadline)
+                require(final["status"] == "PASS" and final["readiness_samples"] > 0, "readiness evidence incomplete")
+                engine.wait(timeout=max(0.1, deadline - time.monotonic()))
+                require(engine.returncode == 0, "harness failed after final receipt")
+            else:
+                result["bar_failures"].append(failure)
+            result["status"] = "FAIL" if failure else "CORRECTNESS_ONLY" if correct else "PASS"
+            write_json(leg / "result.json", result)
+    except BaseException as error:
+        write_json(leg / "failure.json", {"type": type(error).__name__, "error": str(error),
+                                         "traceback": traceback.format_exc()})
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        cleanup_errors = []
+        for name, process in (("harness", engine), ("daemon", daemon)):
+            try:
+                stop_owned(process)
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                cleanup_errors.append(f"{name}: {error}")
+        if sampler is not None:
+            try:
+                sampler.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                try:
+                    stop_owned(sampler)
+                except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                    cleanup_errors.append(f"sampler: {error}")
+            if sampler.returncode != 0 and failure is None:
+                cleanup_errors.append(f"sampler exit: {sampler.returncode}")
+        if cleanup_errors:
+            write_json(leg / "cleanup-error.json", {"errors": cleanup_errors, "retained_fixture": str(scenario)})
+            raise RuntimeError("owned cleanup incomplete; fixture/evidence retained")
+        if (leg / "result.json").is_file():
+            finished = json.loads((leg / "result.json").read_text())
+            finished["daemon_exit"] = daemon.returncode
+            finished["harness_exit"] = engine.returncode
+            if not finished["bar_failures"]:
+                require(daemon.returncode == 0 and engine.returncode == 0, "owned process failed during normal teardown")
+            finished["raw_sha256"] = {path.name: digest(path) for path in leg.iterdir() if path.is_file() and path.name != "result.json"}
+            write_json(leg / "result.json", finished)
+        copy_fixture(scenario, leg / "fixture")
+        shutil.rmtree(scenario)
+
+
+def dataset_harness_records(path):
+    prefixes = ("dataset_reload_ready", "dataset_reload_armed", "dataset_reload_fold", "dataset_reload_exit",
+                "mass_dirty_readiness")
+    records = {prefix: [] for prefix in prefixes}
+    for line in Path(path).read_text().splitlines():
+        prefix, _, body = line.partition(" ")
+        require(prefix in records, "unexpected harness record")
+        records[prefix].append(json.loads(body))
+    return records
+
+
+def readiness_windows(probes):
+    """Contiguous non-200 or failed /readyz samples, each with its observed duration."""
+    windows, current = [], None
+    for probe in probes:
+        if probe["status"] != 200 or probe["phase"] is not None:
+            if current is None:
+                current = {"first_sequence": probe["sequence"], "samples": 0, "statuses": {},
+                           "start_monotonic_seconds": probe["started_monotonic_seconds"], "closed": False}
+                windows.append(current)
+            current["samples"] += 1
+            key = str(probe["status"] if probe["status"] is not None else probe["phase"])
+            current["statuses"][key] = current["statuses"].get(key, 0) + 1
+            current["end_monotonic_seconds"] = probe["finished_monotonic_seconds"]
+        elif current is not None:
+            # The window lasts until the next 200 sample starts.
+            current.update(end_monotonic_seconds=probe["started_monotonic_seconds"], closed=True)
+            current = None
+    for window in windows:
+        start, end = window["start_monotonic_seconds"], window["end_monotonic_seconds"]
+        window["duration_seconds"] = end - start if start is not None and end is not None else None
+    return windows
+
+
+def dataset_readiness(probes, operations, correct):
+    """Validate sampling coverage (INVALID if broken) and summarize the readiness bar."""
+    require(probes, "no readiness samples")
+    for index, probe in enumerate(probes):
+        require(type(probe["sequence"]) is int and probe["sequence"] == index + 1, "readiness sequence changed")
+        require(probe["request_deadline_ms"] == LIMITS["readiness_request_deadline_ms"] and
+                (probe["status"] == 200 or probe["phase"] is not None), "readiness sample/deadline changed")
+        clocks = [probe[key] for key in ("elapsed_seconds", "started_monotonic_seconds", "finished_monotonic_seconds")]
+        if correct:
+            require(clocks == [None] * 3, "correctness mode published readiness timing")
+        elif index:
+            require(probe["started_monotonic_seconds"] - probes[index - 1]["started_monotonic_seconds"]
+                    <= LIMITS["readiness_max_gap_seconds"], "readiness sampling gap exceeded frozen bound")
+    if not correct:
+        for operation in operations:
+            if operation.get("fold") is None:
+                continue
+            trigger, fold = operation["trigger_monotonic_seconds"], operation["fold"]["fold_monotonic_seconds"]
+            require(any(probe["finished_monotonic_seconds"] <= trigger for probe in probes) and
+                    any(probe["started_monotonic_seconds"] >= fold for probe in probes),
+                    "readiness probes do not bracket SIGHUP to fold")
+    windows = readiness_windows(probes)
+    summary = {"samples": len(probes), "non_200_or_failed": sum(window["samples"] for window in windows),
+               "windows": windows}
+    if not correct:
+        elapsed = [probe["elapsed_seconds"] for probe in probes]
+        summary.update(p50_ms=percentile(elapsed, .5) * 1000, p99_ms=percentile(elapsed, .99) * 1000,
+                       max_ms=max(elapsed) * 1000)
+    return summary
+
+
+def analyze_dataset(root, manifest):
+    root = Path(root)
+    binaries = verified_build_evidence(root, manifest)
+    require({path.name for path in root.glob("leg-*")} == {"leg-0-candidate"}, "leg roster differs")
+    leg = root / "leg-0-candidate"
+    row = json.loads((leg / "result.json").read_text())
+    require(row["arm"] == "candidate" and row["index"] == 0 and row["source"] == manifest["head"], "leg identity mismatch")
+    require(row["binary_sha256"] == binaries["rustbgpd-candidate"] and row["harness_sha256"] == binaries["reloadstall"]
+            and row["rbgp_sha256"] == binaries["rbgp"], "compiled leg identity differs")
+    require(row["config_check_exit"] == 0 and (leg / "config-check.log").is_file(), "actual strict config validation missing")
+    raw_files = {path.name for path in leg.iterdir() if path.is_file() and path.name != "result.json"}
+    require(type(row.get("raw_sha256")) is dict and set(row["raw_sha256"]) == raw_files, "raw evidence hash roster differs")
+    for name, expected in row["raw_sha256"].items():
+        require(digest(leg / name) == expected, "raw evidence changed")
+    full = manifest["cohort"] == "dataset-full"
+    validate_fixture(leg / "fixture", json.loads((leg / "fixture.sha256.json").read_text()),
+                     DATASET_FULL_FIXTURE_INPUTS if full else DATASET_FIXTURE_INPUTS)
+    correct, stimulus = manifest["correctness_only"], manifest["dataset_stimulus"]
+    records = dataset_harness_records(leg / "harness.log")
+    require(len(records["dataset_reload_ready"]) == 1, "missing wire baseline")
+    ready = records["dataset_reload_ready"][0]
+    require(ready["family_keys"] == manifest["family_keys"] and ready["receivers"] == manifest["receivers"]
+            and ready["selected_keys"] == stimulus["selected_keys"], "raw wire shape differs")
+    failures = list(row["bar_failures"])
+    require(row["status"] == ("FAIL" if failures else "CORRECTNESS_ONLY" if correct else "PASS"), "leg status differs")
+    operations = row["operations"]
+    require(operations and [op["generation"] for op in operations] == stimulus["operations"][:len(operations)],
+            "operation order differs")
+    if not failures:
+        require(len(operations) == len(stimulus["operations"]) and row["daemon_exit"] == row["harness_exit"] == 0
+                and len(records["dataset_reload_exit"]) == 1, "complete leg lacks an operation or clean exit")
+    elif failures[0].startswith("daemon exited"):
+        require(failures[0] == daemon_exit_failure(row["daemon_exit"]), "recorded daemon exit differs")
+    report, path_errors = [], []
+    folds = records["dataset_reload_fold"]
+    for index, operation in enumerate(operations):
+        generation, fold = operation["generation"], operation["fold"]
+        require(records["dataset_reload_armed"][index] == {"generation": generation, "receivers": manifest["receivers"]},
+                "arm receipt differs")
+        if fold is not None:
+            require(index < len(folds) and folds[index] == fold and fold["generation"] == generation and
+                    fold["receivers"] == manifest["receivers"] and fold["exact_fold"] is True and
+                    fold["sessions_continuous"] is True, "fold receipt differs")
+        entry = {"generation": generation, "outcome_deltas": operation["outcome_deltas"]}
+        if "reevaluations" in operation:
+            # A fully observed operation: replay its outcome, applied record and path.
+            before = reload_outcomes((leg / f"metrics-before-{generation}.prom").read_text())
+            after = reload_outcomes((leg / f"metrics-after-{generation}.prom").read_text())
+            deltas, outcome = outcome_failure(before, after)
+            require(outcome is None and deltas["complete"] == 1, "replayed reload outcome differs")
+            require(json.loads((leg / f"last-reload-{generation}.json").read_text()) == operation["last_reload"],
+                    "last-reload evidence differs")
+            applied = last_reload_failure(operation["last_reload"])
+            require(applied is None or applied in failures, "last-reload failure was not recorded")
+            cursors = operation["daemon_log_bytes"]
+            text = (leg / "daemon.log").read_bytes()[cursors["start"]:cursors["end"]]
+            require((leg / f"daemon-operation-{generation}.jsonl").read_bytes() == text, "operation log slice differs")
+            rows = reevaluations(text.decode())
+            require(rows == operation["reevaluations"], "re-evaluation evidence differs")
+            if not rows:
+                path_errors.append(f"generation {generation}: no dataset re-evaluation logged")
+            elif any(item["mode"] != stimulus["reevaluation_mode"] for item in rows):
+                path_errors.append(f"generation {generation}: re-evaluation mode {[item['mode'] for item in rows]}, "
+                                   f"cell requires {stimulus['reevaluation_mode']}")
+            entry.update(reevaluations=rows, unchanged_announcements=fold["unchanged_announcements"],
+                         announcements=fold["announcements"], prior_replays=fold["prior_replays"])
+            if not correct:
+                for name in ("sighup_to_complete_seconds", "sighup_to_fold_seconds",
+                             "receiver_fold_p50_seconds", "receiver_fold_max_seconds"):
+                    entry[name] = operation[name]
+                require(math.isclose(entry["sighup_to_fold_seconds"],
+                                     fold["fold_monotonic_seconds"] - operation["trigger_monotonic_seconds"],
+                                     abs_tol=1e-6), "fold clock derivation differs")
+        report.append(entry)
+    readiness = dataset_readiness(records["mass_dirty_readiness"], operations, correct)
+    verdict = {"status": "CORRECTNESS_ONLY" if correct else "PASS", "mode": "dataset-reload",
+               "profile": manifest["profile"], "cohort": manifest["cohort"], "release_soak_qualified": False,
+               "operations": report, "readiness": readiness}
+    if not correct and "memory_after" in row:
+        verdict["daemon_memory_peak_bytes"] = row["memory_after"]["memory.peak"]
+    if readiness["non_200_or_failed"]:
+        failures.append(f"{readiness['non_200_or_failed']} non-200 or failed /readyz samples in "
+                        f"{len(readiness['windows'])} window(s), longest "
+                        + (f"{max(window['duration_seconds'] for window in readiness['windows']):.2f} s"
+                           if not correct else "untimed"))
+    # A breach observed during a reload is a FAIL whatever the path. Otherwise
+    # a cell that did not exercise its declared path measured something else.
+    if path_errors and not row["bar_failures"]:
+        raise ValueError("; ".join(path_errors))
+    if failures:
+        verdict["status"] = "FAIL"
+        verdict["reason"] = "; ".join(failures)
+    else:
+        verdict["reason"] = ("all predeclared bars met" if verdict["status"] == "PASS"
+                             else "correctness-only campaign; no timing")
+    write_json(root / "verdict.json", verdict)
+    return verdict
+
+
 def verified_binaries(root):
     root = Path(root)
+    # Without a campaign manifest, keep the stricter two-daemon roster.
+    campaign = root / "campaign.json"
+    dataset = campaign.is_file() and json.loads(campaign.read_text())["cohort"] in DATASET_COHORTS
     hashes = {}
     for line in (root / "binaries.sha256").read_text().splitlines():
         expected, name = line.split(maxsplit=1)
         name = Path(name).name
         require(name not in hashes and digest(root / "bin" / name) == expected, "binary hash changed")
         hashes[name] = expected
+    if dataset:
+        # Dataset reload has absolute bars and no derived control daemon.
+        require(set(hashes) == {"rustbgpd-candidate", "reloadstall", "rbgp"}, "binary roster differs")
+        return hashes
     require(set(hashes) == {"rustbgpd-flat", "rustbgpd-candidate", "reloadstall", "rbgp"}, "binary roster differs")
     require(hashes["rustbgpd-candidate"] != hashes["rustbgpd-flat"], "candidate and flat daemon binaries are identical")
     return hashes
@@ -1080,6 +1664,8 @@ def verified_binaries(root):
 def analyze(root):
     root = Path(root)
     manifest = load_manifest(root)
+    if dataset_cell(manifest):
+        return analyze_dataset(root, manifest)
     binary_hashes = verified_build_evidence(root, manifest)
     require((root / "candidate.sha").read_text().strip() == manifest["head"], "candidate source identity differs")
     expected_legs = {f"leg-{index}-{arm}" for index, arm in enumerate(manifest["schedule"])}
@@ -1411,7 +1997,7 @@ def main():
     initial.add_argument("output")
     initial.add_argument("--head", required=True)
     initial.add_argument("--profile", choices=("full-uc", "full-vpn"), required=True)
-    initial.add_argument("--cohort", choices=("no-refusal", "cap-pressure"), required=True)
+    initial.add_argument("--cohort", choices=MASS_DIRTY_COHORTS + DATASET_COHORTS, required=True)
     initial.add_argument("--daemon-cpus", required=True)
     initial.add_argument("--harness-cpus", required=True)
     initial.add_argument("--correctness-only", action="store_true")

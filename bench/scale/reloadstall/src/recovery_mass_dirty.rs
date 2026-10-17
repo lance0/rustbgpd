@@ -22,6 +22,9 @@ const CELL_DEADLINE: Duration = Duration::from_secs(1800);
 /// the controller judges ceilings, so a slow or failed sample never aborts.
 const READINESS_INTERVAL: Duration = Duration::from_millis(250);
 const READINESS_REQUEST_DEADLINE: Duration = Duration::from_secs(1);
+/// Dataset-reload mode swaps the origins of every hundredth 80-key chunk
+/// into the dataset: 154 of 15,375 chunks, 12,320 keys or about 1%.
+const DATASET_STRIDE: usize = 100;
 
 #[derive(Clone, Copy)]
 struct Shape {
@@ -61,13 +64,34 @@ impl Shape {
             .sum()
     }
 
-    fn origin(self, family: usize, index: usize, generation_b: bool) -> u32 {
-        let chunk = if family == 0 {
+    fn chunk(self, family: usize, index: usize) -> usize {
+        let first = if family == 0 {
             0
         } else {
             self.counts[0].div_ceil(self.batch_size)
-        } + index / self.batch_size;
-        ORIGIN_BASE + 2 * u32::try_from(chunk).unwrap() + u32::from(generation_b)
+        };
+        first + index / self.batch_size
+    }
+
+    fn origin(self, family: usize, index: usize, generation_b: bool) -> u32 {
+        ORIGIN_BASE
+            + 2 * u32::try_from(self.chunk(family, index)).unwrap()
+            + u32::from(generation_b)
+    }
+
+    /// Whether a dataset swap moves this key's chunk origin into the dataset.
+    fn selected(self, family: usize, index: usize) -> bool {
+        self.chunk(family, index).is_multiple_of(DATASET_STRIDE)
+    }
+
+    fn selected_keys(self) -> [usize; 2] {
+        [0, 1].map(|family| {
+            (0..self.counts[family])
+                .step_by(self.batch_size)
+                .filter(|index| self.selected(family, *index))
+                .map(|index| (index + self.batch_size).min(self.counts[family]) - index)
+                .sum()
+        })
     }
 
     fn prefix(self, family: usize, index: usize) -> Prefix {
@@ -359,6 +383,18 @@ struct Inventory {
     started: Option<Instant>,
     completion_seconds: Option<f64>,
     error: Option<String>,
+    /// Dataset-reload mode: the source never changes. Each key's expected
+    /// marker follows the controller's dataset swap for its chunk.
+    dataset: bool,
+    /// Keys whose last announced marker is generation B.
+    marked_b: [Vec<u64>; 2],
+    /// Present keys whose current marker differs from the expected one.
+    mismatched: usize,
+    unchanged: u64,
+    replays: u64,
+    operation_announces: u64,
+    record_clock: bool,
+    completed_monotonic: Option<f64>,
 }
 
 impl Inventory {
@@ -379,7 +415,93 @@ impl Inventory {
             started: None,
             completion_seconds: None,
             error: None,
+            dataset: false,
+            marked_b: words(),
+            mismatched: 0,
+            unchanged: 0,
+            replays: 0,
+            operation_announces: 0,
+            record_clock: false,
+            completed_monotonic: None,
         }
+    }
+
+    fn for_dataset(shape: Shape) -> Self {
+        Self {
+            dataset: true,
+            ..Self::new(shape)
+        }
+    }
+
+    fn expected_b(&self, family: usize, index: usize) -> bool {
+        self.target_b && self.shape.selected(family, index)
+    }
+
+    /// Re-arm for one dataset swap: `swapped` moves the selected chunks'
+    /// verdicts to generation B, otherwise every key expects generation A.
+    fn arm_dataset(&mut self, swapped: bool, record_clock: bool) {
+        self.target_b = swapped;
+        self.recovering = true;
+        self.record_clock = record_clock;
+        self.completed_monotonic = None;
+        self.unchanged = 0;
+        self.replays = 0;
+        self.operation_announces = 0;
+        self.mismatched = 0;
+        for family in 0..2 {
+            self.generation[family].fill(0);
+            for index in 0..self.shape.counts[family] {
+                let (word, bit) = (index / 64, 1_u64 << (index % 64));
+                if self.present[family][word] & bit != 0
+                    && (self.marked_b[family][word] & bit != 0) != self.expected_b(family, index)
+                {
+                    self.mismatched += 1;
+                }
+            }
+        }
+    }
+
+    fn dataset_event(&mut self, family: usize, index: usize, marker: u32) -> Result<(), String> {
+        if marker != COMMUNITY_GEN_A && marker != COMMUNITY_GEN_B {
+            return Err("wrong dataset verdict marker".into());
+        }
+        let (word, bit) = (index / 64, 1_u64 << (index % 64));
+        let marker_b = marker == COMMUNITY_GEN_B;
+        let present = self.present[family][word] & bit != 0;
+        let was_b = self.marked_b[family][word] & bit != 0;
+        let expected_b = self.expected_b(family, index);
+        self.announces[family] += 1;
+        self.operation_announces += 1;
+        if marker_b != expected_b {
+            // A resync may replay the admitted value before this key's
+            // first expected event; returning to it afterwards fails.
+            if self.recovering
+                && present
+                && was_b == marker_b
+                && self.generation[family][word] & bit == 0
+            {
+                self.replays += 1;
+                return Ok(());
+            }
+            return Err("wrong dataset verdict marker".into());
+        }
+        if present {
+            if was_b == marker_b {
+                self.unchanged += 1;
+            } else {
+                self.mismatched -= 1;
+            }
+        } else {
+            self.present[family][word] |= bit;
+            self.present_count[family] += 1;
+        }
+        if marker_b {
+            self.marked_b[family][word] |= bit;
+        } else {
+            self.marked_b[family][word] &= !bit;
+        }
+        self.generation[family][word] |= bit;
+        Ok(())
     }
 
     fn arm(&mut self, target_b: bool) {
@@ -395,6 +517,10 @@ impl Inventory {
     }
 
     fn event(&mut self, family: usize, index: usize, marker: Option<u32>) -> Result<(), String> {
+        if self.dataset {
+            // Announcements route through `dataset_event`; nothing is withdrawn.
+            return Err("unexpected withdrawal in dataset reload".into());
+        }
         let bit = 1_u64 << (index % 64);
         let word = index / 64;
         if let Some(marker) = marker {
@@ -451,6 +577,10 @@ impl Inventory {
     }
 
     fn complete(&self) -> bool {
+        if self.dataset {
+            return self.mismatched == 0
+                && (0..2).all(|family| self.present_count[family] == self.shape.counts[family]);
+        }
         let denied = if self.target_b { self.shape.denied } else { 0 };
         (0..2).all(|family| {
             self.present_count[family] == self.shape.counts[family] - denied
@@ -633,6 +763,14 @@ impl Inventory {
         if self.complete() && self.completion_seconds.is_none() {
             self.completion_seconds = self.started.map(|started| started.elapsed().as_secs_f64());
         }
+        if self.dataset
+            && self.recovering
+            && self.record_clock
+            && self.completed_monotonic.is_none()
+            && self.complete()
+        {
+            self.completed_monotonic = monotonic_seconds(false)?;
+        }
         Ok(())
     }
 
@@ -651,8 +789,13 @@ impl Inventory {
         marker: u32,
         origin: Option<u32>,
     ) -> Result<(), String> {
-        if origin != Some(self.shape.origin(family, index, marker == COMMUNITY_GEN_B)) {
+        // Dataset reload never changes the source: every key keeps origin A.
+        let generation_b = !self.dataset && marker == COMMUNITY_GEN_B;
+        if origin != Some(self.shape.origin(family, index, generation_b)) {
             return Err("wrong chunk/generation origin AS".into());
+        }
+        if self.dataset {
+            return self.dataset_event(family, index, marker);
         }
         self.event(family, index, Some(marker))
     }
@@ -852,7 +995,9 @@ fn source_message(message: Message, shape: Shape) -> Result<(), String> {
     }
 }
 
-async fn connect(shape: Shape, port: u16, index: u32) -> Result<TcpStream, String> {
+/// Receivers get the fixed 4 KiB receive buffer except in dataset-reload
+/// mode, which qualifies ordinary operator-sized sockets.
+async fn connect(shape: Shape, port: u16, index: u32, dataset: bool) -> Result<TcpStream, String> {
     let mut open = stub_open(index, LOCAL_AS, false);
     open.capabilities = shape
         .families()
@@ -871,7 +1016,7 @@ async fn connect(shape: Shape, port: u16, index: u32) -> Result<TcpStream, Strin
         CONNECT_WINDOW,
         &shape.families(),
         StubSocket {
-            receive_buffer: (index != 0).then_some(RECEIVER_BUFFER),
+            receive_buffer: (index != 0 && !dataset).then_some(RECEIVER_BUFFER),
             segment_size: (index == 0).then_some(SOURCE_SEGMENT),
         },
     )
@@ -885,6 +1030,7 @@ async fn connect(shape: Shape, port: u16, index: u32) -> Result<TcpStream, Strin
         return Err("source segment size exceeds the fixed Ethernet-sized fixture".into());
     }
     if index != 0
+        && !dataset
         && socket2::SockRef::from(&stream)
             .recv_buffer_size()
             .map_err(|error| error.to_string())?
@@ -1054,10 +1200,17 @@ async fn run(args: &[String]) -> Result<(), String> {
             .map(String::as_str)
             .ok_or_else(|| format!("missing value for {name}"))
     };
-    let pressure = match value("--cohort")? {
-        "no-refusal" => false,
-        "cap-pressure" => true,
-        _ => return Err("cohort must be no-refusal or cap-pressure".into()),
+    let (pressure, dataset) = match value("--cohort")? {
+        "no-refusal" => (false, false),
+        "cap-pressure" => (true, false),
+        // The harness behaves identically for both dataset cells; the
+        // controller owns the policy that selects the delta or full pass.
+        "dataset-delta" | "dataset-full" => (false, true),
+        _ => {
+            return Err(
+                "cohort must be no-refusal, cap-pressure, dataset-delta or dataset-full".into(),
+            );
+        }
     };
     let shape = Shape::new(value("--profile")?, pressure)?;
     let count: u32 = value("--receivers")?
@@ -1075,11 +1228,15 @@ async fn run(args: &[String]) -> Result<(), String> {
     }
     let mut receivers = Vec::new();
     for index in 1..=count {
-        let stream = connect(shape, port, index).await?;
+        let stream = connect(shape, port, index, dataset).await?;
         let (reader, mut writer) = stream.into_split();
         let (control, pause) = watch::channel(Pause::default());
         let receiver = Arc::new(Receiver {
-            inventory: Arc::new(Mutex::new(Inventory::new(shape))),
+            inventory: Arc::new(Mutex::new(if dataset {
+                Inventory::for_dataset(shape)
+            } else {
+                Inventory::new(shape)
+            })),
             control,
             acknowledged: Arc::new(AtomicU32::new(0)),
             live: Arc::new(AtomicBool::new(true)),
@@ -1098,7 +1255,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         });
         receivers.push(receiver);
     }
-    let source = connect(shape, port, 0).await?;
+    let source = connect(shape, port, 0, dataset).await?;
     let (mut source_reader, mut source_writer) = source.into_split();
     let (updates, mut outgoing) = mpsc::channel::<SourceWrite>(8);
     let source_live = Arc::new(AtomicBool::new(true));
@@ -1173,7 +1330,19 @@ async fn run(args: &[String]) -> Result<(), String> {
     })
     .await?;
     terminal_state(&receivers, &source_live)?;
-    println!(
+    if dataset {
+        let selected = shape.selected_keys();
+        println!(
+            "dataset_reload_ready {{\"receivers\":{count},\"family_keys\":[{},{}],\"selected_keys\":[{},{}],\"selected_chunk_stride\":{DATASET_STRIDE},\"batch_size\":{},\"origin_cardinality\":{},\"correctness_only\":{correctness}}}",
+            shape.counts[0],
+            shape.counts[1],
+            selected[0],
+            selected[1],
+            shape.batch_size,
+            shape.chunks()
+        );
+    } else {
+        println!(
         "mass_dirty_ready {{\"receivers\":{count},\"family_keys\":[{},{}],\"bitmap_bytes\":{},\"correctness_only\":{correctness},\"batch_size\":{},\"origin_cardinality\":{},\"baseline_eor_messages\":2,\"receiver_receive_buffer_bytes\":{}}}",
         shape.counts[0],
         shape.counts[1],
@@ -1185,9 +1354,13 @@ async fn run(args: &[String]) -> Result<(), String> {
                 .sum::<usize>(),
         shape.batch_size, shape.chunks(), RECEIVER_BUFFER * 2
     );
+    }
     let (stop, stopped) = oneshot::channel();
     let mut readiness = tokio::spawn(readiness_watch(metrics, stopped, correctness));
     let protocol = async {
+        if dataset {
+            return dataset_protocol(&receivers, &source_live, correctness).await;
+        }
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
         for (epoch, generation) in [(1, "b"), (2, "a")] {
             let pause = lines
@@ -1324,8 +1497,80 @@ async fn run(args: &[String]) -> Result<(), String> {
     // Recheck actual reader errors, continuity and inventory at its finish boundary.
     terminal_state(&receivers, &source_live)?;
     println!(
-        "mass_dirty_exit {{\"readiness_samples\":{samples},\"readiness_interval_ms\":250,\"readiness_request_deadline_ms\":1000,\"status\":\"PASS\"}}"
+        "{} {{\"readiness_samples\":{samples},\"readiness_interval_ms\":250,\"readiness_request_deadline_ms\":1000,\"status\":\"PASS\"}}",
+        if dataset { "dataset_reload_exit" } else { "mass_dirty_exit" }
     );
+    Ok(())
+}
+
+/// Controller-driven dataset swaps: `arm G` re-arms every receiver for the
+/// swapped (`b`) or reverted (`a`) verdicts before the controller sends
+/// SIGHUP; the fold record follows each receiver's exact final table.
+async fn dataset_protocol(
+    receivers: &[Arc<Receiver>],
+    source_live: &AtomicBool,
+    correctness: bool,
+) -> Result<(), String> {
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    for (generation, swapped) in [("b", true), ("a", false)] {
+        let arm = lines
+            .next_line()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("controller ended")?;
+        if arm != format!("arm {generation}") {
+            return Err("unexpected controller arm".into());
+        }
+        for receiver in receivers {
+            receiver
+                .inventory
+                .lock()
+                .unwrap()
+                .arm_dataset(swapped, !correctness);
+        }
+        println!(
+            "dataset_reload_armed {{\"generation\":\"{generation}\",\"receivers\":{}}}",
+            receivers.len()
+        );
+        wait_for(receivers, |receiver| {
+            receiver.inventory.lock().unwrap().complete()
+        })
+        .await?;
+        let fold = json_seconds(monotonic_seconds(correctness)?);
+        terminal_state(receivers, source_live)?;
+        let (mut announcements, mut unchanged, mut replays, mut folds) = (0, 0, 0, Vec::new());
+        for receiver in receivers {
+            let inventory = receiver.inventory.lock().unwrap();
+            announcements += inventory.operation_announces;
+            unchanged += inventory.unchanged;
+            replays += inventory.replays;
+            folds.extend(inventory.completed_monotonic);
+        }
+        folds.sort_by(f64::total_cmp);
+        let (p50, maximum) = if correctness {
+            ("null".to_owned(), "null".to_owned())
+        } else if folds.len() == receivers.len() {
+            (
+                folds[folds.len() / 2].to_string(),
+                folds[folds.len() - 1].to_string(),
+            )
+        } else {
+            return Err("missing receiver fold clock".into());
+        };
+        println!(
+            "dataset_reload_fold {{\"generation\":\"{generation}\",\"receivers\":{},\"fold_monotonic_seconds\":{fold},\"receiver_fold_p50_monotonic_seconds\":{p50},\"receiver_fold_max_monotonic_seconds\":{maximum},\"announcements\":{announcements},\"unchanged_announcements\":{unchanged},\"prior_replays\":{replays},\"exact_fold\":true,\"sessions_continuous\":true}}",
+            receivers.len()
+        );
+    }
+    if lines
+        .next_line()
+        .await
+        .map_err(|error| error.to_string())?
+        .as_deref()
+        != Some("finish")
+    {
+        return Err("missing controller finish boundary".into());
+    }
     Ok(())
 }
 
@@ -1872,6 +2117,56 @@ mod tests {
         assert_eq!(inventory.generation_count, [0, 0]);
         inventory.event(0, DENIED, Some(COMMUNITY_GEN_A)).unwrap();
         assert!(inventory.event(0, DENIED, Some(COMMUNITY_GEN_B)).is_err());
+    }
+
+    #[test]
+    fn dataset_reload_selects_about_one_percent_of_full_table_keys() {
+        let shape = Shape::new("full-uc", false).unwrap();
+        assert_eq!(shape.selected_keys(), [10_000, 2_320]);
+        assert!(shape.selected(0, 0) && shape.selected(0, 8_079) && !shape.selected(0, 80));
+        assert!(shape.selected(1, 0) && !shape.selected(1, 80) && shape.selected(1, 8_000));
+    }
+
+    #[test]
+    fn dataset_reload_fold_tracks_only_swapped_chunks_and_rejects_reversal() {
+        let shape = Shape {
+            vpn: false,
+            counts: [8_000, 80],
+            denied: 0,
+            batch_size: 80,
+        };
+        let mut inventory = Inventory::for_dataset(shape);
+        for family in 0..2 {
+            for index in 0..shape.counts[family] {
+                inventory
+                    .dataset_event(family, index, COMMUNITY_GEN_A)
+                    .unwrap();
+            }
+        }
+        assert!(inventory.complete());
+        // A wrong verdict fails before and after the swap, and nothing is withdrawn.
+        assert!(inventory.dataset_event(0, 0, COMMUNITY_GEN_B).is_err());
+        assert!(inventory.event(0, 0, None).is_err());
+        inventory.arm_dataset(true, false);
+        assert_eq!(inventory.mismatched, 80 + 80);
+        assert!(!inventory.complete());
+        assert!(inventory.dataset_event(0, 80, COMMUNITY_GEN_B).is_err());
+        inventory.dataset_event(0, 80, COMMUNITY_GEN_A).unwrap();
+        inventory.dataset_event(0, 0, COMMUNITY_GEN_A).unwrap();
+        assert_eq!((inventory.unchanged, inventory.replays), (1, 1));
+        inventory.dataset_event(0, 0, COMMUNITY_GEN_B).unwrap();
+        assert!(inventory.dataset_event(0, 0, COMMUNITY_GEN_A).is_err());
+        for index in 1..80 {
+            inventory.dataset_event(0, index, COMMUNITY_GEN_B).unwrap();
+        }
+        assert!(!inventory.complete());
+        for index in 0..80 {
+            inventory.dataset_event(1, index, COMMUNITY_GEN_B).unwrap();
+        }
+        assert!(inventory.complete());
+        inventory.arm_dataset(false, false);
+        assert_eq!(inventory.mismatched, 160);
+        assert!(inventory.dataset_event(0, 0, u32::MAX).is_err());
     }
 
     #[test]

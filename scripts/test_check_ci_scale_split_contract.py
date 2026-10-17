@@ -102,7 +102,7 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_component_scan_mode_is_explicit_and_preserves_memory_matrix(self) -> None:
         for old, new in (
             ("        default: memory\n", "        default: scan\n"),
-            ("        options: [memory, scan, retirement, mass-dirty]\n", "        options: [scan]\n"),
+            ("        options: [memory, scan, retirement, mass-dirty, dataset-reload]\n", "        options: [scan]\n"),
             ("        type: choice\n", "        type: boolean\n"),
             ("      recovery_receipt_mode:\n", "      ignored_mode:\n"),
             ("inputs.recovery_receipt_mode == 'scan'", "github.event_name == 'workflow_dispatch'"),
@@ -118,7 +118,7 @@ class ScaleSplitContractTests(unittest.TestCase):
         for old, new in (
             ("inputs.recovery_receipt_mode == 'retirement'", "inputs.recovery_receipt_mode == 'memory'"),
             ('{"profile":"full-vpn","cell":"retirement"}', '{"profile":"full-uc","cell":"retirement"}'),
-            ("[memory, scan, retirement, mass-dirty]", "[memory, scan, mass-dirty]"),
+            ("[memory, scan, retirement, mass-dirty, dataset-reload]", "[memory, scan, mass-dirty, dataset-reload]"),
         ):
             with self.subTest(old=old):
                 self.mutate(old, new)
@@ -151,6 +151,12 @@ class ScaleSplitContractTests(unittest.TestCase):
         dedicated = f"    if: {contract.RECOVERY_MASS_DIRTY_SELECTOR}\n"
         for old, new in (
             (component, component.replace(" && inputs.recovery_receipt_mode != 'mass-dirty'", "")),
+            (component, component.replace(" && inputs.recovery_receipt_mode != 'dataset-reload'", "")),
+            (dedicated, dedicated.replace(" || inputs.recovery_receipt_mode == 'dataset-reload'", "")),
+            ("[memory, scan, retirement, mass-dirty, dataset-reload]", "[memory, scan, retirement, mass-dirty]"),
+            ('{"profile":"full-uc","cohort":"dataset-full"}', '{"profile":"full-uc","cohort":"dataset-delta"}'),
+            ('{"profile":"full-vpn","cohort":"dataset-delta"}', '{"profile":"full-vpn","cohort":"no-refusal"}'),
+            ("inputs.recovery_receipt_mode == 'dataset-reload' && '", "inputs.recovery_receipt_mode == 'mass-dirty' && '"),
             (dedicated, ""),
             (dedicated, dedicated.replace(" && inputs.recovery_memory_receipt == true", "")),
             (dedicated, dedicated.replace("'workflow_dispatch'", "'pull_request'")),

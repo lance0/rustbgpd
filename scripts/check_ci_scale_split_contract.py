@@ -22,11 +22,13 @@ ROSTER = {
 }
 RECOVERY_MEMORY_SELECTOR = (
     "${{ github.event_name == 'workflow_dispatch' && "
-    "inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode != 'mass-dirty' }}"
+    "inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode != 'mass-dirty' && "
+    "inputs.recovery_receipt_mode != 'dataset-reload' }}"
 )
 RECOVERY_MASS_DIRTY_SELECTOR = (
     "${{ github.event_name == 'workflow_dispatch' && "
-    "inputs.recovery_memory_receipt == true && inputs.recovery_receipt_mode == 'mass-dirty' }}"
+    "inputs.recovery_memory_receipt == true && (inputs.recovery_receipt_mode == 'mass-dirty' || "
+    "inputs.recovery_receipt_mode == 'dataset-reload') }}"
 )
 RECOVERY_MEMORY_CONCURRENCY = (
     "${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && "
@@ -153,16 +155,25 @@ def _check_mass_dirty(job: str, errors: list[str]) -> None:
         errors.append("mass-dirty receipt must use a fresh ubuntu-24.04 hosted runner")
     if "    timeout-minutes: 120\n" not in job or "      fail-fast: false\n" not in job:
         errors.append("mass-dirty receipt must bound each independent matrix job without canceling siblings")
-    matrix = re.findall(r"(?m)^        include: \$\{\{ fromJSON\('([^']*)'\) \}\}[ \t]*$", job)
+    matrix = re.findall(
+        r"(?m)^        include: \$\{\{ fromJSON\(inputs\.recovery_receipt_mode == 'dataset-reload' && '([^']*)' \|\| '([^']*)'\) \}\}[ \t]*$",
+        job,
+    )
     try:
-        selected = json.loads(matrix[0]) if len(matrix) == 1 else None
+        dataset, selected = map(json.loads, matrix[0]) if len(matrix) == 1 else (None, None)
     except ValueError:
-        selected = None
+        dataset = selected = None
     if selected != [
         {"profile": profile, "cohort": cohort}
         for profile in ("full-uc", "full-vpn") for cohort in ("no-refusal", "cap-pressure")
     ]:
         errors.append("mass-dirty receipt must isolate all four fixed profile/cohort cells")
+    if dataset != [
+        {"profile": "full-uc", "cohort": "dataset-delta"},
+        {"profile": "full-vpn", "cohort": "dataset-delta"},
+        {"profile": "full-uc", "cohort": "dataset-full"},
+    ]:
+        errors.append("dataset-reload receipt must isolate both affected-keys cells and the unicast full-pass cell")
     checkout = _action_inputs(job, "actions/checkout")
     if any(re.findall(rf"(?m)^ {{10}}{name}:[ \t]*(.*?)[ \t]*$", checkout) != [value]
            for name, value in (("ref", "${{ github.sha }}"), ("fetch-depth", "0"))):
@@ -333,7 +344,7 @@ def check(root: Path) -> list[str]:
     scan_input = re.search(r"(?m)^      recovery_receipt_mode:\n(?:        [^\n]*\n)+", dispatch)
     if scan_input is None or any(
         re.findall(rf"(?m)^        {name}:[ \t]*(.*?)[ \t]*$", scan_input.group()) != [value]
-        for name, value in (("type", "choice"), ("options", "[memory, scan, retirement, mass-dirty]"),
+        for name, value in (("type", "choice"), ("options", "[memory, scan, retirement, mass-dirty, dataset-reload]"),
                             ("default", "memory"), ("required", "false"))
     ):
         errors.append("recovery receipt mode must be an optional choice defaulting to memory")
