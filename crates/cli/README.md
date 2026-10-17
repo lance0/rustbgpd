@@ -297,6 +297,7 @@ rbgp policy check <file.rpol>                          # parse, typecheck, and r
 rbgp policy check <file.rpol> --coverage-matched-min 100 # require every source term to match a test route; --coverage-min gates evaluated terms separately
 rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatter (in-place; --check for CI; - = stdin)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
+rbgp policy compare <file.rpol> --neighbor <addr> --policy <name> [--replace <member>]   # export changes vs the installed chain
 rbgp policy stats --direction import|export|both [--neighbor <addr> | --allow-partial]  # live per-term hit counters
 rbgp policy counters --direction both                     # alias
 rbgp policy conditional-advertisements                  # conditional advertisement state (alias: conditional)

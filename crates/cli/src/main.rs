@@ -990,6 +990,46 @@ enum PolicyAction {
         #[arg(long, default_value_t = 0)]
         show_rejected: u32,
     },
+    /// Compare a candidate export chain with the one installed for a peer
+    ///
+    /// Evaluates the peer's installed export chain and the candidate over
+    /// the same live Loc-RIB best routes and reports the routes that would
+    /// change: newly rejected, newly accepted, and accepted with different
+    /// attributes. Policy chains only: native egress steps (split
+    /// horizon, iBGP/RR rules, RS control communities, OTC, NO_EXPORT)
+    /// apply to neither side. Read-only. Exit codes: 0 ran, 1 compile
+    /// diagnostics.
+    Compare {
+        /// Path to the candidate `.rpol` file
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        file: String,
+        /// Candidate policy, a name or call form such as "customer-in(200)";
+        /// repeat in chain order to compare a whole candidate chain
+        #[arg(long = "policy", required = true)]
+        policies: Vec<String>,
+        /// Installed chain member that the single --policy replaces; every
+        /// other installed member stays in place
+        #[arg(long, value_name = "MEMBER")]
+        replace: Option<String>,
+        /// Export target whose installed chain is the baseline
+        #[arg(long = "neighbor", visible_alias = "peer")]
+        neighbor: String,
+        /// Address family filter (ipv4_unicast, ipv6_unicast)
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+        /// Maximum routes to evaluate (default: every route in the snapshot)
+        #[arg(long, value_parser = parse_limit_or_all)]
+        limit: Option<u32>,
+        /// Evaluate every route in the snapshot (the default)
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
+        /// Maximum sample routes to show per class (up to 1000)
+        #[arg(long, default_value_t = 10)]
+        max_samples: u32,
+        /// Candidate dataset binding NAME=PATH (repeat for each declared dataset)
+        #[arg(long = "dataset")]
+        datasets: Vec<String>,
+    },
     /// Show one policy by name
     Get {
         /// Policy name
@@ -4025,6 +4065,7 @@ fn validate_json_version(cli: &Cli) -> Result<(), CliError> {
             PolicyAction::Check { .. } | PolicyAction::Fmt { .. } => false,
             PolicyAction::List
             | PolicyAction::Test { .. }
+            | PolicyAction::Compare { .. }
             | PolicyAction::Get { .. }
             | PolicyAction::Set { .. }
             | PolicyAction::Delete { .. }
@@ -5528,6 +5569,34 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         show_changes,
                         datasets: &datasets,
                         show_rejected,
+                    },
+                    json,
+                )
+                .await
+            }
+            PolicyAction::Compare {
+                file,
+                policies,
+                replace,
+                neighbor,
+                family,
+                limit,
+                all: _,
+                max_samples,
+                datasets,
+            } => {
+                commands::policy::compare(
+                    connection,
+                    commands::policy::CompareOptions {
+                        file: &file,
+                        policies: &policies,
+                        replace: replace.as_deref(),
+                        peer: &neighbor,
+                        family: family.as_deref(),
+                        // Omitted and `--all` both evaluate the whole snapshot (RPC limit 0).
+                        limit: limit.unwrap_or(0),
+                        max_samples,
+                        datasets: &datasets,
                     },
                     json,
                 )

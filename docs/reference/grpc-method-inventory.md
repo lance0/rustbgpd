@@ -152,6 +152,7 @@ shape itself does not raise the tier.
 | `ExplainImportPolicy` | `sensitive_read` | ADR-0073. Reads the per-session import-decision cache to explain why a prefix was permitted / denied / withdrawn on import. Side-effect-free; no RIB or counter mutation. |
 | `ListRejectedRoutes` | `sensitive_read` | Enumerates a peer's retained rejected inbound routes with their reject-reason tokens and a compact attribute summary (`[policy.reject_retention]`, bounded per-peer LRU). Discloses policy structure and what a member announced. Side-effect-free; no RIB or counter mutation. |
 | `TestPolicy` | `sensitive_read` | ADR-0096. Compiles a submitted .rpol policy before RIB access, then dry-runs it read-only over version-fenced pages capped at 1,000 in canonical `(prefix, peer, path_id)` order; family/limit/diffs/counts/hits are global. A conservative Received/Best mutation returns `ABORTED` with no partial response (retry the whole RPC); generation exhaustion or an unavailable RIB backend returns `UNAVAILABLE`. Side-effect-free; no RIB, session, or counter mutation. |
+| `ComparePolicy` | `sensitive_read` | Outside-v1 export policy comparison. Compiles a submitted .rpol candidate (a whole chain, or one policy replacing one named member of the installed chain) before RIB access, reads the target peer's installed export chain from its live outbound registration, then evaluates both read-only over the same version-fenced Loc-RIB best pages and returns counts plus at most 1,000 samples per class of newly rejected, newly accepted and attribute-changed routes. Paging, `ABORTED` and `UNAVAILABLE` match `TestPolicy`; a peer without a live outbound registration returns `FAILED_PRECONDITION`. Discloses policy structure and RIB content. Side-effect-free; no RIB, session, or counter mutation. |
 | `GetPolicyStats` | `sensitive_read` | ADR-0096 Decision 3.3. Snapshots the live per-term guard-hit counters of installed import/export chains (since chain install; reset on chain replace — import rows report their install generation, export rows their counter-instance id). Explicit-peer validation, export/import collection, and dataset reads share one absolute 2 s deadline, matching the peer-manager read and neighbor-service RIB snapshot budgets; a capture that exceeds it returns `DEADLINE_EXCEEDED` with no partial rows. Peer validation, import counters and dataset status are read from the roster the peer manager publishes, and export counters from the roster the RIB manager publishes (ADR-0136), so success does not show that either actor is making progress. Reads stop with the caller. By default all errors fail whole; opt-in unfiltered import/both requests may skip only closed selected sessions, named in sorted unique `incomplete_peer_addresses`. Deadlines and other errors still fail whole. Discloses policy structure and traffic shape. Side-effect-free; does not reset counters. |
 | `GetValidationPolicyPosture` | `sensitive_read` | Bounded conservative proof of RPKI-invalid and ASPA-invalid import disposition for installed peers and prospective dynamic ranges. It does not assert validation readiness, connectivity, intent, FIB state, or runtime enforcement. |
 | `ListConditionalAdvertisements` | `sensitive_read` | ADR-0137. Per-definition conditional-advertisement state: condition prefixes and their observations, applied gate, settle timer, and attached neighbors. Discloses route presence and policy structure. One RIB read bounded by a 2 s deadline (`DEADLINE_EXCEEDED`); no priority over route work. Side-effect-free. |
@@ -280,10 +281,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.8% |
-| `sensitive_read` | 78 | 62.4% |
-| `mutating` | 22 | 17.6% |
-| `operator_only` | 24 | 19.2% |
-| **Total** | **125** | **100%** |
+| `sensitive_read` | 79 | 62.7% |
+| `mutating` | 22 | 17.5% |
+| `operator_only` | 24 | 19.0% |
+| **Total** | **126** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`

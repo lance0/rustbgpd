@@ -426,6 +426,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.PolicyService",
+        "ComparePolicy",
+        "/rustbgpd.v1.PolicyService/ComparePolicy",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.PolicyService",
         "GetPolicyStats",
         "/rustbgpd.v1.PolicyService/GetPolicyStats",
         AuthTier::SensitiveRead,
@@ -1184,7 +1190,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 1);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 78);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 79);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 22);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 24);
     }

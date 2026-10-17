@@ -993,6 +993,26 @@ impl CompiledChain {
         }
     }
 
+    /// Policy `index` alone, with this chain's tables: a single-policy
+    /// donor for [`NamedPolicy::from_rpol`](crate::engine::NamedPolicy::from_rpol),
+    /// so a compiled chain's members can be re-spliced around a replacement
+    /// by [`compile_chain`](crate::compile::compile_chain).
+    #[must_use]
+    pub fn member(&self, index: usize) -> Option<Self> {
+        Some(Self {
+            policies: vec![self.policies.get(index)?.clone()],
+            prefix_sets: self.prefix_sets.clone(),
+            community_sets: self.community_sets.clone(),
+            asn_sets: self.asn_sets.clone(),
+            as_path_regexes: self.as_path_regexes.clone(),
+            prefix_set_names: self.prefix_set_names.clone(),
+            community_set_names: self.community_set_names.clone(),
+            asn_set_names: self.asn_set_names.clone(),
+            datasets: self.datasets.clone(),
+            local_asn: self.local_asn,
+        })
+    }
+
     /// Conservatively classify the disposition of a route whose selected
     /// validation dimension is exactly invalid. The walk follows policy and
     /// short-circuit order, but treats every unrelated predicate as unknown.

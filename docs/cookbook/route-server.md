@@ -279,6 +279,22 @@ ladder: each denied candidate names the export-policy term that dropped
 it, followed by the runner-up actually advertised — instead of the false
 "denied" a single-best dry run would report.
 
+Before changing a member's export policy, compare the candidate with the
+chain installed for that member. Only the routes whose outcome would change
+are counted: newly rejected, newly accepted, and accepted with different
+attributes, with up to 10 samples per class by default:
+
+<!-- rbgp-cli-conformance -->
+```console
+$ rbgp policy compare candidate.rpol --neighbor 198.51.100.3 \
+    --policy rs-member-export --replace rs-transparent-export
+```
+
+`--replace` keeps every other member of the installed chain in place. The
+comparison covers policy chains only; RFC 7947 transparency, OTC and the
+RS control communities apply to neither side. See
+[comparing with the installed chain](../reference/rpol-language.md#comparing-a-candidate-with-the-installed-export-chain).
+
 Members can be added and removed at runtime:
 
 ```console

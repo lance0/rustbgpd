@@ -1275,6 +1275,22 @@ service PolicyService {
   // unicast routes.
   rpc TestPolicy(TestPolicyRequest) returns (TestPolicyResponse);
 
+  // ComparePolicy — compare a candidate .rpol export chain with the
+  // export chain installed for one peer, over the same version-fenced walk
+  // of Loc-RIB best routes, and report only the routes whose verdict or
+  // resulting attributes differ. The candidate is either a whole chain or
+  // one policy replacing one named member of the installed chain. The
+  // installed chain is read when the walk starts, from the peer's live
+  // outbound registration; a peer without one returns FAILED_PRECONDITION.
+  // Compile, paging, ABORTED and UNAVAILABLE behavior match TestPolicy.
+  //
+  // Policy chains only: native egress steps (split horizon, iBGP and
+  // route-reflector rules, RS control communities, OTC, NO_EXPORT, ORF,
+  // sendable families) apply to neither side, so a count can include
+  // routes those steps withhold from the peer. Side-effect free; no
+  // counters move. Outside the v1 inventory.
+  rpc ComparePolicy(ComparePolicyRequest) returns (ComparePolicyResponse);
+
   // GetPolicyStats — live per-term guard-hit counters for installed
   // policy chains (ADR-0096 Decision 3.3, the IOS-XR "show pcl" idea).
   // Counters accumulate on the live evaluation path since a chain
@@ -1972,6 +1988,66 @@ message TestPolicyRequest {
   repeated TestPolicyDataset datasets = 8;
   // Maximum rejected-route samples (up to 1,000). 0 = none.
   uint32 show_rejected = 9;
+}
+
+message ComparePolicyRequest {
+  // Full .rpol source text; compiled server-side. Compile diagnostics
+  // fail the comparison with compiled=false and rendered diagnostics.
+  string rpol_source = 1;
+  // Candidate policies from rpol_source, in chain order: bare names or
+  // call forms such as "customer-in(200)". Without replace_member they
+  // form the whole candidate chain (at most 64 members).
+  repeated string policies = 2;
+  // Installed chain member, by its exact configured name, that the single
+  // entry in policies replaces; every other installed member, including
+  // daemon-appended members, stays in place. Empty compares whole chains.
+  string replace_member = 3;
+  // Required managed peer: its installed export chain is the baseline,
+  // and its address, ASN and peer group are the evaluation context.
+  string peer = 4;
+  // UNSPECIFIED compares IPv4 + IPv6 unicast.
+  AddressFamily afi_safi = 5;
+  // Maximum routes to evaluate across all pages; 0 = the whole walk.
+  uint32 limit = 6;
+  // Maximum samples per class (up to 1,000), in canonical
+  // (prefix, peer, path_id) order. 0 = counts only.
+  uint32 max_samples = 7;
+  // Candidate dataset bindings, as in TestPolicyRequest.datasets.
+  repeated TestPolicyDataset datasets = 8;
+}
+
+// One route the installed and candidate chains treat differently.
+message ComparePolicyRoute {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  // Source peer of the Loc-RIB best route.
+  string peer = 3;
+  // Attribute changes each chain applies to an accepted route, rendered
+  // like TestPolicyDiff.changes. Empty on the side that rejects.
+  repeated string installed_changes = 4;
+  repeated string candidate_changes = 5;
+}
+
+message ComparePolicyResponse {
+  // False when the source failed to compile; diagnostics carries the
+  // rendered error report and every count is zero.
+  bool compiled = 1;
+  string diagnostics = 2;
+  // Member names in evaluation order. An empty installed_chain means no
+  // export chain applies: every route is accepted unmodified.
+  repeated string installed_chain = 3;
+  repeated string candidate_chain = 4;
+  uint64 routes_evaluated = 5;
+  // Accepted by the installed chain, rejected by the candidate.
+  uint64 newly_rejected = 6;
+  // Rejected by the installed chain, accepted by the candidate.
+  uint64 newly_accepted = 7;
+  // Accepted by both with different resulting attributes or next hop.
+  uint64 attributes_changed = 8;
+  // Up to request.max_samples routes per class.
+  repeated ComparePolicyRoute newly_rejected_routes = 9;
+  repeated ComparePolicyRoute newly_accepted_routes = 10;
+  repeated ComparePolicyRoute attributes_changed_routes = 11;
 }
 
 message TestPolicyDataset {

@@ -851,6 +851,52 @@ fn read_test_policy_file(path: &str, limit: usize) -> Result<String, CliError> {
     Ok(text)
 }
 
+/// Read a candidate `.rpol` file and its NAME=PATH dataset bindings,
+/// bounded together by the dry-run request size limit.
+fn read_candidate_inputs(
+    file: &str,
+    bindings: &[String],
+) -> Result<(String, Vec<proto::TestPolicyDataset>), CliError> {
+    if bindings.len() > rustbgpd_policy::datasets::MAX_UNIT_DATASETS {
+        return Err(CliError::Argument("too many --dataset bindings".into()));
+    }
+    let rpol_source = read_test_policy_file(file, TEST_POLICY_MAX_REQUEST_BYTES)?;
+    let mut remaining = TEST_POLICY_MAX_REQUEST_BYTES - rpol_source.len();
+    let mut names = std::collections::HashSet::new();
+    let mut datasets = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let (name, path) = binding.split_once('=').ok_or_else(|| {
+            CliError::Argument(format!("invalid --dataset {binding:?}; expected NAME=PATH"))
+        })?;
+        if name.is_empty() || path.is_empty() || !names.insert(name) {
+            return Err(CliError::Argument(format!(
+                "invalid or duplicate --dataset {binding:?}; expected unique NAME=PATH"
+            )));
+        }
+        remaining = remaining.checked_sub(name.len()).ok_or_else(|| {
+            CliError::Argument("candidate datasets exceed the TestPolicy request size limit".into())
+        })?;
+        let entries = read_test_policy_file(path, remaining)?;
+        remaining -= entries.len();
+        datasets.push(proto::TestPolicyDataset {
+            name: name.into(),
+            entries,
+        });
+    }
+    Ok((rpol_source, datasets))
+}
+
+fn dry_run_family(family: Option<&str>) -> Result<proto::AddressFamily, CliError> {
+    match family {
+        None => Ok(proto::AddressFamily::Unspecified),
+        Some("ipv4_unicast" | "ipv4") => Ok(proto::AddressFamily::Ipv4Unicast),
+        Some("ipv6_unicast" | "ipv6") => Ok(proto::AddressFamily::Ipv6Unicast),
+        Some(other) => Err(CliError::Argument(format!(
+            "unsupported family {other:?}; expected ipv4_unicast or ipv6_unicast"
+        ))),
+    }
+}
+
 #[derive(Serialize)]
 struct JsonTermHits<'a> {
     term: &'a str,
@@ -940,42 +986,8 @@ pub async fn test(
             "--show-rejected exceeds {TEST_POLICY_MAX_REJECTED_SAMPLES}"
         )));
     }
-    if opts.datasets.len() > rustbgpd_policy::datasets::MAX_UNIT_DATASETS {
-        return Err(CliError::Argument("too many --dataset bindings".into()));
-    }
-    let rpol_source = read_test_policy_file(opts.file, TEST_POLICY_MAX_REQUEST_BYTES)?;
-    let mut remaining = TEST_POLICY_MAX_REQUEST_BYTES - rpol_source.len();
-    let mut names = std::collections::HashSet::new();
-    let mut datasets = Vec::with_capacity(opts.datasets.len());
-    for binding in opts.datasets {
-        let (name, path) = binding.split_once('=').ok_or_else(|| {
-            CliError::Argument(format!("invalid --dataset {binding:?}; expected NAME=PATH"))
-        })?;
-        if name.is_empty() || path.is_empty() || !names.insert(name) {
-            return Err(CliError::Argument(format!(
-                "invalid or duplicate --dataset {binding:?}; expected unique NAME=PATH"
-            )));
-        }
-        remaining = remaining.checked_sub(name.len()).ok_or_else(|| {
-            CliError::Argument("candidate datasets exceed the TestPolicy request size limit".into())
-        })?;
-        let entries = read_test_policy_file(path, remaining)?;
-        remaining -= entries.len();
-        datasets.push(proto::TestPolicyDataset {
-            name: name.into(),
-            entries,
-        });
-    }
-    let afi_safi = match opts.family {
-        None => proto::AddressFamily::Unspecified,
-        Some("ipv4_unicast" | "ipv4") => proto::AddressFamily::Ipv4Unicast,
-        Some("ipv6_unicast" | "ipv6") => proto::AddressFamily::Ipv6Unicast,
-        Some(other) => {
-            return Err(CliError::Argument(format!(
-                "unsupported family {other:?}; expected ipv4_unicast or ipv6_unicast"
-            )));
-        }
-    };
+    let (rpol_source, datasets) = read_candidate_inputs(opts.file, opts.datasets)?;
+    let afi_safi = dry_run_family(opts.family)?;
     let request = proto::TestPolicyRequest {
         rpol_source,
         policy: opts.policy.to_string(),
@@ -1056,6 +1068,200 @@ pub async fn test(
                 route.prefix_length,
                 route.peer
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// Options for `rbgp policy compare`.
+#[derive(Clone, Copy)]
+pub struct CompareOptions<'a> {
+    /// Path to the local `.rpol` file (its text is sent to the daemon).
+    pub file: &'a str,
+    /// Candidate policies in chain order (names or call forms).
+    pub policies: &'a [String],
+    /// Installed member the single candidate policy replaces.
+    pub replace: Option<&'a str>,
+    /// Export target peer.
+    pub peer: &'a str,
+    /// Optional family filter (`ipv4_unicast`, `ipv6_unicast`).
+    pub family: Option<&'a str>,
+    /// Max routes evaluated (0 = all).
+    pub limit: u32,
+    /// Max samples per class.
+    pub max_samples: u32,
+    /// Candidate dataset NAME=PATH bindings.
+    pub datasets: &'a [String],
+}
+
+#[derive(Serialize)]
+struct JsonCompareRoute<'a> {
+    prefix: String,
+    peer: &'a str,
+    installed_changes: &'a [String],
+    candidate_changes: &'a [String],
+}
+
+#[derive(Serialize)]
+struct JsonCompare<'a> {
+    file: &'a str,
+    peer: &'a str,
+    compiled: bool,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    diagnostics: &'a str,
+    installed_chain: &'a [String],
+    candidate_chain: &'a [String],
+    routes_evaluated: u64,
+    newly_rejected: u64,
+    newly_accepted: u64,
+    attributes_changed: u64,
+    newly_rejected_routes: Vec<JsonCompareRoute<'a>>,
+    newly_accepted_routes: Vec<JsonCompareRoute<'a>>,
+    attributes_changed_routes: Vec<JsonCompareRoute<'a>>,
+}
+
+fn compare_routes_to_json(routes: &[proto::ComparePolicyRoute]) -> Vec<JsonCompareRoute<'_>> {
+    routes
+        .iter()
+        .map(|route| JsonCompareRoute {
+            prefix: format!("{}/{}", route.prefix, route.prefix_length),
+            peer: &route.peer,
+            installed_changes: &route.installed_changes,
+            candidate_changes: &route.candidate_changes,
+        })
+        .collect()
+}
+
+fn compare_to_json<'a>(
+    resp: &'a proto::ComparePolicyResponse,
+    opts: &CompareOptions<'a>,
+) -> JsonCompare<'a> {
+    JsonCompare {
+        file: opts.file,
+        peer: opts.peer,
+        compiled: resp.compiled,
+        diagnostics: &resp.diagnostics,
+        installed_chain: &resp.installed_chain,
+        candidate_chain: &resp.candidate_chain,
+        routes_evaluated: resp.routes_evaluated,
+        newly_rejected: resp.newly_rejected,
+        newly_accepted: resp.newly_accepted,
+        attributes_changed: resp.attributes_changed,
+        newly_rejected_routes: compare_routes_to_json(&resp.newly_rejected_routes),
+        newly_accepted_routes: compare_routes_to_json(&resp.newly_accepted_routes),
+        attributes_changed_routes: compare_routes_to_json(&resp.attributes_changed_routes),
+    }
+}
+
+/// `rbgp policy compare` — compare a candidate export chain with the one
+/// installed for a peer, over the live Loc-RIB.
+pub async fn compare(
+    connection: Connection,
+    opts: CompareOptions<'_>,
+    json: bool,
+) -> Result<(), CliError> {
+    use prost::Message;
+
+    if opts.max_samples > TEST_POLICY_MAX_REJECTED_SAMPLES {
+        return Err(CliError::Argument(format!(
+            "--max-samples exceeds {TEST_POLICY_MAX_REJECTED_SAMPLES}"
+        )));
+    }
+    if opts.replace.is_some() && opts.policies.len() != 1 {
+        return Err(CliError::Argument(
+            "--replace takes exactly one --policy".into(),
+        ));
+    }
+    let (rpol_source, datasets) = read_candidate_inputs(opts.file, opts.datasets)?;
+    let request = proto::ComparePolicyRequest {
+        rpol_source,
+        policies: opts.policies.to_vec(),
+        replace_member: opts.replace.unwrap_or_default().to_string(),
+        peer: bare_ip_rpc_address(opts.peer).to_string(),
+        afi_safi: dry_run_family(opts.family)? as i32,
+        limit: opts.limit,
+        max_samples: opts.max_samples,
+        datasets,
+    };
+    if request.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
+        return Err(CliError::Argument(
+            "ComparePolicy request exceeds the size limit".into(),
+        ));
+    }
+    let mut client =
+        PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = read_rpc("ComparePolicy", client.compare_policy(request))
+        .await?
+        .into_inner();
+
+    if json {
+        output::print_json_pretty(&compare_to_json(&resp, &opts))?;
+        if !resp.compiled {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if !resp.compiled {
+        eprint!("{}", resp.diagnostics);
+        eprintln!("{}: compile failed", opts.file);
+        std::process::exit(1);
+    }
+    let chain = |names: &[String]| {
+        if names.is_empty() {
+            "(none: accept all)".to_string()
+        } else {
+            names.join(", ")
+        }
+    };
+    outln!(
+        "export to {} over {} route{}:",
+        opts.peer,
+        resp.routes_evaluated,
+        if resp.routes_evaluated == 1 { "" } else { "s" }
+    )?;
+    outln!("  installed: {}", chain(&resp.installed_chain))?;
+    outln!("  candidate: {}", chain(&resp.candidate_chain))?;
+    outln!(
+        "  newly rejected {}  newly accepted {}  attributes changed {}",
+        resp.newly_rejected,
+        resp.newly_accepted,
+        resp.attributes_changed
+    )?;
+    for (label, total, routes) in [
+        (
+            "Newly rejected",
+            resp.newly_rejected,
+            &resp.newly_rejected_routes,
+        ),
+        (
+            "Newly accepted",
+            resp.newly_accepted,
+            &resp.newly_accepted_routes,
+        ),
+        (
+            "Attributes changed",
+            resp.attributes_changed,
+            &resp.attributes_changed_routes,
+        ),
+    ] {
+        if routes.is_empty() {
+            continue;
+        }
+        outln!("{label} (showing {} of {total}):", routes.len())?;
+        for route in routes {
+            outln!(
+                "  {}/{} (from {})",
+                route.prefix,
+                route.prefix_length,
+                route.peer
+            )?;
+            for change in &route.installed_changes {
+                outln!("    installed: {change}")?;
+            }
+            for change in &route.candidate_changes {
+                outln!("    candidate: {change}")?;
+            }
         }
     }
     Ok(())
@@ -2741,6 +2947,98 @@ mod tests {
         assert_eq!(captured.datasets[0].name, "prefixes");
         assert_eq!(captured.datasets[0].entries, "192.0.2.0/24\n");
         assert_eq!(captured.show_rejected, 3);
+    }
+
+    #[tokio::test]
+    async fn compare_sends_the_candidate_and_renders_flip_classes() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let file = write_rpol("policy client-x { term t { accept } }");
+        let policies = ["client-x".to_string()];
+        let opts = CompareOptions {
+            file: file.path().to_str().unwrap(),
+            policies: &policies,
+            replace: Some("client-x"),
+            peer: "fe80::9%eth0",
+            family: Some("ipv6_unicast"),
+            limit: 0,
+            max_samples: 3,
+            datasets: &[],
+        };
+        compare(connection.clone(), opts, false).await.unwrap();
+        let captured = server
+            .state
+            .last_compare_policy
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(
+            captured.rpol_source,
+            "policy client-x { term t { accept } }"
+        );
+        assert_eq!(captured.policies, ["client-x"]);
+        assert_eq!(captured.replace_member, "client-x");
+        assert_eq!(captured.peer, "fe80::9");
+        assert_eq!(
+            captured.afi_safi,
+            crate::proto::AddressFamily::Ipv6Unicast as i32
+        );
+        assert_eq!(captured.max_samples, 3);
+
+        let resp = proto::ComparePolicyResponse {
+            compiled: true,
+            installed_chain: vec!["rs-hygiene".to_string(), "client-x".to_string()],
+            newly_rejected: 2,
+            newly_rejected_routes: vec![proto::ComparePolicyRoute {
+                prefix: "198.18.0.0".to_string(),
+                prefix_length: 15,
+                peer: "10.0.0.9".to_string(),
+                ..Default::default()
+            }],
+            attributes_changed_routes: vec![proto::ComparePolicyRoute {
+                prefix: "192.0.2.0".to_string(),
+                prefix_length: 24,
+                peer: "10.0.0.9".to_string(),
+                installed_changes: vec!["local_pref unset -> 200".to_string()],
+                candidate_changes: vec!["local_pref unset -> 300".to_string()],
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(compare_to_json(
+            &resp,
+            &CompareOptions {
+                file: "candidate.rpol",
+                policies: &policies,
+                replace: Some("client-x"),
+                peer: "192.0.2.1",
+                family: None,
+                limit: 0,
+                max_samples: 3,
+                datasets: &[],
+            },
+        ))
+        .unwrap();
+        assert_eq!(json["newly_rejected"], 2);
+        assert_eq!(json["newly_rejected_routes"][0]["prefix"], "198.18.0.0/15");
+        assert_eq!(
+            json["attributes_changed_routes"][0]["candidate_changes"][0],
+            "local_pref unset -> 300"
+        );
+        assert_eq!(json["installed_chain"][1], "client-x");
+
+        let two = ["a".to_string(), "b".to_string()];
+        let error = compare(
+            connection,
+            CompareOptions {
+                policies: &two,
+                ..opts
+            },
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CliError::Argument(_)));
     }
 
     #[test]

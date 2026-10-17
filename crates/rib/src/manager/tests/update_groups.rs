@@ -726,6 +726,75 @@ fn distribute_direct_route(manager: &mut RibManager, source: Ipv4Addr, prefix: I
     distribute_direct_routes(manager, source, [prefix]);
 }
 
+/// `ComparePolicy` takes its baseline from the per-peer chain, so a grouped
+/// member answers exactly like an ungrouped peer installed with the same
+/// chain; a peer without an outbound registration has no baseline.
+#[test]
+fn installed_export_chain_query_ignores_update_grouping() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let chain = || {
+        PolicyChain::new(vec![Policy {
+            entries: vec![deny_statement(Ipv4Prefix::new(
+                Ipv4Addr::new(10, 0, 0, 0),
+                8,
+            ))],
+            default_action: PolicyAction::Permit,
+        }])
+    };
+    let grouped = [
+        IpAddr::V4(Ipv4Addr::new(10, 63, 9, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 63, 9, 2)),
+    ];
+    let ungrouped = IpAddr::V4(Ipv4Addr::new(10, 63, 9, 3));
+    let mut receivers = Vec::new();
+    // Add-Path send disqualifies a peer from update-group sharing.
+    for (peer, add_path_send_max) in [(grouped[0], 0), (grouped[1], 0), (ungrouped, 2)] {
+        let (outbound_tx, outbound_rx) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: Some(chain()),
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: if add_path_send_max == 0 {
+                vec![]
+            } else {
+                ipv4_sendable()
+            },
+            add_path_send_max,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        receivers.push(outbound_rx);
+    }
+    assert!(
+        grouped
+            .iter()
+            .all(|peer| manager.grouped_member_of(*peer).is_some())
+    );
+    assert!(manager.grouped_member_of(ungrouped).is_none());
+
+    let mut query = |peer| {
+        let (reply, mut answer) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryInstalledExportChain { peer, reply });
+        answer.try_recv().unwrap()
+    };
+    let expected = chain().compiled().clone();
+    for peer in [grouped[0], grouped[1], ungrouped] {
+        let installed = query(peer).expect("registered peer has a baseline");
+        assert_eq!(installed.chain.as_deref(), Some(&expected), "{peer}");
+    }
+    assert!(query(IpAddr::V4(Ipv4Addr::new(10, 63, 9, 4))).is_none());
+}
+
 #[test]
 fn distribution_clones_metrics_once_per_pass() {
     const PEERS: usize = 4;

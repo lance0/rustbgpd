@@ -32,6 +32,7 @@ catalog.
 | What did import policy decide for this prefix from that peer? (opt-in: `[policy.explain] enabled = true`) | `rbgp policy explain --neighbor <peer> --prefix <cidr> --direction import` |
 | Which of a member's routes were filtered, and why? | `rbgp rib received <peer> --rejected` |
 | What would this candidate policy do to the live RIB? | `rbgp policy test <file> --policy <name> --direction import` |
+| Which routes would this export-policy change add, drop, or alter for a peer? | `rbgp policy compare <file> --neighbor <addr> --policy <name> --replace <member>` |
 | Which policy terms are actually firing? | `rbgp policy stats --direction both` |
 | What would this config change touch? | `rbgp config diff <candidate.toml>` |
 
@@ -341,6 +342,7 @@ comparison to look at next.
 | Surface | What it answers |
 |---------|-----------------|
 | `rbgp policy test <file> --policy <p> --direction <d>` | Read-only dry run of a *candidate* policy against the live RIB: accepted/rejected/modified counts, term hits, per-attribute before/after diffs ([rpol-language.md](../reference/rpol-language.md)) |
+| `rbgp policy compare <file> --neighbor <addr> --policy <p> [--replace <member>]` | Read-only comparison of a candidate export chain with the chain installed for one peer: newly rejected, newly accepted and attribute-changed routes, with exact counts and capped samples ([rpol-language.md](../reference/rpol-language.md#comparing-a-candidate-with-the-installed-export-chain)) |
 | `rbgp policy check <file>` | Offline parse/typecheck plus the file's in-language `test` blocks — no daemon needed |
 | `rbgp policy stats --direction import\|export\|both` (alias `counters`) | Live per-term hit counters: which policy terms actually fire |
 | `rbgp config diff <candidate>` / `rbgp config plan <candidate>` | What a config change would touch, each field annotated hot-applied / session reset / restart required ([OPERATIONS.md](../reference/operations.md#config-diff-dry-run-reload)) |
