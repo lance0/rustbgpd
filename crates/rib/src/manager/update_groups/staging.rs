@@ -516,9 +516,12 @@ impl RibManager {
     /// the group tables here; `recompute_and_distribute_vpn` emits them
     /// per member via the RT-pass source-flip matrix (Φ applied at emit
     /// for RTC-negotiated groups).
+    ///
+    /// With `targets`, groups with no member in it are skipped.
     pub(in crate::manager) fn stage_vpn_update_groups(
         &mut self,
         changed: &HashSet<VpnRouteKey>,
+        targets: Option<&HashSet<IpAddr>>,
     ) -> HashMap<usize, VpnGroupStageOutput> {
         let mut staged = HashMap::new();
         if changed.is_empty() || self.group_ribs.is_empty() {
@@ -530,6 +533,12 @@ impl RibManager {
             .filter(|(_, group)| {
                 self.replacement_checkpoint(false);
                 group.stages_vpn()
+                    && targets.is_none_or(|targets| {
+                        group.members.iter().any(|member| {
+                            self.replacement_checkpoint(false);
+                            targets.contains(member)
+                        })
+                    })
             })
             .map(|(gid, _)| *gid)
             .collect();

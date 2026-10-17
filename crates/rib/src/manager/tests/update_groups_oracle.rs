@@ -1313,6 +1313,8 @@ pub(super) struct OraclePeerFeatures {
     /// classifier flip, so the oracle's normal side groups these peers
     /// while the forced side keeps the per-peer correctness oracle.
     pub(super) per_client_best: bool,
+    /// Add-Path send also covers the VPN families (needs `add_path_send_max`).
+    pub(super) add_path_vpn: bool,
 }
 
 impl Oracle {
@@ -1465,7 +1467,9 @@ impl Oracle {
             sendable_families
                 .iter()
                 .copied()
-                .filter(|(_, safi)| *safi == Safi::Unicast)
+                .filter(|(_, safi)| {
+                    *safi == Safi::Unicast || (features.add_path_vpn && *safi == Safi::MplsVpn)
+                })
                 .collect()
         } else {
             Vec::new()
@@ -2668,54 +2672,582 @@ async fn dataset_swap_bounded_reevaluation_matches_full_pass_with_dirty_member()
     }
 }
 
-/// VPN receivers are outside the bounded path: the swap falls back to the
-/// full pass and stays exact.
-#[tokio::test]
-async fn dataset_swap_with_vpn_receivers_uses_full_pass() {
-    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 210, 1, 0), 24));
-    let run = async |with_swaps: bool| {
-        let (handle, chain) = dataset_prefix_policy(prefix, true);
-        let mut oracle = Oracle::spawn(false, Some(Ipv4Addr::new(192, 0, 2, 1)));
-        oracle
-            .peer_up_families(A, false, true, None, 64, vpn_sendable())
-            .await;
-        for peer in [B, C] {
-            oracle
-                .peer_up_families(peer, false, true, Some(chain.clone()), 64, vpn_sendable())
-                .await;
+/// Contents of the datasets the VPN swap oracle's export chain reads.
+#[derive(Clone)]
+struct VpnSwapData {
+    allowed: Vec<rustbgpd_policy::sets::PrefixSetEntry>,
+    blocked: Vec<u32>,
+    marked: Vec<u32>,
+    tagged: Vec<u32>,
+}
+
+impl VpnSwapData {
+    fn base() -> Self {
+        Self {
+            allowed: vpn_swap_allowed(&[1, 2], &[1]),
+            blocked: vec![],
+            marked: vec![],
+            tagged: vec![],
         }
+    }
+
+    fn handles(&self) -> [Arc<rustbgpd_policy::datasets::DatasetHandle>; 4] {
+        use rustbgpd_policy::datasets::{DatasetHandle, DatasetKind};
+        let [allowed, blocked, marked, tagged] = self.data();
+        [
+            Arc::new(DatasetHandle::new("allowed", DatasetKind::Prefix, allowed)),
+            Arc::new(DatasetHandle::new("blocked", DatasetKind::Asn, blocked)),
+            Arc::new(DatasetHandle::new("marked", DatasetKind::Asn, marked)),
+            Arc::new(DatasetHandle::new("tagged", DatasetKind::Community, tagged)),
+        ]
+    }
+
+    fn data(&self) -> [rustbgpd_policy::datasets::DatasetData; 4] {
+        use rustbgpd_policy::datasets::DatasetData;
+        use rustbgpd_policy::sets::{AsnSet, CommunitySet, PrefixSet};
+        [
+            DatasetData::Prefix(PrefixSet::new(self.allowed.iter().copied())),
+            DatasetData::Asn(AsnSet::new(self.blocked.iter().copied())),
+            DatasetData::Asn(AsnSet::new(self.marked.iter().copied())),
+            DatasetData::Community(CommunitySet::new(
+                self.tagged
+                    .iter()
+                    .map(|&value| CommunityMatch::Standard { value }),
+            )),
+        ]
+    }
+}
+
+fn vpn6_inner(n: u8) -> Ipv6Prefix {
+    Ipv6Prefix::new(
+        Ipv6Addr::new(0x2001, 0xdb8, u16::from(n), 0, 0, 0, 0, 0),
+        48,
+    )
+}
+
+/// A `VPNv6` NLRI fixture: RD 65000:(100 + n), inner `2001:db8:n::/48`.
+fn vpn6_nlri(n: u8) -> VpnNlri {
+    VpnNlri {
+        labels: vec![MplsLabelEntry::try_new(600 + u32::from(n), 0, true).unwrap()],
+        route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100 + n]),
+        prefix: VpnPrefix::v6(vpn6_inner(n).addr, 48).unwrap(),
+    }
+}
+
+/// Inner prefixes `v4` (`10.210.n.0/24`) and `v6` (`2001:db8:n::/48`), plus
+/// the matching unicast `10.200.n.0/24` for each `v4` entry.
+fn vpn_swap_allowed(v4: &[u8], v6: &[u8]) -> Vec<rustbgpd_policy::sets::PrefixSetEntry> {
+    let entry = |prefix| rustbgpd_policy::sets::PrefixSetEntry {
+        prefix,
+        ge: None,
+        le: None,
+    };
+    v4.iter()
+        .flat_map(|&n| {
+            [
+                entry(Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(10, 210, n, 0),
+                    24,
+                ))),
+                entry(Prefix::V4(pfx(n, 0))),
+            ]
+        })
+        .chain(v6.iter().map(|&n| entry(Prefix::V6(vpn6_inner(n)))))
+        .collect()
+}
+
+/// Every oracle VPN and unicast route.
+fn vpn_swap_allowed_all() -> Vec<rustbgpd_policy::sets::PrefixSetEntry> {
+    vpn_swap_allowed(&[1, 2, 3, 4, 5, 6, 7, 8], &[1, 2, 3, 4])
+}
+
+/// Accept/reject flips through `allowed` and `blocked`; an attribute
+/// change through `marked`; `tagged` is a community probe, which no route
+/// key bounds.
+fn vpn_swap_chain(handles: &[Arc<rustbgpd_policy::datasets::DatasetHandle>; 4]) -> PolicyChain {
+    use rustbgpd_policy::datasets::DatasetBindings;
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+    let mut bindings = DatasetBindings::new();
+    for handle in handles {
+        bindings.insert(Arc::clone(handle));
+    }
+    let compiled = RpolFile::parse(
+        "dataset prefix-set allowed\ndataset asn-set blocked\ndataset asn-set marked\n\
+         dataset community-set tagged\n\
+         policy p {\n\
+             term deny { if route.origin-as in blocked { reject } }\n\
+             term tag { if route.communities in tagged { add community 65400:3000; accept } }\n\
+             term mark { if route.prefix in allowed && route.origin-as in marked {\n\
+                 add community 65400:2000; accept } }\n\
+             term pass { if route.prefix in allowed { add community 65400:1000; accept } reject }\n\
+         }",
+    )
+    .expect("dataset policy parses")
+    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+    .expect("policy compiles")
+    .expect("dataset binding is complete");
+    PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )])
+}
+
+fn vpn_swap_attributes(local_pref: u32, origin: Option<u32>, community: bool) -> Arc<AttrSet> {
+    let mut attributes = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: origin
+                .map(|origin| vec![AsPathSegment::AsSequence(vec![65100, origin])])
+                .unwrap_or_default(),
+        }),
+        PathAttribute::LocalPref(local_pref),
+    ];
+    if community {
+        attributes.push(PathAttribute::Communities(vec![0xFDE8_0007]));
+    }
+    AttrSet::new(attributes)
+}
+
+fn vpn_swap_route(
+    nlri: VpnNlri,
+    src: Ipv4Addr,
+    local_pref: u32,
+    origin: Option<u32>,
+    community: bool,
+) -> VpnRibRoute {
+    let mut route = vpn_route(nlri, src, local_pref, vec![]);
+    route.attributes = vpn_swap_attributes(local_pref, origin, community);
+    route
+}
+
+/// Final advertised VPN state per peer, keyed by identity and path ID.
+type FoldedVpnPaths =
+    BTreeMap<IpAddr, BTreeMap<(String, u32), (String, IpAddr, IpAddr, Vec<PathAttribute>)>>;
+
+fn fold_vpn_paths(streams: &Streams) -> FoldedVpnPaths {
+    let mut state = FoldedVpnPaths::new();
+    for (peer, msgs) in streams {
+        let table = state.entry(*peer).or_default();
+        for msg in msgs {
+            if msg.session_start.is_some() {
+                table.clear();
+            }
+            for (key, path, _) in &msg.vpn_withdraw {
+                assert!(
+                    table.remove(&(key.clone(), *path)).is_some(),
+                    "spurious VPN withdrawal for {peer}: {key} path {path}"
+                );
+            }
+            for (key, nlri, nh, src, attrs, _, path) in &msg.vpn_announce {
+                table.insert(
+                    (key.clone(), *path),
+                    (nlri.clone(), *nh, *src, attrs.clone()),
+                );
+            }
+        }
+    }
+    state
+}
+
+#[derive(Clone, Copy, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent oracle dimensions, each a receiver feature"
+)]
+struct VpnSwapMode {
+    ungrouped: bool,
+    add_path: bool,
+    /// C's channel is full when the re-evaluation arrives, so C is dirty.
+    jam: bool,
+    /// B and C negotiate RT-Constrain, whose export the bound does not cover.
+    rtc: bool,
+    /// `VPNv4` selection is held for a waiter that never arrives until the
+    /// deferral timer releases it, after the swap.
+    deferred: bool,
+}
+
+/// The VPN counterpart of [`run_swap_case`]: a mixed `VPNv4`/`VPNv6` table
+/// (plus unicast) reflected to B and C, which share the dataset chain.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one oracle topology: sessions, routes, swap and recovery in order"
+)]
+async fn run_vpn_swap_case(
+    initial: &VpnSwapData,
+    next: Option<&VpnSwapData>,
+    mode: VpnSwapMode,
+    with_swaps: bool,
+) -> (FoldedState, FoldedVpnPaths, u64) {
+    let handles = initial.handles();
+    let chain = vpn_swap_chain(&handles);
+    let mut sendable = vec![
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv6, Safi::MplsVpn),
+    ];
+    let source_sendable = sendable.clone();
+    if mode.rtc {
+        sendable.push((Afi::Ipv4, Safi::RtConstrain));
+    }
+    let mut oracle = Oracle::spawn_configured(
+        mode.ungrouped,
+        Some(Ipv4Addr::new(192, 0, 2, 1)),
+        |manager| {
+            if mode.deferred {
+                manager.selection_deferral =
+                    super::super::selection_deferral::SelectionDeferral::new(
+                        crate::SelectionDeferralConfig {
+                            timeout: Duration::from_secs(30),
+                            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                                peer: IpAddr::V4(F),
+                                families: vec![(Afi::Ipv4, Safi::MplsVpn)],
+                            }],
+                        },
+                        &manager.metrics,
+                    );
+            }
+        },
+    );
+    for source in [A, E] {
         oracle
-            .vpn_routes(A, vec![vpn_route(vpn_nlri(1, 100), A, 100, vec![])], vec![])
+            .peer_up_families(source, false, true, None, 64, source_sendable.clone())
             .await;
+    }
+    for (peer, capacity) in [(B, 64), (C, if mode.jam { 1 } else { 64 })] {
         oracle
-            .routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .peer_up_families_generation_with_features(
+                peer,
+                SESSION,
+                false,
+                true,
+                Some(chain.clone()),
+                capacity,
+                sendable.clone(),
+                OraclePeerFeatures {
+                    add_path_send_max: if mode.add_path { 4 } else { 0 },
+                    add_path_vpn: mode.add_path,
+                    ..OraclePeerFeatures::default()
+                },
+            )
             .await;
+    }
+    oracle
+        .peer_up_families(
+            D,
+            false,
+            true,
+            Some(permit_all_with(RouteModifications::default())),
+            64,
+            source_sendable.clone(),
+        )
+        .await;
+    if mode.jam {
+        let eor = oracle.drain_one(C).await;
+        assert!(eor.vpn_announce.is_empty());
+    }
+    if mode.rtc {
+        for peer in [B, C] {
+            oracle.rtc_routes(peer, vec![rtc_default(peer)]).await;
+        }
+    }
+    let origins = [
+        Some(64501),
+        Some(64502),
+        Some(64503),
+        None,
+        Some(64501),
+        Some(64502),
+        Some(64503),
+        Some(64504),
+    ];
+    let mut from_a: Vec<_> = (1..=8)
+        .zip(origins)
+        .map(|(n, origin)| vpn_swap_route(vpn_nlri(n, 100 + u32::from(n)), A, 200, origin, n == 7))
+        .collect();
+    from_a.extend(
+        (1..=4)
+            .zip(origins)
+            .map(|(n, origin)| vpn_swap_route(vpn6_nlri(n), A, 200, origin, false)),
+    );
+    oracle.vpn_routes(A, from_a, vec![]).await;
+    // Runner-up candidates with other origins: Add-Path receivers read
+    // them, so an origin swap must reach non-best paths.
+    oracle
+        .vpn_routes(
+            E,
+            vec![
+                vpn_swap_route(vpn_nlri(5, 205), E, 100, Some(64509), false),
+                vpn_swap_route(vpn_nlri(6, 206), E, 100, Some(64501), false),
+                vpn_swap_route(vpn6_nlri(2), E, 100, Some(64509), false),
+            ],
+            vec![],
+        )
+        .await;
+    let unicast = (1..=4)
+        .zip(origins)
+        .map(|(n, origin)| {
+            let mut route = ibgp_route(pfx(n, 0), A, 200, vec![]);
+            route.attributes = vpn_swap_attributes(200, origin, false);
+            route
+        })
+        .collect();
+    oracle.routes(A, unicast, vec![]).await;
+    if !mode.jam {
         oracle.drain_available();
-        let prior = handle.pin();
-        handle.refresh(dataset_prefix_data(prefix, false)).unwrap();
+    }
+    let mut evals = 0;
+    if let Some(next) = next {
+        let mut swaps = Vec::new();
+        for (handle, data) in handles.iter().zip(next.data()) {
+            let prior = handle.pin();
+            if handle.refresh(data).is_some() {
+                swaps.push(crate::update::DatasetSwap {
+                    handle: Arc::clone(handle),
+                    prior,
+                });
+            }
+        }
+        let before = oracle.export_policy_evals_for(B).await;
+        let bystander = oracle.export_policy_evals_for(D).await;
         let (reply, result) = oneshot::channel();
         oracle
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
                 peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
-                swaps: with_swaps.then(|| {
-                    vec![crate::update::DatasetSwap {
-                        handle: Arc::clone(&handle),
-                        prior,
-                    }]
-                }),
+                swaps: with_swaps.then_some(swaps),
                 reply,
             })
             .await
             .unwrap();
         result.await.unwrap().unwrap();
-        let streams = oracle.finish().await;
-        (fold(&streams), fold_vpn(&streams))
+        evals = oracle.export_policy_evals_for(B).await - before;
+        assert_eq!(
+            oracle.export_policy_evals_for(D).await,
+            bystander,
+            "bystander re-evaluated"
+        );
+    }
+    if mode.deferred {
+        tokio::time::advance(Duration::from_secs(31)).await;
+        oracle.quiesce().await;
+    }
+    if mode.jam {
+        oracle
+            .drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        oracle.quiesce().await;
+        oracle.end_recovery(C).await;
+    }
+    let streams = oracle.finish().await;
+    (fold(&streams), fold_vpn_paths(&streams), evals)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the swap case table reads best as one list"
+)]
+async fn check_vpn_swap_cases(mode: VpnSwapMode) {
+    let base = VpnSwapData::base();
+    let all = VpnSwapData {
+        allowed: vpn_swap_allowed_all(),
+        ..base.clone()
     };
-    let (unicast, vpn) = run(true).await;
-    assert_eq!((unicast, vpn.clone()), run(false).await);
-    for peer in [B, C] {
-        assert!(vpn[&IpAddr::V4(peer)].is_empty(), "VPN verdict refreshed");
+    let cases = [
+        (
+            "prefix add",
+            base.clone(),
+            VpnSwapData {
+                allowed: vpn_swap_allowed(&[1, 2, 3, 5], &[1, 2]),
+                ..base.clone()
+            },
+            SwapPath::Narrow,
+        ),
+        ("prefix remove", all.clone(), base.clone(), SwapPath::Narrow),
+        (
+            // Origin 64502 (v4 2 and 6, v6 2) flips accept to reject.
+            "origin blocks",
+            all.clone(),
+            VpnSwapData {
+                blocked: vec![64502],
+                ..all.clone()
+            },
+            SwapPath::Narrow,
+        ),
+        (
+            // Origin 64501 keys stay accepted with a different community.
+            "attribute change",
+            all.clone(),
+            VpnSwapData {
+                marked: vec![64501],
+                ..all.clone()
+            },
+            SwapPath::Narrow,
+        ),
+        (
+            // v4 6's best (64502) stays blocked; only its runner-up from E
+            // (64501) changes verdict.
+            "runner-up origin",
+            VpnSwapData {
+                blocked: vec![64502],
+                ..all.clone()
+            },
+            VpnSwapData {
+                blocked: vec![64502, 64501],
+                ..all.clone()
+            },
+            SwapPath::Narrow,
+        ),
+        (
+            "prefix, origin and attribute together",
+            base.clone(),
+            VpnSwapData {
+                allowed: vpn_swap_allowed(&[2, 4, 6], &[2, 3]),
+                blocked: vec![64504],
+                marked: vec![64502],
+                tagged: vec![],
+            },
+            SwapPath::Narrow,
+        ),
+        (
+            "no route affected",
+            base.clone(),
+            VpnSwapData {
+                blocked: vec![64999],
+                marked: vec![64998],
+                ..base.clone()
+            },
+            SwapPath::Empty,
+        ),
+        (
+            "every route affected",
+            VpnSwapData {
+                allowed: vec![],
+                ..base.clone()
+            },
+            all.clone(),
+            SwapPath::Every,
+        ),
+        (
+            "community set",
+            base.clone(),
+            VpnSwapData {
+                tagged: vec![0xFDE8_0007],
+                ..base.clone()
+            },
+            SwapPath::Full,
+        ),
+    ];
+    for (name, initial, next, path) in cases {
+        let (bounded, bounded_vpn, bounded_evals) =
+            run_vpn_swap_case(&initial, Some(&next), mode, true).await;
+        let (full, full_vpn, full_evals) =
+            run_vpn_swap_case(&initial, Some(&next), mode, false).await;
+        let (reference, reference_vpn, _) = run_vpn_swap_case(&next, None, mode, false).await;
+        assert_eq!(
+            (&bounded, &bounded_vpn),
+            (&full, &full_vpn),
+            "{name} {mode:?}: bounded and full re-evaluation differ"
+        );
+        assert_eq!(
+            (&full, &full_vpn),
+            (&reference, &reference_vpn),
+            "{name} {mode:?}: full re-evaluation is not exact"
+        );
+        if mode.jam {
+            continue;
+        }
+        let (_, before_vpn, _) = run_vpn_swap_case(&initial, None, mode, false).await;
+        assert_eq!(
+            path == SwapPath::Empty,
+            before_vpn[&IpAddr::V4(B)] == reference_vpn[&IpAddr::V4(B)],
+            "{name} {mode:?}: the swap must change B's VPN exports unless it affects nothing"
+        );
+        // RT-Constrain and a held VPN selection fall back for every swap.
+        let path = if mode.rtc || mode.deferred {
+            SwapPath::Full
+        } else {
+            path
+        };
+        match path {
+            SwapPath::Narrow => assert!(
+                bounded_evals < full_evals,
+                "{name} {mode:?}: {bounded_evals} bounded vs {full_evals} full evaluations"
+            ),
+            SwapPath::Empty => assert_eq!(bounded_evals, 0, "{name} {mode:?}"),
+            SwapPath::Every => assert!(bounded_evals > 0, "{name} {mode:?}"),
+            SwapPath::Full => assert_eq!(bounded_evals, full_evals, "{name} {mode:?}"),
+        }
+    }
+}
+
+/// Re-evaluating only the VPN identities and unicast prefixes a dataset
+/// swap affects leaves every receiver with exactly the Adj-RIB-Out the
+/// full pass produces, which is in turn the state of a run that started
+/// with the new contents. Accept/reject flips, attribute changes and
+/// non-best candidates all count.
+#[tokio::test]
+async fn dataset_swap_bounded_vpn_reevaluation_matches_full_pass() {
+    for (ungrouped, add_path) in [(false, false), (true, false), (true, true)] {
+        check_vpn_swap_cases(VpnSwapMode {
+            ungrouped,
+            add_path,
+            jam: false,
+            rtc: false,
+            deferred: false,
+        })
+        .await;
+    }
+}
+
+/// A VPN member whose channel is full when the swap arrives recovers to
+/// the same state on both paths.
+#[tokio::test]
+async fn dataset_swap_bounded_vpn_reevaluation_matches_full_pass_with_dirty_member() {
+    tokio::time::pause();
+    for ungrouped in [false, true] {
+        check_vpn_swap_cases(VpnSwapMode {
+            ungrouped,
+            add_path: false,
+            jam: true,
+            rtc: false,
+            deferred: false,
+        })
+        .await;
+    }
+}
+
+/// RT-Constrain receivers are outside the bounded path: every swap takes
+/// the full pass and stays exact.
+#[tokio::test]
+async fn dataset_swap_with_rtc_receivers_uses_full_pass() {
+    for ungrouped in [false, true] {
+        check_vpn_swap_cases(VpnSwapMode {
+            ungrouped,
+            add_path: false,
+            jam: false,
+            rtc: true,
+            deferred: false,
+        })
+        .await;
+    }
+}
+
+/// A swap while `VPNv4` selection is still deferred takes the full pass;
+/// after the release every receiver matches the full pass and a fresh start.
+#[tokio::test]
+async fn dataset_swap_during_vpn_selection_deferral_uses_full_pass() {
+    tokio::time::pause();
+    for ungrouped in [false, true] {
+        check_vpn_swap_cases(VpnSwapMode {
+            ungrouped,
+            add_path: false,
+            jam: false,
+            rtc: false,
+            deferred: true,
+        })
+        .await;
     }
 }
 
