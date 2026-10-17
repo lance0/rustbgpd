@@ -2189,3 +2189,49 @@ fn vpn_growth_private_add_path_uses_actual_staged_batch() {
         [1]
     );
 }
+
+#[test]
+fn vpn_withdraw_and_reannounce_on_a_full_table_reserves_after_withdrawals() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let source = Ipv4Addr::new(10, 0, 4, 1);
+    let peer = IpAddr::V4(source);
+    let route = |n: u32, local_pref| {
+        let mut route = make_vpn_rib_route(source, 0, 100, local_pref);
+        route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0a40_0000 + n), 32).unwrap();
+        route
+    };
+    let mut len = 0;
+    while len < 3000 || !manager.ribs[&peer].vpn_needs_reserve(1) {
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: vec![route(len, 100)],
+            withdrawn: vec![],
+        });
+        len += 1;
+    }
+    let capacities = manager.ribs[&peer].vpn_capacities();
+    let full = usize::try_from(len).unwrap();
+    assert_eq!(capacities, (full, full), "both VPN indexes are full");
+
+    // Withdrawals in a dense table leave tombstones that reinsertion cannot
+    // count on, so the reservation must see the post-withdrawal table.
+    let churn: Vec<u32> = (0..len).step_by(8).collect();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: churn.iter().map(|&n| route(n, 200)).collect(),
+        withdrawn: churn.iter().map(|&n| route(n, 100).key()).collect(),
+    });
+    assert_eq!(manager.ribs[&peer].vpn_len(), full);
+    assert_eq!(
+        manager.ribs[&peer].vpn_capacities(),
+        capacities,
+        "re-announced keys must not trigger a hidden native resize"
+    );
+    for n in churn {
+        let selected = manager.loc_rib.get_vpn(&route(n, 200).nlri.key()).unwrap();
+        assert_eq!(selected.local_pref_attr(), Some(200));
+    }
+}

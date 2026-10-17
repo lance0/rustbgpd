@@ -1725,6 +1725,11 @@ impl AdjRibIn {
                     .saturating_sub(self.vpn_key_index.len())
     }
 
+    #[cfg(test)]
+    pub(crate) fn vpn_capacities(&self) -> (usize, usize) {
+        (self.vpn_routes.capacity(), self.vpn_key_index.capacity())
+    }
+
     /// Grow both VPN indexes without changing routes or maintained stale counts.
     pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
         crate::adj_rib_out::reserve_hash_map(&mut self.vpn_routes.map, additional, checkpoint);
