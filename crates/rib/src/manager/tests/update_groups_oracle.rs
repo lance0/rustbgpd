@@ -2366,11 +2366,11 @@ struct SwapMode {
 }
 
 /// The test hook's full pass: per member, or once per group.
-fn full_pass(member: bool) -> TestFullPass {
+fn full_pass(member: bool) -> FullPassPath {
     if member {
-        TestFullPass::Member
+        FullPassPath::Member
     } else {
-        TestFullPass::Group
+        FullPassPath::Group
     }
 }
 
@@ -2403,7 +2403,7 @@ async fn run_swap_case(
     let handles = initial.handles();
     let chain = swap_chain(&handles);
     let mut oracle = Oracle::spawn_configured(mode.ungrouped, None, |manager| {
-        manager.test_full_pass = full_pass(reeval == Reeval::Member);
+        manager.full_pass_path = full_pass(reeval == Reeval::Member);
     });
     oracle.peer_up(A, true, false, None, 64).await;
     oracle.peer_up(E, true, false, None, 64).await;
@@ -2741,7 +2741,7 @@ async fn dataset_full_pass_shares_one_group_payload() {
         let handles = initial.handles();
         let chain = swap_chain(&handles);
         let mut oracle = Oracle::spawn_configured(false, None, |manager| {
-            manager.test_full_pass = full_pass(member_path);
+            manager.full_pass_path = full_pass(member_path);
         });
         oracle.peer_up(A, true, false, None, 64).await;
         for peer in [B, C, F] {
@@ -3054,7 +3054,7 @@ async fn run_vpn_swap_case(
         mode.ungrouped,
         Some(Ipv4Addr::new(192, 0, 2, 1)),
         |manager| {
-            manager.test_full_pass = full_pass(reeval == Reeval::Member);
+            manager.full_pass_path = full_pass(reeval == Reeval::Member);
             if mode.deferred {
                 manager.selection_deferral =
                     super::super::selection_deferral::SelectionDeferral::new(
@@ -3495,7 +3495,7 @@ async fn later_generation_supersedes_a_pending_resync() {
     for member_path in [false, true] {
         let (handle, chain) = dataset_prefix_policy(p1, true);
         let mut o = Oracle::spawn_configured(false, None, |manager| {
-            manager.test_full_pass = full_pass(member_path);
+            manager.full_pass_path = full_pass(member_path);
         });
         o.peer_up(A, true, false, None, 64).await;
         o.peer_up(B, true, false, Some(chain.clone()), 64).await;

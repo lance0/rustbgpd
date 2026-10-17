@@ -533,10 +533,11 @@ struct VpnLabeledStagingContext<'a> {
 #[cfg(test)]
 type PrimaryUpdateHook = Arc<dyn Fn(&RibUpdate) + Send + Sync>;
 
-/// The full pass an unbounded dataset re-evaluation takes in tests.
-#[cfg(test)]
+/// The full pass an unbounded dataset re-evaluation takes under the test and
+/// benchmark hooks.
+#[cfg(any(test, feature = "bench-internals"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TestFullPass {
+enum FullPassPath {
     /// Once per update group where the targets allow it (production).
     Group,
     /// Always the per-member full resync.
@@ -1096,11 +1097,11 @@ pub struct RibManager {
     /// grouped run.
     #[cfg(test)]
     test_force_ungrouped: bool,
-    /// Differential-oracle test hook: which full pass an unbounded dataset
-    /// re-evaluation takes, so the group-level pass can be compared against
-    /// the per-member resync.
-    #[cfg(test)]
-    test_full_pass: TestFullPass,
+    /// Differential-oracle and benchmark hook: which full pass an unbounded
+    /// dataset re-evaluation takes, so the group-level pass can be compared
+    /// against the per-member resync.
+    #[cfg(any(test, feature = "bench-internals"))]
+    full_pass_path: FullPassPath,
     /// Full group-table control-tag scans run by deferred-registration
     /// cohort admission (LAN-1826): the per-turn work bound.
     #[cfg(test)]
@@ -2335,8 +2336,8 @@ impl RibManager {
             evpn_marker_cursor: None,
             #[cfg(test)]
             test_force_ungrouped: false,
-            #[cfg(test)]
-            test_full_pass: TestFullPass::Group,
+            #[cfg(any(test, feature = "bench-internals"))]
+            full_pass_path: FullPassPath::Group,
             #[cfg(test)]
             join_cohort_tag_scans: 0,
             #[cfg(test)]
@@ -2437,6 +2438,16 @@ impl RibManager {
         receipts: mpsc::Sender<(u64, usize, usize, u64)>,
     ) -> Self {
         self.vpn_query_bench_receipts = Some(receipts);
+        self
+    }
+
+    /// Run every unbounded dataset re-evaluation as the per-member full
+    /// resync, which marks each target dirty: the mass-dirty seed of the
+    /// recovery-memory harness and the cost of the fallback path.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn with_member_full_pass(mut self) -> Self {
+        self.full_pass_path = FullPassPath::Member;
         self
     }
 

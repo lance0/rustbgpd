@@ -452,7 +452,12 @@ class RecoveryReceiptTests(unittest.TestCase):
             path.write_text(header + indent + "#[cfg(test)]\n" + anchor + "\n", encoding="utf-8")
         return self.root
 
-    def control_api_tree(self, swaps: bool) -> tuple[Path, Path]:
+    def control_api_tree(self, swaps: bool, hook: bool = True) -> tuple[Path, Path]:
+        manager = self.root / "crates/rib/src/manager/mod.rs"
+        manager.parent.mkdir(parents=True, exist_ok=True)
+        builder = "    " + receipt.MEMBER_FULL_PASS_BUILDER + "mut self) -> Self {}\n"
+        manager.write_text("impl RibManager {\n" + (builder if hook else "") + "}\n",
+                           encoding="utf-8")
         update = self.root / "crates/rib/src/update.rs"
         update.parent.mkdir(parents=True, exist_ok=True)
         field = "        swaps: Option<Vec<DatasetSwap>>,\n" if swaps else ""
@@ -468,7 +473,8 @@ class RecoveryReceiptTests(unittest.TestCase):
         request = ("            .send(RibUpdate::ReevaluatePeerExportPolicies {\n"
                    "                peers: vec![peer],\n" + receipt.HARNESS_SWAPS
                    + "                reply,\n            })\n")
-        harness.write_text(request + "\n" + request, encoding="utf-8")
+        setup = "                RibManager::new()\n" + receipt.HARNESS_MEMBER_FULL_PASS
+        harness.write_text(setup + request + "\n" + request, encoding="utf-8")
         return self.root, harness
 
     def test_control_api_drops_default_swaps_only_for_historical_requests(self) -> None:
@@ -481,6 +487,30 @@ class RecoveryReceiptTests(unittest.TestCase):
         derived = harness.read_text(encoding="utf-8")
         self.assertEqual(derived, original.replace(receipt.HARNESS_SWAPS, ""))
         self.assertNotIn("swaps", derived)
+
+    def test_control_api_drops_member_full_pass_hook_only_without_the_builder(self) -> None:
+        tree, harness = self.control_api_tree(swaps=True)
+        original = harness.read_text(encoding="utf-8")
+        receipt.derive_control_api(tree)
+        self.assertEqual(harness.read_text(encoding="utf-8"), original)
+        for swaps in (True, False):
+            with self.subTest(swaps=swaps):
+                tree, harness = self.control_api_tree(swaps=swaps, hook=False)
+                receipt.derive_control_api(tree)
+                derived = harness.read_text(encoding="utf-8")
+                self.assertNotIn("with_member_full_pass", derived)
+                self.assertEqual("swaps" in derived, swaps)
+
+    def test_control_api_refuses_a_missing_or_moved_member_full_pass_hook(self) -> None:
+        tree, harness = self.control_api_tree(swaps=False, hook=False)
+        harness.write_text(
+            harness.read_text(encoding="utf-8").replace(receipt.HARNESS_MEMBER_FULL_PASS, ""),
+            encoding="utf-8",
+        )
+        original = harness.read_bytes()
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "full-pass hook"):
+            receipt.derive_control_api(tree)
+        self.assertEqual(harness.read_bytes(), original)
 
     def test_control_api_refuses_non_default_swaps_for_historical_requests(self) -> None:
         tree, harness = self.control_api_tree(swaps=False)

@@ -2150,9 +2150,9 @@ impl RibManager {
             let mode = if bounded.is_some() { "delta" } else { "full" };
             let affected = bounded.as_ref().map(|bound| bound.prefixes.len());
             let affected_vpn = bounded.as_ref().map(|bound| bound.vpn.len());
-            #[cfg(test)]
-            let group_pass = manager.test_full_pass == super::TestFullPass::Group;
-            #[cfg(not(test))]
+            #[cfg(any(test, feature = "bench-internals"))]
+            let group_pass = manager.full_pass_path == super::FullPassPath::Group;
+            #[cfg(not(any(test, feature = "bench-internals")))]
             let group_pass = true;
             let mut full_pass = None;
             let result = match bounded {
