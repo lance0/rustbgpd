@@ -1096,6 +1096,12 @@ pub struct RibManager {
     vpn_group_member_emits: usize,
     #[cfg(test)]
     vpn_member_deferral_warnings: usize,
+    /// Per-peer family "outbound channel full" warnings, and dirty peers
+    /// whose resync committed ("outbound routes resynced").
+    #[cfg(test)]
+    per_peer_deferral_warnings: usize,
+    #[cfg(test)]
+    dirty_resync_commits: usize,
     #[cfg(test)]
     test_force_exact_export_slow_path: bool,
     #[cfg(test)]
@@ -2320,6 +2326,10 @@ impl RibManager {
             vpn_group_member_emits: 0,
             #[cfg(test)]
             vpn_member_deferral_warnings: 0,
+            #[cfg(test)]
+            per_peer_deferral_warnings: 0,
+            #[cfg(test)]
+            dirty_resync_commits: 0,
             #[cfg(test)]
             test_force_exact_export_slow_path: false,
             #[cfg(test)]
