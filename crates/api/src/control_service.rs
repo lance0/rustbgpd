@@ -254,8 +254,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn get_metrics_behind_held_render_returns_deadline_exceeded() {
-        let held = crate::metrics_render::RENDER_SLOT.acquire().await.unwrap();
-        let status = make_service()
+        let svc = make_service();
+        let held = svc.metrics.render_slot().acquire().await.unwrap();
+        let status = svc
             .get_metrics(Request::new(proto::MetricsRequest {}))
             .await
             .unwrap_err();
