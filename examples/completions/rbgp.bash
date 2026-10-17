@@ -11232,8 +11232,17 @@ _rbgp() {
             case "${cur}" in
                 --deny-lints=*) rbgp_eq_words="unused-set unused-dataset unused-fn unreachable-term unreferenced-policy"; rbgp_eq_done="--deny-lints="; rbgp_eq_cur="${cur#*=}" ;;
             esac
-            if [[ -z ${rbgp_eq_words} && ${prev} == "=" && ${COMP_CWORD} -ge 2 ]]; then
-                case "${COMP_WORDS[COMP_CWORD-2]}" in
+            if [[ -z ${rbgp_eq_words} ]]; then
+                # Split by COMP_WORDBREAKS: the cursor sits on the `=` word
+                # itself right after typing it, or on the value after it.
+                local rbgp_eq_option=""
+                if [[ ${COMP_CWORD} -ge 1 && ${COMP_WORDS[COMP_CWORD]} == "=" ]]; then
+                    rbgp_eq_option="${COMP_WORDS[COMP_CWORD-1]}"
+                    rbgp_eq_cur=""
+                elif [[ ${COMP_CWORD} -ge 2 && ${COMP_WORDS[COMP_CWORD-1]} == "=" ]]; then
+                    rbgp_eq_option="${COMP_WORDS[COMP_CWORD-2]}"
+                fi
+                case "${rbgp_eq_option}" in
                     --deny-lints) rbgp_eq_words="unused-set unused-dataset unused-fn unreachable-term unreferenced-policy" ;;
                 esac
             fi

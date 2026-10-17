@@ -3663,8 +3663,17 @@ fn patch_bash_equals_options(
         r#"            local rbgp_eq_words="" rbgp_eq_done="" rbgp_eq_cur="${{cur}}"
             case "${{cur}}" in
 {attached}            esac
-            if [[ -z ${{rbgp_eq_words}} && ${{prev}} == "=" && ${{COMP_CWORD}} -ge 2 ]]; then
-                case "${{COMP_WORDS[COMP_CWORD-2]}}" in
+            if [[ -z ${{rbgp_eq_words}} ]]; then
+                # Split by COMP_WORDBREAKS: the cursor sits on the `=` word
+                # itself right after typing it, or on the value after it.
+                local rbgp_eq_option=""
+                if [[ ${{COMP_CWORD}} -ge 1 && ${{COMP_WORDS[COMP_CWORD]}} == "=" ]]; then
+                    rbgp_eq_option="${{COMP_WORDS[COMP_CWORD-1]}}"
+                    rbgp_eq_cur=""
+                elif [[ ${{COMP_CWORD}} -ge 2 && ${{COMP_WORDS[COMP_CWORD-1]}} == "=" ]]; then
+                    rbgp_eq_option="${{COMP_WORDS[COMP_CWORD-2]}}"
+                fi
+                case "${{rbgp_eq_option}}" in
 {split}                esac
             fi
             if [[ -n ${{rbgp_eq_words}} ]]; then
@@ -6772,24 +6781,41 @@ mod tests {
         words: &[&str],
         unset_ifs: bool,
     ) -> (bool, Vec<String>) {
+        bash_replies_at(script, cwd, words, unset_ifs, None)
+    }
+
+    /// [`bash_replies`] with explicit `cur`/`prev` arguments, for states
+    /// where Bash passes values that differ from the last two words.
+    fn bash_replies_at(
+        script: &std::path::Path,
+        cwd: &std::path::Path,
+        words: &[&str],
+        unset_ifs: bool,
+        cur_prev: Option<(&str, &str)>,
+    ) -> (bool, Vec<String>) {
         const HARNESS: &str = r#"
 source "$RBGP_COMPLETION"
 COMP_WORDS=("$@")
 COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
 compopt() { [[ "$1" == "-o" && "$2" == "filenames" ]] && RBGP_FILENAMES=1; [[ "$1" == "-o" && "$2" == "nospace" ]] && RBGP_NOSPACE=1; builtin compopt "$@" 2>/dev/null || :; }
 if [[ "$RBGP_UNSET_IFS" == 1 ]]; then unset IFS; else rbgp_before_ifs="$IFS"; fi
-_rbgp rbgp "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}"
+_rbgp rbgp "${RBGP_CUR-${COMP_WORDS[COMP_CWORD]}}" "${RBGP_PREV-${COMP_WORDS[COMP_CWORD-1]}}"
 if [[ "$RBGP_UNSET_IFS" == 1 ]]; then [[ -z "${IFS+x}" ]] || exit 90; else [[ "$IFS" == "$rbgp_before_ifs" ]] || exit 91; fi
 printf '__FILENAMES__%s\n' "${RBGP_FILENAMES:-0}"
 [[ -n "${RBGP_NOSPACE}" ]] && printf '__NOSPACE__\n'
 printf '%s\n' "${COMPREPLY[@]}"
 "#;
-        let output = std::process::Command::new("bash")
+        let mut command = std::process::Command::new("bash");
+        command
             .args(["--noprofile", "--norc", "-c", HARNESS, "--"])
             .args(words)
             .current_dir(cwd)
             .env("RBGP_COMPLETION", script)
-            .env("RBGP_UNSET_IFS", if unset_ifs { "1" } else { "0" })
+            .env("RBGP_UNSET_IFS", if unset_ifs { "1" } else { "0" });
+        if let Some((cur, prev)) = cur_prev {
+            command.env("RBGP_CUR", cur).env("RBGP_PREV", prev);
+        }
+        let output = command
             .output()
             .expect("bash is available for the Linux completion contract");
         assert!(
@@ -6948,6 +6974,22 @@ printf '%s\n' "${COMPREPLY[@]}"
             ]
         );
         assert_eq!(replies(&["--deny-lints", "=", ""]).1, all);
+        // Tab straight after typing `=`: Bash's current word is the `=`
+        // itself, with an empty `cur` and the option as `prev`.
+        let mut words = vec!["rbgp", "policy", "check", "--deny-lints", "="];
+        let (filenames, at_equals) = bash_replies_at(
+            &script,
+            files.path(),
+            &words,
+            false,
+            Some(("", "--deny-lints")),
+        );
+        assert!(!filenames);
+        assert_eq!(at_equals, all);
+        words.push("unr");
+        let (_, after_equals) =
+            bash_replies_at(&script, files.path(), &words, false, Some(("unr", "=")));
+        assert_eq!(after_equals, ["unreachable-term", "unreferenced-policy"]);
         assert_eq!(
             replies(&["--deny-lints", "=", "unused-set,unreach"]).1,
             ["unused-set,unreachable-term"]
