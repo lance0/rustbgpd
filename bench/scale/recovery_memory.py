@@ -267,25 +267,35 @@ def instrument_observer(tree: Path) -> None:
 
 REEVALUATE_VARIANT = "    ReevaluatePeerExportPolicies {\n"
 HARNESS_SWAPS = "                swaps: None,\n"
+HARNESS_MEMBER_FULL_PASS = "                    .with_member_full_pass()\n"
+MEMBER_FULL_PASS_BUILDER = "pub fn with_member_full_pass("
 
 
 def derive_control_api(tree: Path) -> None:
-    """Drop `swaps: None` for a control whose RibUpdate predates dataset swaps.
+    """Fit the shared harness to a control's RIB request API.
 
-    `None` selects full re-evaluation, which is all such a control can do, so
-    every role still runs the same operation.
+    A control whose RibUpdate predates dataset swaps drops `swaps: None`:
+    `None` selects full re-evaluation, which is all such a control can do. A
+    control without the per-member full-pass hook drops the hook: the
+    per-member resync is the only full pass it has. Every role therefore
+    still runs the same operation.
     """
     update = (tree / "crates/rib/src/update.rs").read_text(encoding="utf-8")
     require(update.count(REEVALUATE_VARIANT) == 1, "unexpected export re-evaluation request")
     start = update.index(REEVALUATE_VARIANT)
     variant = update[start:update.index("\n    },\n", start)]
-    if "        swaps: " in variant:
-        return
+    manager = (tree / "crates/rib/src/manager/mod.rs").read_text(encoding="utf-8")
     harness = tree / "bench/scale/rrharness/src/recovery_memory.rs"
     text = harness.read_text(encoding="utf-8")
-    require(text.count("swaps:") == text.count(HARNESS_SWAPS),
-            "a historical control cannot drop non-default dataset swaps")
-    harness.write_text(text.replace(HARNESS_SWAPS, ""), encoding="utf-8")
+    require(text.count("with_member_full_pass") == text.count(HARNESS_MEMBER_FULL_PASS) == 1,
+            "unexpected per-member full-pass hook in the harness")
+    if MEMBER_FULL_PASS_BUILDER not in manager:
+        text = text.replace(HARNESS_MEMBER_FULL_PASS, "")
+    if "        swaps: " not in variant:
+        require(text.count("swaps:") == text.count(HARNESS_SWAPS),
+                "a historical control cannot drop non-default dataset swaps")
+        text = text.replace(HARNESS_SWAPS, "")
+    harness.write_text(text, encoding="utf-8")
 
 
 def key_values(text: str, name: str) -> dict[str, int]:

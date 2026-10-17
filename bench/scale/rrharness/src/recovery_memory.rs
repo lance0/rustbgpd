@@ -640,6 +640,9 @@ impl RecoveryHarness {
                         manager_metrics,
                     )
                     .with_readiness_queries(readiness_rx)
+                    // Unchanged-policy reevaluation must still mark every
+                    // receiver dirty: the group-level full pass sends nothing.
+                    .with_member_full_pass()
                     .run(),
                 );
             })

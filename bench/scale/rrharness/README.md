@@ -308,7 +308,10 @@ harness. The source has an empty separate non-client profile.
 
 Each cell drains and acknowledges every receiver, pauses consumption, and fills
 all queues with empty envelopes. Reevaluation invokes the production
-`ReevaluatePeerExportPolicies` path with unchanged eligibility. Source removal
+`ReevaluatePeerExportPolicies` path with unchanged eligibility, held on the
+per-member full resync (`with_member_full_pass`): the group-level full pass
+sends nothing for an unchanged policy, so it would leave no receiver dirty.
+Controls without that hook have only the per-member pass. Source removal
 sends the real generation-matched `PeerDown`. Both require observed dirty-peer
 and group-dirty counts equal to the whole cohort. Actor FIFO query barriers and
 receiver folds prove settlement, with family-specific BMP counts including VPN.
