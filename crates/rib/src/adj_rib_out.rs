@@ -73,7 +73,18 @@ pub struct AdjRibOut {
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
     /// Changes whenever the set of VPN keys may have changed.
     vpn_keys: VpnKeyVersion,
+    /// Recent VPN key-set changes, kept only by tables that recovery pools index.
+    vpn_key_log: Option<Box<VpnKeyLog>>,
 }
+
+/// The VPN key-set changes after version `base` of this table, oldest first:
+/// `(key, inserted)`, one entry per version step. Bounded; a full log restarts.
+struct VpnKeyLog {
+    base: u64,
+    entries: Vec<(VpnRibRouteKey, bool)>,
+}
+
+const VPN_KEY_LOG_LIMIT: usize = 4096;
 
 /// Identifies one VPN key set of one table: a process-unique table id and a
 /// count of key-set changes. Replacing an existing route's value keeps it.
@@ -211,7 +222,62 @@ impl AdjRibOut {
             labeled_key_path_ids: HashMap::default(),
             rtc_routes: HashMap::default(),
             vpn_keys: VpnKeyVersion::new(),
+            vpn_key_log: None,
         }
+    }
+
+    /// Record recent VPN key-set changes so an older recovery pool built from
+    /// this table can be brought current without probing every row.
+    #[must_use]
+    pub(crate) fn with_vpn_key_log(mut self) -> Self {
+        self.vpn_key_log = Some(Box::new(VpnKeyLog {
+            base: self.vpn_keys.1,
+            entries: Vec::new(),
+        }));
+        self
+    }
+
+    /// One VPN key-set step: `None` clears every key and restarts the log.
+    fn vpn_keys_changed(&mut self, change: Option<(VpnRibRouteKey, bool)>) {
+        self.vpn_keys.bump();
+        if let Some(log) = &mut self.vpn_key_log {
+            match change {
+                Some(entry) if log.entries.len() < VPN_KEY_LOG_LIMIT => log.entries.push(entry),
+                _ => {
+                    log.entries.clear();
+                    log.base = self.vpn_keys.1;
+                }
+            }
+        }
+    }
+
+    /// Clear every VPN key and free the log's storage with the released maps.
+    fn vpn_keys_released(&mut self) {
+        self.vpn_keys_changed(None);
+        if let Some(log) = &mut self.vpn_key_log {
+            log.entries = Vec::new();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn vpn_key_log_capacity(&self) -> Option<usize> {
+        self.vpn_key_log.as_ref().map(|log| log.entries.capacity())
+    }
+
+    /// Every VPN key-set change since `version` of this table, if all are known.
+    pub(crate) fn vpn_key_changes_since(
+        &self,
+        version: VpnKeyVersion,
+    ) -> Option<&[(VpnRibRouteKey, bool)]> {
+        if version.0 != self.vpn_keys.0 {
+            return None;
+        }
+        if version.1 == self.vpn_keys.1 {
+            return Some(&[]);
+        }
+        let log = self.vpn_key_log.as_deref()?;
+        let start = usize::try_from(version.1.checked_sub(log.base)?).ok()?;
+        log.entries.get(start..)
     }
 
     /// Return the peer address this RIB belongs to.
@@ -493,7 +559,7 @@ impl AdjRibOut {
     /// callers that expect the VPN table to refill. Use [`Self::release_vpn`]
     /// when ownership moves to an update group.
     pub fn clear_vpn(&mut self) {
-        self.vpn_keys.bump();
+        self.vpn_keys_changed(None);
         self.vpn_routes.clear();
         self.vpn_key_path_ids.clear();
     }
@@ -501,14 +567,14 @@ impl AdjRibOut {
     /// Remove only the VPN routes and their secondary key index, releasing
     /// their backing allocations while leaving every other family untouched.
     pub fn release_vpn(&mut self) {
-        self.vpn_keys.bump();
+        self.vpn_keys_released();
         self.vpn_routes = HashMap::default();
         self.vpn_key_path_ids = HashMap::default();
     }
 
     /// Retire and release VPN state while leaving every other family intact.
     pub(crate) fn release_vpn_with(&mut self, checkpoint: &mut impl FnMut()) {
-        self.vpn_keys.bump();
+        self.vpn_keys_released();
         release_hash_map(&mut self.vpn_routes, checkpoint);
         release_hash_map(&mut self.vpn_key_path_ids, checkpoint);
     }
@@ -554,7 +620,7 @@ impl AdjRibOut {
         self.flowspec_routes.clear();
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
-        self.vpn_keys.bump();
+        self.vpn_keys_changed(None);
         self.vpn_routes.clear();
         self.vpn_key_path_ids.clear();
         self.labeled_routes.clear();
@@ -572,7 +638,7 @@ impl AdjRibOut {
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
         retire_hash_map(&mut self.evpn_routes, checkpoint);
         retire_hash_map(&mut self.bgpls_routes, checkpoint);
-        self.vpn_keys.bump();
+        self.vpn_keys_released();
         retire_hash_map(&mut self.vpn_routes, checkpoint);
         retire_hash_map(&mut self.vpn_key_path_ids, checkpoint);
         retire_hash_map(&mut self.labeled_routes, checkpoint);
@@ -764,7 +830,7 @@ impl AdjRibOut {
             }
             Entry::Vacant(entry) => {
                 entry.insert(route);
-                self.vpn_keys.bump();
+                self.vpn_keys_changed(Some((key.clone(), true)));
                 let ids = self.vpn_key_path_ids.entry(key.nlri_key).or_default();
                 if !ids.contains(&key.path_id) {
                     ids.push(key.path_id);
@@ -777,7 +843,7 @@ impl AdjRibOut {
     pub fn remove_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
         let removed = self.vpn_routes.remove(key).is_some();
         if removed {
-            self.vpn_keys.bump();
+            self.vpn_keys_changed(Some((key.clone(), false)));
         }
         if removed && let Some(ids) = self.vpn_key_path_ids.get_mut(&key.nlri_key) {
             ids.retain(|id| *id != key.path_id);

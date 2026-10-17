@@ -1,0 +1,802 @@
+{
+ "bar": "every full-uc and full-vpn cell, sorted and shuffled: candidate/flat complete-capture wall ratio <= 1.5, zero refusals, all cells eligible; evpn-soak and CPU ratios reported only",
+ "runs": [
+  {
+   "profiles": {
+    "full-uc/shuffled": {
+     "cells": [
+      {
+       "candidate_capture_ms": 106.047,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 1.222,
+       "capture_wall_ratio": 1.138,
+       "eligible": true,
+       "flat_capture_ms": 93.216,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 109.06,
+       "candidate_comparisons": 1230043,
+       "capture_cpu_ratio": 1.222,
+       "capture_wall_ratio": 1.181,
+       "eligible": true,
+       "flat_capture_ms": 92.352,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 105.335,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 1.1,
+       "capture_wall_ratio": 1.123,
+       "eligible": true,
+       "flat_capture_ms": 93.787,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 106.435,
+       "candidate_comparisons": 1231376,
+       "capture_cpu_ratio": 1.235,
+       "capture_wall_ratio": 1.202,
+       "eligible": true,
+       "flat_capture_ms": 88.528,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 102.788,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 1.167,
+       "capture_wall_ratio": 1.133,
+       "eligible": true,
+       "flat_capture_ms": 90.761,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 101.826,
+       "candidate_comparisons": 1240320,
+       "capture_cpu_ratio": 1.053,
+       "capture_wall_ratio": 1.1,
+       "eligible": true,
+       "flat_capture_ms": 92.552,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "0d84eb9860ea94739e084988770703c5fb0bf488"
+    },
+    "full-uc/sorted": {
+     "cells": [
+      {
+       "candidate_capture_ms": 33.67,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 1.0,
+       "capture_wall_ratio": 1.006,
+       "eligible": true,
+       "flat_capture_ms": 33.476,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 33.508,
+       "candidate_comparisons": 1230043,
+       "capture_cpu_ratio": 0.207,
+       "capture_wall_ratio": 0.232,
+       "eligible": true,
+       "flat_capture_ms": 144.216,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 34.024,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 0.857,
+       "capture_wall_ratio": 1.042,
+       "eligible": true,
+       "flat_capture_ms": 32.666,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 33.763,
+       "candidate_comparisons": 1231376,
+       "capture_cpu_ratio": 0.25,
+       "capture_wall_ratio": 0.24,
+       "eligible": true,
+       "flat_capture_ms": 140.66,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 33.67,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 0.857,
+       "capture_wall_ratio": 1.037,
+       "eligible": true,
+       "flat_capture_ms": 32.458,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 33.585,
+       "candidate_comparisons": 1240320,
+       "capture_cpu_ratio": 0.214,
+       "capture_wall_ratio": 0.241,
+       "eligible": true,
+       "flat_capture_ms": 139.168,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "0d84eb9860ea94739e084988770703c5fb0bf488"
+    },
+    "full-vpn/shuffled": {
+     "cells": [
+      {
+       "candidate_capture_ms": 56.087,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.314,
+       "capture_wall_ratio": 0.326,
+       "eligible": true,
+       "flat_capture_ms": 172.051,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 803.953,
+       "candidate_comparisons": 1955556,
+       "capture_cpu_ratio": 4.6,
+       "capture_wall_ratio": 4.679,
+       "eligible": true,
+       "flat_capture_ms": 171.814,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 55.846,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.324,
+       "capture_wall_ratio": 0.331,
+       "eligible": true,
+       "flat_capture_ms": 168.957,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 748.888,
+       "candidate_comparisons": 1955624,
+       "capture_cpu_ratio": 4.412,
+       "capture_wall_ratio": 4.458,
+       "eligible": true,
+       "flat_capture_ms": 167.989,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 54.924,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.324,
+       "capture_wall_ratio": 0.322,
+       "eligible": true,
+       "flat_capture_ms": 170.323,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 770.38,
+       "candidate_comparisons": 1956334,
+       "capture_cpu_ratio": 4.636,
+       "capture_wall_ratio": 4.578,
+       "eligible": true,
+       "flat_capture_ms": 168.267,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "0d84eb9860ea94739e084988770703c5fb0bf488"
+    },
+    "full-vpn/sorted": {
+     "cells": [
+      {
+       "candidate_capture_ms": 56.511,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.286,
+       "capture_wall_ratio": 0.272,
+       "eligible": true,
+       "flat_capture_ms": 207.645,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 772.88,
+       "candidate_comparisons": 1955556,
+       "capture_cpu_ratio": 3.78,
+       "capture_wall_ratio": 3.822,
+       "eligible": true,
+       "flat_capture_ms": 202.239,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 56.678,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.262,
+       "capture_wall_ratio": 0.279,
+       "eligible": true,
+       "flat_capture_ms": 203.511,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 751.574,
+       "candidate_comparisons": 1955624,
+       "capture_cpu_ratio": 3.683,
+       "capture_wall_ratio": 3.678,
+       "eligible": true,
+       "flat_capture_ms": 204.348,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 56.46,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.3,
+       "capture_wall_ratio": 0.278,
+       "eligible": true,
+       "flat_capture_ms": 202.751,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 740.96,
+       "candidate_comparisons": 1956334,
+       "capture_cpu_ratio": 3.61,
+       "capture_wall_ratio": 3.66,
+       "eligible": true,
+       "flat_capture_ms": 202.473,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "0d84eb9860ea94739e084988770703c5fb0bf488"
+    }
+   },
+   "reason": "full-vpn older-sparse candidate/flat capture 3.66-4.68x",
+   "run": 38961458049,
+   "source": "0d84eb9860ea94739e084988770703c5fb0bf488",
+   "verdict": "FAIL"
+  },
+  {
+   "profiles": {
+    "evpn-soak/shuffled": {
+     "cells": [
+      {
+       "candidate_capture_ms": 6.213,
+       "candidate_comparisons": 75016,
+       "capture_cpu_ratio": null,
+       "capture_wall_ratio": 1.819,
+       "eligible": true,
+       "flat_capture_ms": 3.415,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 6.248,
+       "candidate_comparisons": 75015,
+       "capture_cpu_ratio": 1.0,
+       "capture_wall_ratio": 1.832,
+       "eligible": true,
+       "flat_capture_ms": 3.411,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 6.257,
+       "candidate_comparisons": 75016,
+       "capture_cpu_ratio": null,
+       "capture_wall_ratio": 1.46,
+       "eligible": true,
+       "flat_capture_ms": 4.286,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 6.373,
+       "candidate_comparisons": 74953,
+       "capture_cpu_ratio": 1.0,
+       "capture_wall_ratio": 1.496,
+       "eligible": true,
+       "flat_capture_ms": 4.261,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 6.259,
+       "candidate_comparisons": 75016,
+       "capture_cpu_ratio": 2.0,
+       "capture_wall_ratio": 1.307,
+       "eligible": true,
+       "flat_capture_ms": 4.79,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 6.215,
+       "candidate_comparisons": 74537,
+       "capture_cpu_ratio": null,
+       "capture_wall_ratio": 1.305,
+       "eligible": true,
+       "flat_capture_ms": 4.761,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "ed597e865e90ae8eceb0d26ead4bbcf50ae18e70"
+    },
+    "evpn-soak/sorted": {
+     "cells": [
+      {
+       "candidate_capture_ms": 2.842,
+       "candidate_comparisons": 75016,
+       "capture_cpu_ratio": null,
+       "capture_wall_ratio": 1.614,
+       "eligible": true,
+       "flat_capture_ms": 1.76,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 2.838,
+       "candidate_comparisons": 75015,
+       "capture_cpu_ratio": null,
+       "capture_wall_ratio": 2.162,
+       "eligible": true,
+       "flat_capture_ms": 1.313,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 2.845,
+       "candidate_comparisons": 75016,
+       "capture_cpu_ratio": 1.0,
+       "capture_wall_ratio": 1.162,
+       "eligible": true,
+       "flat_capture_ms": 2.447,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 2.836,
+       "candidate_comparisons": 74953,
+       "capture_cpu_ratio": 1.0,
+       "capture_wall_ratio": 1.184,
+       "eligible": true,
+       "flat_capture_ms": 2.395,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 2.828,
+       "candidate_comparisons": 75016,
+       "capture_cpu_ratio": 0.0,
+       "capture_wall_ratio": 0.878,
+       "eligible": true,
+       "flat_capture_ms": 3.22,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      },
+      {
+       "candidate_capture_ms": 2.827,
+       "candidate_comparisons": 74537,
+       "capture_cpu_ratio": 1.0,
+       "capture_wall_ratio": 0.897,
+       "eligible": true,
+       "flat_capture_ms": 3.151,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "evpn-sort-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "ed597e865e90ae8eceb0d26ead4bbcf50ae18e70"
+    },
+    "full-uc/shuffled": {
+     "cells": [
+      {
+       "candidate_capture_ms": 117.165,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 0.958,
+       "capture_wall_ratio": 0.956,
+       "eligible": true,
+       "flat_capture_ms": 122.608,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 125.312,
+       "candidate_comparisons": 1230043,
+       "capture_cpu_ratio": 1.042,
+       "capture_wall_ratio": 1.036,
+       "eligible": true,
+       "flat_capture_ms": 120.902,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 117.635,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 0.96,
+       "capture_wall_ratio": 0.959,
+       "eligible": true,
+       "flat_capture_ms": 122.631,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 120.024,
+       "candidate_comparisons": 1231376,
+       "capture_cpu_ratio": 1.0,
+       "capture_wall_ratio": 0.987,
+       "eligible": true,
+       "flat_capture_ms": 121.566,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 119.361,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 1.0,
+       "capture_wall_ratio": 0.964,
+       "eligible": true,
+       "flat_capture_ms": 123.833,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 119.522,
+       "candidate_comparisons": 1240320,
+       "capture_cpu_ratio": 0.96,
+       "capture_wall_ratio": 0.98,
+       "eligible": true,
+       "flat_capture_ms": 121.995,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "ed597e865e90ae8eceb0d26ead4bbcf50ae18e70"
+    },
+    "full-uc/sorted": {
+     "cells": [
+      {
+       "candidate_capture_ms": 32.612,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 1.2,
+       "capture_wall_ratio": 1.095,
+       "eligible": true,
+       "flat_capture_ms": 29.779,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 32.744,
+       "candidate_comparisons": 1230043,
+       "capture_cpu_ratio": 0.259,
+       "capture_wall_ratio": 0.249,
+       "eligible": true,
+       "flat_capture_ms": 131.31,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 32.565,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 0.75,
+       "capture_wall_ratio": 1.092,
+       "eligible": true,
+       "flat_capture_ms": 29.82,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 32.897,
+       "candidate_comparisons": 1231376,
+       "capture_cpu_ratio": 0.269,
+       "capture_wall_ratio": 0.253,
+       "eligible": true,
+       "flat_capture_ms": 129.922,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 32.57,
+       "candidate_comparisons": 1230000,
+       "capture_cpu_ratio": 1.4,
+       "capture_wall_ratio": 1.098,
+       "eligible": true,
+       "flat_capture_ms": 29.667,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      },
+      {
+       "candidate_capture_ms": 32.778,
+       "candidate_comparisons": 1240320,
+       "capture_cpu_ratio": 0.269,
+       "capture_wall_ratio": 0.252,
+       "eligible": true,
+       "flat_capture_ms": 130.291,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "uc-slab-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "ed597e865e90ae8eceb0d26ead4bbcf50ae18e70"
+    },
+    "full-vpn/shuffled": {
+     "cells": [
+      {
+       "candidate_capture_ms": 48.754,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.27,
+       "capture_wall_ratio": 0.267,
+       "eligible": true,
+       "flat_capture_ms": 182.766,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 48.4,
+       "candidate_comparisons": 2,
+       "capture_cpu_ratio": 0.263,
+       "capture_wall_ratio": 0.255,
+       "eligible": true,
+       "flat_capture_ms": 189.616,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 49.422,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.306,
+       "capture_wall_ratio": 0.27,
+       "eligible": true,
+       "flat_capture_ms": 183.245,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 49.733,
+       "candidate_comparisons": 132,
+       "capture_cpu_ratio": 0.263,
+       "capture_wall_ratio": 0.271,
+       "eligible": true,
+       "flat_capture_ms": 183.597,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 50.086,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.27,
+       "capture_wall_ratio": 0.275,
+       "eligible": true,
+       "flat_capture_ms": 181.871,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 48.262,
+       "candidate_comparisons": 1258,
+       "capture_cpu_ratio": 0.278,
+       "capture_wall_ratio": 0.264,
+       "eligible": true,
+       "flat_capture_ms": 182.897,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "ed597e865e90ae8eceb0d26ead4bbcf50ae18e70"
+    },
+    "full-vpn/sorted": {
+     "cells": [
+      {
+       "candidate_capture_ms": 47.117,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.286,
+       "capture_wall_ratio": 0.261,
+       "eligible": true,
+       "flat_capture_ms": 180.592,
+       "layout": "dense",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 45.172,
+       "candidate_comparisons": 2,
+       "capture_cpu_ratio": 0.27,
+       "capture_wall_ratio": 0.243,
+       "eligible": true,
+       "flat_capture_ms": 185.829,
+       "layout": "older-sparse",
+       "records": 2,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 44.396,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.27,
+       "capture_wall_ratio": 0.248,
+       "eligible": true,
+       "flat_capture_ms": 178.983,
+       "layout": "dense",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 49.347,
+       "candidate_comparisons": 132,
+       "capture_cpu_ratio": 0.278,
+       "capture_wall_ratio": 0.275,
+       "eligible": true,
+       "flat_capture_ms": 179.158,
+       "layout": "older-sparse",
+       "records": 64,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 44.067,
+       "candidate_comparisons": 0,
+       "capture_cpu_ratio": 0.243,
+       "capture_wall_ratio": 0.247,
+       "eligible": true,
+       "flat_capture_ms": 178.2,
+       "layout": "dense",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      },
+      {
+       "candidate_capture_ms": 44.307,
+       "candidate_comparisons": 1258,
+       "capture_cpu_ratio": 0.257,
+       "capture_wall_ratio": 0.249,
+       "eligible": true,
+       "flat_capture_ms": 178.245,
+       "layout": "older-sparse",
+       "records": 480,
+       "refusals": 0,
+       "strategy": "vpn-pool-shared"
+      }
+     ],
+     "evidence_verdict": "PASS",
+     "source": "ed597e865e90ae8eceb0d26ead4bbcf50ae18e70"
+    }
+   },
+   "reason": "all full-uc and full-vpn cells <= 1.10x",
+   "run": 38968593819,
+   "source": "ed597e865e90ae8eceb0d26ead4bbcf50ae18e70",
+   "verdict": "PASS"
+  }
+ ],
+ "schema": "rustbgpd.recovery-scan.receipt.v1"
+}

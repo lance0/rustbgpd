@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
@@ -13,16 +14,18 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use rustbgpd_api::runtime_config_settlement::AMBIGUITY_FENCE_GRACE;
 
 use support::{RetainOnPanic, bound_metrics_addr, rbgp_binary};
 
 const FIRST_NEIGHBOR: &str = "192.0.2.1";
 const SECOND_NEIGHBOR: &str = "192.0.2.2";
-const FAILSTOP_GRACE_WITH_JITTER: Duration = Duration::from_secs(7);
+const FAILSTOP_EXIT_LIMIT: Duration = Duration::from_secs(7);
 
 struct Daemon {
     child: Child,
     log_path: PathBuf,
+    fail_stop_hold: Option<UnixListener>,
 }
 
 impl Daemon {
@@ -38,15 +41,84 @@ impl Daemon {
         let stderr = File::create(&log_path).expect("create daemon log");
         let stdout = stderr.try_clone().expect("clone daemon log handle");
         let mut command = Command::new(env!("CARGO_BIN_EXE_rustbgpd"));
+        // One worker waits at phase 0 while another serves the readiness 503.
         command
             .arg(config)
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
+            .stderr(Stdio::from(stderr))
+            .env("RUSTBGPD_WORKER_THREADS", "2")
+            .env_remove("RUSTBGPD_TEST_FAIL_STOP_HOLD");
         if let Some((name, value)) = fault {
             command.env(name, value);
         }
+        let fail_stop_hold = fault.map(|_| {
+            let path = log_path.with_extension("hold.sock");
+            let listener = UnixListener::bind(&path).expect("bind fail-stop test hold");
+            listener.set_nonblocking(true).expect("poll fail-stop hold");
+            command.env("RUSTBGPD_TEST_FAIL_STOP_HOLD", path);
+            listener
+        });
         let child = command.spawn().expect("spawn rustbgpd");
-        Self { child, log_path }
+        Self {
+            child,
+            log_path,
+            fail_stop_hold,
+        }
+    }
+
+    fn wait_until_fenced(&mut self, metrics: SocketAddr) -> UnixStream {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (mut start, _) = self.wait_for_hold(deadline, 0);
+        let first_503 = loop {
+            if ready_status(metrics) == Some(503) {
+                break Instant::now();
+            }
+            self.assert_running();
+            assert!(
+                Instant::now() < deadline,
+                "daemon never reported readiness 503\n{}",
+                self.log()
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        start.write_all(&[1]).expect("start fail-stop grace");
+        let (hold, elapsed_nanos) = self.wait_for_hold(deadline, 1);
+        // Daemon-side elapsed time excludes delays accepting the terminal hold.
+        assert!(
+            elapsed_nanos >= AMBIGUITY_FENCE_GRACE.as_nanos(),
+            "fail-stop hold reached before configured grace: {elapsed_nanos} ns"
+        );
+        assert!(first_503.elapsed() >= AMBIGUITY_FENCE_GRACE);
+        // constants_and_closed_states_are_exact and executor_loss_shortens_prearmed_fatal_deadline
+        // pin the duration and uninstrumented upper bound at the unit level.
+        hold
+    }
+
+    fn wait_for_hold(&mut self, deadline: Instant, expected: u8) -> (UnixStream, u128) {
+        let mut hold = loop {
+            match self.fail_stop_hold.as_ref().unwrap().accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("accept fail-stop test hold: {error}"),
+            }
+            self.assert_running();
+            assert!(
+                Instant::now() < deadline,
+                "daemon never reached fail-stop exit boundary\n{}",
+                self.log()
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        hold.set_read_timeout(Some(deadline.saturating_duration_since(Instant::now())))
+            .expect("bound fail-stop marker");
+        let mut marker = [0];
+        hold.read_exact(&mut marker)
+            .expect("read fail-stop exit marker");
+        assert_eq!(marker, [expected]);
+        let mut elapsed = [0; 16];
+        hold.read_exact(&mut elapsed)
+            .expect("read fail-stop elapsed grace");
+        (hold, u128::from_le_bytes(elapsed))
     }
 
     fn assert_running(&mut self) {
@@ -309,8 +381,7 @@ fn exercise(fault: &str, published: bool) {
     .stderr(Stdio::piped())
     .spawn()
     .expect("start first mutation");
-    wait_until_ready(metrics, &mut daemon, 503);
-    let recovery_fenced_at = Instant::now();
+    let mut fail_stop_hold = daemon.wait_until_fenced(metrics);
     assert_settlement_metrics(
         &settlement_metrics(metrics),
         "neighbor_add",
@@ -345,15 +416,19 @@ fn exercise(fault: &str, published: bool) {
     );
     daemon.assert_running();
 
-    let remaining_grace = FAILSTOP_GRACE_WITH_JITTER
-        .checked_sub(recovery_fenced_at.elapsed())
-        .expect("daemon exceeded the five-second fail-stop grace plus test jitter before wait");
+    let exiting_at = Instant::now();
+    fail_stop_hold
+        .write_all(&[1])
+        .expect("release fail-stop exit");
+    let remaining_grace = FAILSTOP_EXIT_LIMIT
+        .checked_sub(exiting_at.elapsed())
+        .expect("fail-stop release exceeded the exit bound");
     let status = daemon.wait_for_exit(remaining_grace);
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
     assert_one_redacted_diagnostic(&daemon, "not_applicable", false);
     assert!(
-        recovery_fenced_at.elapsed() <= FAILSTOP_GRACE_WITH_JITTER,
-        "exit 70 exceeded the five-second grace plus test jitter"
+        exiting_at.elapsed() <= FAILSTOP_EXIT_LIMIT,
+        "exit 70 exceeded the bound after releasing the fail-stop hold"
     );
     assert!(
         !wait_output(
@@ -396,7 +471,7 @@ fn post_rename_failure_fences_and_restart_loads_complete_candidate() {
     exercise("publication_ambiguous", true);
 }
 
-fn exercise_sighup_ack_loss(fault: &str) {
+fn exercise_sighup_ack_loss(fault: &str, release: Option<u8>) {
     let dir = RetainOnPanic::new(tempfile::tempdir().expect("create test dir"));
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let runtime_dir = dir.path().join("runtime");
@@ -419,8 +494,7 @@ fn exercise_sighup_ack_loss(fault: &str) {
         format!("{initial}\n[[neighbors]]\naddress = \"{FIRST_NEIGHBOR}\"\nremote_asn = 65002\n");
     std::fs::write(&config_path, &operator_candidate).unwrap();
     daemon.sighup();
-    wait_until_ready(metrics, &mut daemon, 503);
-    let fenced_at = Instant::now();
+    let mut fail_stop_hold = daemon.wait_until_fenced(metrics);
     assert_settlement_metrics(
         &settlement_metrics(metrics),
         "sighup",
@@ -439,9 +513,16 @@ fn exercise_sighup_ack_loss(fault: &str) {
     assert!(!rejected.status.success());
     daemon.assert_running();
     daemon.sigterm();
-    let remaining_grace = FAILSTOP_GRACE_WITH_JITTER
-        .checked_sub(fenced_at.elapsed())
-        .expect("daemon exceeded the five-second fail-stop grace plus test jitter before wait");
+    let exiting_at = Instant::now();
+    if let Some(release) = release {
+        fail_stop_hold
+            .write_all(&[release])
+            .expect("release fail-stop exit");
+    }
+    drop(fail_stop_hold);
+    let remaining_grace = FAILSTOP_EXIT_LIMIT
+        .checked_sub(exiting_at.elapsed())
+        .expect("fail-stop release exceeded the exit bound");
     let status = daemon.wait_for_exit(remaining_grace);
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
     // A static-neighbor addition is one owned runtime generation; the lost
@@ -512,13 +593,23 @@ fn exercise_sighup_ack_loss(fault: &str) {
 #[test]
 fn sighup_reconcile_ack_loss_fences_and_exits_once() {
     for _ in 0..3 {
-        exercise_sighup_ack_loss("reconcile");
+        exercise_sighup_ack_loss("reconcile", Some(1));
     }
 }
 
 #[test]
 fn sighup_bridge_persister_ack_loss_fences_and_exits_once() {
     for _ in 0..3 {
-        exercise_sighup_ack_loss("bridge");
+        exercise_sighup_ack_loss("bridge", Some(1));
     }
+}
+
+#[test]
+fn sighup_fail_stop_exits_if_controller_disconnects() {
+    exercise_sighup_ack_loss("bridge", None);
+}
+
+#[test]
+fn sighup_fail_stop_exits_if_controller_release_is_invalid() {
+    exercise_sighup_ack_loss("bridge", Some(0));
 }
