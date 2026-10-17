@@ -230,9 +230,9 @@ fn check_local_with_writer(
             if !options.json {
                 eprint!("{}", diagnostics.render_sources(&sources, stderr_color()));
             }
-            let sources: Vec<(&str, &str)> = sources
+            let sources: Vec<SourceLines<'_>> = sources
                 .iter()
-                .map(|(name, text)| (name.as_str(), text.as_str()))
+                .map(|(name, text)| SourceLines::new(name, text))
                 .collect();
             let messages = diagnostics.0.iter().map(|d| d.message.clone()).collect();
             let findings = diagnostics
@@ -264,12 +264,16 @@ fn check_local_with_writer(
     };
     let mut denied = Vec::new();
     if let Some(file) = &file {
-        let sources: Vec<(&str, &str)> = file
+        let sources: Vec<SourceLines<'_>> = file
             .modules()
             .iter()
-            .map(|m| (m.path.as_str(), m.text.as_str()))
+            .map(|m| SourceLines::new(&m.path, &m.text))
             .collect();
         for lint in file.lints() {
+            // Text output shows only denied lints; skip locating the rest.
+            if !options.json && !options.deny_lints.contains(&lint.kind) {
+                continue;
+            }
             let finding = JsonFinding::lint(&lint, options.deny_lints, &sources);
             if finding.severity == "error" {
                 denied.push(format!(
@@ -386,27 +390,59 @@ struct JsonLocation {
     end_column: usize,
 }
 
-impl JsonLocation {
-    /// Locate `span` in `sources` (`(display path, text)` per module
-    /// index), falling back to the main file like the text renderer.
-    fn new(sources: &[(&str, &str)], span: rustbgpd_policy::rpol::Span) -> Self {
-        fn line_col(text: &str, offset: usize) -> (usize, usize) {
-            let before = &text[..text.floor_char_boundary(offset)];
-            let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
-            (
-                before.matches('\n').count() + 1,
-                before[line_start..].chars().count() + 1,
-            )
-        }
-        let (file, text) = sources
-            .get(span.file as usize)
-            .or_else(|| sources.first())
-            .copied()
-            .unwrap_or_default();
-        let (line, column) = line_col(text, span.start);
-        let (end_line, end_column) = line_col(text, span.end);
+/// One module's display path and text, with its line starts indexed
+/// once so locating each finding costs a binary search plus a scan of
+/// its own line, not a scan from the start of the file.
+struct SourceLines<'a> {
+    name: &'a str,
+    text: &'a str,
+    /// Byte offset of every line start; the first is 0.
+    line_starts: Vec<usize>,
+}
+
+impl<'a> SourceLines<'a> {
+    fn new(name: &'a str, text: &'a str) -> Self {
+        let line_starts = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
+            .collect();
         Self {
-            file: file.to_string(),
+            name,
+            text,
+            line_starts,
+        }
+    }
+
+    /// 1-based line and character column of byte `offset`, clamped to
+    /// the text and to a character boundary.
+    fn line_col(&self, offset: usize) -> (usize, usize) {
+        let offset = self.text.floor_char_boundary(offset);
+        // `line_starts[0] == 0`, so at least one start is <= offset.
+        let line = self.line_starts.partition_point(|&start| start <= offset);
+        let column = self.text[self.line_starts[line - 1]..offset]
+            .chars()
+            .count()
+            + 1;
+        (line, column)
+    }
+}
+
+impl JsonLocation {
+    /// Locate `span` in `sources` (one entry per module index), falling
+    /// back to the main file like the text renderer.
+    fn new(sources: &[SourceLines<'_>], span: rustbgpd_policy::rpol::Span) -> Self {
+        let Some(source) = sources.get(span.file as usize).or_else(|| sources.first()) else {
+            return Self {
+                file: String::new(),
+                line: 1,
+                column: 1,
+                end_line: 1,
+                end_column: 1,
+            };
+        };
+        let (line, column) = source.line_col(span.start);
+        let (end_line, end_column) = source.line_col(span.end);
+        Self {
+            file: source.name.to_string(),
             line,
             column,
             end_line,
@@ -441,7 +477,7 @@ struct JsonFinding {
 impl JsonFinding {
     fn compile_error(
         diagnostic: &rustbgpd_policy::rpol::Diagnostic,
-        sources: &[(&str, &str)],
+        sources: &[SourceLines<'_>],
     ) -> Self {
         use rustbgpd_policy::rpol::Span;
 
@@ -473,7 +509,7 @@ impl JsonFinding {
     fn lint(
         lint: &rustbgpd_policy::rpol::Lint,
         deny: &[rustbgpd_policy::rpol::LintKind],
-        sources: &[(&str, &str)],
+        sources: &[SourceLines<'_>],
     ) -> Self {
         Self {
             severity: if deny.contains(&lint.kind) {
@@ -2994,11 +3030,12 @@ mod tests {
     fn json_location_counts_lines_and_unicode_columns() {
         use rustbgpd_policy::rpol::Span;
 
+        let lib = "# caf\u{e9}\n# \u{e9}\u{e9} x\n";
         let sources = [
-            ("main.rpol", "policy p {}\n"),
-            ("lib.rpol", "# caf\u{e9}\n# \u{e9}\u{e9} x\n"),
+            SourceLines::new("main.rpol", "policy p {}\n"),
+            SourceLines::new("lib.rpol", lib),
         ];
-        let offset = sources[1].1.find('x').unwrap();
+        let offset = lib.find('x').unwrap();
         let at = JsonLocation::new(&sources, Span::in_file(offset..offset + 1, 1));
         assert_eq!(
             (
@@ -3015,6 +3052,37 @@ mod tests {
             (at.line, at.column, at.end_line, at.end_column),
             (1, 8, 2, 1)
         );
+    }
+
+    /// The line index agrees with a scan from the start of the text at
+    /// every byte offset, including inside multi-byte characters, on a
+    /// last line without a trailing newline, and past the end.
+    #[test]
+    fn source_lines_match_a_full_scan_at_every_offset() {
+        fn scan(text: &str, offset: usize) -> (usize, usize) {
+            let before = &text[..text.floor_char_boundary(offset)];
+            let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+            (
+                before.matches('\n').count() + 1,
+                before[line_start..].chars().count() + 1,
+            )
+        }
+        let tail = "a\n\n\u{e9}\u{1f600}x";
+        for text in ["", "\n", "x", tail, "\u{e9}\n\u{e9}\n", "p {}\r\nq\n"] {
+            let lines = SourceLines::new("f", text);
+            for offset in 0..=text.len() + 2 {
+                assert_eq!(
+                    lines.line_col(offset),
+                    scan(text, offset),
+                    "{text:?} @ {offset}"
+                );
+            }
+        }
+        let lines = SourceLines::new("f", tail);
+        let x = tail.find('x').unwrap();
+        assert_eq!(lines.line_col(x), (3, 3));
+        assert_eq!(lines.line_col(tail.len()), (3, 4));
+        assert_eq!(lines.line_col(x - 1), (3, 2), "inside the emoji");
     }
 
     #[test]
