@@ -77,19 +77,20 @@ impl<K, V> ShardedMap<K, V> {
         self.shards_mut().iter_mut().for_each(FastMap::clear);
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.shards().iter().flat_map(FastMap::iter)
+    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = (&K, &V)> {
+        ShardIter::new(self.len(), self.shards().iter().map(FastMap::iter))
     }
 
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
-        self.shards_mut().iter_mut().flat_map(FastMap::iter_mut)
+    pub(crate) fn iter_mut(&mut self) -> impl ExactSizeIterator<Item = (&K, &mut V)> {
+        let len = self.len();
+        ShardIter::new(len, self.shards_mut().iter_mut().map(FastMap::iter_mut))
     }
 
-    pub(crate) fn keys(&self) -> impl Iterator<Item = &K> {
+    pub(crate) fn keys(&self) -> impl ExactSizeIterator<Item = &K> {
         self.iter().map(|(key, _)| key)
     }
 
-    pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
+    pub(crate) fn values(&self) -> impl ExactSizeIterator<Item = &V> {
         self.iter().map(|(_, value)| value)
     }
 }
@@ -197,6 +198,67 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
     {
         self.shard_mut(key).remove(key)
     }
+}
+
+/// Walks a [`ShardedMap`] shard by shard with an exact remaining count, so
+/// a collector reserves the whole map once instead of growing per shard.
+struct ShardIter<S, I> {
+    shards: S,
+    current: Option<I>,
+    remaining: usize,
+}
+
+impl<S, I> ShardIter<S, I> {
+    fn new(len: usize, shards: S) -> Self {
+        Self {
+            shards,
+            current: None,
+            remaining: len,
+        }
+    }
+}
+
+impl<S: Iterator<Item = I>, I: ExactSizeIterator> Iterator for ShardIter<S, I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<I::Item> {
+        loop {
+            if let Some(item) = self.current.as_mut().and_then(Iterator::next) {
+                self.remaining -= 1;
+                return Some(item);
+            }
+            self.current = Some(self.shards.next()?);
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+
+    /// Skips whole shards by their length instead of stepping through them.
+    fn nth(&mut self, mut n: usize) -> Option<I::Item> {
+        loop {
+            let Some(current) = self.current.as_mut() else {
+                self.current = Some(self.shards.next()?);
+                continue;
+            };
+            let len = current.len();
+            if n < len {
+                self.remaining -= n + 1;
+                return current.nth(n);
+            }
+            n -= len;
+            self.remaining -= len;
+            self.current = None;
+        }
+    }
+}
+
+impl<S: Iterator<Item = I>, I: ExactSizeIterator> ExactSizeIterator for ShardIter<S, I> {}
+
+impl<S: std::iter::FusedIterator<Item = I>, I: ExactSizeIterator> std::iter::FusedIterator
+    for ShardIter<S, I>
+{
 }
 
 impl<K, Q, V> std::ops::Index<&Q> for ShardedMap<K, V>
@@ -482,6 +544,59 @@ mod tests {
         *map.entry(vpnv4_key(7)).or_insert(0) += 70;
         assert_eq!(map[&vpnv4_key(7)], 70);
         assert_eq!(map.iter().count(), map.len());
+    }
+
+    /// Sharded iteration reports its exact remaining length, so collectors
+    /// reserve once, and `nth` skips shards without changing the order.
+    #[test]
+    fn sharded_map_iterators_report_exact_size_and_skip_shards() {
+        let total = SHARD_SPLIT_AT * 4 + 3;
+        let mut map = ShardedMap::default();
+        let mut reference = FastMap::default();
+        for i in 0..u32::try_from(total).unwrap() {
+            map.insert(vpnv4_key(i), i);
+            reference.insert(vpnv4_key(i), i);
+        }
+        assert_eq!(map.shards().len(), SHARDS);
+        let mut iter = map.iter();
+        assert_eq!(iter.size_hint(), (total, Some(total)));
+        for _ in 0..1000 {
+            iter.next();
+        }
+        assert_eq!(iter.len(), total - 1000);
+        assert_eq!(map.keys().len(), total);
+        assert_eq!(map.values().size_hint(), (total, Some(total)));
+        // An exact hint lets `collect` allocate once; a lower bound of one
+        // shard grows the vector and leaves spare capacity.
+        let keys: Vec<_> = map.keys().collect();
+        assert_eq!(keys.capacity(), total);
+        let order: Vec<_> = map.iter().collect();
+        assert_eq!(order.len(), reference.len());
+        assert!(
+            order
+                .iter()
+                .all(|(key, value)| reference.get(*key) == Some(*value))
+        );
+        for (start, step) in [(0, 0), (5, 1), (4000, 9000), (1, total - 3), (total - 1, 0)] {
+            let mut iter = map.iter();
+            assert_eq!(iter.nth(start), order.get(start).copied());
+            assert_eq!(iter.len(), total - start - 1);
+            assert_eq!(iter.nth(step), order.get(start + 1 + step).copied());
+            assert_eq!(iter.len(), total.saturating_sub(start + step + 2));
+        }
+        let mut past = map.iter();
+        assert_eq!(past.nth(total), None);
+        assert_eq!((past.len(), past.next()), (0, None));
+        let sum =
+            |map: &ShardedMap<VpnRouteKey, u32>| map.values().copied().map(u64::from).sum::<u64>();
+        drop((iter, past, keys, order));
+        let before = sum(&map);
+        let mut mutable = map.iter_mut();
+        assert_eq!(mutable.len(), total);
+        *mutable.nth(total / 2).unwrap().1 += 1;
+        assert_eq!(mutable.len(), total - total / 2 - 1);
+        drop(mutable);
+        assert_eq!(sum(&map), before + 1);
     }
 
     /// Each shard still spreads sequential VPN keys across hashbrown's tag
