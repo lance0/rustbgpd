@@ -1947,33 +1947,103 @@ class DatasetReloadTests(unittest.TestCase):
             {"record": {**applied["record"], "unapplied_count": 1}}))
         self.assertIn("no completed", receipt.last_reload_failure({"record": None}))
 
+    def processes(self, harness_error=None):
+        """A fail-stopped daemon, a live process and an ended harness with its stderr."""
+        fail_stop = subprocess.Popen(["sh", "-c", "exit 70"])
+        fail_stop.wait()
+        alive = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: (alive.kill(), alive.wait()))
+        ended = subprocess.Popen(["sh", "-c", "exit 1"])
+        ended.wait()
+        errors = self.root / "harness.stderr"
+        errors.write_text("mass_dirty_readiness_failure {}\n" +
+                          (f"mass-dirty qualification failed: {harness_error}\n" if harness_error else ""))
+        return fail_stop, alive, ended, errors
+
     def test_await_reload_reports_exit_70_bad_outcome_and_broken_fold(self):
+        fail_stop, alive, ended, errors = self.processes("wrong dataset verdict marker")
         with (self.root / "records").open("w+") as records:
-            fail_stop = subprocess.Popen(["sh", "-c", "exit 70"])
-            fail_stop.wait()
-            alive = subprocess.Popen(["sleep", "30"])
-            ended = subprocess.Popen(["sh", "-c", "exit 1"])
-            ended.wait()
-            try:
-                before = {outcome: 0 for outcome in receipt.RELOAD_OUTCOMES}
-                deadline = time.monotonic() + 30
-                self.assertEqual(receipt.await_reload(fail_stop, alive, records, 1, before, deadline, False)["failure"],
-                                 "daemon exited with status 70 (fail-stop)")
-                with mock.patch.object(receipt, "http_metrics", return_value=self.outcomes(0, known_partial=1)):
-                    self.assertEqual(receipt.await_reload(alive, alive, records, 1, before, deadline, False)["failure"],
-                                     "SIGHUP reload outcome known_partial +1")
-                with mock.patch.object(receipt, "http_metrics", return_value=self.outcomes(1)):
-                    self.assertEqual(receipt.await_reload(alive, ended, records, 1, before, deadline, False)["failure"],
-                                     "exact fold or session continuity failed: harness exited 1")
-                    fold = {"generation": "b", "exact_fold": True}
-                    records.write("mass_dirty_readiness {}\ndataset_reload_fold " + json.dumps(fold) + "\n")
-                    records.flush()
-                    records.seek(0)
-                    observed = receipt.await_reload(alive, alive, records, 1, before, deadline, False)
-                    self.assertEqual((observed["failure"], observed["fold"]), (None, fold))
-            finally:
-                alive.kill()
-                alive.wait()
+            before = {outcome: 0 for outcome in receipt.RELOAD_OUTCOMES}
+            deadline = time.monotonic() + 30
+            self.assertEqual(receipt.await_reload(fail_stop, alive, records, 1, before, deadline, False, errors)["failure"],
+                             "daemon exited with status 70 (fail-stop)")
+            with mock.patch.object(receipt, "http_metrics", return_value=self.outcomes(0, known_partial=1)):
+                self.assertEqual(receipt.await_reload(alive, alive, records, 1, before, deadline, False, errors)["failure"],
+                                 "SIGHUP reload outcome known_partial +1")
+            with mock.patch.object(receipt, "http_metrics", return_value=self.outcomes(1)):
+                self.assertEqual(receipt.await_reload(alive, ended, records, 1, before, deadline, False, errors)["failure"],
+                                 "exact fold or session continuity failed: wrong dataset verdict marker")
+                fold = {"generation": "b", "exact_fold": True}
+                records.write("mass_dirty_readiness {}\ndataset_reload_fold " + json.dumps(fold) + "\n")
+                records.flush()
+                records.seek(0)
+                observed = receipt.await_reload(alive, alive, records, 1, before, deadline, False, errors)
+                self.assertEqual((observed["failure"], observed["fold"]), (None, fold))
+
+    def test_receiver_failure_after_the_fold_record_is_still_a_fail(self):
+        # Finding 1: the fold is already written and the reload completed, but
+        # a receiver then saw a reversal and the harness ended.
+        _, alive, ended, errors = self.processes("wrong dataset verdict marker")
+        with (self.root / "records").open("w+") as records:
+            records.write("dataset_reload_fold " + json.dumps({"generation": "b", "exact_fold": True}) + "\n")
+            records.flush()
+            records.seek(0)
+            before = {outcome: 0 for outcome in receipt.RELOAD_OUTCOMES}
+            with mock.patch.object(receipt, "http_metrics", return_value=self.outcomes(1)):
+                observed = receipt.await_reload(alive, ended, records, 1, before, time.monotonic() + 30, False, errors)
+        self.assertEqual(observed["failure"], "exact fold or session continuity failed: wrong dataset verdict marker")
+
+    def test_harness_instrument_error_during_reload_stays_invalid(self):
+        _, alive, ended, errors = self.processes("instrument: unexpected controller arm")
+        with (self.root / "records").open("w+") as records, \
+                mock.patch.object(receipt, "http_metrics", return_value=self.outcomes(0)):
+            before = {outcome: 0 for outcome in receipt.RELOAD_OUTCOMES}
+            with self.assertRaisesRegex(ValueError, "harness ended during reload"):
+                receipt.await_reload(alive, ended, records, 1, before, time.monotonic() + 30, False, errors)
+
+    def test_successful_leg_cannot_drop_fold_or_reload_evidence(self):
+        # Finding 2: with no bar failure, every operation must carry its fold
+        # and complete reload evidence, or every later bar would be skipped.
+        for name, mutate in (("fold", lambda op: op.update(fold=None)),
+                             ("reevaluations", lambda op: op.pop("reevaluations")),
+                             ("last_reload", lambda op: op.pop("last_reload"))):
+            for index in (0, 1):
+                with self.subTest(evidence=name, operation=index):
+                    root = self.campaign()
+                    path = root / "leg-0-candidate" / "result.json"
+                    row = json.loads(path.read_text())
+                    mutate(row["operations"][index])
+                    receipt.write_json(path, row)
+                    verdict = self.finalize(root, 0)
+                    self.assertEqual((verdict["status"], verdict["reason"]),
+                                     ("INVALID", "operation lacks its fold or reload evidence"))
+                    shutil.rmtree(root)
+
+    def test_late_target_failure_outside_the_reload_wait_is_a_fail(self):
+        # Finding 3: exit 70 during the last-reload RPC, or a session lost
+        # before the exit record, interrupts a controller step.
+        fail_stop, alive, ended, errors = self.processes("receiver session ended")
+        rpc = subprocess.CalledProcessError(1, ["rbgp", "config", "last-reload"])
+        self.assertEqual(receipt.observe_target(rpc, fail_stop, alive, errors),
+                         "daemon exited with status 70 (fail-stop)")
+        late = ValueError("harness exited before dataset_reload_exit: 1")
+        self.assertEqual(receipt.observe_target(late, alive, ended, errors),
+                         "exact fold or session continuity failed: receiver session ended")
+        with self.assertRaises(subprocess.CalledProcessError):
+            receipt.observe_target(rpc, alive, alive, errors)
+        errors.write_text("mass-dirty qualification failed: instrument: missing controller finish boundary\n")
+        with self.assertRaisesRegex(ValueError, "dataset_reload_exit"):
+            receipt.observe_target(late, alive, ended, errors)
+        # The analyzer accepts that interrupted partial operation only with the recorded FAIL.
+        verdict = self.finalize(self.campaign(bar_failure=("daemon exited with status 70 (fail-stop)", 70)), 1)
+        self.assertEqual((verdict["status"], verdict["reason"]), ("FAIL", "daemon exited with status 70 (fail-stop)"))
+
+    def test_readiness_breach_with_a_wrong_path_is_a_fail_reporting_both(self):
+        # Finding 4: the readiness breach must not be lost to the path INVALID.
+        verdict = self.finalize(self.campaign(mode="full", full_pass="group", statuses={60: 503}), 1)
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertIn("1 non-200 or failed /readyz samples in 1 window(s)", verdict["reason"])
+        self.assertIn("also: generation b: re-evaluation path [('full', 'group')]", verdict["reason"])
 
 
 if __name__ == "__main__":

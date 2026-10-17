@@ -1513,13 +1513,9 @@ async fn dataset_protocol(
 ) -> Result<(), String> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     for (generation, swapped) in [("b", true), ("a", false)] {
-        let arm = lines
-            .next_line()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or("controller ended")?;
-        if arm != format!("arm {generation}") {
-            return Err("unexpected controller arm".into());
+        let arm = controller_line(&mut lines, receivers, source_live).await?;
+        if arm.as_deref() != Some(format!("arm {generation}").as_str()) {
+            return Err("instrument: unexpected controller arm".into());
         }
         for receiver in receivers {
             receiver
@@ -1555,23 +1551,66 @@ async fn dataset_protocol(
                 folds[folds.len() - 1].to_string(),
             )
         } else {
-            return Err("missing receiver fold clock".into());
+            return Err("instrument: missing receiver fold clock".into());
         };
         println!(
             "dataset_reload_fold {{\"generation\":\"{generation}\",\"receivers\":{},\"fold_monotonic_seconds\":{fold},\"receiver_fold_p50_monotonic_seconds\":{p50},\"receiver_fold_max_monotonic_seconds\":{maximum},\"announcements\":{announcements},\"unchanged_announcements\":{unchanged},\"prior_replays\":{replays},\"exact_fold\":true,\"sessions_continuous\":true}}",
             receivers.len()
         );
     }
-    if lines
-        .next_line()
-        .await
-        .map_err(|error| error.to_string())?
+    if controller_line(&mut lines, receivers, source_live)
+        .await?
         .as_deref()
         != Some("finish")
     {
-        return Err("missing controller finish boundary".into());
+        return Err("instrument: missing controller finish boundary".into());
     }
     Ok(())
+}
+
+/// A receiver or source session that fails after a fold must end the harness
+/// at once, not at the next wait, so the controller observes it as a FAIL.
+fn session_failure(receivers: &[Arc<Receiver>], source_live: &AtomicBool) -> Option<String> {
+    if !source_live.load(Ordering::Acquire) {
+        return Some("source session ended".into());
+    }
+    receivers.iter().find_map(|receiver| {
+        receiver
+            .inventory
+            .lock()
+            .unwrap()
+            .error
+            .clone()
+            .or_else(|| {
+                (!receiver.live.load(Ordering::Acquire)).then(|| "receiver session ended".into())
+            })
+    })
+}
+
+/// The next controller line, failing as soon as any session fails meanwhile.
+async fn controller_line(
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+    receivers: &[Arc<Receiver>],
+    source_live: &AtomicBool,
+) -> Result<Option<String>, String> {
+    let watch = async {
+        loop {
+            if let Some(error) = session_failure(receivers, source_live) {
+                return error;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        line = lines.next_line() => {
+            let line = line.map_err(|error| format!("instrument: {error}"))?;
+            if line.is_none() {
+                return Err("instrument: controller ended".into());
+            }
+            Ok(line)
+        }
+        error = watch => Err(error),
+    }
 }
 
 pub(super) fn main(args: &[String]) {
@@ -2167,6 +2206,37 @@ mod tests {
         inventory.arm_dataset(false, false);
         assert_eq!(inventory.mismatched, 160);
         assert!(inventory.dataset_event(0, 0, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn dataset_reload_session_failure_reports_receiver_error_loss_or_source_end() {
+        let shape = Shape::new("full-uc", false).unwrap();
+        let receiver = Arc::new(Receiver {
+            inventory: Arc::new(Mutex::new(Inventory::for_dataset(shape))),
+            control: watch::channel(Pause::default()).0,
+            acknowledged: Arc::new(AtomicU32::new(0)),
+            live: Arc::new(AtomicBool::new(true)),
+        });
+        let receivers = [receiver.clone()];
+        let source = AtomicBool::new(true);
+        assert_eq!(session_failure(&receivers, &source), None);
+        receiver.inventory.lock().unwrap().error = Some("wrong dataset verdict marker".into());
+        assert_eq!(
+            session_failure(&receivers, &source).as_deref(),
+            Some("wrong dataset verdict marker")
+        );
+        receiver.inventory.lock().unwrap().error = None;
+        receiver.live.store(false, Ordering::Release);
+        assert_eq!(
+            session_failure(&receivers, &source).as_deref(),
+            Some("receiver session ended")
+        );
+        receiver.live.store(true, Ordering::Release);
+        source.store(false, Ordering::Release);
+        assert_eq!(
+            session_failure(&receivers, &source).as_deref(),
+            Some("source session ended")
+        );
     }
 
     #[test]

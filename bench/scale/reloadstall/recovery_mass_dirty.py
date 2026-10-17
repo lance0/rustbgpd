@@ -1265,20 +1265,52 @@ def poll_record(records, prefix, pending):
             return json.loads(line[len(prefix) + 1:])
 
 
-def await_reload(daemon, engine, records, port, before, deadline, correct):
+# Harness errors that are the instrument's own fault stay INVALID; every other
+# harness failure is a receiver observing the daemon's wire behaviour.
+INSTRUMENT_ERRORS = ("instrument:", "monotonic clock", "readiness stopped", "no readiness samples")
+
+
+def harness_error(errors):
+    lines = [line for line in Path(errors).read_text().splitlines()
+             if line.startswith("mass-dirty qualification failed: ")]
+    return lines[-1].split(": ", 1)[1] if lines else None
+
+
+def target_failure(daemon, engine, errors):
+    """The observed failure of the system under test, or None if there is none to attribute."""
+    if daemon.poll() is None and engine.poll() is not None:
+        # A receiver error may precede the daemon's own exit; settle it first.
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            daemon.wait(timeout=2)
+    if daemon.poll() is not None:
+        return daemon_exit_failure(daemon.returncode)
+    if engine.poll() is None:
+        return None
+    error = harness_error(errors)
+    if error is None or error.startswith(INSTRUMENT_ERRORS):
+        return None
+    return f"exact fold or session continuity failed: {error}"
+
+
+def observe_target(error, daemon, engine, errors):
+    """Convert an interrupted controller step into the target failure that caused it, or re-raise."""
+    failure = target_failure(daemon, engine, errors)
+    if failure is None:
+        raise error
+    return failure
+
+
+def await_reload(daemon, engine, records, port, before, deadline, correct, errors):
     """Wait for SIGHUP completion and the exact fold, or the first breached bar."""
     pending, fold, completed, deltas = [""], None, None, None
     while True:
-        if daemon.poll() is not None:
-            return {"failure": daemon_exit_failure(daemon.returncode), "fold": fold, "completed": completed, "deltas": deltas}
+        # Liveness on every iteration: a reversal or session loss after the
+        # fold record must not pass because the reload counter advanced.
+        failure = target_failure(daemon, engine, errors)
+        if failure:
+            return {"failure": failure, "fold": fold, "completed": completed, "deltas": deltas}
+        require(engine.poll() is None, f"harness ended during reload: {engine.returncode}")
         fold = fold or poll_record(records, "dataset_reload_fold", pending)
-        if fold is None and engine.poll() is not None:
-            # A receiver error is the daemon's wire behaviour; settle the daemon first.
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                daemon.wait(timeout=2)
-            failure = (daemon_exit_failure(daemon.returncode) if daemon.returncode is not None
-                       else f"exact fold or session continuity failed: harness exited {engine.returncode}")
-            return {"failure": failure, "fold": None, "completed": completed, "deltas": deltas}
         try:
             current = reload_outcomes(http_metrics(port))
         except (OSError, ValueError):
@@ -1366,79 +1398,87 @@ def run_dataset_cell(args, root, manifest):
                     and ready["selected_chunk_stride"] == DATASET_STRIDE, "wire population or swap shape changed")
             (leg / "metrics-initial.prom").write_text(http_metrics(19186))
             read_record(engine, records, "mass_dirty_readiness", deadline)
-            previous_end = 0
-            for generation in stimulus["operations"]:
-                engine.stdin.write(f"arm {generation}\n")
-                engine.stdin.flush()
-                armed = read_record(engine, records, "dataset_reload_armed", deadline)
-                require(armed == {"generation": generation, "receivers": manifest["receivers"]}, "arm handshake incomplete")
-                validate_fixture(scenario, hashes, names)
-                before_text = http_metrics(19186)
-                (leg / f"metrics-before-{generation}.prom").write_text(before_text)
-                before = reload_outcomes(before_text)
-                log_start = (leg / "daemon.log").stat().st_size
-                swap_dataset(scenario, generation, full)
-                triggered = None if correct else time.monotonic()
-                os.kill(pid, signal.SIGHUP)
-                observed = await_reload(daemon, engine, records, 19186, before, deadline, correct)
-                operation = {"generation": generation, "trigger_monotonic_seconds": triggered,
-                             "complete_monotonic_seconds": observed["completed"], "fold": observed["fold"],
-                             "outcome_deltas": observed["deltas"]}
-                result["operations"].append(operation)
-                if observed["failure"]:
-                    failure = observed["failure"]
-                    break
-                after_text = http_metrics(19186)
-                (leg / f"metrics-after-{generation}.prom").write_text(after_text)
-                completed = subprocess.run([str(rbgp), "--addr", addr, "--json", "config", "last-reload"],
-                                           text=True, capture_output=True, timeout=30, check=True)
-                (leg / f"last-reload-{generation}.json").write_text(completed.stdout)
-                operation["last_reload"] = json.loads(completed.stdout)
-                failure = last_reload_failure(operation["last_reload"])
-                # The RIB logs its re-evaluation before acknowledging the
-                # reload; allow the log writer a bounded flush.
-                flushed = min(deadline, time.monotonic() + 30)
-                while True:
-                    log_bytes = (leg / "daemon.log").read_bytes()
-                    log_end = log_bytes.rfind(b"\n") + 1
-                    rows = reevaluations(log_bytes[log_start:log_end].decode())
-                    if rows or time.monotonic() >= flushed:
+            try:
+                previous_end = 0
+                for generation in stimulus["operations"]:
+                    engine.stdin.write(f"arm {generation}\n")
+                    engine.stdin.flush()
+                    armed = read_record(engine, records, "dataset_reload_armed", deadline)
+                    require(armed == {"generation": generation, "receivers": manifest["receivers"]}, "arm handshake incomplete")
+                    validate_fixture(scenario, hashes, names)
+                    before_text = http_metrics(19186)
+                    (leg / f"metrics-before-{generation}.prom").write_text(before_text)
+                    before = reload_outcomes(before_text)
+                    log_start = (leg / "daemon.log").stat().st_size
+                    swap_dataset(scenario, generation, full)
+                    triggered = None if correct else time.monotonic()
+                    os.kill(pid, signal.SIGHUP)
+                    observed = await_reload(daemon, engine, records, 19186, before, deadline, correct,
+                                            leg / "harness.stderr")
+                    operation = {"generation": generation, "trigger_monotonic_seconds": triggered,
+                                 "complete_monotonic_seconds": observed["completed"], "fold": observed["fold"],
+                                 "outcome_deltas": observed["deltas"]}
+                    result["operations"].append(operation)
+                    if observed["failure"]:
+                        failure = observed["failure"]
                         break
-                    time.sleep(.05)
-                require(previous_end <= log_start < log_end, "daemon log cursors out of order")
-                previous_end = log_end
-                (leg / f"daemon-operation-{generation}.jsonl").write_bytes(log_bytes[log_start:log_end])
-                operation.update(daemon_log_bytes={"start": log_start, "end": log_end}, reevaluations=rows)
-                if not correct:
-                    fold = observed["fold"]
-                    operation.update(
-                        sighup_to_complete_seconds=observed["completed"] - triggered,
-                        sighup_to_fold_seconds=fold["fold_monotonic_seconds"] - triggered,
-                        receiver_fold_p50_seconds=fold["receiver_fold_p50_monotonic_seconds"] - triggered,
-                        receiver_fold_max_seconds=fold["receiver_fold_max_monotonic_seconds"] - triggered)
-                if failure:
-                    break
-            if failure is None:
-                require(digest(scenario / "generation.list") == hashes["generation-base.list"], "dataset was not restored")
-                require(process_identity(pid, binary) == owner, "daemon identity changed")
-                if not correct:
-                    result["memory_after"] = snapshot_cgroup(pid, LIMITS["daemon_bytes"])
-                    harness_pid = daemon_pid(harness_binary, deadline)
-                    result["harness_owner"] = process_identity(harness_pid, harness_binary)
-                    result["harness_memory_after"] = snapshot_cgroup(harness_pid, LIMITS["harness_bytes"])
-                    require(sampler.poll() is None, "memory sampler ended before measurement boundary")
-                # Retain a readiness probe after the final observed fold.
-                while True:
-                    probe = read_record(engine, records, "mass_dirty_readiness", deadline)
-                    if correct or probe["started_monotonic_seconds"] >= result["operations"][-1]["fold"]["fold_monotonic_seconds"]:
+                    after_text = http_metrics(19186)
+                    (leg / f"metrics-after-{generation}.prom").write_text(after_text)
+                    completed = subprocess.run([str(rbgp), "--addr", addr, "--json", "config", "last-reload"],
+                                               text=True, capture_output=True, timeout=30, check=True)
+                    (leg / f"last-reload-{generation}.json").write_text(completed.stdout)
+                    operation["last_reload"] = json.loads(completed.stdout)
+                    failure = last_reload_failure(operation["last_reload"])
+                    # The RIB logs its re-evaluation before acknowledging the
+                    # reload; allow the log writer a bounded flush.
+                    flushed = min(deadline, time.monotonic() + 30)
+                    while True:
+                        log_bytes = (leg / "daemon.log").read_bytes()
+                        log_end = log_bytes.rfind(b"\n") + 1
+                        rows = reevaluations(log_bytes[log_start:log_end].decode())
+                        if rows or time.monotonic() >= flushed:
+                            break
+                        time.sleep(.05)
+                    require(previous_end <= log_start < log_end, "daemon log cursors out of order")
+                    previous_end = log_end
+                    (leg / f"daemon-operation-{generation}.jsonl").write_bytes(log_bytes[log_start:log_end])
+                    operation.update(daemon_log_bytes={"start": log_start, "end": log_end}, reevaluations=rows)
+                    if not correct:
+                        fold = observed["fold"]
+                        operation.update(
+                            sighup_to_complete_seconds=observed["completed"] - triggered,
+                            sighup_to_fold_seconds=fold["fold_monotonic_seconds"] - triggered,
+                            receiver_fold_p50_seconds=fold["receiver_fold_p50_monotonic_seconds"] - triggered,
+                            receiver_fold_max_seconds=fold["receiver_fold_max_monotonic_seconds"] - triggered)
+                    if failure:
                         break
-                engine.stdin.write("finish\n")
-                engine.stdin.flush()
-                final = read_record(engine, records, "dataset_reload_exit", deadline)
-                require(final["status"] == "PASS" and final["readiness_samples"] > 0, "readiness evidence incomplete")
-                engine.wait(timeout=max(0.1, deadline - time.monotonic()))
-                require(engine.returncode == 0, "harness failed after final receipt")
-            else:
+                if failure is None:
+                    require(digest(scenario / "generation.list") == hashes["generation-base.list"], "dataset was not restored")
+                    require(process_identity(pid, binary) == owner, "daemon identity changed")
+                    if not correct:
+                        result["memory_after"] = snapshot_cgroup(pid, LIMITS["daemon_bytes"])
+                        harness_pid = daemon_pid(harness_binary, deadline)
+                        result["harness_owner"] = process_identity(harness_pid, harness_binary)
+                        result["harness_memory_after"] = snapshot_cgroup(harness_pid, LIMITS["harness_bytes"])
+                        require(sampler.poll() is None, "memory sampler ended before measurement boundary")
+                    # Retain a readiness probe after the final observed fold.
+                    while True:
+                        probe = read_record(engine, records, "mass_dirty_readiness", deadline)
+                        if correct or probe["started_monotonic_seconds"] >= result["operations"][-1]["fold"]["fold_monotonic_seconds"]:
+                            break
+                    engine.stdin.write("finish\n")
+                    engine.stdin.flush()
+                    final = read_record(engine, records, "dataset_reload_exit", deadline)
+                    require(final["status"] == "PASS" and final["readiness_samples"] > 0, "readiness evidence incomplete")
+                    engine.wait(timeout=max(0.1, deadline - time.monotonic()))
+                    require(engine.returncode == 0, "harness failed after final receipt")
+            except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as error:
+                # Through the finish boundary, a daemon exit or receiver failure
+                # that interrupts a controller step is the measured FAIL; only
+                # an instrument error stays INVALID.
+                failure = observe_target(error, daemon, engine, leg / "harness.stderr")
+                result["interrupted_step"] = f"{type(error).__name__}: {error}"
+            if failure is not None:
                 result["bar_failures"].append(failure)
             result["status"] = "FAIL" if failure else "CORRECTNESS_ONLY" if correct else "PASS"
             write_json(leg / "result.json", result)
@@ -1580,8 +1620,15 @@ def analyze_dataset(root, manifest):
         require(failures[0] == daemon_exit_failure(row["daemon_exit"]), "recorded daemon exit differs")
     report, path_errors = [], []
     folds = records["dataset_reload_fold"]
+    evidence = ("last_reload", "daemon_log_bytes", "reevaluations", "outcome_deltas",
+                *(() if correct else ("sighup_to_complete_seconds", "sighup_to_fold_seconds")))
     for index, operation in enumerate(operations):
         generation, fold = operation["generation"], operation["fold"]
+        observed = fold is not None and all(key in operation for key in evidence)
+        # Only the operation an explicit bar failure interrupted may lack its
+        # fold or reload evidence; anything else would skip every bar below.
+        require(observed or (failures and index == len(operations) - 1),
+                "operation lacks its fold or reload evidence")
         require(records["dataset_reload_armed"][index] == {"generation": generation, "receivers": manifest["receivers"]},
                 "arm receipt differs")
         if fold is not None:
@@ -1589,7 +1636,7 @@ def analyze_dataset(root, manifest):
                     fold["receivers"] == manifest["receivers"] and fold["exact_fold"] is True and
                     fold["sessions_continuous"] is True, "fold receipt differs")
         entry = {"generation": generation, "outcome_deltas": operation["outcome_deltas"]}
-        if "reevaluations" in operation:
+        if observed:
             # A fully observed operation: replay its outcome, applied record and path.
             before = reload_outcomes((leg / f"metrics-before-{generation}.prom").read_text())
             after = reload_outcomes((leg / f"metrics-after-{generation}.prom").read_text())
@@ -1632,10 +1679,12 @@ def analyze_dataset(root, manifest):
                         f"{len(readiness['windows'])} window(s), longest "
                         + (f"{max(window['duration_seconds'] for window in readiness['windows']):.2f} s"
                            if not correct else "untimed"))
-    # A breach observed during a reload is a FAIL whatever the path. Otherwise
-    # a cell that did not exercise its declared path measured something else.
-    if path_errors and not row["bar_failures"]:
+    # A measured breach, readiness included, is a FAIL whatever the path, and
+    # the path difference is reported with it. Without one, a cell that did
+    # not exercise its declared path measured something else: INVALID.
+    if path_errors and not failures:
         raise ValueError("; ".join(path_errors))
+    failures += [f"also: {error}" for error in path_errors]
     if failures:
         verdict["status"] = "FAIL"
         verdict["reason"] = "; ".join(failures)

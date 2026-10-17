@@ -190,7 +190,10 @@ ones above. Differences:
 The manifest freezes these bars before any result:
 
 - **Fail-stop:** the daemon runs through both reloads. Any exit, including
-  fail-stop exit 70, is FAIL.
+  fail-stop exit 70, is FAIL. The controller watches the daemon and every
+  receiver through the finish boundary: a daemon exit or receiver failure that
+  interrupts any later step (the `last-reload` query, the next arm, the exit
+  record) is the same FAIL, and only an instrument error is INVALID.
 - **Applied:** each SIGHUP adds exactly one `complete` to
   `bgp_sighup_reload_outcomes_total` and nothing to any other outcome, and
   `rbgp config last-reload` reports outcome `complete` with nothing unapplied.
@@ -207,7 +210,7 @@ The manifest freezes these bars before any result:
   operation must carry the cell's path: `mode=delta` with no `full_pass`, or
   `mode=full` with `full_pass=group`. A per-member full pass or any other path
   means the cell did not measure its path and is INVALID. A breach of the bars
-  above remains a FAIL.
+  above, readiness included, remains a FAIL that also reports the path.
 
 SIGHUP→reload complete, SIGHUP→exact fold, receiver fold p50/max, the logged
 re-evaluation `elapsed_ms` and affected keys, unchanged re-announcements,
