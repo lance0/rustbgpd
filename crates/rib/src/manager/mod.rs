@@ -533,6 +533,16 @@ struct VpnLabeledStagingContext<'a> {
 #[cfg(test)]
 type PrimaryUpdateHook = Arc<dyn Fn(&RibUpdate) + Send + Sync>;
 
+/// The full pass an unbounded dataset re-evaluation takes in tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestFullPass {
+    /// Once per update group where the targets allow it (production).
+    Group,
+    /// Always the per-member full resync.
+    Member,
+}
+
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
@@ -1086,6 +1096,11 @@ pub struct RibManager {
     /// grouped run.
     #[cfg(test)]
     test_force_ungrouped: bool,
+    /// Differential-oracle test hook: which full pass an unbounded dataset
+    /// re-evaluation takes, so the group-level pass can be compared against
+    /// the per-member resync.
+    #[cfg(test)]
+    test_full_pass: TestFullPass,
     /// Full group-table control-tag scans run by deferred-registration
     /// cohort admission (LAN-1826): the per-turn work bound.
     #[cfg(test)]
@@ -2320,6 +2335,8 @@ impl RibManager {
             evpn_marker_cursor: None,
             #[cfg(test)]
             test_force_ungrouped: false,
+            #[cfg(test)]
+            test_full_pass: TestFullPass::Group,
             #[cfg(test)]
             join_cohort_tag_scans: 0,
             #[cfg(test)]

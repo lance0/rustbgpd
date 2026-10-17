@@ -307,10 +307,17 @@ semantics:
   prefix) or origin AS the old and new contents answer differently. Any
   other probe or family, attached conditional advertisement, or a VPN
   best-path selection still held by graceful-restart deferral
-  re-evaluates every route for those peers. The
+  re-evaluates every route for those peers. That full re-evaluation runs
+  once per update group and sends each member only the routes whose
+  export changed, with one shared encoding per group; peers outside a
+  group re-evaluate against their own Adj-RIB-Out. Receivers that also
+  send another family (EVPN, labeled unicast, FlowSpec, BGP-LS or
+  RT-Constrain), and every receiver while a VPN selection is held by
+  deferral or a conditional advertisement is installed, instead get a
+  complete per-peer resync. The
   `dataset export re-evaluation complete` log event reports which
-  (`mode`), with `affected_prefixes`, `affected_vpn_keys` and
-  `elapsed_ms`.
+  (`mode`, and `full_pass` = `group` or `member` for a full pass), with
+  `affected_prefixes`, `affected_vpn_keys` and `elapsed_ms`.
 - **A file that fails to load or parse rejects the whole reload.**
   Every declared dataset must load before anything is published, so a
   malformed or unreadable file leaves the prior snapshot serving, the

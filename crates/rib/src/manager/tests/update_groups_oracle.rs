@@ -2360,6 +2360,29 @@ struct SwapMode {
     add_path: bool,
     /// C's channel is full when the re-evaluation arrives, so C is dirty.
     jam: bool,
+    /// C alone handles RFC 7947 control communities, and p8 asks not to be
+    /// announced to its AS: grouped members whose outputs differ.
+    rs_control: bool,
+}
+
+/// The test hook's full pass: per member, or once per group.
+fn full_pass(member: bool) -> TestFullPass {
+    if member {
+        TestFullPass::Member
+    } else {
+        TestFullPass::Group
+    }
+}
+
+/// Which re-evaluation the swap oracle sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reeval {
+    /// With the swaps: the bounded path when it can be proved.
+    Bounded,
+    /// Without the swaps: the group-level full pass.
+    Group,
+    /// Without the swaps, forced onto the per-member full resync.
+    Member,
 }
 
 /// Run the oracle topology. `next` swaps every dataset to that content
@@ -2375,13 +2398,18 @@ async fn run_swap_case(
     initial: &SwapData,
     next: Option<&SwapData>,
     mode: SwapMode,
-    with_swaps: bool,
+    reeval: Reeval,
 ) -> (FoldedState, u64) {
     let handles = initial.handles();
     let chain = swap_chain(&handles);
-    let mut oracle = Oracle::spawn(mode.ungrouped, None);
+    let mut oracle = Oracle::spawn_configured(mode.ungrouped, None, |manager| {
+        manager.test_full_pass = full_pass(reeval == Reeval::Member);
+    });
     oracle.peer_up(A, true, false, None, 64).await;
     oracle.peer_up(E, true, false, None, 64).await;
+    if mode.rs_control {
+        oracle.set_rs_control(C, 65000).await;
+    }
     for (peer, capacity) in [(B, 64), (C, if mode.jam { 1 } else { 64 })] {
         oracle
             .peer_up_families_generation_with_features(
@@ -2423,10 +2451,16 @@ async fn run_swap_case(
         Some(64503),
         Some(64504),
     ];
-    let from_a = (1..=8)
+    let mut from_a: Vec<_> = (1..=8)
         .zip(origins)
         .map(|(n, origin)| swap_route(n, A, 200, origin, n == 7))
         .collect();
+    if mode.rs_control {
+        // `0:65010`: not to the oracle's eBGP receivers' AS.
+        let mut attributes: Vec<PathAttribute> = from_a[7].attributes.to_vec();
+        attributes.push(PathAttribute::Communities(vec![65010]));
+        from_a[7].attributes = AttrSet::new(attributes);
+    }
     oracle.routes(A, from_a, vec![]).await;
     // Runner-up candidates with other origins: per-client-best and Add-Path
     // receivers read them, so an origin swap must reach non-best paths.
@@ -2462,7 +2496,7 @@ async fn run_swap_case(
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
                 peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
-                swaps: with_swaps.then_some(swaps),
+                swaps: (reeval == Reeval::Bounded).then_some(swaps),
                 reply,
             })
             .await
@@ -2607,18 +2641,30 @@ async fn check_swap_cases(mode: SwapMode) {
             SwapPath::Full,
         ),
     ];
+    let mut diverged = false;
     for (name, initial, next, path) in cases {
-        let (bounded, bounded_evals) = run_swap_case(&initial, Some(&next), mode, true).await;
-        let (full, full_evals) = run_swap_case(&initial, Some(&next), mode, false).await;
-        let (reference, _) = run_swap_case(&next, None, mode, false).await;
+        let (bounded, bounded_evals) =
+            run_swap_case(&initial, Some(&next), mode, Reeval::Bounded).await;
+        let (full, full_evals) = run_swap_case(&initial, Some(&next), mode, Reeval::Group).await;
+        let (member, _) = run_swap_case(&initial, Some(&next), mode, Reeval::Member).await;
+        let (reference, _) = run_swap_case(&next, None, mode, Reeval::Group).await;
         assert_eq!(
             bounded, full,
             "{name} {mode:?}: bounded and full re-evaluation differ"
         );
         assert_eq!(
-            full, reference,
+            full, member,
+            "{name} {mode:?}: group-level full pass differs from per-member resync"
+        );
+        assert_eq!(
+            member, reference,
             "{name} {mode:?}: full re-evaluation is not exact"
         );
+        if mode.rs_control {
+            let p8 = (Prefix::V4(pfx(8, 0)), 0);
+            assert!(!reference[&IpAddr::V4(C)].contains_key(&p8), "{name}");
+            diverged |= reference[&IpAddr::V4(B)].contains_key(&p8);
+        }
         if mode.jam {
             continue;
         }
@@ -2632,6 +2678,10 @@ async fn check_swap_cases(mode: SwapMode) {
             SwapPath::Full => assert_eq!(bounded_evals, full_evals, "{name} {mode:?}"),
         }
     }
+    assert_eq!(
+        diverged, mode.rs_control,
+        "{mode:?}: an rs-control case must give B a route C does not get"
+    );
 }
 
 /// Re-evaluating only the routes a dataset swap affects leaves every
@@ -2639,18 +2689,21 @@ async fn check_swap_cases(mode: SwapMode) {
 /// in turn the state of a run that started with the new contents.
 #[tokio::test]
 async fn dataset_swap_bounded_reevaluation_matches_full_pass() {
-    for (ungrouped, per_client_best, add_path) in [
-        (false, false, false),
-        (true, false, false),
-        (false, true, false),
-        (true, true, false),
-        (true, false, true),
+    for (ungrouped, per_client_best, add_path, rs_control) in [
+        (false, false, false, false),
+        (true, false, false, false),
+        (false, true, false, false),
+        (true, true, false, false),
+        (true, false, true, false),
+        (false, false, false, true),
+        (true, false, false, true),
     ] {
         check_swap_cases(SwapMode {
             ungrouped,
             per_client_best,
             add_path,
             jam: false,
+            rs_control,
         })
         .await;
     }
@@ -2667,8 +2720,115 @@ async fn dataset_swap_bounded_reevaluation_matches_full_pass_with_dirty_member()
             per_client_best: false,
             add_path: false,
             jam: true,
+            rs_control: false,
         })
         .await;
+    }
+}
+
+/// An unbounded swap (a community-set probe) re-evaluates each update group
+/// once: every member receives the same changed-route payload and encode
+/// cell instead of re-sending its whole table. The per-member resync is the
+/// control, so the assertions are shown to distinguish the two paths.
+#[tokio::test]
+async fn dataset_full_pass_shares_one_group_payload() {
+    for member_path in [false, true] {
+        let initial = SwapData {
+            allowed: swap_some(&[1, 2]),
+            blocked: vec![],
+            tagged: vec![],
+        };
+        let handles = initial.handles();
+        let chain = swap_chain(&handles);
+        let mut oracle = Oracle::spawn_configured(false, None, |manager| {
+            manager.test_full_pass = full_pass(member_path);
+        });
+        oracle.peer_up(A, true, false, None, 64).await;
+        for peer in [B, C, F] {
+            oracle
+                .peer_up(peer, true, false, Some(chain.clone()), 64)
+                .await;
+        }
+        let routes = (1..=8)
+            .map(|n| swap_route(n, A, 200, Some(64500 + u32::from(n)), n == 7))
+            .collect();
+        oracle.routes(A, routes, vec![]).await;
+        oracle.drain_available();
+        let tagged = &handles[2];
+        let prior = tagged.pin();
+        tagged
+            .refresh(
+                SwapData {
+                    tagged: vec![0xFDE8_0007],
+                    ..initial
+                }
+                .data()[2]
+                    .clone(),
+            )
+            .unwrap();
+        let (reply, result) = oneshot::channel();
+        oracle
+            .tx
+            .send(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![IpAddr::V4(B)],
+                swaps: Some(vec![crate::update::DatasetSwap {
+                    handle: Arc::clone(tagged),
+                    prior,
+                }]),
+                reply,
+            })
+            .await
+            .unwrap();
+        result.await.unwrap().unwrap();
+        let mut updates = Vec::new();
+        for peer in [B, C, F] {
+            let update = tokio::time::timeout(Duration::from_secs(10), oracle.drain_one(peer))
+                .await
+                .unwrap_or_else(|_| panic!("{peer} received no re-evaluation"));
+            updates.push(update);
+        }
+        let announced = |update: &OutboundRouteUpdate| {
+            update
+                .announce
+                .iter()
+                .map(|route| route.prefix)
+                .collect::<BTreeSet<_>>()
+        };
+        if member_path {
+            for update in &updates {
+                assert_eq!(announced(update).len(), 3, "the resync re-sends the table");
+                assert!(update.shared_group_encode.is_none());
+            }
+        } else {
+            let first = &updates[0];
+            assert_eq!(announced(first), BTreeSet::from([Prefix::V4(pfx(7, 0))]));
+            let encode = first
+                .shared_group_encode
+                .as_ref()
+                .expect("one group encode");
+            for update in &updates[1..] {
+                assert!(Arc::ptr_eq(&update.announce, &first.announce));
+                assert!(Arc::ptr_eq(
+                    update
+                        .shared_group_encode
+                        .as_ref()
+                        .expect("one group encode"),
+                    encode
+                ));
+            }
+        }
+        let folded = fold(&oracle.finish().await);
+        for peer in [B, C, F] {
+            let advertised: BTreeSet<_> = folded[&IpAddr::V4(peer)].keys().copied().collect();
+            assert_eq!(
+                advertised,
+                [1, 2, 7]
+                    .into_iter()
+                    .map(|n| (Prefix::V4(pfx(n, 0)), 0))
+                    .collect(),
+                "{peer} member_path={member_path}"
+            );
+        }
     }
 }
 
@@ -2877,7 +3037,7 @@ async fn run_vpn_swap_case(
     initial: &VpnSwapData,
     next: Option<&VpnSwapData>,
     mode: VpnSwapMode,
-    with_swaps: bool,
+    reeval: Reeval,
 ) -> (FoldedState, FoldedVpnPaths, u64) {
     let handles = initial.handles();
     let chain = vpn_swap_chain(&handles);
@@ -2894,6 +3054,7 @@ async fn run_vpn_swap_case(
         mode.ungrouped,
         Some(Ipv4Addr::new(192, 0, 2, 1)),
         |manager| {
+            manager.test_full_pass = full_pass(reeval == Reeval::Member);
             if mode.deferred {
                 manager.selection_deferral =
                     super::super::selection_deferral::SelectionDeferral::new(
@@ -3015,7 +3176,7 @@ async fn run_vpn_swap_case(
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
                 peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
-                swaps: with_swaps.then_some(swaps),
+                swaps: (reeval == Reeval::Bounded).then_some(swaps),
                 reply,
             })
             .await
@@ -3141,10 +3302,13 @@ async fn check_vpn_swap_cases(mode: VpnSwapMode) {
     ];
     for (name, initial, next, path) in cases {
         let (bounded, bounded_vpn, bounded_evals) =
-            run_vpn_swap_case(&initial, Some(&next), mode, true).await;
+            run_vpn_swap_case(&initial, Some(&next), mode, Reeval::Bounded).await;
         let (full, full_vpn, full_evals) =
-            run_vpn_swap_case(&initial, Some(&next), mode, false).await;
-        let (reference, reference_vpn, _) = run_vpn_swap_case(&next, None, mode, false).await;
+            run_vpn_swap_case(&initial, Some(&next), mode, Reeval::Group).await;
+        let (member, member_vpn, _) =
+            run_vpn_swap_case(&initial, Some(&next), mode, Reeval::Member).await;
+        let (reference, reference_vpn, _) =
+            run_vpn_swap_case(&next, None, mode, Reeval::Group).await;
         assert_eq!(
             (&bounded, &bounded_vpn),
             (&full, &full_vpn),
@@ -3152,13 +3316,18 @@ async fn check_vpn_swap_cases(mode: VpnSwapMode) {
         );
         assert_eq!(
             (&full, &full_vpn),
+            (&member, &member_vpn),
+            "{name} {mode:?}: group-level full pass differs from per-member resync"
+        );
+        assert_eq!(
+            (&member, &member_vpn),
             (&reference, &reference_vpn),
             "{name} {mode:?}: full re-evaluation is not exact"
         );
         if mode.jam {
             continue;
         }
-        let (_, before_vpn, _) = run_vpn_swap_case(&initial, None, mode, false).await;
+        let (_, before_vpn, _) = run_vpn_swap_case(&initial, None, mode, Reeval::Group).await;
         assert_eq!(
             path == SwapPath::Empty,
             before_vpn[&IpAddr::V4(B)] == reference_vpn[&IpAddr::V4(B)],
@@ -3315,63 +3484,83 @@ async fn dataset_swap_with_intervening_publication_uses_full_pass() {
 /// A later reload generation that re-marks a member still awaiting the
 /// resync an earlier one left supersedes it: the member stays one pending
 /// episode whose age keeps running, receives one replay, and the RIB then
-/// reports no pending resync.
+/// reports no pending resync. Both full passes: the group-level one leaves
+/// the blocked member's missed delta to its resync, the per-member one
+/// re-marks it.
 #[tokio::test]
 async fn later_generation_supersedes_a_pending_resync() {
     use crate::update::OutboundConvergence;
     tokio::time::pause();
-    let (_, chain) = dataset_prefix_policy(Prefix::V4(pfx(1, 0)), true);
-    let mut o = Oracle::spawn(false, None);
-    o.peer_up(A, true, false, None, 64).await;
-    o.peer_up(B, true, false, Some(chain.clone()), 64).await;
-    o.peer_up(C, true, false, Some(chain), 1).await;
-    let eor = o.drain_one(C).await;
-    assert!(eor.announce.is_empty());
-    // p1 fills C's one-slot channel.
-    o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
-        .await;
-    let reevaluate = async |o: &mut Oracle| {
-        let (reply, result) = oneshot::channel();
-        o.tx.send(RibUpdate::ReevaluatePeerExportPolicies {
-            peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
-            swaps: None,
-            reply,
-        })
-        .await
-        .unwrap();
-        result.await.unwrap().unwrap();
-    };
-    reevaluate(&mut o).await;
-    assert_eq!(
-        o.outbound_convergence().await,
-        OutboundConvergence {
-            pending_peers: 1,
-            oldest_pending_secs: 0
+    let p1 = Prefix::V4(pfx(1, 0));
+    for member_path in [false, true] {
+        let (handle, chain) = dataset_prefix_policy(p1, true);
+        let mut o = Oracle::spawn_configured(false, None, |manager| {
+            manager.test_full_pass = full_pass(member_path);
+        });
+        o.peer_up(A, true, false, None, 64).await;
+        o.peer_up(B, true, false, Some(chain.clone()), 64).await;
+        o.peer_up(C, true, false, Some(chain), 1).await;
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty());
+        // p1 fills C's one-slot channel.
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        // Each generation swaps the dataset; neither can be bounded (no
+        // swaps are sent), so each takes the full pass.
+        let reevaluate = async |o: &mut Oracle, permit: bool| {
+            handle.refresh(dataset_prefix_data(p1, permit));
+            let (reply, result) = oneshot::channel();
+            o.tx.send(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                swaps: None,
+                reply,
+            })
+            .await
+            .unwrap();
+            result.await.unwrap().unwrap();
+        };
+        reevaluate(&mut o, false).await;
+        assert_eq!(
+            o.outbound_convergence().await,
+            OutboundConvergence {
+                pending_peers: 1,
+                oldest_pending_secs: 0
+            },
+            "member_path={member_path}"
+        );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        reevaluate(&mut o, true).await;
+        assert_eq!(
+            o.outbound_convergence().await,
+            OutboundConvergence {
+                pending_peers: 1,
+                oldest_pending_secs: 5
+            },
+            "member_path={member_path}: the later generation joins the pending episode"
+        );
+        o.drain_before_recovery(C, RecoveryPath::QueueDeferral)
+            .await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+        let replays = o.drain_peer_available(C).await;
+        o.close_recovery(C);
+        assert_eq!(
+            replays.len(),
+            1,
+            "member_path={member_path}: one replay for both generations"
+        );
+        assert_eq!(
+            o.outbound_convergence().await,
+            OutboundConvergence::default()
+        );
+        let state = fold(&o.finish().await);
+        for peer in [B, C] {
+            assert!(
+                state[&IpAddr::V4(peer)].contains_key(&(p1, 0)),
+                "member_path={member_path}: {peer}"
+            );
         }
-    );
-    tokio::time::advance(Duration::from_secs(5)).await;
-    reevaluate(&mut o).await;
-    assert_eq!(
-        o.outbound_convergence().await,
-        OutboundConvergence {
-            pending_peers: 1,
-            oldest_pending_secs: 5
-        },
-        "the later generation joins the pending episode"
-    );
-    o.drain_before_recovery(C, RecoveryPath::QueueDeferral)
-        .await;
-    tokio::time::advance(Duration::from_secs(2)).await;
-    o.quiesce().await;
-    let replays = o.drain_peer_available(C).await;
-    o.close_recovery(C);
-    assert_eq!(replays.len(), 1, "one replay for both generations");
-    assert_eq!(
-        o.outbound_convergence().await,
-        OutboundConvergence::default()
-    );
-    let state = fold(&o.finish().await);
-    assert!(state[&IpAddr::V4(C)].contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
+    }
 }
 
 pub(super) async fn run_grouped_and_ungrouped<S>(
