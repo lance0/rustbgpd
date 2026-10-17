@@ -3683,10 +3683,10 @@ fn patch_bash_equals_options(
     Ok((prelude, nospace))
 }
 
-/// clap_complete writes a require-equals option as zsh `--opt=`, which
-/// also completes its value as the next word, where the parser would
-/// read it as a positional. `--opt=-` keeps the value in the same word.
-fn patch_zsh_equals_options(command: &clap::Command, raw: Vec<u8>) -> std::io::Result<Vec<u8>> {
+/// Long options whose value must be attached with `=`. The zsh and fish
+/// text patches cannot tell commands apart, so a long name must require
+/// `=` everywhere it is used.
+fn require_equals_longs(command: &clap::Command) -> std::io::Result<Vec<String>> {
     fn visit(command: &clap::Command, found: &mut Vec<(String, bool)>) {
         found.extend(
             command
@@ -3697,34 +3697,65 @@ fn patch_zsh_equals_options(command: &clap::Command, raw: Vec<u8>) -> std::io::R
             visit(subcommand, found);
         }
     }
-    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
-    let mut completion = String::from_utf8(raw)
-        .map_err(|error| invalid(format!("zsh completion was not UTF-8: {error}")))?;
     let mut options = Vec::new();
     visit(command, &mut options);
-    let mut equals: Vec<&str> = options
+    let mut longs: Vec<String> = options
         .iter()
         .filter(|(_, require_equals)| *require_equals)
-        .map(|(long, _)| long.as_str())
+        .map(|(long, _)| long.clone())
         .collect();
-    equals.sort_unstable();
-    equals.dedup();
-    for long in equals {
-        // The text patch cannot tell commands apart, so a long name must
-        // require `=` everywhere it is used.
+    longs.sort_unstable();
+    longs.dedup();
+    for long in &longs {
         if options
             .iter()
             .any(|(other, require_equals)| other == long && !require_equals)
         {
-            return Err(invalid(format!(
-                "--{long} requires `=` on one command but not another"
-            )));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("--{long} requires `=` on one command but not another"),
+            ));
         }
-        let needle = format!("--{long}=[");
-        if !completion.contains(&needle) {
-            return Err(invalid(format!("no zsh spec for --{long}")));
-        }
-        completion = completion.replace(&needle, &format!("--{long}=-["));
+    }
+    Ok(longs)
+}
+
+/// Keep require-equals values in the option's own word. clap_complete
+/// writes zsh `--opt=` and fish `-r`, both of which also complete the
+/// value as the next word, where the parser would read it as a
+/// positional. zsh gets `--opt=-`; fish drops `-r`, which still
+/// completes `--opt=` and the values after it.
+fn patch_equals_options(
+    shell: Shell,
+    command: &clap::Command,
+    raw: Vec<u8>,
+) -> std::io::Result<Vec<u8>> {
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let mut completion = String::from_utf8(raw)
+        .map_err(|error| invalid(format!("{shell} completion was not UTF-8: {error}")))?;
+    for long in require_equals_longs(command)? {
+        let patched = if shell == Shell::Zsh {
+            let needle = format!("--{long}=[");
+            let patched = completion.replace(&needle, &format!("--{long}=-["));
+            (patched != completion).then_some(patched)
+        } else {
+            let flag = format!(" -l {long} ");
+            let mut changed = false;
+            let patched = completion
+                .split_inclusive('\n')
+                .map(|line| {
+                    if line.contains(&flag) && line.contains("' -r ") {
+                        changed = true;
+                        line.replacen("' -r ", "' ", 1)
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<String>();
+            changed.then_some(patched)
+        };
+        completion =
+            patched.ok_or_else(|| invalid(format!("no {shell} completion spec for --{long}")))?;
     }
     Ok(completion.into_bytes())
 }
@@ -3740,10 +3771,10 @@ fn generate_completions(
         let mut raw = Vec::new();
         shell.try_generate(&command, &mut raw)?;
         output.write_all(&patch_bash_file_positionals(&command, binary_name, raw)?)?;
-    } else if shell == Shell::Zsh {
+    } else if matches!(shell, Shell::Zsh | Shell::Fish) {
         let mut raw = Vec::new();
         shell.try_generate(&command, &mut raw)?;
-        output.write_all(&patch_zsh_equals_options(&command, raw)?)?;
+        output.write_all(&patch_equals_options(shell, &command, raw)?)?;
     } else {
         shell.try_generate(&command, output)?;
     }
@@ -6944,14 +6975,26 @@ printf '%s\n' "${COMPREPLY[@]}"
         );
     }
 
-    /// zsh keeps a require-equals value in the same word (`--opt=-`).
+    /// zsh (`--opt=-`) and fish (no `-r`) keep a require-equals value in
+    /// the option's own word instead of completing it as the next word.
     #[test]
-    fn zsh_require_equals_values_stay_in_the_option_word() {
-        let mut generated = Vec::new();
-        generate_completions(Shell::Zsh, BINARY_NAME, &mut generated).unwrap();
-        let generated = String::from_utf8(generated).unwrap();
-        assert_eq!(generated.matches("'*--deny-lints=-[").count(), 1);
-        assert!(!generated.contains("--deny-lints=["));
+    fn zsh_and_fish_require_equals_values_stay_in_the_option_word() {
+        let generate = |shell| {
+            let mut generated = Vec::new();
+            generate_completions(shell, BINARY_NAME, &mut generated).unwrap();
+            String::from_utf8(generated).unwrap()
+        };
+        let zsh = generate(Shell::Zsh);
+        assert_eq!(zsh.matches("'*--deny-lints=-[").count(), 1);
+        assert!(!zsh.contains("--deny-lints=["));
+        let fish = generate(Shell::Fish);
+        let lines: Vec<_> = fish
+            .lines()
+            .filter(|line| line.contains(" -l deny-lints "))
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains("' -r "), "{}", lines[0]);
+        assert!(lines[0].contains("' -f -a \"unused-set"), "{}", lines[0]);
     }
 
     #[test]
