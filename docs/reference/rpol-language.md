@@ -62,10 +62,13 @@ $ echo $?
 0
 ```
 
-Exit codes: `0` clean, `1` compile diagnostics (or unreadable file),
-`2` in-language test failures, `3` coverage below an explicit threshold
-(see [Coverage and lints](#coverage-and-lints)). `--json` emits a
-machine-readable report.
+Exit codes, in precedence order: `1` compile diagnostics (or unreadable
+file), `2` in-language test failures (or no tests under
+`--fail-on-empty`), `3` coverage below an explicit threshold (see
+[Coverage and lints](#coverage-and-lints)), `4` a lint denied by
+`--deny-lints`, otherwise `0`. The
+[CLI reference](../../crates/cli/README.md#policy-check-as-a-ci-and-editor-gate)
+has the full table. `--json` emits a machine-readable report.
 
 ## Lexical structure
 
