@@ -3,6 +3,11 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.8.0 - 2026-10-17
+
+- Move the public wire dependency to 0.26. Verifier and RTR behavior and
+  method signatures are unchanged. Upgrade wire/FSM/RPKI together.
+
 ## 0.7.0 - 2026-10-12
 
 - Move the public wire dependency to 0.25. Verifier and RTR behavior and

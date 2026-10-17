@@ -706,6 +706,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interface, such as a VLAN on the bound bond, as an uplink. Such an uplink is
   logged as an error and the binding reports `uplink_overlap`, as an enslaved
   uplink already did.
+- Embedders of the published crates: `rustbgpd-wire` 0.26.0 changes UPDATE
+  validation without changing any public item or signature.
+  `UpdateMessage::parse_revised` reports an EVPN Type 5 announcement whose
+  ESI, gateway IP, Router's MAC and label are all zero, or whose Router's MAC
+  is multicast or broadcast, as treat-as-withdraw instead of accepting it.
+  `rustbgpd-fsm` 0.13.0 and `rustbgpd-rpki` 0.8.0 move to wire 0.26 with no
+  other API change; upgrade the three together.
 - The EVPN route-reflector promotion changes no configuration, default, RPC
   behavior or CLI output. Automation that wants the v1 promise should read
   reflected EVPN state through `ListReceivedEvpnRoutes` /

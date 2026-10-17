@@ -213,7 +213,8 @@ and ORR topology tables, and the scoped `route-reflector-evpn` v1 role for
 EVPN Types 1–5 reflection. A SIGHUP dataset swap narrows export
 re-evaluation to the affected routes or update groups, readiness probes stay
 answered through full-table VPN recovery, and malformed EVPN Type 5 routes
-are treated as withdraws. It ships on its
+are treated as withdraws. It publishes wire 0.26.0, FSM 0.13.0 and RPKI
+0.8.0. It ships on its
 per-change regression tests and main CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier

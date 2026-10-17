@@ -10,6 +10,10 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+`rustbgpd-fsm` 0.13.0 moves to wire `0.26.0` for its EVPN Type 5 UPDATE
+validation behavior change. There is no FSM API or state-machine change;
+upgrade crates exchanging public wire types together when adopting this line.
+
 `rustbgpd-fsm` 0.12.0 moves to wire `0.25.0` for its EVPN decode and
 validation behavior changes. There is no FSM API or state-machine change;
 upgrade crates exchanging public wire types together when adopting this line.
