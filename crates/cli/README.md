@@ -295,6 +295,7 @@ rbgp policy chain clear-export (--global | --neighbor <addr>) [--yes]
 rbgp policy explain --neighbor <addr> --prefix <cidr> --direction import|export [--path-id <n>]
 rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon)
 rbgp policy check <file.rpol> --coverage-matched-min 100 # require every source term to match a test route; --coverage-min gates evaluated terms separately
+rbgp policy check <file.rpol> --fail-on-empty --deny-lints=unreachable-term # CI gate: fail without tests or on a shadowed term
 rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatter (in-place; --check for CI; - = stdin)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
 rbgp policy stats --direction import|export|both [--neighbor <addr> | --allow-partial]  # live per-term hit counters
@@ -502,6 +503,56 @@ supplies an epoch timestamp and the CLI reads its local clock, running the CLI
 on another host can expose clock skew. `--age` cannot be combined with
 `--count`, rejected-route output, or either explain view. JSON is unchanged by
 the flag and always includes the raw `received_at_epoch_seconds` field.
+
+### Policy check as a CI and editor gate
+
+`rbgp policy check FILE` runs offline. Its exit codes, in precedence order:
+
+| Exit | Meaning |
+|------|---------|
+| 0 | Clean: compiles, every test passes, and no requested gate failed |
+| 1 | Compile diagnostics, an unreadable file, or a failed output write |
+| 2 | A failing test, or no `test` block at all under `--fail-on-empty`; also any argument error, which exits before the file loads |
+| 3 | Coverage below `--coverage-min` or `--coverage-matched-min` |
+| 4 | A lint selected by `--deny-lints` |
+
+Every check computes the static lints. Their stable names are `unused-set`,
+`unused-dataset`, `unused-fn`, `unreachable-term` and `unreferenced-policy`
+(see "Coverage and lints" in the
+[language reference](../../docs/reference/rpol-language.md)). A lint is a
+warning and never changes the exit code unless selected:
+`--deny-lints=unreachable-term,unused-set` denies the named lints, and bare
+`--deny-lints` denies all of them. The value must be attached with `=`.
+`unreferenced-policy` cannot see daemon config chains, so denying it suits
+files whose policies are all referenced by tests. Text output prints each
+denied lint to stderr as `FILE:LINE:COLUMN: error[LINT]: MESSAGE`; warnings
+appear in `-j` output and in the `--coverage` report. `--fail-on-empty`
+counts tests in the file and every module it imports.
+
+`-j` prints one `rbgp-policy-check/1.0` document on stdout (an unreadable file
+prints none). Consumers should check `format` and the major version and ignore
+unknown fields; additive fields increment the minor version.
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `format`, `format_version` | string | `"rbgp-policy-check"`, `"1.0"` |
+| `file` | string | The path as given |
+| `ok` | boolean | Compiles and the tests pass (false under `--fail-on-empty` with no tests); coverage thresholds and denied lints do not change it |
+| `diagnostics` | array of string | Compile error messages only, kept for older consumers |
+| `findings` | array of object | Located compile errors and lints, described below |
+| `tests_total`, `tests_passed` | number | Test counts |
+| `failures` | array of object | `name` and `message` of each failing test |
+| `coverage` | object | Present only under `--coverage` or a coverage threshold |
+
+Each finding has `severity` (`error` fails the check, `warning` does not),
+`code` (`compile-error` or a lint name), `message`, and its location: `file`
+(the resolved path of the module that contains it, which may be an imported
+file), 1-based `line` and `column`, and an exclusive `end_line` and
+`end_column`. Columns count Unicode characters. A compile error adds its primary
+`label`, its `notes` (such as a did-you-mean suggestion), and `related`
+secondary locations, each with the same location keys plus `label`. Lints
+have a null `label` and empty `notes` and `related`. A lint is located at the
+name of the definition it flags.
 
 ### Bounded family route pages
 

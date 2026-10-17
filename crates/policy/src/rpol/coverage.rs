@@ -37,6 +37,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ir::{CompiledPolicy, MatchExpr};
 
+use super::Span;
 use super::ast::{
     ActionStmt, CmpOp, Expr, ForSource, IfStmt, SourceFile, Stmt, TermDef, ValueExprAst,
 };
@@ -115,6 +116,21 @@ pub enum LintKind {
 }
 
 impl LintKind {
+    /// Every lint, in label order of the CLI reference.
+    pub const ALL: [LintKind; 5] = [
+        LintKind::UnusedSet,
+        LintKind::UnusedDataset,
+        LintKind::UnusedFn,
+        LintKind::UnreachableTerm,
+        LintKind::UnreferencedPolicy,
+    ];
+
+    /// The lint with this stable label, if any.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.label() == label)
+    }
+
     /// Stable machine-readable label (the `-j` value).
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -133,8 +149,8 @@ impl LintKind {
 pub struct Lint {
     /// The category.
     pub kind: LintKind,
-    /// Module index of the flagged definition.
-    pub file: u32,
+    /// The flagged definition's name; `span.file` is its module index.
+    pub span: Span,
     /// Human-readable one-liner.
     pub message: String,
 }
@@ -378,7 +394,7 @@ fn belongs(ir: &str, src: &str) -> bool {
 }
 
 /// The static lints (see module docs for scope).
-fn lints(file: &SourceFile) -> Vec<Lint> {
+pub(super) fn lints(file: &SourceFile) -> Vec<Lint> {
     let refs = Refs::collect(file);
     let mut out = Vec::new();
     for (name, span) in file
@@ -395,7 +411,7 @@ fn lints(file: &SourceFile) -> Vec<Lint> {
         if !refs.sets.contains(name.as_str()) {
             out.push(Lint {
                 kind: LintKind::UnusedSet,
-                file: span.file,
+                span,
                 message: format!("set {name} is never referenced by any policy"),
             });
         }
@@ -404,7 +420,7 @@ fn lints(file: &SourceFile) -> Vec<Lint> {
         if !refs.sets.contains(decl.name.node.as_str()) {
             out.push(Lint {
                 kind: LintKind::UnusedDataset,
-                file: decl.name.span.file,
+                span: decl.name.span,
                 message: format!("dataset {} is never probed by any policy", decl.name.node),
             });
         }
@@ -416,7 +432,7 @@ fn lints(file: &SourceFile) -> Vec<Lint> {
         if !refs.fns.contains(def.name.node.as_str()) {
             out.push(Lint {
                 kind: LintKind::UnusedFn,
-                file: def.name.span.file,
+                span: def.name.span,
                 message: format!("fn {} is never called", def.name.node),
             });
         }
@@ -428,7 +444,7 @@ fn lints(file: &SourceFile) -> Vec<Lint> {
             for term in &def.terms[decider + 1..] {
                 out.push(Lint {
                     kind: LintKind::UnreachableTerm,
-                    file: term.name.span.file,
+                    span: term.name.span,
                     message: format!(
                         "term {} in policy {} is unreachable (term {} always decides)",
                         term.name.node, def.name.node, def.terms[decider].name.node
@@ -439,7 +455,7 @@ fn lints(file: &SourceFile) -> Vec<Lint> {
         if !refs.policies.contains(def.name.node.as_str()) {
             out.push(Lint {
                 kind: LintKind::UnreferencedPolicy,
-                file: def.name.span.file,
+                span: def.name.span,
                 message: format!(
                     "policy {} is not referenced by any test or apply in these files \
                      (daemon config chain references are not visible to this check)",

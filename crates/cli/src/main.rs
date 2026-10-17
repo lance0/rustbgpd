@@ -882,10 +882,13 @@ enum PolicyAction {
     List,
     /// Check an `.rpol` policy file locally (parse, typecheck, tests)
     ///
-    /// Resolves the file's `import` graph, parses, typechecks, and runs
-    /// its in-language `test` blocks (from every module). No daemon
-    /// connection. Exit codes: 0 clean, 1 diagnostics, 2 test failures,
-    /// 3 coverage below an explicit threshold.
+    /// Resolves the file's `import` graph, parses, typechecks, runs
+    /// its in-language `test` blocks (from every module), and computes
+    /// static lints. No daemon connection. Exit codes, in precedence
+    /// order: 1 diagnostics, 2 test failures (or no tests under
+    /// --fail-on-empty), 3 coverage below an explicit threshold, 4 a
+    /// lint denied by --deny-lints; 0 otherwise. `-j` prints the
+    /// rbgp-policy-check/1.0 document with located findings.
     Check {
         /// Path to the main `.rpol` file
         #[arg(value_hint = clap::ValueHint::FilePath)]
@@ -926,6 +929,27 @@ enum PolicyAction {
         /// Does not guarantee branch coverage or detect every widened guard
         #[arg(long, value_name = "PCT", value_parser = parse_coverage_percentage)]
         coverage_matched_min: Option<f64>,
+        /// Fail the check (exit 4) on the named lints, comma-separated:
+        /// unused-set, unused-dataset, unused-fn, unreachable-term,
+        /// unreferenced-policy. Bare `--deny-lints` denies every lint.
+        /// Lints are always computed; without this flag they are
+        /// warnings and never change the exit code. Exit codes 1, 2
+        /// and 3 take precedence
+        #[arg(
+            long,
+            value_name = "LINT",
+            num_args = 0..,
+            require_equals = true,
+            value_delimiter = ',',
+            value_parser = clap::builder::PossibleValuesParser::new(
+                rustbgpd_policy::rpol::LintKind::ALL.map(rustbgpd_policy::rpol::LintKind::label)
+            )
+        )]
+        deny_lints: Option<Vec<String>>,
+        /// Exit 2 when the file and its imports define no `test` block,
+        /// so an empty suite cannot pass a CI gate
+        #[arg(long)]
+        fail_on_empty: bool,
     },
     /// Format `.rpol` files in the one canonical style
     ///
@@ -3362,6 +3386,9 @@ struct BashFilePositional {
     repeatable: bool,
     value_options: Vec<String>,
     conflicting_options: Vec<String>,
+    /// Long options whose value must be attached with `=`, with their
+    /// possible values (comma-separated lists).
+    equals_options: Vec<(String, Vec<String>)>,
 }
 
 fn bash_file_positionals(command: &clap::Command) -> Vec<BashFilePositional> {
@@ -3381,10 +3408,24 @@ fn bash_file_positionals(command: &clap::Command) -> Vec<BashFilePositional> {
             .get_positionals()
             .filter(|arg| arg.get_value_hint() == clap::ValueHint::FilePath)
         {
+            // A require-equals option never consumes the next word.
             let mut value_options: Vec<_> = command
                 .get_opts()
-                .filter(|arg| arg.get_action().takes_values())
+                .filter(|arg| arg.get_action().takes_values() && !arg.is_require_equals_set())
                 .flat_map(option_names)
+                .collect();
+            let equals_options = command
+                .get_opts()
+                .filter(|arg| arg.is_require_equals_set())
+                .filter_map(|arg| {
+                    Some((
+                        format!("--{}", arg.get_long()?),
+                        arg.get_possible_values()
+                            .iter()
+                            .map(|value| value.get_name().to_owned())
+                            .collect(),
+                    ))
+                })
                 .collect();
             let mut conflicting_options: Vec<_> = command
                 .get_arg_conflicts_with(positional)
@@ -3401,6 +3442,7 @@ fn bash_file_positionals(command: &clap::Command) -> Vec<BashFilePositional> {
                 repeatable: matches!(positional.get_action(), &clap::ArgAction::Append),
                 value_options,
                 conflicting_options,
+                equals_options,
             });
         }
         for subcommand in command.get_subcommands() {
@@ -3449,10 +3491,6 @@ fn patch_bash_file_positionals(
         let context = positional.path.join(" ");
         let branch_start =
             unique_offset(&completion, &branch_marker, &format!("{context} branch"))? + 1;
-        let branch_end = completion[branch_start..]
-            .find("\n            ;;\n")
-            .map(|offset| branch_start + offset)
-            .ok_or_else(|| invalid(format!("raw Bash branch for {selector} had no terminator")))?;
         let file_cword = positional.path.len() + positional.index;
         let raw_fast_path = format!(
             r#"            if [[ ${{cur}} == -* || ${{COMP_CWORD}} -eq {file_cword} ]] ; then
@@ -3460,11 +3498,6 @@ fn patch_bash_file_positionals(
                 return 0
             fi"#
         );
-        let relative_start = unique_offset(
-            &completion[branch_start..branch_end],
-            &raw_fast_path,
-            &format!("{context} positional fast path"),
-        )?;
         let positions = group
             .iter()
             .map(|positional| {
@@ -3503,15 +3536,29 @@ fn patch_bash_file_positionals(
 "#
             )
         };
+        let (equals_values, equals_nospace) =
+            patch_bash_equals_options(&mut completion, branch_start, positional)?;
+        let branch_end = completion[branch_start..]
+            .find("\n            ;;\n")
+            .map(|offset| branch_start + offset)
+            .ok_or_else(|| invalid(format!("raw Bash branch for {selector} had no terminator")))?;
+        let relative_start = unique_offset(
+            &completion[branch_start..branch_end],
+            &raw_fast_path,
+            &format!("{context} positional fast path"),
+        )?;
         // Count command and positional words, excluding options and their
         // values, so options anywhere in argv cannot shift a file's index.
+        // With `=` in COMP_WORDBREAKS, `--opt=value` arrives as three
+        // words; the `=` word means the next word is that option's value.
         let patched_fast_path = format!(
-            r#"            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
+            r#"{equals_values}            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${{COMP_WORDS[@]:1:COMP_CWORD-1}}"; do
-                if [[ ${{rbgp_value}} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${{rbgp_value}} == 1 ]]; then rbgp_value=0; [[ ${{rbgp_word}} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${{rbgp_options}} == 1 ]]; then
 {conflict_guard}                    case "${{rbgp_word}}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         {value_options}) rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -3532,7 +3579,7 @@ fn patch_bash_file_positionals(
             done
             if [[ ${{cur}} == -* && ${{rbgp_options}} == 1 && ${{rbgp_value}} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${{opts}}" -- "${{cur}}") )
-                return 0
+{equals_nospace}                return 0
             elif [[ ${{rbgp_value}} == 0 && ${{rbgp_file_allowed}} == 1 && ( {positions} ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
                 [ -n "${{IFS+x}}" ] && {{ rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }}
@@ -3549,6 +3596,179 @@ fn patch_bash_file_positionals(
     Ok(completion.into_bytes())
 }
 
+/// Bash completion for require-equals options (`--deny-lints[=LINT,...]`)
+/// in one file-positional branch: offer `--opt=` without a trailing space,
+/// complete values only after the `=` (attached or split off by
+/// COMP_WORDBREAKS, last comma-separated item), and drop the raw `prev`
+/// case that would offer a value as a separate word, which the parser
+/// reads as the positional file. Returns the value-completion prelude and
+/// the nospace line for the option branch, both empty without such
+/// options.
+fn patch_bash_equals_options(
+    completion: &mut String,
+    branch_start: usize,
+    positional: &BashFilePositional,
+) -> std::io::Result<(String, String)> {
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let branch_end = |completion: &str| {
+        completion[branch_start..]
+            .find("\n            ;;\n")
+            .map(|offset| branch_start + offset)
+            .ok_or_else(|| invalid("raw Bash branch had no terminator".into()))
+    };
+    if positional.equals_options.is_empty() {
+        return Ok((String::new(), String::new()));
+    }
+    let mut attached = String::new();
+    let mut split = String::new();
+    for (option, values) in &positional.equals_options {
+        if values.is_empty() {
+            return Err(invalid(format!(
+                "{option} requires `=` but has no possible values to complete"
+            )));
+        }
+        let words = values.join(" ");
+        let branch = &completion[branch_start..branch_end(completion)?];
+        let opts_line = branch
+            .find("opts=\"")
+            .ok_or_else(|| invalid(format!("no opts line in the Bash branch of {option}")))?;
+        let needle = format!(" {option} ");
+        let at = branch[opts_line..]
+            .find(&needle)
+            .ok_or_else(|| invalid(format!("{option} missing from its Bash opts line")))?;
+        let at = branch_start + opts_line + at;
+        completion.replace_range(at..at + needle.len(), &format!(" {option}= "));
+        let raw_value_case = format!(
+            "                {option})\n                    COMPREPLY=($(compgen -W \"{words}\" -- \"${{cur}}\"))\n                    return 0\n                    ;;\n"
+        );
+        let found: Vec<_> = completion[branch_start..branch_end(completion)?]
+            .match_indices(&raw_value_case)
+            .map(|(offset, _)| branch_start + offset)
+            .collect();
+        let [case_at] = found.as_slice() else {
+            return Err(invalid(format!(
+                "expected one raw Bash value case for {option}, found {}",
+                found.len()
+            )));
+        };
+        completion.replace_range(*case_at..*case_at + raw_value_case.len(), "");
+        attached.push_str(&format!(
+            "                {option}=*) rbgp_eq_words=\"{words}\"; rbgp_eq_done=\"{option}=\"; rbgp_eq_cur=\"${{cur#*=}}\" ;;\n"
+        ));
+        split.push_str(&format!(
+            "                    {option}) rbgp_eq_words=\"{words}\" ;;\n"
+        ));
+    }
+    let prelude = format!(
+        r#"            local rbgp_eq_words="" rbgp_eq_done="" rbgp_eq_cur="${{cur}}"
+            case "${{cur}}" in
+{attached}            esac
+            if [[ -z ${{rbgp_eq_words}} ]]; then
+                # Split by COMP_WORDBREAKS: the cursor sits on the `=` word
+                # itself right after typing it, or on the value after it.
+                local rbgp_eq_option=""
+                if [[ ${{COMP_CWORD}} -ge 1 && ${{COMP_WORDS[COMP_CWORD]}} == "=" ]]; then
+                    rbgp_eq_option="${{COMP_WORDS[COMP_CWORD-1]}}"
+                    rbgp_eq_cur=""
+                elif [[ ${{COMP_CWORD}} -ge 2 && ${{COMP_WORDS[COMP_CWORD-1]}} == "=" ]]; then
+                    rbgp_eq_option="${{COMP_WORDS[COMP_CWORD-2]}}"
+                fi
+                case "${{rbgp_eq_option}}" in
+{split}                esac
+            fi
+            if [[ -n ${{rbgp_eq_words}} ]]; then
+                if [[ ${{rbgp_eq_cur}} == *,* ]]; then
+                    rbgp_eq_done="${{rbgp_eq_done}}${{rbgp_eq_cur%,*}},"
+                    rbgp_eq_cur="${{rbgp_eq_cur##*,}}"
+                fi
+                COMPREPLY=( $(compgen -P "${{rbgp_eq_done}}" -W "${{rbgp_eq_words}}" -- "${{rbgp_eq_cur}}") )
+                return 0
+            fi
+"#
+    );
+    let nospace = r#"                if [[ ${#COMPREPLY[@]} == 1 && ${COMPREPLY[0]} == *= && "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o nospace; fi
+"#
+    .to_owned();
+    Ok((prelude, nospace))
+}
+
+/// Long options whose value must be attached with `=`. The zsh and fish
+/// text patches cannot tell commands apart, so a long name must require
+/// `=` everywhere it is used.
+fn require_equals_longs(command: &clap::Command) -> std::io::Result<Vec<String>> {
+    fn visit(command: &clap::Command, found: &mut Vec<(String, bool)>) {
+        found.extend(
+            command
+                .get_opts()
+                .filter_map(|arg| Some((arg.get_long()?.to_owned(), arg.is_require_equals_set()))),
+        );
+        for subcommand in command.get_subcommands() {
+            visit(subcommand, found);
+        }
+    }
+    let mut options = Vec::new();
+    visit(command, &mut options);
+    let mut longs: Vec<String> = options
+        .iter()
+        .filter(|(_, require_equals)| *require_equals)
+        .map(|(long, _)| long.clone())
+        .collect();
+    longs.sort_unstable();
+    longs.dedup();
+    for long in &longs {
+        if options
+            .iter()
+            .any(|(other, require_equals)| other == long && !require_equals)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("--{long} requires `=` on one command but not another"),
+            ));
+        }
+    }
+    Ok(longs)
+}
+
+/// Keep require-equals values in the option's own word. clap_complete
+/// writes zsh `--opt=` and fish `-r`, both of which also complete the
+/// value as the next word, where the parser would read it as a
+/// positional. zsh gets `--opt=-`; fish drops `-r`, which still
+/// completes `--opt=` and the values after it.
+fn patch_equals_options(
+    shell: Shell,
+    command: &clap::Command,
+    raw: Vec<u8>,
+) -> std::io::Result<Vec<u8>> {
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let mut completion = String::from_utf8(raw)
+        .map_err(|error| invalid(format!("{shell} completion was not UTF-8: {error}")))?;
+    for long in require_equals_longs(command)? {
+        let patched = if shell == Shell::Zsh {
+            let needle = format!("--{long}=[");
+            let patched = completion.replace(&needle, &format!("--{long}=-["));
+            (patched != completion).then_some(patched)
+        } else {
+            let flag = format!(" -l {long} ");
+            let mut changed = false;
+            let patched = completion
+                .split_inclusive('\n')
+                .map(|line| {
+                    if line.contains(&flag) && line.contains("' -r ") {
+                        changed = true;
+                        line.replacen("' -r ", "' ", 1)
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<String>();
+            changed.then_some(patched)
+        };
+        completion =
+            patched.ok_or_else(|| invalid(format!("no {shell} completion spec for --{long}")))?;
+    }
+    Ok(completion.into_bytes())
+}
+
 fn generate_completions(
     shell: Shell,
     binary_name: &'static str,
@@ -3560,6 +3780,10 @@ fn generate_completions(
         let mut raw = Vec::new();
         shell.try_generate(&command, &mut raw)?;
         output.write_all(&patch_bash_file_positionals(&command, binary_name, raw)?)?;
+    } else if matches!(shell, Shell::Zsh | Shell::Fish) {
+        let mut raw = Vec::new();
+        shell.try_generate(&command, &mut raw)?;
+        output.write_all(&patch_equals_options(shell, &command, raw)?)?;
     } else {
         shell.try_generate(&command, output)?;
     }
@@ -4088,18 +4312,36 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 coverage_min,
                 coverage_matched_min,
                 max_graph_bytes,
+                deny_lints,
+                fail_on_empty,
             },
     } = &cli.command
     {
+        use rustbgpd_policy::rpol::LintKind;
+
+        // Bare `--deny-lints` denies every lint; the parser already
+        // rejected unknown names.
+        let deny_lints: Vec<LintKind> = match deny_lints.as_deref() {
+            None => Vec::new(),
+            Some([]) => LintKind::ALL.to_vec(),
+            Some(names) => names
+                .iter()
+                .filter_map(|name| LintKind::from_label(name))
+                .collect(),
+        };
         std::process::exit(commands::policy::check_local(
             file,
-            roots,
-            *list_deps,
-            *coverage,
-            *coverage_min,
-            *coverage_matched_min,
-            *max_graph_bytes,
-            cli.json,
+            &commands::policy::CheckOptions {
+                roots,
+                list_deps: *list_deps,
+                coverage: *coverage,
+                coverage_min: *coverage_min,
+                coverage_matched_min: *coverage_matched_min,
+                max_graph_bytes: *max_graph_bytes,
+                deny_lints: &deny_lints,
+                fail_on_empty: *fail_on_empty,
+                json: cli.json,
+            },
         ));
     }
 
@@ -6539,23 +6781,41 @@ mod tests {
         words: &[&str],
         unset_ifs: bool,
     ) -> (bool, Vec<String>) {
+        bash_replies_at(script, cwd, words, unset_ifs, None)
+    }
+
+    /// [`bash_replies`] with explicit `cur`/`prev` arguments, for states
+    /// where Bash passes values that differ from the last two words.
+    fn bash_replies_at(
+        script: &std::path::Path,
+        cwd: &std::path::Path,
+        words: &[&str],
+        unset_ifs: bool,
+        cur_prev: Option<(&str, &str)>,
+    ) -> (bool, Vec<String>) {
         const HARNESS: &str = r#"
 source "$RBGP_COMPLETION"
 COMP_WORDS=("$@")
 COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
-compopt() { [[ "$1" == "-o" && "$2" == "filenames" ]] && RBGP_FILENAMES=1; builtin compopt "$@" 2>/dev/null || :; }
+compopt() { [[ "$1" == "-o" && "$2" == "filenames" ]] && RBGP_FILENAMES=1; [[ "$1" == "-o" && "$2" == "nospace" ]] && RBGP_NOSPACE=1; builtin compopt "$@" 2>/dev/null || :; }
 if [[ "$RBGP_UNSET_IFS" == 1 ]]; then unset IFS; else rbgp_before_ifs="$IFS"; fi
-_rbgp rbgp "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}"
+_rbgp rbgp "${RBGP_CUR-${COMP_WORDS[COMP_CWORD]}}" "${RBGP_PREV-${COMP_WORDS[COMP_CWORD-1]}}"
 if [[ "$RBGP_UNSET_IFS" == 1 ]]; then [[ -z "${IFS+x}" ]] || exit 90; else [[ "$IFS" == "$rbgp_before_ifs" ]] || exit 91; fi
 printf '__FILENAMES__%s\n' "${RBGP_FILENAMES:-0}"
+[[ -n "${RBGP_NOSPACE}" ]] && printf '__NOSPACE__\n'
 printf '%s\n' "${COMPREPLY[@]}"
 "#;
-        let output = std::process::Command::new("bash")
+        let mut command = std::process::Command::new("bash");
+        command
             .args(["--noprofile", "--norc", "-c", HARNESS, "--"])
             .args(words)
             .current_dir(cwd)
             .env("RBGP_COMPLETION", script)
-            .env("RBGP_UNSET_IFS", if unset_ifs { "1" } else { "0" })
+            .env("RBGP_UNSET_IFS", if unset_ifs { "1" } else { "0" });
+        if let Some((cur, prev)) = cur_prev {
+            command.env("RBGP_CUR", cur).env("RBGP_PREV", prev);
+        }
+        let output = command
             .output()
             .expect("bash is available for the Linux completion contract");
         assert!(
@@ -6676,6 +6936,107 @@ printf '%s\n' "${COMPREPLY[@]}"
         let (filenames, replies) = bash_replies(&generated_path, files.path(), &words, false);
         assert!(!filenames);
         assert!(replies.iter().any(|reply| reply == "lan938-prefix"));
+    }
+
+    /// `--deny-lints` takes its value only after `=`: Bash offers
+    /// `--deny-lints=` without a trailing space, completes lint names
+    /// only after the `=` (attached, or split off by COMP_WORDBREAKS),
+    /// and never offers a lint as the separate word the parser would
+    /// read as the policy file.
+    #[test]
+    fn bash_require_equals_values_complete_only_after_equals() {
+        let scripts = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        std::fs::write(files.path().join("edge.rpol"), []).unwrap();
+        let mut generated = Vec::new();
+        generate_completions(Shell::Bash, BINARY_NAME, &mut generated).unwrap();
+        let script = scripts.path().join("generated.bash");
+        std::fs::write(&script, generated).unwrap();
+        let replies = |tail: &[&str]| {
+            let mut words = vec!["rbgp", "policy", "check"];
+            words.extend_from_slice(tail);
+            bash_replies(&script, files.path(), &words, false)
+        };
+        let all = [
+            "unused-set",
+            "unused-dataset",
+            "unused-fn",
+            "unreachable-term",
+            "unreferenced-policy",
+        ];
+
+        assert_eq!(replies(&["--deny"]).1, ["__NOSPACE__", "--deny-lints="]);
+        assert_eq!(
+            replies(&["--deny-lints=unr"]).1,
+            [
+                "--deny-lints=unreachable-term",
+                "--deny-lints=unreferenced-policy"
+            ]
+        );
+        assert_eq!(replies(&["--deny-lints", "=", ""]).1, all);
+        // Tab straight after typing `=`: Bash's current word is the `=`
+        // itself, with an empty `cur` and the option as `prev`.
+        let mut words = vec!["rbgp", "policy", "check", "--deny-lints", "="];
+        let (filenames, at_equals) = bash_replies_at(
+            &script,
+            files.path(),
+            &words,
+            false,
+            Some(("", "--deny-lints")),
+        );
+        assert!(!filenames);
+        assert_eq!(at_equals, all);
+        words.push("unr");
+        let (_, after_equals) =
+            bash_replies_at(&script, files.path(), &words, false, Some(("unr", "=")));
+        assert_eq!(after_equals, ["unreachable-term", "unreferenced-policy"]);
+        assert_eq!(
+            replies(&["--deny-lints", "=", "unused-set,unreach"]).1,
+            ["unused-set,unreachable-term"]
+        );
+        assert_eq!(
+            replies(&["--deny-lints=unused-fn,unused-d"]).1,
+            ["--deny-lints=unused-fn,unused-dataset"]
+        );
+        // A bare flag or a finished value leaves the file position free.
+        for tail in [
+            &["--deny-lints", "ed"][..],
+            &["--deny-lints=unused-set", "ed"][..],
+            &["--deny-lints", "=", "unused-set", "ed"][..],
+            &["--root", "=", "lib", "ed"][..],
+        ] {
+            let (filenames, replies) = replies(tail);
+            assert!(filenames, "{tail:?}");
+            assert_eq!(replies, ["edge.rpol"], "{tail:?}");
+        }
+        // After the file, a bare flag still never offers lint names.
+        let (_, after_file) = replies(&["edge.rpol", "--deny-lints", ""]);
+        assert!(
+            !after_file.iter().any(|reply| all.contains(&reply.as_str())),
+            "{after_file:?}"
+        );
+    }
+
+    /// zsh (`--opt=-`) and fish (no `-r`) keep a require-equals value in
+    /// the option's own word instead of completing it as the next word.
+    #[test]
+    fn zsh_and_fish_require_equals_values_stay_in_the_option_word() {
+        let generate = |shell| {
+            let mut generated = Vec::new();
+            generate_completions(shell, BINARY_NAME, &mut generated).unwrap();
+            String::from_utf8(generated).unwrap()
+        };
+        let zsh = generate(Shell::Zsh);
+        assert_eq!(zsh.matches("'*--deny-lints=-[").count(), 1);
+        assert!(!zsh.contains("--deny-lints=["));
+        let fish = generate(Shell::Fish);
+        let lines: Vec<_> = fish
+            .lines()
+            .filter(|line| line.contains(" -l deny-lints "))
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains("' -r "), "{}", lines[0]);
+        assert!(lines[0].contains("' -f -a \"unused-set"), "{}", lines[0]);
     }
 
     #[test]

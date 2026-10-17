@@ -118,7 +118,12 @@ $ rbgp policy check edge.rpol
 
 Parse, typecheck, and every `test` block — exit 0 clean, 1 for
 diagnostics (rendered with source spans), 2 for test failures. Put
-this in CI next to the config lint; M80 gates on it.
+this in CI next to the config lint; M80 gates on it. In CI, add
+`--fail-on-empty` so a file without tests cannot pass, and
+`--deny-lints=unreachable-term` so a term shadowed by an earlier
+catch-all fails the check (exit 4). `-j` emits located findings for
+editors and CI annotations; see
+[the CLI reference](../../crates/cli/README.md#policy-check-as-a-ci-and-editor-gate).
 
 Keep the file in the canonical style with `rbgp policy fmt edge.rpol`
 (one style, no options; comments and semicolons survive), and add
