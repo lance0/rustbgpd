@@ -2252,7 +2252,8 @@ async fn run_tcp_listener(
         .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_query(rib_query_tx.clone())
         .with_import_roster(import_roster.clone())
-        .with_export_roster(export_roster.clone()),
+        .with_export_roster(export_roster.clone())
+        .with_local_asn(asn),
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
@@ -2536,7 +2537,8 @@ async fn run_uds_listener(
         .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_query(rib_query_tx.clone())
         .with_import_roster(import_roster.clone())
-        .with_export_roster(export_roster.clone()),
+        .with_export_roster(export_roster.clone())
+        .with_local_asn(asn),
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(

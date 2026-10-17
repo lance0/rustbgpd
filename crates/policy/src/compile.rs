@@ -463,7 +463,12 @@ impl ChainSets {
         let index = self
             .datasets
             .iter()
-            .position(|existing| existing.name == slot.name)
+            // Same name and same live handle: a composed chain can carry two
+            // bindings of one name (a dry-run candidate beside installed
+            // members), and each member must keep its own.
+            .position(|existing| {
+                existing.name == slot.name && Arc::ptr_eq(&existing.handle, &slot.handle)
+            })
             .unwrap_or_else(|| {
                 self.datasets.push(slot.clone());
                 self.datasets.len() - 1
