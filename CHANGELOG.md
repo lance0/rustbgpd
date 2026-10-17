@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.78.0] — 2026-10-17
+
 ### Security
 
 - Update rustls to 0.23.46, fixing RUSTSEC-2026-0346 (session `Debug` output

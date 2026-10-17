@@ -202,7 +202,19 @@ Type 5 routes as withdraws instead of resetting the session, accepts
 zero-ESI Type 1 routes, and keeps readiness probes answered through mass
 graceful-restart entry and large reloads. It publishes wire 0.25.0, FSM
 0.12.0 and RPKI 0.7.0. It ships on its per-change regression tests and main
-CI; no flagship receipt covers it. The
+CI; no flagship receipt covers it. v0.78.0 (2026-10-17) is a minor release
+that fixes `.rpol` chain assembly for loop and `let` set probes, which in
+releases 0.51.0 through 0.77.0 could read the wrong set, end a peer session
+or shut the daemon down. It adds `rbgp policy compare` against the installed
+export chain, `rbgp policy check` as a CI gate, opt-in
+`[policy] require_passing_tests` and opt-in RFC 9324 local re-evaluation,
+bounded paged reads for the VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS
+and ORR topology tables, and the scoped `route-reflector-evpn` v1 role for
+EVPN Types 1–5 reflection. A SIGHUP dataset swap narrows export
+re-evaluation to the affected routes or update groups, readiness probes stay
+answered through full-table VPN recovery, and malformed EVPN Type 5 routes
+are treated as withdraws. It ships on its
+per-change regression tests and main CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
