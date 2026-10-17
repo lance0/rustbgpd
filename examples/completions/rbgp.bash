@@ -11220,7 +11220,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__check)
-            opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --coverage-matched-min --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
+            opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --coverage-matched-min --deny-lints --fail-on-empty --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
                 if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
@@ -11228,7 +11228,7 @@ _rbgp() {
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
                         --*=*) continue ;;
-                        "--addr"|"--coverage-matched-min"|"--coverage-min"|"--max-graph-bytes"|"--root"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
+                        "--addr"|"--coverage-matched-min"|"--coverage-min"|"--deny-lints"|"--max-graph-bytes"|"--root"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
                         -?*)
                             rbgp_short="${rbgp_word:1}"
@@ -11272,6 +11272,10 @@ _rbgp() {
                     ;;
                 --coverage-matched-min)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --deny-lints)
+                    COMPREPLY=($(compgen -W "unused-set unused-dataset unused-fn unreachable-term unreferenced-policy" -- "${cur}"))
                     return 0
                     ;;
                 --addr)

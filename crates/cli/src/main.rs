@@ -882,10 +882,13 @@ enum PolicyAction {
     List,
     /// Check an `.rpol` policy file locally (parse, typecheck, tests)
     ///
-    /// Resolves the file's `import` graph, parses, typechecks, and runs
-    /// its in-language `test` blocks (from every module). No daemon
-    /// connection. Exit codes: 0 clean, 1 diagnostics, 2 test failures,
-    /// 3 coverage below an explicit threshold.
+    /// Resolves the file's `import` graph, parses, typechecks, runs
+    /// its in-language `test` blocks (from every module), and computes
+    /// static lints. No daemon connection. Exit codes, in precedence
+    /// order: 1 diagnostics, 2 test failures (or no tests under
+    /// --fail-on-empty), 3 coverage below an explicit threshold, 4 a
+    /// lint denied by --deny-lints; 0 otherwise. `-j` prints the
+    /// rbgp-policy-check/1.0 document with located findings.
     Check {
         /// Path to the main `.rpol` file
         #[arg(value_hint = clap::ValueHint::FilePath)]
@@ -926,6 +929,27 @@ enum PolicyAction {
         /// Does not guarantee branch coverage or detect every widened guard
         #[arg(long, value_name = "PCT", value_parser = parse_coverage_percentage)]
         coverage_matched_min: Option<f64>,
+        /// Fail the check (exit 4) on the named lints, comma-separated:
+        /// unused-set, unused-dataset, unused-fn, unreachable-term,
+        /// unreferenced-policy. Bare `--deny-lints` denies every lint.
+        /// Lints are always computed; without this flag they are
+        /// warnings and never change the exit code. Exit codes 1, 2
+        /// and 3 take precedence
+        #[arg(
+            long,
+            value_name = "LINT",
+            num_args = 0..,
+            require_equals = true,
+            value_delimiter = ',',
+            value_parser = clap::builder::PossibleValuesParser::new(
+                rustbgpd_policy::rpol::LintKind::ALL.map(rustbgpd_policy::rpol::LintKind::label)
+            )
+        )]
+        deny_lints: Option<Vec<String>>,
+        /// Exit 2 when the file and its imports define no `test` block,
+        /// so an empty suite cannot pass a CI gate
+        #[arg(long)]
+        fail_on_empty: bool,
     },
     /// Format `.rpol` files in the one canonical style
     ///
@@ -4088,18 +4112,36 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 coverage_min,
                 coverage_matched_min,
                 max_graph_bytes,
+                deny_lints,
+                fail_on_empty,
             },
     } = &cli.command
     {
+        use rustbgpd_policy::rpol::LintKind;
+
+        // Bare `--deny-lints` denies every lint; the parser already
+        // rejected unknown names.
+        let deny_lints: Vec<LintKind> = match deny_lints.as_deref() {
+            None => Vec::new(),
+            Some([]) => LintKind::ALL.to_vec(),
+            Some(names) => names
+                .iter()
+                .filter_map(|name| LintKind::from_label(name))
+                .collect(),
+        };
         std::process::exit(commands::policy::check_local(
             file,
-            roots,
-            *list_deps,
-            *coverage,
-            *coverage_min,
-            *coverage_matched_min,
-            *max_graph_bytes,
-            cli.json,
+            &commands::policy::CheckOptions {
+                roots,
+                list_deps: *list_deps,
+                coverage: *coverage,
+                coverage_min: *coverage_min,
+                coverage_matched_min: *coverage_matched_min,
+                max_graph_bytes: *max_graph_bytes,
+                deny_lints: &deny_lints,
+                fail_on_empty: *fail_on_empty,
+                json: cli.json,
+            },
         ));
     }
 
