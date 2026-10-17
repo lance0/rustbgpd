@@ -347,6 +347,91 @@ async fn clean_state_non_established_carries_pending_intent_and_commits() {
     live.into_parts().0.shutdown().await.unwrap().unwrap();
 }
 
+/// The shared clean-state retry window bounds retries, not the per-peer RIB
+/// legs between them. On the authoritative walk, the first peer's retry must
+/// not let its long RIB export step expire the second peer's retry.
+#[tokio::test(start_paused = true)]
+async fn clean_state_retry_survives_long_rib_leg_between_peers() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 43, 2, 1));
+    let second = IpAddr::V4(Ipv4Addr::new(10, 43, 2, 2));
+    let (rib_tx, mut rib_rx) = mpsc::channel(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let queries = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+    for (peer, counter) in [first, second].into_iter().zip(&queries) {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            clean_state_test_session(
+                peer,
+                CleanStateReplyMode::FirstTimeoutThenEstablished,
+                Arc::clone(counter),
+            ),
+            false,
+        );
+    }
+    // The second peer keeps its export chain, so the batched cohort declines
+    // and both peers take the per-peer authoritative walk in order.
+    let targets = vec![
+        ResolvedPeerPolicy {
+            address: first,
+            interface: None,
+            import_policy: None,
+            export_policy: Some(deny_policy_chain()),
+        },
+        ResolvedPeerPolicy {
+            address: second,
+            interface: None,
+            import_policy: Some(deny_policy_chain()),
+            export_policy: None,
+        },
+    ];
+    let apply = manager.apply_resolved_policy_snapshot_classified(targets, true);
+    let rib = async {
+        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected the first peer's authoritative RIB apply");
+        };
+        assert_eq!(peer, first);
+        assert_eq!(
+            queries[0].load(Ordering::SeqCst),
+            2,
+            "the first peer retried its missed probe before its RIB step"
+        );
+        tokio::time::sleep(CLEAN_STATE_QUERY_WINDOW + Duration::from_secs(1)).await;
+        reply.send(Ok(())).unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, rib);
+    assert!(
+        result.is_ok(),
+        "the second peer's delayed Established reply must commit: {result:?}"
+    );
+    assert_eq!(
+        queries[1].load(Ordering::SeqCst),
+        2,
+        "the second peer retried its missed probe after the long RIB step"
+    );
+    assert_eq!(
+        manager.peers.get(&key(first)).unwrap().export_policy,
+        Some(deny_policy_chain())
+    );
+    assert_eq!(
+        manager.peers.get(&key(second)).unwrap().import_policy,
+        Some(deny_policy_chain())
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn clean_state_retry_exhaustion_compensates_with_closed_code() {
     let (mut manager, mut rib_rx, peer, queries) =

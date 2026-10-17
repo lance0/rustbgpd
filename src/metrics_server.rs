@@ -15,7 +15,7 @@ use tokio::sync::{Semaphore, oneshot, watch};
 use tokio::time::Instant;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::{Stream, StreamExt};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -78,7 +78,9 @@ fn dataplane_response(workers: &[DataplaneWorkerProbe]) -> String {
 
 pub struct MetricsListener {
     addr: SocketAddr,
-    listener: TcpListener,
+    /// Deregistered from the binding runtime, so the server's own runtime
+    /// can register it with its reactor.
+    listener: std::net::TcpListener,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +97,9 @@ impl MetricsListener {
             .await
             .map_err(|source| MetricsListenerBindError { addr, source })?;
         let addr = listener.local_addr().unwrap_or(addr);
+        let listener = listener
+            .into_std()
+            .map_err(|source| MetricsListenerBindError { addr, source })?;
         Ok(Self { addr, listener })
     }
 
@@ -117,6 +122,13 @@ pub async fn serve_metrics(
     dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
 ) {
     let MetricsListener { addr, listener } = server;
+    let listener = match TcpListener::from_std(listener) {
+        Ok(listener) => listener,
+        Err(error) => {
+            error!(%addr, %error, "metrics listener could not join the server runtime");
+            return;
+        }
+    };
     info!(%addr, "metrics server listening");
     serve_incoming(
         TcpListenerStream::new(listener),
@@ -126,6 +138,83 @@ pub async fn serve_metrics(
         dataplane_probe,
     )
     .await;
+}
+
+/// The metrics/readiness server on its own OS thread and `current_thread`
+/// runtime. Accepting a connection and reading its request line then never
+/// wait for the daemon's runtime workers, so `/livez` and `/metrics` answer
+/// while those workers are saturated. `/readyz` still asks `PeerManager` and the
+/// RIB, which run on the daemon runtime, so their starvation still fails it
+/// within the readiness deadline.
+///
+/// Dropping the handle stops the server and joins its thread.
+pub(crate) struct MetricsServerThread {
+    stop: Option<oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MetricsServerThread {
+    /// The receiver resolves when the server stops on its own: its accept
+    /// loop ended or it panicked. It is closed without a value when the thread
+    /// or its runtime could not start (logged), or after the handle is dropped.
+    pub(crate) fn spawn(
+        server: MetricsListener,
+        metrics: BgpMetrics,
+        readiness_probe: CoreReadinessProbe,
+        dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
+    ) -> (Self, oneshot::Receiver<Result<(), String>>) {
+        let (exit_tx, exited) = oneshot::channel();
+        let (stop, stop_rx) = oneshot::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("metrics-http".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        error!(%error, "failed to build the metrics/readiness runtime");
+                        return;
+                    }
+                };
+                let serve = runtime.spawn(serve_metrics(
+                    server,
+                    metrics,
+                    readiness_probe,
+                    dataplane_probe,
+                ));
+                let exit = runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        _ = stop_rx => None,
+                        result = serve => Some(result),
+                    }
+                });
+                if let Some(result) = exit {
+                    let _ = exit_tx.send(result.map_err(|error| error.to_string()));
+                }
+                // An in-flight render on the blocking pool must not hold the
+                // join; it finishes, or dies with the process, on its own.
+                runtime.shutdown_background();
+            })
+            .inspect_err(|error| error!(%error, "failed to spawn the metrics/readiness thread"))
+            .ok();
+        let server = Self {
+            stop: Some(stop),
+            thread,
+        };
+        (server, exited)
+    }
+}
+
+impl Drop for MetricsServerThread {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 async fn serve_incoming<S>(
@@ -578,6 +667,129 @@ pub(crate) mod tests {
         let scrape = scrape.join().unwrap().unwrap();
         assert!(scrape.starts_with("HTTP/1.1 200 OK"), "{scrape}");
         assert!(scrape.contains("test_gated_render 0\n"), "{scrape}");
+    }
+
+    /// Every worker of the daemon runtime is held by a blocking task, the RIB
+    /// actor among the tasks that cannot run. `/livez` and `/metrics` must
+    /// still answer, and `/readyz` must report the RIB as not ready within its
+    /// deadline instead of hanging: the probe's RIB timeout or the handler's
+    /// guard on the same deadline, whichever fires first. The peer manager
+    /// answers from its own thread so the probe reaches the RIB half.
+    #[test]
+    fn probes_answer_while_the_daemon_runtime_is_starved() {
+        use rustbgpd_api::health_probe::CORE_READINESS_DEADLINE;
+        use std::io::{Read, Write};
+
+        const WORKERS: usize = 2;
+        // Far below the 5 s request-line timeout, far above a served probe.
+        const BOUND: Duration = Duration::from_secs(2);
+        let probe = |addr: SocketAddr, path: &str| -> (std::io::Result<String>, Duration) {
+            let started = std::time::Instant::now();
+            let response = (|| {
+                let mut stream = std::net::TcpStream::connect(addr)?;
+                stream.set_read_timeout(Some(BOUND))?;
+                stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())?;
+                let mut response = String::new();
+                stream.read_to_string(&mut response)?;
+                Ok(response)
+            })();
+            (response, started.elapsed())
+        };
+
+        let daemon = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(WORKERS)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        std::thread::spawn(move || {
+            while let Some(command) = peer_rx.blocking_recv() {
+                if let PeerManagerCommand::Ping { reply } = command {
+                    let _ = reply.send(());
+                }
+            }
+        });
+        daemon.spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::QueryLocRibCount { reply } = update {
+                    let _ = reply.send(0);
+                }
+            }
+        });
+        // Started from inside the daemon runtime, as `run` does.
+        let (server, addr) = {
+            let _daemon = daemon.enter();
+            let listener = daemon
+                .block_on(MetricsListener::bind("127.0.0.1:0".parse().unwrap()))
+                .unwrap();
+            let addr = listener.addr;
+            let (server, _exited) = MetricsServerThread::spawn(
+                listener,
+                BgpMetrics::new(),
+                CoreReadinessProbe::new(peer_tx, rib_tx),
+                None,
+            );
+            (server, addr)
+        };
+
+        let (ready, _) = probe(addr, "/readyz");
+        assert!(ready.unwrap().starts_with("HTTP/1.1 200 OK"));
+
+        // Each blocker reports once it occupies a worker; WORKERS reports
+        // mean no worker is left to poll the RIB actor.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new(std::sync::Barrier::new(WORKERS + 1));
+        for _ in 0..WORKERS {
+            let entered = entered_tx.clone();
+            let release = release.clone();
+            daemon.spawn(async move {
+                entered.send(()).unwrap();
+                release.wait();
+            });
+        }
+        for _ in 0..WORKERS {
+            entered_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("every daemon worker must be held");
+        }
+
+        let starved = [
+            ("/livez", probe(addr, "/livez")),
+            ("/metrics", probe(addr, "/metrics")),
+            ("/readyz", probe(addr, "/readyz")),
+        ];
+        release.wait();
+        let rib_timeout = format!("not ready: {}\n", CoreReadinessError::RibTimedOut);
+        for (path, (response, elapsed)) in &starved {
+            let response = response
+                .as_ref()
+                .unwrap_or_else(|error| panic!("{path} did not answer within {BOUND:?}: {error}"));
+            assert!(elapsed < &BOUND, "{path} took {elapsed:?}");
+            if *path == "/readyz" {
+                assert!(
+                    response.starts_with("HTTP/1.1 503 Service Unavailable")
+                        && (response.ends_with(&rib_timeout)
+                            || response
+                                .ends_with("not ready: readiness probe deadline exceeded\n")),
+                    "{response}"
+                );
+                assert!(*elapsed >= CORE_READINESS_DEADLINE, "{elapsed:?}");
+            } else {
+                assert!(
+                    response.starts_with("HTTP/1.1 200 OK"),
+                    "{path}: {response}"
+                );
+            }
+        }
+
+        // Released workers serve the RIB again.
+        let (ready, _) = probe(addr, "/readyz");
+        assert!(ready.unwrap().starts_with("HTTP/1.1 200 OK"));
+
+        // Dropping the handle stops the server and joins its thread.
+        drop(server);
+        assert!(std::net::TcpStream::connect(addr).is_err());
     }
 
     #[test]

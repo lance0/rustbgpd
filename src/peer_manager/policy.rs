@@ -405,18 +405,23 @@ struct PolicyRollbackFailure {
     detail: String,
 }
 
+/// Retry time spent so far against [`CLEAN_STATE_QUERY_WINDOW`]. Only the
+/// retries themselves are charged: the export, import and RIB legs between
+/// state checks are bounded by their own budgets and the owner's settlement
+/// budget, and a legitimately long leg must not use up the retries.
 #[derive(Default)]
 struct CleanStateQueryWindow {
-    retry_deadline: Option<tokio::time::Instant>,
+    spent: std::time::Duration,
 }
 
 impl CleanStateQueryWindow {
-    fn remaining_retry_budget(&mut self) -> Option<std::time::Duration> {
-        let deadline = *self
-            .retry_deadline
-            .get_or_insert_with(|| tokio::time::Instant::now() + CLEAN_STATE_QUERY_WINDOW);
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    fn remaining_retry_budget(&self) -> Option<std::time::Duration> {
+        let remaining = CLEAN_STATE_QUERY_WINDOW.saturating_sub(self.spent);
         (!remaining.is_zero()).then_some(remaining)
+    }
+
+    fn charge_retry_since(&mut self, started: tokio::time::Instant) {
+        self.spent += started.elapsed();
     }
 }
 
@@ -1472,8 +1477,8 @@ impl PeerManager {
 
     /// Query a post-delivery session state without treating one short actor
     /// miss as session loss. Every peer gets the ordinary 100 ms probe; only a
-    /// typed timeout retries, at most once, and every retry shares one lazy
-    /// absolute two-second window for the complete clean-convergence cohort.
+    /// typed timeout retries, at most once, and every retry shares one
+    /// two-second retry allowance for the complete clean-convergence cohort.
     async fn query_clean_session_state(
         &mut self,
         commands: tokio::sync::mpsc::Sender<rustbgpd_transport::PeerCommand>,
@@ -1497,12 +1502,14 @@ impl PeerManager {
         let Some(remaining) = window.remaining_retry_budget() else {
             return StateQueryOutcome::TimedOut;
         };
+        let retry_started = tokio::time::Instant::now();
         let retried = self
             .await_with_readiness(
                 rustbgpd_transport::PeerHandle::query_state_outcome_with(commands, remaining),
                 operator_reads,
             )
             .await;
+        window.charge_retry_since(retry_started);
         self.drain_readiness_queries().await;
         self.drain_operator_queries(operator_reads).await;
         retried

@@ -1124,6 +1124,18 @@ fn rpol_resolution_settings_change_is_unsupported() {
     assert_eq!(json["reload_applied"]["rpol_changed"], true);
     let text = format_config_diff(&budget_diff);
     assert!(text.contains("rpol_max_graph_bytes"), "{text}");
+
+    // The test gate decides what the load admits, so it is a load setting
+    // like the budget: SIGHUP only, never a transaction.
+    let mut gate_candidate = current.clone();
+    gate_candidate.policy.require_passing_tests = true;
+    let gate_diff = diff_config(&current, &gate_candidate);
+    assert!(gate_diff.policy.rpol_changed);
+    assert_eq!(
+        classify_config_transaction_v1(&gate_diff).unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+    assert!(format_config_diff(&gate_diff).contains("require_passing_tests"));
 }
 
 #[test]

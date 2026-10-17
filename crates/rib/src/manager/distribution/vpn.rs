@@ -795,17 +795,11 @@ impl RibManager {
     /// and staging operate per RD+prefix identity — received Add-Path path
     /// IDs are distinct Adj-RIB-In entries but collapse into one candidate
     /// set per identity.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "VPN recompute keeps loc-rib selection and per-peer ORR/Add-Path staging together"
-    )]
     pub(in crate::manager) fn recompute_and_distribute_vpn(
         &mut self,
         affected: &HashSet<VpnRibRouteKey>,
     ) {
         let readiness = self.replacement_readiness.clone();
-        #[cfg(test)]
-        let retirement_observer = self.replacement_readiness_test_hook.clone();
         let mut checkpoint = || {
             super::super::replacement_readiness_checkpoint_at(&readiness, "selection_vpn", false);
         };
@@ -870,6 +864,38 @@ impl RibManager {
             }
         }
 
+        if !changed_keys.is_empty() {
+            self.metrics
+                .set_loc_rib_prefixes("vpn", gauge_val(self.loc_rib.vpn_len()));
+        }
+        self.distribute_vpn_changes(&changed_keys, &affected_nlri, None);
+        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
+        super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
+    }
+
+    /// Distribute VPN export changes: `changed_keys` to every VPN
+    /// receiver, and `affected_nlri` as well to receivers that read
+    /// non-best candidates (ORR, Add-Path send). The Loc-RIB is not
+    /// touched. With `targets`, other peers and groups without a target
+    /// member are neither evaluated nor staged — exact only when no other
+    /// peer's export verdict can have changed.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "VPN distribution keeps group staging, member emission and per-peer ORR/Add-Path staging together"
+    )]
+    pub(in crate::manager) fn distribute_vpn_changes(
+        &mut self,
+        changed_keys: &HashSet<VpnRouteKey>,
+        affected_nlri: &HashSet<VpnRouteKey>,
+        targets: Option<&HashSet<IpAddr>>,
+    ) {
+        let readiness = self.replacement_readiness.clone();
+        #[cfg(test)]
+        let retirement_observer = self.replacement_readiness_test_hook.clone();
+        let mut checkpoint = || {
+            super::super::replacement_readiness_checkpoint_at(&readiness, "selection_vpn", false);
+        };
+        let targeted = |peer: &IpAddr| targets.is_none_or(|targets| targets.contains(peer));
         // An RFC 9107 ORR peer selects from the per-target candidate set,
         // not the Loc-RIB best — a candidate change that leaves the
         // Loc-RIB best untouched can still flip a vantage best, so
@@ -877,21 +903,19 @@ impl RibManager {
         // the unicast `all_affected` inclusion in `distribute_changes`).
         // Add-Path-send peers need the same widening: a non-best candidate
         // change can alter the staged top-N set.
-        let any_widened_peer = self.outbound_peers.keys().any(|peer| {
-            checkpoint();
-            self.peer_orr_vantage
-                .get(peer)
-                .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
-                || self.peer_vpn_add_path_send(*peer)
-        });
+        let any_widened_peer = self
+            .outbound_peers
+            .keys()
+            .filter(|peer| targeted(peer))
+            .any(|peer| {
+                checkpoint();
+                self.peer_orr_vantage
+                    .get(peer)
+                    .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
+                    || self.peer_vpn_add_path_send(*peer)
+            });
         if changed_keys.is_empty() && !any_widened_peer {
-            super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
             return;
-        }
-
-        if !changed_keys.is_empty() {
-            self.metrics
-                .set_loc_rib_prefixes("vpn", gauge_val(self.loc_rib.vpn_len()));
         }
 
         // Update-group shared VPN staging: ONE export-tail pass per
@@ -905,7 +929,9 @@ impl RibManager {
             .keys()
             .copied()
             .filter(|peer| {
-                self.grouped_member_of(*peer).is_some() && self.outbound_channel_full(*peer)
+                targeted(peer)
+                    && self.grouped_member_of(*peer).is_some()
+                    && self.outbound_channel_full(*peer)
             })
             .collect();
         let mut speculative_group_admitted = Vec::new();
@@ -914,12 +940,13 @@ impl RibManager {
                 speculative_group_admitted.push(peer);
             }
         }
-        let mut vpn_group_stage = self.stage_vpn_update_groups(&changed_keys);
+        let mut vpn_group_stage = self.stage_vpn_update_groups(changed_keys, targets);
 
         let peers: Vec<IpAddr> = self
             .outbound_peers
             .keys()
             .inspect(|_| checkpoint())
+            .filter(|peer| targeted(peer))
             .copied()
             .collect();
         for peer in peers {
@@ -1122,9 +1149,9 @@ impl RibManager {
                 .map(|spf| (&self.orr.topology, spf));
             let peer_add_path = self.peer_vpn_add_path_send(peer);
             let staged_keys = if orr_ctx.is_some() || peer_add_path {
-                &affected_nlri
+                affected_nlri
             } else {
-                &changed_keys
+                changed_keys
             };
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
@@ -1213,8 +1240,7 @@ impl RibManager {
                         ..OutboundCommitBatch::default()
                     },
                 )
-                && self.mark_outbound_dirty(peer)
-                && failure == super::OutboundCommitFailure::WriterUnavailable
+                && self.mark_dirty_after_family_send_failure(peer, failure)
             {
                 warn!(%peer, "outbound channel full — VPN update deferred");
             }
@@ -1250,7 +1276,5 @@ impl RibManager {
         crate::adj_rib_out::release_hash_map(&mut vpn_group_stage, &mut checkpoint);
         #[cfg(feature = "bench-internals")]
         super::super::bench_support::retirement_end(0, retirement);
-        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
-        super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
     }
 }

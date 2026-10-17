@@ -2132,9 +2132,10 @@ impl RibManager {
 
     /// Dataset updates preserve policy identity, so refresh the shared staged
     /// verdicts explicitly. A provable bound distributes only the affected
-    /// prefixes to the targets, through the ordinary incremental pass.
-    /// Otherwise mark members dirty before staging: the existing tombstone
-    /// and source-flip residue then preserves every owed withdrawal.
+    /// unicast prefixes and VPN identities to the targets, through the
+    /// ordinary incremental passes. Otherwise mark members dirty before
+    /// staging: the existing tombstone and source-flip residue then
+    /// preserves every owed withdrawal.
     pub(in crate::manager) fn handle_reevaluate_peer_export_policies(
         &mut self,
         peers: &[IpAddr],
@@ -2145,11 +2146,22 @@ impl RibManager {
             let started = std::time::Instant::now();
             let bounded = swaps.and_then(|swaps| manager.dataset_swap_bound(peers, swaps));
             let mode = if bounded.is_some() { "delta" } else { "full" };
-            let affected = bounded.as_ref().map(|(_, affected)| affected.len());
+            let affected = bounded.as_ref().map(|bound| bound.prefixes.len());
+            let affected_vpn = bounded.as_ref().map(|bound| bound.vpn.len());
             let result = match bounded {
-                Some((targets, affected)) => {
-                    if !affected.is_empty() {
-                        manager.distribute_changes_to_targets(&affected, &targets);
+                Some(bound) => {
+                    // The Loc-RIB best is unchanged, so the VPN identities
+                    // ride as forced keys for every target, not only the
+                    // non-best readers.
+                    if !bound.vpn.is_empty() {
+                        manager.distribute_vpn_changes(
+                            &bound.vpn,
+                            &bound.vpn,
+                            Some(&bound.targets),
+                        );
+                    }
+                    if !bound.prefixes.is_empty() {
+                        manager.distribute_changes_to_targets(&bound.prefixes, &bound.targets);
                     }
                     Ok(())
                 }
@@ -2159,6 +2171,7 @@ impl RibManager {
                 peers = peers.len(),
                 mode,
                 affected_prefixes = affected,
+                affected_vpn_keys = affected_vpn,
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "dataset export re-evaluation complete"
             );
@@ -2167,23 +2180,28 @@ impl RibManager {
         let _ = reply.send(result);
     }
 
-    /// The re-evaluation targets and the unicast prefixes whose export
-    /// verdict `swaps` can change, or `None` when that set cannot be proved
-    /// complete and the full pass must run.
+    /// The re-evaluation targets and the unicast prefixes and VPN
+    /// identities whose export verdict `swaps` can change, or `None` when
+    /// that set cannot be proved complete and the full pass must run.
     ///
     /// A target's verdict reads a swapped dataset only through
     /// `route.prefix in` / `route.origin-as in` guards, which take the
-    /// route's own prefix and origin AS. So a prefix is affected exactly
-    /// when some candidate for it, or its Loc-RIB best, answers differently
-    /// against the prior and current snapshots. Everything else that could
-    /// read the dataset falls back: other probes, a handle the swap does not
-    /// name, an intervening publication, non-unicast families, and
+    /// route's own prefix (a VPN route's inner prefix) and origin AS. So a
+    /// key is affected exactly when some candidate for it, or its Loc-RIB
+    /// best, answers differently against the prior and current snapshots.
+    /// Everything else that could read the dataset falls back: other
+    /// probes, a handle the swap does not name, an intervening publication,
+    /// families other than unicast and VPN, a deferred VPN selection, and
     /// conditional advertisement.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one proof: target families, dataset references, swap lineage and the affected scan"
+    )]
     fn dataset_swap_bound(
         &self,
         peers: &[IpAddr],
         swaps: &[DatasetSwap],
-    ) -> Option<(HashSet<IpAddr>, HashSet<Prefix>)> {
+    ) -> Option<DatasetSwapBound> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         if peers
@@ -2202,14 +2220,26 @@ impl RibManager {
                 targets.extend(group.members.iter().copied());
             }
         }
-        let unicast = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        let bounded = [
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv6, Safi::MplsVpn),
+        ];
         let mut probed = vec![false; swaps.len()];
         for peer in &targets {
             checkpoint();
+            // A held VPN selection would release with only best-changed
+            // keys staged, dropping the forced verdicts: take the full pass.
             if !self
                 .peer_sendable_families
                 .get(peer)
-                .is_some_and(|families| families.iter().all(|family| unicast.contains(family)))
+                .is_some_and(|families| {
+                    families.iter().all(|family| {
+                        bounded.contains(family)
+                            && (family.1 != Safi::MplsVpn || !self.selection_deferred(*family))
+                    })
+                })
             {
                 return None;
             }
@@ -2240,32 +2270,46 @@ impl RibManager {
             }
             changed.push((Arc::clone(&swap.prior), current));
         }
-        let differs = |route: &Route| {
+        let differs = |prefix: Prefix, as_path: Option<&rustbgpd_wire::AsPath>| {
             checkpoint();
-            let origin = route.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
+            let origin = as_path.and_then(rustbgpd_wire::AsPath::origin_asn);
             changed.iter().any(|(prior, current)| {
                 prior
                     .data
-                    .route_key_verdict_differs(&current.data, route.prefix, origin)
+                    .route_key_verdict_differs(&current.data, prefix, origin)
             })
         };
-        let mut affected = HashSet::new();
+        let mut prefixes = HashSet::new();
+        let mut vpn = HashSet::new();
         if !changed.is_empty() {
+            let route_differs = |route: &&Route| differs(route.prefix, route.as_path());
+            let vpn_differs = |route: &&VpnRibRoute| differs(route.inner_prefix(), route.as_path());
             for rib in self.ribs.values() {
-                affected.extend(
-                    rib.iter()
-                        .filter(|route| differs(route))
-                        .map(|route| route.prefix),
+                prefixes.extend(rib.iter().filter(route_differs).map(|route| route.prefix));
+                vpn.extend(
+                    rib.iter_vpn()
+                        .filter(vpn_differs)
+                        .map(|route| route.key().nlri_key),
                 );
             }
-            affected.extend(
+            prefixes.extend(
                 self.loc_rib
                     .iter()
-                    .filter(|route| differs(route))
+                    .filter(route_differs)
                     .map(|route| route.prefix),
             );
+            vpn.extend(
+                self.loc_rib
+                    .iter_vpn()
+                    .filter(vpn_differs)
+                    .map(|route| route.key().nlri_key),
+            );
         }
-        Some((targets, affected))
+        Some(DatasetSwapBound {
+            targets,
+            prefixes,
+            vpn,
+        })
     }
 
     #[expect(
@@ -3222,6 +3266,14 @@ fn classify_effective_distribution_mode(
     } else {
         EffectiveDistributionMode::SingleBest
     }
+}
+
+/// What a dataset swap provably changes: the re-evaluation targets and
+/// the unicast prefixes and VPN identities whose export verdict differs.
+struct DatasetSwapBound {
+    targets: HashSet<IpAddr>,
+    prefixes: HashSet<Prefix>,
+    vpn: HashSet<VpnRouteKey>,
 }
 
 #[cfg(test)]

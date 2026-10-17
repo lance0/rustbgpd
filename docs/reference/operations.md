@@ -221,7 +221,13 @@ these are things to look at, not failures. Four conditions are counted today:
    (off) by default; see [Native gRPC certificate expiry](#native-grpc-certificate-expiry).
 
 All are legitimate configurations and none is rejected; none should reach
-production unnoticed. Note that (2) fires on the omission alone, however well
+production unnoticed.
+
+`--check` also runs the in-language `test` blocks of every configured `.rpol`
+unit, whether or not `[policy] require_passing_tests` is set, so the check
+matches what a daemon with that setting enforces. A failing test is a
+rejection, not a warning: the check exits 1 and names the file, each failed
+test, and its expected and actual outcome. Note that (2) fires on the omission alone, however well
 policed the config is — with no expiry window configured, a `--strict` gate
 on an otherwise clean epoch-less config exits 1 for that reason and no other.
 
@@ -1596,6 +1602,14 @@ The telemetry HTTP listener exposes these read-only paths:
 | `/livez` | `200 ok` once the listener accepts connections | No actor checks. While all 64 connections are in use, the listener closes connections that have not sent their request line within 250 ms of being accepted, oldest first, so idle or slow-sending clients cannot keep `/livez` and `/readyz` waiting for a connection |
 | `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total | `503 not ready: <reason>` |
 | `/dp-readyz` (opt-in alpha) | `200 dataplane workers ready` after each configured FIB/EVPN worker has completed an initial attempt and continues making progress | `404` when disabled; `503` when not configured, starting, unavailable, closed, or stale |
+
+The listener runs on its own thread with a single-threaded runtime, separate
+from the daemon's `worker_threads` runtime. Accepting a connection and reading
+its request line do not wait for the daemon's workers, so `/livez` and
+`/metrics` answer while those workers are saturated. `/readyz` still asks
+PeerManager and the RIB, which run on the daemon runtime: if they cannot be
+scheduled, it returns `503` once the 200 ms deadline passes. The listener costs
+one OS thread, plus a short-lived blocking thread while a scrape renders.
 
 Readiness is actor responsiveness, not routing policy. A daemon with zero
 configured peers, zero Established peers, or zero routes can still be ready.

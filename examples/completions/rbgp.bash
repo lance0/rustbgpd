@@ -1793,10 +1793,11 @@ _rbgp() {
             opts="-s -j -h --expected-runtime-snapshot-token --plan-token --client-request-id --comment --confirm-id --confirm-timeout --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--client-request-id"|"--comment"|"--confirm-id"|"--confirm-timeout"|"--expected-runtime-snapshot-token"|"--json-version"|"--plan-token"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -1941,13 +1942,14 @@ _rbgp() {
             opts="-s -j -h --history --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word%%=*}" in
                         "--history") rbgp_file_allowed=0 ;;
                     esac
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--history"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -2296,10 +2298,11 @@ _rbgp() {
             opts="-s -j -h --format --out --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--format"|"--out"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -2424,10 +2427,11 @@ _rbgp() {
             opts="-s -j -h --expected-runtime-snapshot-token --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--expected-runtime-snapshot-token"|"--json-version"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -2882,10 +2886,11 @@ _rbgp() {
             opts="-s -j -h --peer --neighbor --source --generation --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--generation"|"--neighbor"|"--peer"|"--source"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -2972,10 +2977,11 @@ _rbgp() {
             opts="-s -j -h --view --peer --neighbor --peer-asn --neighbor-asn --source --generation --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--generation"|"--neighbor"|"--neighbor-asn"|"--peer"|"--peer-asn"|"--source"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"--view"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -3130,10 +3136,11 @@ _rbgp() {
             opts="-s -j -h --max-routes --max-input-bytes --detail --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--detail"|"--max-input-bytes"|"--max-routes"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -11243,13 +11250,40 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__check)
-            opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --coverage-matched-min --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
+            opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --coverage-matched-min --deny-lints= --fail-on-empty --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
+            local rbgp_eq_words="" rbgp_eq_done="" rbgp_eq_cur="${cur}"
+            case "${cur}" in
+                --deny-lints=*) rbgp_eq_words="unused-set unused-dataset unused-fn unreachable-term unreferenced-policy"; rbgp_eq_done="--deny-lints="; rbgp_eq_cur="${cur#*=}" ;;
+            esac
+            if [[ -z ${rbgp_eq_words} ]]; then
+                # Split by COMP_WORDBREAKS: the cursor sits on the `=` word
+                # itself right after typing it, or on the value after it.
+                local rbgp_eq_option=""
+                if [[ ${COMP_CWORD} -ge 1 && ${COMP_WORDS[COMP_CWORD]} == "=" ]]; then
+                    rbgp_eq_option="${COMP_WORDS[COMP_CWORD-1]}"
+                    rbgp_eq_cur=""
+                elif [[ ${COMP_CWORD} -ge 2 && ${COMP_WORDS[COMP_CWORD-1]} == "=" ]]; then
+                    rbgp_eq_option="${COMP_WORDS[COMP_CWORD-2]}"
+                fi
+                case "${rbgp_eq_option}" in
+                    --deny-lints) rbgp_eq_words="unused-set unused-dataset unused-fn unreachable-term unreferenced-policy" ;;
+                esac
+            fi
+            if [[ -n ${rbgp_eq_words} ]]; then
+                if [[ ${rbgp_eq_cur} == *,* ]]; then
+                    rbgp_eq_done="${rbgp_eq_done}${rbgp_eq_cur%,*},"
+                    rbgp_eq_cur="${rbgp_eq_cur##*,}"
+                fi
+                COMPREPLY=( $(compgen -P "${rbgp_eq_done}" -W "${rbgp_eq_words}" -- "${rbgp_eq_cur}") )
+                return 0
+            fi
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--coverage-matched-min"|"--coverage-min"|"--max-graph-bytes"|"--root"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -11270,6 +11304,7 @@ _rbgp() {
             done
             if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                if [[ ${#COMPREPLY[@]} == 1 && ${COMPREPLY[0]} == *= && "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o nospace; fi
                 return 0
             elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 ) ]] ; then
                 local rbgp_old_ifs rbgp_ifs_was_set
@@ -11336,10 +11371,11 @@ _rbgp() {
             opts="-a -s -j -h --policy --replace --peer --neighbor --family --limit --all --max-samples --dataset --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--dataset"|"--family"|"--json-version"|"--limit"|"--max-samples"|"--neighbor"|"--peer"|"--policy"|"--replace"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-a"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -11608,10 +11644,11 @@ _rbgp() {
             opts="-s -j -h --check --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;
@@ -12148,10 +12185,11 @@ _rbgp() {
             opts="-a -s -j -h --policy --direction --peer --neighbor --family --limit --all --show-changes --dataset --show-rejected --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
             for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
-                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; continue; fi
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
                 if [[ ${rbgp_options} == 1 ]]; then
                     case "${rbgp_word}" in
                         --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
                         --*=*) continue ;;
                         "--addr"|"--dataset"|"--direction"|"--family"|"--json-version"|"--limit"|"--neighbor"|"--peer"|"--policy"|"--show-changes"|"--show-rejected"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-a"|"-s") rbgp_value=1; continue ;;
                         --*) continue ;;

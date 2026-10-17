@@ -95,7 +95,7 @@
   ],
   "config": {
     "stable_fields": [
-      {"definition": "Config", "fields": ["bmp", "config_epoch", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "81a92b110ab35add21a0a79a8d56cb3cd6e84b95beeafbd58e8a5bb8413a1926"},
+      {"definition": "Config", "fields": ["bmp", "config_epoch", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "6fc6d3cf324ab68cfa7fcb05f0aad791f8d0445073ac585409d0f4f12ea23279"},
       {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "ebgp_requires_policy", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry"], "schema_sha256": "49d2a01119f345d3d261757d82f6935c3c274a65413a5e673a1bfc0914814469"},
       {"definition": "TelemetryConfig", "fields": ["grpc_tcp", "grpc_uds", "log_format", "prometheus_addr"], "schema_sha256": "57dd4b53da31e8ee50be7491812f1bff0e813651635480084678a9e4017319ea"},
       {"definition": "GrpcTcpListenerConfig", "fields": ["access_mode", "address", "enabled", "max_tier", "principal", "tls_cert_file", "tls_client_ca_file", "tls_key_file", "token_file"], "schema_sha256": "2c5304b180fea247a211160087b6eed583e2834558faa02efc3473410a8695b2"},

@@ -1671,6 +1671,11 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l max-graph-bytes -d 'Total source-byte budget for the resolved import graph — mirror of the daemon\'s `[policy] rpol_max_graph_bytes` (default 256 MiB). Set this to match a daemon whose budget was raised, so the offline verdict matches the daemon\'s' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l coverage-min -d 'Minimum acceptable exercised-term percentage, from 0 through 100 (implies --coverage): exit 3 when coverage falls below PCT (CI gate). Diagnostics (1) and test failures (2) take precedence' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l coverage-matched-min -d 'Minimum acceptable matched-term percentage, from 0 through 100 (implies --coverage): exit 3 when fewer source terms match a test route. Independent of --coverage-min; diagnostics (1) and test failures (2) take precedence. Does not guarantee branch coverage or detect every widened guard' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l deny-lints -d 'Fail the check (exit 4) on the named lints, comma-separated: unused-set, unused-dataset, unused-fn, unreachable-term, unreferenced-policy. Bare `--deny-lints` denies every lint. Lints are always computed; without this flag they are warnings and never change the exit code. Exit codes 1, 2 and 3 take precedence' -f -a "unused-set\t''
+unused-dataset\t''
+unused-fn\t''
+unreachable-term\t''
+unreferenced-policy\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1679,6 +1684,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l list-deps -d 'Print the resolved import graph — each module\'s path, SHA-256 content hash, and imports — instead of running tests (audit/packaging aid)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l coverage -d 'Report which policy terms the in-language tests exercised (evaluated vs. matched, per term) plus static lints (unused sets/datasets/fns, unreachable terms, unreferenced policies). A report only — it never changes the exit code by itself'
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l fail-on-empty -d 'Exit 2 when the file and its imports define no `test` block, so an empty suite cannot pass a CI gate'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s h -l help -d 'Print help (see more with \'--help\')'

@@ -3354,6 +3354,8 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
                     .rpol_files
                     .clone_from(&new_config.policy.rpol_files);
                 working_config.policy.rpol = new_config.policy.rpol.clone();
+                working_config.policy.require_passing_tests =
+                    new_config.policy.require_passing_tests;
                 info!("reload: rpol policy registry synced");
             }
             Err(failure) => {
@@ -9888,6 +9890,96 @@ import_policy_chain = ["origin-guard"]
         let (returned, generations) = run(reloaded.runtime.clone()).await;
         assert!(returned.is_some(), "no-op reload completes");
         assert_eq!(generations, 0, "untouched module graph is a no-op");
+    }
+
+    /// `[policy] require_passing_tests`: a SIGHUP candidate whose own
+    /// in-language test fails is refused at candidate load with the knob on,
+    /// before any generation is dispatched, and applied with the knob off. A
+    /// passing candidate applies both ways.
+    #[tokio::test]
+    async fn reload_require_passing_tests_gates_failing_rpol_candidates() {
+        let source = |guard: &str| {
+            format!(
+                "policy edge-in {{ term bogons {{ if route.prefix == {guard} {{ reject }} }} }}\n\
+                 test edge-in-drops-loopback {{\n\
+                     route {{ prefix 127.0.0.0/8 }}\n\
+                     expect edge-in == reject\n\
+                 }}\n"
+            )
+        };
+        for require in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let dir = dir.path();
+            let rpol_path = dir.join("edge.rpol");
+            std::fs::write(&rpol_path, source("127.0.0.0/8")).unwrap();
+            let toml = format!(
+                "{}\n[policy]\nrpol_files = [{:?}]\nrequire_passing_tests = {require}\n\
+                 import_chain = [\"edge-in\"]\n",
+                baseline_toml(),
+                rpol_path.to_str().unwrap(),
+            );
+            let path = dir.join("config.toml");
+            std::fs::write(&path, &toml).unwrap();
+            let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+            let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+            let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+            let run = |current: Config| {
+                let live_grpc_tcp = live_grpc_tcp.clone();
+                let live_grpc_uds = live_grpc_uds.clone();
+                let path = path.clone();
+                async move {
+                    let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+                    let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+                    let returned = reload_config_generation(
+                        path.to_str().unwrap(),
+                        &current,
+                        live_grpc_tcp.as_ref(),
+                        live_grpc_uds.as_ref(),
+                        &peer_mgr_tx,
+                        &internal_tx,
+                        None,
+                        None,
+                    )
+                    .await;
+                    drop(internal_tx);
+                    (returned, generation.await.unwrap().len())
+                }
+            };
+
+            // A passing edit: a second bogon joins the guard and the
+            // pinned route is still rejected.
+            std::fs::write(
+                &rpol_path,
+                source("127.0.0.0/8 || route.prefix == 10.0.0.0/8"),
+            )
+            .unwrap();
+            let (returned, generations) = run(initial).await;
+            assert_eq!(generations, 1, "require={require}: passing edit applies");
+            let current = returned.expect("passing candidate reloads").runtime;
+
+            // A failing edit: the guard no longer covers the tested route.
+            std::fs::write(&rpol_path, source("192.0.2.0/24")).unwrap();
+            if require {
+                let accepted = AcceptedConfigSnapshot::from_config_for_test(current.clone());
+                let Err(error) = AcceptedConfigSnapshot::load_for_reload(
+                    &path,
+                    &accepted,
+                    &current.policy.dataset_bindings,
+                ) else {
+                    panic!("a failing in-language test must refuse the candidate");
+                };
+                assert!(error.contains("edge.rpol"), "{error}");
+                assert!(error.contains("test edge-in-drops-loopback"), "{error}");
+                assert!(error.contains("expected reject, got accept"), "{error}");
+            } else {
+                let (returned, generations) = run(current).await;
+                assert_eq!(
+                    generations, 1,
+                    "knob off: the failing candidate still applies"
+                );
+                assert!(returned.is_some());
+            }
+        }
     }
 
     /// LAN-284: a REJECTED rpol sync must not publish the candidate

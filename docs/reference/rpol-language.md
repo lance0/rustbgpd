@@ -62,10 +62,13 @@ $ echo $?
 0
 ```
 
-Exit codes: `0` clean, `1` compile diagnostics (or unreadable file),
-`2` in-language test failures, `3` coverage below an explicit threshold
-(see [Coverage and lints](#coverage-and-lints)). `--json` emits a
-machine-readable report.
+Exit codes, in precedence order: `1` compile diagnostics (or unreadable
+file), `2` in-language test failures (or no tests under
+`--fail-on-empty`), `3` coverage below an explicit threshold (see
+[Coverage and lints](#coverage-and-lints)), `4` a lint denied by
+`--deny-lints`, otherwise `0`. The
+[CLI reference](../../crates/cli/README.md#policy-check-as-a-ci-and-editor-gate)
+has the full table. `--json` emits a machine-readable report.
 
 ## Lexical structure
 
@@ -302,12 +305,15 @@ semantics:
 - **Changed content swaps atomically** and bumps the generation, then
   refreshes only the referencing peers. On the export side, when every
   referencing receiver probes the dataset only with `route.prefix in` or
-  `route.origin-as in` and sends only IPv4/IPv6 unicast, the RIB
-  re-evaluates only the routes whose prefix or origin AS the old and new
-  contents answer differently. Any other probe, family or attached
-  conditional advertisement re-evaluates every route for those peers.
-  The `dataset export re-evaluation complete` log event reports which
-  (`mode`), with `affected_prefixes` and `elapsed_ms`.
+  `route.origin-as in` and sends only IPv4/IPv6 unicast and VPNv4/VPNv6,
+  the RIB re-evaluates only the routes whose prefix (a VPN route's inner
+  prefix) or origin AS the old and new contents answer differently. Any
+  other probe or family, attached conditional advertisement, or a VPN
+  best-path selection still held by graceful-restart deferral
+  re-evaluates every route for those peers. The
+  `dataset export re-evaluation complete` log event reports which
+  (`mode`), with `affected_prefixes`, `affected_vpn_keys` and
+  `elapsed_ms`.
 - **A file that fails to load or parse rejects the whole reload.**
   Every declared dataset must load before anything is published, so a
   malformed or unreadable file leaves the prior snapshot serving, the
@@ -1285,9 +1291,12 @@ plain `expect p` is a one-member chain. A chain expectation is held to
 the same `MAX_CHAIN_NODES` chain size cap as a configured chain; exceeding
 it fails the test and names the member that crossed the limit.
 
-Tests run at check time (`rbgp policy check`, CI) with zero daemon
-involvement. Testing a *candidate* policy against a live RIB is
-`rbgp policy test` (below).
+Tests run at check time (`rbgp policy check`, CI, and
+`rustbgpd --check`) without a running daemon. A daemon with
+`[policy] require_passing_tests = true` also runs them on every config load
+and refuses a startup or SIGHUP reload whose `.rpol` units fail their own
+tests; see [the configuration reference](configuration.md). Testing a
+*candidate* policy against a live RIB is `rbgp policy test` (below).
 
 ### Coverage and lints
 

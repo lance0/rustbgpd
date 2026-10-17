@@ -553,6 +553,8 @@ thread_local! {
 #[derive(Debug)]
 struct BgpMetricsInner {
     registry: Registry,
+    /// See [`BgpMetrics::render_slot`].
+    render_slot: Arc<tokio::sync::Semaphore>,
     /// See [`NEXT_METRICS_INSTANCE_ID`].
     instance_id: u64,
 
@@ -3712,6 +3714,7 @@ impl BgpMetrics {
 
         Self(Arc::new(BgpMetricsInner {
             registry,
+            render_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             instance_id: NEXT_METRICS_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             state_transitions,
             session_notification_outstanding_value,
@@ -3950,6 +3953,13 @@ impl BgpMetrics {
     #[must_use]
     pub fn registry(&self) -> &Registry {
         &self.0.registry
+    }
+
+    /// One whole-registry render in flight per metrics instance, shared by
+    /// every clone: the daemon's HTTP scrapes and `GetMetrics` calls.
+    #[must_use]
+    pub fn render_slot(&self) -> &Arc<tokio::sync::Semaphore> {
+        &self.0.render_slot
     }
 
     /// Reserve one session notification before its lossless channel send.

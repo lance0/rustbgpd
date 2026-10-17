@@ -3534,6 +3534,7 @@ dependencies = [
  "prometheus",
  "thiserror 2.0.21",
  "tikv-jemalloc-ctl",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
