@@ -141,6 +141,14 @@ impl RpolFile {
     }
 
     /// The unit's interned set tables, built on first use.
+    /// Whether this file's literal set tables have been built (once, on the
+    /// first [`Self::compile_policy_bound_cached_tables`] call).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn literal_tables_built(&self) -> bool {
+        self.tables.get().is_some()
+    }
+
     fn tables(&self) -> &lower::SetTables {
         self.tables.get_or_init(|| {
             // LAN-888: this build is the expensive interning step at IRR

@@ -2773,6 +2773,31 @@ fn recording_hits_resolves_and_fails_closed_like_live_eval() {
     }
 }
 
+/// The non-recording pinned walk (`ComparePolicy`) decides exactly as the
+/// recording walk (`rbgp policy test`), including fail-closed operands.
+#[test]
+fn pinned_walk_decides_like_the_recording_walk() {
+    let chain = compile_ok(
+        "prefix-set c { 10.10.0.0/16 le 32 }
+         policy p {
+             term a { if route.prefix in c { add community 65000:1; } }
+             term b { prepend as peer 3; accept }
+         }",
+    );
+    let frame = crate::DatasetPins::default().frame(&chain);
+    for ctx in [
+        prepend_ctx(Some(65010), None),
+        prepend_ctx(None, None),
+        route_ctx(v4(10, 10, 1, 0, 24), &[], RpkiValidation::NotFound),
+    ] {
+        let mut hits = chain.zero_term_hits();
+        assert_eq!(
+            chain.evaluate_pinned(&ctx, &frame),
+            chain.evaluate_recording_hits(&ctx, &mut hits)
+        );
+    }
+}
+
 /// Explain traces render the source-level operand — and agree with
 /// the live verdict, including the fail-closed case.
 #[test]

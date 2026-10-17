@@ -736,9 +736,11 @@ the RIB's short commit batches wait for the commit, which remains the single
 switch point; a route listing started before the commit cannot be continued
 across it. Forward API policy transactions and their policy-only
 publication-failure compensation use these same admission points.
-`TestPolicy` also uses the operator lane for its live peer context; its route
-pages retain their version fence, without a shared generation pin across
-peer context and routes.
+`TestPolicy` and `ComparePolicy` also use the operator lane for their live peer
+context; their route pages retain their version fence, without a shared
+generation pin across peer context and routes. `ComparePolicy` reads the
+installed export chain in one RIB query before its first page, so a chain
+installed after the walk starts is not its baseline.
 
 When a reload's export-policy transition is rejected and rolled back, the peer
 manager serves session snapshots, import-statistics collections,

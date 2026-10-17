@@ -1572,6 +1572,15 @@ pub struct BestPathCandidate {
     pub multipath: crate::best_path::MultipathEligibility,
 }
 
+/// A registered peer's installed export chain
+/// ([`RibUpdate::QueryInstalledExportChain`]).
+#[derive(Debug, Clone)]
+pub struct InstalledExportChain {
+    /// The compiled IR the live distribution path evaluates, or `None`
+    /// when no chain applies.
+    pub chain: Option<Arc<rustbgpd_policy::ir::CompiledChain>>,
+}
+
 /// Which table a paged route query ([`RibUpdate::QueryRoutesPage`]) reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteQueryScope {
@@ -2668,6 +2677,15 @@ pub enum RibUpdate {
         weighted: bool,
         deadline: tokio::time::Instant,
         reply: oneshot::Sender<Result<ExactFibInstallCandidates, DataplaneExactQueryError>>,
+    },
+    /// Query: the compiled export chain installed for one peer, shared
+    /// without its live hit counters, for read-only policy comparison.
+    /// `None` when the peer has no outbound registration.
+    QueryInstalledExportChain {
+        /// Target peer.
+        peer: IpAddr,
+        /// Response channel.
+        reply: oneshot::Sender<Option<InstalledExportChain>>,
     },
     /// Query: return the current per-peer peer-group map.
     QueryPeerGroups {

@@ -1715,6 +1715,64 @@ Per-term hit counters answer "which term is doing the work" (the
 IOS-XR `show pcl` idea); a term lowered to several IR steps reports as
 `name.1`, `name.2`, ....
 
+### Comparing a candidate with the installed export chain
+
+`rbgp policy test` reports what one candidate policy does on its own.
+Before an export-policy change on a route server or reflector, the question
+is usually narrower: which routes would this peer stop receiving, start
+receiving, or receive with different attributes? `rbgp policy compare`
+answers it. It reads the export chain installed for the peer, builds the
+candidate chain, and evaluates both read-only over the same version-fenced
+walk of Loc-RIB best routes. Only routes whose outcome differs are counted:
+
+```console
+$ rbgp policy compare policies/rs.rpol --neighbor 198.51.100.3 \
+    --policy client-x --replace client-x --max-samples 2
+export to 198.51.100.3 over 4 routes:
+  installed: rs-hygiene, client-x
+  candidate: rs-hygiene, client-x
+  newly rejected 1  newly accepted 0  attributes changed 1
+Newly rejected (showing 1 of 1):
+  198.18.0.0/15 (from 192.0.2.9)
+    installed: local_pref unset -> 120
+Attributes changed (showing 1 of 1):
+  192.0.2.0/24 (from 192.0.2.9)
+    installed: local_pref unset -> 200
+    candidate: local_pref unset -> 300
+```
+
+- `--replace MEMBER --policy NAME` swaps one member of the installed chain,
+  matched by its exact configured name (for example `client-x` or
+  `customer-in(200)`), for `NAME` from the submitted file. Every other
+  member stays in place, including members the daemon appended, so a route
+  that an earlier member such as `rs-hygiene` rejects stays rejected on both
+  sides and is never reported as a candidate accept.
+- Without `--replace`, the repeated `--policy` values, in order, form the
+  whole candidate chain, and the installed chain is replaced entirely.
+- Classes: *newly rejected* (installed accepts, candidate rejects), *newly
+  accepted* (installed rejects, candidate accepts), and *attributes changed*
+  (both accept but the resulting attributes or next hop differ). A route
+  both chains accept with the same result is not reported, even if the two
+  chains reach it through different terms.
+- Counts are exact over the walk; `--max-samples N` (up to 1000, default
+  10) caps the routes listed per class, in canonical order. `--limit`,
+  `--all`, `--family` and `--dataset` work as for `policy test`.
+- Only policy chains are compared. Native egress steps (split horizon, iBGP
+  and route-reflector rules, RS control communities, OTC, NO_EXPORT, ORF,
+  family negotiation) apply to neither side, so a count can include routes
+  those steps withhold from the peer anyway. Use
+  `rbgp rib --prefix P advertised PEER --explain` for the full export ladder
+  of one route.
+- The installed chain is read when the walk starts, from the peer's live
+  session: a peer that is not Established has no installed export chain and
+  the command fails with `FAILED_PRECONDITION`. A grouped (update-group)
+  member is compared through its own chain, exactly like an ungrouped peer.
+- Like `policy test`, the run moves no counters, logs no evaluation
+  warnings, and requires `SensitiveRead`. `--json` emits the chains, counts
+  and samples structurally. The `ComparePolicy` RPC is outside the v1
+  stability inventory. Export only: an import comparison over the retained
+  post-policy Adj-RIB-In would not see routes the installed chain rejected.
+
 ### Explain — which term decided, and why
 
 `.rpol` policies are first-class citizens of the daemon's explain

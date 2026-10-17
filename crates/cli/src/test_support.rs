@@ -297,6 +297,7 @@ pub(crate) struct MockState {
     // not_seen / cache_disabled / no_session CLI pins.
     pub(crate) explain_import_synthetic_outcome: Mutex<Option<server_proto::ImportExplainOutcome>>,
     pub(crate) last_test_policy: Mutex<Option<server_proto::TestPolicyRequest>>,
+    pub(crate) last_compare_policy: Mutex<Option<server_proto::ComparePolicyRequest>>,
     pub(crate) last_get_policy_stats: Mutex<Option<server_proto::GetPolicyStatsRequest>>,
     pub(crate) last_set_neighbor_set: Mutex<Option<server_proto::SetNeighborSetRequest>>,
     pub(crate) last_delete_neighbor_set: Mutex<Option<server_proto::DeleteNeighborSetRequest>>,
@@ -3210,6 +3211,36 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                 prefix_length: 24,
                 peer: "10.0.0.9".to_string(),
                 changes: vec!["local_pref unset -> 200".to_string()],
+            }],
+            ..Default::default()
+        }))
+    }
+
+    async fn compare_policy(
+        &self,
+        request: Request<server_proto::ComparePolicyRequest>,
+    ) -> Result<Response<server_proto::ComparePolicyResponse>, Status> {
+        *self.state.last_compare_policy.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ComparePolicyResponse {
+            compiled: true,
+            installed_chain: vec!["rs-hygiene".to_string(), "client-x".to_string()],
+            candidate_chain: vec!["rs-hygiene".to_string(), "client-x".to_string()],
+            routes_evaluated: 4,
+            newly_rejected: 2,
+            attributes_changed: 1,
+            newly_rejected_routes: vec![server_proto::ComparePolicyRoute {
+                prefix: "198.18.0.0".to_string(),
+                prefix_length: 15,
+                peer: "10.0.0.9".to_string(),
+                installed_changes: vec![],
+                candidate_changes: vec![],
+            }],
+            attributes_changed_routes: vec![server_proto::ComparePolicyRoute {
+                prefix: "192.0.2.0".to_string(),
+                prefix_length: 24,
+                peer: "10.0.0.9".to_string(),
+                installed_changes: vec!["local_pref unset -> 200".to_string()],
+                candidate_changes: vec!["local_pref unset -> 300".to_string()],
             }],
             ..Default::default()
         }))

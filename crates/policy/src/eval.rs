@@ -45,6 +45,47 @@ use crate::sets::prefix_entry_matches;
 /// nothing.
 pub(crate) type PinnedDatasets = [Option<Arc<DatasetSnapshot>>; MAX_UNIT_DATASETS];
 
+/// Caller-owned `(evaluated, matched)` per-term coverage grids.
+type CoverageGrids<'a> = (&'a mut [Vec<u64>], &'a mut [Vec<u64>]);
+
+/// Dataset snapshots pinned once for a series of dry-run evaluations, so
+/// chains that share a live handle read the same generation throughout
+/// (ADR-0103 Decision 8.5, across chains rather than within one walk).
+#[derive(Debug, Default)]
+pub struct DatasetPins(Vec<(Arc<crate::datasets::DatasetHandle>, Arc<DatasetSnapshot>)>);
+
+/// One chain's dataset snapshots, from [`DatasetPins::frame`].
+#[derive(Debug)]
+pub struct PinnedFrame(Option<PinnedDatasets>);
+
+impl DatasetPins {
+    /// Pin `chain`'s datasets, reusing the snapshot already pinned for any
+    /// handle seen before and pinning the rest now.
+    #[must_use]
+    pub fn frame(&mut self, chain: &CompiledChain) -> PinnedFrame {
+        if chain.datasets.is_empty() {
+            return PinnedFrame(None);
+        }
+        let mut pinned: PinnedDatasets = [const { None }; MAX_UNIT_DATASETS];
+        for (slot, binding) in pinned.iter_mut().zip(&chain.datasets) {
+            let snapshot = if let Some((_, snapshot)) = self
+                .0
+                .iter()
+                .find(|(handle, _)| Arc::ptr_eq(handle, &binding.handle))
+            {
+                Arc::clone(snapshot)
+            } else {
+                let snapshot = binding.handle.pin();
+                self.0
+                    .push((Arc::clone(&binding.handle), Arc::clone(&snapshot)));
+                snapshot
+            };
+            *slot = Some(snapshot);
+        }
+        PinnedFrame(Some(pinned))
+    }
+}
+
 /// The dataset-free pin frame — what every chain compiled without
 /// dataset references walks with, at zero per-route cost beyond one
 /// branch.
@@ -962,36 +1003,64 @@ impl CompiledChain {
     /// If either grid is not shaped like `policies` (one counter per
     /// term).
     #[must_use]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
-    )]
     pub fn evaluate_recording_coverage(
         &self,
         ctx: &RouteContext<'_>,
         evaluated: &mut [Vec<u64>],
         matched: &mut [Vec<u64>],
     ) -> PolicyResult {
-        assert_eq!(matched.len(), self.policies.len(), "hits shaped like chain");
-        assert_eq!(
-            evaluated.len(),
-            self.policies.len(),
-            "evaluated shaped like chain"
-        );
+        // LAN-305: pin dataset generations once, identically to the live walk.
+        let pinned_frame = self.pin_datasets();
+        self.evaluate_recording_coverage_in(
+            ctx,
+            Some((evaluated, matched)),
+            pinned_frame.as_ref().unwrap_or(&NO_DATASETS),
+        )
+    }
+
+    /// The dry-run decision of
+    /// [`evaluate_recording_hits`](Self::evaluate_recording_hits) (no live
+    /// counters, no evaluation-error WARN) without recording coverage,
+    /// reading datasets from `frame`, pinned earlier by
+    /// [`DatasetPins::frame`] for this chain. Allocates nothing per call.
+    #[must_use]
+    pub fn evaluate_pinned(&self, ctx: &RouteContext<'_>, frame: &PinnedFrame) -> PolicyResult {
+        self.evaluate_recording_coverage_in(ctx, None, frame.0.as_ref().unwrap_or(&NO_DATASETS))
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
+    )]
+    /// The dry-run walk. `grids` is `(evaluated, matched)`; `None` records
+    /// nothing, with identical decisions.
+    fn evaluate_recording_coverage_in(
+        &self,
+        ctx: &RouteContext<'_>,
+        mut grids: Option<CoverageGrids<'_>>,
+        pinned: &PinnedDatasets,
+    ) -> PolicyResult {
+        if let Some((evaluated, matched)) = &grids {
+            assert_eq!(matched.len(), self.policies.len(), "hits shaped like chain");
+            assert_eq!(
+                evaluated.len(),
+                self.policies.len(),
+                "evaluated shaped like chain"
+            );
+            for ((policy, policy_evals), policy_hits) in self
+                .policies
+                .iter()
+                .zip(evaluated.iter())
+                .zip(matched.iter())
+            {
+                assert_eq!(policy_hits.len(), policy.terms.len());
+                assert_eq!(policy_evals.len(), policy.terms.len());
+            }
+        }
         // LAN-303: dry runs are metered identically to the live walk.
         let mut fuel: u64 = MAX_EVAL_COST;
-        // LAN-305: and pin dataset generations once, identically.
-        let pinned_frame = self.pin_datasets();
-        let pinned = pinned_frame.as_ref().unwrap_or(&NO_DATASETS);
         let mut accumulated = RouteModifications::default();
-        for ((policy, policy_evals), policy_hits) in self
-            .policies
-            .iter()
-            .zip(evaluated.iter_mut())
-            .zip(matched.iter_mut())
-        {
-            assert_eq!(policy_hits.len(), policy.terms.len());
-            assert_eq!(policy_evals.len(), policy.terms.len());
+        for (policy_index, policy) in self.policies.iter().enumerate() {
             let mut continued: Option<RouteModifications> = None;
             // `Some(None)` = permit with no deciding-term mods;
             // `None` after the loop = fell through to default_action.
@@ -999,13 +1068,10 @@ impl CompiledChain {
             let mut denied = false;
             // LAN-302: same lazy `let` frame as the live walk.
             let mut locals: Option<LocalFrame> = None;
-            for ((term, eval_count), hit) in policy
-                .terms
-                .iter()
-                .zip(policy_evals.iter_mut())
-                .zip(policy_hits.iter_mut())
-            {
-                *eval_count += 1;
+            for (term_index, term) in policy.terms.iter().enumerate() {
+                if let Some((evaluated, _)) = &mut grids {
+                    evaluated[policy_index][term_index] += 1;
+                }
                 let mut err = None;
                 let matched = self.eval_expr(
                     &term.guard,
@@ -1020,7 +1086,9 @@ impl CompiledChain {
                     break;
                 }
                 if matched {
-                    *hit += 1;
+                    if let Some((_, hits)) = &mut grids {
+                        hits[policy_index][term_index] += 1;
+                    }
                     match term.action.view() {
                         TermActionView::Permit(mods) => {
                             match self.resolve_computed(mods, ctx, locals_slice(locals.as_ref())) {

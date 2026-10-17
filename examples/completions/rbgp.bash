@@ -889,6 +889,9 @@ _rbgp() {
             rbgp__subcmd__help__subcmd__policy,check)
                 cmd="rbgp__subcmd__help__subcmd__policy__subcmd__check"
                 ;;
+            rbgp__subcmd__help__subcmd__policy,compare)
+                cmd="rbgp__subcmd__help__subcmd__policy__subcmd__compare"
+                ;;
             rbgp__subcmd__help__subcmd__policy,conditional-advertisements)
                 cmd="rbgp__subcmd__help__subcmd__policy__subcmd__conditional__subcmd__advertisements"
                 ;;
@@ -1132,6 +1135,9 @@ _rbgp() {
             rbgp__subcmd__policy,check)
                 cmd="rbgp__subcmd__policy__subcmd__check"
                 ;;
+            rbgp__subcmd__policy,compare)
+                cmd="rbgp__subcmd__policy__subcmd__compare"
+                ;;
             rbgp__subcmd__policy,conditional)
                 cmd="rbgp__subcmd__policy__subcmd__conditional__subcmd__advertisements"
                 ;;
@@ -1209,6 +1215,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__policy__subcmd__help,check)
                 cmd="rbgp__subcmd__policy__subcmd__help__subcmd__check"
+                ;;
+            rbgp__subcmd__policy__subcmd__help,compare)
+                cmd="rbgp__subcmd__policy__subcmd__help__subcmd__compare"
                 ;;
             rbgp__subcmd__policy__subcmd__help,conditional-advertisements)
                 cmd="rbgp__subcmd__policy__subcmd__help__subcmd__conditional__subcmd__advertisements"
@@ -8561,7 +8570,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__policy)
-            opts="list check fmt test get set delete chain stats explain conditional-advertisements"
+            opts="list check fmt test compare get set delete chain stats explain conditional-advertisements"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8659,6 +8668,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__policy__subcmd__check)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__policy__subcmd__compare)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -10767,7 +10790,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy)
-            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help list check fmt test get set delete chain stats counters explain conditional-advertisements conditional help"
+            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help list check fmt test compare get set delete chain stats counters explain conditional-advertisements conditional help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -11344,6 +11367,121 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__policy__subcmd__compare)
+            opts="-a -s -j -h --policy --replace --peer --neighbor --family --limit --all --max-samples --dataset --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            local rbgp_positional=1 rbgp_value=0 rbgp_options=1 rbgp_file_allowed=1 rbgp_word rbgp_short
+            for rbgp_word in "${COMP_WORDS[@]:1:COMP_CWORD-1}"; do
+                if [[ ${rbgp_value} == 1 ]]; then rbgp_value=0; [[ ${rbgp_word} == "=" ]] && rbgp_value=1; continue; fi
+                if [[ ${rbgp_options} == 1 ]]; then
+                    case "${rbgp_word}" in
+                        --) rbgp_options=0; continue ;;
+                        "=") rbgp_value=1; continue ;;
+                        --*=*) continue ;;
+                        "--addr"|"--dataset"|"--family"|"--json-version"|"--limit"|"--max-samples"|"--neighbor"|"--peer"|"--policy"|"--replace"|"--tls-ca"|"--tls-cert"|"--tls-key"|"--tls-server-name"|"--token-file"|"-a"|"-s") rbgp_value=1; continue ;;
+                        --*) continue ;;
+                        -?*)
+                            rbgp_short="${rbgp_word:1}"
+                            while [[ -n ${rbgp_short} ]]; do
+                                case "${rbgp_short:0:1}" in
+                                    "a"|"s")
+                                        [[ ${#rbgp_short} -eq 1 ]] && rbgp_value=1
+                                        break ;;
+                                esac
+                                rbgp_short="${rbgp_short:1}"
+                            done
+                            continue ;;
+                    esac
+                fi
+                rbgp_positional=$((rbgp_positional + 1))
+            done
+            if [[ ${cur} == -* && ${rbgp_options} == 1 && ${rbgp_value} == 0 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            elif [[ ${rbgp_value} == 0 && ${rbgp_file_allowed} == 1 && ( ${rbgp_positional} -eq 3 ) ]] ; then
+                local rbgp_old_ifs rbgp_ifs_was_set
+                [ -n "${IFS+x}" ] && { rbgp_old_ifs="$IFS"; rbgp_ifs_was_set=1; }
+                IFS=$'\n'
+                COMPREPLY=($(compgen -f -- "${cur}"))
+                [ -n "${rbgp_ifs_was_set+x}" ] && IFS="$rbgp_old_ifs" || unset IFS
+                if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then compopt -o filenames; fi
+                return 0
+            fi
+            case "${prev}" in
+                --policy)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --replace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --neighbor)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --peer)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --family)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -a)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --limit)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-samples)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --dataset)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-ca)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-cert)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-server-name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json-version)
+                    COMPREPLY=($(compgen -W "1" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__policy__subcmd__conditional__subcmd__advertisements)
             opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -11624,7 +11762,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__help)
-            opts="list check fmt test get set delete chain stats explain conditional-advertisements help"
+            opts="list check fmt test compare get set delete chain stats explain conditional-advertisements help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -11722,6 +11860,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__help__subcmd__check)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__policy__subcmd__help__subcmd__compare)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

@@ -4126,6 +4126,18 @@ impl RibManager {
                 prefixes, max_paths, relax, weighted, deadline, reply,
             ),
             RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
+            RibUpdate::QueryInstalledExportChain { peer, reply } => {
+                let installed = self.outbound_peers.contains_key(&peer).then(|| {
+                    crate::update::InstalledExportChain {
+                        chain: self
+                            .export_policy_for(peer)
+                            .map(PolicyChain::compiled_shared),
+                    }
+                });
+                if reply.send(installed).is_err() {
+                    warn!("query caller dropped before receiving installed export chain");
+                }
+            }
             RibUpdate::ExplainBestPath {
                 prefix,
                 peer,

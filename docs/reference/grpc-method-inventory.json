@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 125,
+  "method_count": 126,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 78,
+    "sensitive_read": 79,
     "mutating": 22,
     "operator_only": 24
   },
@@ -66,6 +66,7 @@
     { "service": "rustbgpd.v1.PolicyService", "method": "ExplainImportPolicy", "path": "/rustbgpd.v1.PolicyService/ExplainImportPolicy", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PolicyService", "method": "ListRejectedRoutes", "path": "/rustbgpd.v1.PolicyService/ListRejectedRoutes", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PolicyService", "method": "TestPolicy", "path": "/rustbgpd.v1.PolicyService/TestPolicy", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.PolicyService", "method": "ComparePolicy", "path": "/rustbgpd.v1.PolicyService/ComparePolicy", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PolicyService", "method": "GetPolicyStats", "path": "/rustbgpd.v1.PolicyService/GetPolicyStats", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PolicyService", "method": "GetValidationPolicyPosture", "path": "/rustbgpd.v1.PolicyService/GetValidationPolicyPosture", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.PolicyService", "method": "ListConditionalAdvertisements", "path": "/rustbgpd.v1.PolicyService/ListConditionalAdvertisements", "tier": "sensitive_read" },

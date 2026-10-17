@@ -171,18 +171,32 @@ pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain
             source: PolicySource::Toml,
         });
     }
-    CompiledChain {
-        policies,
-        prefix_sets: sets.prefix_sets,
-        community_sets: sets.community_sets,
-        asn_sets: sets.asn_sets,
-        as_path_regexes: sets.as_path_regexes,
-        prefix_set_names: sets.prefix_set_names,
-        community_set_names: sets.community_set_names,
-        asn_set_names: sets.asn_set_names,
-        datasets: sets.datasets,
-        local_asn,
-    }
+    sets.into_chain(policies, local_asn)
+}
+
+/// Compose a chain from already-compiled policies, each spliced by index
+/// from its donor chain's tables and named as given: `(name, donor,
+/// policy index)`. Donors are borrowed, so composing around a large
+/// installed chain copies only the policies it keeps. The first donor
+/// `local_asn` wins, as in [`compile_chain`].
+///
+/// # Panics
+///
+/// If a policy index is out of range for its donor.
+#[must_use]
+pub fn splice_compiled(members: &[(Option<Arc<str>>, &CompiledChain, usize)]) -> CompiledChain {
+    let mut sets = ChainSets::default();
+    let mut local_asn = None;
+    let policies = members
+        .iter()
+        .map(|(name, donor, index)| {
+            local_asn = local_asn.or(donor.local_asn);
+            let mut spliced = splice_policy(&donor.policies[*index], donor, &mut sets);
+            spliced.name.clone_from(name);
+            spliced
+        })
+        .collect();
+    sets.into_chain(policies, local_asn)
 }
 
 /// Copy one pre-compiled `.rpol` policy into the combined chain,
@@ -420,6 +434,21 @@ struct ChainSets {
 }
 
 impl ChainSets {
+    fn into_chain(self, policies: Vec<CompiledPolicy>, local_asn: Option<u32>) -> CompiledChain {
+        CompiledChain {
+            policies,
+            prefix_sets: self.prefix_sets,
+            community_sets: self.community_sets,
+            asn_sets: self.asn_sets,
+            as_path_regexes: self.as_path_regexes,
+            prefix_set_names: self.prefix_set_names,
+            community_set_names: self.community_set_names,
+            asn_set_names: self.asn_set_names,
+            datasets: self.datasets,
+            local_asn,
+        }
+    }
+
     fn prefix_set_id(&mut self, set: Arc<PrefixSet>, name: Option<String>) -> SetId {
         let index = self
             .prefix_sets
@@ -463,7 +492,12 @@ impl ChainSets {
         let index = self
             .datasets
             .iter()
-            .position(|existing| existing.name == slot.name)
+            // Same name and same live handle: a composed chain can carry two
+            // bindings of one name (a dry-run candidate beside installed
+            // members), and each member must keep its own.
+            .position(|existing| {
+                existing.name == slot.name && Arc::ptr_eq(&existing.handle, &slot.handle)
+            })
             .unwrap_or_else(|| {
                 self.datasets.push(slot.clone());
                 self.datasets.len() - 1

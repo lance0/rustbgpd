@@ -1570,6 +1570,18 @@ impl PolicyChain {
     /// `crate::compile::compile_chain` already takes the store).
     #[must_use]
     pub fn compiled(&self) -> &CompiledChain {
+        self.compiled_arc()
+    }
+
+    /// A shared handle onto [`compiled`](Self::compiled), for read-only
+    /// dry runs that evaluate the installed IR off the owning actor
+    /// without its live hit counters.
+    #[must_use]
+    pub fn compiled_shared(&self) -> Arc<CompiledChain> {
+        Arc::clone(self.compiled_arc())
+    }
+
+    fn compiled_arc(&self) -> &Arc<CompiledChain> {
         // Behind a pointer so an uncompiled chain stays pointer-sized —
         // chains are embedded in config/session structs (and api event
         // enums) that mostly never evaluate routes themselves.
