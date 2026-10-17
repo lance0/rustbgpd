@@ -2038,6 +2038,68 @@ class DatasetReloadTests(unittest.TestCase):
         verdict = self.finalize(self.campaign(bar_failure=("daemon exited with status 70 (fail-stop)", 70)), 1)
         self.assertEqual((verdict["status"], verdict["reason"]), ("FAIL", "daemon exited with status 70 (fail-stop)"))
 
+    def interrupted(self, keep, before, failure, daemon_exit):
+        """A passing campaign cut to `keep` operations, with probes started before `before` and a recorded FAIL."""
+        root = self.campaign()
+        leg = root / "leg-0-candidate"
+        row = json.loads((leg / "result.json").read_text())
+        for operation in row["operations"][keep:]:
+            generation = operation["generation"]
+            for name in (f"metrics-before-{generation}.prom", f"metrics-after-{generation}.prom",
+                         f"last-reload-{generation}.json", f"daemon-operation-{generation}.jsonl"):
+                (leg / name).unlink()
+        row["operations"] = row["operations"][:keep]
+        dropped = {"b", "a"} - {operation["generation"] for operation in row["operations"]}
+        lines = []
+        for line in (leg / "harness.log").read_text().splitlines():
+            prefix, _, body = line.partition(" ")
+            record = json.loads(body)
+            if prefix == "dataset_reload_exit" or record.get("generation") in dropped:
+                continue
+            if prefix == "mass_dirty_readiness" and record["started_monotonic_seconds"] >= before:
+                continue
+            lines.append(line + "\n")
+        (leg / "harness.log").write_text("".join(lines))
+        row.update(bar_failures=[failure], status="FAIL", daemon_exit=daemon_exit, harness_exit=1)
+        row["raw_sha256"] = {path.name: receipt.digest(path) for path in leg.iterdir()
+                             if path.is_file() and path.name != "result.json"}
+        receipt.write_json(leg / "result.json", row)
+        return root
+
+    def test_target_failure_between_fold_and_next_probe_stays_a_fail(self):
+        # Round 2, finding 3: operation b folded at 111.5 s; the session was
+        # lost before any later /readyz sample started. The FAIL must survive.
+        failure = "exact fold or session continuity failed: receiver session ended"
+        verdict = self.finalize(self.interrupted(1, 111.5, failure, 0), 1)
+        self.assertEqual((verdict["status"], verdict["reason"]), ("FAIL", failure))
+
+    def test_unbracketed_fold_on_a_successful_leg_stays_invalid(self):
+        # Full bracketing stays mandatory without a recorded target failure.
+        root = self.campaign()
+        leg = root / "leg-0-candidate"
+        text = "".join(line + "\n" for line in (leg / "harness.log").read_text().splitlines()
+                       if not (line.startswith("mass_dirty_readiness ") and
+                               json.loads(line.partition(" ")[2])["started_monotonic_seconds"] >= 131.5))
+        (leg / "harness.log").write_text(text)
+        row = json.loads((leg / "result.json").read_text())
+        row["raw_sha256"]["harness.log"] = receipt.digest(leg / "harness.log")
+        receipt.write_json(leg / "result.json", row)
+        verdict = self.finalize(root, 0)
+        self.assertEqual((verdict["status"], verdict["reason"]), ("INVALID", "readiness probes do not bracket SIGHUP to fold"))
+
+    def test_target_failure_before_the_first_operation_stays_a_fail(self):
+        # Round 2, finding 4: the daemon fail-stopped before operation b was recorded.
+        failure = "daemon exited with status 70 (fail-stop)"
+        verdict = self.finalize(self.interrupted(0, 1e9, failure, 70), 1)
+        self.assertEqual((verdict["status"], verdict["reason"]), ("FAIL", failure))
+        # Without a recorded target failure an empty operation list stays INVALID.
+        root = self.root / "campaign"
+        path = root / "leg-0-candidate" / "result.json"
+        row = json.loads(path.read_text())
+        row.update(bar_failures=[], status="PASS", daemon_exit=0, harness_exit=0)
+        receipt.write_json(path, row)
+        self.assertEqual(self.finalize(root, 0)["status"], "INVALID")
+
     def test_readiness_breach_with_a_wrong_path_is_a_fail_reporting_both(self):
         # Finding 4: the readiness breach must not be lost to the path INVALID.
         verdict = self.finalize(self.campaign(mode="full", full_pass="group", statuses={60: 503}), 1)

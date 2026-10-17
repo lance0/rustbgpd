@@ -1554,8 +1554,12 @@ def readiness_windows(probes):
     return windows
 
 
-def dataset_readiness(probes, operations, correct):
-    """Validate sampling coverage (INVALID if broken) and summarize the readiness bar."""
+def dataset_readiness(probes, operations, correct, interrupted=False):
+    """Validate sampling coverage (INVALID if broken) and summarize the readiness bar.
+
+    `interrupted` marks a leg ended by a recorded target failure: its last
+    operation may have folded just before the failure, with no later probe.
+    """
     require(probes, "no readiness samples")
     for index, probe in enumerate(probes):
         require(type(probe["sequence"]) is int and probe["sequence"] == index + 1, "readiness sequence changed")
@@ -1568,12 +1572,13 @@ def dataset_readiness(probes, operations, correct):
             require(probe["started_monotonic_seconds"] - probes[index - 1]["started_monotonic_seconds"]
                     <= LIMITS["readiness_max_gap_seconds"], "readiness sampling gap exceeded frozen bound")
     if not correct:
-        for operation in operations:
+        for index, operation in enumerate(operations):
             if operation.get("fold") is None:
                 continue
             trigger, fold = operation["trigger_monotonic_seconds"], operation["fold"]["fold_monotonic_seconds"]
+            cut = interrupted and index == len(operations) - 1
             require(any(probe["finished_monotonic_seconds"] <= trigger for probe in probes) and
-                    any(probe["started_monotonic_seconds"] >= fold for probe in probes),
+                    (cut or any(probe["started_monotonic_seconds"] >= fold for probe in probes)),
                     "readiness probes do not bracket SIGHUP to fold")
     windows = readiness_windows(probes)
     summary = {"samples": len(probes), "non_200_or_failed": sum(window["samples"] for window in windows),
@@ -1611,7 +1616,9 @@ def analyze_dataset(root, manifest):
     failures = list(row["bar_failures"])
     require(row["status"] == ("FAIL" if failures else "CORRECTNESS_ONLY" if correct else "PASS"), "leg status differs")
     operations = row["operations"]
-    require(operations and [op["generation"] for op in operations] == stimulus["operations"][:len(operations)],
+    # A target failure may end the leg before the first operation is recorded.
+    require((operations or failures) and
+            [op["generation"] for op in operations] == stimulus["operations"][:len(operations)],
             "operation order differs")
     if not failures:
         require(len(operations) == len(stimulus["operations"]) and row["daemon_exit"] == row["harness_exit"] == 0
@@ -1668,7 +1675,7 @@ def analyze_dataset(root, manifest):
                                      fold["fold_monotonic_seconds"] - operation["trigger_monotonic_seconds"],
                                      abs_tol=1e-6), "fold clock derivation differs")
         report.append(entry)
-    readiness = dataset_readiness(records["mass_dirty_readiness"], operations, correct)
+    readiness = dataset_readiness(records["mass_dirty_readiness"], operations, correct, bool(failures))
     verdict = {"status": "CORRECTNESS_ONLY" if correct else "PASS", "mode": "dataset-reload",
                "profile": manifest["profile"], "cohort": manifest["cohort"], "release_soak_qualified": False,
                "operations": report, "readiness": readiness}
