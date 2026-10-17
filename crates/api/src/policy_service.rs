@@ -1502,7 +1502,6 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use prost::Message;
         use rustbgpd_policy::rpol::RpolFile;
         use rustbgpd_policy::sets::SetStore;
-        use rustbgpd_policy::{NamedPolicy, PolicyChain};
         use rustbgpd_rib::{RibUpdate, RouteQueryScope, route_query_key};
 
         let req = request.into_inner();
@@ -1564,17 +1563,15 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // The structural bound configuration resolution enforces, charged as
         // each member is retained (installed members join it below).
         let mut budget = rustbgpd_policy::compile::ChainNodeBudget::default();
-        let mut charge = |chain: &rustbgpd_policy::ir::CompiledChain| {
-            chain
-                .policies
-                .iter()
-                .try_for_each(|policy| budget.add_policy(policy))
+        let mut charge = |policy: &rustbgpd_policy::ir::CompiledPolicy| {
+            budget
+                .add_policy(policy)
                 .map_err(|reason| Status::invalid_argument(format!("candidate chain: {reason}")))
         };
         let mut compiled = Vec::with_capacity(calls.len());
         for (base, args) in &calls {
             let chain = compile_candidate(&file, base, args, &mut store, &bindings)?;
-            charge(&chain)?;
+            chain.policies.iter().try_for_each(&mut charge)?;
             compiled.push(chain);
         }
 
@@ -1600,17 +1597,17 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         for chain in &mut compiled {
             chain.local_asn = local_asn;
         }
-        let member = |name: Option<&str>, chain: rustbgpd_policy::ir::CompiledChain| {
-            let mut member = NamedPolicy::from_rpol(String::new(), std::sync::Arc::new(chain));
-            member.name = name.map(str::to_string);
-            member
-        };
-        let members: Vec<NamedPolicy> = if req.replace_member.is_empty() {
-            req.policies
+        let candidate = if req.replace_member.is_empty() {
+            let members: Vec<_> = req
+                .policies
                 .iter()
-                .zip(compiled)
-                .map(|(call, chain)| member(Some(call), chain))
-                .collect()
+                .zip(&compiled)
+                .flat_map(|(call, chain)| {
+                    (0..chain.policies.len())
+                        .map(move |index| (Some(std::sync::Arc::from(call.as_str())), chain, index))
+                })
+                .collect();
+            rustbgpd_policy::compile::splice_compiled(&members)
         } else {
             let installed = installed.as_deref().ok_or_else(|| {
                 Status::failed_precondition(format!(
@@ -1629,33 +1626,26 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     req.replace_member
                 )));
             };
-            for (index, _) in installed.policies.iter().enumerate() {
-                if index != replaced {
-                    charge(&installed.member(index).expect("index in range"))?;
+            // Retained members are spliced by index from the borrowed
+            // installed chain, never copied into per-member donors.
+            let replacement = &compiled[0];
+            let mut members = Vec::with_capacity(installed.policies.len());
+            for (index, policy) in installed.policies.iter().enumerate() {
+                if index == replaced {
+                    members.extend((0..replacement.policies.len()).map(|candidate_index| {
+                        (
+                            Some(std::sync::Arc::from(req.policies[0].as_str())),
+                            replacement,
+                            candidate_index,
+                        )
+                    }));
+                } else {
+                    charge(policy)?;
+                    members.push((policy.name.clone(), installed, index));
                 }
             }
-            let mut candidate = compiled.pop();
-            installed
-                .policies
-                .iter()
-                .enumerate()
-                .map(|(index, policy)| {
-                    if index == replaced {
-                        member(
-                            Some(&req.policies[0]),
-                            candidate.take().expect("one candidate"),
-                        )
-                    } else {
-                        member(
-                            policy.name.as_deref(),
-                            installed.member(index).expect("index in range"),
-                        )
-                    }
-                })
-                .collect()
+            rustbgpd_policy::compile::splice_compiled(&members)
         };
-        let candidate =
-            rustbgpd_policy::compile::compile_chain(&PolicyChain::from_named(members), &mut store);
         // A walk pins at most this many dataset slots; a probe of an unpinned
         // slot would fail closed and read as a rejection.
         if candidate.datasets.len() > rustbgpd_policy::datasets::MAX_UNIT_DATASETS {
@@ -1667,6 +1657,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
         let installed = installed
             .unwrap_or_else(|| std::sync::Arc::new(rustbgpd_policy::ir::CompiledChain::empty()));
+        // One dataset generation for the whole comparison: a retained member
+        // shares its live handle with the installed chain, so both sides must
+        // read the same snapshot or a refresh mid-walk reads as a difference.
+        let mut pins = rustbgpd_policy::DatasetPins::default();
+        let frames = ComparePolicyFrames {
+            installed: pins.frame(&installed),
+            candidate: pins.frame(&candidate),
+        };
 
         let mut page = query_test_policy_page(rib_tx, RouteQueryScope::Best, None, None).await?;
         let snapshot_version = page.version;
@@ -1695,6 +1693,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             run_compare_policy_page(
                 &installed,
                 &candidate,
+                &frames,
                 &page.routes,
                 &scope,
                 &peer_context,
@@ -2302,13 +2301,20 @@ fn exported_attributes(
     (attributes, next_hop)
 }
 
+/// Dataset snapshots each side of one comparison reads.
+struct ComparePolicyFrames {
+    installed: rustbgpd_policy::PinnedFrame,
+    candidate: rustbgpd_policy::PinnedFrame,
+}
+
 /// Evaluate the installed and candidate chains over one page and count the
 /// routes they treat differently. Both run through the dry-run evaluator
 /// with scratch hit grids, so no live counter moves and no evaluation-error
-/// WARN is logged.
+/// WARN is logged, and read datasets from `frames`, pinned once per run.
 fn run_compare_policy_page(
     installed: &rustbgpd_policy::ir::CompiledChain,
     candidate: &rustbgpd_policy::ir::CompiledChain,
+    frames: &ComparePolicyFrames,
     routes: &[rustbgpd_rib::Route],
     scope: &ComparePolicyScope,
     peer_context: &DryRunPeerContext,
@@ -2338,8 +2344,10 @@ fn run_compare_policy_page(
         let as_path_str = dry_run_as_path_string(route, needs_as_path_string);
         let ctx = dry_run_route_context(route, &as_path_str, Some(scope.target), peer_context);
         response.routes_evaluated += 1;
-        let before = installed.evaluate_recording_hits(&ctx, &mut installed_hits);
-        let after = candidate.evaluate_recording_hits(&ctx, &mut candidate_hits);
+        let before =
+            installed.evaluate_recording_hits_pinned(&ctx, &mut installed_hits, &frames.installed);
+        let after =
+            candidate.evaluate_recording_hits_pinned(&ctx, &mut candidate_hits, &frames.candidate);
         let (count, samples) = match (before.action, after.action) {
             (PolicyAction::Permit, PolicyAction::Deny) => (
                 &mut response.newly_rejected,
@@ -4693,6 +4701,7 @@ policy client-x {
         let installed = installed_rpol_chain(COMPARE_INSTALLED_RPOL, &["rs-hygiene", "client-x"]);
         for request in [
             compare_request(COMPARE_INSTALLED_RPOL, &["client-x"], "client-x"),
+            compare_request(COMPARE_INSTALLED_RPOL, &["rs-hygiene"], "rs-hygiene"),
             compare_request(COMPARE_INSTALLED_RPOL, &["rs-hygiene", "client-x"], ""),
         ] {
             let response = run_compare(compare_routes(), Some(&installed), request)
@@ -4801,6 +4810,90 @@ policy client-x {
         assert_eq!(compare_counts(&response), (4, 1, 1, 0));
         assert_eq!(sampled(&response.newly_rejected_routes), ["192.0.2.0/24"]);
         assert_eq!(sampled(&response.newly_accepted_routes), ["198.18.0.0/15"]);
+    }
+
+    /// A retained member shares its live dataset handle with the installed
+    /// chain. A refresh after the installed side pinned it must not reach the
+    /// candidate side of the same comparison, or an identical replacement
+    /// reads as a difference.
+    #[tokio::test]
+    async fn compare_policy_reads_one_dataset_generation_on_both_sides() {
+        const SOURCE: &str = r"
+dataset prefix-set bogons
+dataset prefix-set customers
+
+policy rs-hygiene {
+    term bogon { if route.prefix in bogons { reject } }
+    term rest { accept }
+}
+
+policy client-x {
+    term customers { if route.prefix in customers { accept } }
+    term rest { reject }
+}
+";
+        const CUSTOMERS: &str = "10.1.0.0/16\n192.0.2.0/24\n";
+        let installed = installed_rpol_chain_bound(
+            SOURCE,
+            &["rs-hygiene", "client-x"],
+            &[("bogons", "10.0.0.0/8 le 32\n"), ("customers", CUSTOMERS)],
+        )
+        .compiled_shared();
+        let file = rustbgpd_policy::rpol::RpolFile::parse(SOURCE).unwrap();
+        let bindings = bind_candidate_datasets(
+            &file,
+            &[proto::TestPolicyDataset {
+                name: "customers".to_string(),
+                entries: CUSTOMERS.to_string(),
+            }],
+        )
+        .unwrap();
+        let replacement = compile_candidate(
+            &file,
+            "client-x",
+            &[],
+            &mut rustbgpd_policy::sets::SetStore::new(),
+            &bindings,
+        )
+        .unwrap();
+        let candidate = rustbgpd_policy::compile::splice_compiled(&[
+            (installed.policies[0].name.clone(), &installed, 0),
+            (Some(Arc::from("client-x")), &replacement, 0),
+        ]);
+
+        let mut pins = rustbgpd_policy::DatasetPins::default();
+        let installed_frame = pins.frame(&installed);
+        let bogons = installed
+            .datasets
+            .iter()
+            .find(|slot| &*slot.name == "bogons")
+            .unwrap();
+        assert!(
+            bogons
+                .handle
+                .refresh(rustbgpd_policy::rpol::parse_dataset_text("", bogons.kind).unwrap())
+                .is_some()
+        );
+        let frames = ComparePolicyFrames {
+            installed: installed_frame,
+            candidate: pins.frame(&candidate),
+        };
+        let mut response = proto::ComparePolicyResponse::default();
+        run_compare_policy_page(
+            &installed,
+            &candidate,
+            &frames,
+            &compare_routes(),
+            &ComparePolicyScope {
+                target: COMPARE_PEER.parse().unwrap(),
+                family_filter: None,
+                limit: 0,
+                max_samples: 10,
+            },
+            &DryRunPeerContext::new(),
+            &mut response,
+        );
+        assert_eq!(compare_counts(&response), (4, 0, 0, 0));
     }
 
     /// A composed chain whose dataset table exceeds the per-walk pin frame is

@@ -45,6 +45,44 @@ use crate::sets::prefix_entry_matches;
 /// nothing.
 pub(crate) type PinnedDatasets = [Option<Arc<DatasetSnapshot>>; MAX_UNIT_DATASETS];
 
+/// Dataset snapshots pinned once for a series of dry-run evaluations, so
+/// chains that share a live handle read the same generation throughout
+/// (ADR-0103 Decision 8.5, across chains rather than within one walk).
+#[derive(Debug, Default)]
+pub struct DatasetPins(Vec<(Arc<crate::datasets::DatasetHandle>, Arc<DatasetSnapshot>)>);
+
+/// One chain's dataset snapshots, from [`DatasetPins::frame`].
+#[derive(Debug)]
+pub struct PinnedFrame(Option<PinnedDatasets>);
+
+impl DatasetPins {
+    /// Pin `chain`'s datasets, reusing the snapshot already pinned for any
+    /// handle seen before and pinning the rest now.
+    #[must_use]
+    pub fn frame(&mut self, chain: &CompiledChain) -> PinnedFrame {
+        if chain.datasets.is_empty() {
+            return PinnedFrame(None);
+        }
+        let mut pinned: PinnedDatasets = [const { None }; MAX_UNIT_DATASETS];
+        for (slot, binding) in pinned.iter_mut().zip(&chain.datasets) {
+            let snapshot = if let Some((_, snapshot)) = self
+                .0
+                .iter()
+                .find(|(handle, _)| Arc::ptr_eq(handle, &binding.handle))
+            {
+                Arc::clone(snapshot)
+            } else {
+                let snapshot = binding.handle.pin();
+                self.0
+                    .push((Arc::clone(&binding.handle), Arc::clone(&snapshot)));
+                snapshot
+            };
+            *slot = Some(snapshot);
+        }
+        PinnedFrame(Some(pinned))
+    }
+}
+
 /// The dataset-free pin frame — what every chain compiled without
 /// dataset references walks with, at zero per-route cost beyond one
 /// branch.
@@ -962,15 +1000,55 @@ impl CompiledChain {
     /// If either grid is not shaped like `policies` (one counter per
     /// term).
     #[must_use]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
-    )]
     pub fn evaluate_recording_coverage(
         &self,
         ctx: &RouteContext<'_>,
         evaluated: &mut [Vec<u64>],
         matched: &mut [Vec<u64>],
+    ) -> PolicyResult {
+        // LAN-305: pin dataset generations once, identically to the live walk.
+        let pinned_frame = self.pin_datasets();
+        self.evaluate_recording_coverage_in(
+            ctx,
+            evaluated,
+            matched,
+            pinned_frame.as_ref().unwrap_or(&NO_DATASETS),
+        )
+    }
+
+    /// [`evaluate_recording_hits`](Self::evaluate_recording_hits) reading
+    /// datasets from `frame`, pinned earlier by [`DatasetPins::frame`] for
+    /// this chain, instead of pinning them per call.
+    ///
+    /// # Panics
+    ///
+    /// If `hits` is not shaped like `policies`.
+    #[must_use]
+    pub fn evaluate_recording_hits_pinned(
+        &self,
+        ctx: &RouteContext<'_>,
+        hits: &mut [Vec<u64>],
+        frame: &PinnedFrame,
+    ) -> PolicyResult {
+        let mut evaluated = self.zero_term_hits();
+        self.evaluate_recording_coverage_in(
+            ctx,
+            &mut evaluated,
+            hits,
+            frame.0.as_ref().unwrap_or(&NO_DATASETS),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
+    )]
+    fn evaluate_recording_coverage_in(
+        &self,
+        ctx: &RouteContext<'_>,
+        evaluated: &mut [Vec<u64>],
+        matched: &mut [Vec<u64>],
+        pinned: &PinnedDatasets,
     ) -> PolicyResult {
         assert_eq!(matched.len(), self.policies.len(), "hits shaped like chain");
         assert_eq!(
@@ -980,9 +1058,6 @@ impl CompiledChain {
         );
         // LAN-303: dry runs are metered identically to the live walk.
         let mut fuel: u64 = MAX_EVAL_COST;
-        // LAN-305: and pin dataset generations once, identically.
-        let pinned_frame = self.pin_datasets();
-        let pinned = pinned_frame.as_ref().unwrap_or(&NO_DATASETS);
         let mut accumulated = RouteModifications::default();
         for ((policy, policy_evals), policy_hits) in self
             .policies

@@ -29,4 +29,6 @@ pub use engine::{
     encode_route_extended_community, evaluate_chain, evaluate_chain_with_attribution,
     evaluate_policy, is_rfc8212_reserved_policy_name, parse_community_match,
 };
-pub use eval::{EvalError, EvalErrorKind, PolicyHitCounters, PolicyTermLabels};
+pub use eval::{
+    DatasetPins, EvalError, EvalErrorKind, PinnedFrame, PolicyHitCounters, PolicyTermLabels,
+};
