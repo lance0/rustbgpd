@@ -465,7 +465,7 @@ impl RibManager {
                         .entry(peer)
                         .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
                     rib_out.reserve_unicast_with(base.unicast.len(), &mut checkpoint);
-                    rib_out.reserve_vpn_with(base.vpn.len(), &mut checkpoint);
+                    rib_out.reserve_vpn_with(base.vpn.values(), &mut checkpoint);
                     let mut unicast = base.unicast.into_values();
                     for route in unicast.by_ref() {
                         checkpoint();

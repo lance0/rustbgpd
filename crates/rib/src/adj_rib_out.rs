@@ -211,22 +211,35 @@ pub(crate) fn release_sharded_map<K, V>(
     checkpoint.checkpoint(RetirementProgress::Boundary);
 }
 
-/// [`reserve_hash_map`] for a [`ShardedMap`]. A batch that takes the map
-/// past one table splits it first; each shard then reserves its share, so
-/// no rebuild moves more than one shard's entries.
+/// [`reserve_hash_map`] for a [`ShardedMap`] and the keys a batch inserts.
+/// Missing keys are counted per destination shard, so a skewed batch gets
+/// headroom where it lands and no other shard over-reserves. A batch that
+/// takes the map past one table splits it first; no rebuild moves more
+/// than one shard's entries.
 pub(crate) fn reserve_sharded_map<K: Eq + std::hash::Hash, V>(
     map: &mut ShardedMap<K, V>,
-    additional: usize,
+    keys: impl IntoIterator<Item = K>,
     checkpoint: &mut impl FnMut(),
 ) {
-    if map.len().saturating_add(additional) >= crate::fast_hash::SHARD_SPLIT_AT {
+    let mut missing = [0_usize; crate::fast_hash::SHARDS];
+    for key in keys {
+        checkpoint();
+        if map.get(&key).is_none() {
+            missing[crate::fast_hash::shard_index(&key)] += 1;
+        }
+    }
+    let total: usize = missing.iter().sum();
+    if map.len().saturating_add(total) >= crate::fast_hash::SHARD_SPLIT_AT {
         map.split();
         checkpoint();
     }
-    let shards = map.shards_mut();
-    let share = additional.div_ceil(shards.len());
-    for shard in shards {
-        reserve_hash_map(shard, share, checkpoint);
+    match map.shards_mut() {
+        [single] => reserve_hash_map(single, total, checkpoint),
+        shards => {
+            for (shard, additional) in shards.iter_mut().zip(missing) {
+                reserve_hash_map(shard, additional, checkpoint);
+            }
+        }
     }
 }
 
@@ -626,9 +639,21 @@ impl AdjRibOut {
     }
 
     /// Reserve both VPN advertised-route indexes for a known outbound batch.
-    pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
-        reserve_sharded_map(&mut self.vpn_routes, additional, checkpoint);
-        reserve_sharded_map(&mut self.vpn_key_path_ids, additional, checkpoint);
+    /// Each index counts its own missing keys, which hash to different shards.
+    pub(crate) fn reserve_vpn_with<'a>(
+        &mut self,
+        routes: impl IntoIterator<Item = &'a VpnRibRoute> + Clone,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let keys = routes.clone().into_iter().map(VpnRibRoute::key);
+        reserve_sharded_map(&mut self.vpn_routes, keys, checkpoint);
+        let nlri_keys = routes.into_iter().map(|route| route.nlri.key());
+        reserve_sharded_map(&mut self.vpn_key_path_ids, nlri_keys, checkpoint);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn vpn_shard_count(&self) -> usize {
+        self.vpn_routes.shards().len()
     }
 
     #[cfg(test)]
@@ -1218,6 +1243,48 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
         }
+    }
+
+    /// A batch whose keys all land in one nearly full shard must reserve
+    /// that shard's headroom, so committing it never rehashes a shard.
+    #[test]
+    fn vpn_reservation_covers_a_batch_skewed_into_one_shard() {
+        use crate::fast_hash::{SHARD_SPLIT_AT, shard_index};
+        let route = |n: u32| make_vpn_route(vpn_nlri((0x0a00_0000 + n).to_be_bytes(), 32, 100), 1);
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let split = u32::try_from(SHARD_SPLIT_AT).unwrap() + 1;
+        for n in 0..split {
+            rib.insert_vpn(route(n));
+        }
+        assert_eq!(rib.vpn_shard_count(), crate::fast_hash::SHARDS);
+        let target = shard_index(&route(0).key());
+        let mut fresh = (split..).filter(|&n| shard_index(&route(n).key()) == target);
+        let headroom = |rib: &AdjRibOut| {
+            let shard = &rib.vpn_routes.shards()[target];
+            shard.capacity() - shard.len()
+        };
+        while headroom(&rib) > 1 {
+            rib.insert_vpn(route(fresh.next().unwrap()));
+        }
+        let batch: Vec<_> = fresh.take(2).map(route).collect();
+        rib.reserve_vpn_with(&batch, &mut || {});
+        let capacities = |rib: &AdjRibOut| {
+            let routes: Vec<_> = rib
+                .vpn_routes
+                .shards()
+                .iter()
+                .map(HashMap::capacity)
+                .collect();
+            let index: Vec<_> = (rib.vpn_key_path_ids.shards().iter())
+                .map(HashMap::capacity)
+                .collect();
+            (routes, index)
+        };
+        let reserved = capacities(&rib);
+        for route in batch {
+            rib.insert_vpn(route);
+        }
+        assert_eq!(capacities(&rib), reserved, "commit grew a reserved shard");
     }
 
     #[test]

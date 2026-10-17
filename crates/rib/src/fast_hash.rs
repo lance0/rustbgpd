@@ -15,7 +15,19 @@ pub(crate) const SHARD_SPLIT_AT: usize = 1 << 14;
 /// each grown shard large enough that the allocator returns the replaced
 /// table at once; 64 shards held about 330 MB of replaced tables at the peak
 /// of a 1.23M-key load.
-const SHARDS: usize = 16;
+pub(crate) const SHARDS: usize = 16;
+
+/// The shard a key occupies once a [`ShardedMap`] is split: a multiplicative
+/// mix of the key's hash, so each shard still spreads over hashbrown's tag
+/// (top) and bucket (low) bits.
+pub(crate) fn shard_index<Q: std::hash::Hash + ?Sized>(key: &Q) -> usize {
+    use std::hash::BuildHasher;
+    let mixed = FastState::default()
+        .hash_one(key)
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    // The top four bits select one of 16 shards.
+    usize::try_from(mixed >> 60).expect("four bits fit usize")
+}
 
 /// A [`FastMap`] that splits into fixed hash shards once it is large.
 ///
@@ -98,17 +110,6 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
         )
     }
 
-    /// Shard index from a multiplicative mix of the key's hash, so each
-    /// shard still spreads over hashbrown's tag (top) and bucket (low) bits.
-    fn shard_index<Q: std::hash::Hash + ?Sized>(key: &Q) -> usize {
-        use std::hash::BuildHasher;
-        let mixed = FastState::default()
-            .hash_one(key)
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        // The top four bits select one of 16 shards.
-        usize::try_from(mixed >> 60).expect("four bits fit usize")
-    }
-
     fn shard<Q>(&self, key: &Q) -> &FastMap<K, V>
     where
         K: std::borrow::Borrow<Q>,
@@ -116,7 +117,7 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
     {
         match self {
             Self::One(map) => map,
-            Self::Split(shards) => &shards[Self::shard_index(key)],
+            Self::Split(shards) => &shards[shard_index(key)],
         }
     }
 
@@ -127,7 +128,7 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
     {
         match self {
             Self::One(map) => map,
-            Self::Split(shards) => &mut shards[Self::shard_index(key)],
+            Self::Split(shards) => &mut shards[shard_index(key)],
         }
     }
 
@@ -149,7 +150,7 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
             .map(|_| FastMap::with_capacity_and_hasher(per_shard, FastState::default()))
             .collect();
         for (key, value) in std::mem::take(map) {
-            shards[Self::shard_index(&key)].insert(key, value);
+            shards[shard_index(&key)].insert(key, value);
         }
         *self = Self::Split(shards);
     }

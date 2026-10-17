@@ -3596,9 +3596,13 @@ mod tests {
         let mut table = logged_vpn_table(200);
         let mut ledger = AdmittedRecovery::new();
         let hint = capture_vpn(&mut ledger, peer(1), None, &table, true).handle;
-        // Growth migrates every row into a new map without changing the key set.
+        // A batch past the split threshold splits the table, then rebuilds
+        // each shard through checkpoints, without changing the key set.
+        let batch: Vec<_> = (200..20_000).map(vpn_route).collect();
+        assert_eq!(table.vpn_shard_count(), 1);
         let mut checkpoints = 0;
-        table.reserve_vpn_with(4096, &mut || checkpoints += 1);
+        table.reserve_vpn_with(&batch, &mut || checkpoints += 1);
+        assert_eq!(table.vpn_shard_count(), crate::fast_hash::SHARDS);
         assert!(checkpoints > 400, "every row moved through the reservation");
         let mut replaced = vpn_route(7);
         replaced.next_hop = peer(9);

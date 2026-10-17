@@ -4447,14 +4447,7 @@ impl RibManager {
                     })
                     .count();
                 rib_out.reserve_bgpls_with(additional, &mut || checkpoint());
-                let additional = vpn_announce
-                    .iter()
-                    .filter(|route| {
-                        checkpoint();
-                        rib_out.get_vpn(&route.key()).is_none()
-                    })
-                    .count();
-                rib_out.reserve_vpn_with(additional, &mut || checkpoint());
+                rib_out.reserve_vpn_with(&vpn_announce, &mut || checkpoint());
                 let additional = labeled_announce
                     .iter()
                     .filter(|route| {
