@@ -185,7 +185,7 @@ ones above. Differences:
 - `dataset-delta` expects the affected-keys path. `dataset-full` adds a
   community-set dataset read through `route.communities in` (it never matches
   the source routes) and changes it in the same SIGHUP. That probe cannot be
-  bounded, so the daemon must take its full re-evaluation pass.
+  bounded, so the daemon must take its group-level full re-evaluation pass.
 
 The manifest freezes these bars before any result:
 
@@ -204,9 +204,10 @@ The manifest freezes these bars before any result:
   reported with its duration. Broken sampling coverage (a gap over 1.25 s, or
   no sample before SIGHUP and after the fold) is INVALID.
 - **Path:** every `dataset export re-evaluation complete` log record for an
-  operation must carry the cell's mode (`delta` or `full`); otherwise the cell
-  did not measure its path and is INVALID. A breach of the bars above remains
-  a FAIL.
+  operation must carry the cell's path: `mode=delta` with no `full_pass`, or
+  `mode=full` with `full_pass=group`. A per-member full pass or any other path
+  means the cell did not measure its path and is INVALID. A breach of the bars
+  above remains a FAIL.
 
 SIGHUP→reload complete, SIGHUP→exact fold, receiver fold p50/max, the logged
 re-evaluation `elapsed_ms` and affected keys, unchanged re-announcements,

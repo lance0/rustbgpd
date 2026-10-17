@@ -1771,7 +1771,7 @@ class DatasetReloadTests(unittest.TestCase):
                        f'{complete if outcome == "complete" else others.get(outcome, 0)}\n'
                        for outcome in receipt.RELOAD_OUTCOMES)
 
-    def campaign(self, cohort="dataset-delta", mode=None, statuses=(), bar_failure=None):
+    def campaign(self, cohort="dataset-delta", mode=None, statuses=(), bar_failure=None, full_pass=...):
         """A complete synthetic measured campaign; no daemon, harness or clock runs."""
         root, manifest = self.manifest(cohort=cohort)
         (root / "candidate.sha").write_text(manifest["head"] + "\n")
@@ -1803,6 +1803,7 @@ class DatasetReloadTests(unittest.TestCase):
         (leg / "config-check.log").write_text("ok\n")
         stimulus = manifest["dataset_stimulus"]
         mode = mode or stimulus["reevaluation_mode"]
+        full_pass = stimulus["full_pass"] if full_pass is ... else full_pass
         records = [("dataset_reload_ready", {"receivers": 12, "family_keys": manifest["family_keys"],
                                              "selected_keys": stimulus["selected_keys"], "selected_chunk_stride": 100,
                                              "batch_size": 80, "origin_cardinality": 15_375, "correctness_only": False})]
@@ -1820,7 +1821,9 @@ class DatasetReloadTests(unittest.TestCase):
             last = {"record": {"outcome": "complete", "unapplied_count": 0, "failure_bucket": None, "applied_count": 1},
                     "convergence": {"state": "converged"}}
             (leg / f"last-reload-{generation}.json").write_text(json.dumps(last))
-            line = json.dumps({"fields": {"message": receipt.REEVALUATION_MESSAGE, "mode": mode, "peers": 12,
+            # tracing omits the full_pass field when it is None (delta path).
+            fields = {"full_pass": full_pass} if full_pass else {}
+            line = json.dumps({"fields": {"message": receipt.REEVALUATION_MESSAGE, "mode": mode, **fields, "peers": 12,
                                           "affected_prefixes": 12_320, "affected_vpn_keys": 0, "elapsed_ms": 80}}).encode() + b"\n"
             start = len(log)
             log += b'{"fields":{"message":"reload staged"}}\n' + line
@@ -1921,11 +1924,12 @@ class DatasetReloadTests(unittest.TestCase):
         self.assertEqual((verdict["status"], verdict["reason"]), ("INVALID", "fold receipt differs"))
 
     def test_cell_that_takes_the_wrong_path_is_invalid(self):
-        for cohort, mode in (("dataset-delta", "full"), ("dataset-full", "delta")):
-            with self.subTest(cohort=cohort):
-                verdict = self.finalize(self.campaign(cohort=cohort, mode=mode), 0)
+        for cohort, mode, full_pass in (("dataset-delta", "full", "group"), ("dataset-full", "delta", None),
+                                        ("dataset-full", "full", "member"), ("dataset-delta", "delta", "group")):
+            with self.subTest(cohort=cohort, mode=mode, full_pass=full_pass):
+                verdict = self.finalize(self.campaign(cohort=cohort, mode=mode, full_pass=full_pass), 0)
                 self.assertEqual(verdict["status"], "INVALID")
-                self.assertIn(f"re-evaluation mode ['{mode}']", verdict["reason"])
+                self.assertIn(f"re-evaluation path [('{mode}', {full_pass!r})]", verdict["reason"])
                 shutil.rmtree(self.root / "campaign")
 
     def test_reload_outcome_and_applied_bars(self):

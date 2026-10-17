@@ -63,7 +63,8 @@ DATASET_BARS = {
                   "with no withdrawal, no wrong verdict, no reversal and continuous sessions; otherwise FAIL",
     "readiness": "every /readyz sample is 200; any non-200 or failed sample is FAIL and each contiguous "
                  "non-200 window is reported with its duration",
-    "path": "every re-evaluation logged for an operation takes the cell's mode (delta or full); otherwise INVALID",
+    "path": "every re-evaluation logged for an operation takes the cell's path (delta, or full with "
+            "full_pass=group); otherwise INVALID",
     "reported_not_gated": ["SIGHUP to reload complete", "SIGHUP to exact fold", "re-evaluation elapsed_ms",
                            "affected keys", "unchanged re-announcements", "/readyz latency", "daemon cgroup peak"],
 }
@@ -287,6 +288,8 @@ def dataset_stimulus(profile, cohort):
             "operations": ["b", "a"],
             "swap": "b adds the unchanged source origin of every selected chunk to generation_b; a restores the base content",
             "reevaluation_mode": "full" if full else "delta",
+            # The full pass must take the group path; a per-member resync is the wrong path.
+            "full_pass": "group" if full else None,
             "fallback_trigger": ("the same SIGHUP also changes a community-set dataset that the export policy reads "
                                  "through route.communities in; that probe cannot be bounded") if full else None,
             "receiver_receive_buffer": "kernel default", "receiver_timers": "daemon defaults"}
@@ -1231,7 +1234,7 @@ def reevaluations(text):
         fields = json.loads(line).get("fields", {})
         if fields.get("message") == REEVALUATION_MESSAGE:
             rows.append({key: fields.get(key) for key in
-                         ("mode", "peers", "affected_prefixes", "affected_vpn_keys", "elapsed_ms")})
+                         ("mode", "full_pass", "peers", "affected_prefixes", "affected_vpn_keys", "elapsed_ms")})
     return rows
 
 
@@ -1603,9 +1606,11 @@ def analyze_dataset(root, manifest):
             require(rows == operation["reevaluations"], "re-evaluation evidence differs")
             if not rows:
                 path_errors.append(f"generation {generation}: no dataset re-evaluation logged")
-            elif any(item["mode"] != stimulus["reevaluation_mode"] for item in rows):
-                path_errors.append(f"generation {generation}: re-evaluation mode {[item['mode'] for item in rows]}, "
-                                   f"cell requires {stimulus['reevaluation_mode']}")
+            elif any((item["mode"], item["full_pass"]) != (stimulus["reevaluation_mode"], stimulus["full_pass"])
+                     for item in rows):
+                path_errors.append(f"generation {generation}: re-evaluation path "
+                                   f"{[(item['mode'], item['full_pass']) for item in rows]}, cell requires "
+                                   f"{(stimulus['reevaluation_mode'], stimulus['full_pass'])}")
             entry.update(reevaluations=rows, unchanged_announcements=fold["unchanged_announcements"],
                          announcements=fold["announcements"], prior_replays=fold["prior_replays"])
             if not correct:
