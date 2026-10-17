@@ -64,8 +64,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   New `rbgp rib vpn|labeled|rtc received|advertised`
   and `rbgp evpn best` commands expose mutation-fenced continuation tokens
   and JSON page metadata. Group-owned VPN advertised pages refuse reads
-  while that destination is resynchronizing. Existing unpaged RPCs and CLI arrays are unchanged;
-  the additions remain outside the current v1 inventory.
+  while that destination is resynchronizing. Existing unpaged RPCs and CLI
+  arrays are unchanged. `ListVpnRibRoutes`, `ListLabeledRibRoutes` and
+  `ListRtcRibRoutes` and the `rbgp rib vpn|labeled|rtc` command paths join
+  the v1 inventory in the scoped `route-reflector-l3vpn`,
+  `route-reflector-labeled-unicast` and `route-reflector-rtc` roles, and
+  `ListBestEvpnRoutes` with route types 1 to 5, including its MAC, ESI and
+  VNI filters, joins the scoped `route-reflector-evpn` role (see Changed).
+  The MAC, ESI and VNI filters on EVPN received/advertised pages and the
+  `rbgp evpn best` command remain outside v1.
 - `rbgp policy check` works as a CI and editor gate. Every check now computes
   the static lints, and `--deny-lints[=LINT,...]` fails the check with exit
   code 4 on the named lints (or all of them), after the existing 1, 2 and 3.
@@ -176,9 +183,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   See the [API reference](docs/reference/api.md#list-bgp-ls-routes).
 - Promote bounded VPN, labeled-unicast, RT-Constrain and EVPN best read RPCs
   into their scoped route-reflector roles; EVPN remains limited to Types 1–5.
-  Deprecate the four older whole-table reads outside v1, retaining their
-  signatures and behavior, and document each bounded replacement. Family and
-  EVPN pages now clamp requests above 1000 rows rather than rejecting them.
+  Deprecate the four older whole-table reads, which remain outside v1 with
+  their signatures and behavior retained, and document each bounded
+  replacement. Family and EVPN pages now clamp requests above 1000 rows
+  rather than rejecting them.
   The additive `AddressFamily` values 8–12 select VPNv4/v6, labeled IPv4/IPv6
   and RT-Constrain; existing enum values are unchanged. EVPN peer-filter
   clients must verify the documented response metadata acknowledgement.
@@ -228,7 +236,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inventory as the scoped RR-only `route-reflector-evpn` role. It covers the
   `l2vpn_evpn` family value in the existing family keys;
   `ListReceivedEvpnRoutes` and `ListAdvertisedEvpnRoutes` called with a route
-  type of 1 to 5, with `EvpnRouteEntry` fields 1–16; the `rbgp evpn received`
+  type of 1 to 5, with `EvpnRouteEntry` fields 1–16; the bounded
+  `ListBestEvpnRoutes` called with a route type of 1 to 5, including its
+  winner-source, typed RD, MAC, ESI and VNI filters; the `rbgp evpn received`
   and `rbgp evpn advertised` command paths with `--route-type` 1 to 5 and the
   key/type floor of their `--json` page; and the names, types and labels of
   nine RIB, loop, discard and restart metrics. The unpaged `ListEvpnRoutes`
@@ -729,8 +739,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`,
   `ListBestEvpnRoutes`, `ListBgpLsRibRoutes`, `ListOrrTopologyNodes` and
   `ListOrrTopologyLinks`. The deprecated reads keep their signatures and
-  behavior outside v1. Family and EVPN page requests above 1000 rows are now
-  clamped instead of rejected.
+  behavior outside v1; the bounded replacements are inventoried in their
+  scoped route-reflector roles, and `ListBestEvpnRoutes` only for route types
+  1 to 5. Family and EVPN page requests above 1000 rows are now clamped
+  instead of rejected.
 - RD-bearing API and CLI output uses raw hexadecimal for a Type 2 Route
   Distinguisher whose ASN is at most 65535, distinguishing it from a
   different Type 0 RD. Clients can pass the returned spelling back to RD
