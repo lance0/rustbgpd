@@ -3195,6 +3195,16 @@ rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
   prefix lists renders to ~65 MB) load with headroom, while still
   stopping unbounded or recursively generated graphs at load time. A
   unit over the budget is a config load error naming the file.
+- **Test gate (`require_passing_tests`, default `false`):** when `true`,
+  every load runs the in-language `test` blocks of each loaded unit
+  (each unit that defines a policy) after compiling it. A failing test,
+  including an unexpected evaluation error, is a config load error naming
+  the file, each failed test, and its expected and actual outcome: the
+  daemon refuses to start, and a SIGHUP reload is rejected without runtime
+  effect, keeping the running policy. Tests read only their own fixtures and
+  `dataset` overrides, never live data. Read from the incoming config on
+  every load, like `rpol_max_graph_bytes`. `rustbgpd --check` runs the tests
+  whether or not this is set.
 - **One namespace:** `.rpol` policies and `[policy.definitions]` TOML
   policies share the named-policy namespace. A name defined by both —
   or by two `.rpol` files — is a load error naming both sources.

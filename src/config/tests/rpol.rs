@@ -200,6 +200,7 @@ fn config_load_emits_phase_timing_fields() {
     assert!(
         phase("toml_parse_ms")
             + phase("rpol_load_ms")
+            + phase("rpol_test_ms")
             + phase("dataset_bind_ms")
             + phase("validate_ms")
             <= phase("elapsed_ms"),
@@ -704,6 +705,44 @@ fn rpol_compile_diagnostics_fail_config_load() {
         error.contains("route.nosuch") || error.contains("nosuch"),
         "{error}"
     );
+}
+
+/// `edge-in` with a test pinning its bogon guard; `GUARD` is replaced by
+/// the guarded prefix. `127.0.0.0/8` passes the test; anything else fails it.
+const RPOL_TESTED: &str = "
+policy edge-in { term bogons { if route.prefix == GUARD { reject } } }
+
+test edge-in-drops-loopback {
+    route { prefix 127.0.0.0/8 }
+    expect edge-in == reject
+}
+";
+
+fn rpol_tested_dir(guard: &str, require: bool) -> tempfile::TempDir {
+    let dir = rpol_config_dir(&RPOL_TESTED.replace("GUARD", guard), r#""edge-in""#);
+    let toml_path = dir.path().join("config.toml");
+    let toml = fs::read_to_string(&toml_path).unwrap().replace(
+        "rpol_files = [\"policies/core.rpol\"]",
+        &format!("rpol_files = [\"policies/core.rpol\"]\nrequire_passing_tests = {require}"),
+    );
+    fs::write(&toml_path, toml).unwrap();
+    dir
+}
+
+#[test]
+fn require_passing_tests_refuses_a_unit_whose_own_test_fails() {
+    let error = load_dir(&rpol_tested_dir("192.0.2.0/24", true))
+        .expect_err("a failing in-language test must fail the load");
+    assert!(error.contains("core.rpol"), "{error}");
+    assert!(error.contains("1 of 1 in-language tests failed"), "{error}");
+    assert!(error.contains("test edge-in-drops-loopback"), "{error}");
+    assert!(error.contains("expected reject, got accept"), "{error}");
+
+    // Default off: the same file loads exactly as before.
+    load_dir(&rpol_tested_dir("192.0.2.0/24", false)).expect("knob off keeps the old behavior");
+    // A passing unit loads either way.
+    load_dir(&rpol_tested_dir("127.0.0.0/8", true)).expect("passing tests load");
+    load_dir(&rpol_tested_dir("127.0.0.0/8", false)).expect("passing tests load");
 }
 
 #[test]

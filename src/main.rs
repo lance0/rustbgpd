@@ -2884,6 +2884,15 @@ fn main() -> ExitCode {
     }
 
     if check_only {
+        // `--check` matches what the daemon would enforce under
+        // `[policy] require_passing_tests`, without needing the knob. With
+        // the knob set, the load above already ran the tests.
+        if !config.policy.require_passing_tests
+            && let Err(error) = config.policy.verify_rpol_tests()
+        {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
         // Retain the exact staged generation used for credential preflight so
         // expiry warnings describe those bytes without reading the files again.
         let grpc_listeners = match resolve_grpc_listeners(&config) {

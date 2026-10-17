@@ -221,7 +221,13 @@ these are things to look at, not failures. Four conditions are counted today:
    (off) by default; see [Native gRPC certificate expiry](#native-grpc-certificate-expiry).
 
 All are legitimate configurations and none is rejected; none should reach
-production unnoticed. Note that (2) fires on the omission alone, however well
+production unnoticed.
+
+`--check` also runs the in-language `test` blocks of every configured `.rpol`
+unit, whether or not `[policy] require_passing_tests` is set, so the check
+matches what a daemon with that setting enforces. A failing test is a
+rejection, not a warning: the check exits 1 and names the file, each failed
+test, and its expected and actual outcome. Note that (2) fires on the omission alone, however well
 policed the config is — with no expiry window configured, a `--strict` gate
 on an otherwise clean epoch-less config exits 1 for that reason and no other.
 

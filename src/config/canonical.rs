@@ -385,6 +385,7 @@ fn policy_is_default(value: &PolicyConfig) -> bool {
         rpol_files,
         rpol_roots,
         rpol_max_graph_bytes,
+        require_passing_tests,
         rpol: _,
         datasets,
         dataset_bindings: _,
@@ -402,6 +403,7 @@ fn policy_is_default(value: &PolicyConfig) -> bool {
         && rpol_files.is_empty()
         && rpol_roots.is_empty()
         && *rpol_max_graph_bytes == rustbgpd_policy::rpol::DEFAULT_MAX_GRAPH_BYTES
+        && !*require_passing_tests
         && datasets.is_empty()
 }
 

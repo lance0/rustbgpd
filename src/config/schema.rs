@@ -2708,6 +2708,15 @@ pub struct PolicyConfig {
     /// compiles under the reloaded file's own value.
     #[serde(default = "default_rpol_max_graph_bytes")]
     pub rpol_max_graph_bytes: usize,
+    /// Run every loaded `.rpol` unit's in-language `test` blocks at
+    /// config load and refuse the load when any test fails. Default
+    /// off. When set, startup refuses to boot and a SIGHUP reload is
+    /// rejected without runtime effect, naming the file, the test and
+    /// the expected and actual outcome. Read from the incoming config on
+    /// every load, like `rpol_max_graph_bytes`. `rustbgpd --check` runs
+    /// the tests whether or not this is set.
+    #[serde(default)]
+    pub require_passing_tests: bool,
     /// Compiled `.rpol` policy registry (populated at load, not
     /// serialized). `PartialEq` is resolved-content-based across each
     /// unit's whole module graph, so config diffs see an edit to any
@@ -2768,12 +2777,51 @@ impl Default for PolicyConfig {
             rpol_files: Vec::new(),
             rpol_roots: Vec::new(),
             rpol_max_graph_bytes: default_rpol_max_graph_bytes(),
+            require_passing_tests: false,
             rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
             datasets: HashMap::new(),
             dataset_bindings: rustbgpd_policy::datasets::DatasetBindings::default(),
             dataset_events: DatasetLoadEvents::default(),
             external_sources_digest: ExternalSourcesDigest::default(),
         }
+    }
+}
+
+impl PolicyConfig {
+    /// Run the in-language `test` blocks of every loaded `.rpol` unit
+    /// (each unit once, in path order) and fail on the first unit with a
+    /// failing test, naming the file, each failed test, and its expected
+    /// and actual outcome. Tests read only their own fixtures and dataset
+    /// overrides, never live data.
+    pub(crate) fn verify_rpol_tests(&self) -> Result<(), ConfigError> {
+        use std::fmt::Write as _;
+
+        let mut units: Vec<_> = self.rpol.policies.values().collect();
+        units.sort_by(|a, b| a.path.cmp(&b.path));
+        units.dedup_by(|a, b| std::sync::Arc::ptr_eq(&a.file, &b.file));
+        for unit in units {
+            let report = unit.file.run_tests();
+            if report.all_passed() {
+                continue;
+            }
+            let mut reason = format!(
+                "{} of {} in-language tests failed",
+                report.failures.len(),
+                report.total
+            );
+            for failure in &report.failures {
+                let _ = write!(
+                    reason,
+                    "\n  test {} ... FAILED: {}",
+                    failure.name, failure.message
+                );
+            }
+            return Err(ConfigError::InvalidRpolFile {
+                path: unit.path.clone(),
+                reason,
+            });
+        }
+        Ok(())
     }
 }
 
