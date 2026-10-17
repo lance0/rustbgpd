@@ -2634,6 +2634,27 @@ impl RibManager {
                 .is_none_or(|limits| limits.admits_grouped(&route.prefix))
     }
 
+    /// Mark `peer` dirty after a failed per-peer family send. Returns true
+    /// only when the caller should warn: a full writer channel on the
+    /// clean→dirty transition. A peer that stays blocked is restaged by
+    /// every pass; warning each time would flood the log while the dirty
+    /// gauges and the route-drop counter already track the episode.
+    pub(super) fn mark_dirty_after_family_send_failure(
+        &mut self,
+        peer: IpAddr,
+        failure: OutboundCommitFailure,
+    ) -> bool {
+        let newly_dirty = !self.dirty_peers.contains(&peer);
+        let warn = self.mark_outbound_dirty(peer)
+            && newly_dirty
+            && failure == OutboundCommitFailure::WriterUnavailable;
+        #[cfg(test)]
+        if warn {
+            self.per_peer_deferral_warnings += 1;
+        }
+        warn
+    }
+
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,
         peer: IpAddr,
@@ -8976,6 +8997,10 @@ impl RibManager {
                                         self.pending_eor.remove(&peer);
                                     }
                                     if evpn_covered {
+                                        #[cfg(test)]
+                                        {
+                                            self.dirty_resync_commits += 1;
+                                        }
                                         self.dirty_peers.remove(&peer);
                                         self.clear_grouped_member_synced(peer);
                                         self.flush_pending_eor(peer);

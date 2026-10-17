@@ -767,6 +767,8 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
         manager.distribute_evpn_keys_to_peer(full, &keys, &mut || {});
         tracing::callsite::rebuild_interest_cache();
         messages();
+        // The warm-up started a dirty episode; only a clean peer warns.
+        manager.dirty_peers.remove(&full);
 
         // The session closes after the pass's gone-check but before its
         // send, as when it tears down concurrently.
@@ -784,6 +786,95 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
         assert_eq!(messages(), vec![DEFERRED.to_string()]);
         assert!(manager.dirty_peers.contains(&full));
     });
+}
+
+/// A per-peer family send blocked behind a full channel warns once per
+/// dirty episode, not once per pass, while every refused send still counts
+/// as a route drop. The resync after the channel drains ends the episode,
+/// so a later block warns again.
+#[test]
+fn blocked_per_peer_evpn_send_warns_once_per_dirty_episode() {
+    const PASSES: usize = 10;
+    let (_tx, rx) = mpsc::channel(4);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some("192.0.2.254".parse().unwrap()),
+        BgpMetrics::new(),
+    );
+    let peer: IpAddr = "192.0.2.31".parse().unwrap();
+    let (outbound_tx, mut out) = mpsc::channel(1);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: "192.0.2.31".parse().unwrap(),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while out.try_recv().is_ok() {}
+
+    // The announce fills the one-slot channel. Forget it in the
+    // Adj-RIB-Out so every later pass stages it again.
+    let route = make_evpn_imet("192.0.2.10".parse().unwrap(), 100);
+    let key = route.key();
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    let keys = HashSet::from([key]);
+    let forget = |manager: &mut RibManager| {
+        assert!(
+            manager
+                .adj_ribs_out
+                .get_mut(&peer)
+                .unwrap()
+                .remove_evpn(&key)
+        );
+    };
+    forget(&mut manager);
+    assert!(manager.outbound_channel_full(peer));
+    let drops = |manager: &RibManager| {
+        counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[])
+    };
+    let before = drops(&manager);
+
+    for _ in 0..PASSES {
+        manager.distribute_evpn_keys_to_peer(peer, &keys, &mut || {});
+    }
+    assert!(manager.dirty_peers.contains(&peer));
+    assert_eq!(
+        manager.per_peer_deferral_warnings, 1,
+        "a peer that stays blocked warns only on the clean→dirty transition"
+    );
+    #[expect(clippy::cast_precision_loss, reason = "small test pass count")]
+    let passes = PASSES as f64;
+    assert!(
+        (drops(&manager) - before - passes).abs() < f64::EPSILON,
+        "every refused send still counts as a route drop"
+    );
+
+    // The receiver drains; the dirty resync commits and ends the episode.
+    while out.try_recv().is_ok() {}
+    while manager.resync_dirty_peers_bounded() {}
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(manager.dirty_resync_commits, 1);
+
+    // The resync refilled the channel: a new block is a new episode.
+    forget(&mut manager);
+    manager.distribute_evpn_keys_to_peer(peer, &keys, &mut || {});
+    manager.distribute_evpn_keys_to_peer(peer, &keys, &mut || {});
+    assert!(manager.dirty_peers.contains(&peer));
+    assert_eq!(manager.per_peer_deferral_warnings, 2);
 }
 
 /// Regression: when an EVPN update fails to send (outbound channel full),

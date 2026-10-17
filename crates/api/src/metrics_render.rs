@@ -5,23 +5,19 @@ use std::time::Duration;
 
 use prometheus::{Encoder, TextEncoder};
 use rustbgpd_telemetry::BgpMetrics;
-use tokio::sync::Semaphore;
 
 /// Bounds how long one caller waits: for the slot plus the render itself. On
 /// expiry the render keeps running and holds the slot until it finishes. Far
 /// above a normal render, below Prometheus's default 10 s scrape timeout.
 pub const RENDER_DEADLINE: Duration = Duration::from_secs(5);
 
-/// One whole-registry render in flight per process; later callers wait for
-/// the slot instead of each occupying a blocking-pool thread. A daemon has
-/// one registry, so a process-wide slot is also a per-registry slot.
-pub(crate) static RENDER_SLOT: Semaphore = Semaphore::const_new(1);
-
 /// Gather and encode the whole registry as Prometheus text.
 ///
 /// The render scales with peer count (tens of milliseconds and several MiB
 /// at 1000 peers), so it runs on the blocking pool rather than stalling an
-/// async worker and every task queued behind it.
+/// async worker and every task queued behind it. One render per metrics
+/// instance runs at a time ([`BgpMetrics::render_slot`]); later callers wait
+/// for the slot instead of each occupying a blocking-pool thread.
 ///
 /// # Errors
 ///
@@ -31,7 +27,12 @@ pub(crate) static RENDER_SLOT: Semaphore = Semaphore::const_new(1);
 pub async fn render_text(metrics: &BgpMetrics) -> std::io::Result<String> {
     let metrics = metrics.clone();
     let render = async move {
-        let permit = RENDER_SLOT.acquire().await.map_err(std::io::Error::other)?;
+        let permit = metrics
+            .render_slot()
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(std::io::Error::other)?;
         tokio::task::spawn_blocking(move || {
             // The permit moves with the render, so a dropped or timed-out
             // caller does not release the slot while the render still runs.
@@ -132,7 +133,7 @@ mod tests {
         // The expired caller left; its render still owns the slot, so no
         // later render can reach gather until the first one finishes.
         assert!(
-            RENDER_SLOT.try_acquire().is_err(),
+            metrics.render_slot().try_acquire().is_err(),
             "a timed-out render released the render slot while still running"
         );
         let second = tokio::spawn({
@@ -149,6 +150,19 @@ mod tests {
         );
         let text = second.await.unwrap().unwrap();
         assert!(text.contains("test_gated_render 0\n"), "{text}");
+    }
+
+    /// The slot belongs to one metrics instance: a render held on one
+    /// registry must not delay a render of another.
+    #[tokio::test]
+    async fn a_held_render_slot_does_not_block_another_registry() {
+        let held = BgpMetrics::new();
+        let _slot = held.render_slot().acquire().await.unwrap();
+        let other = BgpMetrics::new();
+        tokio::time::timeout(std::time::Duration::from_secs(1), render_text(&other))
+            .await
+            .expect("a render of another registry waited for the held slot")
+            .unwrap();
     }
 
     /// Each render publishes the RIB slice maximum since the previous render.

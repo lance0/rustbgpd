@@ -1039,7 +1039,8 @@ session state through its own signals instead, such as the
   daemon whose PeerManager or RIB has stopped answering. The restart comes
   after the stop: see the grace period below.
 - **`/livez`**. It returns `200 ok` whenever the HTTP listener accepts a
-  connection and checks no actors. It will not restart a deadlocked RIB or
+  connection and checks no actors. The listener has its own thread, so
+  `/livez` keeps answering while the daemon's runtime workers are saturated. It will not restart a deadlocked RIB or
   PeerManager. Choose it only when another mechanism handles a wedged daemon.
 
 Do not point liveness at `/readyz` with the default `failureThreshold: 3`.
