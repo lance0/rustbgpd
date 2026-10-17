@@ -13,8 +13,15 @@ resolved.
 
 - **Reloads can produce transient readiness failures.** The current core probe
   can return `/readyz` 503 during a policy reload, and observed HTTP latency can
-  exceed its shared 200 ms actor deadline. Timing instrumentation supports
-  investigation but does not establish that the underlying delay is fixed.
+  exceed its shared 200 ms actor deadline. The peer manager now answers
+  readiness probes while it waits on the RIB during reload settlement,
+  graceful-restart bursts and full RIB mailboxes, and the probe listener runs
+  on its own thread. `/readyz` still asks the peer manager and the RIB on the
+  daemon runtime, so saturated runtime workers or a RIB busy with a large
+  reload can still return 503 within the deadline.
+  `bgp_readiness_probe_failures_total{reason}` names the failing component.
+  Timing instrumentation supports investigation but does not establish that
+  the underlying delay is fixed.
   The [operator probe contract](operations.md#http-probes) distinguishes
   instantaneous responses from consumer hysteresis. The
   [route-server soak policy](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)

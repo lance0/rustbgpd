@@ -3715,6 +3715,68 @@ rbgp evpn duplicate-mac-quarantines
 rbgp evpn duplicate-mac-quarantines --json
 ```
 
+### Drain or undrain an Ethernet Segment
+
+`SetEthernetSegmentDrain` is the ADR-0084 maintenance control for one
+configured Ethernet Segment. It is an operator-tier mutation; a read-only
+listener returns `PERMISSION_DENIED`.
+
+Request fields:
+
+- `esi` — the Ethernet Segment Identifier as 10 colon-separated hex octets,
+  for example `00:11:22:33:44:55:66:77:88:99`. A malformed ESI returns
+  `INVALID_ARGUMENT`; an ESI with no configured `[[ethernet_segments]]`
+  entry returns `NOT_FOUND`.
+- `drained` — `true` adds the `operator` drain reason, `false` removes it.
+
+Draining withdraws the segment's Type 4 (ES), EAD-per-ES and EAD-per-EVI
+routes, so this PE leaves DF election, and withdraws the local Type 2
+MAC/MAC+IP routes of its member VNIs while suppressing new local-MAC
+origination. Undraining re-originates the ES and EAD routes, re-runs DF
+election and replays the cached local MAC/MAC+IP state.
+
+Drain reasons compose (ADR-0085). This RPC adds or removes only the
+`operator` reason; it never clears a `link` reason held by the segment's
+bound interface. An operator undrain while the bound link is down therefore
+leaves the segment drained, and origination resumes when the attachment
+circuit recovers. An operator drain on a segment that is already
+link-drained records the reason without withdrawing anything new.
+
+Response fields:
+
+- `drained` — the composed state after the request: `true` while any drain
+  reason is held.
+- `changed` — `false` when the `operator` reason already matched the
+  request. Repeating a request is an idempotent no-op.
+- `member_vni_count` — the number of member VNIs whose local Type 2
+  origination the drain governs.
+- `message` — a human-readable summary of the route classes withdrawn or
+  re-originated and of any remaining drain reasons.
+- `reasons` — the drain reasons held after the request, as lowercase
+  strings (`operator`, `link`); empty when the segment is not drained.
+
+Drain state is in memory only. A daemon restart clears it and replays the
+configured state, so re-apply a drain after a restart that happens during
+maintenance. `UNAVAILABLE` means the daemon's Ethernet Segment drain control
+is not running.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"esi": "00:11:22:33:44:55:66:77:88:99", "drained": true}' \
+  localhost:50051 rustbgpd.v1.EvpnService/SetEthernetSegmentDrain
+```
+
+Or via CLI:
+
+```bash
+rbgp evpn es drain 00:11:22:33:44:55:66:77:88:99
+rbgp evpn es undrain 00:11:22:33:44:55:66:77:88:99 --json
+rbgp evpn es list 00:11:22:33:44:55:66:77:88:99   # drain reasons and DF role
+```
+
+See [ADR-0084](../adr/0084-evpn-ethernet-segment-drain.md) and
+[ADR-0085](../adr/0085-evpn-es-interface-binding.md).
+
 ### Apply EVPN runtime candidate
 
 Validates a full candidate rustbgpd TOML document against the committed

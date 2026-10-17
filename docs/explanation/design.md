@@ -93,8 +93,8 @@ enables permission scoping (for example, read-only listeners for monitoring),
 and mirrors internal architecture.
 
 ```protobuf
-// Abridged — proto/rustbgpd.proto is authoritative; NeighborService has
-// 14 RPCs and RibService 24, only representative subsets are shown here.
+// Abridged — proto/rustbgpd.proto is authoritative; for the larger services
+// only representative subsets are shown here.
 
 // Global daemon configuration and identity
 service GlobalService {
@@ -135,10 +135,10 @@ service InjectionService {
 }
 
 // Policy CRUD, chain assignment, and import-policy explain
-service PolicyService { /* 23 RPCs: policies, neighbor sets, chains, explain/rejected views, dry-run/stats, validation posture */ }
+service PolicyService { /* policies, neighbor sets, chains, explain/rejected views, dry-run/stats, validation posture */ }
 
 // Peer group CRUD
-service PeerGroupService { /* 6 RPCs: List/Get/Set/Delete groups, Set/Clear neighbor membership */ }
+service PeerGroupService { /* List/Get/Set/Delete groups, Set/Clear neighbor membership */ }
 
 // Daemon control and health
 service ControlService {
@@ -828,15 +828,15 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | FlowSpec | 8955 | post-v0.3.0 | — | IPv4/IPv6 unicast FlowSpec implemented; speaker-mode hardening continues |
 | Graceful restart (receiving speaker) | 4724 | v0.3.0 | FRR | Stale demotion, per-family EoR, two-phase timer (ADR-0024) |
 | LLGR (two-phase GR timer) | 9494 | post-v0.3.0 | FRR | Implemented; GR-stale → LLGR-stale promotion, configurable stale time |
-| TCP-AO | 5925 | Post-v1 | BIRD | Static and direct dynamic-prefix keyrings; fail-closed accept validation and live API/CLI health; successor install, observation-gated RNext selection/deprecation, and later deprecated unselected-MKT deletion |
+| TCP-AO | 5925 | Shipped (ADR-0062) | BIRD | Static and direct dynamic-prefix keyrings; fail-closed accept validation and live API/CLI health; successor install, observation-gated RNext selection/deprecation, and later deprecated unselected-MKT deletion |
 | BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); reconnect replay + periodic stats + coordinated-shutdown termination |
 | MRT dump export | 6396 | post-v0.3.0 | — | Implemented (ADR-0044); TABLE_DUMP_V2 periodic + on-demand, gzip optional |
 | RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); `RpkiService` provides bounded point validation, ASPA lookup and AS_PATH verification, and read-only configured-cache accepted-epoch inventory, while cache mutation remains deferred |
 
 This matrix is updated with every milestone. "Interop Tested" means validated
 by a documented containerlab or privileged-netns procedure. CI-gated rows are
-called out explicitly; privileged kernel dataplane smokes run locally until a
-privileged runner is available.
+called out explicitly; privileged kernel dataplane smokes run in the hosted
+[kernel dataplane workflow](../how-to/kernel-dataplane-runner.md).
 
 ---
 

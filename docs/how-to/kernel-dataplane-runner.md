@@ -116,6 +116,12 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   against FRR.
 - M110: EVPN Type 5 symmetric Interface-less IRB over an IPv6-only VXLAN
   underlay against FRR (uses `vrf`).
+- M117: EVPN L2 ARP ping across VXLAN through daemon-programmed ingress
+  replication flood rows against FRR 10.7.1.
+- M121: EVPN all-active forwarding against FRR 10.7.1: preference-DF cells, the
+  default-modulo hazard, and the ADR-0140 core-isolation hold, checked against
+  the CE's kernel LACP state.
+- M123: RFC 9785 Don't-Preempt recovery against Nokia SR Linux 25.10.1.
 - Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
   `bfd_runtime`, `dataplane_vlan_fdb`, `peer_sync_local_fdb`,
   `dataplane_remote_mac`, `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,

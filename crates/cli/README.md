@@ -157,6 +157,7 @@ rbgp config confirm deploy-123
 rbgp config abort deploy-123
 rbgp config effective                       # dump running post-defaults config (redacted TOML; -j for JSON; bounded to 384 MiB)
 rbgp config history                         # list retained config-history rows, newest first
+rbgp config last-reload                     # latest SIGHUP outcome, effect receipt and convergence (applied/converging/converged)
 rbgp config rollback <n>                    # roll back to an eligible history row (1 = previous applied config; metadata-only rows for oversized configs are not eligible)
 
 # Translate a BIRD 2/3 / FRR / GoBGP config (local, no daemon; policy is
@@ -305,6 +306,7 @@ rbgp policy conditional-advertisements                  # conditional advertisem
 
 rbgp flowspec
 rbgp flowspec received 192.0.2.1 -a ipv4_flowspec
+rbgp flowspec advertised 192.0.2.1 -a ipv4_flowspec
 rbgp flowspec add -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80" --action drop
 rbgp flowspec delete -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80" [--allow-missing]
 rbgp fib-table list
@@ -328,6 +330,11 @@ the last completed result; a candidate with no completed result reports
 `validation: "pending"`. This command requires a daemon that acknowledges the
 received view and does not fall back to selected routes on older servers.
 Ordinary `rbgp flowspec` and its JSON shape remain the selected-route view.
+
+`rbgp flowspec advertised PEER` shows the committed post-export-policy rules
+toward one destination peer. Each row's `peer_address` is the source peer,
+and export denials omit rows. The command rejects a server that does not
+acknowledge the advertised view rather than show its selected routes.
 
 For large accepted unicast listings, use `rbgp --json-lines rib`,
 `rbgp --json-lines rib received 192.0.2.1`, or
