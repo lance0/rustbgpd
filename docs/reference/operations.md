@@ -1595,6 +1595,14 @@ The telemetry HTTP listener exposes these read-only paths:
 | `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total | `503 not ready: <reason>` |
 | `/dp-readyz` (opt-in alpha) | `200 dataplane workers ready` after each configured FIB/EVPN worker has completed an initial attempt and continues making progress | `404` when disabled; `503` when not configured, starting, unavailable, closed, or stale |
 
+The listener runs on its own thread with a single-threaded runtime, separate
+from the daemon's `worker_threads` runtime. Accepting a connection and reading
+its request line do not wait for the daemon's workers, so `/livez` and
+`/metrics` answer while those workers are saturated. `/readyz` still asks
+PeerManager and the RIB, which run on the daemon runtime: if they cannot be
+scheduled, it returns `503` once the 200 ms deadline passes. The listener costs
+one OS thread, plus a short-lived blocking thread while a scrape renders.
+
 Readiness is actor responsiveness, not routing policy. A daemon with zero
 configured peers, zero Established peers, or zero routes can still be ready.
 Event-history, EVPN, FIB, and peer-count health are surfaced through their own
