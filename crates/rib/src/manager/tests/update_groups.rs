@@ -10104,8 +10104,6 @@ fn source_peer_down_preserves_nested_owner_kind_identity_and_age() {
         }
         assert_eq!(manager.loc_rib.vpn_len(), 2);
         assert_eq!(manager.loc_rib.len(), 0);
-        // Exclude the VPN ingest owners used to build the teardown fixture.
-        manager.replacement_readiness_receipts.clear();
         let (tx, rx) = mpsc::channel(8);
         manager.readiness_rx = Some(rx);
         let response = Arc::new(Mutex::new(

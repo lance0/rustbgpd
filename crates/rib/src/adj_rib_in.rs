@@ -4,7 +4,6 @@
 
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 
-use std::collections::hash_map::Entry;
 use std::net::IpAddr;
 
 // Route-bearing maps use FxHash (rustc-hash) rather than the default SipHash
@@ -34,7 +33,7 @@ use rustbgpd_wire::{
 use smallvec::SmallVec;
 
 use crate::attr_set::AttrSet;
-use crate::fast_hash::{FastMap as HashMap, FastSet as HashSet, FastState};
+use crate::fast_hash::{FastMap as HashMap, FastSet as HashSet, ShardedMap};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -220,14 +219,14 @@ fn for_each_counted<'a, K: 'a, R: RetainedRoute + 'a>(
 /// no caller can change a route's stale flags without the counters seeing it.
 #[derive(Debug)]
 struct StaleTracked<K, V> {
-    map: HashMap<K, V>,
+    map: ShardedMap<K, V>,
     counts: StaleCounters,
 }
 
 impl<K, V> Default for StaleTracked<K, V> {
     fn default() -> Self {
         Self {
-            map: HashMap::default(),
+            map: ShardedMap::default(),
             counts: StaleCounters::default(),
         }
     }
@@ -236,21 +235,14 @@ impl<K, V> Default for StaleTracked<K, V> {
 impl<K: Eq + std::hash::Hash, V: RetainedRoute> StaleTracked<K, V> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            map: HashMap::with_capacity_and_hasher(capacity, FastState::default()),
+            map: ShardedMap::with_capacity(capacity),
             counts: StaleCounters::default(),
         }
     }
 
     fn insert(&mut self, key: K, route: V) -> Option<V> {
         let after = route.retention();
-        // Occupied entries need no insertion headroom when the map is full.
-        let previous = match self.map.entry(key) {
-            Entry::Occupied(mut entry) => Some(entry.insert(route)),
-            Entry::Vacant(entry) => {
-                entry.insert(route);
-                None
-            }
-        };
+        let previous = self.map.insert(key, route);
         self.counts
             .shift(previous.as_ref().and_then(RetainedRoute::retention), after);
         previous
@@ -285,7 +277,7 @@ impl<K: Eq + std::hash::Hash, V: RetainedRoute> StaleTracked<K, V> {
 }
 
 impl<K, V> std::ops::Deref for StaleTracked<K, V> {
-    type Target = HashMap<K, V>;
+    type Target = ShardedMap<K, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.map
@@ -341,7 +333,7 @@ pub struct AdjRibIn {
     /// Secondary index: VPN RD+prefix identity → Add-Path path IDs stored for
     /// it (the SAFI 128 analog of `prefix_index`). `SmallVec<[u32; 1]>`
     /// inlines the non-Add-Path case (`path_id=0`) without heap allocation.
-    vpn_key_index: HashMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
+    vpn_key_index: ShardedMap<rustbgpd_wire::VpnRouteKey, SmallVec<[u32; 1]>>,
     /// Labeled-unicast routes keyed by RFC 8277 prefix + path-id identity.
     /// Deliberately separate from the unicast `routes` map (ADR-0077 §2).
     labeled_routes: StaleTracked<LabeledRibRouteKey, LabeledRibRoute>,
@@ -374,14 +366,14 @@ impl AdjRibIn {
     pub(crate) fn retire_with(mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.routes.release_with(checkpoint);
         self.prefix_index.release_with(checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.flowspec_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.evpn_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.bgpls_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.vpn_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.vpn_key_index, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.labeled_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.flowspec_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.evpn_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.bgpls_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.vpn_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.vpn_key_index, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.labeled_routes.map, checkpoint);
         crate::adj_rib_out::release_hash_map(&mut self.labeled_key_index, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.rtc_routes.map, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.rtc_routes.map, checkpoint);
         retire_local_tags(&mut self.llgr_stale_local_tags, checkpoint);
         retire_local_tags(&mut self.flowspec_llgr_stale_local_tags, checkpoint);
         retire_local_tags(&mut self.evpn_llgr_stale_local_tags, checkpoint);
@@ -418,7 +410,7 @@ impl AdjRibIn {
             evpn_routes: StaleTracked::default(),
             bgpls_routes: StaleTracked::default(),
             vpn_routes: StaleTracked::default(),
-            vpn_key_index: HashMap::default(),
+            vpn_key_index: ShardedMap::default(),
             labeled_routes: StaleTracked::default(),
             labeled_key_index: HashMap::default(),
             rtc_routes: StaleTracked::default(),
@@ -1711,29 +1703,21 @@ impl AdjRibIn {
         self.clear_local_llgr_stale_bgpls_community(&clear_local_llgr);
     }
 
-    /// Whether a known batch could outgrow either VPN index.
-    pub(crate) fn vpn_needs_reserve(&self, additional: usize) -> bool {
-        additional
-            > self
-                .vpn_routes
-                .capacity()
-                .saturating_sub(self.vpn_routes.len())
-            || additional
-                > self
-                    .vpn_key_index
-                    .capacity()
-                    .saturating_sub(self.vpn_key_index.len())
-    }
-
+    /// Per-shard capacities of the VPN route map and its key index.
     #[cfg(test)]
-    pub(crate) fn vpn_capacities(&self) -> (usize, usize) {
-        (self.vpn_routes.capacity(), self.vpn_key_index.capacity())
-    }
-
-    /// Grow both VPN indexes without changing routes or maintained stale counts.
-    pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
-        crate::adj_rib_out::reserve_hash_map(&mut self.vpn_routes.map, additional, checkpoint);
-        crate::adj_rib_out::reserve_hash_map(&mut self.vpn_key_index, additional, checkpoint);
+    pub(crate) fn vpn_shard_capacities(&self) -> [Vec<usize>; 2] {
+        [
+            self.vpn_routes
+                .shards()
+                .iter()
+                .map(HashMap::capacity)
+                .collect(),
+            self.vpn_key_index
+                .shards()
+                .iter()
+                .map(HashMap::capacity)
+                .collect(),
+        ]
     }
 
     /// Insert or replace a VPNv4/VPNv6 route.
@@ -3201,50 +3185,6 @@ mod tests {
         assert!(rib.withdraw_vpn(&key));
         assert_eq!(rib.vpn_len(), 0);
         assert!(!rib.withdraw_vpn(&key));
-    }
-
-    #[test]
-    fn vpn_growth_preserves_stale_counters_and_add_path_index() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let mut rib = AdjRibIn::new(peer);
-        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
-        for path_id in [7, 9, 11] {
-            let mut route = make_vpn_route(nlri.clone(), 1);
-            route.path_id = path_id;
-            route.is_stale = true;
-            route.is_llgr_stale = path_id == 9;
-            rib.insert_vpn(route);
-        }
-        let capacities = (rib.vpn_routes.capacity(), rib.vpn_key_index.capacity());
-        let mut replacement = make_vpn_route(nlri.clone(), 2);
-        replacement.path_id = 7;
-        assert!(rib.insert_vpn(replacement));
-        assert_eq!(
-            (rib.vpn_routes.capacity(), rib.vpn_key_index.capacity()),
-            capacities
-        );
-        let stale = rib.maintained_stale_route_counts();
-        assert!(rib.vpn_needs_reserve(64));
-        let mut checkpoints = 0;
-        rib.reserve_vpn_with(64, &mut || checkpoints += 1);
-        assert!(checkpoints > 2, "entries move through interior checkpoints");
-        assert!(!rib.vpn_needs_reserve(64));
-        assert_eq!(rib.maintained_stale_route_counts(), stale);
-        assert_eq!(
-            rib.maintained_stale_route_counts(),
-            rib.scanned_stale_route_counts()
-        );
-        assert_eq!(rib.iter_vpn_for_nlri(&nlri.key()).count(), 3);
-        for path_id in [7, 9, 11] {
-            let route = rib
-                .get_vpn(&VpnRibRouteKey {
-                    nlri_key: nlri.key(),
-                    path_id,
-                })
-                .unwrap();
-            assert_eq!(route.is_stale, path_id != 7);
-            assert_eq!(route.is_llgr_stale, path_id == 9);
-        }
     }
 
     #[test]

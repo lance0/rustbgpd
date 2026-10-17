@@ -803,14 +803,6 @@ impl RibManager {
         &mut self,
         affected: &HashSet<VpnRibRouteKey>,
     ) {
-        if self.loc_rib.vpn_needs_reserve(affected.len()) && self.replacement_readiness.is_none() {
-            super::super::with_executor_handoff(|| {
-                self.with_replacement_readiness(|manager| {
-                    manager.recompute_and_distribute_vpn(affected);
-                });
-            });
-            return;
-        }
         let readiness = self.replacement_readiness.clone();
         #[cfg(test)]
         let retirement_observer = self.replacement_readiness_test_hook.clone();
@@ -828,20 +820,6 @@ impl RibManager {
             .filter(|key| !self.selection_deferred(key.afi_safi()))
             .map(|key| key.nlri_key)
             .collect();
-        if self.loc_rib.vpn_needs_reserve(affected_nlri.len()) {
-            let additional = affected_nlri
-                .iter()
-                .inspect(|_| checkpoint())
-                .filter(|key| self.loc_rib.get_vpn(key).is_none())
-                .count();
-            self.loc_rib.reserve_vpn_with(additional, &mut || {
-                super::super::replacement_readiness_checkpoint_at(
-                    &readiness,
-                    "selection_vpn_growth",
-                    false,
-                );
-            });
-        }
 
         let mut changed_keys: HashSet<VpnRouteKey> = HashSet::new();
         for key in &affected_nlri {
@@ -1226,30 +1204,19 @@ impl RibManager {
                 &mut || super::super::replacement_readiness_checkpoint(&readiness, false),
             );
 
-            if !vpn_announce.is_empty() || !vpn_withdraw.is_empty() {
-                // Add-Path can stage more routes than the received batch.
-                let growth = rib_out.vpn_needs_reserve(vpn_announce.len());
-                let commit = |manager: &mut Self| {
-                    manager.try_send_and_commit_outbound_update(
-                        peer,
-                        OutboundCommitBatch {
-                            vpn_announce,
-                            vpn_withdraw,
-                            ..OutboundCommitBatch::default()
-                        },
-                    )
-                };
-                let result = if growth && self.replacement_readiness.is_none() {
-                    super::super::with_executor_handoff(|| self.with_replacement_readiness(commit))
-                } else {
-                    commit(self)
-                };
-                if let Err(failure) = result
-                    && self.mark_outbound_dirty(peer)
-                    && failure == super::OutboundCommitFailure::WriterUnavailable
-                {
-                    warn!(%peer, "outbound channel full — VPN update deferred");
-                }
+            if (!vpn_announce.is_empty() || !vpn_withdraw.is_empty())
+                && let Err(failure) = self.try_send_and_commit_outbound_update(
+                    peer,
+                    OutboundCommitBatch {
+                        vpn_announce,
+                        vpn_withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
+                )
+                && self.mark_outbound_dirty(peer)
+                && failure == super::OutboundCommitFailure::WriterUnavailable
+            {
+                warn!(%peer, "outbound channel full — VPN update deferred");
             }
         }
         self.release_speculative_group_admitted_keys(&speculative_group_admitted);
