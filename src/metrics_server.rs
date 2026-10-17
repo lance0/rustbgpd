@@ -672,8 +672,9 @@ pub(crate) mod tests {
     /// Every worker of the daemon runtime is held by a blocking task, the RIB
     /// actor among the tasks that cannot run. `/livez` and `/metrics` must
     /// still answer, and `/readyz` must report the RIB as not ready within its
-    /// deadline instead of hanging. The peer manager answers from its own
-    /// thread so the probe reaches the RIB half.
+    /// deadline instead of hanging: the probe's RIB timeout or the handler's
+    /// guard on the same deadline, whichever fires first. The peer manager
+    /// answers from its own thread so the probe reaches the RIB half.
     #[test]
     fn probes_answer_while_the_daemon_runtime_is_starved() {
         use rustbgpd_api::health_probe::CORE_READINESS_DEADLINE;
@@ -759,6 +760,7 @@ pub(crate) mod tests {
             ("/readyz", probe(addr, "/readyz")),
         ];
         release.wait();
+        let rib_timeout = format!("not ready: {}\n", CoreReadinessError::RibTimedOut);
         for (path, (response, elapsed)) in &starved {
             let response = response
                 .as_ref()
@@ -767,10 +769,9 @@ pub(crate) mod tests {
             if *path == "/readyz" {
                 assert!(
                     response.starts_with("HTTP/1.1 503 Service Unavailable")
-                        && response.ends_with(&format!(
-                            "not ready: {}\n",
-                            CoreReadinessError::RibTimedOut
-                        )),
+                        && (response.ends_with(&rib_timeout)
+                            || response
+                                .ends_with("not ready: readiness probe deadline exceeded\n")),
                     "{response}"
                 );
                 assert!(*elapsed >= CORE_READINESS_DEADLINE, "{elapsed:?}");
