@@ -5119,16 +5119,6 @@ impl RibManager {
 
         {
             let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
-            if rib.vpn_needs_reserve(announced.len()) {
-                let additional = announced
-                    .iter()
-                    .inspect(|_| replacement_readiness_checkpoint(&readiness, false))
-                    .filter(|route| rib.get_vpn(&route.key()).is_none())
-                    .count();
-                rib.reserve_vpn_with(additional, &mut || {
-                    replacement_readiness_checkpoint_at(&readiness, "vpn_ingest_growth", false);
-                });
-            }
             for key in withdrawn {
                 let family = key.afi_safi();
                 if rib.withdraw_vpn(&key) {
@@ -5141,6 +5131,20 @@ impl RibManager {
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
+            }
+
+            // Count after withdrawals: a withdrawn key that is re-announced can
+            // need a fresh slot, because removal may leave a tombstone that
+            // returns no insertion headroom.
+            if rib.vpn_needs_reserve(announced.len()) {
+                let additional = announced
+                    .iter()
+                    .inspect(|_| replacement_readiness_checkpoint(&readiness, false))
+                    .filter(|route| rib.get_vpn(&route.key()).is_none())
+                    .count();
+                rib.reserve_vpn_with(additional, &mut || {
+                    replacement_readiness_checkpoint_at(&readiness, "vpn_ingest_growth", false);
+                });
             }
 
             for mut route in announced {
