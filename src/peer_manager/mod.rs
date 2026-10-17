@@ -105,9 +105,10 @@ impl OperatorReadSeam {
 /// stalled peer surfaces as `stale = true` instead of as a wedged RPC.
 const PEER_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// One absolute retry window shared by every clean-convergence state check in
-/// a settlement-owned policy cohort. A first 100 ms miss may be load rather
-/// than session loss; it is retried at most once inside this fixed window.
+/// One retry allowance shared by every clean-convergence state check in a
+/// settlement-owned policy cohort. A first 100 ms miss may be load rather
+/// than session loss; it is retried at most once, and the retries together
+/// spend at most this much time. Work between state checks is not charged.
 const CLEAN_STATE_QUERY_WINDOW: Duration = Duration::from_secs(2);
 
 /// Hard deadline for any single peer-session policy hot-apply (import or

@@ -6187,6 +6187,38 @@ policy p {
         );
     }
 
+    /// Every lint kind is located at the flagged definition's name, with
+    /// no tests needed, and the coverage pass reports the same list.
+    #[test]
+    fn lints_locate_the_flagged_name_without_tests() {
+        let source = "prefix-set dead-set { 10.0.0.0/8 }
+dataset prefix-set dead-data
+fn dead-fn(x: u32) -> u32 { x }
+policy p { term a { accept } term b { reject } }
+";
+        let file = RpolFile::parse(source).expect("clean rpol");
+        let located: Vec<(&str, &str)> = file
+            .lints()
+            .iter()
+            .map(|lint| (lint.kind.label(), &source[lint.span.range()]))
+            .collect();
+        assert_eq!(
+            located,
+            [
+                ("unused-set", "dead-set"),
+                ("unused-dataset", "dead-data"),
+                ("unused-fn", "dead-fn"),
+                ("unreachable-term", "b"),
+                ("unreferenced-policy", "p"),
+            ]
+        );
+        assert_eq!(file.lints(), file.run_tests_with_coverage().1.lints);
+        for kind in LintKind::ALL {
+            assert_eq!(LintKind::from_label(kind.label()), Some(kind));
+        }
+        assert_eq!(LintKind::from_label("unused"), None);
+    }
+
     /// The unreachable-term lint covers exactly the static cases: a
     /// bare terminal action, an `if`/`else` with both branches
     /// terminal, and a constant guard that folds true (#768 folding).

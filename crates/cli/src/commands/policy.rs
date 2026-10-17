@@ -153,98 +153,107 @@ fn stderr_color() -> bool {
         != " "
 }
 
-/// `rbgp policy check <file.rpol>` — run the `.rpol` frontend
-/// in-process (import resolution, parse, typecheck, in-language
-/// tests); no daemon. `roots` are extra `import` resolution roots
-/// (the file's own directory is always one); `list_deps` prints the
-/// resolved import graph + content hashes instead of running tests.
-/// `coverage` (or either coverage threshold, which implies it)
-/// additionally reports per-term test coverage and static lints.
-/// Only the explicit thresholds affect the exit code.
-///
-/// Returns the process exit code: 0 clean, 1 diagnostics (or an
-/// unreadable file), 2 test failures, 3 coverage below an explicit threshold.
-/// Diagnostics render to stderr, results to stdout.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "thin CLI plumbing mirroring the flag surface; a struct would only relabel it"
-)]
-pub fn check_local(
-    path: &str,
-    roots: &[String],
-    list_deps: bool,
-    coverage: bool,
-    coverage_min: Option<f64>,
-    coverage_matched_min: Option<f64>,
-    max_graph_bytes: Option<usize>,
-    json: bool,
-) -> i32 {
-    check_local_with_writer(
-        path,
-        roots,
-        list_deps,
-        coverage,
-        coverage_min,
-        coverage_matched_min,
-        max_graph_bytes,
-        json,
-        &mut std::io::stdout().lock(),
-    )
+/// Exit code of `rbgp policy check` for compile diagnostics, an
+/// unreadable file, or a failed output write.
+pub const CHECK_EXIT_ERRORS: i32 = 1;
+/// Exit code for a failing test, or no tests under `--fail-on-empty`.
+pub const CHECK_EXIT_TESTS: i32 = 2;
+/// Exit code for coverage below `--coverage-min`/`--coverage-matched-min`.
+pub const CHECK_EXIT_COVERAGE: i32 = 3;
+/// Exit code for a lint selected by `--deny-lints`.
+pub const CHECK_EXIT_LINTS: i32 = 4;
+
+/// The `rbgp policy check` flags.
+#[derive(Debug, Default)]
+pub struct CheckOptions<'a> {
+    /// Extra `import` resolution roots (`--root`).
+    pub roots: &'a [String],
+    /// Print the resolved import graph instead of running tests.
+    pub list_deps: bool,
+    /// Report per-term coverage (`--coverage`).
+    pub coverage: bool,
+    /// `--coverage-min` threshold (implies coverage).
+    pub coverage_min: Option<f64>,
+    /// `--coverage-matched-min` threshold (implies coverage).
+    pub coverage_matched_min: Option<f64>,
+    /// `--max-graph-bytes` import-graph budget.
+    pub max_graph_bytes: Option<usize>,
+    /// Lints that fail the check (`--deny-lints`).
+    pub deny_lints: &'a [rustbgpd_policy::rpol::LintKind],
+    /// Fail when the unit defines no tests (`--fail-on-empty`).
+    pub fail_on_empty: bool,
+    /// Emit the `-j` document.
+    pub json: bool,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "thin CLI plumbing mirroring the flag surface; a struct would only relabel it"
-)]
+/// `rbgp policy check <file.rpol>` — run the `.rpol` frontend
+/// in-process (import resolution, parse, typecheck, in-language
+/// tests, static lints); no daemon. See [`CheckOptions`] for the flags.
+///
+/// Returns the process exit code, in precedence order:
+/// [`CHECK_EXIT_ERRORS`], [`CHECK_EXIT_TESTS`], [`CHECK_EXIT_COVERAGE`],
+/// [`CHECK_EXIT_LINTS`], else 0. Diagnostics render to stderr, results
+/// to stdout.
+pub fn check_local(path: &str, options: &CheckOptions<'_>) -> i32 {
+    check_local_with_writer(path, options, &mut std::io::stdout().lock())
+}
+
 fn check_local_with_writer(
     path: &str,
-    roots: &[String],
-    list_deps: bool,
-    coverage: bool,
-    coverage_min: Option<f64>,
-    coverage_matched_min: Option<f64>,
-    max_graph_bytes: Option<usize>,
-    json: bool,
+    options: &CheckOptions<'_>,
     stdout: &mut dyn std::io::Write,
 ) -> i32 {
     use std::path::PathBuf;
 
     use rustbgpd_policy::rpol::{DEFAULT_MAX_GRAPH_BYTES, LoadError, RpolFile};
 
-    let root_paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+    let root_paths: Vec<PathBuf> = options.roots.iter().map(PathBuf::from).collect();
     // Standalone check has no daemon config to read a budget from —
     // the default matches the daemon's `[policy] rpol_max_graph_bytes`
     // default (override with --max-graph-bytes to mirror a raised
     // daemon budget), so a file that checks clean here loads under a
     // default-budget daemon.
-    let (file, diagnostics) = match RpolFile::load(
+    let (file, diagnostics, mut findings) = match RpolFile::load(
         std::path::Path::new(path),
         &root_paths,
-        max_graph_bytes.unwrap_or(DEFAULT_MAX_GRAPH_BYTES),
+        options.max_graph_bytes.unwrap_or(DEFAULT_MAX_GRAPH_BYTES),
     ) {
-        Ok(file) => (Some(file), Vec::new()),
+        Ok(file) => (Some(file), Vec::new(), Vec::new()),
         Err(LoadError::Io { path, reason }) => {
             eprintln!("Error: cannot read {path}: {reason}");
-            return 1;
+            return CHECK_EXIT_ERRORS;
         }
-        Err(error @ LoadError::Compile { .. }) => {
-            if !json {
-                eprint!("{}", error.render(stderr_color()));
+        Err(LoadError::Compile {
+            sources,
+            diagnostics,
+        }) => {
+            if !options.json {
+                eprint!("{}", diagnostics.render_sources(&sources, stderr_color()));
             }
-            let messages = error
-                .diagnostics()
-                .map(|diags| diags.0.iter().map(|d| d.message.clone()).collect())
-                .unwrap_or_default();
-            (None, messages)
+            let sources: Vec<SourceLines<'_>> = sources
+                .iter()
+                .map(|(name, text)| SourceLines::new(name, text))
+                .collect();
+            let messages = diagnostics.0.iter().map(|d| d.message.clone()).collect();
+            let findings = diagnostics
+                .0
+                .iter()
+                .map(|d| JsonFinding::compile_error(d, &sources))
+                .collect();
+            (None, messages, findings)
         }
     };
 
     // --list-deps on a broken graph falls through to the compile
     // diagnostics below (exit 1).
-    if list_deps && let Some(file) = &file {
-        return print_deps(path, file, json, stdout);
+    if options.list_deps
+        && let Some(file) = &file
+    {
+        return print_deps(path, file, options.json, stdout);
     }
-    let want_coverage = coverage || coverage_min.is_some() || coverage_matched_min.is_some();
+    let want_coverage = options.coverage
+        || options.coverage_min.is_some()
+        || options.coverage_matched_min.is_some();
     let (tests, cov) = match &file {
         Some(file) if want_coverage => {
             let (tests, cov) = file.run_tests_with_coverage();
@@ -253,18 +262,47 @@ fn check_local_with_writer(
         Some(file) => (Some(file.run_tests()), None),
         None => (None, None),
     };
+    let mut denied = Vec::new();
+    if let Some(file) = &file {
+        let sources: Vec<SourceLines<'_>> = file
+            .modules()
+            .iter()
+            .map(|m| SourceLines::new(&m.path, &m.text))
+            .collect();
+        for lint in file.lints() {
+            // Text output shows only denied lints; skip locating the rest.
+            if !options.json && !options.deny_lints.contains(&lint.kind) {
+                continue;
+            }
+            let finding = JsonFinding::lint(&lint, options.deny_lints, &sources);
+            if finding.severity == "error" {
+                denied.push(format!(
+                    "{}:{}:{}: error[{}]: {}",
+                    finding.at.file,
+                    finding.at.line,
+                    finding.at.column,
+                    finding.code,
+                    finding.message
+                ));
+            }
+            findings.push(finding);
+        }
+    }
+    let empty_suite = options.fail_on_empty && tests.as_ref().is_some_and(|t| t.total == 0);
 
-    if json {
+    if options.json {
         if let Err(error) = print_check_json(
             path,
             &diagnostics,
+            &findings,
             tests.as_ref(),
+            empty_suite,
             cov.as_ref(),
             file.as_ref(),
             stdout,
         ) {
             output::report_write_error("policy JSON output", &error);
-            return 1;
+            return CHECK_EXIT_ERRORS;
         }
     } else if !diagnostics.is_empty() {
         // Rendered excerpts already went to stderr above.
@@ -276,7 +314,9 @@ fn check_local_with_writer(
     } else {
         let result = (|| -> Result<(), CliError> {
             if let Some(tests) = &tests {
-                if tests.total == 0 {
+                if empty_suite {
+                    eprintln!("{path}: no tests (--fail-on-empty)");
+                } else if tests.total == 0 {
                     writeln!(stdout, "{path}: ok (no tests)")?;
                 } else {
                     for failure in &tests.failures {
@@ -297,35 +337,194 @@ fn check_local_with_writer(
             Ok(())
         })();
         if report_policy_write_result(result) != 0 {
-            return 1;
+            return CHECK_EXIT_ERRORS;
+        }
+        for line in &denied {
+            eprintln!("{line}");
         }
     }
 
     if !diagnostics.is_empty() {
-        return 1;
+        return CHECK_EXIT_ERRORS;
     }
-    if tests.as_ref().is_some_and(|tests| !tests.all_passed()) {
-        return 2;
+    if empty_suite || tests.as_ref().is_some_and(|tests| !tests.all_passed()) {
+        return CHECK_EXIT_TESTS;
     }
-    if let (Some(min), Some(cov)) = (coverage_min, &cov)
+    if let (Some(min), Some(cov)) = (options.coverage_min, &cov)
         && cov.percent() < min
     {
         eprintln!(
             "{path}: coverage {:.1}% is below --coverage-min {min}%",
             cov.percent()
         );
-        return 3;
+        return CHECK_EXIT_COVERAGE;
     }
-    if let (Some(min), Some(cov)) = (coverage_matched_min, &cov)
+    if let (Some(min), Some(cov)) = (options.coverage_matched_min, &cov)
         && cov.matched_percent() < min
     {
         eprintln!(
             "{path}: matched coverage {:.1}% is below --coverage-matched-min {min}%",
             cov.matched_percent()
         );
-        return 3;
+        return CHECK_EXIT_COVERAGE;
+    }
+    if !denied.is_empty() {
+        eprintln!(
+            "{path}: {} lint{} denied by --deny-lints",
+            denied.len(),
+            if denied.len() == 1 { "" } else { "s" }
+        );
+        return CHECK_EXIT_LINTS;
     }
     0
+}
+
+/// A source position of a `-j` finding: 1-based line and column
+/// (columns count Unicode scalar values); the end is exclusive.
+#[derive(Debug, Serialize)]
+struct JsonLocation {
+    file: String,
+    line: usize,
+    column: usize,
+    end_line: usize,
+    end_column: usize,
+}
+
+/// One module's display path and text, with its line starts indexed
+/// once so locating each finding costs a binary search plus a scan of
+/// its own line, not a scan from the start of the file.
+struct SourceLines<'a> {
+    name: &'a str,
+    text: &'a str,
+    /// Byte offset of every line start; the first is 0.
+    line_starts: Vec<usize>,
+}
+
+impl<'a> SourceLines<'a> {
+    fn new(name: &'a str, text: &'a str) -> Self {
+        let line_starts = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
+            .collect();
+        Self {
+            name,
+            text,
+            line_starts,
+        }
+    }
+
+    /// 1-based line and character column of byte `offset`, clamped to
+    /// the text and to a character boundary.
+    fn line_col(&self, offset: usize) -> (usize, usize) {
+        let offset = self.text.floor_char_boundary(offset);
+        // `line_starts[0] == 0`, so at least one start is <= offset.
+        let line = self.line_starts.partition_point(|&start| start <= offset);
+        let column = self.text[self.line_starts[line - 1]..offset]
+            .chars()
+            .count()
+            + 1;
+        (line, column)
+    }
+}
+
+impl JsonLocation {
+    /// Locate `span` in `sources` (one entry per module index), falling
+    /// back to the main file like the text renderer.
+    fn new(sources: &[SourceLines<'_>], span: rustbgpd_policy::rpol::Span) -> Self {
+        let Some(source) = sources.get(span.file as usize).or_else(|| sources.first()) else {
+            return Self {
+                file: String::new(),
+                line: 1,
+                column: 1,
+                end_line: 1,
+                end_column: 1,
+            };
+        };
+        let (line, column) = source.line_col(span.start);
+        let (end_line, end_column) = source.line_col(span.end);
+        Self {
+            file: source.name.to_string(),
+            line,
+            column,
+            end_line,
+            end_column,
+        }
+    }
+}
+
+/// A secondary labelled location of a compile error.
+#[derive(Debug, Serialize)]
+struct JsonRelated {
+    #[serde(flatten)]
+    at: JsonLocation,
+    label: String,
+}
+
+/// One `-j` finding: a compile error or a static lint.
+#[derive(Debug, Serialize)]
+struct JsonFinding {
+    /// `error` (fails the check) or `warning`.
+    severity: &'static str,
+    /// `compile-error` or the lint's stable name.
+    code: &'static str,
+    message: String,
+    #[serde(flatten)]
+    at: JsonLocation,
+    label: Option<String>,
+    notes: Vec<String>,
+    related: Vec<JsonRelated>,
+}
+
+impl JsonFinding {
+    fn compile_error(
+        diagnostic: &rustbgpd_policy::rpol::Diagnostic,
+        sources: &[SourceLines<'_>],
+    ) -> Self {
+        use rustbgpd_policy::rpol::Span;
+
+        let (span, label) = diagnostic
+            .labels
+            .first()
+            .map_or((Span::new(0..0), None), |(span, label)| {
+                (*span, Some(label.clone()))
+            });
+        Self {
+            severity: "error",
+            code: "compile-error",
+            message: diagnostic.message.clone(),
+            at: JsonLocation::new(sources, span),
+            label,
+            notes: diagnostic.notes.clone(),
+            related: diagnostic
+                .labels
+                .iter()
+                .skip(1)
+                .map(|(span, label)| JsonRelated {
+                    at: JsonLocation::new(sources, *span),
+                    label: label.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn lint(
+        lint: &rustbgpd_policy::rpol::Lint,
+        deny: &[rustbgpd_policy::rpol::LintKind],
+        sources: &[SourceLines<'_>],
+    ) -> Self {
+        Self {
+            severity: if deny.contains(&lint.kind) {
+                "error"
+            } else {
+                "warning"
+            },
+            code: lint.kind.label(),
+            message: lint.message.clone(),
+            at: JsonLocation::new(sources, lint.span),
+            label: None,
+            notes: Vec::new(),
+            related: Vec::new(),
+        }
+    }
 }
 
 /// The `--coverage` text report (stdout): the exercised-term headline,
@@ -402,12 +601,19 @@ fn write_coverage_text(
     Ok(())
 }
 
-/// The `-j` form of `rbgp policy check` output (stable keys; the
-/// `coverage` object appears only under `--coverage` or either coverage threshold).
+/// The `-j` form of `rbgp policy check` output, the
+/// `rbgp-policy-check/1.0` document (stable keys; the `coverage` object
+/// appears only under `--coverage` or either coverage threshold).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per document section; a struct would only relabel it"
+)]
 fn print_check_json(
     path: &str,
     diagnostics: &[String],
+    findings: &[JsonFinding],
     tests: Option<&rustbgpd_policy::rpol::TestReport>,
+    empty_suite: bool,
     cov: Option<&rustbgpd_policy::rpol::CoverageReport>,
     file: Option<&rustbgpd_policy::rpol::RpolFile>,
     stdout: &mut dyn std::io::Write,
@@ -448,9 +654,12 @@ fn print_check_json(
     }
     #[derive(Serialize)]
     struct JsonCheck<'a> {
+        format: &'static str,
+        format_version: &'static str,
         file: &'a str,
         ok: bool,
         diagnostics: &'a [String],
+        findings: &'a [JsonFinding],
         tests_total: usize,
         tests_passed: usize,
         failures: Vec<JsonFailure<'a>>,
@@ -490,16 +699,20 @@ fn print_check_json(
             .iter()
             .map(|lint| JsonLint {
                 kind: lint.kind.label(),
-                file: module_path(lint.file),
+                file: module_path(lint.span.file),
                 message: &lint.message,
             })
             .collect(),
     });
     let out = JsonCheck {
+        format: "rbgp-policy-check",
+        format_version: "1.0",
         file: path,
         ok: diagnostics.is_empty()
+            && !empty_suite
             && tests.is_none_or(rustbgpd_policy::rpol::TestReport::all_passed),
         diagnostics,
+        findings,
         tests_total: tests.map_or(0, |t| t.total),
         tests_passed: tests.map_or(0, rustbgpd_policy::rpol::TestReport::passed),
         failures: tests.map_or_else(Vec::new, |t| {
@@ -2810,6 +3023,68 @@ mod tests {
         assert!(matches!(err, CliError::Argument(_)), "{err:?}");
     }
 
+    /// Lines and columns are 1-based, columns count characters (not
+    /// bytes), the end is exclusive, and a span in another module is
+    /// located in that module's text.
+    #[test]
+    fn json_location_counts_lines_and_unicode_columns() {
+        use rustbgpd_policy::rpol::Span;
+
+        let lib = "# caf\u{e9}\n# \u{e9}\u{e9} x\n";
+        let sources = [
+            SourceLines::new("main.rpol", "policy p {}\n"),
+            SourceLines::new("lib.rpol", lib),
+        ];
+        let offset = lib.find('x').unwrap();
+        let at = JsonLocation::new(&sources, Span::in_file(offset..offset + 1, 1));
+        assert_eq!(
+            (
+                at.file.as_str(),
+                at.line,
+                at.column,
+                at.end_line,
+                at.end_column
+            ),
+            ("lib.rpol", 2, 6, 2, 7)
+        );
+        let at = JsonLocation::new(&sources, Span::new(7..12));
+        assert_eq!(
+            (at.line, at.column, at.end_line, at.end_column),
+            (1, 8, 2, 1)
+        );
+    }
+
+    /// The line index agrees with a scan from the start of the text at
+    /// every byte offset, including inside multi-byte characters, on a
+    /// last line without a trailing newline, and past the end.
+    #[test]
+    fn source_lines_match_a_full_scan_at_every_offset() {
+        fn scan(text: &str, offset: usize) -> (usize, usize) {
+            let before = &text[..text.floor_char_boundary(offset)];
+            let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+            (
+                before.matches('\n').count() + 1,
+                before[line_start..].chars().count() + 1,
+            )
+        }
+        let tail = "a\n\n\u{e9}\u{1f600}x";
+        for text in ["", "\n", "x", tail, "\u{e9}\n\u{e9}\n", "p {}\r\nq\n"] {
+            let lines = SourceLines::new("f", text);
+            for offset in 0..=text.len() + 2 {
+                assert_eq!(
+                    lines.line_col(offset),
+                    scan(text, offset),
+                    "{text:?} @ {offset}"
+                );
+            }
+        }
+        let lines = SourceLines::new("f", tail);
+        let x = tail.find('x').unwrap();
+        assert_eq!(lines.line_col(x), (3, 3));
+        assert_eq!(lines.line_col(tail.len()), (3, 4));
+        assert_eq!(lines.line_col(x - 1), (3, 2), "inside the emoji");
+    }
+
     #[test]
     fn check_local_clean_file_exits_zero() {
         let tmp = write_rpol(
@@ -2820,28 +3095,16 @@ mod tests {
              }",
         );
         assert_eq!(
-            check_local(
-                tmp.path().to_str().unwrap(),
-                &[],
-                false,
-                false,
-                None,
-                None,
-                None,
-                false
-            ),
+            check_local(tmp.path().to_str().unwrap(), &CheckOptions::default()),
             0
         );
         assert_eq!(
             check_local(
                 tmp.path().to_str().unwrap(),
-                &[],
-                false,
-                false,
-                None,
-                None,
-                None,
-                true
+                &CheckOptions {
+                    json: true,
+                    ..CheckOptions::default()
+                }
             ),
             0
         );
@@ -2917,14 +3180,11 @@ mod tests {
         assert_eq!(
             check_local_with_writer(
                 tmp.path().to_str().unwrap(),
-                &[],
-                false,
-                false,
-                None,
-                None,
-                None,
-                true,
-                &mut BrokenWriter,
+                &CheckOptions {
+                    json: true,
+                    ..CheckOptions::default()
+                },
+                &mut BrokenWriter
             ),
             1
         );
@@ -2941,13 +3201,11 @@ mod tests {
             assert_eq!(
                 check_local_with_writer(
                     path,
-                    &[],
-                    list_deps,
-                    coverage,
-                    None,
-                    None,
-                    None,
-                    false,
+                    &CheckOptions {
+                        list_deps,
+                        coverage,
+                        ..CheckOptions::default()
+                    },
                     &mut BrokenWriter
                 ),
                 1
@@ -2961,13 +3219,11 @@ mod tests {
             assert_eq!(
                 check_local_with_writer(
                     path,
-                    &[],
-                    list_deps,
-                    coverage,
-                    None,
-                    None,
-                    None,
-                    false,
+                    &CheckOptions {
+                        list_deps,
+                        coverage,
+                        ..CheckOptions::default()
+                    },
                     &mut flush
                 ),
                 1
@@ -2975,7 +3231,14 @@ mod tests {
         }
         let mut bytes = Vec::new();
         assert_eq!(
-            check_local_with_writer(path, &[], false, true, None, None, None, false, &mut bytes),
+            check_local_with_writer(
+                path,
+                &CheckOptions {
+                    coverage: true,
+                    ..CheckOptions::default()
+                },
+                &mut bytes
+            ),
             0
         );
         assert_eq!(
@@ -2990,30 +3253,12 @@ mod tests {
     fn check_local_diagnostics_exit_one() {
         let tmp = write_rpol("policy p { term t { if route.zzz == 1 { accept } } }");
         assert_eq!(
-            check_local(
-                tmp.path().to_str().unwrap(),
-                &[],
-                false,
-                false,
-                None,
-                None,
-                None,
-                false
-            ),
+            check_local(tmp.path().to_str().unwrap(), &CheckOptions::default()),
             1
         );
         // Unreadable file is also exit 1.
         assert_eq!(
-            check_local(
-                "/nonexistent/nope.rpol",
-                &[],
-                false,
-                false,
-                None,
-                None,
-                None,
-                false
-            ),
+            check_local("/nonexistent/nope.rpol", &CheckOptions::default()),
             1
         );
     }
@@ -3045,44 +3290,50 @@ mod tests {
         let main = main.to_str().unwrap();
         let root = lib.path().to_str().unwrap().to_string();
         // Without the root the import cannot resolve.
-        assert_eq!(
-            check_local(main, &[], false, false, None, None, None, false),
-            1
-        );
+        assert_eq!(check_local(main, &CheckOptions::default()), 1);
         // With it: clean check (the cross-module test runs) and deps.
         assert_eq!(
             check_local(
                 main,
-                std::slice::from_ref(&root),
-                false,
-                false,
-                None,
-                None,
-                None,
-                false
+                &CheckOptions {
+                    roots: std::slice::from_ref(&root),
+                    ..CheckOptions::default()
+                }
             ),
             0
         );
         assert_eq!(
             check_local(
                 main,
-                std::slice::from_ref(&root),
-                true,
-                false,
-                None,
-                None,
-                None,
-                false
+                &CheckOptions {
+                    roots: std::slice::from_ref(&root),
+                    list_deps: true,
+                    ..CheckOptions::default()
+                }
             ),
             0
         );
         assert_eq!(
-            check_local(main, &[root], true, false, None, None, None, true),
+            check_local(
+                main,
+                &CheckOptions {
+                    roots: &[root],
+                    list_deps: true,
+                    json: true,
+                    ..CheckOptions::default()
+                }
+            ),
             0
         );
         // --list-deps on a broken graph still exits 1.
         assert_eq!(
-            check_local(main, &[], true, false, None, None, None, false),
+            check_local(
+                main,
+                &CheckOptions {
+                    list_deps: true,
+                    ..CheckOptions::default()
+                }
+            ),
             1
         );
     }
@@ -3097,16 +3348,7 @@ mod tests {
              }",
         );
         assert_eq!(
-            check_local(
-                tmp.path().to_str().unwrap(),
-                &[],
-                false,
-                false,
-                None,
-                None,
-                None,
-                false
-            ),
+            check_local(tmp.path().to_str().unwrap(), &CheckOptions::default()),
             2
         );
     }
@@ -3127,19 +3369,45 @@ mod tests {
         );
         let path = tmp.path().to_str().unwrap();
         assert_eq!(
-            check_local(path, &[], false, true, None, None, None, false),
+            check_local(
+                path,
+                &CheckOptions {
+                    coverage: true,
+                    ..CheckOptions::default()
+                }
+            ),
             0
         );
         assert_eq!(
-            check_local(path, &[], false, true, None, None, None, true),
+            check_local(
+                path,
+                &CheckOptions {
+                    coverage: true,
+                    json: true,
+                    ..CheckOptions::default()
+                }
+            ),
             0
         );
         assert_eq!(
-            check_local(path, &[], false, false, Some(100.0), None, None, false),
+            check_local(
+                path,
+                &CheckOptions {
+                    coverage_min: Some(100.0),
+                    ..CheckOptions::default()
+                }
+            ),
             3
         );
         assert_eq!(
-            check_local(path, &[], false, true, Some(50.0), None, None, false),
+            check_local(
+                path,
+                &CheckOptions {
+                    coverage: true,
+                    coverage_min: Some(50.0),
+                    ..CheckOptions::default()
+                }
+            ),
             0
         );
         // A failing test wins over the coverage threshold.
@@ -3152,7 +3420,13 @@ mod tests {
         );
         let failing = failing.path().to_str().unwrap();
         assert_eq!(
-            check_local(failing, &[], false, false, Some(100.0), None, None, false),
+            check_local(
+                failing,
+                &CheckOptions {
+                    coverage_min: Some(100.0),
+                    ..CheckOptions::default()
+                }
+            ),
             2
         );
     }
@@ -3993,10 +4267,7 @@ mod tests {
             "another writer's stage"
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
-        assert_eq!(
-            check_local(&files[0], &[], false, false, None, None, None, false),
-            0
-        );
+        assert_eq!(check_local(&files[0], &CheckOptions::default()), 0);
     }
 
     #[test]

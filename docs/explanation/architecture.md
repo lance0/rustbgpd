@@ -293,8 +293,10 @@ of taking its default process action. The ordering is a contract, asserted by
    configured-peer roster is installed, and the import roster published once,
    before inbound BGP can be admitted.
 7. It activates BGP ingress by starting the accept loop and its PeerManager
-   forwarder, then starts the optional metrics/readiness server. A configured-
-   peer failure suppresses both activations and enters coordinated teardown.
+   forwarder, then starts the optional metrics/readiness server on its own
+   thread and single-threaded runtime, which it stops last in coordinated
+   teardown. A configured-peer failure suppresses both activations and enters
+   coordinated teardown.
 8. It constructs the gNMI dial-out manager and applies the configured targets
    after metrics/readiness activation. An initial configured-peer failure also
    suppresses this dial-out activation.

@@ -196,7 +196,7 @@ Required. Defines the local BGP speaker identity.
 | `listen_addresses`  | array of IP strings | no | -- | Exact local BGP endpoints and active-open source addresses. Omission preserves the tolerant dual-wildcard listener. When present, the list must be nonempty with at most one address per family; every listed address must be a usable unicast endpoint (unspecified, multicast, IPv4 broadcast, IPv4-mapped IPv6, and IPv6 link-local are rejected); every configured peer and dynamic range must use a listed family; and every bind is atomic. Scoped IPv6 link-local `[[neighbors]]` and `[[dynamic_neighbors]]` entries are not supported alongside an explicit list — keep those deployments on the default dual-wildcard listener. **Restart-required.** |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (must be > 0) |
 | `max_as_path_length` | u16 | no       | `750`                | Maximum number of AS numbers accepted in a received `AS_PATH`, counted across every segment with prepends and `AS_SET` members included. A longer path carrying reachable NLRI is handled as RFC 7606 treat-as-withdraw (subcode 11): its routes are withdrawn, the session stays Established, and `bgp_update_malformed_total{disposition="treat_as_withdraw"}` increments. Without reachable NLRI, RFC 7606 section 5.2 requires a session reset. `0` disables the ceiling. Distinct from the `as_path_length` policy match, which filters without withdrawing. **Restart-required.** |
-| `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
+| `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. The `prometheus_addr` HTTP listener runs on its own thread outside this runtime and is not counted. **Restart-required** (runtime built once at startup). |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB and BLACKHOLE ownership receipts, and gRPC socket) |
 | `warm_cache_checkpoint_on_shutdown` | bool | no | `false`             | Publish a bounded daemon-private routing checkpoint during coordinated shutdown. **Restart-required.** Publication only; startup does not restore routes. |
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
@@ -3195,6 +3195,16 @@ rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
   prefix lists renders to ~65 MB) load with headroom, while still
   stopping unbounded or recursively generated graphs at load time. A
   unit over the budget is a config load error naming the file.
+- **Test gate (`require_passing_tests`, default `false`):** when `true`,
+  every load runs the in-language `test` blocks of each loaded unit
+  (each unit that defines a policy) after compiling it. A failing test,
+  including an unexpected evaluation error, is a config load error naming
+  the file, each failed test, and its expected and actual outcome: the
+  daemon refuses to start, and a SIGHUP reload is rejected without runtime
+  effect, keeping the running policy. Tests read only their own fixtures and
+  `dataset` overrides, never live data. Read from the incoming config on
+  every load, like `rpol_max_graph_bytes`. `rustbgpd --check` runs the tests
+  whether or not this is set.
 - **One namespace:** `.rpol` policies and `[policy.definitions]` TOML
   policies share the named-policy namespace. A name defined by both —
   or by two `.rpol` files — is a load error naming both sources.

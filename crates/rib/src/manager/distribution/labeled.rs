@@ -905,8 +905,7 @@ impl RibManager {
                         ..OutboundCommitBatch::default()
                     },
                 )
-                && self.mark_outbound_dirty(peer)
-                && failure == super::OutboundCommitFailure::WriterUnavailable
+                && self.mark_dirty_after_family_send_failure(peer, failure)
             {
                 warn!(%peer, "outbound channel full — labeled update deferred");
             }

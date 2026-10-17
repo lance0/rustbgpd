@@ -217,7 +217,7 @@ Reload-applied changes:
     + 192.0.2.33 (AS 4242)
 
   Policy:
-    ~ rpol_files / rpol_roots / rpol_max_graph_bytes / .rpol graph
+    ~ rpol_files / rpol_roots / rpol_max_graph_bytes / require_passing_tests / .rpol graph
     ~ policy dataset bindings / paths
 
 SIGHUP reload route: generation (one owned runtime generation; a late failure restores the prior generation)

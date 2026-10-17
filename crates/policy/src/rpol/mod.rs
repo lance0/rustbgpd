@@ -226,6 +226,15 @@ impl RpolFile {
         (report, accum.finish(&self.file))
     }
 
+    /// The static lints of the compilation unit (unused sets, datasets
+    /// and fns, unreachable terms, unreferenced policies), each located
+    /// at the flagged definition's name. Needs no tests; the same list
+    /// [`Self::run_tests_with_coverage`] reports.
+    #[must_use]
+    pub fn lints(&self) -> Vec<Lint> {
+        coverage::lints(&self.file)
+    }
+
     /// `(name, kind)` for every `dataset` declared in the compilation
     /// unit (main file plus imports), in source order. The daemon
     /// config validates these against `[policy.datasets]` bindings at

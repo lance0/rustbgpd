@@ -2884,6 +2884,15 @@ fn main() -> ExitCode {
     }
 
     if check_only {
+        // `--check` matches what the daemon would enforce under
+        // `[policy] require_passing_tests`, without needing the knob. With
+        // the knob set, the load above already ran the tests.
+        if !config.policy.require_passing_tests
+            && let Err(error) = config.policy.verify_rpol_tests()
+        {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
         // Retain the exact staged generation used for credential preflight so
         // expiry warnings describe those bytes without reading the files again.
         let grpc_listeners = match resolve_grpc_listeners(&config) {
@@ -6423,7 +6432,7 @@ async fn run<T>(
     .with_rib_readiness(rib_readiness_tx.clone());
     // Supervised like the other listeners: `serve_metrics` returns only when
     // its accept loop ends (an unusable socket), so any exit is a failure.
-    // With no configured listener the task never completes.
+    // With no configured listener its supervision arm never completes.
     let metrics_listener = metrics_listener.filter(|_| !initial_peer_boot_failed);
     let metrics_clone = metrics.clone();
     let readiness_probe = core_probe.clone().with_gate(daemon_gate.clone());
@@ -6462,20 +6471,29 @@ async fn run<T>(
         }
         workers
     });
+    // Served from its own thread and runtime so saturated daemon workers
+    // cannot delay `/livez` or `/metrics`; `/readyz` still asks the actors on
+    // this runtime. Dropped after the coordinated teardown below.
+    let (metrics_server, metrics_exited) = metrics_listener
+        .map(|metrics_listener| {
+            if test_metrics_listener_unusable {
+                metrics_listener.shut_down_for_test();
+            }
+            metrics_server::MetricsServerThread::spawn(
+                metrics_listener,
+                metrics_clone,
+                readiness_probe,
+                dataplane_probe,
+            )
+        })
+        .unzip();
     let mut metrics_handle = tokio::spawn(async move {
-        let Some(metrics_listener) = metrics_listener else {
+        let Some(exited) = metrics_exited else {
             return std::future::pending().await;
         };
-        if test_metrics_listener_unusable {
-            metrics_listener.shut_down_for_test();
-        }
-        metrics_server::serve_metrics(
-            metrics_listener,
-            metrics_clone,
-            readiness_probe,
-            dataplane_probe,
-        )
-        .await;
+        exited
+            .await
+            .unwrap_or_else(|_| Err("metrics/readiness thread did not start".to_string()))
     });
     let runtime_probe = runtime_probe::RuntimeProbe::spawn(&metrics);
 
@@ -7416,6 +7434,9 @@ async fn run<T>(
     }
 
     runtime_probe.shutdown(&stop_waiting).await;
+    // Last to stop, as when it shared the daemon runtime: probes keep getting
+    // `503 not ready: daemon is shutting down` through the whole teardown.
+    drop(metrics_server);
     info!("rustbgpd exiting");
     component_failed
 }
@@ -8149,7 +8170,7 @@ mod tests {
             "bfd_runtime::spawn_prepared_with_reload(",
             "let mut bgp_forwarder_handle = tokio::spawn(async move {",
             "let mut bgp_listener_handle = tokio::spawn(async move {",
-            "metrics_server::serve_metrics(",
+            "metrics_server::MetricsServerThread::spawn(",
         ] {
             let position = production
                 .find(activation)
@@ -8173,7 +8194,9 @@ mod tests {
             production
                 .find("// Activate BGP ingress only after the complete configured-peer roster is")
                 .unwrap()
-                < production.find("metrics_server::serve_metrics(").unwrap()
+                < production
+                    .find("metrics_server::MetricsServerThread::spawn(")
+                    .unwrap()
         );
 
         let after_boundary = &production[boundary..];

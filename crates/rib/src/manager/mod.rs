@@ -533,6 +533,17 @@ struct VpnLabeledStagingContext<'a> {
 #[cfg(test)]
 type PrimaryUpdateHook = Arc<dyn Fn(&RibUpdate) + Send + Sync>;
 
+/// The full pass an unbounded dataset re-evaluation takes under the test and
+/// benchmark hooks.
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullPassPath {
+    /// Once per update group where the targets allow it (production).
+    Group,
+    /// Always the per-member full resync.
+    Member,
+}
+
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
@@ -1086,6 +1097,11 @@ pub struct RibManager {
     /// grouped run.
     #[cfg(test)]
     test_force_ungrouped: bool,
+    /// Differential-oracle and benchmark hook: which full pass an unbounded
+    /// dataset re-evaluation takes, so the group-level pass can be compared
+    /// against the per-member resync.
+    #[cfg(any(test, feature = "bench-internals"))]
+    full_pass_path: FullPassPath,
     /// Full group-table control-tag scans run by deferred-registration
     /// cohort admission (LAN-1826): the per-turn work bound.
     #[cfg(test)]
@@ -1096,6 +1112,12 @@ pub struct RibManager {
     vpn_group_member_emits: usize,
     #[cfg(test)]
     vpn_member_deferral_warnings: usize,
+    /// Per-peer family "outbound channel full" warnings, and dirty peers
+    /// whose resync committed ("outbound routes resynced").
+    #[cfg(test)]
+    per_peer_deferral_warnings: usize,
+    #[cfg(test)]
+    dirty_resync_commits: usize,
     #[cfg(test)]
     test_force_exact_export_slow_path: bool,
     #[cfg(test)]
@@ -2314,12 +2336,18 @@ impl RibManager {
             evpn_marker_cursor: None,
             #[cfg(test)]
             test_force_ungrouped: false,
+            #[cfg(any(test, feature = "bench-internals"))]
+            full_pass_path: FullPassPath::Group,
             #[cfg(test)]
             join_cohort_tag_scans: 0,
             #[cfg(test)]
             vpn_group_member_emits: 0,
             #[cfg(test)]
             vpn_member_deferral_warnings: 0,
+            #[cfg(test)]
+            per_peer_deferral_warnings: 0,
+            #[cfg(test)]
+            dirty_resync_commits: 0,
             #[cfg(test)]
             test_force_exact_export_slow_path: false,
             #[cfg(test)]
@@ -2410,6 +2438,16 @@ impl RibManager {
         receipts: mpsc::Sender<(u64, usize, usize, u64)>,
     ) -> Self {
         self.vpn_query_bench_receipts = Some(receipts);
+        self
+    }
+
+    /// Run every unbounded dataset re-evaluation as the per-member full
+    /// resync, which marks each target dirty: the mass-dirty seed of the
+    /// recovery-memory harness and the cost of the fallback path.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn with_member_full_pass(mut self) -> Self {
+        self.full_pass_path = FullPassPath::Member;
         self
     }
 

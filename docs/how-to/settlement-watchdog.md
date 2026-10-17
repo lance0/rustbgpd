@@ -539,7 +539,8 @@ detached), with a few semantics of its own:
   restored outcomes are clean — only an *unprovable* outcome fences.
 - **Policy state proof gets one bounded retry.** At a settlement-owned policy
   clean-state fence, one missed 100 ms session-state reply is retried at most
-  once inside a two-second window shared by the operation. Confirmed
+  once. All retries in the operation share two seconds of retry time; export,
+  import and RIB work between state checks does not use it up. Confirmed
   non-Established state, session-task loss, or exhaustion compensates. The RIB
   side registers one reverse-order exact rollback batch before Route Refresh;
   only validated ordered receipts clear pending debt. A late batch stays

@@ -535,6 +535,7 @@ impl AcceptedConfigSnapshot {
         if config.policy.rpol_files != self.config.policy.rpol_files
             || config.policy.rpol_roots != self.config.policy.rpol_roots
             || config.policy.rpol_max_graph_bytes != self.config.policy.rpol_max_graph_bytes
+            || config.policy.require_passing_tests != self.config.policy.require_passing_tests
             || config.policy.datasets != self.config.policy.datasets
         {
             return Err(

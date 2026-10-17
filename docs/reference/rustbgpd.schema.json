@@ -193,6 +193,7 @@
           "capacity": 1024,
           "enabled": true
         },
+        "require_passing_tests": false,
         "rpol_files": [],
         "rpol_max_graph_bytes": 268435456,
         "rpol_roots": []
@@ -3363,6 +3364,11 @@
             "capacity": 1024,
             "enabled": true
           }
+        },
+        "require_passing_tests": {
+          "description": "Run every loaded `.rpol` unit's in-language `test` blocks at\nconfig load and refuse the load when any test fails. Default\noff. When set, startup refuses to boot and a SIGHUP reload is\nrejected without runtime effect, naming the file, the test and\nthe expected and actual outcome. Read from the incoming config on\nevery load, like `rpol_max_graph_bytes`. `rustbgpd --check` runs\nthe tests whether or not this is set.",
+          "type": "boolean",
+          "default": false
         },
         "route_flap_dampening": {
           "description": "Alpha dampening parameter schema. Effective enablement is rejected:\nthe pure penalty engine is not yet connected to received routes.",

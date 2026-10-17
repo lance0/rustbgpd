@@ -2133,9 +2133,11 @@ impl RibManager {
     /// Dataset updates preserve policy identity, so refresh the shared staged
     /// verdicts explicitly. A provable bound distributes only the affected
     /// unicast prefixes and VPN identities to the targets, through the
-    /// ordinary incremental passes. Otherwise mark members dirty before
-    /// staging: the existing tombstone and source-flip residue then
-    /// preserves every owed withdrawal.
+    /// ordinary incremental passes. Otherwise the same passes carry every
+    /// key, once per update group, when the targets' families allow it.
+    /// Failing that, mark members dirty before staging: the existing
+    /// tombstone and source-flip residue then preserves every owed
+    /// withdrawal.
     pub(in crate::manager) fn handle_reevaluate_peer_export_policies(
         &mut self,
         peers: &[IpAddr],
@@ -2148,6 +2150,11 @@ impl RibManager {
             let mode = if bounded.is_some() { "delta" } else { "full" };
             let affected = bounded.as_ref().map(|bound| bound.prefixes.len());
             let affected_vpn = bounded.as_ref().map(|bound| bound.vpn.len());
+            #[cfg(any(test, feature = "bench-internals"))]
+            let group_pass = manager.full_pass_path == super::FullPassPath::Group;
+            #[cfg(not(any(test, feature = "bench-internals")))]
+            let group_pass = true;
+            let mut full_pass = None;
             let result = match bounded {
                 Some(bound) => {
                     // The Loc-RIB best is unchanged, so the VPN identities
@@ -2165,11 +2172,24 @@ impl RibManager {
                     }
                     Ok(())
                 }
-                None => manager.reevaluate_peer_export_policies_synchronously(peers),
+                None => {
+                    if let Some(targets) = group_pass
+                        .then(|| manager.dataset_reevaluation_targets(peers))
+                        .flatten()
+                    {
+                        full_pass = Some("group");
+                        manager.reevaluate_full_pass_by_group(&targets);
+                        Ok(())
+                    } else {
+                        full_pass = Some("member");
+                        manager.reevaluate_peer_export_policies_synchronously(peers)
+                    }
+                }
             };
             info!(
                 peers = peers.len(),
                 mode,
+                full_pass,
                 affected_prefixes = affected,
                 affected_vpn_keys = affected_vpn,
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -2193,10 +2213,6 @@ impl RibManager {
     /// probes, a handle the swap does not name, an intervening publication,
     /// families other than unicast and VPN, a deferred VPN selection, and
     /// conditional advertisement.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one proof: target families, dataset references, swap lineage and the affected scan"
-    )]
     fn dataset_swap_bound(
         &self,
         peers: &[IpAddr],
@@ -2204,45 +2220,10 @@ impl RibManager {
     ) -> Option<DatasetSwapBound> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
-        if peers
-            .iter()
-            .any(|peer| !self.outbound_peers.contains_key(peer))
-            || self.has_conditional_advertisements()
-        {
-            return None;
-        }
-        let mut targets: HashSet<IpAddr> = peers.iter().copied().collect();
-        for peer in peers {
-            if let Some(group) = self
-                .grouped_member_of(*peer)
-                .and_then(|gid| self.group_ribs.get(&gid))
-            {
-                targets.extend(group.members.iter().copied());
-            }
-        }
-        let bounded = [
-            (Afi::Ipv4, Safi::Unicast),
-            (Afi::Ipv6, Safi::Unicast),
-            (Afi::Ipv4, Safi::MplsVpn),
-            (Afi::Ipv6, Safi::MplsVpn),
-        ];
+        let targets = self.dataset_reevaluation_targets(peers)?;
         let mut probed = vec![false; swaps.len()];
         for peer in &targets {
             checkpoint();
-            // A held VPN selection would release with only best-changed
-            // keys staged, dropping the forced verdicts: take the full pass.
-            if !self
-                .peer_sendable_families
-                .get(peer)
-                .is_some_and(|families| {
-                    families.iter().all(|family| {
-                        bounded.contains(family)
-                            && (family.1 != Safi::MplsVpn || !self.selection_deferred(*family))
-                    })
-                })
-            {
-                return None;
-            }
             let Some(chain) = self.export_policy_for(*peer).map(PolicyChain::compiled) else {
                 continue;
             };
@@ -2310,6 +2291,146 @@ impl RibManager {
             prefixes,
             vpn,
         })
+    }
+
+    /// The peers a dataset re-evaluation of `peers` must reach (every
+    /// member of their update groups), when the ordinary incremental passes
+    /// can carry it: every target is registered and sends only unicast and
+    /// VPN families, VPN selection is not deferred (a held selection would
+    /// release with only best-changed keys staged, dropping the forced
+    /// verdicts), and no conditional advertisement is installed. `None`
+    /// leaves the per-member full resync.
+    fn dataset_reevaluation_targets(&self, peers: &[IpAddr]) -> Option<HashSet<IpAddr>> {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        if peers
+            .iter()
+            .any(|peer| !self.outbound_peers.contains_key(peer))
+            || self.has_conditional_advertisements()
+        {
+            return None;
+        }
+        let mut targets: HashSet<IpAddr> = peers.iter().copied().collect();
+        for peer in peers {
+            if let Some(group) = self
+                .grouped_member_of(*peer)
+                .and_then(|gid| self.group_ribs.get(&gid))
+            {
+                targets.extend(group.members.iter().copied());
+            }
+        }
+        let carried = [
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv6, Safi::MplsVpn),
+        ];
+        targets
+            .iter()
+            .all(|peer| {
+                checkpoint();
+                self.peer_sendable_families
+                    .get(peer)
+                    .is_some_and(|families| {
+                        families.iter().all(|family| {
+                            carried.contains(family)
+                                && (family.1 != Safi::MplsVpn || !self.selection_deferred(*family))
+                        })
+                    })
+            })
+            .then_some(targets)
+    }
+
+    /// The full re-evaluation as one incremental pass over every key the
+    /// targets can hold: each update group re-evaluates its table once and
+    /// its clean members receive only the resulting delta, instead of every
+    /// member re-sending its whole table through a dirty resync. Eligible
+    /// unicast announcements ride one shared payload and encode cell per
+    /// group; VPN deltas are emitted and encoded per member. Ungrouped targets re-evaluate
+    /// against their own Adj-RIB-Out; dirty and channel-full members keep
+    /// their ordinary resync and deferral handling.
+    fn reevaluate_full_pass_by_group(&mut self, targets: &HashSet<IpAddr>) {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        let groups: HashSet<usize> = targets
+            .iter()
+            .filter_map(|peer| self.grouped_member_of(*peer))
+            .collect();
+        let mut prefixes: HashSet<Prefix> = self
+            .unicast_prefix_peers
+            .prefixes
+            .keys()
+            .inspect(|_| checkpoint())
+            .copied()
+            .collect();
+        prefixes.extend(
+            self.loc_rib
+                .iter()
+                .inspect(|_| checkpoint())
+                .map(|route| route.prefix),
+        );
+        let mut vpn: HashSet<VpnRouteKey> = self
+            .loc_rib
+            .iter_vpn()
+            .inspect(|_| checkpoint())
+            .map(|route| route.key().nlri_key)
+            .collect();
+        for rib in self.ribs.values() {
+            vpn.extend(
+                rib.iter_vpn()
+                    .inspect(|_| checkpoint())
+                    .map(|route| route.key().nlri_key),
+            );
+        }
+        for gid in &groups {
+            if let Some(group) = self.group_ribs.get(gid) {
+                prefixes.extend(
+                    group
+                        .table
+                        .iter()
+                        .inspect(|_| checkpoint())
+                        .map(|route| route.prefix),
+                );
+                vpn.extend(
+                    group
+                        .table
+                        .iter_vpn()
+                        .inspect(|_| checkpoint())
+                        .map(|route| route.key().nlri_key),
+                );
+            }
+        }
+        for peer in targets {
+            if let Some(rib_out) = self.adj_ribs_out.get(peer) {
+                prefixes.extend(
+                    rib_out
+                        .iter()
+                        .inspect(|_| checkpoint())
+                        .map(|route| route.prefix),
+                );
+                vpn.extend(
+                    rib_out
+                        .iter_vpn()
+                        .inspect(|_| checkpoint())
+                        .map(|route| route.key().nlri_key),
+                );
+            }
+            if let Some(blocked) = self.peer_otc_blocked.get(peer) {
+                prefixes.extend(blocked.keys().inspect(|_| checkpoint()).copied());
+            }
+        }
+        if !vpn.is_empty() {
+            self.distribute_vpn_changes(&vpn, &vpn, Some(targets));
+        }
+        // Operator summaries are served from the frozen snapshot between
+        // the family passes, while the group tables are mid-update.
+        self.replacement_checkpoint_at("dataset_staging", true);
+        if !prefixes.is_empty() {
+            self.distribute_changes_to_targets(&prefixes, targets);
+        }
+        self.replacement_checkpoint_at("dataset_staging", true);
+        super::retire_hash_set(&mut vpn, &mut || checkpoint());
+        super::retire_hash_set(&mut prefixes, &mut || checkpoint());
     }
 
     #[expect(
