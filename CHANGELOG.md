@@ -11,6 +11,735 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Update rustls to 0.23.46, fixing RUSTSEC-2026-0346 (session `Debug` output
+  could expose TLS secrets) and RUSTSEC-2026-0347 and RUSTSEC-2026-0349
+  affecting the gRPC TLS listener and `rbgp` client.
+
+### Added
+
+- Prepare bounded recovery provenance and connection-fenced reset handling for
+  EVPN update groups. The counter
+  `bgp_evpn_recovery_provenance_exhausted_total{cause}` records resets accepted by
+  the captured connection. EVPN grouping remains inactive pending storage,
+  encoding and qualification; current private EVPN exports are unchanged.
+- Prepare shared EVPN route storage and admitted member projections for update
+  groups, retaining received route-target and reflection inputs across staging,
+  regroup and replay. EVPN grouping remains inactive pending live admission,
+  shared encoding and qualification.
+- A pinned FRR 10.7.1 interoperability leg for global IPv4 and IPv6 SRv6
+  service routes, proving selection, Prefix-SID preservation through route
+  reflection and independent withdrawals. This is a
+  [control-plane proof](tests/interop/m125-srv6-global-reflection/README.md);
+  SRv6 service import, origination and forwarding remain unsupported.
+- `bgp_outbound_eor_deferrals_total{peer}` counts End-of-RIB markers that were
+  deferred because the peer writer channel was full or closed. These deferrals
+  were previously only logged. The marker stays pending and is retried after
+  the peer's next resync. `bgp_outbound_route_drops_total` is unchanged. The
+  Grafana "RIB ingest pressure" panel plots the new counter.
+- `NeighborState` reports outbound resync and update-group recovery fallback
+  per peer: `outbound_resync_pending`, `outbound_dirty_seconds` and
+  `update_group_recovery_fallback` (the `cause` label of
+  `bgp_update_group_recovery_fallback_total`). `rbgp neighbor <addr>` shows
+  them as `Outbound Resync` and `Recovery Fallback`, and its JSON adds the
+  same keys. `rbgp doctor` adds `peer.<addr>.outbound_resync`, yellow while a
+  fallback cause is set or a resync has been pending for 60 seconds, and
+  `rib.update_group_recovery`, yellow once a `peer_limit`, `daemon_limit` or
+  `allocation_failure` fallback has occurred since daemon start. See
+  [Update-group recovery fallback](docs/reference/operations.md#update-group-recovery-fallback).
+  The additive fields change the v1 `NeighborService` message-graph digest.
+- Bounded received and advertised VPN, labeled-unicast and RT-Constrain
+  route pages, with typed family selectors, exact or longer prefix filters,
+  and RD or membership filters as appropriate. Views distinguish the required
+  received/advertised neighbor from an optional best-route source filter.
+  An additive EVPN best-route page filters MAC, ESI and VXLAN VNI without
+  copying the full table. EVPN received/advertised pages also accept the
+  explicitly unstable MAC, ESI and VNI filters, with exact raw RD input
+  available on the new family pages and existing EVPN peer pages. New EVPN
+  peer filters require daemon acknowledgement before the CLI prints a result,
+  preventing an older server from silently ignoring them.
+  New `rbgp rib vpn|labeled|rtc received|advertised`
+  and `rbgp evpn best` commands expose mutation-fenced continuation tokens
+  and JSON page metadata. Group-owned VPN advertised pages refuse reads
+  while that destination is resynchronizing. Existing unpaged RPCs and CLI arrays are unchanged;
+  the additions remain outside the current v1 inventory.
+- `rbgp policy check` works as a CI and editor gate. Every check now computes
+  the static lints, and `--deny-lints[=LINT,...]` fails the check with exit
+  code 4 on the named lints (or all of them), after the existing 1, 2 and 3.
+  Without the flag, lints stay warnings and exit codes are unchanged.
+  `--fail-on-empty` exits 2 when the file and its imports define no tests.
+  `-j` output is now the versioned `rbgp-policy-check/1.0` document; a new
+  `findings` array locates each compile error and lint by file, line and
+  column, with a stable code, severity, label and notes. Existing keys,
+  including the message-only `diagnostics` strings, keep their shape. See
+  [the CLI reference](crates/cli/README.md#policy-check-as-a-ci-and-editor-gate).
+- `rbgp policy compare` and the `ComparePolicy` RPC compare a candidate
+  `.rpol` export chain with the chain installed for one peer over the same
+  live Loc-RIB walk, and report only the routes that change: newly
+  rejected, newly accepted, and accepted with different attributes, with
+  exact counts and at most 1,000 samples per class. `--replace MEMBER`
+  swaps one installed member and keeps the rest of the chain, so routes an
+  earlier member rejects are not reported as candidate accepts. Native
+  egress steps apply to neither side. The run is read-only, moves no
+  counters, requires `SensitiveRead`, and is outside the v1 inventory
+  ([comparing with the installed chain](docs/reference/rpol-language.md#comparing-a-candidate-with-the-installed-export-chain)).
+- `bgp_readiness_probe_failures_total{reason}` counts each failed `/readyz`
+  probe once, by the failing component: `deadline`,
+  `peer_manager_unavailable`, `peer_manager_timeout`, `rib_unavailable`,
+  `rib_timeout`, `rib_stalled` or `daemon_unavailable`. Readiness status,
+  response bodies and deadlines are unchanged.
+  `bgp_inbound_connections_dropped_total{reason}` now exports every reason at 0
+  from startup, so a first drop is visible to `increase()`. See
+  [HTTP probes](docs/reference/operations.md#http-probes).
+- Log slow `/readyz` HTTP phases when accepting a connection through reading
+  its request line, or starting its probe through writing its response, exceeds
+  100 ms. Warnings separate handler startup, request-line reads, the core probe
+  and response writes; existing probe-failure warnings also include elapsed
+  context. Readiness status, response bodies and deadlines are unchanged.
+- `bgp_update_group_recovery_limit_bytes{scope}` exports the fixed unicast/VPN
+  update-group recovery caps (`peer` and `daemon`), and
+  `bgp_rib_outbound_dirty_peers` and `bgp_rib_outbound_dirty_oldest_seconds`
+  report how many peers are currently dirty and awaiting outbound resync and
+  how long the longest-waiting one has been dirty, sampled from RIB state. See
+  [update-group recovery fallback](docs/reference/operations.md#update-group-recovery-fallback).
+- Measure stalls in process instead of through sampled `/readyz` probes.
+  `bgp_rib_actor_slice_seconds{stage}` times every poll of the RIB actor
+  (`stage="actor_poll"`) and the slices between sampled readiness
+  checkpoints, and `bgp_rib_actor_slice_max_microseconds{stage}` reports the
+  longest slice since the previous metrics render. A 10 ms tokio probe
+  records `bgp_runtime_scheduler_lateness_seconds`, and
+  `bgp_runtime_worker_busy_microseconds_total{worker}` exports each runtime
+  worker's busy time, so RIB actor occupancy can be told apart from runtime
+  worker saturation. The histograms resolve 1 ms to 2 s with dense buckets
+  around 25, 50, 100, 200 and 500 ms. The overview dashboard gains panels for
+  both, and [the operations reference](docs/reference/operations.md)
+  documents them. Readiness semantics and deadlines are unchanged.
+- Opt-in RFC 9324 local re-evaluation: with `local_revalidation = true` in
+  `[rpki]`, sessions whose import policy matches RPKI or ASPA state keep their
+  pre-policy IPv4/IPv6 unicast input, and a VRP or ASPA change re-runs import
+  policy locally for the covered routes instead of sending inbound Route
+  Refresh to every dependent peer. Each session retains at most 65,536
+  validation rejects; beyond that it falls back to Route Refresh until the
+  session resets. FlowSpec families and IRR dataset swaps keep Route Refresh.
+  See [local re-evaluation](docs/reference/configuration.md#local-re-evaluation-rfc-9324).
+- Policy tests support `removes large-community GA:*:*`, `not removed`
+  community assertions, and `with only` to require an exact modification
+  set. The IXP Manager renderer tests pin the wildcard export scrub and
+  retention of other ASNs' communities. RT/RO removal checks follow their
+  decoded identity across encodings.
+- `[policy] require_passing_tests` (default `false`) makes every config load
+  run the in-language `test` blocks of each loaded `.rpol` unit and refuse
+  the load when one fails, naming the file, the test, and the expected and
+  actual outcome. With it on, the daemon refuses to start on such a policy
+  and a SIGHUP reload is rejected without runtime effect, keeping the running
+  policy. `rustbgpd --check` now runs these tests whether or not the setting
+  is on and exits 1 on a failure, so a config whose `.rpol` tests fail no
+  longer passes `--check`. The `config source loaded` log line gains an
+  `rpol_test_ms` phase. See the
+  [configuration reference](docs/reference/configuration.md).
+- `.rpol` in-language tests can assert what a policy removes and what it
+  leaves alone: `with removes community LIT` (and the `large-community` /
+  `ext-community` forms), `without community LIT`, and `without
+  local-pref|med|next-hop|prepend`. Previously a scrub term was covered only
+  by `expect p == accept`, which still passed after the scrub was deleted.
+  `expect chain [p1, p2(args), ...]` evaluates several policies as one
+  configured chain, through the daemon's own chain assembly and merge rules,
+  with coverage attributed to each member. The renderer's shared hygiene
+  policy now includes a test that fails if any scrub term is removed. See
+  [Tests](docs/reference/rpol-language.md#tests).
+- `rbgp config last-reload`, its `--json` output and `GetLastSighupReload`
+  now report the RIB-side outbound convergence of a `complete` SIGHUP
+  reload: `converging` with the number of peers whose RIB outbound resync is
+  still pending and the oldest one's age, `converged` once none is pending,
+  or `applied` when the RIB has not answered within two seconds. `converged`
+  does not confirm that peers received the view; transport processing and
+  socket writes may still be pending. The counts come from the RIB's
+  outbound-dirty set, the state behind `bgp_rib_outbound_dirty_peers`.
+  `rbgp doctor` warns when a complete reload is still converging after 60
+  seconds. The reload acknowledgement itself is unchanged. See
+  [Configuration reload](docs/reference/operations.md#configuration-reload-sighup).
+
+### Changed
+
+- Refresh the BIRD 2 interoperability pin to 2.19.3 for the M83, M85, M93,
+  M95 and M104 labs. The M100 control and published comparison receipts
+  retain BIRD 2.19.2.
+- Add the bounded `ListBgpLsRibRoutes` read with best, received and advertised
+  views, family and NLRI-type filters, a 100-row default page, a 1000-row clamp
+  and mutation-fenced continuation tokens. It replaces the whole-table
+  `ListBgpLsRoutes` in the scoped BGP-LS route-reflector role; the older read
+  is deprecated and outside v1, with its signature and behavior retained.
+  `rbgp rib bgpls` now walks every bounded page and prints the same JSON array.
+  See the [API reference](docs/reference/api.md#list-bgp-ls-routes).
+- Promote bounded VPN, labeled-unicast, RT-Constrain and EVPN best read RPCs
+  into their scoped route-reflector roles; EVPN remains limited to Types 1–5.
+  Deprecate the four older whole-table reads outside v1, retaining their
+  signatures and behavior, and document each bounded replacement. Family and
+  EVPN pages now clamp requests above 1000 rows rather than rejecting them.
+  The additive `AddressFamily` values 8–12 select VPNv4/v6, labeled IPv4/IPv6
+  and RT-Constrain; existing enum values are unchanged. EVPN peer-filter
+  clients must verify the documented response metadata acknowledgement.
+- Add bounded `ListOrrTopologyNodes` and `ListOrrTopologyLinks` reads of the
+  RFC 9107 ORR topology, with the shared family page contract: 100-row
+  default, 1000-row clamp and mutation-fenced continuation tokens. Links are
+  ordered by endpoint keys and Link NLRI, so parallel links each appear once.
+  They replace the whole-graph `ListTopologyNodes` and `ListTopologyLinks` in
+  the scoped BGP-LS route-reflector role; the older reads are deprecated and
+  outside v1, with signatures and behavior retained. `rbgp topology nodes` and
+  `rbgp topology links` now walk every page and print the same JSON arrays.
+  See the
+  [API reference](docs/reference/api.md#list-orr-topology-nodes-and-links).
+- A SIGHUP dataset swap that cannot be bounded to the affected routes, such
+  as a change to a community set read through `route.communities in`, now
+  re-evaluates each update group once and sends members only the routes
+  whose export changed. Changed unicast announcements are encoded once per
+  group; changed VPN routes are still encoded per session. Previously every
+  member re-sent its whole table through a dirty resync, which on a full
+  table held the RIB long enough for readiness to report a stalled
+  export-policy transition. Receivers that also send EVPN, labeled
+  unicast, FlowSpec, BGP-LS or RT-Constrain, and every receiver while a
+  VPN selection is held by deferral or a conditional advertisement is
+  installed, keep the per-member resync. The
+  `dataset export re-evaluation complete` log event gains `full_pass`.
+  See [Datasets](docs/reference/rpol-language.md#refresh-failure-and-observability).
+- A SIGHUP dataset content swap now re-evaluates only the export routes
+  whose prefix or origin AS the old and new contents answer differently,
+  instead of every route of every referencing receiver. This applies when
+  each receiver probes the dataset only with `route.prefix in` or
+  `route.origin-as in` and sends only IPv4/IPv6 unicast; community,
+  peer-ASN and binding probes, VPN and other families, conditional
+  advertisement, compensation and the legacy dataset refresh keep the full
+  re-evaluation. A new `dataset export re-evaluation complete` log event
+  reports `mode` (`delta` or `full`), `affected_prefixes` and `elapsed_ms`.
+  See [Datasets](docs/reference/rpol-language.md#refresh-failure-and-observability).
+- A SIGHUP dataset content swap now also re-evaluates only the affected
+  VPNv4/VPNv6 routes, matched by inner prefix or origin AS, instead of
+  running the full export re-evaluation for VPN receivers. A small swap on
+  a full VPN table no longer holds the RIB long enough for readiness to
+  report a stalled export-policy transition. RT-Constrain receivers and a
+  VPN selection still held by graceful-restart deferral keep the full
+  re-evaluation. The `dataset export re-evaluation complete` log event
+  gains `affected_vpn_keys`.
+  See [Datasets](docs/reference/rpol-language.md#refresh-failure-and-observability).
+- Include EVPN Types 1–5 route reflection in the narrow v1 compatibility
+  inventory as the scoped RR-only `route-reflector-evpn` role. It covers the
+  `l2vpn_evpn` family value in the existing family keys;
+  `ListReceivedEvpnRoutes` and `ListAdvertisedEvpnRoutes` called with a route
+  type of 1 to 5, with `EvpnRouteEntry` fields 1–16; the `rbgp evpn received`
+  and `rbgp evpn advertised` command paths with `--route-type` 1 to 5 and the
+  key/type floor of their `--json` page; and the names, types and labels of
+  nine RIB, loop, discard and restart metrics. The unpaged `ListEvpnRoutes`
+  query and base `rbgp evpn` command, `ExplainEvpnRoute`, EVPN events,
+  unfiltered or Type 6 peer-view calls, `EvpnRouteEntry.prefix_sid` and
+  `.smet`, Type 6 SMET relay, VTEP, IRB, multi-homing, local EVI and segment
+  configuration, and every Linux dataplane behavior remain alpha. See the
+  [EVPN reflector boundary](docs/reference/v1-stable-contract.md#evpn-route-reflector-boundary).
+- Skip the per-peer VPN key-set build during a VPN update-group member's
+  dirty or forced resync, and hash the labeled-unicast resync key set with
+  the RIB's route hasher. A grouped member's VPN replay is assembled from the
+  group table, so the set was only checked for emptiness; the member's VPN
+  sources are now probed for one eligible key instead.
+- Serve `/metrics`, `/livez`, `/readyz` and `/dp-readyz` from a dedicated
+  thread with its own single-threaded runtime, so saturated daemon runtime
+  workers no longer delay accepting a probe or reading its request line.
+  `/livez` and `/metrics` keep answering while those workers are busy;
+  `/readyz` still asks PeerManager and the RIB on the daemon runtime, so their
+  starvation still returns `503` within the 200 ms deadline. Readiness
+  semantics, deadlines, supervision, bind-failure exit codes and
+  `worker_threads` / `RUSTBGPD_WORKER_THREADS` are unchanged. The cost is one
+  additional OS thread, plus a short-lived blocking thread while a scrape
+  renders. See [operations](docs/reference/operations.md#http-probes).
+- A full recovery capture for an update-group member that negotiates VPN no
+  longer looks up every VPN route in the shared key pool when the group's VPN
+  key set is unchanged since the pool was built; it admits the pool's VPN keys
+  directly. When up to a few thousand VPN routes were added or removed since,
+  it applies just those changes. This removes most of the extra RIB time that
+  shared VPN capture added to mass-dirty recovery during route churn. A larger
+  key-set change still uses exact lookups for every route.
+- Reserve the announce buffer when a VPN update-group member's dirty or forced
+  resync replays the whole group table, hash the VPN and exact-export key sets
+  on the resync path with the RIB's existing route hasher, and compare VPN
+  recovery-proof keys as integers. Each reallocation of the unreserved buffer
+  was one uncheckpointed copy of the table.
+
+### Fixed
+
+- `.rpol` set probes on a `for` loop variable or a `let` binding
+  (`for c in route.communities { if c in scrub { remove community c } }`,
+  `let x = route.origin-as; if x in bogons { reject }`) and loops over an
+  `asn-set` now read the right set in a daemon policy chain. Releases 0.51.0
+  through 0.77.0 are affected for any import or export chain whose `.rpol`
+  members use these forms, including the documented scrub idiom. Chain
+  assembly remapped ordinary guards into the chain's merged set tables but
+  left these probes and loop bodies pointing at the member file's own table
+  positions. Where that position fell inside the merged tables, the probe
+  silently read another set, so the policy made the wrong decision with no
+  error. Where it fell past them, route evaluation panicked. A panic in an
+  import chain ended only that peer's session. A panic in an export chain, or
+  in other RIB-side evaluation, stopped the RIB manager, and the daemon shut
+  down as a component failure. `rbgp policy check` tests did not show the
+  problem because they evaluated each policy without chain assembly.
+- RD-typed API requests and CLI selectors accept `0x` or `0X` followed by
+  exactly 16 hexadecimal digits for every Route Distinguisher type. API
+  output uses raw hexadecimal for Type 2 RDs with a small ASN so their
+  text selects the same route instead of a different Type 0 RD. Published
+  wire-crate parsing and ordinary RD output are unchanged.
+- A SIGHUP reload no longer fails, or reports a completed dataset refresh
+  as ambiguous, because a long export, import or RIB step used up the
+  two-second allowance for retrying a missed session-state reply. Only the
+  retries themselves now count against that allowance, so a peer whose
+  state reply is briefly late after a slow full-table re-evaluation still
+  gets its retry.
+- The per-family `outbound channel full — <family> update deferred` warnings
+  (EVPN, VPN, FlowSpec, labeled unicast, BGP-LS, RT-Constrain) no longer fire
+  when the send failed because the peer's session had already closed. That
+  case is not backpressure: the peer's dirty state is dropped and the event is
+  logged at debug as `outbound channel closed — dropping dirty state instead
+  of re-marking`. Mass session teardown no longer produces spurious
+  channel-full warnings.
+- Service dedicated readiness probes while retiring detached received routes,
+  private advertised routes and regroup baselines during peer teardown, including
+  the subsequent unused-attribute sweep. Ordinary reads and mutations remain
+  fenced, and the existing stalled-owner deadline is unchanged.
+- Check the dirty-route recovery work budget after each complete peer replay,
+  keeping forced retries inside the same peer selection. Large peer backlogs
+  return to the actor between replays instead of accumulating one readiness
+  ownership window across several full tables. The existing stalled-operation
+  deadline still applies to an individual replay and any enclosing transition.
+- Service dedicated RIB readiness queries at the existing checkpoints inside
+  timer-driven dirty-route recovery.
+- `rbgp doctor` now checks the `peer.<address>.inbound_prefix_bound` warning
+  per negotiated family. A bound on one family no longer satisfies the check
+  for another, so an eBGP peer with only an IPv4 bound that also negotiates
+  IPv6, or only a VPN bound that also negotiates unicast, now warns. The
+  aggregate `max_prefixes` still covers every family. The detail names each
+  unbounded family and the keys that would bound it; see the
+  [doctor reference](docs/reference/operations.md).
+- Retry deferred End-of-RIB markers when outbound queue capacity returns,
+  including markers left pending after empty-inventory dirty resyncs.
+- `[evpn_core_isolation]` now excludes an uplink stacked on a bound interface,
+  such as a VLAN on the bound bond, from the uplink signal. The hold's own
+  admin-down took carrier from such an uplink, so when it was the only uplink
+  with carrier the PE read itself as isolated and the hold never released.
+  The daemon follows each uplink's kernel lower device (`IFLA_LINK`); see
+  [the configuration reference](docs/reference/configuration.md#evpn_core_isolation).
+- Keep outbound rejection overlays, diagnostics and common-family recovery
+  state unchanged when final EVPN recovery admission refuses a mixed-family
+  update. EVPN update-group ownership remains disabled in production.
+- Dormant EVPN group recovery preparation rejects incomplete captures and
+  invalid admission batches with a bounded, connection-fenced reset instead
+  of stalling or asserting. Reset control retains execution acknowledgements
+  and retries rejected or dropped handoffs. The fixed metric causes also
+  include `capture_unavailable` and `admission_invariant`; the counter stays
+  zero while production EVPN grouping is inactive. Provenance lookups use
+  indexed owner ranges and charged running peer totals. This prepares
+  recovery control and does not enable EVPN grouping.
+- EVPN update-group preparation excludes peers that negotiated RT-Constrain
+  from shared EVPN ownership and staging, while preserving their unicast and
+  VPN update groups. Their EVPN view remains private and RT-filtered; stale
+  membership state does not filter peers without negotiated RT-Constrain.
+  Production EVPN grouping remains disabled, and grouped RTC still requires
+  prior-membership capture and separate qualification.
+- Prepare shared immutable EVPN recovery key storage with separate admission
+  masks and bounded sparse additions for each member. Captures retain only the
+  actual old admitted projection, including when reusing an older key universe.
+  Production EVPN grouping remains disabled pending complete-feed settlement
+  and resource qualification.
+- Dormant EVPN recovery snapshots charge a shared key universe once per peer,
+  including across retained snapshots and session records. Each record, mask,
+  sparse allocation and temporary resize overlap remains charged; another
+  peer keeps its own universe credit. This corrects premature per-peer budget
+  refusals in recovery preparation and does not enable EVPN grouping.
+- An EVPN Type 5 route announced with a zero ESI, a zero gateway IP, a zero
+  label and no Router's MAC Extended Community is now treat-as-withdraw
+  (RFC 9136 §3.2) instead of being accepted and reflected. A Router's MAC
+  community carrying an all-zero MAC counts as absent. The same route with a
+  non-zero Router's MAC, or with any non-zero label or VNI, is still
+  accepted. As with the other EVPN treat-as-withdraw rules, the whole
+  UPDATE's routes are withdrawn and the session stays up.
+- An EVPN Type 5 route announced with a multicast or broadcast Router's MAC
+  (the EVPN Router's MAC Extended Community) is now treat-as-withdraw, as
+  RFC 9136 requires, instead of being accepted and reflected. This applies
+  whatever the route's ESI, gateway IP and label. A unicast Router's MAC,
+  globally or locally administered, is still accepted, and a Type 2 route
+  carrying the community is unaffected. As with the other EVPN
+  treat-as-withdraw rules, the whole UPDATE's routes are withdrawn and the
+  session stays up.
+- Re-announce unicast routes when an unchanged export policy switches between
+  `set_next_hop = "self"` and the received next hop while removing the attributes
+  that selected that action. Private and grouped peers, including per-client-best
+  winner promotion, now retain the admitted action through refused sends and
+  regroup recovery. Actions that produce identical bytes for the peer do not
+  cause an extra announcement.
+- Grouped unicast export explain returns `FAILED_PRECONDITION` while a dirty
+  peer has no admitted baseline, instead of reporting a refused next-hop
+  action as already advertised. Retry after its resync completes.
+- Full outbound replays now service dedicated readiness probes while retiring
+  temporary exact-encoding results and prior advertised-route keys. Existing
+  stalled-operation bounds and ordinary-query/mutation fencing are preserved.
+- Full outbound resyncs triggered by route ingestion now service dedicated
+  readiness probes within each peer replay. Existing stalled-operation bounds
+  and ordinary query and mutation fencing are preserved.
+- A SIGHUP that swaps the contents of a dataset used by export policy no
+  longer fail-stops, or reports a partial reload, when the RIB needs more
+  than five seconds to re-evaluate the affected update groups. At
+  full-table scale that work takes tens of seconds; the reload previously
+  gave up on the RIB's acknowledgement after five seconds, fenced
+  `known_divergence` and exited 70 while the work was still completing.
+  The reload now waits for the RIB to finish, serving readiness and
+  operator reads meanwhile, bounded by the
+  [settlement watchdog](docs/how-to/settlement-watchdog.md) budget.
+- Grouped VPN advertised pages refuse reads after the outbound receiver
+  closes and before peer teardown, including when retry flags have cleared.
+  Unicast advertised listing and export explain use the retained admitted
+  baseline in this window, or refuse when none exists. Shared staged routes
+  are no longer reported as admitted updates for a closed receiver.
+- `ListAdvertisedRoutes` and `rbgp rib advertised <peer>` now agree with
+  unicast export explain for an update-group member whose outbound queue was
+  full. While the member has no admitted baseline, both return
+  `FAILED_PRECONDITION` until its resync is accepted. The listing previously
+  showed the group's desired routes as advertised in that window. A regrouped
+  member that keeps its pre-regroup baseline is now listed from that baseline,
+  which explain already used. See the
+  [explain how-to](docs/how-to/explain.md#export-explain).
+- Reuse immutable slab-slot indexes for full unicast recovery captures, with
+  exact-key checks and bounded flat fallback under heavy slot churn. Groups
+  that negotiate VPN share the same pool, with an exact hashed VPN position
+  index in place of slab slots, so full-table VPN members dirtied together no
+  longer exhaust the recovery memory limit and fall back to conservative
+  withdrawal. Existing memory budgets and the fallback remain in force.
+  Incremental and empty-proof sharing is unchanged.
+- Service dedicated RIB readiness queries during OLD-state recovery capture
+  triggered by normal route ingestion. Ordinary queries and mutations remain
+  queued.
+- A labeled-unicast or VPN route whose NLRI binds more than one MPLS label
+  is no longer reflected. RFC 8277 §2.1 and §3.2.1 forbid sending such a
+  route to a peer that has not negotiated the Multiple Labels Capability,
+  and rustbgpd does not advertise it, so the route is withheld from every
+  peer. A route already advertised with one label is withdrawn when it is
+  replaced by a multi-label route. Multi-label routes are still received,
+  stored and shown. Earlier releases reflected the stack unchanged. See
+  [RFC notes](docs/reference/rfc-notes.md#rfc-8277--label-stacks-on-labeled-unicast-and-vpn-routes).
+- The whole-graph ORR topology reads built without configured vantages now
+  exclude BGP-LS families whose selection is still deferred, matching the
+  topology that vantages use.
+- `bgp_outbound_route_drops_total{peer}` now counts a full or closed peer
+  writer channel for every address family. FlowSpec, EVPN, BGP-LS, VPN,
+  labeled-unicast and RT-Constrain deferrals were previously only logged.
+  The counter no longer counts fail-closed commit refusals, which are now
+  counted in the new `bgp_outbound_commit_refusals_total{peer,reason}`, with
+  `reason` set to `selection_gate`, `missing_encoder` or `evpn_recovery`.
+  The warnings for unicast, initial-dump, route-refresh and RT-Constrain
+  membership sends that were not delivered now carry a `reason` field and no
+  longer report a refusal as a full channel.
+- `rbgp neighbor` no longer presents an update-group member's advertised count
+  as delivered while the member awaits outbound resync. During that window
+  `prefixes_sent` is still the group's desired count, which
+  `rbgp rib advertised <addr>` and export explain do not back up. The new
+  `NeighborState.prefixes_sent_pending` flags it, the detail view prints
+  `(pending outbound resync)` after the count, the neighbor table prefixes it
+  with `~`, and the JSON adds `prefixes_sent_pending`.
+- A peer outside an update group whose outbound channel stays full now
+  logs `outbound channel full — <family> update deferred` (VPN, EVPN,
+  labeled, FlowSpec, BGP-LS or RTC) once, when it first falls behind,
+  instead of once per distribution pass for every family with a change.
+  The message text and fields are unchanged. The existing
+  `outbound routes resynced` info event still marks recovery, and
+  `bgp_outbound_route_drops_total` still counts every refused send.
+- `/readyz` and `GetHealth` no longer report the peer manager as timed out
+  while it waits for room in a full RIB mailbox. Several RIB updates waited
+  for mailbox admission without serving readiness: a policy cohort's export
+  transition, discarding a prepared export destination, the `PeerDown` fence
+  for a replaced or capacity-blocked session, and the deleted-peer marker.
+  When the RIB's primary queue was full, as it can be during a large reload
+  or a mass session flap, the peer manager stopped answering readiness probes
+  until the RIB drained. Mailbox admission for these updates now answers
+  readiness probes while it waits. The updates are still always delivered,
+  never dropped for time. Neighbor reads are answered while the cohort
+  transition waits for admission, as they already were during its reply
+  wait. They stay queued behind the other updates, whose peer state is
+  mid-change.
+- `/readyz` and `GetHealth` no longer report the peer manager as timed out
+  while it waits on the RIB for a conditional-advertisement install or
+  re-observation, a config-transaction plan's update-group snapshot, or a
+  dampening capacity disable, explicit enable or dynamic-peer retirement
+  barrier. Each of these acknowledgements queues behind the RIB's
+  primary-lane work, which can take seconds after a large export change, and
+  the peer manager stopped answering readiness probes for the whole wait. It
+  now answers them throughout. Neighbor reads are also answered during the
+  conditional-advertisement and update-group waits; they stay queued behind
+  the dampening waits, whose peer state is mid-transition. The 200 ms
+  deadline and the 5 s RIB reply bound are unchanged.
+- Reuse live unicast/VPN update-group recovery key snapshots across route
+  additions and withdrawals. Peers that become dirty in different passes share
+  an older key universe with separate admission bits and bounded extra keys,
+  avoiding repeated full-table snapshot allocations. Recovery limits and the
+  conservative withdrawal fallback remain unchanged; private and regrouped flat
+  proofs retain their existing resource limits.
+- Retry bounded flat recovery proofs when an older shared unicast/VPN snapshot
+  and its immediate sparse additions exceed the proof budget, preserving exact
+  admitted keys without unnecessary conservative withdrawals.
+- The RIB actor now yields once a run of queued route or End-of-RIB messages
+  exceeds its 25 ms poll budget, as its timer drain already did. With a deep
+  ingest backlog, such as a full-table VPN churn, it used to apply up to
+  Tokio's whole cooperative budget of messages (128) in one poll. A `/readyz`
+  probe answered during that poll then waited for the rest of it before it
+  could send its response. Message order is unchanged.
+- The graceful-restart stale timer, the LLGR stale timer, the enhanced
+  route refresh window and the startup selection-deferral timer now fire
+  under sustained inbound traffic. Each waited for the RIB's inbound queue
+  to empty before expiring, so a continuously busy RIB could keep stale
+  routes, an open refresh window or deferred route selection alive past
+  the deadline indefinitely. Each timer now processes only the updates
+  already queued when it fell due, then fires.
+- Toward a peer that negotiated RT-Constrain and starts with an empty RT
+  membership, the VPNv4, VPNv6 and EVPN End-of-RIB markers now wait for the
+  peer's RT-Constrain End-of-RIB, as
+  [RFC 4684 §6](docs/reference/rfc-notes.md#rfc-4684--rt-constrain-membership-matching)
+  asks. Previously a PE that kept the route reflector's VPN routes as a
+  graceful-restart helper, but whose RT-Constrain routes the reflector had
+  not retained, received the VPN End-of-RIB before any VPN routes. It then
+  swept the VPN routes it had kept and dropped that traffic until its
+  interest re-arrived. A peer whose OPEN sets the graceful-restart Restart
+  State bit is exempt: under RFC 4724 §4.1 it sends nothing, its
+  RT-Constrain End-of-RIB included, until it has ours.
+- Share immutable unicast/VPN recovery keys between grouped peers while keeping
+  admission records separate. Reserve known capture sizes before walking a full
+  table, retaining the existing per-peer and daemon bounds and conservative
+  withdrawal fallback when a complete proof cannot be retained.
+- Settle successful grouped initial dumps and refreshes when recovery proof
+  reservation fails, avoiding an unnecessary second full-table replay.
+- Unicast export reconciliation and final-owner payload retirement now service
+  dedicated readiness probes while preserving ordinary read and mutation fences.
+  Shared payloads remain immutable, and readiness deadlines are unchanged.
+- Bound shared unicast/VPN recovery capture work by sorting a fallible,
+  capacity-accounted buffer of borrowed OLD route references, then merging
+  into the shared admission mask. Sparse additions, temporary allocation
+  overlap, flat fallback, and readiness checkpoints retain their existing
+  limits. The same capture preparation applies to dormant EVPN grouping.
+- Service dedicated RIB readiness queries while source-peer teardown collects
+  affected keys, recomputes selected routes and distributes withdrawals. Counts
+  reflect completed unicast prefix changes, while ordinary reads and mutations
+  remain fenced. Teardown exceeding the existing healthy-age bound reports
+  `RIB peer teardown stalled` under the new `peer_teardown` value of
+  `bgp_rib_readiness_query_wait_seconds{seam}`; existing limits are unchanged.
+- Bound transient unicast/VPN update-group admitted-key recovery capacity
+  and preserve owed withdrawals when a send fails without a full channel or
+  complete admitted proof is unavailable. Restore shared encoding for plain
+  groups and restrict full prior-slot snapshots to per-client-best groups.
+  Add `bgp_update_group_recovery_entries`,
+  `bgp_update_group_recovery_bytes`, `bgp_update_group_recovery_peak_bytes`,
+  and `bgp_update_group_recovery_fallback_total` to expose capacity charge
+  and conservative fallback causes. See
+  [update-group operation](docs/reference/configuration.md) for the
+  internal bounds and accounting scope.
+- Update-group distribution suppresses unchanged per-client-best substitutions
+  when the winner changes, matching the private per-peer announcement sequence.
+- Dirty unicast and VPN resyncs withdraw only keys actually admitted to each
+  receiver, including across RT-Constrain changes and interrupted regroups.
+  Shared tombstones could previously withdraw routes a receiver never received.
+- Grouped exports preserve the prior admitted slot when OTC or exact encoding
+  rejects its replacement. Fresh blocked routes no longer produce unknown
+  withdrawals, and a rejected replacement withdraws the old alternate once.
+- A grouped VPN member whose outbound channel stays full now logs
+  `outbound VPN update deferred without admission` once, when it first
+  falls behind, instead of once per VPN distribution pass. While its
+  channel stays full, later passes also skip building that member's
+  group deltas for a send that would fail; its resync still sends the
+  full table and withdraws the keys it missed.
+- VPN UPDATE distribution now answers pending `/readyz` probes at each peer
+  boundary of its per-peer loop, as unicast ingest already does. With many
+  dirty grouped members on the per-member recovery path (a refused shared
+  proof, a peer-limit fallback, or ungrouped VPN peers), one UPDATE's
+  distribution could hold the RIB for about 200 ms on a small host.
+- Keep readiness answered while a large VPN table is learned. The received,
+  selected and advertised VPN route maps now split into 16 hash shards once
+  they pass 16,384 entries, so a table resize rehashes one shard instead of
+  the whole table inside a single UPDATE. Previously several full-table
+  resizes could land in one UPDATE near one million keys and hold the RIB for
+  about 600 ms. Total resize work, settled memory and peak memory are
+  unchanged in the measured 1.23M-key initial load.
+- VPN group staging and EVPN recovery-refusal paths now service dedicated
+  readiness probes while retiring temporary export state. Ordinary reads and
+  mutations remain fenced, and existing readiness deadlines are unchanged.
+- Sessions sending large VPN, labeled-unicast or EVPN tables no longer hold a
+  tokio worker for tens of milliseconds per outbound slice. Announcements are
+  grouped into UPDATEs through a hash index instead of a linear scan that
+  compared freshly prepared attribute lists, each envelope's routes are
+  released slice by slice instead of all at once after its last UPDATE, and
+  a slice that overruns a 4 ms encode budget makes the next one smaller.
+
+### Documentation
+
+- Add the M123 hosted interop leg and its [SR Linux 25.10.1 receipt](docs/artifacts/interop/m123-evpn-dont-preempt-20261013/README.md)
+  for RFC 9785 Don't-Preempt on a two-PE all-active Ethernet Segment behind a
+  Linux LACP CE: a restarted rustbgpd inherits SR Linux's preference with DP=0
+  and leaves it DF, SR Linux recovering from a CE-link failure inherits
+  rustbgpd's preference, and the survivor of a reference-PE withdrawal
+  restores its administrative values. Lowest-Preference, more than two PEs,
+  SR Linux node restart and forwarding remain outside this receipt.
+- The deployment guide now recommends Kubernetes startup, readiness and
+  liveness probe settings: readiness on `/readyz` with the Kubernetes
+  defaults, and liveness either on `/readyz` with a tolerance matching the
+  systemd watchdog or on `/livez`, which checks no actors and does not
+  restart a deadlocked RIB. See
+  [Kubernetes probes](docs/how-to/deployment.md#kubernetes-probes).
+- Record the retained bottom-of-stack interpretation for labeled-unicast and
+  VPN reception, with pinned-peer source comparisons and byte-level regressions
+  for ambiguous S-clear labels, valid stacks, and malformed MP NLRI. Receive
+  behavior and published crate versions are unchanged.
+
+### Upgrade notes
+
+- Releases 0.51.0 through 0.77.0 can evaluate the wrong set in a daemon
+  policy chain. An import or export chain is affected when its `.rpol` members
+  probe a set through a `for` loop variable or a `let` binding, or loop with
+  `for ... in` over an `asn-set`; the documented community scrub idiom
+  `for c in route.communities { if c in scrub { remove community c } }` is
+  one such form. On an affected release the probe either silently read
+  another set, so the policy made the wrong accept, reject or modify decision
+  with no error, or panicked during route evaluation. A panic in an import
+  chain ended that peer's session; a panic in an export chain, or in other
+  RIB-side evaluation, shut the daemon down. This release fixes the chain
+  assembly with no configuration change. Policy decisions for such chains
+  can change after the upgrade, because they now read the sets the policy
+  names. `rbgp policy check` on an affected release did not show the
+  problem, because it evaluated each policy without chain assembly.
+- `rustbgpd --check` now runs the in-language `test` blocks of every
+  configured `.rpol` unit and exits 1 when one fails. A deployment gate that
+  passed a config whose `.rpol` tests fail will now stop it; run
+  `rbgp policy check` on the named file to see the failure. The running
+  daemon's behavior is unchanged unless `[policy] require_passing_tests` is
+  set.
+- A `.rpol` test fixture `as-path` must be decimal ASNs separated by spaces,
+  with `{...}` around an AS_SET. Other text, such as `"hello world"`,
+  `"64501,64500"`, or an unbalanced brace, was silently ignored and is now a
+  compile diagnostic, so a file containing one fails `rbgp policy check` and
+  daemon configuration load or reload until the fixture is corrected. Fixture
+  paths now evaluate exactly like received paths: `route.as-path.len` counts
+  an AS_SET as 1 (it previously counted each member), and `matches` sees the
+  canonical rendering with single spaces. A test that relied on the old
+  counting or spacing reports a failure.
+- `rbgp doctor` can turn yellow on a daemon that passed before the
+  upgrade. `peer.<address>.inbound_prefix_bound` now checks each negotiated
+  family, so an eBGP peer bounded on only some of its families warns; the
+  check name and its advisory exit status 0 are unchanged. The new
+  `peer.<address>.outbound_resync` check is yellow while a recovery fallback
+  cause is set or a resync has been pending for 60 seconds, and the new
+  `rib.update_group_recovery` check is yellow once a `peer_limit`,
+  `daemon_limit` or `allocation_failure` fallback has occurred since daemon
+  start or while the recovery charge is above 75% of the daemon cap. A
+  complete SIGHUP reload still converging after 60 seconds also warns.
+- The shipped alert pack adds the warning alerts
+  `BgpPolicyTransitionFallback` (a `fallback_handoff` or
+  `fallback_cleanup_error` export-policy transition in the last 15 minutes),
+  `BgpInboundNotificationBackoffDrops` (inbound connections closed during a
+  neighbor's NOTIFICATION reconnect wait), `BgpUpdateGroupRecoveryLimited` (a
+  `peer_limit`, `daemon_limit` or `allocation_failure` recovery fallback in
+  the last 15 minutes), `BgpOutboundResyncStalled` (one peer dirty for 15
+  minutes; churn across peers that keep resyncing does not raise it, and
+  graceful-restart selection-deferral holds end well before it),
+  `BgpOutboundCommitRefused` (`missing_encoder` refusals) and
+  `EvpnCoreIsolationHold`, and the critical `EvpnCoreIsolationFault`. The
+  two EVPN alerts mirror the `rbgp doctor` core-isolation verdicts. The
+  Grafana overview adds "Readiness probe failures", "Inbound connection drops
+  by reason", "Update-group recovery" and "Outbound dirty peers" panels, its
+  "Ungrouped (fallback) peers" description lists every fallback reason, its
+  "RIB ingest pressure" panel plots commit refusals by reason, and the EVPN
+  dashboard adds a "Core isolation" row. The `rbgp` TUI marks a neighbor's
+  transmitted prefix count as pending (`~` in the table, `(pending outbound
+  resync)` in the detail view) while its outbound resync is pending, as
+  `rbgp neighbor` does.
+- `bgp_outbound_route_drops_total{peer}` keeps its name and labels, but what it
+  counts has changed. It now rises for writer-channel deferrals in every
+  address family, so rates on EVPN, VPN, FlowSpec, labeled-unicast, BGP-LS or
+  RT-Constrain peers can rise after the upgrade. It no longer counts RFC 4724
+  selection-gate, missing-encoder or EVPN-recovery refusals. Those refusals are
+  now counted in `bgp_outbound_commit_refusals_total{peer,reason}`.
+  The shipped `BgpOutboundRouteDrops` alert changed from critical to warning and
+  now describes the automatic dirty-peer resync instead of asking for a manual
+  outbound refresh. A local copy of the alert pack keeps the old critical rule
+  until it is replaced, and routing keyed on its severity needs review. Both
+  `bgp_rib_dirty_resync_total` outcomes are now exported at 0 from startup, and
+  the RIB loop records `cleared` when it sees that a message handler, such as
+  session teardown, drained armed resync work; a drain on a loop path that
+  continues before that check is still not counted. See the
+  [alert notes](docs/how-to/grafana.md).
+- `bgp_validation_import_refreshes_total` gains the `revalidated_locally`
+  and `fallback_refresh` outcomes for the opt-in `[rpki] local_revalidation`;
+  the default behaviour is unchanged.
+- Outbound backpressure warnings are quieter. The per-family
+  `outbound channel full — <family> update deferred` warning appears only
+  while the peer's session is still live, and a peer outside an update group
+  logs it once, when it first falls behind, instead of on every distribution
+  pass. A grouped VPN member logs `outbound VPN update deferred without
+  admission` once in the same way. The deferred update is still resent by the
+  dirty-peer resync, and `bgp_rib_outbound_dirty_peers` and
+  `bgp_rib_outbound_dirty_oldest_seconds` show how long a peer stays behind.
+- Toward a peer that negotiated RT-Constrain and starts with an empty RT
+  membership, the VPNv4, VPNv6 and EVPN End-of-RIB markers are now sent after
+  the peer's RT-Constrain End-of-RIB, or after a fixed 60-second cap when none
+  arrives. A peer that never sends End-of-RIB, such as GoBGP without graceful
+  restart, receives them 60 seconds after the session comes up. VPN routes
+  still flow as soon as matching interest arrives, and other families'
+  End-of-RIB is unchanged.
+- Labeled-unicast and VPN routes whose NLRI binds more than one MPLS label
+  are no longer reflected, and a route already advertised with one label is
+  withdrawn when a multi-label route replaces it. Each withheld route counts
+  as
+  `bgp_exact_export_rejections_total{reason="multiple_labels_not_negotiated"}`,
+  a new reason value whose zero series exists only for the labeled-unicast
+  and VPN families.
+- Under load, stale routes from a peer that does not return are swept at
+  the restart or Long-Lived Stale Time instead of after the load subsides.
+  The enhanced route refresh window and the startup selection-deferral timer
+  likewise end on time under sustained inbound traffic.
+- An EVPN Type 5 route with a zero ESI, zero gateway IP, zero label and no
+  Router's MAC (or an all-zero one), and a Type 5 route with a multicast or
+  broadcast Router's MAC, are now treat-as-withdraw instead of reflected. The
+  whole UPDATE's routes are withdrawn, the session stays up, and the UPDATE
+  counts as `bgp_update_malformed_total{disposition="treat_as_withdraw"}`.
+- `[evpn_core_isolation]` no longer counts an uplink stacked on a bound
+  interface, such as a VLAN on the bound bond, as an uplink. Such an uplink is
+  logged as an error and the binding reports `uplink_overlap`, as an enslaved
+  uplink already did.
+- The EVPN route-reflector promotion changes no configuration, default, RPC
+  behavior or CLI output. Automation that wants the v1 promise should read
+  reflected EVPN state through `ListReceivedEvpnRoutes` /
+  `ListAdvertisedEvpnRoutes` (or `rbgp evpn received|advertised PEER --json`)
+  one route type at a time, 1 through 5, follow `next_page_token`, and restart
+  from an empty token after `ABORTED`. Whole-table `ListEvpnRoutes` /
+  `rbgp evpn`, type 0 or 6 peer-view calls, EVPN explain and events keep
+  working as alpha surfaces. The EVPN table gauges count the whole table,
+  including any Type 6 routes, and `bgp_gr_stale_routes` sums stale routes
+  across all families rather than counting EVPN alone.
+- The whole-table `ListVpnRoutes`, `ListLabeledRoutes`, `ListRtcRoutes`,
+  `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes` and
+  `ListTopologyLinks` reads are deprecated in favor of the bounded
+  `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`,
+  `ListBestEvpnRoutes`, `ListBgpLsRibRoutes`, `ListOrrTopologyNodes` and
+  `ListOrrTopologyLinks`. The deprecated reads keep their signatures and
+  behavior outside v1. Family and EVPN page requests above 1000 rows are now
+  clamped instead of rejected.
+- RD-bearing API and CLI output uses raw hexadecimal for a Type 2 Route
+  Distinguisher whose ASN is at most 65535, distinguishing it from a
+  different Type 0 RD. Clients can pass the returned spelling back to RD
+  filters and selectors. Ordinary RD output is unchanged; persisted
+  historical event labels and payloads are not migrated. See
+  [Route Distinguisher identity](docs/reference/api.md#route-distinguisher-identity)
+  for the accepted input grammar and optional versus required fields.
+- Invalid export-explain RD input reports the RD diagnostic once instead
+  of naming a nonexistent `rd_filter` field. The status remains
+  `INVALID_ARGUMENT`.
+- `/readyz` stays answered, and reports no stalled export-policy
+  transition, through full-table recovery, large VPN UPDATE backlogs and
+  full-VPN dirty resyncs on a small worker pool, and grouped members'
+  full-table VPN resyncs use less CPU. Readiness semantics and deadlines are
+  unchanged. Under CPU pressure, a session sending a large VPN,
+  labeled-unicast or EVPN table may split it into more, smaller UPDATEs; the
+  routes and their per-route order are unchanged.
+
 ## [0.77.0] — 2026-10-12
 
 ### Security
