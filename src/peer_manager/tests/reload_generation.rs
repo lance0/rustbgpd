@@ -26,11 +26,18 @@ struct GenerationSessionCounters {
     no_route_refresh: AtomicBool,
     state_queries: AtomicU32,
     drop_state_after: AtomicU32,
+    /// 1-based state queries whose reply arrives only after the ordinary
+    /// per-peer probe deadline.
+    late_state_queries: Mutex<BTreeSet<u32>>,
     export_owners: Mutex<Vec<PolicyOwners>>,
     stops: AtomicU32,
     starts: AtomicU32,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fake session answers every command shape a generation drives"
+)]
 fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounters>) {
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
     let (publication, receiver) =
@@ -107,6 +114,13 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                     ));
                     state.negotiated_hold_time = Some(90);
                     state.four_octet_as = Some(true);
+                    if in_task.late_state_queries.lock().unwrap().contains(&query) {
+                        tokio::spawn(async move {
+                            tokio::time::sleep(PEER_QUERY_TIMEOUT * 2).await;
+                            let _ = reply.send(state);
+                        });
+                        continue;
+                    }
                     let _ = reply.send(state);
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } => {
@@ -5785,4 +5799,67 @@ async fn failed_generation_keeps_a_runtime_disabled_peer_down() {
     assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
     assert_eq!(counters.starts.load(Ordering::SeqCst), 0);
     harness.shutdown().await;
+}
+
+/// The clean-state retry window bounds state-query retries, not the export
+/// and import legs between them. A settlement whose first qualification
+/// retried a missed probe must still get its final-qualification retry after
+/// an export wait longer than the whole window, instead of reporting a
+/// completed refresh as ambiguous.
+#[tokio::test(start_paused = true)]
+async fn dataset_generation_long_export_keeps_clean_state_retry_window() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let slow = "10.0.0.9".parse::<IpAddr>().unwrap();
+    // Query 1 is the preflight; 2 is the settlement's first qualification,
+    // whose miss opens the shared window and is retried as query 3. Query 4
+    // is the final qualification after the export; its miss needs a retry.
+    harness.counters[&slow]
+        .late_state_queries
+        .lock()
+        .unwrap()
+        .extend([2, 4]);
+    let (mut held_rx, proxy) = hold_first_dataset_export(&mut harness);
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let driver = async {
+        let reply = held_rx
+            .recv()
+            .await
+            .expect("export re-evaluation dispatched");
+        assert_eq!(
+            harness.counters[&slow].state_queries.load(Ordering::SeqCst),
+            3,
+            "the first qualification retried its missed probe before the export"
+        );
+        tokio::time::advance(CLEAN_STATE_QUERY_WINDOW + Duration::from_secs(1)).await;
+        reply.send(Ok(())).unwrap();
+    };
+    let (outcome, ()) = tokio::join!(
+        Box::pin(
+            harness
+                .mgr
+                .apply_reload_generation(candidate, Vec::new(), prepared)
+        ),
+        driver
+    );
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        harness.counters[&slow].state_queries.load(Ordering::SeqCst),
+        5,
+        "the final qualification retried its missed probe after the export"
+    );
+    assert!(
+        harness
+            .mgr
+            .peers
+            .values()
+            .all(|managed| !managed.pending_export_apply && !managed.pending_refresh),
+        "the settled refresh clears its debt"
+    );
+    harness.shutdown().await;
+    proxy.await.unwrap();
 }
