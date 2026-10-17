@@ -1,0 +1,311 @@
+{
+ "receipt": "full-table dataset reload",
+ "cells": [
+  {
+   "run": 39048263987,
+   "source": "4877d84efde0794b37aaea3b07e8a789ac648f8c",
+   "profile": "full-uc",
+   "cohort": "dataset-delta",
+   "status": "PASS",
+   "reason": "all predeclared bars met",
+   "daemon_exit": 0,
+   "update_group_members": {
+    "0": 12,
+    "1": 1
+   },
+   "daemon_cgroup_peak_bytes": 1008582656,
+   "readiness": {
+    "samples": 3,
+    "non_200_or_failed": 0,
+    "max_ms": 0.335,
+    "windows_s": []
+   },
+   "operations": [
+    {
+     "generation": "b",
+     "mode": "delta",
+     "full_pass": null,
+     "affected_prefixes": 12320,
+     "affected_vpn_keys": 0,
+     "rib_pass_ms": 63,
+     "peers": 13,
+     "sighup_to_complete_s": 0.105,
+     "sighup_to_fold_s": 0.085,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 147840,
+     "unchanged_announcements": 0,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    },
+    {
+     "generation": "a",
+     "mode": "delta",
+     "full_pass": null,
+     "affected_prefixes": 12320,
+     "affected_vpn_keys": 0,
+     "rib_pass_ms": 64,
+     "peers": 13,
+     "sighup_to_complete_s": 0.108,
+     "sighup_to_fold_s": 0.085,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 147840,
+     "unchanged_announcements": 0,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    }
+   ]
+  },
+  {
+   "run": 39048263987,
+   "source": "4877d84efde0794b37aaea3b07e8a789ac648f8c",
+   "profile": "full-uc",
+   "cohort": "dataset-full",
+   "status": "PASS",
+   "reason": "all predeclared bars met",
+   "daemon_exit": 0,
+   "update_group_members": {
+    "0": 12,
+    "1": 1
+   },
+   "daemon_cgroup_peak_bytes": 1152962560,
+   "readiness": {
+    "samples": 38,
+    "non_200_or_failed": 0,
+    "max_ms": 14.811,
+    "windows_s": []
+   },
+   "operations": [
+    {
+     "generation": "b",
+     "mode": "full",
+     "full_pass": "group",
+     "affected_prefixes": null,
+     "affected_vpn_keys": null,
+     "rib_pass_ms": 4604,
+     "peers": 13,
+     "sighup_to_complete_s": 4.647,
+     "sighup_to_fold_s": 4.614,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 147840,
+     "unchanged_announcements": 0,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    },
+    {
+     "generation": "a",
+     "mode": "full",
+     "full_pass": "group",
+     "affected_prefixes": null,
+     "affected_vpn_keys": null,
+     "rib_pass_ms": 4434,
+     "peers": 13,
+     "sighup_to_complete_s": 4.519,
+     "sighup_to_fold_s": 4.452,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 147840,
+     "unchanged_announcements": 0,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    }
+   ]
+  },
+  {
+   "run": 39048263987,
+   "source": "4877d84efde0794b37aaea3b07e8a789ac648f8c",
+   "profile": "full-vpn",
+   "cohort": "dataset-delta",
+   "status": "PASS",
+   "reason": "all predeclared bars met",
+   "daemon_exit": 0,
+   "update_group_members": {
+    "0": 12,
+    "1": 1
+   },
+   "daemon_cgroup_peak_bytes": 2473951232,
+   "readiness": {
+    "samples": 6,
+    "non_200_or_failed": 0,
+    "max_ms": 0.44,
+    "windows_s": []
+   },
+   "operations": [
+    {
+     "generation": "b",
+     "mode": "delta",
+     "full_pass": null,
+     "affected_prefixes": 0,
+     "affected_vpn_keys": 12320,
+     "rib_pass_ms": 491,
+     "peers": 13,
+     "sighup_to_complete_s": 0.541,
+     "sighup_to_fold_s": 0.512,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 147840,
+     "unchanged_announcements": 0,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    },
+    {
+     "generation": "a",
+     "mode": "delta",
+     "full_pass": null,
+     "affected_prefixes": 0,
+     "affected_vpn_keys": 12320,
+     "rib_pass_ms": 509,
+     "peers": 13,
+     "sighup_to_complete_s": 0.534,
+     "sighup_to_fold_s": 0.531,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 147840,
+     "unchanged_announcements": 0,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    }
+   ]
+  },
+  {
+   "run": 39015807823,
+   "source": "07fe76cb79ebcb93e956b08506ece108f2b25e13",
+   "profile": "full-uc",
+   "cohort": "dataset-full",
+   "status": "FAIL",
+   "reason": "44 non-200 or failed /readyz samples in 2 window(s), longest 5.75 s",
+   "daemon_exit": 0,
+   "update_group_members": {
+    "0": 12,
+    "1": 1
+   },
+   "daemon_cgroup_peak_bytes": 1748062208,
+   "readiness": {
+    "samples": 288,
+    "non_200_or_failed": 44,
+    "max_ms": 24.89,
+    "windows_s": [
+     5.75,
+     5.25
+    ]
+   },
+   "operations": [
+    {
+     "generation": "b",
+     "mode": "full",
+     "full_pass": null,
+     "affected_prefixes": null,
+     "affected_vpn_keys": null,
+     "rib_pass_ms": 35772,
+     "peers": 13,
+     "sighup_to_complete_s": 35.866,
+     "sighup_to_fold_s": 35.921,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 14760000,
+     "unchanged_announcements": 14612160,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    },
+    {
+     "generation": "a",
+     "mode": "full",
+     "full_pass": null,
+     "affected_prefixes": null,
+     "affected_vpn_keys": null,
+     "rib_pass_ms": 35362,
+     "peers": 13,
+     "sighup_to_complete_s": 35.413,
+     "sighup_to_fold_s": 35.507,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 14758800,
+     "unchanged_announcements": 14610960,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    }
+   ]
+  },
+  {
+   "run": 39015812391,
+   "source": "07fe76cb79ebcb93e956b08506ece108f2b25e13",
+   "profile": "full-uc",
+   "cohort": "dataset-full",
+   "status": "FAIL",
+   "reason": "24 non-200 or failed /readyz samples in 2 window(s), longest 3.00 s",
+   "daemon_exit": 0,
+   "update_group_members": {
+    "0": 12,
+    "1": 1
+   },
+   "daemon_cgroup_peak_bytes": 1762967552,
+   "readiness": {
+    "samples": 266,
+    "non_200_or_failed": 24,
+    "max_ms": 23.853,
+    "windows_s": [
+     3.0,
+     3.0
+    ]
+   },
+   "operations": [
+    {
+     "generation": "b",
+     "mode": "full",
+     "full_pass": null,
+     "affected_prefixes": null,
+     "affected_vpn_keys": null,
+     "rib_pass_ms": 33000,
+     "peers": 13,
+     "sighup_to_complete_s": 33.069,
+     "sighup_to_fold_s": 32.96,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 14754704,
+     "unchanged_announcements": 14606864,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    },
+    {
+     "generation": "a",
+     "mode": "full",
+     "full_pass": null,
+     "affected_prefixes": null,
+     "affected_vpn_keys": null,
+     "rib_pass_ms": 33028,
+     "peers": 13,
+     "sighup_to_complete_s": 33.051,
+     "sighup_to_fold_s": 32.991,
+     "outcome_deltas": {
+      "complete": 1
+     },
+     "announcements": 14758800,
+     "unchanged_announcements": 14610960,
+     "exact_fold": true,
+     "sessions_continuous": true,
+     "receivers": 12
+    }
+   ]
+  }
+ ]
+}
