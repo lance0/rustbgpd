@@ -690,7 +690,6 @@ rbgp events --limit 500    # recent route events (default 100; there is no -l sh
 rbgp events --all          # the full retained route-event window
 rbgp events watch
 rbgp events watch --backfill 50
-rbgp events watch --from-event-id 41236
 rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
 rbgp events sessions --neighbor 192.0.2.1   # --peer is an accepted alias
 rbgp events policy
@@ -706,17 +705,10 @@ rbgp completions bash
 rbgp man                # man page (roff) on stdout: rbgp man | man -l -
 ```
 
-`events watch --from-event-id N` durably replays events after `N` and tails
-the outbox. While the command remains running, a clean stream end or gRPC
-`UNAVAILABLE` reconnects with a 1-second exponential backoff capped at 30
-seconds. Every category, type, neighbor, family, and prefix filter is preserved.
-The resume cursor advances from the top-level `BgpEvent.event_id` only after the
-complete human or JSON record, newline, and stdout flush succeed; a lag frame
-without that ID does not advance it. Other RPC statuses and output failures are
-terminal. This is a process-local resume cursor, not a persisted downstream
-checkpoint; use the event-bridge pattern when the consumer must store its own
-confirmed cursor. Cursorless OTC subscriptions and ordinary `WatchEvents`
-streams remain one-shot.
+`events watch` is one-shot: it ends with the stream and does not replay events
+missed while disconnected. A collector that needs to resynchronize after a
+reconnect re-reads current state, for example with gNMI `Subscribe`, which sends
+a full snapshot before changes.
 
 Human event lines print timestamps as RFC 3339 UTC, the format `config history`
 uses. JSON event records keep `timestamp`, the daemon's decimal Unix-seconds

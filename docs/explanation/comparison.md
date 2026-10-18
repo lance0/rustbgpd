@@ -537,7 +537,7 @@ member individually.
 [^gnmi]: rustbgpd ships a native `gnmi.gNMI` target for a strict
     OpenConfig BGP operational-state subset: `Capabilities`, `Get`, and
     `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE for
-    neighbor `session-state` when `[event_history]` is enabled) over UDS or
+    neighbor `session-state`) over UDS or
     mTLS TCP, plus an operator-tier `Set` subset — transaction-backed static
     numbered-neighbor create/update/delete and the commit-confirmed extension
     via ADR-0076, with unsupported paths returning `Unimplemented`. Dial-out is
@@ -640,9 +640,7 @@ continuous churn left different final route totals. A 2026-06-02
 independent whole-daemon DHAT profile attributes
 the route-heavy shape primarily to the three-layer RIB model
 (Adj-RIB-In + Loc-RIB + Adj-RIB-Out) and its route-map / prefix-index
-storage. The durable event-history outbox is opt-in
-(default off); enabling it adds raw cgroup usage roughly proportional to event
-volume. OpenBGPD is absent because a bgperf2 harness defect prevented it
+storage. OpenBGPD is absent because a bgperf2 harness defect prevented it
 from starting, not because of a daemon result. See
 [BENCHMARKS.md](../benchmarks.md) for the full cross-stack tables and
 [the cross-stack receipt](../perf/competitive-bgperf2-2026-07.md) for

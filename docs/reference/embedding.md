@@ -21,18 +21,16 @@ This document is the contract for embedders: which crate to depend on, what the
 |---------|---------------|-----------------------------------------|------|
 | `birdwatcher-adapter` | Disabled | `rustbgpd-api` | Birdwatcher-compatible REST adapter backed by the daemon gRPC API. |
 | `enhanced-route-refresh-receipt` | Disabled | `rustbgpd-wire` | Enhanced Route Refresh protocol receipt harness. |
-| `event-bridge` | Disabled | `rustbgpd-api` | Reference durable-event collector bridge. |
 | `peer-loop` | Disabled | `rustbgpd-fsm`, `rustbgpd-wire` | Minimal BGP speaker embedding the published codec and FSM crates. |
 | `reloadstall` | Disabled | `rustbgpd-wire` | Route-server convergence, reload and failover harness. |
 | `rrharness` | Disabled | `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | In-process route-reflector scale and profiling harness. |
 | `rrtransport` | Disabled | `rustbgpd-evpn-load`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Route-reflector transport scale and receipt harness. |
 | `rs-config-render` | Disabled | `rustbgpd-policy` | Route-server configuration rendering tool. |
 | `rustbgpctl` | Disabled | `rustbgpd-policy`, `rustbgpd-wire` | Thin gRPC management CLI and support library. |
-| `rustbgpd` | Disabled | `rustbgpd-api`, `rustbgpd-bfd`, `rustbgpd-bmp`, `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-evpn-linux`, `rustbgpd-fsm`, `rustbgpd-mrt`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Daemon binary and internal assembly library. |
-| `rustbgpd-api` | Disabled | `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | gRPC server, generated bindings, and service types. |
+| `rustbgpd` | Disabled | `rustbgpd-api`, `rustbgpd-bfd`, `rustbgpd-bmp`, `rustbgpd-evpn`, `rustbgpd-evpn-linux`, `rustbgpd-fsm`, `rustbgpd-mrt`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Daemon binary and internal assembly library. |
+| `rustbgpd-api` | Disabled | `rustbgpd-evpn`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | gRPC server, generated bindings, and service types. |
 | `rustbgpd-bfd` | Disabled | None | Pure BFD packet codec and session state machine. |
 | `rustbgpd-bmp` | Disabled | `rustbgpd-telemetry`, `rustbgpd-wire` | RFC 7854 BMP export. |
-| `rustbgpd-event-history` | Disabled | `rustbgpd-telemetry` | Durable local event outbox. |
 | `rustbgpd-evpn` | Disabled | `rustbgpd-wire` | EVPN VTEP domain model. |
 | `rustbgpd-evpn-linux` | Disabled | `rustbgpd-evpn` | Linux netlink EVPN dataplane reconciler. |
 | `rustbgpd-evpn-load` | Disabled | `rustbgpd-wire` | EVPN route-reflector benchmark load generator. |
@@ -336,7 +334,7 @@ The three services that matter for a route-injection controller:
 |---------|-------------------------------|
 | `InjectionService` | `AddPath` / `DeletePath` (unicast prefixes), `AddFlowSpec` / `DeleteFlowSpec`, `AddEvpnRoute` / `DeleteEvpnRoute` |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainBestPath`, `ExplainAdvertisedRoute`, `ListRouteEvents` |
-| `EventService` | `WatchEvents` (live stream), `SubscribeFromEvent` (durable cursor replay, §8) |
+| `EventService` | `WatchEvents` (live stream) |
 
 Route origination is `InjectionService`, not `RibService` — `RibService` is the
 read and explain surface. [`docs/reference/grpc-method-inventory.md`](grpc-method-inventory.md)
@@ -438,8 +436,8 @@ To be the de facto Rust BGP codec, the concrete gaps:
    timer, and session actions, and prints successfully parsed UPDATEs; its
    loopback tests assert Established, one UPDATE round-trip, and the
    NOTIFICATION and hold-expiry exits. This is the "it works" receipt for
-   consumers #1 and #3. The `event-bridge` example proves the gRPC-client shape;
-   this proves the library-embedding shape.
+   consumers #1 and #3. The `birdwatcher-adapter` example proves the gRPC-client
+   shape; this proves the library-embedding shape.
 2. **Add a `tokio_util::codec::Decoder/Encoder` impl.** Done: the default-off
    `tokio-codec` feature exports typed
    `BgpCodec` / `BgpCodecError` framing with independent inbound and outbound
@@ -567,28 +565,22 @@ gRPC consumer gains from the recent proto additions
   surfaces. Omit it to retain the fail-closed max-prefix shutdown until an
   explicit enable.
 
-**The event-replay contract** (`EventService.SubscribeFromEvent`,
-ADR-0072) is the durable half of the event surface and the one an
-integration should build on: events carry a monotonic `event_id`;
-the consumer persists the last id it processed and resumes with
-`from_event_id` after either side restarts. It requires
-`[event_history].enabled = true` on the daemon and returns
-`FAILED_PRECONDITION` otherwise — treat that as "replay not
-provisioned", not an error to retry. The live `WatchEvents` stream
-emits `stream_lagged` warnings when a bounded source dropped events;
-that is the signal to fall back to the durable cursor.
+**The event contract is snapshot-then-watch.** `WatchEvents` is a live stream
+with no replay: after a connect or reconnect, read the state the integration
+needs (or use gNMI `Subscribe`, which starts with a fresh snapshot), then
+follow the live stream. A `stream_lagged` warning means a bounded source
+dropped events; re-read state before trusting later deltas. For a durable
+record, use BMP to a collector, Prometheus, or the daemon logs.
 
-**Reference consumers in-tree:** `examples/event-bridge/` (gRPC →
-JSON-lines event bridge, the minimal Shape-A skeleton) and
-`examples/birdwatcher-adapter/` (a Birdwatcher-shaped status, peer,
-accepted-route, filtered-route, and noexport REST subset sourced entirely
+**Reference consumer in-tree:** `examples/birdwatcher-adapter/` (a
+Birdwatcher-shaped status, peer, accepted-route, filtered-route, and noexport REST subset sourced entirely
 from the public gRPC API, including per-route `age` from
 `received_at_epoch_seconds`, `GET /routes/filtered/{id}` served from
 `PolicyService.ListRejectedRoutes` with structured reject reasons, and
 `GET /routes/noexport/{id}` served from the `ListBestRoutes` −
 `ListAdvertisedRoutes` diff with each suppression explained by
-`RibService.ExplainAdvertisedRoute`). Both live in this workspace, so they take
-`rustbgpd-api` as a path dependency; read them for the call shapes and the RPC
+`RibService.ExplainAdvertisedRoute`). It lives in this workspace, so it takes
+`rustbgpd-api` as a path dependency; read it for the call shapes and the RPC
 sequencing, but generate your own client from the proto (§3.5) rather than
 copying that dependency line. The adapter is the honest template: if the public
 API is missing a field an external tool needs, the fix is an additive proto

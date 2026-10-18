@@ -46,7 +46,7 @@ Follow a procedure for a specific task.
 | [Route-server shadow pilot](cookbook/route-server-shadow-pilot.md) | Evaluate beside an incumbent without taking authority. |
 | [Route-server migration](cookbook/route-server-migration.md) | Plan a shadow trial, cutover, and rollback. |
 | [MANRS IXP Action 1](cookbook/manrs-ixp-action1.md) | Map the requirements to configuration and verification. |
-| [Controller and monitoring feed](cookbook/monitoring-feed.md) | Export BMP, durable events, and MRT. |
+| [Controller and monitoring feed](cookbook/monitoring-feed.md) | Export BMP, live events, and MRT. |
 | [EVPN fabric route reflector](cookbook/evpn-fabric-rr.md) | Reflect EVPN routes in a leaf/spine fabric. |
 | [Policy quickstart](cookbook/policy-quickstart.md) | Test and activate a typed routing policy. |
 | [Backup route with conditional advertisement](cookbook/conditional-advertisement-backup.md) | Announce to a backup upstream only while the primary route is gone. |

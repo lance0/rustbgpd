@@ -6,8 +6,8 @@ Export routing state to your monitoring stack.
 
 **When this is you:** Your controller, analytics pipeline, or NOC needs
 routing state. It needs to see what this daemon sees — pre-policy,
-post-policy, and Loc-RIB route streams into BMP collectors, a durable
-event feed your bridge can replay after a restart, periodic MRT table
+post-policy, and Loc-RIB route streams into BMP collectors, a live event
+stream your controller follows after reading a snapshot, periodic MRT table
 archives, and a Grafana dashboard on top. rustbgpd exports the full BMP
 monitoring trio on one exporter (RFC 7854 Adj-RIB-In, RFC 8671
 Adj-RIB-Out as byte-exact wire PDUs, RFC 9069 Loc-RIB), selectable per
@@ -24,7 +24,7 @@ and [`examples/route-collector/`](../../examples/route-collector/).
 ## Config
 
 The example is an RR that also feeds the monitoring stack; the same
-`[bmp]` / `[event_history]` / `[mrt]` blocks bolt onto any of the
+`[bmp]` / `[mrt]` blocks bolt onto any of the
 other recipes unchanged.
 
 ```toml
@@ -46,13 +46,6 @@ log_format = "json"
 # implicit "local-operator" principal — no [security.grpc] block needed.
 [global.telemetry.grpc_uds]
 path = "/var/lib/rustbgpd/grpc.sock"
-
-# Durable event outbox (ADR-0072): restart-safe replay cursor for
-# SubscribeFromEvent. Opt-in — it costs memory/CPU at scale, which is
-# why it is off by default. Enable it here because replay is the
-# point of this deployment.
-[event_history]
-enabled = true
 
 # Periodic MRT TABLE_DUMP_V2 snapshots — readable by bgpdump, BGPKIT,
 # and the RouteViews/RIPE RIS toolchains.
@@ -204,34 +197,21 @@ connection generation's peak. The `collector` value is the configured socket
 address including port. A high-water mark near the fixed 8192-row bound means
 the collector or dump path needs investigation before the next burst.
 
-**Event replay (the bridge contract):** live tail plus durable replay
-from a cursor. `--from-event-id 0` replays everything retained, then
-tails; your bridge persists the last `event_id` it processed and
-resumes from there after either side restarts:
+**Events (snapshot, then watch):** the event stream is live only. A
+controller reads the state it needs, then follows the stream; after any
+reconnect it does the same again:
 
 ```console
-$ rbgp events watch --from-event-id 0
-$ rbgp events watch --category route,session --from-event-id 41236
+$ rbgp neighbor
+$ rbgp events watch --category route,session
 ```
 
-While this CLI process remains running, a clean stream end or gRPC
-`UNAVAILABLE` reconnects from the highest successfully flushed top-level
-`BgpEvent.event_id`. Reconnect delay starts at 1 second, doubles to a 30-second
-cap, and resets after a complete human or JSON record plus newline has been
-written and stdout has been flushed. The CLI preserves the full filter set on
-every request. Lag frames without a top-level event ID do not move the cursor;
-all other RPC statuses and output failures are terminal. Cursorless OTC
-subscriptions and ordinary `WatchEvents` streams remain one-shot. This
-process-local retry does not replace the bridge's downstream-confirmed,
-persisted cursor across CLI restarts.
-
-The same contract over raw gRPC is
-`EventService.SubscribeFromEvent` — see
-[`examples/event-bridge/`](../../examples/event-bridge/) for a
-complete bridge (gRPC → JSON lines) you can pipe into Kafka, NATS,
-or Vector. rustbgpd deliberately is not an event bus; the outbox is
-a bounded SQLite WAL store with a monotonic cursor
-([ADR-0072](../adr/0072-durable-event-history.md)).
+The same pattern over raw gRPC is a state read followed by
+`EventService.WatchEvents`. gNMI `Subscribe` ON_CHANGE on neighbor
+`session-state` combines both: every subscription starts with a fresh
+snapshot and `sync_response`, then streams changes. Neither replays the
+disconnected window. rustbgpd deliberately is not an event bus: the BMP feed
+above, Prometheus, and the JSON logs are the durable record.
 
 **MRT:** force a dump and inspect it with your usual tooling:
 
@@ -256,13 +236,12 @@ what each view contains.
 ## Watch
 
 Import the overview dashboard per [`GRAFANA.md`](../how-to/grafana.md); the
-BMP / event-outbox row is populated once the features above are
+BMP and event-streaming row is populated once the features above are
 configured. Key series:
 
 | Metric | Meaning |
 |--------|---------|
-| `bgp_event_outbox_degraded` | 1 = latched durability-impacting loss, committed-event delivery skip, or DB open/recovery/quarantine failure; expected shutdown `reason=closed` drops are excluded. Inspect the drop reason and daemon log: replay can remain available |
-| `bgp_event_outbox_storage_failed` | 1 = the event-history storage stopped at runtime; the outbox refuses events and durable subscriptions until a restart |
+| `bgp_event_stream_lagged_total{service,source}` | events missed by a slow live subscriber; that consumer re-reads state and restarts its watch |
 | `bmp_collector_drops_total` | per-collector queue/dump failures; live fan-out Full/Closed automatically resets only that collector generation, replays cached Peer Up state, and rebuilds configured Loc-RIB state after the one-second reconnect |
 | `bmp_source_drops_total` | per-peer BMP events dropped at the source tap, including a periodic stats report whose session-state query timed out |
 | `bmp_replay_attempts_total` | PeerUp-cache replays on collector reconnect |
@@ -270,15 +249,11 @@ configured. Key series:
 
 ## Failure modes
 
-**`SubscribeFromEvent` / `rbgp events watch --from-event-id` returns
-`FAILED_PRECONDITION`.** The daemon is running with
-`[event_history].enabled = false` (the default). Enable it and
-restart — the outbox fields are restart-required.
-
-**The bridge missed events during a burst.** Live streams emit
+**The controller missed events during a burst.** Live streams emit
 `stream_lagged` warnings when a bounded source dropped events for a
-slow consumer. That is the signal to resume via the durable cursor
-(`--from-event-id <last-processed>`) rather than the live ring.
+slow consumer, and gNMI ON_CHANGE ends with `DATA_LOSS`. Either is the
+signal to re-read state (or resubscribe without `updates_only`) before
+trusting later deltas.
 
 **A BMP collector shows nothing after a network blip.** The daemon
 redials with backoff capped by `reconnect_interval` and replays cached Peer Up
@@ -296,9 +271,3 @@ bootstrap failures.
 expected: pmacct does not decode the draft BMPv4 TLV framing. Per the config
 comment above, point v4 only at tooling that tracks draft-ietf-grow-bmp-tlv. Move that collector to
 `version = 3` (or drop the `version` key; 3 is the default).
-
-**The events DB was corrupted by a crash.** The bad file is renamed
-`events.db.stale`, the daemon continues (pass-through) unless
-`[event_history].required = true`, and `bgp_event_outbox_degraded`
-latches to 1 until an operator restart. Details:
-[`CONFIGURATION.md` §event_history](../reference/configuration.md#event_history).

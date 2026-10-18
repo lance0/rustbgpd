@@ -62,10 +62,10 @@ not by itself make it v1-stable.
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ReplayOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `ComparePolicy`, `GetPolicyStats`, `GetValidationPolicyPosture`, `ListConditionalAdvertisements` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, bounded invalid-validation disposition posture, and conditional-advertisement state |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrTopologyNodes`, `ListOrrTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`, `ListBgpLsRibRoutes`, `ListBestEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrTopologyNodes`, `ListOrrTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`, `ListBgpLsRibRoutes`, `ListBestEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` |
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
-| `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
+| `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
@@ -306,8 +306,7 @@ remain unchanged.
 OpenConfig BGP telemetry surface (ADR-0070). The supported subset is
 deliberately narrow: `Capabilities`, `Get`, and `Subscribe` (`ONCE`, `POLL`,
 `STREAM SAMPLE`, and `STREAM ON_CHANGE` — the last is scoped to the neighbor
-session-state leaf, requires `[event_history]` enabled, and returns
-`FAILED_PRECONDITION` otherwise) for global and neighbor `state` under the
+session-state leaf and follows the live session-event stream) for global and neighbor `state` under the
 default network instance. `Set` is operator-only and supports the first durable
 config subset: static, numbered BGP neighbor create/update/delete for
 `neighbor-address`, `peer-as`, `description`, and `peer-group`, peer-group
@@ -1598,7 +1597,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ## RibService
 
 Query the routing information base. Its route surface is query-only; stream live
-route changes through `EventService.WatchEvents` or `EventService.SubscribeFromEvent`.
+route changes through `EventService.WatchEvents`.
 
 | RPC | Description |
 |-----|-------------|
@@ -1749,7 +1748,7 @@ through one RPC shape.
 | Recent EVPN route timeline | `EventService.ListEvpnEvents` / `rbgp events evpn` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | RFC 7999 discard programming | `ListBlackholeDiscards` / `rbgp rib blackholes` | Snapshot | Current reconcile snapshot only; retryable limit blocks are `REJECTED` with `active_limit_exceeded` or `install_rate_limited` |
 | ADR-0061 general Linux FIB programming | `ListFibRoutes` / `rbgp rib fib` | Snapshot | Current reconcile snapshot plus persisted owned-state semantics |
-| ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rbgp events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; durable replay via `SubscribeFromEvent` when `[event_history].enabled = true`; no bounded `List*` history API |
+| ADR-0061 FIB route apply outcomes | `EventService.WatchEvents` with `EVENT_CATEGORY_DATAPLANE` and `BGP_EVENT_TYPE_DATAPLANE_ROUTE_*` / `rbgp events watch --category dataplane` | Streaming event feed | Live via `WatchEvents`; no replay and no bounded `List*` history API |
 | EVPN L2/L3 dataplane readiness and managed-netdev ownership status | `EvpnService` (`ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`) / `rbgp evpn ...` | Snapshot | Latest daemon or dataplane report snapshot |
 | BGP-LS topology objects | `ListBgpLsRibRoutes` / `rbgp rib bgpls` | Bounded pages | Selected Loc-RIB, accepted input or committed export; raw BGP-LS NLRI/TLV bytes preserved |
 | ADR-0067 BFD session state | `BfdService.GetBfdSessions` / `rbgp bfd` | Snapshot | Current BFD actor snapshot |
@@ -1993,8 +1992,7 @@ per-route ASPA fact rather than cache readiness.
 ### Watch route changes (streaming)
 
 Live route deltas stream through `EventService.WatchEvents` with
-`EVENT_CATEGORY_ROUTE` (see [Watch unified events](#watch-unified-events));
-durable cursor replay goes through `EventService.SubscribeFromEvent`.
+`EVENT_CATEGORY_ROUTE` (see [Watch unified events](#watch-unified-events)).
 
 ```bash
 # Live route stream (streams until interrupted)
@@ -2023,7 +2021,7 @@ process.
 `WatchEvents` does not backfill recent events for new subscribers. Clients
 that need both context and a live tail should call `ListRouteEvents` first,
 then open a live stream for subsequent deltas (`rbgp events watch --backfill 50`
-does exactly this), or use `SubscribeFromEvent` when event history is enabled.
+does exactly this).
 `WatchEvents` emits `BGP_EVENT_TYPE_STREAM_LAGGED` with a `StreamLagEvent`
 payload when a subscriber falls behind the bounded route broadcast.
 
@@ -2682,7 +2680,6 @@ ADR-0061 per-route FIB apply outcomes, and BFD session state changes.
 | RPC | Description |
 |-----|-------------|
 | `WatchEvents` | Server-streaming: unified typed event stream sourced from structured daemon events |
-| `SubscribeFromEvent` | Server-streaming: durable event-history cursor replay from the local outbox, then live |
 | `ListSessionEvents` | Unary: recent session lifecycle events from the peer manager's bounded in-memory history |
 | `ListPolicyEvents` | Unary: recent policy / neighbor-set / peer-group / chain mutation events from the peer manager's bounded in-memory history |
 | `ListEvpnEvents` | Unary: recent EVPN route add / withdraw / best-change events from the RIB's bounded in-memory history |
@@ -2739,11 +2736,6 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"categories": ["EVENT_CATEGORY_EVPN"], "event_types": ["BGP_EVENT_TYPE_EVPN_ROUTE_ADDED", "BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN", "BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED"], "neighbor_address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
 
-# Replay all retained durable events, then continue live
-grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  -d '{"from_event_id": 0}' \
-  localhost:50051 rustbgpd.v1.EventService/SubscribeFromEvent
-
 # Query recent Type 2 EVPN route events for one RD
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"route_type_filter": 2, "rd_filter": "65000:100", "limit": 20}' \
@@ -2759,27 +2751,10 @@ live route events whose `event_id` was already printed. The command prints a
 history block followed by the live tail; it does not server-side merge the two
 streams by wall-clock timestamp.
 
-`SubscribeFromEvent` is the restart-safe durable cursor surface backed by
-`[event_history]`'s local SQLite outbox. Its `from_event_id` field uses explicit
-presence: absent means live-only, `0` replays every retained event before
-joining live, and `N > 0` replays events with `event_id > N` before joining
-live. If `N` is older than the retention floor, the first response is a
-`BGP_EVENT_TYPE_STREAM_LAGGED` event whose `missed_count` describes the global
-outbox gap; the stream then continues from the earliest retained event. If
-retention evicts events ahead of a replay still in progress, another such event
-precedes the next replayed event and counts exactly the evicted ids, so a
-collector must accept this event at any position in the stream. Empty
-category and type filters select every EHM-fed category on this RPC: route,
-EVPN, session lifecycle, session notifications, policy, dataplane, and BFD.
-Dataplane summary and per-route FIB apply events remain live on `WatchEvents`
-and are also replayable through `SubscribeFromEvent` when event history is
-enabled. When event history is disabled or startup fell back to live-only
-operation, the RPC returns `FAILED_PRECONDITION` at admission; legacy live and
-`List*Events` RPCs are unaffected. That admission result takes precedence over
-filter validation.
-
-Pre-admission loss is the baseline; later loss wins delivery races and ends with
-`DATA_LOSS`. Cursors cannot replay pre-commit loss, so reconcile state first.
+There is no durable event cursor. A client that reconnects re-reads the state
+it needs (or uses gNMI `Subscribe`, which starts with a fresh snapshot) and then
+opens a new live stream. BMP to a collector, Prometheus, and the daemon logs
+are the durable record.
 
 Filters compose AND-wise across category, type, peer, family, and exact prefix.
 Repeated categories are ORed, repeated types are ORed, and the two dimensions
@@ -2791,7 +2766,7 @@ rules below still apply).
 Synthetic `BGP_EVENT_TYPE_STREAM_LAGGED` control frames bypass ordinary
 category, type, peer, family, and prefix filters after compatibility validation.
 
-Live `WatchEvents` compatibility:
+`WatchEvents` compatibility:
 
 | Category | Compatible event types |
 |----------|------------------------|
@@ -2802,27 +2777,6 @@ Live `WatchEvents` compatibility:
 | EVPN | `BGP_EVENT_TYPE_EVPN_ROUTE_ADDED`, `BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
 | BFD | `BGP_EVENT_TYPE_BFD_SESSION_UP`, `BGP_EVENT_TYPE_BFD_SESSION_DOWN`, `BGP_EVENT_TYPE_BFD_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
 
-Durable `SubscribeFromEvent` compatibility:
-
-If the storage actor becomes unavailable after admission and no producer loss
-has been observed, the stream ends with gRPC `UNAVAILABLE`. Resume from the
-last received top-level `event_id` after restoring the daemon. Once the
-storage thread has stopped, admission itself returns `UNAVAILABLE`, and open
-streams end with `DATA_LOSS` because producer events are refused until restart. Allocator
-pass-through remains `FAILED_PRECONDITION`; post-admission producer loss retains
-`DATA_LOSS` precedence.
-
-| Category | Compatible event types |
-|----------|------------------------|
-| Route | `BGP_EVENT_TYPE_ROUTE_ADDED`, `BGP_EVENT_TYPE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_ROUTE_BEST_CHANGED`, `BGP_EVENT_TYPE_ROUTE_POLICY_FILTERED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
-| Session | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`, `BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ADDED`, `BGP_EVENT_TYPE_PEER_REMOVED`, `BGP_EVENT_TYPE_PEER_ENABLED`, `BGP_EVENT_TYPE_PEER_DISABLED`, `BGP_EVENT_TYPE_MAX_PREFIX_WARNING`, `BGP_EVENT_TYPE_NOTIFICATION_SENT`, `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
-| Policy | `BGP_EVENT_TYPE_POLICY_CHANGED`, `BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
-| Dataplane | `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
-| EVPN | `BGP_EVENT_TYPE_EVPN_ROUTE_ADDED`, `BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
-| BFD | `BGP_EVENT_TYPE_BFD_SESSION_UP`, `BGP_EVENT_TYPE_BFD_SESSION_DOWN`, `BGP_EVENT_TYPE_BFD_SESSION_STATE_CHANGED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
-
-`OTC_ROUTE_BLOCKED` is durable Policy only. Durable `STREAM_LAGGED` describes a
-global committed-stream gap and is therefore compatible with every category.
 Route events are sourced from the structured RIB broadcast,
 including export-policy denial events (`route_policy_filtered`) for unicast
 routes present in Loc-RIB but filtered from an outbound peer;
@@ -2834,8 +2788,7 @@ in the bounded `ListPolicyEvents` process-local history ring; dataplane summary
 events are status-row count changes from the existing `ListFibRoutes` and
 `ListBlackholeDiscards` snapshots. ADR-0061 per-route FIB dataplane events are
 emitted directly by the FIB runtime when a route is installed, withdrawn, or
-fails to apply, and are replayable through `SubscribeFromEvent` when
-`[event_history].enabled = true` (they are not replayed by `ListFibRoutes`).
+fails to apply; they are live only and are not replayed by `ListFibRoutes`.
 EVPN events are sourced from the RIB's EVPN best-path broadcast and are also
 retained in a bounded `ListEvpnEvents` process-local history ring.
 The FIB `rejected` count reflects surfaced status rows; high-cardinality
@@ -2853,7 +2806,7 @@ state-change lifecycle events over
 a bounded channel that is separate from the lossless TCP collision-coordination
 path, so high churn can drop observability events without risking collision
 handling. Live lag warnings emit for route, session, per-route dataplane, EVPN,
-and BFD sources, but not policy or peerless dataplane; durable lag is global.
+and BFD sources, but not policy or peerless dataplane.
 Prefix and family
 filters match unicast route events and per-route FIB dataplane events; session,
 policy, EVPN, BFD, and peerless dataplane summary events do not match requests
@@ -2956,7 +2909,7 @@ Stream health event types:
 
 | Type | Meaning |
 |------|---------|
-| `BGP_EVENT_TYPE_STREAM_LAGGED` | Live: source-scoped route, session, per-route dataplane, EVPN, or BFD loss. Durable: a global outbox gap compatible with every category. |
+| `BGP_EVENT_TYPE_STREAM_LAGGED` | Source-scoped route, session, per-route dataplane, EVPN, or BFD loss on the live stream. |
 
 Policy event types:
 
