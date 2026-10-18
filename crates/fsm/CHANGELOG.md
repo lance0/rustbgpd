@@ -3,6 +3,13 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.13.0 - 2026-10-18
+
+- Move the public wire dependency to 0.26. Upgrade crates exchanging public
+  wire types together. The paired wire release changes EVPN Type 5 UPDATE
+  validation behavior only; no FSM API or session-state-machine behavior
+  changes.
+
 ## 0.12.0 - 2026-10-12
 
 - Move the public wire dependency to 0.25. Upgrade crates exchanging public

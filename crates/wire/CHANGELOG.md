@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.26.0 - 2026-10-18
 
 - `UpdateMessage::parse_revised` (and `parse_revised_observed*`) now report
   an EVPN Type 5 announcement whose ESI, gateway IP, Router's MAC and label
@@ -15,13 +15,16 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   `evpn_announced` for the UPDATE-wide withdrawal, and withdrawals still
   decode it. `validate_evpn_announcements` is unchanged because it sees
   only the NLRI. No public item or signature changes. This is a validation
-  behavior change and ships in the next minor release.
+  behavior change, so under the crate's semver policy it ships in a minor
+  release, not a patch.
 - The same parsers now also report an EVPN Type 5 announcement whose first
   Router's MAC Extended Community carries a multicast or broadcast MAC (I/G
   bit set) as a treat-as-withdraw `MalformedAttribute` on `MP_REACH_NLRI`
   (RFC 9136 §3.2, Table 1 note), whatever the route's ESI, gateway IP and
   label. A unicast Router's MAC is accepted, and Type 2 routes are not
   checked. No public item or signature changes.
+- Pair this wire compatibility line with FSM 0.13 and RPKI 0.8 when sharing
+  public wire types.
 
 ## 0.25.0 - 2026-10-12
 

@@ -22,11 +22,11 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | Primary interface | gRPC | CLI (vtysh) | CLI (birdc) | gRPC | CLI (bgpctl) |
 | First release | 2026 | 2017 | 1998 | 2014 | 2004 |
 | Multithreaded | Yes (tokio) | Partial (packet I/O + keepalive pthreads; route processing single-threaded) | Yes (BIRD 3) | Yes (goroutines) | Yes (3-process) |
-| Latest release (verified 2026-10-12)[^versions] | v0.77.0 (2026-10-12) | 10.7.1 (2026-08-31) | 3.3.3 (2026-10-01) | v4.10.0 (2026-10-04) | 9.3 (2026-09-30) |
+| Latest release (verified 2026-10-18)[^versions] | v0.78.0 (2026-10-18) | 10.7.1 (2026-08-31) | 3.4.0 (2026-10-12) | v4.10.0 (2026-10-04) | 9.3 (2026-09-30) |
 
 [^versions]: Dates are the upstream release announcements: FRR
     [frr-10.7.1](https://github.com/FRRouting/frr/releases/tag/frr-10.7.1),
-    BIRD [3.3.3 `NEWS`](https://gitlab.nic.cz/labs/bird/-/blob/v3.3.3/NEWS),
+    BIRD [3.4.0 `NEWS`](https://gitlab.nic.cz/labs/bird/-/blob/v3.4.0/NEWS),
     GoBGP [v4.10.0](https://github.com/osrg/gobgp/releases/tag/v4.10.0),
     OpenBGPD [9.3](https://cdn.openbsd.org/pub/OpenBSD/OpenBGPD/openbgpd-9.3-relnotes.txt),
     and the rustbgpd [changelog](../../CHANGELOG.md). This row does not
@@ -584,7 +584,7 @@ member individually.
 The freshest published [v0.68.0 cross-stack
 receipt](../perf/competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is an 80-cell, counterbalanced same-host campaign against fresh pinned builds
-of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. BIRD 2.19.3, released 2026-10-02, FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Values are
+of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. BIRD 2.19.3, released 2026-10-02, BIRD 2.20.0, released 2026-10-12, FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Values are
 successful-run medians of **convergence seconds / total seconds**.
 
 | Scenario | rustbgpd v0.68.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
@@ -659,7 +659,7 @@ and the losses published alongside the wins. The current rows are the
 which ran rustbgpd v0.75.0 and OpenBGPD 9.3 on one host in the same night.
 BIRD's current matrix rows are BIRD 3.3.2 in the
 [v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04
-against rustbgpd v0.74.0; BIRD 3.3.3, released 2026-10-01, is not yet
+against rustbgpd v0.74.0; BIRD 3.3.3, released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet
 measured. The matrix's earlier rows are dated, last measured 2026-08-30,
 and their receiver-bound completion rows used the glibc-malloc harness, so
 they are not directly comparable ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)).
@@ -681,8 +681,8 @@ A separate
 measures BIRD 3.3.3, released 2026-10-01, and OpenBGPD 9.3 against unreleased rustbgpd source
 `dcc9b6384` at 0% overlap only: completion p50 was 0.578–0.606 s for
 rustbgpd, 12.493–14.490 s for BIRD 3.3.3 and 44.429–59.541 s for OpenBGPD
-9.3. It is not a release result, and BIRD 3.3.3 has no 10% or 50% overlap
-measurement yet.
+9.3. It is not a release result, BIRD 3.3.3 has no 10% or 50% overlap
+measurement yet, and BIRD 3.4.0, released 2026-10-12, is not yet measured.
 
 A separate [1,000-peer retained receipt](../perf/route-server-1000-2026-07.md),
 measured 2026-07-20 with a source-equivalent v0.68.0 rerun measured 2026-08-30,
@@ -792,8 +792,8 @@ policy-reload completion (rustbgpd v0.75.0 p50 0.75–0.91 s against
 201.90–208.04 s for OpenBGPD 9.3 in the
 [same-night v0.75.0 receipt](../perf/cross-daemon-v0750-2026-10.md), measured 2026-10-04 to 2026-10-05;
 BIRD 3.3.2 read 89.06–103.61 s against rustbgpd v0.74.0's 0.83–0.90 s in the
-[v0.74.0 receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04, and BIRD
-3.3.3, released 2026-10-01, is not yet measured), on the same host and wire
+[v0.74.0 receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04; BIRD
+3.3.3, released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet measured), on the same host and wire
 inputs, with per-daemon wins and losses — including OpenBGPD's smaller
 stall tail — published in the receipts.
 

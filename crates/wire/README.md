@@ -16,6 +16,23 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### 0.26.0 compatibility note
+
+`rustbgpd-wire` 0.26.0 is a breaking minor release for UPDATE validation
+behavior; no public item or signature changes. It pairs with FSM 0.13 and
+RPKI 0.8 when sharing public wire types. Upgrade crates exchanging public wire
+types together when adopting this line.
+
+Behavior change: `UpdateMessage::parse_revised` (and
+`parse_revised_observed*`) report an EVPN Type 5 announcement as an RFC 7606
+treat-as-withdraw `MalformedAttribute` on `MP_REACH_NLRI` (RFC 9136 §3.2)
+when its ESI, gateway IP, Router's MAC and label are all zero, or when its
+first Router's MAC Extended Community carries a multicast or broadcast MAC.
+An absent or all-zero Router's MAC counts as zero, and any non-zero label or
+VNI is accepted. The route stays in `evpn_announced` for the UPDATE-wide
+withdrawal, withdrawals still decode it, and `validate_evpn_announcements`
+is unchanged.
+
 ### 0.25.0 compatibility note
 
 `rustbgpd-wire` 0.25.0 is a breaking minor release for decode and validation
@@ -430,7 +447,7 @@ Add the published codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.25.0"
+rustbgpd-wire = "0.26.0"
 bytes = "1"
 ```
 

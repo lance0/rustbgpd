@@ -47,7 +47,7 @@ Each result below links to its published, reproducible receipt:
   BIRD 3.3.2 completed in 89.06–103.61 s the night before, against
   rustbgpd v0.74.0 at 0.83–0.90 s —
   [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md); BIRD 3.3.3,
-  released 2026-10-01, is not yet measured.
+  released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet measured.
   Earlier rows, including the dated v0.68.0 and comparator rows in the
   [IXP receipt matrix](ixp-matrix-2026-07.md), last measured 2026-08-30, used
   the glibc-malloc receiver harness, and their completion rows are not directly comparable
@@ -62,8 +62,7 @@ Each result below links to its published, reproducible receipt:
   BIRD 3.3.3 was measured only at 0% overlap, against unreleased source
   `dcc9b6384` on 2026-10-06 (completion p50 12.493–14.490 s, against
   rustbgpd's 0.578–0.606 s) — the current-source IRR comparison under
-  [Primary records](#primary-records); its 10% and 50% overlaps are not yet
-  measured.
+  [Primary records](#primary-records); its 10% and 50% overlaps are not yet measured. BIRD 3.4.0, released 2026-10-12, is not yet measured.
   The v0.68.0 rows measured 2026-08-30 (0.852–1.085 s) are dated, on the
   earlier harness — [v0.68.0 receipt](irr-reload-v0680-2026-08.md)
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
@@ -72,7 +71,7 @@ Each result below links to its published, reproducible receipt:
   2026-10-04 to 2026-10-05 — [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md).
   BIRD 3.3.2 read 3.27–4.06 s and 0.68–0.99 s the night before, against
   rustbgpd v0.74.0 — [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md);
-  BIRD 3.3.3, released 2026-10-01, is not yet measured
+  BIRD 3.3.3, released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet measured
 - **Cold start**: full 400,400-route table delivered to all 700 members in
   **2.8 s** for rustbgpd v0.75.0, against 325.2–417.8 s for OpenBGPD 9.3;
   all 700 sessions were Established in 0.8 s and 88.6–182.5 s, measured
@@ -80,7 +79,7 @@ Each result below links to its published, reproducible receipt:
   [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md). BIRD
   3.3.2 read 67.3–70.1 s and 15.2–17.8 s the night before —
   [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md); BIRD 3.3.3,
-  released 2026-10-01, is not yet measured
+  released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet measured
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
   wire in **305–330 ms** at **350,504–383,660 KiB** direct-process RSS in nine
   v0.73.0 runs, against 332–356 ms at 376,440–419,292 KiB in nine same-night
@@ -105,7 +104,7 @@ Each result below links to its published, reproducible receipt:
   511–544 MiB at S3), and settled RSS under flap churn is mixed (BIRD
   377/332/373 MiB, rustbgpd 376/376/375 MiB) —
   [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md#memory-matrix-shapes);
-  BIRD 3.3.3, released 2026-10-01, is not yet measured. Cross-daemon memory is not otherwise
+  BIRD 3.3.3, released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet measured. Cross-daemon memory is not otherwise
   ranked, because daemon and container defaults differ.
 
 The v0.75.0 rows above measure commit `319d14e4b`, overnight 2026-10-04 to
@@ -114,8 +113,8 @@ and its daemon sources differ from it only in version strings. OpenBGPD 9.3
 ran in every cell with the matrix daemon order alternated; BIRD 3.3.2 ran in
 the IRR roots only, so its matrix rows are the v0.74.0 night's. BIRD 3.3.3
 (released 2026-10-01) is measured only in the separate 0%-overlap IRR
-comparison against unreleased source, and GoBGP v4.10.0 (released
-2026-10-04) is not yet measured. The v0.74.0, v0.73.0, current-main and v0.68.0 rows these bullets
+comparison against unreleased source, and BIRD 3.4.0 (released 2026-10-12) and GoBGP v4.10.0 (released
+2026-10-04) are not yet measured. The v0.74.0, v0.73.0, current-main and v0.68.0 rows these bullets
 replace remain in the [v0.74.0 cross-daemon receipt](cross-daemon-v0740-2026-10.md),
 the [v0.73.0 refresh receipt](headline-refresh-v0730-2026-09.md), the
 [jemalloc-harness receipt](headline-refresh-jemalloc-2026-10.md) and the
@@ -146,7 +145,7 @@ The freshest published [v0.68.0 cross-stack bgperf2
 receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is the headline same-host IPv4 import/convergence comparison. All 80 cells
 reached the exact expected route count across five fixed shapes; the largest is
-two peers × 100,000 prefixes, not a full-table cell. BIRD 2.19.3, released 2026-10-02, FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Microbenchmarks and memory
+two peers × 100,000 prefixes, not a full-table cell. BIRD 2.19.3, released 2026-10-02, BIRD 2.20.0, released 2026-10-12, FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Microbenchmarks and memory
 scaling are in [Benchmarks](../benchmarks.md). That page also retains
 the corrected July campaign as explicitly historical evidence; it supports no
 cross-daemon ranking. Every receipt is indexed in
