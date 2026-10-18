@@ -428,12 +428,20 @@ generation. Deletion removes only deprecated MKTs that are neither Current nor
 RNext; an ambiguous partial session mutation discards the complete changed
 cohort before the failure is exposed.
 
+`authentication` is part of the v1 contract. The TCP-AO inspection and
+rotation fields (`tcp_ao`, `tcp_ao_health`, the two generation fields,
+`tcp_ao_rotation_phase` and `tcp_ao_rotation_error`) follow the alpha TCP-AO
+lifecycle and are explicitly unstable.
+
 `NeighborState.effective_distribution_mode` reports the live RIB selection
 surface. When multiple mechanisms apply, its primary-label precedence is
 `ADD_PATH` > `PER_CLIENT_BEST` > `ORR` > `SINGLE_BEST`. It is `UNKNOWN` when the
 peer has no active outbound registration; `UNSPECIFIED` remains the
 backward-compatible value returned by older servers. This field is independent
-of the diagnostic `update_group` label. A peer eligible for both per-client-best
+of the diagnostic `update_group` label, which is explicitly unstable: its
+`group:N` identifier is process-local and its private-path reasons may change.
+Compare membership with `update_group_comparison`
+(`rbgp neighbor ADDR --compare NEIGHBOR`). A peer eligible for both per-client-best
 and ORR reports `PER_CLIENT_BEST` because it is the primary label; that value
 does not mean its configured ORR vantage is inactive.
 
@@ -566,7 +574,9 @@ recorded for the current session (`peer_limit`, `daemon_limit`,
 desired count for a grouped member awaiting resync rather than routes the peer
 is known to hold; `ListAdvertisedRoutes` for that peer reads its admitted
 baseline or returns `FAILED_PRECONDITION` during the same window. The two
-optional booleans are absent from an older daemon. See
+optional booleans are absent from an older daemon. Both
+`update_group_recovery_fallback` and `prefixes_sent_pending` are update-group
+diagnostics and explicitly unstable. See
 [Update-group recovery fallback](operations.md#update-group-recovery-fallback).
 
 `NeighborState.max_prefix_action` is the effective current disposition of a
@@ -668,7 +678,8 @@ normalized TOML, complete manifest, and source digest to match exactly.
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
-`rustbgpd --diff --json` schema. Secret-bearing fields such as
+`rustbgpd --diff --json` schema. `diff_json` is unversioned and explicitly
+unstable; automation should read the boolean summary fields. Secret-bearing fields such as
 neighbor `md5_password` and `tcp_ao.key` material are redacted in renderings.
 The corresponding `grpc_authz` request summaries never log `candidate_toml`
 content; they record only redacted metadata such as request body size and token

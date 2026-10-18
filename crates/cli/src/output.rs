@@ -1692,12 +1692,6 @@ mod tests {
                         assert_json_shape(row, nested, contract_id);
                     }
                 }
-                "tcp_ao" => assert_json_shape(&value["tcp_ao"], nested, contract_id),
-                "tcp_ao.keys[]" => {
-                    for key in value["tcp_ao"]["keys"].as_array().unwrap() {
-                        assert_json_shape(key, nested, contract_id);
-                    }
-                }
                 path => panic!("unhandled {contract_id} nested contract path {path}"),
             }
         }
