@@ -4236,7 +4236,7 @@ mod tests {
         route.path_id = 0;
         route.stale = false;
         route.llgr_stale = false;
-        expected["family"] = "bgp_ls".into();
+        expected["family"] = "linkstate".into();
         for key in ["path_id", "stale", "llgr_stale"] {
             expected.as_object_mut().unwrap().remove(key);
         }

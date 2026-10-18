@@ -275,7 +275,14 @@ experimental fields such as Paths-Limit are explicitly excluded in the
 inventory and may evolve under their experimental contract after review. The
 new update-group impact projection and alpha EVPN/BFD/dataplane event payloads
 are excluded the same way even though they are reachable through otherwise
-stable transaction or event envelopes. A method set may also name
+stable transaction or event envelopes. On `NeighborState`, `authentication`
+is stable, but the TCP-AO inspection and rotation fields follow the alpha
+TCP-AO lifecycle, and the update-group diagnostics (`update_group`,
+`update_group_recovery_fallback`, `prefixes_sent_pending` and the selection
+deferral `waiter_session_id`) expose process-local identifiers and reasons;
+all of them are explicitly unstable. So is
+`DiffRuntimeConfigResponse.diff_json`, an unversioned document; automation
+should read that response's boolean summary fields. A method set may also name
 `excluded_message_fields`; those explicitly unstable fields are removed before
 its own digest is computed, as the
 [EVPN reflector boundary](#evpn-route-reflector-boundary) does for Type 6 and
@@ -310,7 +317,9 @@ record in those real goldens and then passes each complete artifact through the
 fail-closed parser. The neighbor-detail JSON, neighbor update-group comparison
 JSON, support-bundle manifest v2, and the scoped EVPN peer-page JSON pin
 required and optional key/type floors, including promised nested object shapes,
-in their serializer contract tests while allowing additive fields.
+in their serializer contract tests while allowing additive fields. The
+neighbor-detail floor lists its TCP-AO and update-group keys as explicitly
+experimental instead of pinning them.
 
 Prometheus metrics and structured event payloads used by the stable roles are
 covered by semantic rules rather than a promise that no new metric, event kind,

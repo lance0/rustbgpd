@@ -355,5 +355,83 @@ class EvpnReflectorRoleTests(unittest.TestCase):
                 self.check_with({"fixture.rs": text})
 
 
+class RoleFamilyTests(unittest.TestCase):
+    """Role families must use the configuration labels the daemon accepts."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.inventory = checker.load_json(checker.INVENTORY_PATH)
+        cls.canonical = checker.canonical_family_labels()
+
+    def rejected(self, roles, expected):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            checker.check_role_families(roles, self.canonical)
+        self.assertIn(expected, stderr.getvalue())
+
+    def test_canonical_labels_come_from_the_wire_table(self):
+        self.assertLessEqual(
+            {"ipv4_unicast", "linkstate", "l3vpn_ipv4_unicast", "rtc"}, self.canonical
+        )
+        self.assertNotIn("vpnv4_unicast", self.canonical)
+
+    def test_live_roles_pass(self):
+        checker.check_role_families(self.inventory["roles"], self.canonical)
+
+    def test_legacy_and_malformed_families_fail(self):
+        cases = [
+            (["vpnv4_unicast", "vpnv6_unicast"], "non-canonical families ['vpnv4_unicast'"),
+            (["bgp_ls"], "non-canonical families ['bgp_ls']"),
+            (["ipv4_unicast", "ipv4_unicast"], "repeats a family"),
+            ([], "must list its families"),
+            ([["ipv4_unicast"]], "must list its families"),
+        ]
+        for families, expected in cases:
+            with self.subTest(families=families):
+                roles = copy.deepcopy(self.inventory["roles"])
+                next(r for r in roles if r["id"] == "route-reflector-l3vpn")["families"] = families
+                self.rejected(roles, expected)
+
+
+class NestedExperimentalJsonFieldTests(unittest.TestCase):
+    """Nested JSON shapes may mark keys experimental, but never also pin them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.inventory = checker.load_json(checker.INVENTORY_PATH)
+
+    def neighbor_detail(self):
+        contract = next(
+            contract
+            for contract in copy.deepcopy(self.inventory["cli"]["test_pinned_json_contracts"])
+            if contract["id"] == "neighbor-detail-v1"
+        )
+        nested = next(
+            shape for shape in contract["nested_json_contracts"]
+            if shape["path"] == "selection_deferral[]"
+        )
+        return contract, nested
+
+    def rejected(self, contract, expected):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            checker.check_json_contract(contract, "neighbor-detail-v1", require_id_literal=False)
+        self.assertIn(expected, stderr.getvalue())
+
+    def test_live_contract_passes(self):
+        contract, _ = self.neighbor_detail()
+        checker.check_json_contract(contract, "neighbor-detail-v1", require_id_literal=False)
+
+    def test_nested_field_cannot_be_both_pinned_and_experimental(self):
+        contract, nested = self.neighbor_detail()
+        nested["optional_json_types"]["waiter_session_id"] = "number"
+        self.rejected(contract, "both contract-pinned and explicitly experimental")
+
+    def test_nested_experimental_field_must_exist(self):
+        contract, nested = self.neighbor_detail()
+        nested["explicitly_experimental_json_fields"].append("zz_missing_field")
+        self.rejected(contract, "'zz_missing_field' disappeared")
+
+
 if __name__ == "__main__":
     unittest.main()
