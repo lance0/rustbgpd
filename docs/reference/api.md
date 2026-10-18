@@ -439,8 +439,11 @@ does not mean its configured ORR vantage is inactive.
 
 `NeighborState.selection_deferral` is empty on a cold start. During a planned,
 marker-backed RFC 4724 restart it reports one row per frozen address-family
-gate: whether the gate is active, this peer's waiter state and stamped session,
-the process-wide blocking-waiter count, and remaining time. Released rows are
+gate: its canonical `family` label (for example `ipv4_unicast`; empty from an
+older daemon) alongside the numeric `afi`/`safi`, whether the gate is active,
+this peer's waiter state and stamped session, the process-wide blocking-waiter
+count, and remaining time. `waiter_session_id` is a process-local stamp and is
+explicitly unstable. Released rows are
 retained for the daemon lifetime with reason `all_eor`, `all_excluded`, or
 `timer`, so an operator can distinguish complete convergence from timer-driven
 release.

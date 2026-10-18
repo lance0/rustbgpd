@@ -1014,6 +1014,9 @@ message SelectionDeferralFamilyState {
   uint64 remaining_millis = 7;
   // Empty while active; "all_eor" or "timer" after release.
   string release_reason = 8;
+  // Canonical family label for afi/safi, for example "ipv4_unicast", using
+  // the configuration spelling. Empty from an older daemon.
+  string family = 9;
 }
 
 enum EffectiveDistributionMode {

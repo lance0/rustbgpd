@@ -640,6 +640,9 @@ pub struct JsonUpdateGroupComparison {
 pub struct JsonSelectionDeferralFamily {
     pub afi: u32,
     pub safi: u32,
+    /// Canonical family label; absent from an older daemon.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub family: String,
     pub active: bool,
     pub waiter_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2113,6 +2116,7 @@ mod tests {
             selection_deferral: vec![JsonSelectionDeferralFamily {
                 afi: 1,
                 safi: 1,
+                family: "ipv4_unicast".to_string(),
                 active: true,
                 waiter_state: "awaiting_eor".to_string(),
                 waiter_session_id: Some(42),
@@ -2312,6 +2316,7 @@ mod tests {
         );
         assert_eq!(value["graceful_shutdown_advertise_intent"], true);
         assert_eq!(value["selection_deferral"][0]["afi"], 1);
+        assert_eq!(value["selection_deferral"][0]["family"], "ipv4_unicast");
         assert_eq!(
             value["selection_deferral"][0]["waiter_state"],
             "awaiting_eor"
