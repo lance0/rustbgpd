@@ -114,10 +114,6 @@ log_format = "json"
 address = "127.0.0.1:{grpc_port}"
 token_file = "{token_path}"
 principal = "rustbgpd://observer/exit-code-test"
-
-[event_history]
-enabled = true
-required = true
 "#,
         runtime_dir = runtime_dir.display(),
         token_path = token_path.display()
@@ -451,7 +447,6 @@ fn initial_peer_rejection_uses_shortened_coordinated_teardown() {
         "peer-add failure must exit 1\n{logs}"
     );
     for message in [
-        "event history manager started",
         "failed to add configured peer during startup",
         "peer-two: peer 127.0.0.2%rustbgpd-test-invalid-interface has an interface but is not IPv6 link-local",
         "initiating shortened coordinated shutdown after configured-peer startup failure",
@@ -1417,7 +1412,6 @@ fn metrics_listener_bind_failure_exits_nonzero() {
     let mut daemon = spawn_daemon(temp.path(), &config_path);
     let status = daemon.wait_within(Duration::from_secs(30));
     let logs = daemon.logs();
-    assert!(!logs.contains("event history manager started"), "{logs}");
     assert!(
         logs.contains("failed to bind configured metrics/readiness listener"),
         "the diagnostic must identify the configured health surface\n{logs}"
@@ -1467,48 +1461,6 @@ fn metrics_listener_unusable_after_startup_uses_common_shutdown_and_exits_nonzer
 }
 
 #[test]
-fn event_history_schema_downgrade_exits_nonzero_and_keeps_the_store() {
-    // A store written by a newer daemon is not corruption: with
-    // `required = true` the daemon must exit 1 naming both versions and
-    // leave the store in place instead of quarantining it to `.stale`.
-    let temp = private_tempdir();
-    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
-    let runtime_dir = temp.path().join("runtime");
-    let events_db = runtime_dir.join("events.db");
-    let conn = rusqlite::Connection::open(&events_db).expect("create events db");
-    conn.execute_batch(
-        "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-         INSERT INTO metadata (key, value) VALUES ('schema_version', '99'), ('last_event_id', '0');",
-    )
-    .expect("seed newer schema version");
-    drop(conn);
-
-    let mut daemon = spawn_daemon(temp.path(), &config_path);
-    let status = daemon.wait_within(Duration::from_secs(30));
-    let logs = daemon.logs();
-    assert_eq!(
-        status.code(),
-        Some(1),
-        "a newer on-disk schema with required = true must exit 1, got {status}\n{logs}"
-    );
-    assert!(
-        logs.contains("schema version 99") && logs.contains("supported version 1"),
-        "the diagnostic must name both schema versions\n{logs}"
-    );
-    assert!(!logs.contains("event history manager started"), "{logs}");
-    assert!(events_db.exists(), "the store must stay in place\n{logs}");
-    let quarantined: Vec<_> = std::fs::read_dir(&runtime_dir)
-        .expect("read runtime dir")
-        .map(|entry| entry.expect("dir entry").file_name())
-        .filter(|name| name.to_string_lossy().contains("stale"))
-        .collect();
-    assert!(
-        quarantined.is_empty(),
-        "the store must not be quarantined: {quarantined:?}\n{logs}"
-    );
-}
-
-#[test]
 fn bgp_listener_bind_failure_exits_nonzero() {
     let temp = private_tempdir();
     // Hold the BGP listen port on BOTH address families with live
@@ -1538,7 +1490,6 @@ fn bgp_listener_bind_failure_exits_nonzero() {
     let mut daemon = spawn_daemon(temp.path(), &config_path);
     let status = daemon.wait_within(Duration::from_secs(120));
     let logs = daemon.logs();
-    assert!(!logs.contains("event history manager started"), "{logs}");
     assert!(
         logs.contains("failed to bind BGP listener on either address family"),
         "the daemon must exit for the BGP listener, not some other cause\n{logs}"

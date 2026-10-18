@@ -1477,7 +1477,6 @@ max_prefix_warning\t''
 notification_sent\t''
 notification_received\t''
 policy_changed\t''
-otc_route_blocked\t''
 dataplane_status_changed\t''
 dataplane_route_installed\t''
 dataplane_route_withdrawn\t''
@@ -1489,8 +1488,7 @@ bfd_up\t''
 bfd_down\t''
 bfd_state_changed\t''
 stream_lagged\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l backfill -d 'Print recent route history before tailing the live stream. Applies only to route-capable event streams. Mutually exclusive with `--from-event-id`; `--backfill` replays the daemon\'s process-local route ring (resets on restart), while `--from-event-id` replays the durable event outbox (survives restart)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l from-event-id -d 'Durable cursor: replay committed events with `event_id > N` from the daemon\'s local event outbox, then tail the live stream. `0` replays everything retained. Survives daemon restart. Fails when the daemon was started with `[event_history].enabled = false` or its event history is unavailable' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l backfill -d 'Print recent route history before tailing the live stream. Applies only to route-capable event streams. Replays the daemon\'s process-local route ring, which resets on restart' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F

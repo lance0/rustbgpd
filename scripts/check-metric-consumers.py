@@ -55,7 +55,6 @@ CUSTOM_COLLECTORS = frozenset(
     {
         (TELEMETRY, "JemallocCollector"),
         (TELEMETRY, "SessionNotificationDepthCollector"),
-        (TELEMETRY, "EventOutboxQueueDepthCollector"),
         (TELEMETRY, "RpkiCacheEndOfDataAgeCollector"),
         (SETTLEMENT, "RuntimeConfigSettlementCollector"),
         (CREDENTIALS, "TlsExpiryCollector"),
@@ -64,7 +63,6 @@ CUSTOM_COLLECTORS = frozenset(
 CUSTOM_COLLECTOR_PREFIXES = {
     (TELEMETRY, "JemallocCollector"): "jemalloc_",
     (TELEMETRY, "SessionNotificationDepthCollector"): "bgp_session_notification_",
-    (TELEMETRY, "EventOutboxQueueDepthCollector"): "bgp_event_outbox_queue_depth",
     (TELEMETRY, "RpkiCacheEndOfDataAgeCollector"): "bgp_rpki_cache_end_of_data_age_seconds",
     (SETTLEMENT, "RuntimeConfigSettlementCollector"): "bgp_runtime_config_settlement_",
     (CREDENTIALS, "TlsExpiryCollector"): "bgp_grpc_tls_certificate_not_after_seconds",
@@ -75,7 +73,6 @@ SPECIAL_REGISTRATIONS = {
         "prometheus::process_collector::ProcessCollector::for_self()",
         "jemalloc_stats::JemallocCollector::new()",
         "SessionNotificationDepthCollector::new(Arc::clone(&session_notification_outstanding_value),Arc::clone(&session_notification_outstanding_high_watermark_value),)",
-        "EventOutboxQueueDepthCollector::new(Arc::clone(&event_outbox_queue_depth_source,))",
         "RpkiCacheEndOfDataAgeCollector::new(Arc::clone(&rpki_cache_end_of_data_accepted_at,))",
     ),
     SETTLEMENT: (
@@ -109,15 +106,16 @@ ALLOWLIST = {
 
 # Vacuity guard for the extractors, not a census: adding a family needs no
 # edit here. Each sentinel comes from a different extractor (static
-# definitions, the jemalloc collector, both queue-depth collectors,
-# settlement, TLS expiry), and the floor catches one that goes partly blind.
+# definitions, the jemalloc collector, the session queue-depth and RPKI
+# cache-age collectors, settlement, TLS expiry), and the floor catches one
+# that goes partly blind.
 INVENTORY_FLOOR = 200
 SENTINEL_FAMILIES = frozenset(
     {
         "bgp_peer_session_state",
         "jemalloc_resident_bytes",
         "bgp_session_notification_outstanding",
-        "bgp_event_outbox_queue_depth",
+        "bgp_rpki_cache_end_of_data_age_seconds",
         "bgp_runtime_config_settlement_active",
         "bgp_grpc_tls_certificate_not_after_seconds",
     }
@@ -679,14 +677,6 @@ def local_gauge_vector_inventory(
     return {expected_name: "ordinary"}, {variable}
 
 
-def event_outbox_queue_depth_inventory(source: str) -> tuple[dict[str, str], set[str]]:
-    return local_gauge_vector_inventory(
-        source, "EventOutboxQueueDepthCollector",
-        CUSTOM_COLLECTOR_PREFIXES[(TELEMETRY, "EventOutboxQueueDepthCollector")],
-        "category",
-    )
-
-
 def rpki_cache_end_of_data_age_inventory(source: str) -> tuple[dict[str, str], set[str]]:
     return local_gauge_vector_inventory(
         source, "RpkiCacheEndOfDataAgeCollector",
@@ -823,9 +813,6 @@ def workspace_metric_inventory(
     session_depth, session_depth_variables = session_notification_depth_inventory(
         sources[TELEMETRY]
     )
-    event_outbox_depth, event_outbox_depth_variables = (
-        event_outbox_queue_depth_inventory(sources[TELEMETRY])
-    )
     rpki_cache_age, rpki_cache_age_variables = rpki_cache_end_of_data_age_inventory(
         sources[TELEMETRY]
     )
@@ -833,7 +820,6 @@ def workspace_metric_inventory(
         set(telemetry_definitions)
         - jemalloc_variables
         - session_depth_variables
-        - event_outbox_depth_variables
         - rpki_cache_age_variables
     )
     if registered != expected_registered:
@@ -855,7 +841,6 @@ def workspace_metric_inventory(
     }
     telemetry.update(jemalloc)
     telemetry.update(session_depth)
-    telemetry.update(event_outbox_depth)
     telemetry.update(rpki_cache_age)
 
     settlement = settlement_metric_inventory(sources[SETTLEMENT])

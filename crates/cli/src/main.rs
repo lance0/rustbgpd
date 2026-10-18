@@ -2045,22 +2045,10 @@ enum EventsAction {
         event_types: Vec<String>,
 
         /// Print recent route history before tailing the live stream.
-        /// Applies only to route-capable event streams. Mutually
-        /// exclusive with `--from-event-id`; `--backfill` replays the
-        /// daemon's process-local route ring (resets on restart),
-        /// while `--from-event-id` replays the durable event outbox
-        /// (survives restart).
+        /// Applies only to route-capable event streams. Replays the
+        /// daemon's process-local route ring, which resets on restart.
         #[arg(long, default_value_t = 0)]
         backfill: u32,
-
-        /// Durable cursor: replay committed events with
-        /// `event_id > N` from the daemon's local event outbox,
-        /// then tail the live stream. `0` replays everything
-        /// retained. Survives daemon restart. Fails when the daemon
-        /// was started with `[event_history].enabled = false` or its
-        /// event history is unavailable.
-        #[arg(long, value_name = "EVENT_ID")]
-        from_event_id: Option<u64>,
     },
     /// Show recent session lifecycle events
     Sessions {
@@ -4605,13 +4593,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             Some(EventsAction::Watch {
                 categories,
                 event_types,
-                from_event_id,
                 ..
             }),
         ..
     } = &cli.command
     {
-        commands::watch::validate_events_watch_filter(categories, event_types, *from_event_id)?;
+        commands::watch::validate_events_watch_filter(categories, event_types)?;
     }
     confirm_daemon_wide(&cli.command, &cli.addr)?;
     let connection = connect_with_tls(&cli.addr, cli.token_file.as_deref(), &cli.tls).await?;
@@ -5451,7 +5438,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 prefix: watch_prefix,
                 event_types,
                 backfill,
-                from_event_id,
             }) => {
                 reject_events_parent_filters_for_subcommand(
                     "events watch",
@@ -5470,7 +5456,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         prefix: watch_prefix,
                         event_types,
                         backfill,
-                        from_event_id,
                         json,
                     },
                 )
@@ -6536,7 +6521,6 @@ mod tests {
         }
         let watch_names: Vec<_> = EventTypeScope::All.names().collect();
         assert!(watch_names.contains(&"policy_filtered"));
-        assert!(watch_names.contains(&"otc_route_blocked"));
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let mut generated = Vec::new();
             generate_completions(shell, BINARY_NAME, &mut generated).unwrap();
@@ -10248,8 +10232,7 @@ printf '%s\n' "${COMPREPLY[@]}"
     async fn events_watch_rejects_impossible_filters_before_connect() {
         for tail in [
             "--category session --type added",
-            "--from-event-id 0 --category session --type added",
-            "--category session --type otc_route_blocked",
+            "--category policy --type stream_lagged",
         ] {
             let args = format!("rbgp --addr http://127.0.0.1:1 events watch {tail}");
             let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();

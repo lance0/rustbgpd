@@ -221,7 +221,6 @@ fn documented_startup_phases_match_unique_main_anchors_in_order() {
     let anchors = [
         "let listener_result = if let Some(endpoints)",
         "let metrics_listener = if let Some(prometheus_addr)",
-        "EventHistoryManager::start(ehm_config).await",
         "// Spawn BMP subsystem (manager + per-collector clients).",
         "let mut rib_handle = tokio::spawn(rib_manager.run());",
         "// Spawn RPKI subsystem (VRP manager + per-cache RTR clients)",

@@ -102,7 +102,7 @@ pub enum DialoutMode {
     /// Periodic resample of the subscribed paths.
     Sample,
     /// Event-driven updates (v1: the `session-state` leaf only), sourced
-    /// from the durable event outbox like dial-in `ON_CHANGE`.
+    /// from the live session-event stream like dial-in `ON_CHANGE`.
     OnChange,
 }
 

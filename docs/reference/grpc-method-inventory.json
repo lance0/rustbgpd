@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 126,
+  "method_count": 125,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 79,
+    "sensitive_read": 78,
     "mutating": 22,
     "operator_only": 24
   },
@@ -117,7 +117,6 @@
     { "service": "rustbgpd.v1.EventService", "method": "ListEvpnEvents", "path": "/rustbgpd.v1.EventService/ListEvpnEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "ListSessionEvents", "path": "/rustbgpd.v1.EventService/ListSessionEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "ListPolicyEvents", "path": "/rustbgpd.v1.EventService/ListPolicyEvents", "tier": "sensitive_read" },
-    { "service": "rustbgpd.v1.EventService", "method": "SubscribeFromEvent", "path": "/rustbgpd.v1.EventService/SubscribeFromEvent", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.InjectionService", "method": "AddPath", "path": "/rustbgpd.v1.InjectionService/AddPath", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "DeletePath", "path": "/rustbgpd.v1.InjectionService/DeletePath", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "AddFlowSpec", "path": "/rustbgpd.v1.InjectionService/AddFlowSpec", "tier": "operator_only" },

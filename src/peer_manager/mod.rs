@@ -606,19 +606,6 @@ pub struct PeerManager {
     /// session set; the BFD actor is a pure session-runner that reconciles it.
     /// `None` when no neighbor configures BFD.
     bfd_coupling: Option<bfd::BfdCoupling>,
-    /// Optional handle to the durable event outbox (ADR-0072). When
-    /// `Some`, each `publish_*_event` call additionally enqueues an
-    /// encoded `BgpEvent` for durable cursor replay. The legacy
-    /// ring + broadcast remain unconditional. When `None`, the
-    /// durable enqueue is skipped — daemons with `[event_history]
-    /// .enabled = false` see no behavior change.
-    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
-    /// Out-of-crate transport event sink (ADR-0072 follow-up). When
-    /// `Some`, each spawned `PeerHandle` is wired with this sink so
-    /// transport-layer policy events (today: OTC route-leak
-    /// decisions) are published through the durable cursor. Wired
-    /// at the same daemon-startup site as `event_history`.
-    transport_event_sink: Option<std::sync::Arc<dyn rustbgpd_transport::TransportEventSink>>,
     /// Per-process key for the optimistic config-transaction snapshot token.
     /// Seeded once at construction; never leaves the process. Keeps the token
     /// from acting as an offline oracle for config secrets. See
@@ -739,7 +726,6 @@ impl PeerManager {
                 fib_tables: Vec::new(),
                 bfd_profiles: Vec::new(),
                 apply_bum_enforcement: false,
-                event_history: crate::config::EventHistoryConfig::default(),
                 inbound_admission: crate::config::InboundAdmissionConfig::default(),
             },
         )
@@ -1259,8 +1245,6 @@ impl PeerManager {
             conditional_reconcile_retry: None,
             current_config,
             bfd_coupling: None,
-            event_history: None,
-            transport_event_sink: None,
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             accepted_rx: None,
             #[cfg(test)]
@@ -1274,36 +1258,6 @@ impl PeerManager {
             #[cfg(test)]
             test_command_hook: None,
         }
-    }
-
-    /// Install the durable event-outbox handle (ADR-0072). Called
-    /// once at startup by the daemon binary when `[event_history]
-    /// .enabled = true`. With the handle installed, every
-    /// `publish_*_event` call additionally encodes the event and
-    /// enqueues it for durable cursor replay; the legacy ring +
-    /// broadcast surfaces are unchanged.
-    #[must_use]
-    pub fn with_event_history(
-        mut self,
-        handle: Option<rustbgpd_event_history::EventHistoryHandle>,
-    ) -> Self {
-        self.event_history = handle;
-        self
-    }
-
-    /// Install the out-of-crate transport event sink (ADR-0072
-    /// follow-up). Each spawned `PeerHandle` carries this sink so
-    /// transport-layer policy events (OTC route-leak decisions) are
-    /// published through the durable cursor alongside the existing
-    /// counter + per-`NeighborState` scalar. Called at the same
-    /// startup site as `with_event_history`.
-    #[must_use]
-    pub fn with_transport_event_sink(
-        mut self,
-        sink: Option<std::sync::Arc<dyn rustbgpd_transport::TransportEventSink>>,
-    ) -> Self {
-        self.transport_event_sink = sink;
-        self
     }
 
     fn allocate_session_id(&mut self) -> u64 {

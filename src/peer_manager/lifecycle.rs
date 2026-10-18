@@ -801,7 +801,6 @@ impl PeerManager {
             self.validation_rx.clone(),
             false,
             SessionIdentity::primary(session_id),
-            self.transport_event_sink.clone(),
             self.tcp_ao_generation,
         );
 
