@@ -6529,8 +6529,7 @@ async fn run<T>(
                 rustbgpd_api::server::AccessMode::ReadOnly,
                 peer_mgr_tx.clone(),
                 Some(peer_mgr_operator_tx.clone()),
-            )
-            .with_event_history(event_history_handle.clone()),
+            ),
             metrics.clone(),
         ),
     ));

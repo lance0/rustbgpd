@@ -2329,8 +2329,7 @@ async fn run_tcp_listener(
                 Some(peer_mgr_operator_tx.clone()),
             )
             .with_initial_roster_gate(daemon_gate.clone())
-            .with_set_handler(gnmi_set.clone())
-            .with_event_history(event_history.clone()),
+            .with_set_handler(gnmi_set.clone()),
             interceptor.clone(),
         ));
     }
@@ -2613,8 +2612,7 @@ async fn run_uds_listener(
             Some(peer_mgr_operator_tx),
         )
         .with_initial_roster_gate(daemon_gate.clone())
-        .with_set_handler(gnmi_set)
-        .with_event_history(event_history.clone()),
+        .with_set_handler(gnmi_set),
         interceptor,
     ));
 

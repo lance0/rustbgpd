@@ -891,6 +891,9 @@ impl PeerManager {
             PeerManagerOperatorQuery::HasPeerAddress { address, reply } => {
                 let _ = reply.send(self.unique_peer_key_for_address(address).is_some());
             }
+            PeerManagerOperatorQuery::SubscribeSessionEvents { reply } => {
+                let _ = reply.send(self.session_events_tx.subscribe());
+            }
         }
     }
 

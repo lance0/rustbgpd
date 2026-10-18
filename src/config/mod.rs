@@ -7658,13 +7658,6 @@ pub(crate) fn gnmi_dialout_targets(
             GnmiDialoutModeConfig::Sample => dialout::DialoutMode::Sample,
             GnmiDialoutModeConfig::OnChange => dialout::DialoutMode::OnChange,
         };
-        if mode == dialout::DialoutMode::OnChange && !config.event_history.enabled {
-            return Err(fail(
-                "mode = \"on_change\" requires [event_history].enabled = true \
-                 (the durable event outbox sources the transitions)"
-                    .to_string(),
-            ));
-        }
         let subscriptions = dialout::build_subscription_list(
             &target.paths,
             mode,
