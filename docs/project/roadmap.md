@@ -202,7 +202,7 @@ Type 5 routes as withdraws instead of resetting the session, accepts
 zero-ESI Type 1 routes, and keeps readiness probes answered through mass
 graceful-restart entry and large reloads. It publishes wire 0.25.0, FSM
 0.12.0 and RPKI 0.7.0. It ships on its per-change regression tests and main
-CI; no flagship receipt covers it. v0.78.0 (2026-10-17) is a minor release
+CI; no flagship receipt covers it. v0.78.0 (2026-10-18) is a minor release
 that fixes `.rpol` chain assembly for loop and `let` set probes, which in
 releases 0.51.0 through 0.77.0 could read the wrong set, end a peer session
 or shut the daemon down. It adds `rbgp policy compare` against the installed
@@ -214,8 +214,10 @@ EVPN Types 1–5 reflection. A SIGHUP dataset swap narrows export
 re-evaluation to the affected routes or update groups, readiness probes stay
 answered through full-table VPN recovery, and malformed EVPN Type 5 routes
 are treated as withdraws. It publishes wire 0.26.0, FSM 0.13.0 and RPKI
-0.8.0. It ships on its
-per-change regression tests and main CI; no flagship receipt covers it. The
+0.8.0. A 24-hour route-server flagship soak on the release-candidate source,
+whose Rust sources match v0.78.0, passed all gates: 1,000 sessions held
+through six planned max-prefix trips, RSS peaked at 611 MB with a late slope
+of +0.45 MB/h, and there were no readiness failures. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.26.0 - 2026-10-17
+## 0.26.0 - 2026-10-18
 
 - `UpdateMessage::parse_revised` (and `parse_revised_observed*`) now report
   an EVPN Type 5 announcement whose ESI, gateway IP, Router's MAC and label
