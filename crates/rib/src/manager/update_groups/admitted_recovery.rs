@@ -25,14 +25,14 @@ pub(in crate::manager) enum Key {
     Vpn(VpnRouteKey, u32),
 }
 
-/// The derived order (variant, then fields), with the VPN arm comparing the
-/// RD and address as integers instead of bytewise. Proof lookups binary
+/// The derived order (variant, then fields), with both arms comparing
+/// addresses and RDs as integers instead of bytewise. Proof lookups binary
 /// search on this comparison once per admitted key.
 impl Ord for Key {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Self::Unicast(left, left_id), Self::Unicast(right, right_id)) => {
-                left.cmp(right).then(left_id.cmp(right_id))
+                prefix_cmp(left, right).then(left_id.cmp(right_id))
             }
             (Self::Vpn(left, left_id), Self::Vpn(right, right_id)) => {
                 vpn_key_cmp(left, right).then(left_id.cmp(right_id))
@@ -46,6 +46,22 @@ impl Ord for Key {
 impl PartialOrd for Key {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+/// `Prefix::cmp`: big-endian integer order equals octet order, and `V4`
+/// sorts before `V6`.
+#[inline]
+fn prefix_cmp(left: &Prefix, right: &Prefix) -> Ordering {
+    match (left, right) {
+        (Prefix::V4(left), Prefix::V4(right)) => {
+            (left.addr.to_bits(), left.len).cmp(&(right.addr.to_bits(), right.len))
+        }
+        (Prefix::V6(left), Prefix::V6(right)) => {
+            (left.addr.to_bits(), left.len).cmp(&(right.addr.to_bits(), right.len))
+        }
+        (Prefix::V4(_), Prefix::V6(_)) => Ordering::Less,
+        (Prefix::V6(_), Prefix::V4(_)) => Ordering::Greater,
     }
 }
 
@@ -1763,24 +1779,11 @@ impl AdmittedRecovery {
         A: Iterator<Item = Key>,
     {
         let mut len = keys.len();
+        // One checkpoint per key: a lookup is a few dozen comparisons, far
+        // below any readiness budget, and is not worth a seam per comparison.
         for key in announcements {
             checkpoint(false);
-            if universe
-                .binary_search_by(|prior| {
-                    checkpoint(false);
-                    prior.cmp(&key)
-                })
-                .is_ok()
-            {
-                continue;
-            }
-            if keys
-                .binary_search_by(|prior| {
-                    checkpoint(false);
-                    prior.cmp(&key)
-                })
-                .is_err()
-            {
+            if universe.binary_search(&key).is_err() && keys.binary_search(&key).is_err() {
                 len = len.checked_add(1).ok_or_else(Self::overflow)?;
             }
         }
@@ -1856,11 +1859,48 @@ impl AdmittedRecovery {
     }
 
     /// Unique ANN may be unordered; W is sorted/unique. Reservation makes this allocation-free.
+    /// Production commits use [`Self::apply_reserved_admitted_with_checkpoint`]
+    /// after their pre-send reservation.
+    #[cfg(test)]
     pub(in crate::manager) fn apply_admitted_with_checkpoint<A, W>(
         &mut self,
         peer: IpAddr,
         announcements: A,
         withdrawals: W,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<bool, Failure>
+    where
+        A: Clone + Iterator<Item = Key>,
+        W: Clone + Iterator<Item = Key>,
+    {
+        self.apply_admitted_inner(peer, announcements, withdrawals, true, checkpoint)
+    }
+
+    /// Apply a sent batch whose announcements are a subset of a set this proof
+    /// already reserved, with no proof mutation in between. Unique ANN may be
+    /// unordered; W is sorted/unique. It skips a second union count; an
+    /// announcement beyond the existing reservation fails the proof closed
+    /// instead of growing it.
+    pub(in crate::manager) fn apply_reserved_admitted_with_checkpoint<A, W>(
+        &mut self,
+        peer: IpAddr,
+        announcements: A,
+        withdrawals: W,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<bool, Failure>
+    where
+        A: Clone + Iterator<Item = Key>,
+        W: Clone + Iterator<Item = Key>,
+    {
+        self.apply_admitted_inner(peer, announcements, withdrawals, false, checkpoint)
+    }
+
+    fn apply_admitted_inner<A, W>(
+        &mut self,
+        peer: IpAddr,
+        announcements: A,
+        withdrawals: W,
+        reserve: bool,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Failure>
     where
@@ -1895,7 +1935,9 @@ impl AdmittedRecovery {
             }
             previous = Some(key);
         }
-        if !self.reserve_admitted_with_checkpoint(peer, announcements.clone(), checkpoint)? {
+        if reserve
+            && !self.reserve_admitted_with_checkpoint(peer, announcements.clone(), checkpoint)?
+        {
             return Ok(false);
         }
         let universe = self.records[index]
@@ -1934,13 +1976,7 @@ impl AdmittedRecovery {
                     record.words[position / 64] |= bit;
                     record.masked += 1;
                 }
-            } else if keys[..old_len]
-                .binary_search_by(|prior| {
-                    checkpoint(false);
-                    prior.cmp(&key)
-                })
-                .is_err()
-            {
+            } else if keys[..old_len].binary_search(&key).is_err() {
                 if keys.len() == keys.capacity() {
                     return Err(self.fail(index, self.missing_proof(peer), checkpoint));
                 }
@@ -2142,6 +2178,33 @@ mod tests {
             Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(1), 128)),
             0,
         ));
+        let unicast = [
+            (Ipv4Addr::UNSPECIFIED, 0),
+            (Ipv4Addr::new(0, 0, 0, 255), 32),
+            (Ipv4Addr::new(1, 0, 0, 0), 8),
+            (Ipv4Addr::new(10, 0, 0, 0), 24),
+            (Ipv4Addr::new(10, 0, 1, 0), 24),
+            (Ipv4Addr::new(128, 0, 0, 0), 1),
+            (Ipv4Addr::BROADCAST, 32),
+        ]
+        .map(|(addr, len)| Prefix::V4(Ipv4Prefix::new(addr, len)))
+        .into_iter()
+        .chain(
+            [
+                (0, 0),
+                (1, 128),
+                (0x2001_0db8 << 96, 32),
+                (0x2001_0db8 << 96, 64),
+                (1 << 127, 1),
+                (u128::MAX, 128),
+            ]
+            .map(|(addr, len)| Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(addr), len))),
+        );
+        for prefix in unicast {
+            for path_id in [0, 1, u32::MAX] {
+                keys.push(Key::Unicast(prefix, path_id));
+            }
+        }
         for left in &keys {
             for right in &keys {
                 assert_eq!(
@@ -2521,6 +2584,46 @@ mod tests {
         assert!(ledger.fail_next_allocation);
         assert_eq!(ledger.peak_bytes(), peak);
         assert_eq!(ledger.entries(), 0);
+        assert!(ledger.get(&peer(1)).is_none());
+        assert_eq!(ledger.begin_capture(peer(1)), Err(error));
+    }
+
+    #[test]
+    fn reserved_apply_commits_within_the_reservation_and_fails_closed_beyond_it() {
+        let mut ledger = AdmittedRecovery::new();
+        capture(&mut ledger, peer(1), &[key(1)]);
+        ledger
+            .reserve_admitted(peer(1), [key(2), key(3)].into_iter())
+            .unwrap();
+        let peak = ledger.peak_bytes();
+        ledger.fail_next_allocation_for_test();
+        assert!(
+            ledger
+                .apply_reserved_admitted_with_checkpoint(
+                    peer(1),
+                    [key(3)].into_iter(),
+                    [key(1)].into_iter(),
+                    &mut |_| {},
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            ledger.owned_proof(&peer(1)).unwrap(),
+            [ExactExportKey::from(key(3))].into_iter().collect()
+        );
+        // Three slots were reserved (one held plus two candidates); key(3)
+        // holds one, so a third new key exceeds them.
+        let error = ledger
+            .apply_reserved_admitted_with_checkpoint(
+                peer(1),
+                [key(2), key(4), key(5)].into_iter(),
+                [].into_iter(),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert_eq!(error.cause, FailureCause::MissingProof);
+        assert!(ledger.fail_next_allocation, "no growth was attempted");
+        assert_eq!(ledger.peak_bytes(), peak);
         assert!(ledger.get(&peer(1)).is_none());
         assert_eq!(ledger.begin_capture(peer(1)), Err(error));
     }

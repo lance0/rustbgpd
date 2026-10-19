@@ -2878,6 +2878,55 @@ fn bench_route_refresh_group_member(c: &mut Criterion) {
     group.finish();
 }
 
+/// `GROUP_JOINERS` RR clients of one converged group go dirty together and
+/// hold admitted-key proofs; timed is their full dirty resync through the
+/// production resync timer, one member per slice. Fixture construction, the
+/// dirty marks (proof capture) and receipt checks stay outside.
+fn bench_grouped_dirty_resync(c: &mut Criterion) {
+    let mut group = c.benchmark_group("grouped_dirty_resync");
+    group.sample_size(10);
+    let routes = 65_536;
+    group.bench_function(BenchmarkId::new("proof_backed", routes), |bench| {
+        bench.iter_custom(|iterations| {
+            let mut accumulated = Duration::ZERO;
+            for _ in 0..iterations {
+                let mut manager = build_group_join(1, routes);
+                let mut receivers: Vec<_> = (1..=GROUP_JOINERS)
+                    .map(|index| {
+                        let (sender, mut receiver) = mpsc::channel(2);
+                        manager.bench_join_route_reflector_peer(
+                            index,
+                            sender,
+                            fanout_bench_export_encoder(),
+                        );
+                        assert_eq!(
+                            receiver.try_recv().expect("joiner dump").announce.len(),
+                            routes
+                        );
+                        receiver.try_recv().expect("joiner EoR");
+                        receiver
+                    })
+                    .collect();
+                for index in 1..=GROUP_JOINERS {
+                    assert!(manager.bench_mark_joined_peer_dirty(index));
+                }
+                let started = Instant::now();
+                let held = manager.bench_resync_dirty_peers();
+                accumulated += started.elapsed();
+                assert_eq!(held, (0, 0), "every member syncs and releases its proof");
+                for receiver in &mut receivers {
+                    let response = receiver.try_recv().expect("resync response");
+                    assert_eq!(response.announce.len(), routes);
+                    assert!(response.withdraw.is_empty());
+                    assert!(receiver.try_recv().is_err());
+                }
+            }
+            accumulated
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_fanout,
@@ -2892,6 +2941,7 @@ criterion_group!(
     bench_initial_table_group_join,
     bench_initial_table_deferred_group_join,
     bench_route_refresh_group_member,
+    bench_grouped_dirty_resync,
     bench_add_path_export_staging,
     bench_policy_regroup_resync,
     bench_ixp_policy_regroup_resync,

@@ -108,13 +108,8 @@ impl RibManager {
         // lane withdraw survives the filter while the lane is empty
         // (it must be delivered) and drops once the lane refills (the
         // substituted announce above replaces it without a transient).
-        let member_retains = |key: &(Prefix, u32)| {
-            group.adv_entry(member, &key.0, key.1).is_some_and(|entry| {
-                let (communities, large_communities) =
-                    group.source_control_for_route(entry.route, entry.source_attrs);
-                !rs_control_suppressed(communities, large_communities, rs_control)
-            })
-        };
+        let member_retains =
+            |key: &(Prefix, u32)| group.member_retains(member, &key.0, key.1, rs_control);
         let mut keys: HashSet<(Prefix, u32)> = suppressed_withdraws;
         if let Some(base) = baseline {
             checkpoint(true);
