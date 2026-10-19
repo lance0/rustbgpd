@@ -250,6 +250,12 @@ fn decode_attributes(afi: Afi, prefix: Prefix, raw: &[Vec<u8>]) -> Result<Attrib
                     let AsPathSegment::AsSequence(asns) = segment else {
                         return Err(unsupported("AS_PATH may hold only AS_SEQUENCE segments"));
                     };
+                    // RFC 4271 malformed AS_PATH, as the wire crate's UPDATE
+                    // validation treats it; the attribute decoder accepts it.
+                    // An AS_PATH with no segments stays valid.
+                    if asns.is_empty() {
+                        return Err(invalid("AS_PATH has an empty AS_SEQUENCE segment"));
+                    }
                     out.as_path.extend_from_slice(asns);
                 }
             }
@@ -594,6 +600,35 @@ mod tests {
         let mut req = request(IP, NLRI_V4_HOST, &[NEXT_HOP_V4], false);
         req.path.as_mut().unwrap().nlri = Some(prost_types::Any::default());
         assert_eq!(code(&req), tonic::Code::Unimplemented);
+    }
+
+    #[test]
+    fn empty_as_path_segment_is_malformed() {
+        let empty_segment = [0x40, 2, 2, 2, 0];
+        for withdraw in [false, true] {
+            assert_eq!(
+                code(&request(
+                    IP,
+                    NLRI_V4_HOST,
+                    &[NEXT_HOP_V4, &empty_segment],
+                    withdraw
+                )),
+                tonic::Code::InvalidArgument,
+                "withdraw={withdraw}"
+            );
+        }
+        // An AS_PATH with no segments at all is valid and means an empty path.
+        let empty_path = [0x40, 2, 0];
+        let req = announce(
+            decode(&request(
+                IP,
+                NLRI_V4_HOST,
+                &[NEXT_HOP_V4, &empty_path],
+                false,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(req.as_path, Vec::<u32>::new());
     }
 
     #[test]
