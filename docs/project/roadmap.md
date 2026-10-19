@@ -1661,8 +1661,11 @@ rustbgpd is an API-first BGP daemon. The following are explicitly out of scope:
   EVPN/VXLAN overlay.
 - **CLI-first operation.** The gRPC API is the primary interface; the CLI and
   TUI are polished convenience wrappers, but gRPC is the contract.
-- **GoBGP proto compatibility.** Our protos are our own. A compat adapter can
-  exist as a separate project if anyone wants it.
+- **GoBGP proto compatibility.** Our protos are our own. GoBGP compatibility
+  lives in a separate tool outside the daemon and the v1 contract:
+  [`tools/gobgp-bridge`](../../tools/gobgp-bridge/README.md) serves GoBGP v3
+  `AddPath` for RTBH detectors that drive GoBGP and applies it through the
+  injection API.
 - **Non-Linux daemon support.** macOS, BSD, and Windows remain outside the
   supported daemon targets; portable component work does not change that
   [platform contract](../../SUPPORT.md#platform-support).

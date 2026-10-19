@@ -1,0 +1,2 @@
+# Keep the default list (".."), and accept the project name GoBGP in docs.
+doc-valid-idents = ["GoBGP", ".."]

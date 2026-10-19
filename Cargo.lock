@@ -3342,6 +3342,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustbgpd-gobgp-bridge"
+version = "0.78.0"
+dependencies = [
+ "clap",
+ "hyper-util",
+ "prost",
+ "prost-types",
+ "protoc-bin-vendored",
+ "rustbgpd-wire",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rustbgpd-mcp"
 version = "0.78.0"
 dependencies = [
