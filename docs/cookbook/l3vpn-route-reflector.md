@@ -142,7 +142,7 @@ Refresh a PE's VPN view without touching the session (the stale
 lifecycle is BoRR/EoRR-bounded per RFC 7313):
 
 ```console
-$ rbgp neighbor 10.0.0.11 softreset --family l3vpn_ipv4_unicast
+$ rbgp neighbor 10.0.0.11 refresh-in --family l3vpn_ipv4_unicast
 ```
 
 ## Watch

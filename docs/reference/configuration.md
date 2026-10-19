@@ -5448,7 +5448,7 @@ recovery rather than leaving the authority ambiguous.
 
 When a peer's effective import chain changes, the peer manager issues
 `soft_reset_in` (gated on Established) so routes already in `AdjRibIn` are
-re-evaluated. Operators do not need to follow up with a manual `softreset`
+re-evaluated. Operators do not need to follow up with a manual `refresh-in`
 after a chain swap.
 
 `[global]` identity and daemon-wide flags (ASN, router-id, listen

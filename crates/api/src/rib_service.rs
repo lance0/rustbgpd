@@ -2449,6 +2449,7 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
             Prefix::V6(_) => proto::AddressFamily::Ipv6Unicast,
         }
         .into(),
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&event.timestamp),
         timestamp: event.timestamp,
         previous_peer_address: event
             .previous_peer
