@@ -182,8 +182,8 @@ struct Session {
     peer_group: Option<String>,
     hold_time: Option<u16>,
     families: Vec<String>,
-    max_prefixes_ipv4: Option<u32>,
-    max_prefixes_ipv6: Option<u32>,
+    max_prefixes_ipv4_unicast: Option<u32>,
+    max_prefixes_ipv6_unicast: Option<u32>,
     auth_present: bool,
     admin_down: Option<bool>,
 }
@@ -327,9 +327,9 @@ fn afi_safi(model: &mut Model, source: &str, label: &str, value: &toml::Value, s
         .filter(|limit| *limit > 0)
     {
         if ipv6 {
-            s.max_prefixes_ipv6 = Some(limit);
+            s.max_prefixes_ipv6_unicast = Some(limit);
         } else {
-            s.max_prefixes_ipv4 = Some(limit);
+            s.max_prefixes_ipv4_unicast = Some(limit);
         }
     }
 }
@@ -358,8 +358,8 @@ fn neighbor(model: &mut Model, source: &str, idx: usize, value: &toml::Value) {
         peer_group: s.peer_group,
         hold_time: s.hold_time,
         families: s.families,
-        max_prefixes_ipv4: s.max_prefixes_ipv4,
-        max_prefixes_ipv6: s.max_prefixes_ipv6,
+        max_prefixes_ipv4_unicast: s.max_prefixes_ipv4_unicast,
+        max_prefixes_ipv6_unicast: s.max_prefixes_ipv6_unicast,
         auth_present: s.auth_present,
         admin_down: s.admin_down,
         admin_down_reason: None,
@@ -387,8 +387,8 @@ fn peer_group(model: &mut Model, source: &str, value: &toml::Value) {
         remote_asn: s.remote_asn,
         hold_time: s.hold_time,
         families: s.families,
-        max_prefixes_ipv4: s.max_prefixes_ipv4,
-        max_prefixes_ipv6: s.max_prefixes_ipv6,
+        max_prefixes_ipv4_unicast: s.max_prefixes_ipv4_unicast,
+        max_prefixes_ipv6_unicast: s.max_prefixes_ipv6_unicast,
         auth_present: s.auth_present,
         admin_down: s.admin_down,
         admin_down_reason: None,

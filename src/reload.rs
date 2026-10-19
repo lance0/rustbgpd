@@ -1096,14 +1096,14 @@ fn copy_outbound_prefix_limit_fields(target: &mut Config, source: &Config) {
         if let Some(desired) = source.neighbors.iter().find(|desired| {
             desired.address == neighbor.address && desired.interface == neighbor.interface
         }) {
-            neighbor.max_prefixes_out_ipv4 = desired.max_prefixes_out_ipv4;
-            neighbor.max_prefixes_out_ipv6 = desired.max_prefixes_out_ipv6;
+            neighbor.max_prefixes_out_ipv4_unicast = desired.max_prefixes_out_ipv4_unicast;
+            neighbor.max_prefixes_out_ipv6_unicast = desired.max_prefixes_out_ipv6_unicast;
         }
     }
     for (name, group) in &mut target.peer_groups {
         if let Some(desired) = source.peer_groups.get(name) {
-            group.max_prefixes_out_ipv4 = desired.max_prefixes_out_ipv4;
-            group.max_prefixes_out_ipv6 = desired.max_prefixes_out_ipv6;
+            group.max_prefixes_out_ipv4_unicast = desired.max_prefixes_out_ipv4_unicast;
+            group.max_prefixes_out_ipv6_unicast = desired.max_prefixes_out_ipv6_unicast;
         }
     }
 }
@@ -9152,7 +9152,9 @@ import_policy_chain = ["origin-guard"]
         };
         let error = failure.error.to_string();
         assert!(
-            error.contains("peer group \"core\" max_prefixes_out_ipv4 changed together with"),
+            error.contains(
+                "peer group \"core\" max_prefixes_out_ipv4_unicast changed together with"
+            ),
             "{error}"
         );
         assert!(tags.is_empty(), "no peer/auth mutation: {tags:?}");

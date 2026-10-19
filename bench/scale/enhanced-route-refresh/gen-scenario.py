@@ -43,7 +43,7 @@ route_server_client = true
 families = ["ipv4_unicast"]
 hold_time = 600
 max_prefixes = 100000
-max_prefixes_ipv4 = 100000
+max_prefixes_ipv4_unicast = 100000
 """,
     encoding="utf-8",
 )

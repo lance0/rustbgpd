@@ -37,7 +37,7 @@ operator = "operator"
 [peer_groups."TRANSIT"]
 hold_time = 90
 families = ["ipv4_unicast"]
-max_prefixes_ipv4 = 500000
+max_prefixes_ipv4_unicast = 500000
 
 [[neighbors]]
 address = "192.0.2.1"
@@ -54,4 +54,4 @@ remote_asn = 64497
 description = "transit-b v6"
 hold_time = 60
 families = ["ipv6_unicast"]
-max_prefixes_ipv6 = 200000
+max_prefixes_ipv6_unicast = 200000

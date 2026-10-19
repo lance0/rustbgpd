@@ -690,7 +690,7 @@ fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_schema_specific() {
     for (name, expected) in [
         (
             "config.toml",
-            "f8f53e2f884f12e3feb91dda8c4aa5d6b29fdfa4a71144ee0890fce3e1c8c619",
+            "c2e2d7338195acf50d4722331c71d2cc7f19d327f99eab10e8b3a29291c85f4c",
         ),
         (
             "policy/client-3.rpol",
@@ -776,7 +776,7 @@ fn v2_filter_policies_preserve_order_direction_and_reachability() {
     let full = rendered_v2(&v2_value(V2_FILTERS)).unwrap().files;
     assert_eq!(
         content_digest(&full.values().map(String::as_str).collect::<String>()),
-        "a7972cee747960d54821ad3a362c4a38fecdd75fdc9b0edebf349cf509258645"
+        "9a9fdd195418f614ce49e6b4dd3c4ee9d5271cfb89eda51d90af5c55b6bdf567"
     );
     let import = &full["policy/client-1.rpol"];
     assert_terms(

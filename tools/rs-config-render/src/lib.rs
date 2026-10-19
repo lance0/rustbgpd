@@ -1130,9 +1130,12 @@ impl ResolvedClient<'_> {
     /// received bound, `false` its accepted-route bound.
     fn max_prefix_limit_keys(&self) -> (&'static str, &'static str) {
         if self.count_rejected_routes {
-            ("max_prefixes_received_ipv4", "max_prefixes_received_ipv6")
+            (
+                "max_prefixes_received_ipv4_unicast",
+                "max_prefixes_received_ipv6_unicast",
+            )
         } else {
-            ("max_prefixes_ipv4", "max_prefixes_ipv6")
+            ("max_prefixes_ipv4_unicast", "max_prefixes_ipv6_unicast")
         }
     }
 }
@@ -3929,10 +3932,10 @@ fn build_receipt(
             "prefix_set_size": rc.prefixes.len(),
             "origin_set_size": rc.origins.len(),
             "white_list_routes": rc.white_list_routes.len(),
-            "max_prefixes_ipv4": rc.limit_ipv4.filter(|_| !rc.count_rejected_routes),
-            "max_prefixes_ipv6": rc.limit_ipv6.filter(|_| !rc.count_rejected_routes),
-            "max_prefixes_received_ipv4": rc.limit_ipv4.filter(|_| rc.count_rejected_routes),
-            "max_prefixes_received_ipv6": rc.limit_ipv6.filter(|_| rc.count_rejected_routes),
+            "max_prefixes_ipv4_unicast": rc.limit_ipv4.filter(|_| !rc.count_rejected_routes),
+            "max_prefixes_ipv6_unicast": rc.limit_ipv6.filter(|_| !rc.count_rejected_routes),
+            "max_prefixes_received_ipv4_unicast": rc.limit_ipv4.filter(|_| rc.count_rejected_routes),
+            "max_prefixes_received_ipv6_unicast": rc.limit_ipv6.filter(|_| rc.count_rejected_routes),
             "max_prefix_restart_seconds": rc.max_prefix_restart_seconds,
             "max_prefix_action": rc.max_prefix_action,
         })).collect::<Vec<_>>(),
