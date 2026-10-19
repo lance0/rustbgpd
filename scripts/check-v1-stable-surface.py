@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import fnmatch
 import hashlib
 import io
 import json
@@ -1095,9 +1096,21 @@ def emitted_label_values(
         ]
         if element in parameters:
             setters.append((setter.group(1), parameters.index(element)))
-    for setter, index in setters:
+    pending = [(setter, index, True) for setter, index in setters]
+    seen: set[tuple[str, int, bool]] = set()
+    while pending:
+        setter, index, method = pending.pop()
+        if (setter, index, method) in seen:
+            continue
+        seen.add((setter, index, method))
+        # A method is called as `.name(`; a free function by a bare or path name.
+        call_pattern = (
+            rf"\.\s*{re.escape(setter)}\s*\("
+            if method
+            else rf"(?<!fn )(?<![\w.]){re.escape(setter)}\s*\("
+        )
         for text in sources.values():
-            for call in re.finditer(rf"\.\s*{re.escape(setter)}\s*\(", text):
+            for call in re.finditer(call_pattern, text):
                 arguments = call_arguments(text, call.end())
                 if arguments is None or len(arguments) <= index:
                     continue
@@ -1106,6 +1119,10 @@ def emitted_label_values(
                 if literal:
                     values.add(literal.group(1))
                     continue
+                constant = const_label_values(sources, argument)
+                if constant:
+                    values.update(constant)
+                    continue
                 direct = re.fullmatch(r"(\w+)\(.*\)", argument, flags=re.DOTALL)
                 bound = re.search(
                     rf"\blet\s+{re.escape(argument)}\s*=\s*(\w+)\(", text[: call.start()]
@@ -1113,15 +1130,68 @@ def emitted_label_values(
                 function = (direct or bound).group(1) if (direct or bound) else None
                 if function:
                     values.update(label_function_values(sources, function))
+                elif re.fullmatch(r"\w+", argument):
+                    # A wrapper passing its own parameter through: follow its callers.
+                    through = enclosing_parameter(text, call.start(), argument)
+                    if through:
+                        pending.append(through)
     return values
+
+
+def const_label_values(sources: dict[str, str], argument: str) -> set[str]:
+    """String literals of the `const` an argument names, by plain or path name."""
+    name = argument.rsplit("::", 1)[-1]
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+        return set()
+    values: set[str] = set()
+    pattern = rf"\bconst\s+{name}\s*:[^=]*=\s*(\[[^\]]*\]|\"[^\"]*\")\s*;"
+    for text in sources.values():
+        for match in re.finditer(pattern, text):
+            values.update(re.findall(r"\"([^\"]+)\"", match.group(1)))
+    return values
+
+
+def enclosing_parameter(text: str, position: int, identifier: str) -> tuple[str, int, bool] | None:
+    """(function, parameter index, is method) when `identifier` passes a parameter through.
+
+    The identifier is a parameter of the function enclosing `position`, or a
+    `for` binding that iterates one. Only that function's callers can then
+    supply its values.
+    """
+    functions = list(re.finditer(r"\bfn\s+(\w+)\s*(?:<[^>{]*>)?\s*\(", text[:position]))
+    if not functions:
+        return None
+    function = functions[-1]
+    arguments = call_arguments(text, function.end())
+    if arguments is None:
+        return None
+    method = any(
+        re.fullmatch(r"&?\s*(?:'\w+\s+)?(?:mut\s+)?self", argument) for argument in arguments
+    )
+    parameters = [
+        re.sub(r"^mut\s+", "", argument.split(":", 1)[0].strip())
+        for argument in arguments
+        if ":" in argument
+    ]
+    source = identifier
+    loops = re.findall(
+        rf"\bfor\s+\(?\s*{re.escape(identifier)}\b[^{{;]*?\bin\s+(\w+)",
+        text[function.end() : position],
+    )
+    if identifier not in parameters and loops:
+        source = loops[-1]
+    if source not in parameters:
+        return None
+    return function.group(1), parameters.index(source), method
 
 
 def check_metrics(
     inventory: dict, source: str | None = None, emission_sources: dict[str, str] | None = None
 ) -> None:
     section = inventory.get("metrics")
-    if not isinstance(section, dict) or set(section) != {"source", "scoped_rr_only_series"}:
-        fail("metrics must be an object with exactly 'source' and 'scoped_rr_only_series'")
+    expected = {*METRIC_SERIES_KEYS, "source", "diagnostic_series"}
+    if not isinstance(section, dict) or set(section) != expected:
+        fail(f"metrics must be an object with exactly {sorted(expected)}")
     if source is None:
         path = ROOT / safe_relative_path(section["source"], "metric source")
         try:
@@ -1130,14 +1200,43 @@ def check_metrics(
             fail(f"cannot read metric source {section['source']}: {error}")
     # Test-only literals in the metric module itself are not emission evidence.
     source = strip_cfg_test_items(source)
-    series = section["scoped_rr_only_series"]
+    for key in METRIC_SERIES_KEYS:
+        emission_sources = check_metric_series(
+            f"metrics.{key}", section[key], source, emission_sources
+        )
+    check_diagnostic_series(section, source)
+
+
+def check_diagnostic_series(section: dict, source: str) -> None:
+    """Diagnostic name patterns each match a registered series and no pinned one."""
+    patterns = section["diagnostic_series"]
+    if not isinstance(patterns, list) or not patterns:
+        fail("metrics.diagnostic_series must list at least one name pattern")
+    require_sorted_unique(patterns, "metrics.diagnostic_series")
+    registered = set(re.findall(r"(?:Histogram)?Opts::new\(\s*\"(\w+)\"", source))
+    pinned = {entry["name"] for key in METRIC_SERIES_KEYS for entry in section[key]}
+    for pattern in patterns:
+        if not any(fnmatch.fnmatchcase(name, pattern) for name in registered):
+            fail(f"metrics.diagnostic_series pattern {pattern!r} matches no registered metric")
+        overlap = sorted(name for name in pinned if fnmatch.fnmatchcase(name, pattern))
+        if overlap:
+            fail(f"metrics.diagnostic_series pattern {pattern!r} matches pinned series {overlap}")
+
+
+# The RS/RR floor every stable role relies on, and the scoped EVPN reflector set.
+METRIC_SERIES_KEYS = ("stable_series", "scoped_rr_only_series")
+
+
+def check_metric_series(
+    key: str, series, source: str, emission_sources: dict[str, str] | None
+) -> dict[str, str] | None:
     if not isinstance(series, list) or not series:
-        fail("metrics.scoped_rr_only_series must pin at least one series")
+        fail(f"{key} must pin at least one series")
     names = [entry.get("name") for entry in series]
-    require_sorted_unique(names, "metrics.scoped_rr_only_series")
+    require_sorted_unique(names, key)
     for entry in series:
         name = entry["name"]
-        label = f"metrics.scoped_rr_only_series.{name}"
+        label = f"{key}.{name}"
         unknown = sorted(set(entry) - {"name", "type", "labels", "label_values", "meaning"})
         if unknown:
             fail(f"{label} has unknown keys {unknown}")
@@ -1155,21 +1254,22 @@ def check_metrics(
             fail(f"pinned metric {name} changed type: inventory {entry.get('type')!r}, source {kind!r}")
         if sorted(defined_labels) != labels:
             fail(f"pinned metric {name} changed labels: inventory {labels}, source {sorted(defined_labels)}")
-        for key, values in entry.get("label_values", {}).items():
-            if key not in labels:
-                fail(f"{label}.label_values names unknown label {key!r}")
+        for label_name, values in entry.get("label_values", {}).items():
+            if label_name not in labels:
+                fail(f"{label}.label_values names unknown label {label_name!r}")
             if not isinstance(values, list) or not values:
-                fail(f"{label}.label_values.{key} must pin at least one value")
-            require_sorted_unique(values, f"{label}.label_values.{key}")
+                fail(f"{label}.label_values.{label_name} must pin at least one value")
+            require_sorted_unique(values, f"{label}.label_values.{label_name}")
             if emission_sources is None:
                 emission_sources = production_rust_sources(ROOT)
-            emitted = emitted_label_values(source, emission_sources, name, key, defined_labels)
+            emitted = emitted_label_values(source, emission_sources, name, label_name, defined_labels)
             missing = [value for value in values if value not in emitted]
             if missing:
                 fail(
-                    f"pinned metric {name} label {key} values {missing} have no production "
+                    f"pinned metric {name} label {label_name} values {missing} have no production "
                     "call site or label function emitting them"
                 )
+    return emission_sources
 
 
 def semantic_toml_sha256(path: Path) -> str:

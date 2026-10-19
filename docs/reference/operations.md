@@ -1598,6 +1598,14 @@ cover the BMP exporter and MRT dump export. A ready-to-load
 Prometheus alert-rule pack covering the high-signal `bgp_*` metrics ships
 at [`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml).
 
+For route-server and route-reflector deployments, the series to build on are
+listed under `metrics.stable_series` in the
+[v1 inventory](v1-stable-surface.json). Each entry gives the series' type,
+label set and meaning. Series matching a `metrics.diagnostic_series` pattern
+expose RIB actor, scheduler, update-group and recovery internals. They are
+diagnostic, carry no compatibility promise, and can change in any release. See
+the [v1 contract](v1-stable-contract.md#stable-surfaces).
+
 Two fail-signal counters outside that pack also deserve an alert:
 `evpn_runtime_decomposed_fail_stops_total` increments when a decomposed
 `ApplyEvpnRuntime` sequence leaves unrestored effects and pins the coordinator
