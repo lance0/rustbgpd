@@ -258,11 +258,11 @@ $ rbgp summary                           # both members Established
 ```
 
 Distribution mode per member — the mitigation each one uses is visible in
-the detail view (`single-best` / `add-path` / `per-client-best`):
+the detail view (`single_best` / `add_path` / `per_client_best`):
 
 ```console
-$ rbgp neighbor 198.51.100.2             # Distribution Mode: add-path
-$ rbgp neighbor 198.51.100.3             # Distribution Mode: per-client-best
+$ rbgp neighbor 198.51.100.2             # Distribution Mode: add_path
+$ rbgp neighbor 198.51.100.3             # Distribution Mode: per_client_best
 ```
 
 Transparency and per-member views:
@@ -298,7 +298,7 @@ Members can be added and removed at runtime:
 
 ```console
 $ rbgp neighbor 198.51.100.4 add --remote-asn 64503 \
-    --route-server-client --per-client-best --role rs \
+    --route-server-client --per-client-best --role route_server \
     --families ipv4_unicast,ipv6_unicast \
     --max-prefixes 50000 --max-prefix-restart-seconds 30
 ```

@@ -969,7 +969,7 @@ _arguments "${_arguments_options[@]}" : \
 (verify-path)
 _arguments "${_arguments_options[@]}" : \
 '--neighbor-asn=[Effective neighbor ASN (never inferred from the path)]:NEIGHBOR_ASN:_default' \
-'--role=[Local receiving role; none selects unconfigured-role upstream behavior]:ROLE:(none provider customer peer route-server rs-client)' \
+'--role=[Local receiving role; none selects unconfigured-role upstream behavior]:ROLE:(none provider customer peer route_server route_server_client)' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

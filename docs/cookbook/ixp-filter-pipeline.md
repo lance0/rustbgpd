@@ -225,7 +225,8 @@ SIGHUP reload route: generation (one owned runtime generation; a late failure re
 Plan: 1 to add · no session resets expected
 ```
 
-Exit code `2` means changes are present, `0` none, and `1` an error.
+Exit code `2` means changes are present, `0` none, and `1` an error. A
+mistyped flag or missing argument exits `64`, so it is never read as changes.
 
 The rendered configuration names its `.rpol` and dataset files relative to
 its own directory. `rbgp config diff` resolves those paths from the candidate
