@@ -17,7 +17,7 @@ mod update_groups_harness;
 use crate::attr_set::AttrSet;
 use crate::manager::distribution::OutboundCommitBatch;
 use update_groups_harness::{
-    RunningManager, spawn_running_manager, spawn_running_manager_with_roster,
+    RunningManager, await_dirty_resync, spawn_running_manager, spawn_running_manager_with_roster,
 };
 
 #[test]
@@ -4810,7 +4810,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
     assert_eq!(jammed.announce[0].prefix, Prefix::V4(p1));
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
-    quiesce().await;
+    await_dirty_resync(&tx, peer).await;
     let resync = out_rx
         .try_recv()
         .expect("the per-peer resync must emit the residue withdraw");
