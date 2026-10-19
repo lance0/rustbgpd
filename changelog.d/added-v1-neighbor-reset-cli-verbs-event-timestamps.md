@@ -8,7 +8,9 @@
   `clear-import` and `clear-export` subcommands.
   **Operator-visible:** `rbgp neighbor <addr> softreset` is now
   `rbgp neighbor <addr> refresh-in`, pairing with `refresh-out` and
-  `replay-out`; `softreset` remains accepted as an alias.
+  `replay-out`; `softreset` remains accepted as an alias. Its `--json`
+  result reports `"action": "refresh_inbound"` (previously `"softreset"`),
+  matching `refresh_outbound` and `replay_outbound`.
 - `RouteEvent` and `BgpEvent` carry a typed `int64 timestamp_unix_ms`. The
   decimal-string `timestamp` field is still populated but deprecated; new
   clients should read the typed field. Producers record whole seconds, so the

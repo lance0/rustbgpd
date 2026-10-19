@@ -1529,7 +1529,7 @@ pub async fn softreset(
     .await?;
     output::print_result(
         json,
-        "softreset",
+        "refresh_inbound",
         address,
         &format!("Soft reset requested for {address}"),
     )
