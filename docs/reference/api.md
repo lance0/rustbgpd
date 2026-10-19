@@ -3006,7 +3006,10 @@ next-hop self, the usual default for a remotely triggered blackhole (RTBH)
 controller that lets the edge's own policy map a community to a discard
 route. The daemon resolves it per session at export, like `set next-hop self`
 in export policy, for eBGP, iBGP and route-server-client sessions alike; an
-explicit export-policy next-hop action still wins.
+explicit export-policy next-hop action still wins. An export-policy IPv6 next
+hop cannot apply to an IPv4 route toward a peer without Extended Next Hop; as
+for any route, the default next hop is used instead, which for this route is
+self.
 
 | Prefix | Next hop sent on each session |
 |---|---|
@@ -3068,7 +3071,7 @@ on every reconcile pass:
 |---|---|
 | `PATH_INJECT_OUTCOME_CREATED` | No local route had this key. |
 | `PATH_INJECT_OUTCOME_REPLACED` | A local route with this key had a different next hop or attributes; the new route replaced it. |
-| `PATH_INJECT_OUTCOME_UNCHANGED` | An identical local route already existed. Nothing is redistributed. |
+| `PATH_INJECT_OUTCOME_UNCHANGED` | An identical local route already existed. The stored route, including its RPKI validation state, is kept and nothing is redistributed. |
 | `PATH_INJECT_OUTCOME_UNSPECIFIED` | The daemon predates the field. |
 
 The outcome compares the new route with the previous *local* route only, as
@@ -3098,11 +3101,18 @@ returns `NOT_FOUND`, and a present route is deleted with outcome
 `UNSPECIFIED`.
 
 Injected routes are process-local. They are not written to the config and do
-not survive a daemon restart. A controller detects a restart when
-`ControlService.GetHealth` reports a smaller `uptime_seconds` than on its
-previous poll, and then re-injects its whole route set; because `AddPath` is
-an upsert, re-injecting routes that are still present is harmless. To list
-exactly the injected routes, call `RibService.ListReceivedRoutes` with
+not survive a daemon restart. A restart can fall between two polls of any
+signal, so a controller does not rely on detecting it. It reconciles
+periodically and idempotently: it re-adds its whole desired route set, where
+routes still present report `UNCHANGED` and cost no redistribution, and
+withdraws what it no longer wants with `allow_missing: true`. It always
+reconciles after reconnecting to the daemon. A `ControlService.GetHealth`
+`uptime_seconds` lower than on the previous poll is an extra trigger to
+reconcile at once, not the detector: a poll can see a restarted daemon whose
+uptime has already passed the previous reading. The owner leases in
+[ADR-0141](../adr/0141-injection-owner-lease.md), once available, add a
+stronger signal: renewing a lease generation from before the restart fails.
+To list exactly the injected routes, call `RibService.ListReceivedRoutes` with
 `neighbor_address: "0.0.0.0"`.
 
 #### Connecting a controller

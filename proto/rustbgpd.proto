@@ -3520,8 +3520,10 @@ service InjectionService {
   // while Graceful Restart selection deferral is active for the family. OK
   // does not mean any peer received or installed the route, and a received
   // route for the same prefix can out-select it. Injected routes are
-  // process-local: a controller must re-inject them after a daemon restart,
-  // which it can detect from a reset ControlService.GetHealth uptime_seconds.
+  // process-local and lost on a daemon restart, so a controller reconciles
+  // periodically and after every reconnect by re-adding its desired routes
+  // (an UNCHANGED re-add is cheap). A lower ControlService.GetHealth
+  // uptime_seconds is an extra trigger, not a reliable restart detector.
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
   // Withdraw a locally injected unicast route by its (prefix, prefix_length,
   // path_id) key. Only routes added through AddPath are affected; routes
