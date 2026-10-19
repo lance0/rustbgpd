@@ -279,15 +279,54 @@ grpc_delete_path_allow_missing() {
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath 2>/dev/null
 }
 
-# Pre-policy Adj-RIB-In next hop FRR-C recorded from rustbgpd (iBGP).
-frr_c_received_next_hop() {
+# Classify a `received-routes json` document (stdin) for one prefix: the
+# recorded next hop, "present-without-next-hop", "absent" when a valid
+# receivedRoutes object lacks the prefix, or "invalid" for anything else
+# (an error such as {"warning": ...}, a missing object, non-JSON).
+received_route_state() {
+    python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    doc = None
+routes = doc.get("receivedRoutes") if isinstance(doc, dict) else None
+if not isinstance(routes, dict):
+    print("invalid")
+elif sys.argv[1] not in routes:
+    print("absent")
+else:
+    route = routes[sys.argv[1]]
+    print(route.get("nextHopGlobal") or route.get("nextHop") or "present-without-next-hop")
+' "$1"
+}
+
+# Negative parser cases: an unexpected response must never read as "absent".
+check_received_route_parser() {
+    local input expected actual bad=0
+    while IFS='|' read -r input expected; do
+        actual=$(printf '%s' "$input" | received_route_state "2001:db8:3::/48")
+        if [ "$actual" != "$expected" ]; then
+            fail "received-routes parser: $input -> '$actual', expected $expected"
+            bad=1
+        fi
+    done <<'CASES'
+{"warning":"No such neighbor or address family"}|invalid
+not json|invalid
+{}|invalid
+{"receivedRoutes":[]}|invalid
+{"receivedRoutes":{"2001:db8:3::/48":{}}}|present-without-next-hop
+{"receivedRoutes":{"2001:db8:3::/48":{"nextHopGlobal":"::"}}}|::
+{"receivedRoutes":{"2001:db8:4::/48":{"nextHopGlobal":"2001:db8::1"}}}|absent
+CASES
+    [ "$bad" -eq 0 ] && ok "received-routes parser rejects unexpected responses"
+}
+
+# Pre-policy Adj-RIB-In state FRR-C recorded from rustbgpd (iBGP).
+frr_c_received() {
     local afi=$1 prefix=$2
     docker exec "$FRR_C" vtysh -c "show bgp $afi unicast neighbors 10.0.2.1 received-routes json" 2>/dev/null \
-        | python3 -c '
-import json, sys
-route = json.load(sys.stdin).get("receivedRoutes", {}).get(sys.argv[1], {})
-print(route.get("nextHopGlobal") or route.get("nextHop") or "")
-' "$prefix"
+        | received_route_state "$prefix"
 }
 
 expect_frr_next_hop() {
@@ -306,6 +345,7 @@ expect_frr_next_hop() {
 
 test_next_hop_self_injection() {
     log "Test 6: AddPath next hop 0.0.0.0 is next-hop self per session"
+    check_received_route_parser
 
     local result
     result=$(grpc_add_path "172.17.0.0" 16 "0.0.0.0" 0 || echo "ERROR")
@@ -327,7 +367,7 @@ test_next_hop_self_injection() {
     # an unresolved 0.0.0.0 would show up as such in the Adj-RIB-In.
     local actual=""
     for _ in $(seq 1 15); do
-        actual=$(frr_c_received_next_hop ipv4 "172.17.0.0/16")
+        actual=$(frr_c_received ipv4 "172.17.0.0/16")
         [ "$actual" = "10.0.2.1" ] && break
         sleep 1
     done
@@ -358,12 +398,27 @@ sys.exit(caps.get("ipv6Unicast", {}).get("advertisedAndReceived") is not True)
     else
         fail "AddPath :: not created: $result"
     fi
-    sleep 3
-    actual=$(frr_c_received_next_hop ipv6 "2001:db8:3::/48")
-    if [ -z "$actual" ]; then
+    # Control: an IPv6 route with an explicit next hop reaches FRR-C, so the
+    # IPv6 received-routes view is live and non-empty when it is read.
+    grpcurl_call \
+        -d '{"prefix": "2001:db8:4::", "prefix_length": 48, "next_hop": "2001:db8::1"}' \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath >/dev/null 2>&1 \
+        || fail "AddPath 2001:db8:4::/48 failed"
+    for _ in $(seq 1 15); do
+        actual=$(frr_c_received ipv6 "2001:db8:4::/48")
+        [ "$actual" = "2001:db8::1" ] && break
+        sleep 1
+    done
+    if [ "$actual" = "2001:db8::1" ]; then
+        ok "$FRR_C: control 2001:db8:4::/48 received with next hop 2001:db8::1"
+    else
+        fail "$FRR_C: control 2001:db8:4::/48 state '$actual', expected 2001:db8::1"
+    fi
+    actual=$(frr_c_received ipv6 "2001:db8:3::/48")
+    if [ "$actual" = "absent" ]; then
         ok "$FRR_C: 2001:db8:3::/48 refused (no local IPv6 next hop)"
     else
-        fail "$FRR_C: 2001:db8:3::/48 received with next hop '$actual'"
+        fail "$FRR_C: 2001:db8:3::/48 state '$actual', expected absent"
     fi
     if docker exec "$FRR_C" vtysh -c "show bgp neighbors 10.0.2.1 json" 2>/dev/null \
         | python3 -c 'import json, sys; sys.exit(json.load(sys.stdin)["10.0.2.1"]["bgpState"] != "Established")'; then
@@ -372,6 +427,7 @@ sys.exit(caps.get("ipv6Unicast", {}).get("advertisedAndReceived") is not True)
         fail "$FRR_C session is not Established"
     fi
     grpc_delete_path "2001:db8:3::" 48 >/dev/null || fail "DeletePath 2001:db8:3::/48 failed"
+    grpc_delete_path "2001:db8:4::" 48 >/dev/null || fail "DeletePath 2001:db8:4::/48 failed"
 
     result=$(grpc_delete_path "172.17.0.0" 16 || echo "ERROR")
     if echo "$result" | grep -q '"outcome": "PATH_DELETE_OUTCOME_DELETED"'; then
