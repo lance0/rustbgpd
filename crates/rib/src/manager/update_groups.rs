@@ -1209,21 +1209,6 @@ impl GroupRibOut {
         }
     }
 
-    /// The single ADR-0126 Decision 4 derivation of a member's
-    /// advertised slot — `adv(m)` at one staged key:
-    ///
-    /// > adv(m) = for each prefix: `w` (the staged entry) if
-    /// > `source(w) ≠ m`; else `r` (the lane entry) if the lane holds
-    /// > one; else nothing — always at `path_id 0`.
-    ///
-    /// Decision 6's "no second bookkeeping path to diverge" is a code
-    /// claim on this method: every read seam — queries, counts,
-    /// counter replay — routes through this ONE definition instead of
-    /// restating the `peer == member ⇒ skip` rule inline. For a plain
-    /// group the lane is empty by construction AND gated off by
-    /// `per_client_best`, so this reduces exactly to the historical
-    /// skip rule. Meaningful for grouped unicast only (`path_id 0`);
-    /// the VPN maps are an ADR-0126 non-goal.
     /// Whether `member` still holds this key: [`Self::adv_entry`] resolves a
     /// slot that its rs-control context does not suppress. Without that
     /// context only the slot's presence matters, so the entry's next-hop and
@@ -1253,6 +1238,21 @@ impl GroupRibOut {
             })
     }
 
+    /// The single ADR-0126 Decision 4 derivation of a member's
+    /// advertised slot — `adv(m)` at one staged key:
+    ///
+    /// > adv(m) = for each prefix: `w` (the staged entry) if
+    /// > `source(w) ≠ m`; else `r` (the lane entry) if the lane holds
+    /// > one; else nothing — always at `path_id 0`.
+    ///
+    /// Decision 6's "no second bookkeeping path to diverge" is a code
+    /// claim on this method: every read seam — queries, counts,
+    /// counter replay — routes through this ONE definition instead of
+    /// restating the `peer == member ⇒ skip` rule inline. For a plain
+    /// group the lane is empty by construction AND gated off by
+    /// `per_client_best`, so this reduces exactly to the historical
+    /// skip rule. Meaningful for grouped unicast only (`path_id 0`);
+    /// the VPN maps are an ADR-0126 non-goal.
     pub(in crate::manager) fn adv_entry(
         &self,
         member: IpAddr,
