@@ -4027,9 +4027,10 @@ impl RibManager {
             RibUpdate::WithdrawInjected {
                 prefix,
                 path_id,
+                allow_missing,
                 reply,
             } => {
-                self.handle_withdraw_injected(prefix, path_id, reply);
+                self.handle_withdraw_injected(prefix, path_id, allow_missing, reply);
                 self.retire_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
             }
             RibUpdate::QueryRoutesPage {
