@@ -1,6 +1,6 @@
 # ADR-0141: Owner-scoped lease on controller-injected routes
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-10-19
 
 ## Context
@@ -446,10 +446,14 @@ Paused clock:
 - Delete-then-add conversion: a leased add on an unowned key returns
   `FAILED_PRECONDITION` and leaves the entry unowned. After a delete, the same
   leased add succeeds.
-- Expiry lag across generations: let generation g expire with the RIB
-  stalled, start generation g+1 with a different deadline, advance, then
-  release. The `WARN` line and its lag field report g's deadline-to-apply
-  lag, not one computed from g+1's deadline.
+- Expiry lag across generations: let generation g expire and capture the
+  expiry task's batch through a test seam on its RIB sender, so the batch is
+  not yet delivered. A leased add then commits in the RIB and starts
+  generation g+1, with a different deadline. Advance the clock and deliver
+  the captured batch. The `WARN` line's lag field reports g's
+  deadline-to-apply lag, not one computed from g+1's deadline, and the key
+  tagged g+1 survives. A generation can start only in a RIB turn, so the
+  test cannot stall the RIB and start g+1 at the same time.
 - Unowned routes survive any advance.
 - Race: a late renewal of generation g after a re-add started g+1 gets
   `FAILED_PRECONDITION` and leaves g+1's deadline unchanged.
