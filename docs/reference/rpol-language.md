@@ -1676,7 +1676,7 @@ Changes (up to 2):
   set. It can still hold routes the installed policy would now reject:
   after an import-policy change until a Route Refresh replay
   re-evaluates them (a reload requests one for affected peers;
-  `rbgp neighbor <addr> softreset` requests one on demand), and under an
+  `rbgp neighbor <addr> refresh-in` requests one on demand), and under an
   active GR/LLGR window until re-sync/EOR. Rejected routes are not
   stored there, so the dry run shows candidate rejections or modifications
   among retained post-policy routes, but not which routes it would newly

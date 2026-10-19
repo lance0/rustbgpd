@@ -714,7 +714,7 @@ What happens:
    SIGHUP reload or a gRPC mutation), the peer manager issues
    `soft_reset_in` (gated on Established) so routes already in
    `AdjRibIn` get re-evaluated against the new policy. Operators no
-   longer need to run `softreset` manually after a chain swap.
+   longer need to run `refresh-in` manually after a chain swap.
 
 Outside configuration transactions, a pending neighbor inventory or detail
 snapshot allows a bounded batch of policy-statistics reads to proceed while
@@ -3237,14 +3237,14 @@ ranges that have not accepted a peer yet. JSON compatibility is unchanged:
 the same empty live-neighbor result is exactly `[]`, with no range lookup or
 extra inventory fields; use `rbgp dynamic-neighbor list -j` for range JSON.
 
-### Soft reset (re-evaluate import policy)
+### Refresh inbound (re-evaluate import policy)
 
 ```bash
-rbgp neighbor 10.0.0.2 softreset
+rbgp neighbor 10.0.0.2 refresh-in
 ```
 
 Re-applies import policy to all routes from this peer without tearing down
-the session.
+the session. `softreset` remains accepted as an alias.
 
 > Note: as of v0.12.0, `update_runtime_policies` automatically issues a
 > Route Refresh whenever a peer's effective import chain materially
@@ -3260,7 +3260,7 @@ the session.
 rbgp neighbor 10.0.0.2 refresh-out
 ```
 
-The outbound sibling of `softreset`: re-emits this one peer's current
+The outbound sibling of `refresh-in`: re-emits this one peer's current
 exportable routes through the live export path
 (`NeighborService.RefreshOutbound`) without tearing down or renegotiating
 the session. Useful when a peer is suspected of having missed or dropped
