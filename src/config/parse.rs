@@ -378,7 +378,13 @@ pub(super) fn resolve_chain_with_store(
             };
             budget.add_named(&member, store).map_err(|reason| {
                 ConfigError::PolicyChainTooLarge {
-                    reason: format!("chain member {name:?}: {reason}"),
+                    reason: format!(
+                        "{} chain member {name:?}: {reason}",
+                        match direction {
+                            ChainDirection::Import => "import",
+                            ChainDirection::Export => "export",
+                        }
+                    ),
                 }
             })?;
             Ok(member)

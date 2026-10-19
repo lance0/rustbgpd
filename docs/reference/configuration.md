@@ -3309,7 +3309,9 @@ path = "/var/lib/rustbgpd/datasets/customers.list"
   effect; see the
   [reload matrix](reload-matrix.md#sighup-reload-routes).
 - Bounds: 64 MiB and 1,000,000 records per file; at most 16 datasets
-  per `.rpol` compilation unit.
+  per `.rpol` compilation unit, and at most 16 distinct datasets across
+  the members of one composed policy chain. A chain over that bound is
+  refused at load and reload.
 - Producers should write-temp-then-rename so a refresh never reads a
   torn file. Full format, semantics, and the operator how-to:
   [`rpol-language.md`](rpol-language.md) § Datasets.
