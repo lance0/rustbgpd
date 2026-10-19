@@ -98,7 +98,7 @@ pub struct LocRib {
 }
 
 /// Per-family-pair table sizes; see [`LocRib::family_lens`] and
-/// [`crate::AdjRibOut::family_lens`].
+/// [`crate::adj_rib_out::AdjRibOut::family_lens`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FamilyLens {
     /// `[ipv4_unicast, ipv6_unicast]`.
