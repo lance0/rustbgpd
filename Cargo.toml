@@ -14,13 +14,11 @@ members = [
     "crates/mrt",
     "crates/evpn",
     "crates/evpn-linux",
-    "crates/event-history",
     "bench/evpn-load",
     "bench/scale/enhanced-route-refresh",
     "bench/scale/reloadstall",
     "bench/scale/rrharness",
     "bench/scale/rrtransport",
-    "examples/event-bridge",
     "examples/birdwatcher-adapter",
     "examples/peer-loop",
     "tools/rs-config-render",
@@ -42,9 +40,7 @@ default-members = [
     "crates/mrt",
     "crates/evpn",
     "crates/evpn-linux",
-    "crates/event-history",
     "bench/evpn-load",
-    "examples/event-bridge",
     "examples/birdwatcher-adapter",
     "examples/peer-loop",
     "tools/rs-config-render",
@@ -77,7 +73,6 @@ rustbgpd-bmp = { path = "crates/bmp", version = "0.78.0" }
 rustbgpd-mrt = { path = "crates/mrt", version = "0.78.0" }
 rustbgpd-evpn = { path = "crates/evpn", version = "0.78.0" }
 rustbgpd-evpn-linux = { path = "crates/evpn-linux", version = "0.78.0" }
-rustbgpd-event-history = { path = "crates/event-history", version = "0.78.0" }
 
 # External dependencies — pinned across workspace
 bytes = "1"
@@ -142,12 +137,6 @@ dhat = "0.3"
 rcgen = "0.14"
 tempfile = "3"
 flate2 = "1"
-# Embedded SQLite for the durable event history outbox (ADR-0072).
-# Bundled libsqlite avoids per-distro packaging variance — the outbox
-# is a daemon-local file, not something operators expect to inspect
-# with a system sqlite3 CLI.
-rusqlite = { version = "0.40", features = ["bundled"] }
-# Daemon boot ID stamping for restart detection (ADR-0072).
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 ureq = { version = "3.4.1", default-features = false, features = ["rustls", "platform-verifier"] }
@@ -196,7 +185,6 @@ rustbgpd-bmp.workspace = true
 rustbgpd-mrt.workspace = true
 rustbgpd-evpn.workspace = true
 rustbgpd-evpn-linux.workspace = true
-rustbgpd-event-history.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -239,9 +227,6 @@ rs-config-render = { path = "tools/rs-config-render" }
 rustbgpctl = { path = "crates/cli" }
 serde_yaml.workspace = true
 tempfile.workspace = true
-# Seeds an events DB with a newer schema version for the downgrade-fence
-# proof in tests/grpc_failure_exit_code.rs.
-rusqlite.workspace = true
 criterion.workspace = true
 tikv-jemalloc-ctl.workspace = true
 # Drives the gRPC services directly (Request/Status/Code) in the tests that

@@ -200,36 +200,6 @@ fn vpn_inner_prefix(prefix: &rustbgpd_wire::VpnPrefix) -> Prefix {
         }
     }
 }
-/// Build the `(otc_value, as_path_string)` pair attached to an
-/// [`crate::event_sink::OtcRouteBlockedEvent`] for the ingress decision sites.
-///
-/// `otc_value` is `None` on the `malformed_length` path because the
-/// attribute could not be decoded. For both
-/// I1 (`ingress_from_customer_rsclient`) and I2
-/// (`ingress_peer_mismatch`) the codec returns the present ASN.
-///
-/// `as_path_string` uses
-/// [`rustbgpd_wire::AsPath::to_aspath_string`] so `AS_SET` / confed
-/// segments survive the lossless round-trip into the structured
-/// event — the proto field is `string`, not `repeated uint32`.
-fn otc_event_context(attrs: &[PathAttribute], reason: OtcBlockReason) -> (Option<u32>, String) {
-    let otc_value = if reason == OtcBlockReason::MalformedLength {
-        None
-    } else {
-        match otc_state(attrs) {
-            OtcState::Present(asn) => Some(asn),
-            OtcState::Absent => None,
-        }
-    };
-    let as_path_string = attrs
-        .iter()
-        .find_map(|a| match a {
-            PathAttribute::AsPath(p) => Some(p.to_aspath_string()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    (otc_value, as_path_string)
-}
 fn otc_ingress_action(
     local_role: Option<BgpRole>,
     remote_asn: Option<u32>,
@@ -860,25 +830,6 @@ impl PeerSession {
             "OTC rule rejected unicast announcements"
         );
         self.record_otc_routes_blocked(reason, rejected as u64);
-        if !self.event_sink().wants_otc_route_blocked() {
-            return;
-        }
-        let blocked_prefixes = self
-            .eligible_unicast_announcement_iter(parsed)
-            .map(|(prefix, _)| prefix.to_string())
-            .collect();
-        let (otc_value, as_path_string) = otc_event_context(&parsed.attributes, reason);
-        self.event_sink()
-            .publish_otc_route_blocked(&crate::event_sink::OtcRouteBlockedEvent {
-                peer: self.peer_ip,
-                direction: crate::event_sink::OtcDirection::Ingress,
-                reason,
-                prefixes: blocked_prefixes,
-                local_role: self.config.peer.local_role,
-                remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
-                otc_value,
-                as_path: as_path_string,
-            });
     }
 
     /// Iterate over the unicast announcement identities accepted from this

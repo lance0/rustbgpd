@@ -336,7 +336,7 @@ jobs:
       - run: cargo check --locked -p rustbgpd-rib --features bench-internals --benches
       # Transport has the same feature-gated `bench-internals` bench surface.
       - run: cargo check --locked -p rustbgpd-transport --features bench-internals --benches
-      # API owns the feature-gated event-history producer bench.
+      # API owns the feature-gated VPN query benches.
       - run: cargo check --locked -p rustbgpd-api --features bench-internals --benches
       # `cargo check` above proves the bench targets compile, not that they run.
       # A fixture the codec later made illegal (RFC 9774 AS_SET in the wire

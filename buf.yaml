@@ -44,3 +44,8 @@ breaking:
     - PACKAGE_NO_DELETE
     - PACKAGE_SERVICE_NO_DELETE
     - RPC_NO_DELETE
+  # Pre-v1 removal of EventService.SubscribeFromEvent with the durable event
+  # history. Remove this entry once the removal is on main.
+  ignore_only:
+    RPC_NO_DELETE:
+      - proto/rustbgpd.proto

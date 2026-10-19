@@ -13,7 +13,6 @@ done
 ROOT=$(git rev-parse --show-toplevel)
 mapfile -t files < <(
     git -C "$ROOT" ls-files -- \
-        'crates/api/benches/event_history_producer.rs' \
         'docs/perf/*event-history*' \
         'docs/perf/bgperf-rustbgpd-ehm-wrapper.sh' \
         'docs/perf/artifacts/event-history-producer-2026-07/**'

@@ -63,7 +63,7 @@
 #   31  (a) GoBGP holds BIRD's best for the same prefix (sanity)
 #   32  (a) export explain toward FRR: Deny, naming deny-to-frr
 #   33  (b) after per_client_best flip (sed + SIGHUP + session bounce):
-#       `rbgp neighbor` shows Distribution Mode per-client-best
+#       `rbgp neighbor` shows Distribution Mode per_client_best
 #   34  (b) FRR receives the runner-up: AS_PATH 65002
 #   35  (b) FRR runner-up NEXT_HOP = 10.83.2.2 (still the originator's)
 #   36  (b) export explain: per-client ladder — candidate 1 of 2 denied
@@ -1351,10 +1351,10 @@ flip_frr_per_client_best() {
 
 assert_per_client_best() {
     log "Assertions 33-37: per-client best-path (RFC 7947 §2.3.2, ADR-0101)"
-    if rs_ctl neighbor "$FRR_ADDR" | grep "per-client-best" >/dev/null; then
-        ok "rbgp neighbor shows Distribution Mode per-client-best"
+    if rs_ctl neighbor "$FRR_ADDR" | grep "per_client_best" >/dev/null; then
+        ok "rbgp neighbor shows Distribution Mode per_client_best"
     else
-        fail "Distribution Mode per-client-best not reported"
+        fail "Distribution Mode per_client_best not reported"
         rs_ctl neighbor "$FRR_ADDR" >&2 || true
     fi
 

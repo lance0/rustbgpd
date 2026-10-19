@@ -53,8 +53,7 @@ In particular:
   `Config.flowspec`, receive-side validation and its shared diagnostic fields,
   remote received-candidate mode, FlowSpec CLI surfaces, GR/LLGR guarantees,
   and dataplane enforcement remain outside that promise.
-- Files under `runtime_state_dir`, and the event store wherever
-  `[event_history].path` places it, remain outside the inventory; the
+- Files under `runtime_state_dir` remain outside the inventory; the
   contract's [on-disk runtime state](v1-stable-contract.md#on-disk-runtime-state)
   section records how each reader treats older and newer versions today.
 - Unlisted RPCs and CLI commands remain alpha. For an inventoried CLI command,

@@ -6,7 +6,8 @@ surface with human-readable and JSON output modes.
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 Parser and usage errors, such as an unknown flag or malformed neighbor address,
-exit with code `2` before connecting. Argument validation after parsing, such as
+exit with code `64` (`EX_USAGE`) before connecting, so they never collide with a
+detailed code such as `2` for "changes present". Argument validation after parsing, such as
 an out-of-range `top --interval` or an empty policy-chain list, keeps exit code
 `1`, as do connection and execution failures and a declined confirmation
 prompt. Commands with detailed exit codes document them in `--help`; those codes
@@ -19,7 +20,7 @@ name the target endpoint and scope and ask `[y/N]` first; any answer other than
 the prompt. Non-interactive runs, such as scripts and pipelines, never prompt.
 The policy-chain and `gshut` commands require an explicit scope: `--global`
 (policy chains) or `--all` (`gshut`) for the daemon-wide scope, or `--neighbor`
-for one peer. Omitting both is a usage error (exit code `2`) and nothing is
+for one peer. Omitting both is a usage error (exit code `64`) and nothing is
 sent to the daemon. `rbgp shutdown` is always daemon-wide and takes no scope
 flag.
 
@@ -218,8 +219,9 @@ for monitoring reset behavior, completion evidence, and the five-second bound.
 `rpki aspa` returns up to 256 sorted effective providers, retaining AS0 and
 explicit `found`, `complete`, and `omitted` fields in JSON. `rpki verify-path`
 requires the **local receiving role** (`none`, `provider`, `customer`, `peer`,
-`route-server`, or `rs-client`) and an explicit nonzero neighbor ASN. Only
-`rs-client` skips the first-AS check; `customer` selects downstream verification.
+`route_server`, or `route_server_client`; `route-server`, `rs` and `rs-client`
+are accepted aliases) and an explicit nonzero neighbor ASN. Only
+`route_server_client` skips the first-AS check; `customer` selects downstream verification.
 The literal path accepts nonzero decimal ASNs and `{ASN ASN}` sets, at most
 4096 ASNs and 65536 input bytes. Empty quoted paths and AS_SETs produce an
 `invalid` verdict; malformed braces, AS0, and missing context are usage errors.
@@ -690,7 +692,6 @@ rbgp events --limit 500    # recent route events (default 100; there is no -l sh
 rbgp events --all          # the full retained route-event window
 rbgp events watch
 rbgp events watch --backfill 50
-rbgp events watch --from-event-id 41236
 rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
 rbgp events sessions --neighbor 192.0.2.1   # --peer is an accepted alias
 rbgp events policy
@@ -706,17 +707,14 @@ rbgp completions bash
 rbgp man                # man page (roff) on stdout: rbgp man | man -l -
 ```
 
-`events watch --from-event-id N` durably replays events after `N` and tails
-the outbox. While the command remains running, a clean stream end or gRPC
-`UNAVAILABLE` reconnects with a 1-second exponential backoff capped at 30
-seconds. Every category, type, neighbor, family, and prefix filter is preserved.
-The resume cursor advances from the top-level `BgpEvent.event_id` only after the
-complete human or JSON record, newline, and stdout flush succeed; a lag frame
-without that ID does not advance it. Other RPC statuses and output failures are
-terminal. This is a process-local resume cursor, not a persisted downstream
-checkpoint; use the event-bridge pattern when the consumer must store its own
-confirmed cursor. Cursorless OTC subscriptions and ordinary `WatchEvents`
-streams remain one-shot.
+`events watch` is one-shot: it ends with the stream and does not replay events
+missed while disconnected. A collector that needs to resynchronize after a
+reconnect restarts the watch first, then re-reads current state and reconciles
+the overlap; reading state before the watch starts loses changes in between.
+The CLI prints nothing when its stream is established, so a backgrounded
+`events watch` gives no handoff signal; a client that needs one waits for the
+`WatchEvents` response headers before reading state.
+gNMI `Subscribe` does both in order, sending a full snapshot before changes.
 
 Human event lines print timestamps as RFC 3339 UTC, the format `config history`
 uses. JSON event records keep `timestamp`, the daemon's decimal Unix-seconds

@@ -599,7 +599,7 @@ fn collect_example_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
             collect_example_toml_files(&path, out);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
             // Some `examples/` entries are Rust workspace members
-            // (e.g. ADR-0072 `examples/event-bridge/`) and ship a
+            // (e.g. `examples/peer-loop/`) and ship a
             // `Cargo.toml`, not a daemon config. Skip those here;
             // their compile-time correctness is enforced by the
             // workspace build, not this validator.

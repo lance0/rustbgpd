@@ -187,7 +187,7 @@ wait_frr_established "$FRR_RSCLIENT" "10.55.2.1" "RS↔RS-Client"
 wait_frr_established "$FRR_PEER" "10.55.3.1" "Peer↔Peer"
 
 wait_rust_role_status "10.55.1.2" "provider" "customer"
-wait_rust_role_status "10.55.2.2" "rs" "rs-client"
+wait_rust_role_status "10.55.2.2" "route_server" "route_server_client"
 wait_rust_role_status "10.55.3.2" "peer" "peer"
 
 wait_rust_not_established_with_notification "10.55.4.2" "Provider↔Provider mismatch"

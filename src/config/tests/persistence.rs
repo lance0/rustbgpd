@@ -47,12 +47,11 @@ fn persisted_config_sorts_every_hash_map_and_round_trips_to_a_fixpoint() {
     assert_eq!(statements[1].action, "deny");
 }
 
-const DEFAULT_OPTIONAL_SECTIONS: [&str; 6] = [
+const DEFAULT_OPTIONAL_SECTIONS: [&str; 5] = [
     "security",
     "policy",
     "flowspec",
     "managed_netdevs",
-    "event_history",
     "inbound_admission",
 ];
 
@@ -128,7 +127,6 @@ fn canonical_persistence_retains_each_configured_optional_section() {
             name: "br-fixture".into(),
             vlan_filtering: true,
         });
-    config.event_history.enabled = true;
     config.inbound_admission.enabled = true;
     config.validate().unwrap();
 
@@ -879,7 +877,6 @@ fn canonical_projection_borrows_every_large_config_field() {
         "flowspec: Option<&'a FlowSpecConfig>",
         "managed_netdevs: Option<&'a ManagedNetdevsConfig>",
         "bfd_profiles: &'a [BfdProfileConfig]",
-        "event_history: Option<&'a EventHistoryConfig>",
         "inbound_admission: Option<&'a InboundAdmissionConfig>",
     ] {
         assert!(source.contains(field), "canonical projection lost {field}");

@@ -2150,9 +2150,9 @@ log_format = "json"
 
     /// The v0.75.0 release wrote this pending authority for a confirmed apply.
     /// The archived metadata binds the capture host's raw-file inode, so boot
-    /// recovery cannot be replayed here; the byte decoders, linkage, digest and
-    /// retained-snapshot checks that boot runs must still accept it, and the
-    /// same documents declaring version 4 must be refused.
+    /// recovery cannot be replayed here; the byte decoders, linkage and digest
+    /// checks that boot runs must still accept it, and the same documents
+    /// declaring version 4 must be refused.
     #[test]
     fn released_v075_pending_authority_decodes_and_future_version_is_refused() {
         let locator =
@@ -2179,12 +2179,12 @@ log_format = "json"
             inode: metadata_wire.raw_inode,
         };
         validate_raw(raw.as_bytes(), recorded, &metadata_wire).unwrap();
-        let accepted = AcceptedConfigSnapshot::load_retained(raw, &target).unwrap();
-        verify_snapshot(&accepted, raw, &metadata_wire).unwrap();
-        assert_eq!(
-            accepted.config_ref().neighbors[0].description.as_deref(),
-            Some("released-state-fixture")
-        );
+        // The retained v0.75.0 prior carries the removed `[event_history]`
+        // section, so boot recovery refuses it before touching any file.
+        let error = AcceptedConfigSnapshot::load_retained(raw, &target)
+            .err()
+            .expect("removed [event_history] section must not load");
+        assert!(error.contains("event_history"), "{error}");
 
         let future = |bytes: &[u8]| {
             String::from_utf8(bytes.to_vec()).unwrap().replacen(
