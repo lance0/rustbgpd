@@ -175,10 +175,6 @@ fn sorted_family_limits<T>(
     limits
 }
 
-fn remaining_prefix_headroom(limit: Option<u32>, count: usize) -> Option<u32> {
-    limit.map(|limit| limit.saturating_sub(u32::try_from(count).unwrap_or(u32::MAX)))
-}
-
 impl PeerSession {
     async fn administrative_reset(&mut self, reason: Option<bytes::Bytes>) {
         if self.fsm.state() == SessionState::Idle {
@@ -1191,18 +1187,6 @@ impl PeerSession {
                 action: self.config.max_prefix_action,
                 prefix_count_ipv4,
                 prefix_count_ipv6,
-                max_prefixes: self.config.max_prefixes,
-                max_prefixes_ipv4: self.config.max_prefixes_ipv4,
-                max_prefixes_ipv6: self.config.max_prefixes_ipv6,
-                headroom: remaining_prefix_headroom(self.config.max_prefixes, prefix_count),
-                headroom_ipv4: remaining_prefix_headroom(
-                    self.config.max_prefixes_ipv4,
-                    prefix_count_ipv4,
-                ),
-                headroom_ipv6: remaining_prefix_headroom(
-                    self.config.max_prefixes_ipv6,
-                    prefix_count_ipv6,
-                ),
             },
             negotiated_hold_time: neg.map(|n| n.hold_time),
             four_octet_as: neg.map(|n| n.four_octet_as),
