@@ -74,6 +74,7 @@
     {
       "afi": 101,
       "safi": 102,
+      "family": "family-value",
       "active": false,
       "waiter_state": "waiter_state-value",
       "waiter_session_id": 105,

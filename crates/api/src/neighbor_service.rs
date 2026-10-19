@@ -1272,6 +1272,7 @@ fn selection_deferral_to_proto(
             blocking_waiters: row.blocking_waiters,
             remaining_millis: row.remaining_millis,
             release_reason: row.release_reason.clone(),
+            family: family_to_string(row.afi, row.safi),
         })
         .collect()
 }
@@ -4449,6 +4450,7 @@ mod tests {
         assert_eq!(state.export_policy_routes_denied, 4);
         assert_eq!(state.effective_distribution_mode, proto::EffectiveDistributionMode::AddPath as i32);
         assert_eq!(state.selection_deferral.len(), 1);
+        assert_eq!(state.selection_deferral[0].family, "ipv4_unicast");
         assert_eq!(state.outbound_prefix_limits.len(), 1);
         assert_eq!(result.verdict, proto::UpdateGroupComparisonVerdict::Separate as i32);
         assert_eq!(result.primary_membership, proto::UpdateGroupComparisonMembership::Grouped as i32);

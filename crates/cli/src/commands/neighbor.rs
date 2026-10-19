@@ -450,6 +450,7 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
             .map(|row| JsonSelectionDeferralFamily {
                 afi: row.afi,
                 safi: row.safi,
+                family: row.family.clone(),
                 active: row.active,
                 waiter_state: row.waiter_state.clone(),
                 waiter_session_id: row.waiter_session_id,
@@ -908,7 +909,12 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
                     row.release_reason, row.waiter_state
                 )
             };
-            rows.line(1, format!("AFI {}/SAFI {} — {state}", row.afi, row.safi));
+            let family = if row.family.is_empty() {
+                format!("AFI {}/SAFI {}", row.afi, row.safi)
+            } else {
+                row.family.clone()
+            };
+            rows.line(1, format!("{family} — {state}"));
         }
     }
     if !n.outbound_prefix_limits.is_empty() {
@@ -1764,6 +1770,7 @@ mod tests {
                 blocking_waiters: 106,
                 remaining_millis: 107,
                 release_reason: "release_reason-value".to_string(),
+                family: "family-value".to_string(),
             }],
             tcp_ao_desired_generation: 132,
             tcp_ao_applied_generation: 133,
@@ -2420,7 +2427,7 @@ Policy Stats:
   Export:                 permitted=120 denied=121
 Update Group:             update_group-value
 Selection Deferral:
-  AFI 101/SAFI 102 — released=release_reason-value; waiter=waiter_state-value; session=105
+  family-value — released=release_reason-value; waiter=waiter_state-value; session=105
 Outbound Prefix Limits:
   family-value   usage=102; limit=103; headroom=104; blocking=reason-value
 Inbound Prefix Limits:

@@ -276,7 +276,9 @@ message DiffRuntimeConfigResponse {
   // values follow the same redaction policy as `rustbgpd --diff`.
   string human_text = 6;
   // Pretty-printed JSON object using the same schema as
-  // `rustbgpd --diff --json`.
+  // `rustbgpd --diff --json`. The document is unversioned and explicitly
+  // unstable: its keys may change between releases. Use the boolean summary
+  // fields above for automation.
   string diff_json = 7;
 }
 
@@ -684,7 +686,9 @@ message NeighborState {
   // the private-path reason
   // ("policy_peer_context", "add_path_send", "per_client_best",
   // "orr_vantage", "orf_installed", "conditional_advertisement", "slow_peer").
-  // Empty when the peer has no outbound registration.
+  // Empty when the peer has no outbound registration. Diagnostic and
+  // explicitly unstable: N is a process-local identifier and the reason set
+  // may change. Compare membership with update_group_comparison instead.
   string update_group = 22;
   // Total BGP messages received/sent, all types (OPEN, KEEPALIVE,
   // UPDATE, NOTIFICATION, ROUTE-REFRESH). Mirrors the
@@ -705,6 +709,9 @@ message NeighborState {
   AuthenticationMode authentication = 27;
   // Best-effort query-time Linux TCP-AO inspection; absent when not AO or when
   // no live snapshot is available (including disconnect or inspection failure).
+  // The TCP-AO fields (tcp_ao, tcp_ao_health, and tcp_ao_desired_generation
+  // through tcp_ao_rotation_error) follow the alpha TCP-AO lifecycle and are
+  // explicitly unstable.
   TcpAoState tcp_ao = 28;
   // Health derived from the effective protection identity and query-time
   // inspection. UNAVAILABLE means TCP-AO protection is expected but no socket
@@ -720,7 +727,7 @@ message NeighborState {
   // coordinator and the generation fully applied to this peer session.
   uint64 tcp_ao_desired_generation = 32;
   uint64 tcp_ao_applied_generation = 33;
-  // Stable values: idle, add_only, add_only_failed, selecting,
+  // Current values: idle, add_only, add_only_failed, selecting,
   // awaiting_peer, selection_failed, deleting, delete_failed.
   string tcp_ao_rotation_phase = 34;
   // Secret-free actionable rotation failure. Empty when the phase is healthy.
@@ -819,11 +826,13 @@ message NeighborState {
   // the cause label of bgp_update_group_recovery_fallback_total. While set,
   // the member's resync withdraws every candidate prefix it might have
   // advertised instead of only the ones it is known to have advertised.
-  // Empty when no fallback is recorded.
+  // Empty when no fallback is recorded. Update-group internal; explicitly
+  // unstable.
   string update_group_recovery_fallback = 64;
   // True while prefixes_sent is the update group's desired count for a
   // member whose delivery is unconfirmed (a grouped member awaiting resync),
   // not the routes the peer is known to hold. Absence means an older daemon.
+  // Update-group internal; explicitly unstable.
   optional bool prefixes_sent_pending = 65;
 }
 
@@ -1009,11 +1018,15 @@ message SelectionDeferralFamilyState {
   uint32 safi = 2;
   bool active = 3;
   string waiter_state = 4;
+  // Process-local session stamp; explicitly unstable.
   optional uint64 waiter_session_id = 5;
   uint64 blocking_waiters = 6;
   uint64 remaining_millis = 7;
   // Empty while active; "all_eor" or "timer" after release.
   string release_reason = 8;
+  // Canonical family label for afi/safi, for example "ipv4_unicast", using
+  // the configuration spelling. Empty from an older daemon.
+  string family = 9;
 }
 
 enum EffectiveDistributionMode {

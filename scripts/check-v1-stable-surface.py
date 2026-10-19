@@ -32,6 +32,10 @@ ROOT = Path(__file__).resolve().parents[1]
 INVENTORY_PATH = ROOT / "docs/reference/v1-stable-surface.json"
 SCHEMA_PATH = ROOT / "docs/reference/rustbgpd.schema.json"
 GRPC_INVENTORY_PATH = ROOT / "docs/reference/grpc-method-inventory.json"
+WIRE_CAPABILITY_PATH = ROOT / "crates/wire/src/capability.rs"
+CONFIGURED_FAMILIES_RE = re.compile(
+    r"pub const CONFIGURED_FAMILIES: &\[\(&str, Afi, Safi\)\] = &\[(.*?)\];", re.DOTALL
+)
 WORKSPACE_MANIFEST_PATH = ROOT / "Cargo.toml"
 JSON_TYPES = {"array", "boolean", "null", "number", "object", "string"}
 V1_UPGRADE_HISTORY_ORIGIN = (0, 50, 0)
@@ -1828,10 +1832,17 @@ def check_json_contract(
     require_sorted_unique(nested_paths, f"{label}.nested_json_contracts")
     for shape in nested:
         check_json_shape(shape, f"{label}.{shape['path']}")
-    experimental = contract.get("explicitly_experimental_json_fields", [])
+    check_experimental_json_fields(contract, label, source)
+    for shape in nested:
+        check_experimental_json_fields(shape, f"{label}.{shape['path']}", source)
+
+
+def check_experimental_json_fields(shape: dict, label: str, source: str) -> None:
+    """Experimental keys stay out of the pinned floor but must still exist."""
+    experimental = shape.get("explicitly_experimental_json_fields", [])
     require_sorted_unique(experimental, f"{label}.explicitly_experimental_json_fields")
-    classified = set(contract.get("required_json_types", {})) | set(
-        contract.get("optional_json_types", {})
+    classified = set(shape.get("required_json_types", {})) | set(
+        shape.get("optional_json_types", {})
     )
     overlap = sorted(classified & set(experimental))
     if overlap:
@@ -1965,11 +1976,44 @@ def check_named_rust_test_region_selftests() -> None:
         )
 
 
+def canonical_family_labels() -> set[str]:
+    """The configuration family labels, read from the wire crate's table."""
+    try:
+        source = WIRE_CAPABILITY_PATH.read_text()
+    except OSError as error:
+        fail(f"cannot read {WIRE_CAPABILITY_PATH.relative_to(ROOT)}: {error}")
+    table = CONFIGURED_FAMILIES_RE.search(source)
+    labels = re.findall(r'\(\s*"([a-z0-9_]+)"\s*,\s*Afi::', table.group(1)) if table else []
+    if not labels:
+        fail(f"cannot read CONFIGURED_FAMILIES from {WIRE_CAPABILITY_PATH.relative_to(ROOT)}")
+    return set(labels)
+
+
+def check_role_families(roles: list[dict], canonical: set[str]) -> None:
+    for role in roles:
+        families = role.get("families")
+        if (
+            not isinstance(families, list)
+            or not families
+            or not all(isinstance(family, str) for family in families)
+        ):
+            fail(f"role {role['id']!r} must list its families as strings")
+        if len(families) != len(set(families)):
+            fail(f"role {role['id']!r} repeats a family")
+        unknown = sorted(set(families) - canonical)
+        if unknown:
+            fail(
+                f"role {role['id']!r} names non-canonical families {unknown}; use the "
+                "configuration labels in crates/wire/src/capability.rs CONFIGURED_FAMILIES"
+            )
+
+
 def check_policy(inventory: dict) -> None:
     roles = inventory["roles"]
     role_ids = [role["id"] for role in roles]
     if len(role_ids) != len(set(role_ids)):
         fail("role matrix contains duplicate ids")
+    check_role_families(roles, canonical_family_labels())
     classifications = {role["classification"] for role in roles}
     required = {"stable", "scoped_rr_only", "alpha", "experimental"}
     if not required <= classifications:

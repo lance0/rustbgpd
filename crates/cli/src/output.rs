@@ -253,16 +253,26 @@ pub fn parse_family(family: &str) -> Option<i32> {
     }
 }
 
-/// Format address family enum value to string.
-pub fn format_family(afi: i32) -> &'static str {
-    match afi {
-        1 => "ipv4_unicast",
-        2 => "ipv6_unicast",
-        3 => "ipv4_flowspec",
-        4 => "ipv6_flowspec",
-        6 => "bgp_ls",
-        7 => "bgp_ls_vpn",
-        _ => "unknown",
+/// Format an `AddressFamily` enum value as its canonical configuration label.
+///
+/// The match is exhaustive so a new enum value cannot fall through to
+/// `"unknown"`; only `UNSPECIFIED` and values this client does not know do.
+pub fn format_family(afi_safi: i32) -> &'static str {
+    use proto::AddressFamily as Family;
+    match Family::try_from(afi_safi) {
+        Ok(Family::Ipv4Unicast) => "ipv4_unicast",
+        Ok(Family::Ipv6Unicast) => "ipv6_unicast",
+        Ok(Family::Ipv4Flowspec) => "ipv4_flowspec",
+        Ok(Family::Ipv6Flowspec) => "ipv6_flowspec",
+        Ok(Family::L2vpnEvpn) => "l2vpn_evpn",
+        Ok(Family::BgpLs) => "linkstate",
+        Ok(Family::BgpLsVpn) => "linkstate_vpn",
+        Ok(Family::L3vpnIpv4Unicast) => "l3vpn_ipv4_unicast",
+        Ok(Family::L3vpnIpv6Unicast) => "l3vpn_ipv6_unicast",
+        Ok(Family::Ipv4LabeledUnicast) => "ipv4_labeled_unicast",
+        Ok(Family::Ipv6LabeledUnicast) => "ipv6_labeled_unicast",
+        Ok(Family::Ipv4RtConstrain) => "rtc",
+        Ok(Family::Unspecified) | Err(_) => "unknown",
     }
 }
 
@@ -630,6 +640,9 @@ pub struct JsonUpdateGroupComparison {
 pub struct JsonSelectionDeferralFamily {
     pub afi: u32,
     pub safi: u32,
+    /// Canonical family label; absent from an older daemon.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub family: String,
     pub active: bool,
     pub waiter_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1456,6 +1469,36 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
 mod tests {
     use super::*;
 
+    /// Every `AddressFamily` value except `UNSPECIFIED` prints a distinct
+    /// canonical configuration label, and together they cover every family
+    /// the daemon accepts. A missing arm, a legacy spelling such as
+    /// `bgp_ls`, or a duplicated label makes this red.
+    #[test]
+    fn format_family_prints_a_canonical_label_for_every_address_family() {
+        let mut labels = std::collections::BTreeSet::new();
+        for value in 0..=i32::from(u8::MAX) {
+            let Ok(family) = proto::AddressFamily::try_from(value) else {
+                assert_eq!(format_family(value), "unknown");
+                continue;
+            };
+            let label = format_family(value);
+            if family == proto::AddressFamily::Unspecified {
+                assert_eq!(label, "unknown");
+                continue;
+            }
+            assert!(
+                rustbgpd_wire::parse_family(label).is_some(),
+                "{family:?} prints non-canonical label {label:?}"
+            );
+            assert!(labels.insert(label), "{family:?} reuses label {label:?}");
+        }
+        let canonical: std::collections::BTreeSet<_> = rustbgpd_wire::CONFIGURED_FAMILIES
+            .iter()
+            .map(|(label, _, _)| *label)
+            .collect();
+        assert_eq!(labels, canonical);
+    }
+
     #[test]
     fn versioned_json_document_preserves_payload_and_inventory_floor() {
         let inventory: serde_json::Value = serde_json::from_str(include_str!(
@@ -1647,12 +1690,6 @@ mod tests {
                 "gr_retention[]" => {
                     for row in value["gr_retention"].as_array().unwrap() {
                         assert_json_shape(row, nested, contract_id);
-                    }
-                }
-                "tcp_ao" => assert_json_shape(&value["tcp_ao"], nested, contract_id),
-                "tcp_ao.keys[]" => {
-                    for key in value["tcp_ao"]["keys"].as_array().unwrap() {
-                        assert_json_shape(key, nested, contract_id);
                     }
                 }
                 path => panic!("unhandled {contract_id} nested contract path {path}"),
@@ -2073,6 +2110,7 @@ mod tests {
             selection_deferral: vec![JsonSelectionDeferralFamily {
                 afi: 1,
                 safi: 1,
+                family: "ipv4_unicast".to_string(),
                 active: true,
                 waiter_state: "awaiting_eor".to_string(),
                 waiter_session_id: Some(42),
@@ -2272,6 +2310,7 @@ mod tests {
         );
         assert_eq!(value["graceful_shutdown_advertise_intent"], true);
         assert_eq!(value["selection_deferral"][0]["afi"], 1);
+        assert_eq!(value["selection_deferral"][0]["family"], "ipv4_unicast");
         assert_eq!(
             value["selection_deferral"][0]["waiter_state"],
             "awaiting_eor"
