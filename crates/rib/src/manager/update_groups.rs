@@ -1224,6 +1224,35 @@ impl GroupRibOut {
     /// `per_client_best`, so this reduces exactly to the historical
     /// skip rule. Meaningful for grouped unicast only (`path_id 0`);
     /// the VPN maps are an ADR-0126 non-goal.
+    /// Whether `member` still holds this key: [`Self::adv_entry`] resolves a
+    /// slot that its rs-control context does not suppress. Without that
+    /// context only the slot's presence matters, so the entry's next-hop and
+    /// source attributes are not resolved.
+    pub(in crate::manager) fn member_retains(
+        &self,
+        member: IpAddr,
+        prefix: &Prefix,
+        path_id: u32,
+        rs_control: Option<(u32, u32)>,
+    ) -> bool {
+        if rs_control.is_none() {
+            return self.table.get(prefix, path_id).is_some_and(|staged| {
+                staged.peer != member
+                    || (self.per_client_best && self.runner_up.contains_key(prefix))
+            });
+        }
+        self.adv_entry(member, prefix, path_id)
+            .is_some_and(|entry| {
+                let (communities, large) =
+                    self.source_control_for_route(entry.route, entry.source_attrs);
+                !super::distribution::rs_control::rs_control_suppressed(
+                    communities,
+                    large,
+                    rs_control,
+                )
+            })
+    }
+
     pub(in crate::manager) fn adv_entry(
         &self,
         member: IpAddr,
@@ -1744,6 +1773,27 @@ impl RibManager {
             .rev()
             .find(|record| record.session_id == session && record.outbound_tx.same_channel(sender))?
             .group_recovery_fallback
+    }
+
+    /// Whether this peer reads a fallback now, or would read back one that a
+    /// refusal records now: the newest live record is its current outbound
+    /// registration.
+    pub(in crate::manager) fn group_recovery_fallback_durable(&self, peer: IpAddr) -> bool {
+        if self.group_recovery_fallback(peer).is_some() {
+            return true;
+        }
+        let (Some(session), Some(sender)) = (
+            self.outbound_session_ids.get(&peer),
+            self.outbound_peers.get(&peer),
+        ) else {
+            return false;
+        };
+        self.live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+            .is_some_and(|record| {
+                record.session_id == *session && record.outbound_tx.same_channel(sender)
+            })
     }
 
     pub(in crate::manager) fn set_group_recovery_fallback(
