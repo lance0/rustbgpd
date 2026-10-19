@@ -87,12 +87,21 @@ Each result below links to its published, reproducible receipt:
   v0.68.0 arm read 322–349 ms, against its rows measured 2026-08-30 of
   318–341 ms; the historical receipt was measured 2026-07-03,
   [1000-peer scale receipt](scale-receipt-2026-07.md)
+- **S2 reload stall**: in a 2026-10-19 rerun, unreleased rustbgpd `3e3fba0de`
+  had a changed-observer stall of median p50 **39.4 ms**, median p95
+  **48.6 ms** and worst **94.0 ms**, against 197.4, 203.1 and 229.5 ms for
+  OpenBGPD 9.3 (image digest `sha256:8f4b44f2…`, the v0.75.0 campaign's pin).
+  Three fresh processes per daemon, two reloads each, daemon order alternated;
+  all six legs passed the harness's churn-stream validity check —
+  [rerun bundle](artifacts/competitive-bgperf2-paired-s2-2026-10-19/README.md).
+  One host and the S2 shape only. In the v0.75.0 campaign OpenBGPD 9.3 held
+  the smaller tail (p95 198–267 ms against 217–365 ms; worst single observer
+  268 against 378 ms). Both the rustbgpd source and the `reloadstall` harness
+  changed between the two: the harness's churners now stay phased, and a leg
+  whose control-window churn stream has a gap above 31.25 ms is INVALID. The
+  rerun does not separate those two changes
 - **The losses, stated plainly**, from the same-night v0.75.0 campaign:
-  OpenBGPD 9.3 holds the smaller S2 reload stall tail (p95 198–267 ms
-  against rustbgpd's 217–365 ms; worst single observer 268 against 378 ms).
-  The stall p50 is close: rustbgpd's median is 177.3 ms against 197.8 ms,
-  about 10% lower, but the per-reload values overlap at the tails.
-  OpenBGPD 9.3 also has a shorter changed-observer gap at IRR 50% overlap
+  OpenBGPD 9.3 has a shorter changed-observer gap at IRR 50% overlap
   (377–517 against 591–627 ms) and an earlier first re-announced route after
   a member flap (p50 0.10–0.17 s, median 0.13 s, against 0.16–0.17 s). S2
   reload peak memory is about even by cgroup peak (rustbgpd's own scope
@@ -145,7 +154,7 @@ The freshest published [v0.68.0 cross-stack bgperf2
 receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is the headline same-host IPv4 import/convergence comparison. All 80 cells
 reached the exact expected route count across five fixed shapes; the largest is
-two peers × 100,000 prefixes, not a full-table cell. A [2026-10-19 spot-check](../benchmarks.md#2026-10-19-comparator-spot-check) measured BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with two repetitions per cell. BIRD 2.20.0, released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. Microbenchmarks and memory
+two peers × 100,000 prefixes, not a full-table cell. A [2026-10-19 paired-read rerun](../benchmarks.md#2026-10-19-paired-read-rerun) measured unreleased rustbgpd `3e3fba0de` against BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with three repetitions per cell. rustbgpd had the lowest median total time in all three shapes on that host, at 10 peers × 1k within one sampling step of BIRD 2. BIRD 2.20.0, released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. Microbenchmarks and memory
 scaling are in [Benchmarks](../benchmarks.md). That page also retains
 the corrected July campaign as explicitly historical evidence; it supports no
 cross-daemon ranking. Every receipt is indexed in

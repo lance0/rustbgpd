@@ -17,7 +17,7 @@ mod update_groups_harness;
 use crate::attr_set::AttrSet;
 use crate::manager::distribution::OutboundCommitBatch;
 use update_groups_harness::{
-    RunningManager, spawn_running_manager, spawn_running_manager_with_roster,
+    RunningManager, await_dirty_resync, spawn_running_manager, spawn_running_manager_with_roster,
 };
 
 #[test]
@@ -4810,7 +4810,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
     assert_eq!(jammed.announce[0].prefix, Prefix::V4(p1));
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
-    quiesce().await;
+    await_dirty_resync(&tx, peer).await;
     let resync = out_rx
         .try_recv()
         .expect("the per-peer resync must emit the residue withdraw");
@@ -10717,6 +10717,10 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
     }
     let family = (Afi::Ipv4, Safi::MplsVpn);
     manager.pending_eor.entry(peer).or_default().insert(family);
+    if stage == "group_prior_retirement" {
+        // A durable fallback replaces the copied prior; exercise the copy.
+        super::update_groups_recovery::detach_fallback_record(&mut manager, peer);
+    }
     let (query_tx, query_rx) = mpsc::channel(8);
     manager.query_rx = query_rx;
     let (readiness_tx, readiness_rx) = mpsc::channel(8);
@@ -11471,6 +11475,8 @@ async fn admitted_prior_retain_services_readiness() {
         manager.pending_group_admitted.get(&peer).unwrap().len(),
         128
     );
+    // A durable fallback replaces the copied prior; exercise the copy.
+    super::update_groups_recovery::detach_fallback_record(&mut manager, peer);
     let flowspec = make_flowspec_route(Ipv4Addr::new(192, 0, 2, 1)).selection_key();
     encoder.set_profile(
         2,

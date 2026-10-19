@@ -24,6 +24,16 @@ remote_asn = 65003
 description = "frr-b"
 hold_time = 90
 
+# iBGP receiver for the next-hop-self injection test. IPv6 unicast runs over
+# IPv4 transport with no local_ipv6_nexthop, so an injected IPv6 route with
+# next hop :: has no self address here and is refused, not sent with ::.
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65001
+description = "frr-c"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+
 [security.grpc]
 enforcement = "tier"
 

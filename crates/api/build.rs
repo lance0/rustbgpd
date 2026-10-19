@@ -1,4 +1,9 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The protos live outside this package, so Cargo's default scan misses
+    // them; declaring paths replaces that scan. The directory covers the
+    // rustbgpd, dial-out and vendored gNMI protos and their imports.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../proto");
     // tonic 0.14 split prost-coupled codegen out into tonic-prost-build.
     // Same `compile_protos` / `configure()` surface, different crate;
     // tonic-build itself now generates only service-stub wiring.

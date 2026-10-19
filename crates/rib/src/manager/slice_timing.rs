@@ -16,6 +16,8 @@
 use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -118,17 +120,24 @@ fn classify(name: &str) -> RibActorSliceStage {
     }
 }
 
-/// Times each poll of the wrapped actor future.
+/// Times each poll of the wrapped actor future, and sets `suspended` each
+/// time a poll returns `Pending`.
 pub(super) struct TimedActor<F> {
     inner: Pin<Box<F>>,
     recorder: Option<Box<RibActorSliceRecorder>>,
+    suspended: Arc<AtomicBool>,
 }
 
 impl<F> TimedActor<F> {
-    pub(super) fn new(inner: F, recorder: RibActorSliceRecorder) -> Self {
+    pub(super) fn new(
+        inner: F,
+        recorder: RibActorSliceRecorder,
+        suspended: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             inner: Box::pin(inner),
             recorder: Some(Box::new(recorder)),
+            suspended,
         }
     }
 }
@@ -147,6 +156,16 @@ impl<F: Future> Future for TimedActor<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        let output = self.as_mut().poll_timed(cx);
+        if output.is_pending() {
+            self.suspended.store(true, Ordering::Relaxed);
+        }
+        output
+    }
+}
+
+impl<F: Future> TimedActor<F> {
+    fn poll_timed(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let this = &mut *self;
         let Some(recorder) = this.recorder.take() else {
             return this.inner.as_mut().poll(cx);
@@ -230,6 +249,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(70));
             },
             metrics.rib_actor_slice_recorder(),
+            Arc::default(),
         )
         .await;
         let (samples, max) = retirement_stall(&metrics);

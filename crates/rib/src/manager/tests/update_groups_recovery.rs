@@ -166,6 +166,93 @@ fn missing_completed_proof_resync_counts_fallback_and_keeps_the_owed_withdrawal(
     assert!(receiver.try_recv().is_err());
 }
 
+/// Point the newest live record away from the outbound registration, so a
+/// refusal could not be read back as a fallback and resync copies the prior.
+pub(super) fn detach_fallback_record(manager: &mut RibManager, peer: IpAddr) {
+    let (detached, _) = mpsc::channel(1);
+    manager
+        .live_sessions
+        .get_mut(&peer)
+        .and_then(|sessions| sessions.last_mut())
+        .unwrap()
+        .outbound_tx = detached;
+    assert!(!manager.group_recovery_fallback_durable(peer));
+}
+
+/// A complete proof normally stands in for the eager prior, because a refusal
+/// leaves a fallback. Without a live record to carry that fallback, a
+/// pre-send refusal must still find the copied prior and keep the withdrawal.
+#[test]
+fn reserve_refusal_without_a_durable_fallback_keeps_the_owed_withdrawal() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    source_update(&mut manager, &[1], &[]);
+    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 7).into();
+    let (outbound, mut receiver) = mpsc::channel(16);
+    let mut registration = peer_up(member, outbound, None);
+    if let RibUpdate::PeerUp {
+        per_client_best,
+        is_ebgp,
+        ..
+    } = &mut registration
+    {
+        // A per-client-best member intersects withdrawals with its prior.
+        *per_client_best = true;
+        *is_ebgp = true;
+    }
+    manager.handle_update(registration);
+    while receiver.try_recv().is_ok() {}
+    assert!(manager.mark_outbound_dirty(member));
+    let owed = (Prefix::V4(prefix(1)), 0);
+    assert!(
+        manager
+            .pending_group_admitted
+            .get(&member)
+            .unwrap()
+            .contains(&ExactExportKey::Unicast(owed.0, owed.1))
+    );
+
+    // Stage the withdrawal of the admitted key and one new key without
+    // emitting, so the pre-send reservation must grow the proof.
+    let source: IpAddr = Ipv4Addr::new(192, 0, 2, 1).into();
+    let added = (Prefix::V4(prefix(2)), 0);
+    let rib = manager.ribs.get_mut(&source).unwrap();
+    assert!(rib.withdraw(&owed.0, owed.1));
+    rib.insert(make_route(prefix(2), Ipv4Addr::new(192, 0, 2, 1)));
+    manager.register_unicast_announcer(source, added.0);
+    let affected = HashSet::from([owed.0, added.0]);
+    let changed = manager.recompute_best(&affected);
+    let gid = manager.grouped_member_of(member).unwrap();
+    manager.stage_update_groups(
+        &changed,
+        &affected,
+        &mut crate::manager::distribution::ExportMemo::default(),
+        None,
+    );
+    assert!(manager.group_ribs[&gid].tombstones.contains(&owed));
+    assert!(receiver.try_recv().is_err());
+
+    detach_fallback_record(&mut manager, member);
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+
+    while manager.resync_dirty_peers_bounded() {}
+    let recovered = receiver.try_recv().unwrap();
+    assert_eq!(recovered.withdraw, vec![owed]);
+    assert_eq!(
+        recovered
+            .announce
+            .iter()
+            .map(|route| (route.prefix, route.path_id))
+            .collect::<Vec<_>>(),
+        vec![added]
+    );
+    assert_eq!(fallback_count(&manager, "allocation_failure"), 1.0);
+    assert_eq!(manager.group_recovery_fallback(member), None);
+    assert!(manager.pending_group_admitted.get(&member).is_none());
+}
+
 fn fallback_count(manager: &RibManager, cause: &str) -> f64 {
     manager
         .metrics

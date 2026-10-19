@@ -123,6 +123,7 @@ pub fn decode(request: &gobgp::AddPathRequest) -> Result<Decoded, Status> {
                 prefix: addr,
                 prefix_length: u32::from(len),
                 path_id,
+                allow_missing: false,
             }),
             uuid,
         });
@@ -492,6 +493,7 @@ mod tests {
                 prefix: "203.0.113.7".into(),
                 prefix_length: 32,
                 path_id: 0,
+                allow_missing: false,
             })
         );
         let mp = mp_reach_v6([0; 16], NLRI_V6_HOST);
