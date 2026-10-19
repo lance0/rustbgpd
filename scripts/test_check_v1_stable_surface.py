@@ -413,7 +413,11 @@ class MetricFloorTests(unittest.TestCase):
 
 
 class PassThroughEmissionTests(unittest.TestCase):
-    """A label value counts when a wrapper passes a constant through to the setter."""
+    """A label value counts when a wrapper passes a constant through to the setter.
+
+    Callers and constants resolve by module path: a same-named function or
+    constant in another module is no evidence.
+    """
 
     METRIC = (
         'let gauge = IntGaugeVec::new(Opts::new("bgp_x", "help"), &["peer", "family"]).unwrap();\n'
@@ -422,32 +426,78 @@ class PassThroughEmissionTests(unittest.TestCase):
         "}\n"
     )
     WRAPPER = (
-        'const PAIR: [&str; 2] = ["fam_a", "fam_b"];\n'
-        'const OTHER: [&str; 1] = ["fam_c"];\n'
-        "fn publish(metrics: &M, peer: &str, families: [&str; 2], counts: [usize; 2]) {\n"
+        'pub const PAIR: [&str; 2] = ["fam_a", "fam_b"];\n'
+        'pub const OTHER: [&str; 1] = ["fam_c"];\n'
+        "pub fn publish(metrics: &M, peer: &str, families: [&str; 2], counts: [usize; 2]) {\n"
         "    for (family, count) in families.into_iter().zip(counts) {\n"
         "        metrics.set_x(peer, family, count);\n"
         "    }\n"
         "}\n"
     )
+    # Same names, no metric: neither the function nor its constants emit bgp_x.
+    UNRELATED = (
+        'pub const PAIR: [&str; 2] = ["old_a", "old_b"];\n'
+        "pub fn publish(metrics: &M, peer: &str, families: [&str; 2], counts: [usize; 2]) {}\n"
+    )
 
-    def emitted(self, caller):
-        sources = {"wrapper.rs": self.WRAPPER, "caller.rs": caller}
+    def emitted(self, caller, **extra):
+        sources = {
+            "crates/fixture/src/wrapper.rs": self.WRAPPER,
+            "crates/fixture/src/unrelated.rs": self.UNRELATED,
+            "crates/fixture/src/caller.rs": caller,
+            **extra,
+        }
         return checker.emitted_label_values(
             self.METRIC, sources, "bgp_x", "family", ["peer", "family"]
         )
 
     def test_constant_passed_through_a_loop_parameter_counts(self):
-        self.assertEqual(
-            self.emitted('fn caller(m: &M) { crate::wrapper::publish(m, "p", PAIR, [1, 2]); }'),
-            {"fam_a", "fam_b"},
-        )
+        for caller in (
+            'fn caller(m: &M) { crate::wrapper::publish(m, "p", crate::wrapper::PAIR, [1, 2]); }',
+            'use crate::wrapper::{publish, PAIR};\n'
+            'fn caller(m: &M) { publish(m, "p", PAIR, [1, 2]); }',
+            'use crate::wrapper;\n'
+            'fn caller(m: &M) { wrapper::publish(m, "p", wrapper::PAIR, [1, 2]); }',
+        ):
+            with self.subTest(caller=caller):
+                self.assertEqual(self.emitted(caller), {"fam_a", "fam_b"})
 
     def test_unpassed_constant_and_same_named_method_do_not_count(self):
         # OTHER is defined but never passed; `.publish(` is some other method.
         self.assertEqual(
-            self.emitted('fn caller(m: &M, x: &X) { x.publish(m, "p", OTHER, [1, 2]); }'),
+            self.emitted(
+                'fn caller(m: &M, x: &X) { x.publish(m, "p", crate::wrapper::OTHER, [1, 2]); }'
+            ),
             set(),
+        )
+
+    def test_same_named_function_in_another_module_is_no_evidence(self):
+        # Only crate::wrapper::publish reaches the metric.
+        for caller in (
+            'fn caller(m: &M) { crate::unrelated::publish(m, "p", crate::unrelated::PAIR, [1, 2]); }',
+            'use crate::unrelated::{publish, PAIR};\n'
+            'fn caller(m: &M) { publish(m, "p", PAIR, [1, 2]); }',
+        ):
+            with self.subTest(caller=caller):
+                self.assertEqual(self.emitted(caller), set())
+
+    def test_constant_resolves_to_the_referenced_module_only(self):
+        # The live call passes crate::wrapper::PAIR; the unused same-named
+        # crate::unrelated::PAIR keeps the old labels and must not count.
+        caller = 'fn caller(m: &M) { crate::wrapper::publish(m, "p", crate::wrapper::PAIR, [1, 2]); }'
+        self.assertEqual(self.emitted(caller), {"fam_a", "fam_b"})
+        renamed = self.WRAPPER.replace('["fam_a", "fam_b"]', '["new_a", "new_b"]')
+        emitted = self.emitted(caller, **{"crates/fixture/src/wrapper.rs": renamed})
+        self.assertEqual(emitted, {"new_a", "new_b"})
+
+    def test_ambiguous_or_unresolvable_constant_is_no_evidence(self):
+        caller = 'fn caller(m: &M) { crate::wrapper::publish(m, "p", PAIR, [1, 2]); }'
+        # Bare PAIR is neither declared in the caller nor imported.
+        self.assertEqual(self.emitted(caller), set())
+        twice = self.WRAPPER + 'pub const PAIR: [&str; 1] = ["fam_z"];\n'
+        qualified = caller.replace(", PAIR,", ", crate::wrapper::PAIR,")
+        self.assertEqual(
+            self.emitted(qualified, **{"crates/fixture/src/wrapper.rs": twice}), set()
         )
 
 

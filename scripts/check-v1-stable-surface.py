@@ -1096,21 +1096,31 @@ def emitted_label_values(
         ]
         if element in parameters:
             setters.append((setter.group(1), parameters.index(element)))
-    pending = [(setter, index, True) for setter, index in setters]
-    seen: set[tuple[str, int, bool]] = set()
+    # (function, parameter index, is method, defining file); a method's file is
+    # None because its callers are matched by receiver-free `.name(` alone.
+    pending: list[tuple[str, int, bool, str | None]] = [
+        (setter, index, True, None) for setter, index in setters
+    ]
+    seen: set[tuple[str, int, bool, str | None]] = set()
     while pending:
-        setter, index, method = pending.pop()
-        if (setter, index, method) in seen:
+        item = pending.pop()
+        if item in seen:
             continue
-        seen.add((setter, index, method))
-        # A method is called as `.name(`; a free function by a bare or path name.
+        seen.add(item)
+        setter, index, method, defined_in = item
+        # A method is called as `.name(`; a free function by a bare or path name,
+        # which must resolve to the module that defines it.
         call_pattern = (
             rf"\.\s*{re.escape(setter)}\s*\("
             if method
-            else rf"(?<!fn )(?<![\w.]){re.escape(setter)}\s*\("
+            else rf"(?<!fn )(?<![\w.:])((?:\w+::)*){re.escape(setter)}\s*\("
         )
-        for text in sources.values():
+        for path, text in sources.items():
             for call in re.finditer(call_pattern, text):
+                if not method and not calls_function(
+                    path, text, call.group(1), setter, defined_in
+                ):
+                    continue
                 arguments = call_arguments(text, call.end())
                 if arguments is None or len(arguments) <= index:
                     continue
@@ -1119,9 +1129,8 @@ def emitted_label_values(
                 if literal:
                     values.add(literal.group(1))
                     continue
-                constant = const_label_values(sources, argument)
-                if constant:
-                    values.update(constant)
+                if re.fullmatch(r"(?:\w+::)*[A-Z][A-Z0-9_]*", argument):
+                    values.update(const_label_values(sources, path, text, argument))
                     continue
                 direct = re.fullmatch(r"(\w+)\(.*\)", argument, flags=re.DOTALL)
                 bound = re.search(
@@ -1134,21 +1143,126 @@ def emitted_label_values(
                     # A wrapper passing its own parameter through: follow its callers.
                     through = enclosing_parameter(text, call.start(), argument)
                     if through:
-                        pending.append(through)
+                        pending.append((*through, None if through[2] else path))
     return values
 
 
-def const_label_values(sources: dict[str, str], argument: str) -> set[str]:
-    """String literals of the `const` an argument names, by plain or path name."""
-    name = argument.rsplit("::", 1)[-1]
-    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+def rust_module(path: str) -> tuple[str, tuple[str, ...]] | None:
+    """(source root, module path) of a Rust file under a `src` directory."""
+    parts = Path(path).parts
+    if "src" not in parts:
+        return None
+    root = parts.index("src")
+    module = [*parts[root + 1 : -1], Path(parts[-1]).stem]
+    if module[-1] in {"lib", "main", "mod"}:
+        module.pop()
+    return "/".join(parts[: root + 1]), tuple(module)
+
+
+def use_imports(text: str) -> dict[str, list[str]]:
+    """Names a file's `use` declarations bring into scope, mapped to their paths."""
+    imports: dict[str, list[str]] = {}
+
+    def add(prefix: list[str], tree: str) -> None:
+        tree = tree.strip()
+        braced = re.fullmatch(r"((?:\w+::)*)\{(.*)\}", tree, flags=re.DOTALL)
+        if braced:
+            inner = [*prefix, *[seg for seg in braced.group(1).split("::") if seg]]
+            depth, start = 0, 0
+            body = braced.group(2)
+            for position, char in enumerate(body + ","):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                elif char == "," and depth == 0:
+                    if body[start:position].strip():
+                        add(inner, body[start:position])
+                    start = position + 1
+            return
+        alias = re.fullmatch(r"((?:\w+::)*\w+)\s+as\s+(\w+)", tree)
+        target, name = (alias.group(1), alias.group(2)) if alias else (tree, tree.split("::")[-1])
+        if re.fullmatch(r"(?:\w+::)*\w+", target):
+            imports[name] = [*prefix, *target.split("::")]
+
+    for declaration in re.finditer(r"\buse\s+([^;]+);", text):
+        add([], declaration.group(1))
+    return imports
+
+
+def resolve_module(
+    path: str, text: str, segments: list[str], depth: int = 0
+) -> tuple[str, tuple[str, ...]] | None:
+    """The module a `::` path names from one file, or None when it cannot be told."""
+    origin = rust_module(path)
+    if origin is None or not segments or depth > 4:
+        return None
+    root, here = origin
+    head, rest = segments[0], segments[1:]
+    if head == "crate":
+        return root, tuple(rest)
+    if head in {"self", "super"}:
+        module = list(here)
+        while segments and segments[0] in {"self", "super"}:
+            if segments.pop(0) == "super":
+                if not module:
+                    return None
+                module.pop()
+        return root, (*module, *segments)
+    imported = use_imports(text).get(head)
+    if imported is not None:
+        return resolve_module(path, text, [*imported, *rest], depth + 1)
+    if re.search(rf"\bmod\s+{re.escape(head)}\s*[;{{]", text):
+        return root, (*here, head, *rest)
+    return None
+
+
+def calls_function(
+    path: str, text: str, prefix: str, name: str, defined_in: str | None
+) -> bool:
+    """Whether a free call `prefix name(` resolves to the function in `defined_in`."""
+    if defined_in is None:
+        return False
+    target = rust_module(defined_in)
+    if target is None:
+        return False
+    segments = [segment for segment in prefix.split("::") if segment]
+    if segments:
+        return resolve_module(path, text, segments) == target
+    if path == defined_in:
+        return True
+    imported = use_imports(text).get(name)
+    return imported is not None and resolve_module(path, text, imported[:-1]) == target
+
+
+def const_label_values(sources: dict[str, str], path: str, text: str, argument: str) -> set[str]:
+    """String literals of the one `const` an argument names from the calling file.
+
+    The constant resolves by its path, or its bare name in the calling module
+    or through a `use`; a constant that cannot be resolved to a single
+    declaration is no evidence.
+    """
+    segments = argument.split("::")
+    name = segments[-1]
+    if len(segments) > 1:
+        module = resolve_module(path, text, segments[:-1])
+    elif re.search(rf"\bconst\s+{name}\b", text):
+        module = rust_module(path)
+    else:
+        imported = use_imports(text).get(name)
+        module = resolve_module(path, text, imported[:-1]) if imported else None
+    if module is None:
         return set()
-    values: set[str] = set()
     pattern = rf"\bconst\s+{name}\s*:[^=]*=\s*(\[[^\]]*\]|\"[^\"]*\")\s*;"
-    for text in sources.values():
-        for match in re.finditer(pattern, text):
-            values.update(re.findall(r"\"([^\"]+)\"", match.group(1)))
-    return values
+    found = [
+        match.group(1)
+        for candidate, body in sources.items()
+        if rust_module(candidate) == module
+        for match in re.finditer(pattern, body)
+    ]
+    if len(found) != 1:
+        return set()
+    return set(re.findall(r"\"([^\"]+)\"", found[0]))
 
 
 def enclosing_parameter(text: str, position: int, identifier: str) -> tuple[str, int, bool] | None:
