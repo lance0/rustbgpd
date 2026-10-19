@@ -266,7 +266,8 @@ resolved.
   require selected AFI/SAFIs from a peer's OPEN, but BGP has no symmetric
   standard capability that makes the remote implementation enforce rustbgpd's
   advertised set. Configure the equivalent policy independently on both ends;
-  BIRD 3.3.1 exposes this as per-channel `mandatory on`. The rustbgpd rejection
+  BIRD exposes this as per-channel `mandatory on` (accepted by the pinned
+  BIRD 2.19.3 and 3.3.3 interop images). The rustbgpd rejection
   interop fixture deliberately leaves BIRD `mandatory` off so rustbgpd remains
   the rejecting speaker under test.
 

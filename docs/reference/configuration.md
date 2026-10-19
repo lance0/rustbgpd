@@ -2759,6 +2759,9 @@ a local one.
 
 ### Local re-evaluation (RFC 9324)
 
+A fragment, not a complete configuration: add the key to the `[rpki]` section
+that configures the cache sources.
+
 ```toml
 [rpki]
 local_revalidation = true

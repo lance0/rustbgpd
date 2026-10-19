@@ -231,6 +231,9 @@ def render_capabilities(inventory: dict, legs: dict) -> str:
         "",
         header(f"the capabilities section of {INVENTORY} and interop driver headers"),
         "",
+        "> **Document class: CURRENT.** This generated page reflects the tree it was "
+        "generated from; regenerate it instead of editing it.",
+        "",
         "This table connects a few scoped capabilities to the interop evidence behind them.",
         "It is navigation, not a promotion mechanism: compatibility comes only from the",
         "roles and inventoried surfaces in [`v1-stable-surface.json`](v1-stable-surface.json),",

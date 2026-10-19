@@ -2006,7 +2006,9 @@ carries inactive (absent), unlimited (zero), or finite.
 - Wire codec for all 5 RFC 7432 route types:
   - **Type 1 EAD** (per-ES when `ethernet_tag == MAX_ET (0xFFFFFFFF)`,
     per-EVI otherwise). Distinct `EvpnRouteKey` variants prevent
-    semantic collapse.
+    semantic collapse. An all-zero ESI is accepted: a single-homed VPWS
+    per-EVI Ethernet A-D route carries ESI 0 (RFC 8214 §4), and RFC 7432
+    §8.2.1 does not prohibit it on a per-ES route.
   - **Type 2 MAC/IP Advertisement.** IP Addr Length is in **bits**
     (0 / 32 / 128). Label2 is optional — either 0 or 3 trailing bytes
     after the primary label. A MAC Address Length of 0 is RFC 7606
@@ -2015,7 +2017,9 @@ carries inactive (absent), unlimited (zero), or finite.
     route is dropped rather than keyed as the 48-bit route for the same
     MAC: it never removes that route and is never reflected.
   - **Type 3 IMET.** IP length is in bits (32 / 128).
-  - **Type 4 ES.** IP length in bits.
+  - **Type 4 ES.** IP length in bits. An announcement with an all-zero
+    ESI is treat-as-withdraw (RFC 7432 §8.1.1: an ES route names a
+    multihomed segment, whose ESI is non-zero); a withdrawal still decodes.
   - **Type 5 IP Prefix (RFC 9136).** Fixed total length disambiguates
     IPv4 (34 bytes) from IPv6 (58 bytes) — prefix-length byte alone
     cannot distinguish since 32 is valid for both. An announcement with
