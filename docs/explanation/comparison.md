@@ -584,7 +584,7 @@ member individually.
 The freshest published [v0.68.0 cross-stack
 receipt](../perf/competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is an 80-cell, counterbalanced same-host campaign against fresh pinned builds
-of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. BIRD 2.19.3, released 2026-10-02, BIRD 2.20.0, released 2026-10-12, FRR 10.7.1, released 2026-08-31, and GoBGP v4.10.0, released 2026-10-04, are not yet measured. Values are
+of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. A [2026-10-19 spot-check](../benchmarks.md#2026-10-19-comparator-spot-check) measured BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with two repetitions per cell. BIRD 2.20.0, released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. Values are
 successful-run medians of **convergence seconds / total seconds**.
 
 | Scenario | rustbgpd v0.68.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
@@ -595,8 +595,11 @@ successful-run medians of **convergence seconds / total seconds**.
 | 30 peers × 1k prefixes | 2.5 / 9.31 | 3 / 9.75 | 4 / 10.91 | 4 / 10.93 |
 | 100 peers × 1k prefixes | 3 / 11.95 | 5 / 14.02 | 7 / 16.55 | 16 / 24.78 |
 
-Rustbgpd had the lowest median total time in all five shapes and tied or had the
-lowest median convergence time. All 80 cells reached their exact expected
+In this 2026-08-30 campaign, rustbgpd had the lowest median total time in all
+five shapes and tied or had the lowest median convergence time. In the
+2026-10-19 spot-check (n=2 per cell, three shapes), BIRD 2.19.3 (8.58 s) and
+BIRD 3.3.3 (9.11 s) had a lower median total time than rustbgpd (9.72 s) at
+10 peers × 1k; rustbgpd had the lowest at 2 × 10k and 2 × 100k. All 80 cells reached their exact expected
 route count. These fixed shapes top out at two peers × 100,000 prefixes; this
 is not a full-table campaign, and no CPU or memory ranking is claimed.
 
