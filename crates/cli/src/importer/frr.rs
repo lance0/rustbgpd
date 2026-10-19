@@ -437,8 +437,14 @@ impl Entry<'_> {
     }
     fn max_prefixes(self, limit: u32, ipv6: bool) {
         let (v4, v6) = match self {
-            Entry::Group(g) => (&mut g.max_prefixes_ipv4, &mut g.max_prefixes_ipv6),
-            Entry::Neighbor(n) => (&mut n.max_prefixes_ipv4, &mut n.max_prefixes_ipv6),
+            Entry::Group(g) => (
+                &mut g.max_prefixes_ipv4_unicast,
+                &mut g.max_prefixes_ipv6_unicast,
+            ),
+            Entry::Neighbor(n) => (
+                &mut n.max_prefixes_ipv4_unicast,
+                &mut n.max_prefixes_ipv6_unicast,
+            ),
         };
         if ipv6 {
             *v6 = Some(limit);

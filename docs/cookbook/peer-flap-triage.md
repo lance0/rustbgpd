@@ -65,7 +65,7 @@ points at the transport or the peer.
 ## 3. Match the teardown reason
 
 - **Cease / Maximum Number of Prefixes Reached** — the peer breached an
-  inbound `max_prefixes`, `max_prefixes_ipv4`, or `max_prefixes_ipv6`
+  inbound `max_prefixes`, `max_prefixes_ipv4_unicast`, or `max_prefixes_ipv6_unicast`
   ceiling. Inspect `rbgp neighbor 10.0.0.2` before enabling it: an
   armed opt-in restart shows `Max-Prefix Action: restart` and a live
   `Max-Prefix Hold-Down` countdown. Without

@@ -1946,10 +1946,10 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
     Some(match field {
         "description"
         | "max_prefixes"
-        | "max_prefixes_ipv4"
-        | "max_prefixes_ipv6"
-        | "max_prefixes_received_ipv4"
-        | "max_prefixes_received_ipv6"
+        | "max_prefixes_ipv4_unicast"
+        | "max_prefixes_ipv6_unicast"
+        | "max_prefixes_received_ipv4_unicast"
+        | "max_prefixes_received_ipv6_unicast"
         | "max_prefixes_l3vpn_ipv4_unicast"
         | "max_prefixes_l3vpn_ipv6_unicast"
         | "max_prefixes_ipv4_labeled_unicast"
@@ -1960,8 +1960,8 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "max_prefixes_rtc"
         | "max_prefix_action"
         | "max_prefix_warning_percent"
-        | "max_prefixes_out_ipv4"
-        | "max_prefixes_out_ipv6"
+        | "max_prefixes_out_ipv4_unicast"
+        | "max_prefixes_out_ipv6_unicast"
         | "max_prefix_restart_seconds"
         | "gr_peer_restart_time_max"
         | "gr_stale_routes_time"
@@ -2160,10 +2160,10 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(slow_peer_duration);
     cmp_field!(slow_peer_isolation);
     cmp_field!(max_prefixes);
-    cmp_field!(max_prefixes_ipv4);
-    cmp_field!(max_prefixes_ipv6);
-    cmp_field!(max_prefixes_received_ipv4);
-    cmp_field!(max_prefixes_received_ipv6);
+    cmp_field!(max_prefixes_ipv4_unicast);
+    cmp_field!(max_prefixes_ipv6_unicast);
+    cmp_field!(max_prefixes_received_ipv4_unicast);
+    cmp_field!(max_prefixes_received_ipv6_unicast);
     cmp_field!(max_prefixes_l3vpn_ipv4_unicast);
     cmp_field!(max_prefixes_l3vpn_ipv6_unicast);
     cmp_field!(max_prefixes_ipv4_labeled_unicast);
@@ -2174,8 +2174,8 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(max_prefixes_rtc);
     cmp_field!(max_prefix_action);
     cmp_field!(max_prefix_warning_percent);
-    cmp_field!(max_prefixes_out_ipv4);
-    cmp_field!(max_prefixes_out_ipv6);
+    cmp_field!(max_prefixes_out_ipv4_unicast);
+    cmp_field!(max_prefixes_out_ipv6_unicast);
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(ttl_security_hops);
@@ -2310,10 +2310,10 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.slow_peer_duration == new.slow_peer_duration
         && old.slow_peer_isolation == new.slow_peer_isolation
         && old.max_prefixes == new.max_prefixes
-        && old.max_prefixes_ipv4 == new.max_prefixes_ipv4
-        && old.max_prefixes_ipv6 == new.max_prefixes_ipv6
-        && old.max_prefixes_received_ipv4 == new.max_prefixes_received_ipv4
-        && old.max_prefixes_received_ipv6 == new.max_prefixes_received_ipv6
+        && old.max_prefixes_ipv4_unicast == new.max_prefixes_ipv4_unicast
+        && old.max_prefixes_ipv6_unicast == new.max_prefixes_ipv6_unicast
+        && old.max_prefixes_received_ipv4_unicast == new.max_prefixes_received_ipv4_unicast
+        && old.max_prefixes_received_ipv6_unicast == new.max_prefixes_received_ipv6_unicast
         && old.max_prefixes_l3vpn_ipv4_unicast == new.max_prefixes_l3vpn_ipv4_unicast
         && old.max_prefixes_l3vpn_ipv6_unicast == new.max_prefixes_l3vpn_ipv6_unicast
         && old.max_prefixes_ipv4_labeled_unicast == new.max_prefixes_ipv4_labeled_unicast
@@ -2324,8 +2324,8 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.max_prefixes_rtc == new.max_prefixes_rtc
         && old.max_prefix_action == new.max_prefix_action
         && old.max_prefix_warning_percent == new.max_prefix_warning_percent
-        && old.max_prefixes_out_ipv4 == new.max_prefixes_out_ipv4
-        && old.max_prefixes_out_ipv6 == new.max_prefixes_out_ipv6
+        && old.max_prefixes_out_ipv4_unicast == new.max_prefixes_out_ipv4_unicast
+        && old.max_prefixes_out_ipv6_unicast == new.max_prefixes_out_ipv6_unicast
         && old.max_prefix_restart_seconds == new.max_prefix_restart_seconds
         && old.md5_password == new.md5_password
         && old.bfd == new.bfd
@@ -3254,18 +3254,18 @@ impl Config {
             neighbor.max_prefixes = neighbor
                 .max_prefixes
                 .or_else(|| group.and_then(|g| g.max_prefixes));
-            neighbor.max_prefixes_ipv4 = neighbor
-                .max_prefixes_ipv4
-                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4));
-            neighbor.max_prefixes_ipv6 = neighbor
-                .max_prefixes_ipv6
-                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6));
-            neighbor.max_prefixes_received_ipv4 = neighbor
-                .max_prefixes_received_ipv4
-                .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv4));
-            neighbor.max_prefixes_received_ipv6 = neighbor
-                .max_prefixes_received_ipv6
-                .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6));
+            neighbor.max_prefixes_ipv4_unicast = neighbor
+                .max_prefixes_ipv4_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4_unicast));
+            neighbor.max_prefixes_ipv6_unicast = neighbor
+                .max_prefixes_ipv6_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6_unicast));
+            neighbor.max_prefixes_received_ipv4_unicast = neighbor
+                .max_prefixes_received_ipv4_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv4_unicast));
+            neighbor.max_prefixes_received_ipv6_unicast = neighbor
+                .max_prefixes_received_ipv6_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6_unicast));
             neighbor.max_prefixes_l3vpn_ipv4_unicast = neighbor
                 .max_prefixes_l3vpn_ipv4_unicast
                 .or_else(|| group.and_then(|g| g.max_prefixes_l3vpn_ipv4_unicast));
@@ -3297,12 +3297,12 @@ impl Config {
             neighbor.max_prefix_warning_percent = neighbor
                 .max_prefix_warning_percent
                 .or_else(|| group.and_then(|g| g.max_prefix_warning_percent));
-            neighbor.max_prefixes_out_ipv4 = neighbor
-                .max_prefixes_out_ipv4
-                .or_else(|| group.and_then(|g| g.max_prefixes_out_ipv4));
-            neighbor.max_prefixes_out_ipv6 = neighbor
-                .max_prefixes_out_ipv6
-                .or_else(|| group.and_then(|g| g.max_prefixes_out_ipv6));
+            neighbor.max_prefixes_out_ipv4_unicast = neighbor
+                .max_prefixes_out_ipv4_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_out_ipv4_unicast));
+            neighbor.max_prefixes_out_ipv6_unicast = neighbor
+                .max_prefixes_out_ipv6_unicast
+                .or_else(|| group.and_then(|g| g.max_prefixes_out_ipv6_unicast));
             neighbor.max_prefix_restart_seconds = neighbor
                 .max_prefix_restart_seconds
                 .or_else(|| group.and_then(|g| g.max_prefix_restart_seconds));
@@ -6346,10 +6346,10 @@ pub fn describe_peer_group_changes(
     cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
     cmp_field!(max_prefixes);
-    cmp_field!(max_prefixes_ipv4);
-    cmp_field!(max_prefixes_ipv6);
-    cmp_field!(max_prefixes_received_ipv4);
-    cmp_field!(max_prefixes_received_ipv6);
+    cmp_field!(max_prefixes_ipv4_unicast);
+    cmp_field!(max_prefixes_ipv6_unicast);
+    cmp_field!(max_prefixes_received_ipv4_unicast);
+    cmp_field!(max_prefixes_received_ipv6_unicast);
     cmp_field!(max_prefixes_l3vpn_ipv4_unicast);
     cmp_field!(max_prefixes_l3vpn_ipv6_unicast);
     cmp_field!(max_prefixes_ipv4_labeled_unicast);
@@ -6360,8 +6360,8 @@ pub fn describe_peer_group_changes(
     cmp_field!(max_prefixes_rtc);
     cmp_field!(max_prefix_action);
     cmp_field!(max_prefix_warning_percent);
-    cmp_field!(max_prefixes_out_ipv4);
-    cmp_field!(max_prefixes_out_ipv6);
+    cmp_field!(max_prefixes_out_ipv4_unicast);
+    cmp_field!(max_prefixes_out_ipv6_unicast);
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(ttl_security_hops);
@@ -6425,10 +6425,10 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         slow_peer_threshold_pct,
         slow_peer_duration,
         slow_peer_isolation,
-        max_prefixes_ipv4,
-        max_prefixes_ipv6,
-        max_prefixes_received_ipv4,
-        max_prefixes_received_ipv6,
+        max_prefixes_ipv4_unicast,
+        max_prefixes_ipv6_unicast,
+        max_prefixes_received_ipv4_unicast,
+        max_prefixes_received_ipv6_unicast,
         max_prefixes_l3vpn_ipv4_unicast,
         max_prefixes_l3vpn_ipv6_unicast,
         max_prefixes_ipv4_labeled_unicast,
@@ -6439,8 +6439,8 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         max_prefixes_rtc,
         max_prefix_action,
         max_prefix_warning_percent,
-        max_prefixes_out_ipv4,
-        max_prefixes_out_ipv6,
+        max_prefixes_out_ipv4_unicast,
+        max_prefixes_out_ipv6_unicast,
         bfd,
         send_non_transitive_extended_communities,
         next_hop_ownership,
@@ -6489,10 +6489,10 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.slow_peer_threshold_pct = slow_peer_threshold_pct;
     target.slow_peer_duration = slow_peer_duration;
     target.slow_peer_isolation = slow_peer_isolation;
-    target.max_prefixes_ipv4 = max_prefixes_ipv4;
-    target.max_prefixes_ipv6 = max_prefixes_ipv6;
-    target.max_prefixes_received_ipv4 = max_prefixes_received_ipv4;
-    target.max_prefixes_received_ipv6 = max_prefixes_received_ipv6;
+    target.max_prefixes_ipv4_unicast = max_prefixes_ipv4_unicast;
+    target.max_prefixes_ipv6_unicast = max_prefixes_ipv6_unicast;
+    target.max_prefixes_received_ipv4_unicast = max_prefixes_received_ipv4_unicast;
+    target.max_prefixes_received_ipv6_unicast = max_prefixes_received_ipv6_unicast;
     target.max_prefixes_l3vpn_ipv4_unicast = max_prefixes_l3vpn_ipv4_unicast;
     target.max_prefixes_l3vpn_ipv6_unicast = max_prefixes_l3vpn_ipv6_unicast;
     target.max_prefixes_ipv4_labeled_unicast = max_prefixes_ipv4_labeled_unicast;
@@ -6503,8 +6503,8 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.max_prefixes_rtc = max_prefixes_rtc;
     target.max_prefix_action = max_prefix_action;
     target.max_prefix_warning_percent = max_prefix_warning_percent;
-    target.max_prefixes_out_ipv4 = max_prefixes_out_ipv4;
-    target.max_prefixes_out_ipv6 = max_prefixes_out_ipv6;
+    target.max_prefixes_out_ipv4_unicast = max_prefixes_out_ipv4_unicast;
+    target.max_prefixes_out_ipv6_unicast = max_prefixes_out_ipv6_unicast;
     target.bfd = bfd;
     target.send_non_transitive_extended_communities = send_non_transitive_extended_communities;
     target.next_hop_ownership = next_hop_ownership;
@@ -6570,8 +6570,8 @@ pub fn peer_group_file_only_changes(
                 .get(name)
                 .map_or_else(PeerGroupConfig::default, |prior| {
                     let mut prior = prior.clone();
-                    prior.max_prefixes_out_ipv4 = group.max_prefixes_out_ipv4;
-                    prior.max_prefixes_out_ipv6 = group.max_prefixes_out_ipv6;
+                    prior.max_prefixes_out_ipv4_unicast = group.max_prefixes_out_ipv4_unicast;
+                    prior.max_prefixes_out_ipv6_unicast = group.max_prefixes_out_ipv6_unicast;
                     prior
                 });
             let fields = peer_group_file_only_differences(&base, group);

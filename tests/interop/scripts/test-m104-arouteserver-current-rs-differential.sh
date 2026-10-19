@@ -356,10 +356,10 @@ render_rustbgpd_config() {
     cat "$POLICY_EXPLAIN_FRAGMENT" >>"$RENDER_DIR/config.toml"
 
     if jq -e \
-        '.clients | length == 3 and ([.[].id] | sort == ["AS64500_1", "AS64501_1", "AS64502_1"]) and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
+        '.clients | length == 3 and ([.[].id] | sort == ["AS64500_1", "AS64501_1", "AS64502_1"]) and all(.[]; .max_prefixes_ipv4_unicast == 100 and .max_prefixes_ipv6_unicast == 12000)' \
         "$RENDER_DIR/render-receipt.json" >/dev/null 2>&1 \
-        && [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$RENDER_DIR/config.toml")" -eq 3 ] \
-        && [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$RENDER_DIR/config.toml")" -eq 3 ]; then
+        && [ "$(grep -c '^max_prefixes_ipv4_unicast = 100$' "$RENDER_DIR/config.toml")" -eq 3 ] \
+        && [ "$(grep -c '^max_prefixes_ipv6_unicast = 12000$' "$RENDER_DIR/config.toml")" -eq 3 ]; then
         ok "render receipt and config carry all 3 exact 100/12000 limits"
     else
         fail "render receipt/config missing exact 3-member limits"

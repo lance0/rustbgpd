@@ -957,12 +957,12 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `slow_peer_threshold_pct` | u8    | no       | 50      | Slow-peer detection: backlog threshold as a percentage (1--100) of the outbound writer buffer. The peer is a slow-peer candidate while its buffered outbound updates stay at or above this fraction |
 | `slow_peer_duration`   | u32      | no       | 30      | How long (seconds) the backlog must persist above the threshold before the peer is flagged slow (neighbor status flag, warn log, `bgp_peer_slow` metric). 0 disables detection. Purely observational unless `slow_peer_isolation` is set |
 | `slow_peer_isolation`  | bool     | no       | false   | Move a flagged-slow peer onto its own per-peer update path so it stops holding back its update-group's shared encode; it regroups automatically when the flag clears. Requires detection (`slow_peer_duration > 0`) |
-| `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before the peer is torn down and, by default, latched off until explicit enable |
-| `max_prefixes_ipv4`    | u32      | no       | --      | Maximum unique IPv4-unicast prefixes accepted before latched teardown. Without Notification GR, Cease/1 carries RFC 4486 AFI/SAFI/bound data; with the N-bit, RFC 8538 Cease/9 encapsulates that complete Cease/1. Enforced independently of `max_prefixes` — each configured bound applies to its own count, the aggregate stays a global backstop (ADR-0108) |
-| `max_prefixes_ipv6`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108) |
-| `max_prefixes_received_ipv4` | u32 | no      | --      | Maximum unique IPv4-unicast prefixes the peer may announce, counted **before** import policy: every prefix the peer currently announces counts once whether policy accepts or rejects it, Add-Path identities share one slot, and an explicit withdrawal or an enhanced-route-refresh sweep releases it. Same latched Cease/1 teardown, RFC 4486 data, Notification GR encapsulation, and `max_prefix_restart_seconds` contract as `max_prefixes_ipv4`, enforced independently of it. Rejected identities are tracked only while this bound is set; enabling it on an Established session requests a route refresh so the peer's existing rejections are recounted. Inherits from the peer group when omitted; a neighbor value overrides the group value (ADR-0108 amendment) |
-| `max_prefixes_received_ipv6` | u32 | no      | --      | IPv6-unicast sibling of `max_prefixes_received_ipv4`; inherits from the peer group when omitted and may be overridden per neighbor |
-| `max_prefixes_l3vpn_ipv4_unicast` | u32 | no | -- | Maximum unique accepted VPN-IPv4 routes (RD + prefix) from the peer, counted after import policy like `max_prefixes_ipv4`: Add-Path paths of one route share a slot, withdrawals and enhanced-route-refresh sweeps release it, and a session reset clears it. Applies `max_prefix_action`: `shutdown` sends Cease/1 with RFC 4486 AFI/SAFI/bound data (RFC 8538 Cease/9 encapsulation under Notification GR) and latches the peer; `block` withholds net-new routes of this family only; `warning` reports. Enforced independently of `max_prefixes` and every other family bound, so a leak in one family never consumes another family's budget. Inherits from the peer group when omitted; a neighbor value overrides it |
+| `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted from the peer, all families together. Crossing it applies `max_prefix_action`: `shutdown` (default) tears the session down with Cease/1 and latches it off until explicit enable, unless `max_prefix_restart_seconds` is set; `warning` logs and keeps accepting. `block` applies only to the per-family bounds and is rejected while this is set |
+| `max_prefixes_ipv4_unicast`    | u32      | no       | --      | Maximum unique IPv4-unicast prefixes accepted (after import policy) before `max_prefix_action` applies; under the default `shutdown`, a latched teardown. Without Notification GR, Cease/1 carries RFC 4486 AFI/SAFI/bound data; with the N-bit, RFC 8538 Cease/9 encapsulates that complete Cease/1. Enforced independently of `max_prefixes` — each configured bound applies to its own count, the aggregate stays a global backstop (ADR-0108) |
+| `max_prefixes_ipv6_unicast`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4_unicast` (ADR-0108) |
+| `max_prefixes_received_ipv4_unicast` | u32 | no      | --      | Maximum unique IPv4-unicast prefixes the peer may announce, counted **before** import policy: every prefix the peer currently announces counts once whether policy accepts or rejects it, Add-Path identities share one slot, and an explicit withdrawal or an enhanced-route-refresh sweep releases it. Same latched Cease/1 teardown, RFC 4486 data, Notification GR encapsulation, and `max_prefix_restart_seconds` contract as `max_prefixes_ipv4_unicast`, enforced independently of it. Rejected identities are tracked only while this bound is set; enabling it on an Established session requests a route refresh so the peer's existing rejections are recounted. Inherits from the peer group when omitted; a neighbor value overrides the group value (ADR-0108 amendment) |
+| `max_prefixes_received_ipv6_unicast` | u32 | no      | --      | IPv6-unicast sibling of `max_prefixes_received_ipv4_unicast`; inherits from the peer group when omitted and may be overridden per neighbor |
+| `max_prefixes_l3vpn_ipv4_unicast` | u32 | no | -- | Maximum unique accepted VPN-IPv4 routes (RD + prefix) from the peer, counted after import policy like `max_prefixes_ipv4_unicast`: Add-Path paths of one route share a slot, withdrawals and enhanced-route-refresh sweeps release it, and a session reset clears it. Applies `max_prefix_action`: `shutdown` sends Cease/1 with RFC 4486 AFI/SAFI/bound data (RFC 8538 Cease/9 encapsulation under Notification GR) and latches the peer; `block` withholds net-new routes of this family only; `warning` reports. Enforced independently of `max_prefixes` and every other family bound, so a leak in one family never consumes another family's budget. Inherits from the peer group when omitted; a neighbor value overrides it |
 | `max_prefixes_l3vpn_ipv6_unicast` | u32 | no | -- | VPN-IPv6 (AFI 2/SAFI 128) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
 | `max_prefixes_ipv4_labeled_unicast` | u32 | no | -- | IPv4 labeled unicast (AFI 1/SAFI 4) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
 | `max_prefixes_ipv6_labeled_unicast` | u32 | no | -- | IPv6 labeled unicast (AFI 2/SAFI 4) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
@@ -972,8 +972,8 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `max_prefixes_rtc` | u32 | no | -- | RT-Constrain (AFI 1/SAFI 132) sibling of `max_prefixes_l3vpn_ipv4_unicast` |
 | `max_prefix_action`    | string   | no       | `"shutdown"` | What a crossed max-prefix bound does. `"shutdown"`: Cease/1 teardown and latch (plus the optional `max_prefix_restart_seconds` timed restart). `"block"`: net-new prefixes beyond a full bound are withheld (never installed; the episode is counted once in `bgp_max_prefix_blocked_total`) while the session stays Established; a prefix already accepted still takes attribute changes and new Add-Path identities. Usage falling below the bound, removing the bound, or leaving `block` ends the episode and requests one route refresh so the peer replays what was withheld. Without negotiated route refresh, peer reannouncement or a session reset is required. `"warning"`: warn once per crossing at the bound and keep accepting. `block` applies to the per-family bounds (unicast and the non-unicast `max_prefixes_<family>` keys) and requires the aggregate `max_prefixes` to be unset; `block` and `warning` exclude `max_prefix_restart_seconds`. Inherits from the peer group (ADR-0108 amendment) |
 | `max_prefix_warning_percent` | u8 | no      | --      | Warning threshold as a percentage (1..=100) of every finite max-prefix bound, independent of `max_prefix_action`. Crossing it (usage ≥ percent of the bound) emits one warn log line, one `max_prefix_warning` session event, and one `bgp_max_prefix_warning_total` increment; the latch re-arms when usage falls back under the threshold. Never a teardown. Inherits from the peer group |
-| `max_prefixes_out_ipv4` | non-zero u32 | no | -- | Maximum distinct IPv4-unicast prefixes advertised **to** this peer (ADR-0113). Excess net-new prefixes are withheld while the session stays Established; nothing already advertised is withdrawn and no NOTIFICATION is sent. Counts prefixes, not paths: every Add-Path identity for one NLRI shares a slot |
-| `max_prefixes_out_ipv6` | non-zero u32 | no | -- | IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113) |
+| `max_prefixes_out_ipv4_unicast` | non-zero u32 | no | -- | Maximum distinct IPv4-unicast prefixes advertised **to** this peer (ADR-0113). Excess net-new prefixes are withheld while the session stays Established; nothing already advertised is withdrawn and no NOTIFICATION is sent. Counts prefixes, not paths: every Add-Path identity for one NLRI shares a slot |
+| `max_prefixes_out_ipv6_unicast` | non-zero u32 | no | -- | IPv6-unicast sibling of `max_prefixes_out_ipv4_unicast` (ADR-0113) |
 | `max_prefix_restart_seconds` | non-zero u32 | no | unset | Opt in to one timed restart attempt after max-prefix teardown. Omit to retain the indefinite fail-closed latch until explicit enable; failure to deliver the timed session `Start` command consumes the attempt and stays latched off |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only; 1..=80 bytes, the kernel `TCP_MD5SIG` key limit). Also accepted on a peer group with the same bound |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
@@ -1048,7 +1048,14 @@ actionable `last_error`. Successful delivery clears the latch and returns the
 session to ordinary TCP/OPEN retry; it does not assert that establishment
 already succeeded.
 
-`max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` are the outbound mirror:
+The unicast bounds follow the `max_prefixes[_received|_out]_<family>` naming
+used by every other family bound. The earlier spellings `max_prefixes_ipv4`,
+`max_prefixes_ipv6`, `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
+`max_prefixes_out_ipv4` and `max_prefixes_out_ipv6` are deprecated but still
+accepted with the same meaning; setting both spellings of one key in the same
+table is rejected. Configs the daemon writes back use only the canonical names.
+
+`max_prefixes_out_ipv4_unicast` / `max_prefixes_out_ipv6_unicast` are the outbound mirror:
 they bound what a bad export policy can grow one client's advertised table
 to. Only IPv4- and IPv6-unicast are in scope; VPN, labeled unicast, FlowSpec,
 EVPN, BGP-LS, and RT-Constrain are neither counted nor gated. There is one
@@ -1639,9 +1646,9 @@ hold_time = 45  # neighbor override beats peer-group default
 Peer-group fields mirror every neighbor setting except `address`,
 `interface`, `remote_asn`, `description`, `peer_group`, and `tcp_ao`.
 That covers `admin_down` / `admin_down_reason` (static members only), timers, families,
-prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
-`max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`, the non-unicast
-`max_prefixes_<family>` keys, `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
+prefix limits (`max_prefixes`, `max_prefixes_ipv4_unicast`, `max_prefixes_ipv6_unicast`,
+`max_prefixes_received_ipv4_unicast`, `max_prefixes_received_ipv6_unicast`, the non-unicast
+`max_prefixes_<family>` keys, `max_prefixes_out_ipv4_unicast`, `max_prefixes_out_ipv6_unicast`) and
 `max_prefix_restart_seconds`,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
 receive-side Prefix ORF, `disable_ipv4_unicast`, `link_local_next_hop`,
@@ -2033,7 +2040,7 @@ the corresponding outbound Add-Path family at the smaller of `send_max` and
 the peer's value; it does not affect other families. For negotiated IPv4/IPv6
 unicast Add-Path receive, rustbgpd also applies `receive_max` locally to each
 prefix's retained path IDs. Accepted IDs count; rejected IDs count only when
-`max_prefixes_received_ipv4` or `max_prefixes_received_ipv6` enables received
+`max_prefixes_received_ipv4_unicast` or `max_prefixes_received_ipv6_unicast` enables received
 identity tracking for that family. `max_prefix_action = "block"` withholds a
 net-new ID beyond the cap, `"shutdown"` sends Cease/1 and latches the peer,
 and `"warning"` reports the over-limit attempt but keeps accepting. A

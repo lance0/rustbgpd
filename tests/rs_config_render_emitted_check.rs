@@ -64,7 +64,7 @@ fn emitted_config_passes_rustbgpd_check_strict() {
     let rendered = render(&yaml, &rtr_options()).expect("healthy context renders");
     assert!(
         rendered.files["config.toml"]
-            .contains("max_prefixes_ipv6 = 1000\nmax_prefix_restart_seconds = 2220"),
+            .contains("max_prefixes_ipv6_unicast = 1000\nmax_prefix_restart_seconds = 2220"),
         "{}",
         rendered.files["config.toml"]
     );

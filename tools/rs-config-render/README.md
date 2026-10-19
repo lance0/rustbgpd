@@ -572,9 +572,9 @@ An absent action or zero family limits emit neither ceilings, a restart timer,
 nor an action. The effective
 `max_prefix.count_rejected_routes` selects the counting model: `true`
 (ARouteServer 1.23.2's default) emits the pre-policy
-`max_prefixes_received_ipv4`/`_ipv6` bounds, which count every unicast prefix
+`max_prefixes_received_ipv4_unicast`/`_ipv6_unicast` bounds, which count every unicast prefix
 the member announces whether or not import policy accepts it; `false` emits
-the accepted-route `max_prefixes_ipv4`/`_ipv6` bounds. The render receipt
+the accepted-route `max_prefixes_ipv4_unicast`/`_ipv6_unicast` bounds. The render receipt
 carries the limit under the emitted key and `null` under the other.
 
 An effective `reject_policy: tag_and_reject` instead emits ordered origin- and

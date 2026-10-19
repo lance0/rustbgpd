@@ -1177,7 +1177,7 @@ fn inbound_prefix_bound_check(
             return None;
         }
         format!(
-            "peer {identity} is Established eBGP with no effective inbound prefix bound; configure max_prefixes, max_prefixes_ipv4, max_prefixes_ipv6, max_prefixes_received_ipv4, or max_prefixes_received_ipv6 on the neighbor or its peer group"
+            "peer {identity} is Established eBGP with no effective inbound prefix bound; configure max_prefixes, max_prefixes_ipv4_unicast, max_prefixes_ipv6_unicast, max_prefixes_received_ipv4_unicast, or max_prefixes_received_ipv6_unicast on the neighbor or its peer group"
         )
     } else {
         let unbounded: Vec<String> = negotiated
@@ -1222,8 +1222,12 @@ fn family_bounded(neighbor: &crate::proto::NeighborState, family: &str) -> bool 
 /// The per-family keys that can bound `family`, besides the aggregate.
 fn family_bound_keys(family: &str) -> String {
     match family {
-        "ipv4_unicast" => "max_prefixes_ipv4 or max_prefixes_received_ipv4".to_string(),
-        "ipv6_unicast" => "max_prefixes_ipv6 or max_prefixes_received_ipv6".to_string(),
+        "ipv4_unicast" => {
+            "max_prefixes_ipv4_unicast or max_prefixes_received_ipv4_unicast".to_string()
+        }
+        "ipv6_unicast" => {
+            "max_prefixes_ipv6_unicast or max_prefixes_received_ipv6_unicast".to_string()
+        }
         "l3vpn_ipv4_unicast"
         | "l3vpn_ipv6_unicast"
         | "ipv4_labeled_unicast"
@@ -5007,10 +5011,10 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(check.status, CheckStatus::Warn);
         for key in [
             "max_prefixes",
-            "max_prefixes_ipv4",
-            "max_prefixes_ipv6",
-            "max_prefixes_received_ipv4",
-            "max_prefixes_received_ipv6",
+            "max_prefixes_ipv4_unicast",
+            "max_prefixes_ipv6_unicast",
+            "max_prefixes_received_ipv4_unicast",
+            "max_prefixes_received_ipv6_unicast",
         ] {
             assert!(check.detail.contains(key), "{}", check.detail);
         }
@@ -5137,7 +5141,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             .expect("the negotiated IPv4 unicast feed is unbounded");
         assert!(
             detail.contains(
-                "negotiated families ipv4_unicast (max_prefixes_ipv4 or max_prefixes_received_ipv4);"
+                "negotiated families ipv4_unicast (max_prefixes_ipv4_unicast or max_prefixes_received_ipv4_unicast);"
             ),
             "{detail}"
         );
@@ -5162,7 +5166,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             .expect("the negotiated IPv6 unicast feed is unbounded");
         assert!(
             detail.contains(
-                "negotiated families ipv6_unicast (max_prefixes_ipv6 or max_prefixes_received_ipv6);"
+                "negotiated families ipv6_unicast (max_prefixes_ipv6_unicast or max_prefixes_received_ipv6_unicast);"
             ),
             "{detail}"
         );
@@ -5175,7 +5179,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let detail = bound_warning(&peer).expect("the negotiated IPv6 unicast feed is unbounded");
         assert!(
             detail.contains(
-                "negotiated families ipv6_unicast (max_prefixes_ipv6 or max_prefixes_received_ipv6);"
+                "negotiated families ipv6_unicast (max_prefixes_ipv6_unicast or max_prefixes_received_ipv6_unicast);"
             ),
             "{detail}"
         );
@@ -5230,10 +5234,10 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let detail = bound_warning(&bound_peer(&DUAL_STACK_PEER, &[])).unwrap();
         for key in [
             "max_prefixes",
-            "max_prefixes_ipv4",
-            "max_prefixes_ipv6",
-            "max_prefixes_received_ipv4",
-            "max_prefixes_received_ipv6",
+            "max_prefixes_ipv4_unicast",
+            "max_prefixes_ipv6_unicast",
+            "max_prefixes_received_ipv4_unicast",
+            "max_prefixes_received_ipv6_unicast",
         ] {
             assert!(detail.contains(key), "{detail}");
         }
@@ -7794,7 +7798,7 @@ paths = ["x"]
         let state_dir = tempfile::tempdir().unwrap();
         *server.state.config_effective_toml.lock().await = Some(format!(
             "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n\
-             [peer_groups.members]\nmax_prefixes_received_ipv4 = 100\n\
+             [peer_groups.members]\nmax_prefixes_received_ipv4_unicast = 100\n\
              [[neighbors]]\naddress = \"192.0.2.2\"\nremote_asn = 65000\n\
              [[neighbors]]\naddress = \"192.0.2.4\"\nremote_asn = 65002\npeer_group = \"members\"\n",
             state_dir.path().display()

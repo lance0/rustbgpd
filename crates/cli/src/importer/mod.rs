@@ -90,8 +90,8 @@ pub struct Group {
     pub remote_asn: Option<u32>,
     pub hold_time: Option<u16>,
     pub families: Vec<String>,
-    pub max_prefixes_ipv4: Option<u32>,
-    pub max_prefixes_ipv6: Option<u32>,
+    pub max_prefixes_ipv4_unicast: Option<u32>,
+    pub max_prefixes_ipv6_unicast: Option<u32>,
     /// Source configures MD5/auth on the group. Never carries the secret.
     pub auth_present: bool,
     /// Source keeps the group's sessions administratively down.
@@ -110,8 +110,8 @@ pub struct Neighbor {
     pub peer_group: Option<String>,
     pub hold_time: Option<u16>,
     pub families: Vec<String>,
-    pub max_prefixes_ipv4: Option<u32>,
-    pub max_prefixes_ipv6: Option<u32>,
+    pub max_prefixes_ipv4_unicast: Option<u32>,
+    pub max_prefixes_ipv6_unicast: Option<u32>,
     /// Source configures MD5/auth for this session. Never carries the secret.
     pub auth_present: bool,
     /// Source keeps this session administratively down (BIRD `disabled`,
@@ -693,11 +693,11 @@ fn emit_toml(
             let _ = writeln!(out, "hold_time = {hold}");
         }
         write_families(&mut out, &group.families);
-        if let Some(limit) = group.max_prefixes_ipv4 {
-            let _ = writeln!(out, "max_prefixes_ipv4 = {limit}");
+        if let Some(limit) = group.max_prefixes_ipv4_unicast {
+            let _ = writeln!(out, "max_prefixes_ipv4_unicast = {limit}");
         }
-        if let Some(limit) = group.max_prefixes_ipv6 {
-            let _ = writeln!(out, "max_prefixes_ipv6 = {limit}");
+        if let Some(limit) = group.max_prefixes_ipv6_unicast {
+            let _ = writeln!(out, "max_prefixes_ipv6_unicast = {limit}");
         }
         if group.auth_present {
             out.push_str(AUTH_COMMENT);
@@ -726,11 +726,11 @@ fn emit_toml(
             let _ = writeln!(out, "hold_time = {hold}");
         }
         write_families(&mut out, &neighbor.families);
-        if let Some(limit) = neighbor.max_prefixes_ipv4 {
-            let _ = writeln!(out, "max_prefixes_ipv4 = {limit}");
+        if let Some(limit) = neighbor.max_prefixes_ipv4_unicast {
+            let _ = writeln!(out, "max_prefixes_ipv4_unicast = {limit}");
         }
-        if let Some(limit) = neighbor.max_prefixes_ipv6 {
-            let _ = writeln!(out, "max_prefixes_ipv6 = {limit}");
+        if let Some(limit) = neighbor.max_prefixes_ipv6_unicast {
+            let _ = writeln!(out, "max_prefixes_ipv6_unicast = {limit}");
         }
         if neighbor.auth_present {
             out.push_str(AUTH_COMMENT);
