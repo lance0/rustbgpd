@@ -354,6 +354,7 @@ pub(crate) fn build_cursor_gap_event(
         )
     };
     proto::BgpEvent {
+        timestamp_unix_ms: 0,
         timestamp: String::new(),
         category: proto::EventCategory::Unspecified as i32,
         event_type: proto::BgpEventType::StreamLagged as i32,
@@ -380,6 +381,7 @@ fn build_live_lag_event(missed_count: u64) -> proto::BgpEvent {
     let reason =
         format!("durable event live stream lagged; missed_committed_events={missed_count}");
     proto::BgpEvent {
+        timestamp_unix_ms: 0,
         timestamp: String::new(),
         category: proto::EventCategory::Unspecified as i32,
         event_type: proto::BgpEventType::StreamLagged as i32,

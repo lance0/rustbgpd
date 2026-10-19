@@ -885,6 +885,7 @@ fn fib_runtime_event_to_bgp_event(
     };
 
     rustbgpd_api::proto::BgpEvent {
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&event.timestamp),
         timestamp: event.timestamp,
         category: rustbgpd_api::proto::EventCategory::Dataplane as i32,
         event_type: event_type as i32,
@@ -1003,6 +1004,7 @@ fn bfd_runtime_event_to_bgp_event(
     let diagnostic = bfd_diagnostic_to_str(event.diagnostic).to_string();
     let summary = format!("bfd {peer_address} {old_state:?} → {new_state:?} ({diagnostic})");
     proto::BgpEvent {
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&timestamp),
         timestamp: timestamp.clone(),
         category: proto::EventCategory::Bfd as i32,
         event_type: event_type as i32,

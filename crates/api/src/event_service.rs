@@ -1688,6 +1688,7 @@ mod tests {
     fn bfd_bgp_event(event_type: proto::BgpEventType, peer: &str) -> proto::BgpEvent {
         proto::BgpEvent {
             timestamp: "0".to_string(),
+            timestamp_unix_ms: 0,
             category: proto::EventCategory::Bfd as i32,
             event_type: event_type as i32,
             severity: proto::EventSeverity::Info as i32,
@@ -1851,15 +1852,16 @@ mod tests {
     /// (prost oneof sized by its largest variant). Shrinking the never-used
     /// FIB (4096-slot) and BFD (1024-slot) proto rings to 1-slot placeholders
     /// removes 4095 + 1023 = 5118 slots of eager payload capacity per daemon:
-    /// 5118 × 976 B = 4,995,168 B of slot payload, before per-slot metadata.
+    /// 5118 × 984 B = 5,036,112 B of slot payload, before per-slot metadata.
     /// The boxed optional Prefix-SID and SMET views add 32 B to the earlier
     /// 944 B layout: 64 B across unused placeholders, or 163,840 B with both
     /// actors enabled. SMET adds 16 B per slot instead of 160 B unboxed.
+    /// The envelope's typed `timestamp_unix_ms` adds 8 B.
     /// Populated views allocate their boxes and retained attribute data
     /// outside this payload.
     #[test]
     fn watch_events_ring_slot_payload_size_pin() {
-        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 976);
+        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 984);
     }
 
     #[test]
@@ -2878,10 +2880,12 @@ mod tests {
             target_peer_address: String::new(),
             path_id: 0,
             timestamp: "0".to_string(),
+            timestamp_unix_ms: 0,
             reason: String::new(),
         };
         let envelope_proto = proto::BgpEvent {
             timestamp: "0".to_string(),
+            timestamp_unix_ms: 0,
             category: proto::EventCategory::Route as i32,
             event_type: proto::BgpEventType::RouteAdded as i32,
             severity: proto::EventSeverity::Info as i32,

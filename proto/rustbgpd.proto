@@ -3190,7 +3190,7 @@ message RouteEvent {
   uint32 prefix_length = 3;
   string peer_address = 4;
   AddressFamily afi_safi = 5;
-  // Unix epoch seconds.
+  // Deprecated: use timestamp_unix_ms. Unix epoch seconds as a decimal string.
   string timestamp = 6;
   string previous_peer_address = 7;
   // Add-Path path identifier (RFC 7911). 0 = no Add-Path.
@@ -3202,6 +3202,9 @@ message RouteEvent {
   string target_peer_address = 10;
   // Stable operator-facing reason, e.g. "policy_denied".
   string reason = 11;
+  // Event time in Unix epoch milliseconds. Producers currently record whole
+  // seconds, so the value is a multiple of 1000.
+  int64 timestamp_unix_ms = 12;
 }
 
 enum EventCategory {
@@ -3593,8 +3596,11 @@ message OtcRouteBlockedEvent {
 }
 
 message BgpEvent {
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
+  // Deprecated: use timestamp_unix_ms. Unix epoch seconds as a decimal string.
   string timestamp = 1;
+  // Event time in Unix epoch milliseconds. Producers currently record whole
+  // seconds, so the value is a multiple of 1000. Zero when timestamp is empty.
+  int64 timestamp_unix_ms = 23;
   // Common fields are duplicated from the category-specific payload on purpose:
   // category-agnostic consumers can filter/render without unpacking the oneof,
   // while payloads preserve the full source event shape for category-specific

@@ -62,6 +62,7 @@ pub fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEv
 
     proto::BgpEvent {
         timestamp: route.timestamp.clone(),
+        timestamp_unix_ms: route.timestamp_unix_ms,
         category: proto::EventCategory::Route as i32,
         event_type: event_type as i32,
         severity: proto::EventSeverity::Info as i32,
@@ -114,6 +115,7 @@ pub fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> proto::Bg
     };
 
     proto::BgpEvent {
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&event.timestamp),
         timestamp: event.timestamp,
         category: proto::EventCategory::Evpn as i32,
         event_type: event_type as i32,
@@ -227,6 +229,7 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
     };
 
     proto::BgpEvent {
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&event.timestamp),
         timestamp: event.timestamp,
         category: proto::EventCategory::Session as i32,
         event_type: event_type as i32,
@@ -267,6 +270,7 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
     };
 
     proto::BgpEvent {
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&event.timestamp),
         timestamp: event.timestamp,
         category: proto::EventCategory::Session as i32,
         event_type: event_type as i32,
@@ -309,6 +313,7 @@ pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
     };
 
     proto::BgpEvent {
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&timestamp),
         timestamp,
         category: proto::EventCategory::Policy as i32,
         event_type: proto::BgpEventType::PolicyChanged as i32,
@@ -368,6 +373,7 @@ pub fn otc_route_blocked_event_to_bgp_event(
     };
 
     proto::BgpEvent {
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&timestamp),
         timestamp,
         category: proto::EventCategory::Policy as i32,
         event_type: proto::BgpEventType::OtcRouteBlocked as i32,
@@ -413,8 +419,10 @@ pub(crate) fn stream_lag_bgp_event(
         proto::EventCategory::Unspecified => "unknown",
     };
     let summary = format!("{source} event stream lagged; missed {missed_count} event(s)");
+    let timestamp = rustbgpd_rib::event::unix_timestamp_now();
     proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&timestamp),
+        timestamp,
         category: source_category as i32,
         event_type: proto::BgpEventType::StreamLagged as i32,
         severity: proto::EventSeverity::Warning as i32,
@@ -450,8 +458,10 @@ pub(super) fn dataplane_summary_to_bgp_event(
         rejected: summary.rejected,
         failed: summary.failed,
     };
+    let timestamp = rustbgpd_rib::event::unix_timestamp_now();
     proto::BgpEvent {
-        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
+        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&timestamp),
+        timestamp,
         category: proto::EventCategory::Dataplane as i32,
         event_type: proto::BgpEventType::DataplaneStatusChanged as i32,
         severity: severity as i32,
@@ -515,6 +525,45 @@ mod tests {
     }
 
     #[test]
+    fn converted_events_carry_typed_millisecond_timestamps() {
+        let peer = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut route = crate::test_support::route_event(
+            rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                Ipv4Addr::new(10, 1, 0, 0),
+                24,
+            )),
+            peer,
+        );
+        route.timestamp = "1783915200".to_string();
+        let event = route_event_to_bgp_event(route);
+        assert_eq!(event.timestamp, "1783915200");
+        assert_eq!(event.timestamp_unix_ms, 1_783_915_200_000);
+        let Some(proto::bgp_event::Payload::Route(payload)) = event.payload else {
+            panic!("expected route payload");
+        };
+        assert_eq!(payload.timestamp_unix_ms, 1_783_915_200_000);
+
+        let event = policy_event_to_bgp_event(PolicyEvent {
+            operation: "set",
+            target_type: "policy",
+            target: "p".to_string(),
+            peer: None,
+            peer_label: None,
+            affected_peer_count: 0,
+            timestamp: "1783915201".to_string(),
+            reason: String::new(),
+        });
+        assert_eq!(event.timestamp_unix_ms, 1_783_915_201_000);
+
+        let event = stream_lag_bgp_event(proto::EventCategory::Route, 1);
+        assert_eq!(
+            event.timestamp_unix_ms,
+            event.timestamp.parse::<i64>().unwrap() * 1000
+        );
+        assert!(event.timestamp_unix_ms > 0);
+    }
+
+    #[test]
     fn peer_presence_events_lower_with_exact_state_and_classification() {
         let peer = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         for (kind, expected_type, new_state) in [
@@ -548,6 +597,7 @@ mod tests {
                     ),
                 }));
             assert_eq!(event.category, proto::EventCategory::Session as i32);
+            assert_eq!(event.timestamp_unix_ms, 123_000);
             assert_eq!(event.event_type, expected_type as i32);
             assert_eq!(event.severity, proto::EventSeverity::Info as i32);
             let Some(proto::bgp_event::Payload::Session(session)) = event.payload else {

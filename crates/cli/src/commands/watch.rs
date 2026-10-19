@@ -946,6 +946,7 @@ fn route_event_to_bgp_event(event: RouteEvent) -> BgpEvent {
 
     BgpEvent {
         timestamp: event.timestamp.clone(),
+        timestamp_unix_ms: event.timestamp_unix_ms,
         category: EventCategory::Route as i32,
         event_type,
         severity: crate::proto::EventSeverity::Info as i32,
@@ -2541,6 +2542,7 @@ mod tests {
         fn envelope(category: EventCategory, afi_safi: i32, event_id: Option<u64>) -> BgpEvent {
             BgpEvent {
                 timestamp: "2026-06-15T00:00:00Z".to_string(),
+                timestamp_unix_ms: 0,
                 category: category as i32,
                 event_type: BgpEventType::OtcRouteBlocked as i32,
                 severity: crate::proto::EventSeverity::Warning as i32,
@@ -2744,6 +2746,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
             path_id: 0,
@@ -2781,6 +2784,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             previous_peer_address: "10.0.0.2".to_string(),
             target_peer_address: String::new(),
             path_id: 0,
@@ -2807,6 +2811,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
             path_id: 0,
@@ -2831,6 +2836,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             previous_peer_address: String::new(),
             target_peer_address: "10.0.0.2".to_string(),
             path_id: 9,
@@ -2878,6 +2884,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
             path_id: 0,
@@ -2913,6 +2920,7 @@ mod tests {
         };
         let event = BgpEvent {
             timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             category: EventCategory::Policy as i32,
             event_type: BgpEventType::OtcRouteBlocked as i32,
             severity: crate::proto::EventSeverity::Warning as i32,
@@ -2966,6 +2974,7 @@ mod tests {
         };
         let event = BgpEvent {
             timestamp: "1".to_string(),
+            timestamp_unix_ms: 1000,
             category: EventCategory::Policy as i32,
             event_type: BgpEventType::OtcRouteBlocked as i32,
             severity: crate::proto::EventSeverity::Warning as i32,
@@ -3228,6 +3237,7 @@ mod tests {
             peer_address: "192.0.2.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "123".to_string(),
+            timestamp_unix_ms: 123_000,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
             path_id: 0,
@@ -3255,6 +3265,7 @@ mod tests {
             peer_address: "2001:db8::1".to_string(),
             afi_safi: AddressFamily::Ipv6Unicast as i32,
             timestamp: "123".to_string(),
+            timestamp_unix_ms: 123_000,
             previous_peer_address: "2001:db8::2".to_string(),
             target_peer_address: String::new(),
             path_id: 17,
@@ -3711,6 +3722,7 @@ mod tests {
             previous_peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "123".to_string(),
+            timestamp_unix_ms: 123_000,
             path_id: 7,
             event_id: 0,
             target_peer_address: String::new(),
@@ -3787,6 +3799,7 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             timestamp: "0".to_string(),
+            timestamp_unix_ms: 0,
             previous_peer_address: String::new(),
             target_peer_address: String::new(),
             path_id: 0,
