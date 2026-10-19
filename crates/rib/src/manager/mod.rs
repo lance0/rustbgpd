@@ -727,6 +727,10 @@ pub struct RibManager {
     /// fleet size (measured ~0.88 s of emission stagger at 700 members).
     /// Tests override this to force deterministic per-stride parking.
     flush_poll_budget: std::time::Duration,
+    /// Set by the actor's poll wrapper whenever the actor future returns
+    /// `Pending`, whichever `select!` branch or await caused it; consumed by
+    /// the primary run budget.
+    actor_suspended: Arc<AtomicBool>,
     /// Peers whose next `distribute_changes` pass must bypass the
     /// `AdjRibOut`-already-matches suppression for currently-
     /// advertised routes. Used by `RibUpdate::RefreshPeerOutbound`
@@ -1177,22 +1181,23 @@ struct ExpiryCutoffs([Option<usize>; ExpiryTimer::COUNT]);
 /// Wall-clock bound on one run of primary updates the run loop applies
 /// back to back without yielding.
 ///
-/// The run ends when the budget is spent (the loop yields) or when the
-/// receive that produced the next update actually parked the actor. Idle time
-/// between runs is therefore never charged: a lone update after an idle gap
-/// does not yield ahead of the loop's own due-timer check. A backlog sampled
-/// empty does not end the run, because a producer on another worker can
-/// refill it before the receive is polled; only a real `Pending` counts.
+/// The run ends when the budget is spent (the loop yields) or when the actor
+/// has suspended since the previous update, whichever `select!` branch or
+/// await suspended it. Idle time between runs is therefore never charged: a
+/// lone update after an idle gap does not yield ahead of the loop's own
+/// due-timer check. A backlog sampled empty does not end the run, because a
+/// producer on another worker can refill it before the receive is polled;
+/// only a real `Pending` of the actor future counts.
 #[derive(Debug, Default)]
 struct PrimaryRunBudget {
     started: Option<std::time::Instant>,
 }
 
 impl PrimaryRunBudget {
-    /// The start of the current run. `parked` reports whether the receive
-    /// returned `Pending` before this update; that ends the previous run.
-    fn start(&mut self, now: std::time::Instant, parked: bool) -> std::time::Instant {
-        if parked {
+    /// The start of the current run. A suspension recorded in `suspended`
+    /// since the previous update ends the previous run; the flag is consumed.
+    fn start(&mut self, now: std::time::Instant, suspended: &AtomicBool) -> std::time::Instant {
+        if suspended.swap(false, Ordering::Relaxed) {
             self.started = None;
         }
         *self.started.get_or_insert(now)
@@ -1211,20 +1216,6 @@ impl PrimaryRunBudget {
         }
         false
     }
-}
-
-/// Await `future`, also reporting whether it returned `Pending` before it
-/// completed, which means the task suspended in between.
-async fn note_park<T>(future: impl Future<Output = T>) -> (T, bool) {
-    let mut future = std::pin::pin!(future);
-    let mut parked = false;
-    let output = std::future::poll_fn(|cx| {
-        let poll = future.as_mut().poll(cx);
-        parked |= poll.is_pending();
-        poll
-    })
-    .await;
-    (output, parked)
 }
 
 impl ExpiryCutoffs {
@@ -2292,6 +2283,7 @@ impl RibManager {
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
             flush_poll_budget: FLUSH_POLL_BUDGET,
+            actor_suspended: Arc::default(),
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
             evpn_feed_receipt_count: 0,
@@ -5672,7 +5664,8 @@ impl RibManager {
     /// into `bgp_rib_actor_slice_seconds`.
     pub async fn run(self) {
         let recorder = self.metrics.rib_actor_slice_recorder();
-        slice_timing::TimedActor::new(self.run_actor(), recorder).await;
+        let suspended = Arc::clone(&self.actor_suspended);
+        slice_timing::TimedActor::new(self.run_actor(), recorder, suspended).await;
     }
 
     #[expect(
@@ -6113,11 +6106,12 @@ impl RibManager {
                             None => query_rx_open = false,
                         }
                     }
-                    (update, parked) = note_park(Self::recv_primary(&mut self.primary_lookahead, &mut self.rx)) => {
+                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx) => {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                let started = primary_run.start(std::time::Instant::now(), parked);
+                                let started = primary_run
+                                    .start(std::time::Instant::now(), &self.actor_suspended);
                                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                                     manager.handle_update(update);
                                 });
@@ -6197,11 +6191,12 @@ impl RibManager {
                             None => query_rx_open = false,
                         }
                     }
-                    (update, parked) = note_park(Self::recv_primary(&mut self.primary_lookahead, &mut self.rx)) => {
+                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx) => {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                let started = primary_run.start(std::time::Instant::now(), parked);
+                                let started = primary_run
+                                    .start(std::time::Instant::now(), &self.actor_suspended);
                                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                                     manager.handle_update(update);
                                 });

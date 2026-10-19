@@ -424,35 +424,43 @@ async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
 }
 
 /// Idle time between runs is not poll time. A lone update after the actor
-/// parked through a gap longer than the budget must not yield: a yield there
-/// lets a caller act before the run loop's own due-timer check, so a timer
-/// that fell due during the gap would trail a message that arrived after it.
+/// suspended through a gap longer than the budget must not yield: a yield
+/// there lets a caller act before the run loop's own due-timer check, so a
+/// timer that fell due during the gap would trail a message that arrived
+/// after it.
 #[test]
-fn primary_run_budget_does_not_charge_a_parked_gap_to_the_next_run() {
+fn primary_run_budget_does_not_charge_a_suspended_gap_to_the_next_run() {
     let budget = Duration::from_millis(25);
     let t0 = std::time::Instant::now();
+    let suspended = std::sync::atomic::AtomicBool::new(true);
     let mut run = PrimaryRunBudget::default();
 
-    let started = run.start(t0, true);
+    let started = run.start(t0, &suspended);
     assert!(!run.should_yield(started, t0 + Duration::from_millis(1), budget));
 
-    // The receive parks for 40 ms, then one more update arrives.
+    // The actor suspends for 40 ms, then one more update arrives.
+    suspended.store(true, Ordering::Relaxed);
     let next = t0 + Duration::from_millis(40);
-    let started = run.start(next, true);
-    assert_eq!(started, next, "the park ended the previous run");
+    let started = run.start(next, &suspended);
+    assert_eq!(started, next, "the suspension ended the previous run");
+    assert!(
+        !suspended.load(Ordering::Relaxed),
+        "the suspension is consumed"
+    );
     assert!(!run.should_yield(started, next + Duration::from_millis(1), budget));
 }
 
-/// A backlog that refills before the receive is polled never parks the
+/// A backlog that refills before the receive is polled never suspends the
 /// actor, even when it was sampled empty after the previous update. Such
 /// updates stay one run, so four 10 ms updates still yield at 25 ms.
 #[test]
 fn primary_run_budget_bounds_a_backlog_refilled_before_each_receive() {
     let budget = Duration::from_millis(25);
     let t0 = std::time::Instant::now();
+    let suspended = std::sync::atomic::AtomicBool::new(true);
     let mut run = PrimaryRunBudget::default();
 
-    let started = run.start(t0, true);
+    let started = run.start(t0, &suspended);
     let mut yielded_at = None;
     for update in 1..=4u32 {
         let done = t0 + Duration::from_millis(10 * u64::from(update));
@@ -460,9 +468,9 @@ fn primary_run_budget_bounds_a_backlog_refilled_before_each_receive() {
             yielded_at = Some(update);
             break;
         }
-        // Each refill is ready on the first poll: the receive never parks.
+        // Each refill is ready on the first poll: the actor never suspends.
         assert_eq!(
-            run.start(done, false),
+            run.start(done, &suspended),
             t0,
             "update {update} continues the run"
         );
@@ -473,18 +481,62 @@ fn primary_run_budget_bounds_a_backlog_refilled_before_each_receive() {
         "the third 10 ms update spends the budget"
     );
     let after = t0 + Duration::from_millis(31);
-    assert_eq!(run.start(after, false), after, "a yield ends the run");
+    assert_eq!(run.start(after, &suspended), after, "a yield ends the run");
 }
 
-/// `note_park` reports a park only when the receive actually returned
-/// `Pending` before completing.
+/// The suspension is observed on the whole actor future, not one branch.
+/// After an idle gap, a non-primary branch can win the wakeup and the next
+/// primary update can then be ready at once; that update must still start a
+/// new run, because the actor did suspend in between.
 #[tokio::test]
-async fn note_park_reports_only_a_real_pending() {
-    assert_eq!(super::super::note_park(async { 7 }).await, (7, false));
-    let parked = super::super::note_park(async {
-        tokio::task::yield_now().await;
-        8
-    })
+async fn primary_run_budget_ends_on_a_suspension_another_branch_woke() {
+    let metrics = BgpMetrics::new();
+    let budget = Duration::from_millis(25);
+    let t0 = std::time::Instant::now();
+    let suspended = Arc::new(AtomicBool::new(true));
+    let mut run = PrimaryRunBudget::default();
+    let started = run.start(t0, &suspended);
+    assert!(!run.should_yield(started, t0 + Duration::from_millis(1), budget));
+
+    // One actor turn: the wait suspends, another branch (here a query
+    // channel) wins, and its handler finishes without touching the run.
+    let (query_tx, mut query_rx) = mpsc::channel::<()>(1);
+    let mut actor = Box::pin(super::super::slice_timing::TimedActor::new(
+        async move { query_rx.recv().await },
+        metrics.rib_actor_slice_recorder(),
+        Arc::clone(&suspended),
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(
+        actor.as_mut().poll(&mut cx).is_pending(),
+        "the wait suspends"
+    );
+    query_tx.try_send(()).unwrap();
+    assert!(
+        actor.as_mut().poll(&mut cx).is_ready(),
+        "the query branch wins"
+    );
+
+    // The next primary update is ready on its first poll.
+    let next = t0 + Duration::from_millis(40);
+    assert_eq!(
+        run.start(next, &suspended),
+        next,
+        "the suspension another branch woke ended the previous run"
+    );
+    assert!(!run.should_yield(next, next + Duration::from_millis(1), budget));
+
+    // A turn that never suspends records nothing and continues the run.
+    super::super::slice_timing::TimedActor::new(
+        async {},
+        metrics.rib_actor_slice_recorder(),
+        Arc::clone(&suspended),
+    )
     .await;
-    assert_eq!(parked, (8, true));
+    let later = next + Duration::from_millis(2);
+    assert_eq!(
+        run.start(later, &suspended),
+        next,
+        "a ready turn continues the run"
+    );
 }
