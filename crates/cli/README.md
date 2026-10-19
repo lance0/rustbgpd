@@ -179,7 +179,7 @@ rbgp neighbor <addr> add --remote-asn <asn> [--peer-group <name>] [--families <l
 rbgp neighbor <addr> enable
 rbgp neighbor <addr> disable --reason "maintenance"
 rbgp neighbor <addr> reset [--reason "maintenance"]   # Cease/Administrative Reset; static peers retry, dynamic peers reconnect inbound
-rbgp neighbor <addr> softreset
+rbgp neighbor <addr> refresh-in             # re-apply import policy via inbound route refresh (alias: softreset)
 rbgp neighbor <addr> refresh-out            # re-send this peer's current exportable outbound routes
 rbgp neighbor <addr> replay-out             # explicit unicast replay; scheduling acknowledgement only
 rbgp neighbor <addr> delete

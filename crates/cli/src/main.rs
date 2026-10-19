@@ -1437,8 +1437,11 @@ enum NeighborAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Trigger soft reset (inbound)
-    Softreset {
+    /// Re-apply import policy by requesting an inbound route refresh
+    ///
+    /// `softreset` remains accepted as a compatibility alias.
+    #[command(alias = "softreset")]
+    RefreshIn {
         /// Address family to refresh
         #[arg(short = 'a', long)]
         family: Option<String>,
@@ -4819,7 +4822,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             (Some(addr), Some(NeighborAction::Reset { reason })) => {
                 commands::neighbor::reset(connection, &addr, reason, json).await
             }
-            (Some(addr), Some(NeighborAction::Softreset { family })) => {
+            (Some(addr), Some(NeighborAction::RefreshIn { family })) => {
                 commands::neighbor::softreset(connection, &addr, family, json).await
             }
             (Some(addr), Some(NeighborAction::RefreshOut)) => {
@@ -7672,6 +7675,23 @@ printf '%s\n' "${COMPREPLY[@]}"
             Cli::try_parse_from(["rbgp", "doctor", "--pre-upgrade"]).is_err(),
             "--pre-upgrade names the config the upgraded daemon will boot"
         );
+    }
+
+    #[test]
+    fn test_parse_neighbor_refresh_in_accepts_softreset_alias() {
+        for verb in ["refresh-in", "softreset"] {
+            let cli =
+                Cli::try_parse_from(["rbgp", "neighbor", "192.0.2.1", verb, "-a", "ipv4_unicast"])
+                    .unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Neighbor {
+                    address: Some(address),
+                    action: Some(NeighborAction::RefreshIn { family: Some(family) }),
+                    ..
+                } if address == "192.0.2.1" && family == "ipv4_unicast"
+            ));
+        }
     }
 
     #[test]
