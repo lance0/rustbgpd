@@ -502,6 +502,10 @@ cheaper, guarantee arbitrary table sizes, or change third-party gRPC clients.
 Paginated unicast listings, streams, and control RPCs keep tonic's 4 MiB
 default. `rib fib --limit N [--page-token T]` returns one bounded page instead;
 the older `--page-size` spelling remains a hidden alias.
+Without a view, `--limit`, `--page-token`, or a filter, `rib vpn|labeled|rtc`
+calls the deprecated whole-table `ListVpnRoutes`, `ListLabeledRoutes`, or
+`ListRtcRoutes` RPC (outside v1); any of those options selects the bounded
+`List*RibRoutes` query instead.
 
 `--age` appends an `Age` column to the human best, received, or advertised
 route table. It is the age of the original RIB receive event, including in the

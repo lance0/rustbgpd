@@ -1592,6 +1592,14 @@ cover the BMP exporter and MRT dump export. A ready-to-load
 Prometheus alert-rule pack covering the high-signal `bgp_*` metrics ships
 at [`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml).
 
+Two fail-signal counters outside that pack also deserve an alert:
+`evpn_runtime_decomposed_fail_stops_total` increments when a decomposed
+`ApplyEvpnRuntime` sequence leaves unrestored effects and pins the coordinator
+(see [EvpnService](api.md#evpnservice)), and
+`bgp_grpc_credential_reloads_total{outcome="failure"}` counts gRPC credential
+rotations that kept the last-known-good generation (see
+[security.md](security.md)).
+
 ### HTTP probes
 
 The telemetry HTTP listener exposes these read-only paths:
@@ -2522,7 +2530,7 @@ The RPCs that deserve the most attention are:
 
 | Class | Examples | Guardrail |
 |-------|----------|-----------|
-| Large sensitive reads | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListEvpnRoutes`, `ListFlowSpecRoutes`, `GetMetrics` | Prefer pagination or narrow filters, set client deadlines, and alert on sustained `sensitive_read` volume |
+| Large sensitive reads | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListEvpnRoutes`, `ListFlowSpecRoutes`, `ComparePolicy`, `GetMetrics` | Prefer pagination or narrow filters, set client deadlines, and alert on sustained `sensitive_read` volume |
 | Live streams | `EventService.WatchEvents`, `EventService.SubscribeFromEvent` | Keep clients draining, reconnect after `stream_lagged`, and alert on subscriber count or lag spikes |
 | History queries | `ListRouteEvents`, `ListSessionEvents`, `ListPolicyEvents` | Histories are bounded and process-local; use explicit limits for dashboards |
 | Mutating calls | Neighbor, policy, peer-group, injection RPCs | Use listener `max_tier`, role enforcement, and audit alerts on `mutating` volume |
