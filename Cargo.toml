@@ -23,6 +23,7 @@ members = [
     "examples/peer-loop",
     "tools/rs-config-render",
     "tools/mcp",
+    "tools/gobgp-bridge",
 ]
 default-members = [
     ".",
@@ -45,6 +46,7 @@ default-members = [
     "examples/peer-loop",
     "tools/rs-config-render",
     "tools/mcp",
+    "tools/gobgp-bridge",
 ]
 resolver = "2"
 
