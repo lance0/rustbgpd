@@ -1178,18 +1178,23 @@ struct ExpiryCutoffs([Option<usize>; ExpiryTimer::COUNT]);
 /// back to back without yielding.
 ///
 /// The run ends when the budget is spent (the loop yields) or when the
-/// primary backlog drains (the loop parks in `select!` next, which already
-/// lets other tasks run). Idle time between runs is therefore never charged:
-/// a lone update after an idle gap does not yield ahead of the loop's own
-/// due-timer check.
+/// receive that produced the next update actually parked the actor. Idle time
+/// between runs is therefore never charged: a lone update after an idle gap
+/// does not yield ahead of the loop's own due-timer check. A backlog sampled
+/// empty does not end the run, because a producer on another worker can
+/// refill it before the receive is polled; only a real `Pending` counts.
 #[derive(Debug, Default)]
 struct PrimaryRunBudget {
     started: Option<std::time::Instant>,
 }
 
 impl PrimaryRunBudget {
-    /// The start of the current run, beginning one at `now` if none is open.
-    fn start(&mut self, now: std::time::Instant) -> std::time::Instant {
+    /// The start of the current run. `parked` reports whether the receive
+    /// returned `Pending` before this update; that ends the previous run.
+    fn start(&mut self, now: std::time::Instant, parked: bool) -> std::time::Instant {
+        if parked {
+            self.started = None;
+        }
         *self.started.get_or_insert(now)
     }
 
@@ -1199,17 +1204,27 @@ impl PrimaryRunBudget {
         started: std::time::Instant,
         now: std::time::Instant,
         budget: std::time::Duration,
-        backlog: usize,
     ) -> bool {
         if now.duration_since(started) >= budget {
             self.started = None;
             return true;
         }
-        if backlog == 0 {
-            self.started = None;
-        }
         false
     }
+}
+
+/// Await `future`, also reporting whether it returned `Pending` before it
+/// completed, which means the task suspended in between.
+async fn note_park<T>(future: impl Future<Output = T>) -> (T, bool) {
+    let mut future = std::pin::pin!(future);
+    let mut parked = false;
+    let output = std::future::poll_fn(|cx| {
+        let poll = future.as_mut().poll(cx);
+        parked |= poll.is_pending();
+        poll
+    })
+    .await;
+    (output, parked)
 }
 
 impl ExpiryCutoffs {
@@ -6098,11 +6113,11 @@ impl RibManager {
                             None => query_rx_open = false,
                         }
                     }
-                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx) => {
+                    (update, parked) = note_park(Self::recv_primary(&mut self.primary_lookahead, &mut self.rx)) => {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                let started = primary_run.start(std::time::Instant::now());
+                                let started = primary_run.start(std::time::Instant::now(), parked);
                                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                                     manager.handle_update(update);
                                 });
@@ -6118,7 +6133,6 @@ impl RibManager {
                                     started,
                                     std::time::Instant::now(),
                                     self.flush_poll_budget,
-                                    self.primary_backlog(),
                                 ) {
                                     tokio::task::yield_now().await;
                                 }
@@ -6183,11 +6197,11 @@ impl RibManager {
                             None => query_rx_open = false,
                         }
                     }
-                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx) => {
+                    (update, parked) = note_park(Self::recv_primary(&mut self.primary_lookahead, &mut self.rx)) => {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                let started = primary_run.start(std::time::Instant::now());
+                                let started = primary_run.start(std::time::Instant::now(), parked);
                                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                                     manager.handle_update(update);
                                 });
@@ -6197,7 +6211,6 @@ impl RibManager {
                                     started,
                                     std::time::Instant::now(),
                                     self.flush_poll_budget,
-                                    self.primary_backlog(),
                                 ) {
                                     tokio::task::yield_now().await;
                                 }
