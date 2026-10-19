@@ -48,8 +48,9 @@ rustbgpd-gobgp-bridge \
 | `--allow-non-loopback` | Serve on a non-loopback address. Read the security section first. |
 
 The bridge starts while the daemon is down and connects on the next request.
-It logs each applied or refused request to stderr; set `RUST_LOG` to change
-the level.
+It logs each applied or refused request to stderr, with the daemon's outcome
+(for example `Created`, `Unchanged`, `Deleted` or `NotPresent`), since
+GoBGP's response has no field for it. Set `RUST_LOG` to change the level.
 
 ## Security
 
@@ -106,16 +107,20 @@ dropped silently.
 | Path identifier | `identifier`, passed through as the injected path id. |
 | Attributes | ORIGIN; NEXT_HOP (IPv4); MP_REACH_NLRI (IPv6, GoBGP's shape); COMMUNITIES; AS_PATH with four-octet AS_SEQUENCE segments; MULTI_EXIT_DISC; LOCAL_PREF. Each type at most once. |
 | Announce | `is_withdraw = false` becomes `InjectionService.AddPath`. A next hop is required. A missing ORIGIN means IGP. |
-| Withdraw | `is_withdraw = true` becomes `InjectionService.DeletePath`. Attributes are checked but not used, as GoBGP does. Withdrawing a route that is not present succeeds. |
+| Withdraw | `is_withdraw = true` becomes `InjectionService.DeletePath` with `allow_missing`. Attributes are checked but not used, as GoBGP does. Withdrawing a route that is not present succeeds. |
 | Response | A UUID derived from (family, prefix, path id). Repeated requests for the same path return the same UUID. |
 
 GoBGP's IPv6 shape puts the prefix in `nlri_binary` and the next hop in an
 MP_REACH_NLRI attribute. The MP_REACH_NLRI must be IPv6 unicast with one
 16-octet next hop. Any NLRI inside it must be the same prefix.
 
-A next hop of `0.0.0.0` or `::`, which GoBGP treats as its own address, is
-refused with `FAILED_PRECONDITION` until rustbgpd supports next-hop-self for
-injected routes. Configure an explicit next hop in the detector.
+A next hop of `0.0.0.0` or `::`, the usual detector default, means
+next-hop-self. The daemon stores the route with the unspecified next hop and
+advertises it with its own address on each session, as GoBGP does for eBGP
+and iBGP peers. Route listings show `0.0.0.0` or `::`. An IPv6 route goes
+only to sessions that have a local IPv6 next hop. See
+[next-hop self](../../docs/reference/api.md#next-hop-self) in the API
+reference for the exact rules.
 
 A request succeeds only after rustbgpd has acknowledged the change to its
 local RIB. It does not mean that any peer has received the route. Daemon
