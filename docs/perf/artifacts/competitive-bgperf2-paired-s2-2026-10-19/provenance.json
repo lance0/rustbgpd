@@ -1,0 +1,51 @@
+{
+  "measured_on": "2026-10-19",
+  "rustbgpd_source_commit": "3e3fba0de8f1955c3b979ac3705827636dc886e4",
+  "bgperf2_revision": "1a2648da73b4e89e2a6ad0ce00367ca8f665eb73",
+  "target_read_pairing_window_ms": [
+    -500.0,
+    50.0
+  ],
+  "testers": [
+    {
+      "count": 1,
+      "daemon": "bird",
+      "image": "bgperf/bird:latest",
+      "image_id": "sha256:e5e814ba77bae6cfbc9ced5a0efff591b6c69511deab94d76b13b0dfd8c3d795",
+      "version": "2.19.2"
+    }
+  ],
+  "monitor": {
+    "daemon": "gobgp",
+    "image": "bgperf/gobgp:4.8.0",
+    "image_id": "sha256:f91cfada87a38ad9de62ec4bae6f59e83745f1da9c7dd4616541b51a30d312f8",
+    "version": "4.8.0"
+  },
+  "targets": [
+    {
+      "daemon": "bird",
+      "image": "bgperf/bird:2.19.3-qq1014",
+      "image_id": "sha256:400ffe13fad62409968eaef493ace9c7a7f934acd1adffbf8587d8b42bc41ff6",
+      "version": "2.19.3"
+    },
+    {
+      "daemon": "bird",
+      "image": "bgperf/bird:3.3.3-qq1014",
+      "image_id": "sha256:beeeeaa45fe87b72dc88c0d71f88cad5362c3a82f620ba50ceddfe123ccd0c13",
+      "version": "3.3.3"
+    },
+    {
+      "daemon": "gobgp",
+      "image": "bgperf/gobgp:4.10.0-qq1014",
+      "image_id": "sha256:7501fc382cef3981ef3ac6aad0abbb3fd67b7753d175b95a7a1fba07b1488fe6",
+      "version": "4.10.0"
+    },
+    {
+      "daemon": "rustbgpd",
+      "image": "bgperf/rustbgpd:qq1019d-3e3fba0de",
+      "image_id": "sha256:9e5afded9a636a84f2a526059d31f98603a72c87415e1e4a74450b72d96c7d5e",
+      "neighbor_poll_mode": "poll1",
+      "version": "rustbgpd 0.78.0"
+    }
+  ]
+}

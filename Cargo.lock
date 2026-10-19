@@ -3235,6 +3235,7 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
+ "hyper-util",
  "libc",
  "nix 0.31.3",
  "prometheus",
@@ -3339,6 +3340,27 @@ dependencies = [
  "proptest",
  "rustbgpd-wire",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rustbgpd-gobgp-bridge"
+version = "0.78.0"
+dependencies = [
+ "clap",
+ "hyper-util",
+ "prost",
+ "prost-types",
+ "protoc-bin-vendored",
+ "rustbgpd-wire",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

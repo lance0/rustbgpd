@@ -1,0 +1,38 @@
+[package]
+publish = false
+name = "rustbgpd-gobgp-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Accepts GoBGP v3 AddPath calls from RTBH detectors and applies them through the rustbgpd injection API"
+
+[lib]
+name = "rustbgpd_gobgp_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustbgpd-gobgp-bridge"
+path = "src/main.rs"
+
+[dependencies]
+rustbgpd-wire.workspace = true
+clap.workspace = true
+hyper-util = { version = "0.1", features = ["tokio"] }
+prost.workspace = true
+prost-types.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal"] }
+tonic.workspace = true
+tonic-prost.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1152,7 +1152,7 @@ struct Ctx {
     // Uniform IPv4-only modes retain their historical per-member size.
     per_peer: u32,
     totals: [u32; 2],
-    // Armed only during a dual-stack reload; timestamps follow successful socket writes.
+    // Armed for the control window and a dual-stack reload; timestamps follow successful socket writes.
     churn_writes: Mutex<Option<Vec<(u64, u8)>>>,
     daemon: SocketAddr,
     obs: Vec<Obs>,
@@ -2179,9 +2179,9 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                             writer.shutdown().await.map_err(|e| format!("shutdown: {e}"))?;
                             return Ok(());
                         }
-                        if dualstack() {
-                            if let Some(churner) = churner_index(writer_ctx.n_peers, i) {
-                                let written_at = now_us(&writer_ctx);
+                        if let Some(churner) = churner_index(writer_ctx.n_peers, i) {
+                            let written_at = now_us(&writer_ctx);
+                            if writer_ctx.churn_writes.lock().unwrap().is_some() {
                                 let family = churn_family(&msg, churner);
                                 if family != 0 {
                                     if let Some(writes) = writer_ctx.churn_writes.lock().unwrap().as_mut() {
@@ -3864,6 +3864,7 @@ fn start_churn(no_churn: bool, stubs: &[Stub], ctx: &Arc<Ctx>) -> Vec<tokio::tas
         return Vec::new();
     }
     let mut churn_tasks = Vec::new();
+    let start = tokio::time::Instant::now();
     // The last CHURNERS stubs flap a dedicated block.
     for c in 0..CHURNERS {
         let i = ctx.n_peers - CHURNERS + c;
@@ -3872,13 +3873,10 @@ fn start_churn(no_churn: bool, stubs: &[Stub], ctx: &Arc<Ctx>) -> Vec<tokio::tas
         let block6: Vec<Ipv6Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix6(c, j)).collect();
         let cctx = Arc::clone(ctx);
         churn_tasks.push(tokio::spawn(async move {
-            // Stagger churners across the interval.
-            tokio::time::sleep(Duration::from_millis(
-                u64::from(c) * CHURN_MS / u64::from(CHURNERS),
-            ))
-            .await;
+            let mut tick = churn_ticker(start, c);
             let mut announced = false;
             loop {
+                tick.tick().await;
                 let msg = if announced {
                     withdraw_msg(&block)
                 } else {
@@ -3906,11 +3904,62 @@ fn start_churn(no_churn: bool, stubs: &[Stub], ctx: &Arc<Ctx>) -> Vec<tokio::tas
                     }
                 }
                 cctx.churn_cycles.fetch_add(1, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_millis(CHURN_MS)).await;
             }
         }));
     }
     churn_tasks
+}
+
+/// Churner `c`'s offset within the shared churn period: the churners are
+/// evenly phased, `CHURN_MS / CHURNERS` apart.
+fn churn_phase(c: u32) -> Duration {
+    Duration::from_micros(u64::from(c) * CHURN_MS * 1000 / u64::from(CHURNERS))
+}
+
+/// Churner `c`'s flap schedule: a fixed grid at `start + churn_phase(c) +
+/// k * CHURN_MS`. A sleep after each flap re-anchors to the late wake-up, so a
+/// stall shared by every churner collapsed their phases for the rest of the run
+/// and left a gap of most of a period in the merged write stream. `Skip` fires
+/// a late flap once and then returns to the grid, keeping the phases apart.
+fn churn_ticker(start: tokio::time::Instant, c: u32) -> tokio::time::Interval {
+    let mut tick =
+        tokio::time::interval_at(start + churn_phase(c), Duration::from_millis(CHURN_MS));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick
+}
+
+/// Twice the nominal merged churner write spacing (`CHURN_MS / CHURNERS`,
+/// 15.625 ms): above it, the control window's observer gaps include a hole in
+/// the harness's own churn stream rather than measuring the daemon.
+const CONTROL_CHURN_GAP_BOUND_US: u64 = 2 * CHURN_MS * 1000 / CHURNERS as u64;
+
+/// Largest gap (µs) in the merged churner write stream over [s_us, e_us],
+/// including the leading and trailing edges as [`max_gap_ms`] does.
+fn churn_write_max_gap_us(writes: &[(u64, u8)], s_us: u64, e_us: u64) -> u64 {
+    let mut times: Vec<u64> = writes
+        .iter()
+        .map(|&(t, _)| t)
+        .filter(|t| (s_us..=e_us).contains(t))
+        .collect();
+    times.sort_unstable();
+    let mut last = s_us;
+    let mut max_gap = 0;
+    for t in times.into_iter().chain([e_us]) {
+        max_gap = max_gap.max(t - last);
+        last = t;
+    }
+    max_gap
+}
+
+/// The INVALID reason when the control window's churn stream was bunched.
+fn control_churn_invalid(max_gap_us: u64) -> Option<String> {
+    (max_gap_us > CONTROL_CHURN_GAP_BOUND_US).then(|| {
+        format!(
+            "control-window churner writes left a {:.1} ms gap, above the {:.2} ms bound (2x the {CHURN_MS} ms / {CHURNERS} churner spacing); observer gaps would measure the harness",
+            max_gap_us as f64 / 1000.0,
+            CONTROL_CHURN_GAP_BOUND_US as f64 / 1000.0,
+        )
+    })
 }
 
 fn no_churn_allowed(
@@ -4705,9 +4754,13 @@ fn main() {
         }
 
         // --- Control window. ---
+        if !no_churn {
+            *ctx.churn_writes.lock().unwrap() = Some(Vec::new());
+        }
         let cs = now_us(&ctx);
         tokio::time::sleep(Duration::from_secs(control_secs)).await;
         let ce = now_us(&ctx);
+        let control_churn_writes = ctx.churn_writes.lock().unwrap().take();
         let gaps: Vec<f64> = (0..n_peers as usize)
             .map(|i| max_gap_ms(&ctx, i, cs, ce, true))
             .collect();
@@ -4721,6 +4774,20 @@ fn main() {
             }
         }
         println!("control_rss_mib {}", rss_mib(pid));
+        if let Some(writes) = control_churn_writes {
+            let gap_us = churn_write_max_gap_us(&writes, cs, ce);
+            println!(
+                "control_churn_write_maxgap_ms {:.1} bound_ms {:.2} writes {}",
+                gap_us as f64 / 1000.0,
+                CONTROL_CHURN_GAP_BOUND_US as f64 / 1000.0,
+                writes.len()
+            );
+            // The iBGP-RR soak reports no gap-based stall, so it only logs the line.
+            if let Some(reason) = control_churn_invalid(gap_us).filter(|_| ibgp_rr.is_none()) {
+                eprintln!("INVALID: {reason}");
+                std::process::exit(3);
+            }
+        }
 
         // --- Flapstorm mode: an alternative to the reload loop. ---
         if let Some(k) = flapstorm {
@@ -6927,6 +6994,81 @@ mod tests {
             (1, Some(12), Some(12))
         );
         assert_eq!(churn_window(&writes, FAMILY_V6, 13, 20), (0, None, None));
+    }
+
+    /// Two seconds of churner writes (µs) with each churner at its own offset in the period.
+    fn churn_stream(offsets_us: [u64; CHURNERS as usize]) -> Vec<(u64, u8)> {
+        let mut writes: Vec<(u64, u8)> = (0..16)
+            .flat_map(|k| offsets_us.map(|o| (1_000_000 + o + k * CHURN_MS * 1000, FAMILY_V4)))
+            .collect();
+        writes.reverse(); // writer tasks push out of order
+        writes
+    }
+
+    #[test]
+    fn control_churn_gap_invalidates_only_a_bunched_write_stream() {
+        assert_eq!(CONTROL_CHURN_GAP_BOUND_US, 31_250);
+        let (s, e) = (1_000_000, 1_000_000 + 15 * CHURN_MS * 1000);
+        let even = churn_stream(std::array::from_fn(|c| {
+            churn_phase(c as u32).as_micros() as u64
+        }));
+        assert_eq!(churn_write_max_gap_us(&even, s, e), 15_625);
+        assert_eq!(control_churn_invalid(15_625), None);
+        // The 2026-10-19 shape: six churners collapsed onto one phase.
+        let bunched = churn_stream([0, 0, 0, 17_000, 29_400, 0, 0, 0]);
+        let gap = churn_write_max_gap_us(&bunched, s, e);
+        assert_eq!(gap, 95_600);
+        let reason = control_churn_invalid(gap).expect("bunched stream is INVALID");
+        assert!(reason.contains("95.6 ms gap"), "{reason}");
+        // The bound itself is still valid; leading/trailing edges count.
+        assert_eq!(control_churn_invalid(31_250), None);
+        assert!(control_churn_invalid(31_251).is_some());
+        assert_eq!(churn_write_max_gap_us(&even, s, e + 149_375), 40_000);
+        assert_eq!(churn_write_max_gap_us(&[], s, s + 50_000), 50_000);
+    }
+
+    #[test]
+    fn churn_phases_are_even_across_the_period() {
+        let spacing = Duration::from_micros(CHURN_MS * 1000 / u64::from(CHURNERS));
+        assert_eq!(churn_phase(0), Duration::ZERO);
+        for c in 1..CHURNERS {
+            assert_eq!(churn_phase(c) - churn_phase(c - 1), spacing);
+        }
+        assert_eq!(
+            churn_phase(CHURNERS - 1) + spacing,
+            Duration::from_millis(CHURN_MS)
+        );
+    }
+
+    /// A stall shared by every churner must not collapse their phases: after
+    /// it, each churner's flaps return to its own grid slot.
+    #[tokio::test(start_paused = true)]
+    async fn churn_ticker_keeps_phase_after_a_shared_stall() {
+        let start = tokio::time::Instant::now();
+        let mut ticks: Vec<_> = (0..CHURNERS).map(|c| churn_ticker(start, c)).collect();
+        for tick in &mut ticks {
+            tick.tick().await;
+        }
+        tokio::time::advance(Duration::from_millis(3 * CHURN_MS + 20)).await;
+        for _ in 0..3 {
+            for (c, tick) in ticks.iter_mut().enumerate() {
+                let at = tick.tick().await - start;
+                let slot = at.as_micros() % u128::from(CHURN_MS * 1000);
+                assert_eq!(
+                    slot,
+                    churn_phase(c as u32).as_micros(),
+                    "churner {c} at {at:?}"
+                );
+            }
+        }
+        // The late flap fires once, not as a catch-up burst of missed flaps.
+        let mut tick = churn_ticker(tokio::time::Instant::now(), 3);
+        tick.tick().await;
+        tokio::time::advance(Duration::from_millis(3 * CHURN_MS + 20)).await;
+        tick.tick().await;
+        let at = tick.tick().await;
+        // The timer wheel wakes at millisecond resolution; a burst would be a period stale.
+        assert!(tokio::time::Instant::now() - at < Duration::from_millis(1));
     }
 
     // ---- dual-stack negative cases: packet totals never masquerade as delivery ----

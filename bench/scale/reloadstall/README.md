@@ -810,6 +810,16 @@ acceptance or extend completion. A concurrent-churn campaign must require
 show sender progress; receiver inventory and stable-marker checks remain the
 independent delivery proof.
 
+The eight churners flap on one fixed 125 ms grid, evenly phased 15.625 ms
+apart. A late flap fires once and the churner returns to its grid slot, so a
+stall shared by every churner no longer leaves their phases collapsed. The
+control window prints `control_churn_write_maxgap_ms`: the largest gap in the
+merged churner socket-write stream, edges included. Above the 31.25 ms bound
+(twice the nominal spacing), observer gaps include a hole in the harness's own
+churn stream, so the run prints `INVALID: <reason>` and exits 3 before any
+reload or flapstorm and reports no stall. The iBGP-RR soak logs the row without exiting. `--no-churn` skips
+the check.
+
 The existing 20-member 50/50 receipt is historical. These inventory options
 and overlap rows do not establish asymmetric or 700-member scale proof.
 
