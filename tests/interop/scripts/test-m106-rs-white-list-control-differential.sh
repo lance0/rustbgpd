@@ -220,10 +220,10 @@ render_rustbgpd_config() {
     # exact receipt/config assertion fail before either
     # daemon starts.
     if jq -e \
-        '.clients | length == 4 and ([.[].id] | sort == ["AS64500_1", "AS64501_1", "AS64502_1", "AS64503_1"]) and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
+        '.clients | length == 4 and ([.[].id] | sort == ["AS64500_1", "AS64501_1", "AS64502_1", "AS64503_1"]) and all(.[]; .max_prefixes_ipv4_unicast == 100 and .max_prefixes_ipv6_unicast == 12000)' \
         "$RENDER_DIR/render-receipt.json" >/dev/null 2>&1 \
-        && [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$RENDER_DIR/config.toml")" -eq 4 ] \
-        && [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$RENDER_DIR/config.toml")" -eq 4 ]; then
+        && [ "$(grep -c '^max_prefixes_ipv4_unicast = 100$' "$RENDER_DIR/config.toml")" -eq 4 ] \
+        && [ "$(grep -c '^max_prefixes_ipv6_unicast = 12000$' "$RENDER_DIR/config.toml")" -eq 4 ]; then
         ok "render receipt and config carry all 4 members with exact 100/12000 limits"
     else
         fail "render receipt/config missing exact 4-member 100/12000 max-prefix limits"

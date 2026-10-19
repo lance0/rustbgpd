@@ -2275,7 +2275,7 @@
           "minimum": 1
         },
         "max_prefixes": {
-          "description": "Maximum prefixes accepted from this peer before the session is\ntorn down. Unset = unlimited.",
+          "description": "Maximum prefixes accepted from this peer, all families together.\nCrossing it applies `max_prefix_action`: `\"shutdown\"` (default)\ntears the session down with Cease/1, latched unless\n`max_prefix_restart_seconds` is set; `\"warning\"` logs and keeps\naccepting. `\"block\"` applies only to the per-family bounds and\nis rejected while this is set. Unset = unlimited.",
           "type": [
             "integer",
             "null"
@@ -2284,12 +2284,13 @@
           "minimum": 0
         },
         "max_prefixes_ipv4": {
-          "description": "Maximum unique IPv4-unicast prefixes accepted from this peer\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes` (ADR-0108). Unset = unlimited.",
+          "description": "Deprecated spelling of `max_prefixes_ipv4_unicast`, still accepted. Set only one of the two.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint32",
+          "deprecated": true,
           "minimum": 0
         },
         "max_prefixes_ipv4_flowspec": {
@@ -2310,13 +2311,23 @@
           "format": "uint32",
           "minimum": 0
         },
-        "max_prefixes_ipv6": {
-          "description": "Maximum unique IPv6-unicast prefixes accepted from this peer\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes` (ADR-0108). Unset = unlimited.",
+        "max_prefixes_ipv4_unicast": {
+          "description": "Maximum unique accepted (post-import-policy) IPv4-unicast\nprefixes from this peer before `max_prefix_action` applies\n(Cease/1 carrying the AFI/SAFI under `shutdown`). Enforced\nindependently of `max_prefixes` (ADR-0108). Unset = unlimited.\nThe earlier spelling `max_prefixes_ipv4` is still accepted.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6": {
+          "description": "Deprecated spelling of `max_prefixes_ipv6_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
           "minimum": 0
         },
         "max_prefixes_ipv6_flowspec": {
@@ -2330,6 +2341,15 @@
         },
         "max_prefixes_ipv6_labeled_unicast": {
           "description": "Maximum unique accepted IPv6 labeled-unicast prefixes\nfrom this peer, Add-Path paths collapsed, before\n`max_prefix_action` applies (Cease/1 carrying the AFI/SAFI\nunder `shutdown`). Enforced independently of every other\nbound. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_unicast": {
+          "description": "Maximum unique accepted (post-import-policy) IPv6-unicast\nprefixes from this peer before `max_prefix_action` applies\n(Cease/1 carrying the AFI/SAFI under `shutdown`). Enforced\nindependently of `max_prefixes` (ADR-0108). Unset = unlimited.\nThe earlier spelling `max_prefixes_ipv6` is still accepted.",
           "type": [
             "integer",
             "null"
@@ -2365,7 +2385,17 @@
           "minimum": 0
         },
         "max_prefixes_out_ipv4": {
-          "description": "Maximum distinct IPv4-unicast prefixes advertised TO this peer\n(ADR-0113). Excess net-new prefixes are withheld while the session\nstays established; nothing already advertised is withdrawn. Unset =\nunlimited.",
+          "description": "Deprecated spelling of `max_prefixes_out_ipv4_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
+          "minimum": 1
+        },
+        "max_prefixes_out_ipv4_unicast": {
+          "description": "Maximum distinct IPv4-unicast prefixes advertised TO this peer\n(ADR-0113). Excess net-new prefixes are withheld while the session\nstays established; nothing already advertised is withdrawn. Unset =\nunlimited. The earlier spelling `max_prefixes_out_ipv4` is still\naccepted.",
           "type": [
             "integer",
             "null"
@@ -2374,7 +2404,17 @@
           "minimum": 1
         },
         "max_prefixes_out_ipv6": {
-          "description": "IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113).",
+          "description": "Deprecated spelling of `max_prefixes_out_ipv6_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
+          "minimum": 1
+        },
+        "max_prefixes_out_ipv6_unicast": {
+          "description": "IPv6-unicast sibling of `max_prefixes_out_ipv4_unicast` (ADR-0113).\nThe earlier spelling `max_prefixes_out_ipv6` is still accepted.",
           "type": [
             "integer",
             "null"
@@ -2383,7 +2423,17 @@
           "minimum": 1
         },
         "max_prefixes_received_ipv4": {
-          "description": "Maximum unique IPv4-unicast prefixes this peer may announce,\ncounted before import policy (accepted and rejected alike),\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes_ipv4` (ADR-0108 amendment).\nUnset = unlimited.",
+          "description": "Deprecated spelling of `max_prefixes_received_ipv4_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
+          "minimum": 0
+        },
+        "max_prefixes_received_ipv4_unicast": {
+          "description": "Maximum unique IPv4-unicast prefixes this peer may announce,\ncounted before import policy (accepted and rejected alike),\nbefore `max_prefix_action` applies (Cease/1 carrying the\nAFI/SAFI under `shutdown`). Enforced independently of\n`max_prefixes_ipv4_unicast` (ADR-0108 amendment). Unset =\nunlimited. The earlier spelling `max_prefixes_received_ipv4`\nis still accepted.",
           "type": [
             "integer",
             "null"
@@ -2392,7 +2442,17 @@
           "minimum": 0
         },
         "max_prefixes_received_ipv6": {
-          "description": "Maximum unique IPv6-unicast prefixes this peer may announce,\ncounted before import policy (accepted and rejected alike),\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes_ipv6` (ADR-0108 amendment).\nUnset = unlimited.",
+          "description": "Deprecated spelling of `max_prefixes_received_ipv6_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
+          "minimum": 0
+        },
+        "max_prefixes_received_ipv6_unicast": {
+          "description": "Maximum unique IPv6-unicast prefixes this peer may announce,\ncounted before import policy (accepted and rejected alike),\nbefore `max_prefix_action` applies (Cease/1 carrying the\nAFI/SAFI under `shutdown`). Enforced independently of\n`max_prefixes_ipv6_unicast` (ADR-0108 amendment). Unset =\nunlimited. The earlier spelling `max_prefixes_received_ipv6`\nis still accepted.",
           "type": [
             "integer",
             "null"
@@ -2908,12 +2968,13 @@
           "minimum": 0
         },
         "max_prefixes_ipv4": {
-          "description": "IPv4-unicast prefix limit inherited by neighbors in this group.\nSee the neighbor-level `max_prefixes_ipv4`.",
+          "description": "Deprecated spelling of `max_prefixes_ipv4_unicast`, still accepted. Set only one of the two.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint32",
+          "deprecated": true,
           "minimum": 0
         },
         "max_prefixes_ipv4_flowspec": {
@@ -2934,13 +2995,23 @@
           "format": "uint32",
           "minimum": 0
         },
-        "max_prefixes_ipv6": {
-          "description": "IPv6-unicast prefix limit inherited by neighbors in this group.\nSee the neighbor-level `max_prefixes_ipv6`.",
+        "max_prefixes_ipv4_unicast": {
+          "description": "IPv4-unicast prefix limit inherited by neighbors in this group.\nSee the neighbor-level `max_prefixes_ipv4_unicast`.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6": {
+          "description": "Deprecated spelling of `max_prefixes_ipv6_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
           "minimum": 0
         },
         "max_prefixes_ipv6_flowspec": {
@@ -2954,6 +3025,15 @@
         },
         "max_prefixes_ipv6_labeled_unicast": {
           "description": "Per-family limit inherited by neighbors in this group. See\nthe neighbor-level `max_prefixes_ipv6_labeled_unicast`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6_unicast": {
+          "description": "IPv6-unicast prefix limit inherited by neighbors in this group.\nSee the neighbor-level `max_prefixes_ipv6_unicast`.",
           "type": [
             "integer",
             "null"
@@ -2989,7 +3069,17 @@
           "minimum": 0
         },
         "max_prefixes_out_ipv4": {
-          "description": "Outbound IPv4-unicast prefix maximum inherited by neighbors in this\ngroup. See the neighbor-level `max_prefixes_out_ipv4`.",
+          "description": "Deprecated spelling of `max_prefixes_out_ipv4_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
+          "minimum": 1
+        },
+        "max_prefixes_out_ipv4_unicast": {
+          "description": "Outbound IPv4-unicast prefix maximum inherited by neighbors in this\ngroup. See the neighbor-level `max_prefixes_out_ipv4_unicast`.",
           "type": [
             "integer",
             "null"
@@ -2998,7 +3088,17 @@
           "minimum": 1
         },
         "max_prefixes_out_ipv6": {
-          "description": "Outbound IPv6-unicast prefix maximum inherited by neighbors in this\ngroup. See the neighbor-level `max_prefixes_out_ipv6`.",
+          "description": "Deprecated spelling of `max_prefixes_out_ipv6_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
+          "minimum": 1
+        },
+        "max_prefixes_out_ipv6_unicast": {
+          "description": "Outbound IPv6-unicast prefix maximum inherited by neighbors in this\ngroup. See the neighbor-level `max_prefixes_out_ipv6_unicast`.",
           "type": [
             "integer",
             "null"
@@ -3007,7 +3107,17 @@
           "minimum": 1
         },
         "max_prefixes_received_ipv4": {
-          "description": "Pre-policy IPv4-unicast received-prefix limit inherited by\nneighbors in this group. See the neighbor-level\n`max_prefixes_received_ipv4`.",
+          "description": "Deprecated spelling of `max_prefixes_received_ipv4_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
+          "minimum": 0
+        },
+        "max_prefixes_received_ipv4_unicast": {
+          "description": "Pre-policy IPv4-unicast received-prefix limit inherited by\nneighbors in this group. See the neighbor-level\n`max_prefixes_received_ipv4_unicast`.",
           "type": [
             "integer",
             "null"
@@ -3016,7 +3126,17 @@
           "minimum": 0
         },
         "max_prefixes_received_ipv6": {
-          "description": "Pre-policy IPv6-unicast received-prefix limit inherited by\nneighbors in this group. See the neighbor-level\n`max_prefixes_received_ipv6`.",
+          "description": "Deprecated spelling of `max_prefixes_received_ipv6_unicast`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "deprecated": true,
+          "minimum": 0
+        },
+        "max_prefixes_received_ipv6_unicast": {
+          "description": "Pre-policy IPv6-unicast received-prefix limit inherited by\nneighbors in this group. See the neighbor-level\n`max_prefixes_received_ipv6_unicast`.",
           "type": [
             "integer",
             "null"

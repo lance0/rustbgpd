@@ -187,8 +187,8 @@ struct BgpAcc {
     hold_time: Option<u16>,
     keepalive: Option<u16>,
     families: Vec<String>,
-    max_prefixes_ipv4: Option<u32>,
-    max_prefixes_ipv6: Option<u32>,
+    max_prefixes_ipv4_unicast: Option<u32>,
+    max_prefixes_ipv6_unicast: Option<u32>,
     auth_present: bool,
     admin_down: Option<bool>,
 }
@@ -498,9 +498,9 @@ fn channel_stmt(model: &mut Model, stack: &mut [Frame], ipv6: bool, line: usize,
                     stack.iter_mut().rev().find(|f| matches!(f, Frame::Bgp(_)))
                 {
                     if ipv6 {
-                        acc.max_prefixes_ipv6 = Some(limit);
+                        acc.max_prefixes_ipv6_unicast = Some(limit);
                     } else {
-                        acc.max_prefixes_ipv4 = Some(limit);
+                        acc.max_prefixes_ipv4_unicast = Some(limit);
                     }
                 }
                 return;
@@ -535,8 +535,8 @@ fn finalize_bgp(model: &mut Model, acc: BgpAcc) {
             remote_asn: acc.remote_asn,
             hold_time: acc.hold_time,
             families: acc.families,
-            max_prefixes_ipv4: acc.max_prefixes_ipv4,
-            max_prefixes_ipv6: acc.max_prefixes_ipv6,
+            max_prefixes_ipv4_unicast: acc.max_prefixes_ipv4_unicast,
+            max_prefixes_ipv6_unicast: acc.max_prefixes_ipv6_unicast,
             auth_present: acc.auth_present,
             admin_down: acc.admin_down,
             admin_down_reason: None,
@@ -560,8 +560,8 @@ fn finalize_bgp(model: &mut Model, acc: BgpAcc) {
         peer_group: acc.from,
         hold_time: acc.hold_time,
         families: acc.families,
-        max_prefixes_ipv4: acc.max_prefixes_ipv4,
-        max_prefixes_ipv6: acc.max_prefixes_ipv6,
+        max_prefixes_ipv4_unicast: acc.max_prefixes_ipv4_unicast,
+        max_prefixes_ipv6_unicast: acc.max_prefixes_ipv6_unicast,
         auth_present: acc.auth_present,
         admin_down: acc.admin_down,
         admin_down_reason: None,

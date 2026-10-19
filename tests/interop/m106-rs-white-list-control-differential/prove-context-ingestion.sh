@@ -94,12 +94,12 @@ diff <(jq -S '{clients, warnings}' "$WORK/render-real/render-receipt.json") \
 # fixture makes the earlier byte-for-byte pinned-image comparison fail.
 for render in render-real render-hand; do
     jq -e \
-        '.clients | length == 4 and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
+        '.clients | length == 4 and all(.[]; .max_prefixes_ipv4_unicast == 100 and .max_prefixes_ipv6_unicast == 12000)' \
         "$WORK/$render/render-receipt.json" >/dev/null \
         || die "$render receipt does not carry all four exact 100/12000 limits"
-    [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$WORK/$render/config.toml")" -eq 4 ] \
+    [ "$(grep -c '^max_prefixes_ipv4_unicast = 100$' "$WORK/$render/config.toml")" -eq 4 ] \
         || die "$render config does not emit exactly four IPv4 limits of 100"
-    [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$WORK/$render/config.toml")" -eq 4 ] \
+    [ "$(grep -c '^max_prefixes_ipv6_unicast = 12000$' "$WORK/$render/config.toml")" -eq 4 ] \
         || die "$render config does not emit exactly four IPv6 limits of 12000"
     jq -e '
         .schema == "rustbgpd.arouteserver-reject-communities.v1" and

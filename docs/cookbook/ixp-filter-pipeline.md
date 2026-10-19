@@ -79,9 +79,9 @@ ARouteServer leaves resolved limit values in the context; a zero family
 limit is likewise treated as unset, and a restart timer is emitted only with a
 positive family limit. `count_rejected_routes` selects the counting model:
 ARouteServer 1.23.2 defaults it to `true`, which renders the pre-policy
-`max_prefixes_received_ipv4`/`_ipv6` bounds (every unicast prefix the member
+`max_prefixes_received_ipv4_unicast`/`_ipv6_unicast` bounds (every unicast prefix the member
 announces counts, accepted or rejected); `false` renders the accepted-route
-`max_prefixes_ipv4`/`_ipv6` bounds.
+`max_prefixes_ipv4_unicast`/`_ipv6_unicast` bounds.
 
 The command's output format is arouteserver's, not ours: 1.23.2 emits
 a *sectioned report* (per-key heading plus a YAML fragment). The

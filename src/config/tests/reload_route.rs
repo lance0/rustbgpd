@@ -651,7 +651,10 @@ fn diff_rejects_sequential_candidate_adding_group_with_file_only_fields() {
     );
     for (field, line) in [
         ("prefix_orf_receive", "prefix_orf_receive = true"),
-        ("max_prefixes_out_ipv4", "max_prefixes_out_ipv4 = 100"),
+        (
+            "max_prefixes_out_ipv4_unicast",
+            "max_prefixes_out_ipv4_unicast = 100",
+        ),
     ] {
         let added = rs(&format!(
             "{md5}\n[peer_groups.edge]\nhold_time = 90\n{line}\n"

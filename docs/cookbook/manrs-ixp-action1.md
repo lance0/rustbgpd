@@ -146,8 +146,8 @@ route_server_client = true
 role = "route_server"
 import_policy_chain = ["reject-rpki-invalid", "member-a-irr"]
 export_policy_chain = ["rs-transparent-export"]
-max_prefixes_ipv4 = 10000
-max_prefixes_ipv6 = 2000
+max_prefixes_ipv4_unicast = 10000
+max_prefixes_ipv6_unicast = 2000
 max_prefix_restart_seconds = 900
 ```
 
