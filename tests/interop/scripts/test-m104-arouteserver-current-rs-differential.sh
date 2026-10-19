@@ -107,7 +107,7 @@ preflight_m104_inputs() {
     require_file_sha "$LAB_DIR/arouteserver.yml" c3b85f1af54c437ae50b0d4e1502b3a6e95cb2c4b12c255ac1c90cfc9eec5b19
     require_file_sha "$LAB_DIR/bgpq4-stub.sh" cebb06da5c9adff5184652bca877ab7956f137c5d9cd425b7c449ad0e950bb84
     require_file_sha "$POLICY_EXPLAIN_FRAGMENT" 811634752dee124d80be1b0836c61f1a5f20af32b3c94c7fb48536573fd98030
-    require_file_sha "$LAB_DIR/prove-context-ingestion.sh" 638d50ee11b4ff4b55ae888d69ecde0225d4d69a6b6f6b9d7a1250b54e2b2270
+    require_file_sha "$LAB_DIR/prove-context-ingestion.sh" 584194537db219c5b16dc691c6c89d4ab4ab539e436e86ed2e6022a1cea108a7
     require_file_sha "$SCRIPT_DIR/../configs/gobgp-m90-member1.toml" b7d897cb35aa657d469dbc7c35d9bdff2b346dc7169bcf820a331a06866f33e2
     require_file_sha "$SCRIPT_DIR/../configs/gobgp-m90-member2.toml" 1cfea7eee37eb764a5ab8f090d7f3f25d252ed18d8ff0b9b7f9dbf5e2defd329
     require_file_sha "$SCRIPT_DIR/../configs/gobgp-m90-member3.toml" 27e3955e743203ba352f177eb5e0899d061520bd14e7c0412a02007073c74f72
