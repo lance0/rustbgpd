@@ -433,5 +433,59 @@ class NestedExperimentalJsonFieldTests(unittest.TestCase):
         self.rejected(contract, "'zz_missing_field' disappeared")
 
 
+
+class CliExitCodeContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.inventory = checker.load_json(checker.INVENTORY_PATH)
+
+    def contract(self):
+        inventory = copy.deepcopy(self.inventory)
+        return inventory, inventory["cli"]["exit_code_contract"]
+
+    def rejected(self, inventory, expected):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            checker.check_cli_exit_codes(inventory)
+        self.assertIn(expected, stderr.getvalue())
+
+    def test_live_contract_passes(self):
+        checker.check_cli_exit_codes(self.inventory)
+
+    def test_usage_code_must_match_the_cli(self):
+        inventory, contract = self.contract()
+        contract["usage_error"] = 2
+        self.rejected(inventory, "is not the CLI's USAGE_EXIT_CODE")
+
+    def test_detailed_code_cannot_reuse_the_usage_code(self):
+        inventory, contract = self.contract()
+        contract["command_exit_codes"]["doctor"] = [0, 1, 2, 64]
+        self.rejected(inventory, "reuses the usage-error code 64")
+
+    def test_pinned_codes_must_match_the_help(self):
+        inventory, contract = self.contract()
+        contract["command_exit_codes"]["config plan"] = [0, 1, 2]
+        self.rejected(inventory, "EXIT_CODES_HELP documents [0, 1, 2, 3]")
+
+    def test_pinned_command_must_be_stable_and_exercised(self):
+        inventory, contract = self.contract()
+        contract["command_exit_codes"] = dict(
+            sorted({**contract["command_exit_codes"], "config import": [0, 1, 2, 3]}.items())
+        )
+        self.rejected(inventory, "reference unpinned CLI paths: ['config import']")
+        inventory, contract = self.contract()
+        inventory["cli"]["stable_command_paths"].append("config rollback")
+        inventory["cli"]["stable_command_paths"].sort()
+        contract["command_exit_codes"] = dict(
+            sorted({**contract["command_exit_codes"], "config rollback": [0, 1, 3]}.items())
+        )
+        self.rejected(inventory, "does not exercise a usage error on 'config rollback'")
+
+    def test_help_text_decoding(self):
+        source = 'const X: &str = "Exit codes:\\n  \\\n    64 usage\\n  \\\n    doctor  0 a / 2 b";'
+        self.assertEqual(
+            checker.rust_str_const(source, "X"), "Exit codes:\n  64 usage\n  doctor  0 a / 2 b"
+        )
+
 if __name__ == "__main__":
     unittest.main()

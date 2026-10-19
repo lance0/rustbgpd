@@ -2085,10 +2085,10 @@ mod tests {
                 rs_control_communities: true,
                 orr_vantage: Some("192.0.2.7".to_string()),
             }),
-            distribution_mode: "add-path".to_string(),
-            role: "rs".to_string(),
+            distribution_mode: "add_path".to_string(),
+            role: "route_server".to_string(),
             strict_role: true,
-            remote_role: "rs-client".to_string(),
+            remote_role: "route_server_client".to_string(),
             role_negotiated: true,
             otc_routes_blocked: 3,
             import_policy_routes_permitted: 8,
@@ -2181,9 +2181,9 @@ mod tests {
         assert_eq!(value["effective_posture"]["interpret_rfc1997"], false);
         assert_eq!(value["effective_posture"]["rs_control_communities"], true);
         assert_eq!(value["effective_posture"]["orr_vantage"], "192.0.2.7");
-        assert_eq!(value["role"], "rs");
+        assert_eq!(value["role"], "route_server");
         assert_eq!(value["strict_role"], true);
-        assert_eq!(value["remote_role"], "rs-client");
+        assert_eq!(value["remote_role"], "route_server_client");
         assert_eq!(value["role_negotiated"], true);
         assert_eq!(value["authentication"], "tcp_ao");
         assert_eq!(value["tcp_ao_health"], "unavailable");

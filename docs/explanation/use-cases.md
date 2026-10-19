@@ -752,7 +752,7 @@ than reflected; see the
 - Spin up a VTEP with a templated FRR config + a gRPC call to register
   the new peer — no config-file write dance.
 - Pipe EVPN route events into your SDN controller or fabric-observability
-  tool via `WatchEvents` / `SubscribeFromEvent` (typed `EvpnRouteEvent`
+  tool via `WatchEvents` (typed `EvpnRouteEvent`
   payloads). BMP route monitoring and MRT `RIB_GENERIC` dumps carry EVPN
   routes as well.
 - Inspect EVPN routes with `rbgp evpn --route-type 2 --rd 65000:100`.

@@ -1,8 +1,22 @@
 # ADR-0072: Durable Event History (Local Outbox)
 
-**Status:** Accepted — implementation shipped v0.24.0+; **default posture
-changed in v0.32.0** (see note below).
+**Status:** Superseded (2026-10-18) — the durable event history was removed
+after v0.78.0; see the note below. Previously: Accepted — implementation
+shipped v0.24.0+; **default posture changed in v0.32.0**.
 **Date:** 2026-05-26
+
+> **2026-10-18 update — removed.** The local outbox, `SubscribeFromEvent`,
+> the `[event_history]` config section, the `bgp_event_outbox_*` metrics and
+> `rbgp events watch --from-event-id` were removed without a deprecation
+> release. The outbox was off by default, had no soak coverage, and
+> duplicated the durable record that BMP collectors, Prometheus and shipped
+> logs already provide. Its main dependent, gNMI `Subscribe ON_CHANGE`, now
+> reads the live session-event stream: a reconnecting client gets a fresh
+> snapshot, which is the standard gNMI recovery path and cannot fail on an
+> expired cursor. A config that still contains `[event_history]` fails to
+> load. The bounded in-memory histories behind `ListSessionEvents`,
+> `ListPolicyEvents`, `ListEvpnEvents` and `ListRouteEvents` are unchanged.
+> The design below is kept as history.
 
 > **v0.32.0 update — default flipped to off (opt-in).** The outbox shipped
 > *default-on*. v0.32.0 bgperf2 benchmarking then showed the always-on cost was

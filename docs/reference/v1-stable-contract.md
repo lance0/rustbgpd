@@ -291,7 +291,10 @@ SRv6 inspection fields.
 The stable CLI set is also explicit. For an inventoried command, the v1 promise
 covers only its command path and command name. Flags, positional arguments,
 defaults, exit behavior, and human-readable output remain outside v1 unless a
-separate inventory entry explicitly pins them. The versioned machine formats
+separate inventory entry explicitly pins them. The exit-code entry pins the exit codes of
+`config diff`, `config plan`, `config apply`, `config confirm`, `config abort`,
+and `doctor`, and reserves 64 for parser and usage errors on every command, so
+a usage error never reads as "changes present" or "red checks". The versioned machine formats
 currently include `rbgp-json/1.1` (explicit `-j --json-version 1` documents),
 `rbgp-rib/1.1` (explicit `--json-lines` accepted-unicast
 listings), `rbgp-ribdiff/1`, and `rbgp-ribsnap/1`. The RIB JSON-lines header
@@ -386,8 +389,7 @@ The [stability guide](stability.md) lists which surfaces are alpha.
 
 ### On-disk runtime state
 
-Files under `runtime_state_dir`, the event store wherever
-`[event_history].path` places it, and the commit-confirm locator beside the
+Files under `runtime_state_dir` and the commit-confirm locator beside the
 launch config are outside the inventoried v1 surface. No inventory digest pins
 their formats, and the migration window above covers configuration and the
 inventoried surfaces, not these files. The
@@ -408,11 +410,7 @@ lists each file's version marker and reader behavior. What holds today:
   target; while one exists, the daemon records no new history and logs a
   warning.
   The BLACKHOLE receipt stays in place and BLACKHOLE kernel mutations are
-  disabled. The event store stays in place, neither migrated nor
-  quarantined. When event history is enabled, the daemon exits at startup
-  if `[event_history].required` is true and otherwise runs live-only
-  without durable history; with event history disabled the store is never
-  opened.
+  disabled.
 - **Binary rollback:** follow the
   [rollback procedure](../how-to/deployment.md#rollback). It settles pending
   commit-confirm transactions and moves `config-history/` aside when the

@@ -8,14 +8,10 @@ pinned dependencies, and nothing here is part of the build.
 
 ## When this beats shelling out to `rbgp`
 
-`rbgp -j events watch --from-event-id N` already emits NDJSON and reconnects
-with exponential backoff (1 s, capped at 30 s) while keeping its filters and
-cursor, so for tailing events on a host that has the binary,
-`subprocess.Popen` around `rbgp` is less code and more robust than a
-hand-rolled gRPC loop. It needs the daemon's durable event history
-(`[event_history] enabled = true`, off by default); plain `rbgp watch` ends
-when its stream ends and does not reconnect. Reach for a Python
-client when **there is no `rbgp` binary on the host** — a containerized
+`rbgp -j events watch` already emits NDJSON, so for tailing events on a host
+that has the binary, `subprocess.Popen` around `rbgp` is less code than a
+hand-rolled gRPC loop. It ends when its stream ends and does not reconnect.
+Reach for a Python client when **there is no `rbgp` binary on the host** — a containerized
 controller or sidecar that talks mTLS from its own identity, gets typed
 protobuf messages instead of parsed JSON, and sets its own per-call deadline
 on every RPC. Both scripts here pass an explicit `timeout=` to every call for

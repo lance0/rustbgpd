@@ -1880,6 +1880,7 @@ def check_cli(inventory: dict) -> None:
             require_id_literal=True,
             stable_command_paths=set(stable_canonical),
         )
+    check_cli_exit_codes(inventory)
     pinned = inventory["cli"]["test_pinned_json_contracts"]
     pinned_ids = [contract["id"] for contract in pinned]
     require_sorted_unique(pinned_ids, "cli.test_pinned_json_contracts")
@@ -1889,6 +1890,76 @@ def check_cli(inventory: dict) -> None:
             f"cli.test_pinned_json_contracts.{contract['id']}",
             require_id_literal=False,
         )
+
+
+def rust_str_const(source: str, name: str) -> str | None:
+    """The value of `const NAME: &str = "...";`, with continuations and `\\n` decoded."""
+    match = re.search(rf'const {re.escape(name)}: &str = "(.*?)";', source, flags=re.DOTALL)
+    if not match:
+        return None
+    return re.sub(r"\\\n\s*", "", match.group(1)).replace("\\n", "\n")
+
+
+def check_cli_exit_codes(inventory: dict) -> None:
+    """Pinned exit codes must match the rendered help, and usage errors stay distinct."""
+    contract = inventory["cli"]["exit_code_contract"]
+    label = "cli.exit_code_contract"
+    usage = contract.get("usage_error")
+    if not isinstance(usage, int) or isinstance(usage, bool):
+        fail(f"{label}.usage_error must be an integer")
+    source_path = ROOT / safe_relative_path(contract["source"], "exit-code contract source")
+    try:
+        source = source_path.read_text()
+    except OSError as error:
+        fail(f"cannot read exit-code contract source {contract['source']}: {error}")
+    if not re.search(rf"const USAGE_EXIT_CODE: i32 = {usage};", source):
+        fail(f"{label}.usage_error {usage} is not the CLI's USAGE_EXIT_CODE")
+    help_text = rust_str_const(source, "EXIT_CODES_HELP")
+    if help_text is None:
+        fail(f"{label}: EXIT_CODES_HELP disappeared from {contract['source']}")
+    if not re.search(rf"^\s*{usage}\s+parser or usage error", help_text, flags=re.MULTILINE):
+        fail(f"{label}: EXIT_CODES_HELP does not document usage errors as {usage}")
+
+    commands = contract.get("command_exit_codes")
+    if not isinstance(commands, dict) or not commands:
+        fail(f"{label}.command_exit_codes must pin at least one command")
+    require_sorted_unique(list(commands), f"{label}.command_exit_codes")
+    check_contract_command_paths(
+        {"command_paths": list(commands)},
+        label,
+        set(inventory["cli"]["stable_command_paths"]),
+    )
+    for command, codes in commands.items():
+        if codes != sorted(set(codes)) or 0 not in codes:
+            fail(f"{label}.{command} codes must be sorted, unique and include 0")
+        if usage in codes:
+            fail(f"{label}.{command} reuses the usage-error code {usage}")
+        line = re.search(
+            rf"^\s*{re.escape(command)}\s{{2,}}(\S.*)$", help_text, flags=re.MULTILINE
+        )
+        if not line:
+            fail(f"{label}.{command} has no EXIT_CODES_HELP line")
+        documented = [int(part.split()[0]) for part in line.group(1).split(" / ")]
+        if documented != codes:
+            fail(f"{label}.{command} pins {codes} but EXIT_CODES_HELP documents {documented}")
+
+    test_path = ROOT / safe_relative_path(contract["test_source"], "exit-code contract test")
+    try:
+        test_source = test_path.read_text()
+    except OSError as error:
+        fail(f"cannot read exit-code contract test {contract['test_source']}: {error}")
+    region = named_rust_test_region(test_source, contract["test"])
+    if not region:
+        fail(f"{label} has no live named contract test")
+    linkage = contract.get("test_linkage")
+    if not linkage or linkage not in region:
+        fail(f"{label} test is not linked to its usage-error code")
+    if not re.search(rf"const {re.escape(linkage)}: i32 = {usage};", test_source):
+        fail(f"{label} test does not assert usage-error code {usage}")
+    for command in commands:
+        words = ", ".join(f'"{word}"' for word in command.split())
+        if f"[{words}" not in region:
+            fail(f"{label} test does not exercise a usage error on {command!r}")
 
 
 def expect_checker_failure(action, expected: str, label: str) -> None:

@@ -239,17 +239,17 @@ measures nothing. `cargo bench --workspace` is not a substitute either: seven
 targets are standalone CLIs rather than criterion harnesses and reject
 criterion's flags.
 
-Run each target explicitly with `-p <crate> --bench <name>`. Twenty exist.
+Run each target explicitly with `-p <crate> --bench <name>`. Nineteen exist.
 Seven build with default features (wire/`codec`, rib/`rib_ops`,
 rib/`export_roster`, policy/`policy_eval`, rpki/`validate`,
-mrt/`snapshot_allocation`, api/`import_roster`); thirteen are
+mrt/`snapshot_allocation`, api/`import_roster`); twelve are
 `bench-internals`-gated (transport/`fanout`, transport/`inbound_attrs`,
 transport/`explain_snapshot`, transport/`outbound_encode`,
 rustbgpd/`fib_projection`, rib/`route_paging`, rib/`evpn_dataplane_query`,
 rib/`dataplane_prefix_paging`, rib/`selection_deferral_release`,
-rib/`gr_end_of_rib`, api/`event_history_producer`, api/`vpn_query_timing`,
+rib/`gr_end_of_rib`, api/`vpn_query_timing`,
 api/`vpn_query_allocation` — the last also requires the api crate's
-`vpn-query-allocation` feature). Seven of the twenty —
+`vpn-query-allocation` feature). Seven of the nineteen —
 `snapshot_allocation`, `route_paging`, `dataplane_prefix_paging`,
 `selection_deferral_release`, `gr_end_of_rib`, `vpn_query_timing`, and
 `vpn_query_allocation` — are standalone measurement CLIs with their own
@@ -1287,7 +1287,7 @@ across copies, and global attribute interning shares one allocation across
 routes with identical attributes, whichever peers they came from. It is
 **distinct from the peak raw container cgroup usage** below — it excludes the
 daemon's operational surfaces
-(event-history, gRPC, telemetry, BFD, the tokio runtime, allocator arenas).
+(gRPC, telemetry, BFD, the tokio runtime, allocator arenas).
 
 ### RR / Route-Server Fanout Shape: 2 In + LocRib + 2 Out
 
@@ -1387,7 +1387,7 @@ peak raw container cgroup usage at scale uses bgperf2.
 | + AdjRibOut capacity hints (v0.30-era) | ~260 MB | 11s |
 | v0.31.0-era — event-history **on** (daemon default then) | ~439 MB | ~11s |
 | v0.31.0-era — event-history off | ~344 MB | ~11s |
-| **v0.32.0 — event-history off (daemon default now)** | **~284 MB** | ~11s |
+| **v0.32.0 — event-history off (default from v0.32.0)** | **~284 MB** | ~11s |
 | **v0.32.0 — event-history on (opt-in)** | **~346 MB** | ~11s |
 
 **v0.32.0 cut 2p/100k peak raw container cgroup usage ~21%** (event-history on:
@@ -1407,21 +1407,18 @@ improved ~9% — see above). Since the ~257–260 MB era the daemon gained
 substantial always-available operational surfaces (BFD, gNMI, ASPA, BGP
 roles/OTC, plus the explain cache — opt-in, default off since v0.61.0) and
 `PathAttribute` grew 72→112 B over that era (it later reached 208 B and is
-48 B on HEAD — see the Type Sizes table above). The single
-biggest contributor is the durable **event-history outbox** (ADR-0072), which
-persists every route event to SQLite: enabling it
-(`[event_history].enabled = true`) adds **~62 MB** raw cgroup usage (~284 →
-~346 MB) **and roughly doubles peak CPU** (~115% → ~239%). Convergence is unchanged at ~11s
-(≈2s route-flood; the outbox is not on the convergence-critical path). Criterion
-and the RIB-only `memory_profile` above remain the regression-tracking surfaces
-for RIB data-structure changes.
+48 B on HEAD — see the Type Sizes table above). At v0.32.0 the single
+biggest contributor was the durable **event-history outbox**
+([ADR-0072](adr/0072-durable-event-history.md)), which persisted every route
+event to SQLite: enabling it added **~62 MB** raw cgroup usage (~284 →
+~346 MB) **and roughly doubled peak CPU** (~115% → ~239%). Convergence was
+unchanged at ~11s (≈2s route-flood; the outbox was not on the
+convergence-critical path). Criterion and the RIB-only `memory_profile` above
+remain the regression-tracking surfaces for RIB data-structure changes.
 
-> **Operator note — the event-history outbox is opt-in as of v0.32.0.** That
-> always-on cost (~62 MB raw cgroup usage + roughly double the peak CPU at 2p/100k) is
-> exactly why: the outbox now defaults to `[event_history].enabled = false`, so
-> the lean numbers above are the default. Deployments that want restart-safe
-> event replay set `enabled = true` and accept the cost. See ADR-0072 and the
-> two deployment profiles in `docs/reference/operations.md`.
+> **Note — the event-history outbox has since been removed.** It became opt-in
+> at v0.32.0 because of that cost and was later removed from the daemon; the
+> "event-history on" rows and receipts are history, not a current option.
 
 The Arc deep-clone fix (`RouteModifications::is_empty()` guard) was the biggest
 memory win: `Arc::make_mut()` was called unconditionally on every route in
@@ -1831,8 +1828,8 @@ cross-daemon memory ranking. An independent whole-daemon dhat heap profile
 live-at-peak heap** to **RIB route-storage map/index bucket arrays** across the
 three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out the
 single largest piece. API / event / metrics operational surfaces were
-**negligible (<1 MB)**. The opt-in event-history outbox adds raw cgroup usage
-when enabled, but that two-peer route-heavy profile does not price a 100-peer
+**negligible (<1 MB)**. The since-removed opt-in event-history outbox added raw
+cgroup usage when enabled, but that two-peer route-heavy profile does not price a 100-peer
 session fleet.
 A controlled 10/100-peer × 10k/100k-route follow-up measures both dimensions
 and attributes 6,150,300 control bytes at 100 ordinary-message peers to eager

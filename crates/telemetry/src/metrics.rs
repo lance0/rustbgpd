@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use prometheus::{
@@ -69,67 +69,6 @@ impl Collector for SessionNotificationDepthCollector {
         let mut families = current_gauge.collect();
         families.extend(high_watermark_gauge.collect());
         families
-    }
-}
-
-const EVENT_OUTBOX_QUEUE_CLOSED: u64 = 1 << 63;
-
-/// Snapshot source for one event-history manager generation's packed queue ledgers.
-pub trait EventOutboxQueueDepthSource: Send + Sync + std::fmt::Debug {
-    fn snapshot(&self) -> [u64; 6];
-}
-
-#[derive(Debug)]
-struct EventOutboxQueueDepthCollector {
-    current: Arc<RwLock<Option<Arc<dyn EventOutboxQueueDepthSource>>>>,
-    desc: Desc,
-}
-
-impl EventOutboxQueueDepthCollector {
-    fn new(current: Arc<RwLock<Option<Arc<dyn EventOutboxQueueDepthSource>>>>) -> Self {
-        Self {
-            current,
-            desc: Desc::new(
-                "bgp_event_outbox_queue_depth".to_string(),
-                "Accepted pending events in the EHM producer queue per category, including a producer handoff between the admission CAS and channel send. Climbs before drops start; an operator early-warning signal.".to_string(),
-                vec!["category".to_string()],
-                std::collections::HashMap::new(),
-            )
-            .expect("valid metric descriptor"),
-        }
-    }
-}
-
-impl Collector for EventOutboxQueueDepthCollector {
-    fn desc(&self) -> Vec<&Desc> {
-        vec![&self.desc]
-    }
-
-    fn collect(&self) -> Vec<MetricFamily> {
-        let source = self
-            .current
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let Some(source) = source else {
-            return Vec::new();
-        };
-        let packed = source.snapshot();
-        let gauges = IntGaugeVec::new(
-            Opts::new(
-                "bgp_event_outbox_queue_depth",
-                "Accepted pending events in the EHM producer queue per category, including a producer handoff between the admission CAS and channel send. Climbs before drops start; an operator early-warning signal.",
-            ),
-            &["category"],
-        )
-        .expect("valid metric definition");
-        for (index, category) in EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES.iter().enumerate() {
-            let depth = packed[index] & !EVENT_OUTBOX_QUEUE_CLOSED;
-            gauges
-                .with_label_values(&[category])
-                .set(i64::try_from(depth).unwrap_or(i64::MAX));
-        }
-        gauges.collect()
     }
 }
 
@@ -340,10 +279,6 @@ const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
     "malformed_attribute_29",
     "default_with_ignored_flex_algo",
 ];
-
-/// Fixed `category` label vocabulary emitted by the event-history manager.
-const EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES: [&str; 6] =
-    ["route", "evpn", "session", "policy", "bfd", "dataplane"];
 
 /// Exact RFC 4271 FSM state vocabulary exported by
 /// `bgp_peer_session_state`.
@@ -847,25 +782,6 @@ struct BgpMetricsInner {
     mrt_last_dump_duration_milliseconds: IntGauge,
     mrt_dump_bytes_written: IntCounter,
     mrt_dump_failures: IntCounterVec,
-
-    // ── Event history outbox (ADR-0072) ───────────────────────
-    event_outbox_committed: IntCounterVec,
-    event_outbox_dropped: IntCounterVec,
-    event_outbox_queue_depth_source: Arc<RwLock<Option<Arc<dyn EventOutboxQueueDepthSource>>>>,
-    event_outbox_db_size_bytes: IntGauge,
-    event_outbox_retention_evicted: IntCounterVec,
-    event_outbox_latest_event_id: IntGauge,
-    event_outbox_open_failures: IntCounter,
-    event_outbox_degraded: IntGauge,
-    event_outbox_storage_failed: IntGauge,
-    /// Number of cursor-gap `StreamLagEvent`s emitted on
-    /// `SubscribeFromEvent` streams because the replay cursor was
-    /// older than the retained floor: the leading gap for a stale
-    /// request cursor, plus one per mid-replay eviction that
-    /// overtook the cursor. Operator signal that
-    /// `[event_history].max_events` / `max_bytes` is undersized
-    /// for the collector reconnect SLA (ADR-0072 PR5).
-    event_outbox_cursor_gap: IntCounter,
 }
 
 /// Prometheus metrics for the BGP daemon.
@@ -2957,72 +2873,6 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
-        // ── Event history outbox (ADR-0072) ─────────────────────
-        let event_outbox_committed = IntCounterVec::new(
-            Opts::new(
-                "bgp_event_outbox_committed_total",
-                "Events durably committed to the local event outbox (ADR-0072) by category.",
-            ),
-            &["category"],
-        )
-        .expect("valid metric definition");
-
-        let event_outbox_dropped = IntCounterVec::new(
-            Opts::new(
-                "bgp_event_outbox_dropped_total",
-                "Events lost before durable storage, or committed events skipped during durable cursor delivery, by category and reason (ADR-0072).",
-            ),
-            &["category", "reason"],
-        )
-        .expect("valid metric definition");
-
-        let event_outbox_queue_depth_source = Arc::new(RwLock::new(None));
-
-        let event_outbox_db_size_bytes = IntGauge::new(
-            "bgp_event_outbox_db_size_bytes",
-            "Combined size of events.db + WAL on disk. The [event_history].max_bytes setting is a retention trigger/target, not a strict filesystem cap.",
-        )
-        .expect("valid metric definition");
-
-        let event_outbox_retention_evicted = IntCounterVec::new(
-            Opts::new(
-                "bgp_event_outbox_retention_evicted_total",
-                "Events evicted by the retention pass, by reason (count_cap or byte_cap).",
-            ),
-            &["reason"],
-        )
-        .expect("valid metric definition");
-
-        let event_outbox_latest_event_id = IntGauge::new(
-            "bgp_event_outbox_latest_event_id",
-            "Latest committed monotonic event_id. Operator sanity check that the daemon is making forward progress.",
-        )
-        .expect("valid metric definition");
-
-        let event_outbox_open_failures = IntCounter::new(
-            "bgp_event_outbox_open_failures_total",
-            "Events DB open failures across the process lifetime. Typically 0 or 1; non-zero means the daemon went into recovery or pass-through (ADR-0072).",
-        )
-        .expect("valid metric definition");
-
-        let event_outbox_degraded = IntGauge::new(
-            "bgp_event_outbox_degraded",
-            "1 = latched durability-impacting loss, delivery skip, or DB open/recovery/quarantine failure since process start; expected shutdown reason=closed drops are excluded. 0 = no such failure observed.",
-        )
-        .expect("valid metric definition");
-
-        let event_outbox_storage_failed = IntGauge::new(
-            "bgp_event_outbox_storage_failed",
-            "1 = the event-history storage thread stopped while the daemon was running; the outbox refuses producer events and durable cursor subscriptions until restart. 0 = no runtime storage failure observed.",
-        )
-        .expect("valid metric definition");
-
-        let event_outbox_cursor_gap = IntCounter::new(
-            "bgp_event_outbox_cursor_gap_total",
-            "Cursor-gap StreamLagEvents emitted on SubscribeFromEvent streams because the replay cursor was older than the retained floor, at subscribe time or when retention overtook a replay in progress. Operator signal that [event_history].max_events / max_bytes is undersized for the collector reconnect SLA (ADR-0072).",
-        )
-        .expect("valid metric definition");
-
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -3687,38 +3537,6 @@ impl BgpMetrics {
         registry
             .register(Box::new(mrt_dump_failures.clone()))
             .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_committed.clone()))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_dropped.clone()))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(EventOutboxQueueDepthCollector::new(Arc::clone(
-                &event_outbox_queue_depth_source,
-            ))))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_db_size_bytes.clone()))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_retention_evicted.clone()))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_latest_event_id.clone()))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_open_failures.clone()))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_degraded.clone()))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_storage_failed.clone()))
-            .expect("metric not already registered");
-        registry
-            .register(Box::new(event_outbox_cursor_gap.clone()))
-            .expect("metric not already registered");
 
         #[cfg(feature = "jemalloc")]
         registry
@@ -3950,16 +3768,6 @@ impl BgpMetrics {
             mrt_last_dump_duration_milliseconds,
             mrt_dump_bytes_written,
             mrt_dump_failures,
-            event_outbox_committed,
-            event_outbox_dropped,
-            event_outbox_queue_depth_source,
-            event_outbox_db_size_bytes,
-            event_outbox_retention_evicted,
-            event_outbox_latest_event_id,
-            event_outbox_open_failures,
-            event_outbox_degraded,
-            event_outbox_storage_failed,
-            event_outbox_cursor_gap,
         }))
     }
 
@@ -6988,112 +6796,6 @@ impl BgpMetrics {
             &[("collector", collector)],
         );
     }
-
-    // ── Event history outbox (ADR-0072) ─────────────────────────
-
-    /// Record one successful durable commit.
-    pub fn record_event_outbox_committed(&self, category: &str) {
-        self.record_event_outbox_committed_by(category, 1);
-    }
-
-    /// Bulk version of [`Self::record_event_outbox_committed`] for a
-    /// committed batch containing `count` events in the same category.
-    pub fn record_event_outbox_committed_by(&self, category: &str, count: u64) {
-        if count == 0 {
-            return;
-        }
-        self.0
-            .event_outbox_committed
-            .with_label_values(&[category])
-            .inc_by(count);
-    }
-
-    /// Record an outbox drop or cursor-delivery skip. `reason` is
-    /// bounded by caller: `queue_full`, `closed`, `db_error`, `shutdown_timeout`,
-    /// `decode_failure`, `opaque_codec`, or `source_lagged`. Call
-    /// [`Self::mark_event_outbox_degraded`] separately when the drop
-    /// represents an operator-visible outbox degradation; shutdown-time
-    /// `closed` drops intentionally do not mark degraded.
-    pub fn record_event_outbox_drop(&self, category: &str, reason: &str) {
-        self.0
-            .event_outbox_dropped
-            .with_label_values(&[category, reason])
-            .inc();
-    }
-
-    /// Bulk version of [`Self::record_event_outbox_drop`] for the case
-    /// where a single upstream signal represents `count` lost events
-    /// — e.g. a `broadcast::error::RecvError::Lagged(missed)` on the
-    /// FIB or BFD bridge, where `missed` events were never seen by
-    /// the bridge body and therefore never enqueued into EHM. Same
-    /// bounded `reason` vocabulary as `record_event_outbox_drop`.
-    pub fn record_event_outbox_drops_by(&self, category: &str, reason: &str, count: u64) {
-        self.0
-            .event_outbox_dropped
-            .with_label_values(&[category, reason])
-            .inc_by(count);
-    }
-
-    /// Bind the current event-history manager generation's queue ledger.
-    pub fn bind_event_outbox_queue_depth_source(
-        &self,
-        source: Arc<dyn EventOutboxQueueDepthSource>,
-    ) {
-        let mut current = self
-            .0
-            .event_outbox_queue_depth_source
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = current.replace(source);
-        drop(current);
-        drop(previous);
-    }
-
-    pub fn set_event_outbox_db_size_bytes(&self, bytes: i64) {
-        self.0.event_outbox_db_size_bytes.set(bytes);
-    }
-
-    pub fn record_event_outbox_retention_evicted(&self, reason: &str, count: u64) {
-        self.0
-            .event_outbox_retention_evicted
-            .with_label_values(&[reason])
-            .inc_by(count);
-    }
-
-    pub fn set_event_outbox_latest_event_id(&self, event_id: i64) {
-        self.0.event_outbox_latest_event_id.set(event_id);
-    }
-
-    pub fn record_event_outbox_open_failure(&self) {
-        self.0.event_outbox_open_failures.inc();
-        self.0.event_outbox_degraded.set(1);
-    }
-
-    pub fn mark_event_outbox_degraded(&self) {
-        self.0.event_outbox_degraded.set(1);
-    }
-
-    /// Latch the runtime storage-failure gauge. A dead store is also a
-    /// durability-impacting failure, so the degraded gauge latches too.
-    pub fn mark_event_outbox_storage_failed(&self) {
-        self.0.event_outbox_storage_failed.set(1);
-        self.0.event_outbox_degraded.set(1);
-    }
-
-    /// Increment the `SubscribeFromEvent` cursor-gap counter. The
-    /// gRPC handler calls this whenever it emits a cursor-gap
-    /// `StreamLagEvent` because the replay cursor was below the
-    /// retention floor (ADR-0072 PR5).
-    pub fn record_event_outbox_cursor_gap(&self) {
-        self.0.event_outbox_cursor_gap.inc();
-    }
-
-    /// Whether the outbox is currently flagged degraded. 1 = at least
-    /// one drop or open failure since process start.
-    #[must_use]
-    pub fn event_outbox_degraded(&self) -> bool {
-        self.0.event_outbox_degraded.get() != 0
-    }
 }
 
 impl Default for BgpMetrics {
@@ -7427,7 +7129,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Mutex;
 
-    use prometheus::{Encoder, core::Collector};
+    use prometheus::Encoder;
 
     /// Epoch assertions and peer reaps share one process-global memo epoch.
     /// Serialize only tests that can advance it; production remains lock-free.
@@ -7525,33 +7227,6 @@ mod tests {
         assert!(samples[0].get_gauge().get_value() > 0.0);
     }
 
-    fn event_outbox_queue_depths(m: &BgpMetrics) -> Vec<(String, f64)> {
-        let Some(family) = m
-            .registry()
-            .gather()
-            .into_iter()
-            .find(|family| family.name() == "bgp_event_outbox_queue_depth")
-        else {
-            return Vec::new();
-        };
-        let mut values = family
-            .get_metric()
-            .iter()
-            .map(|metric| {
-                let category = metric
-                    .get_label()
-                    .iter()
-                    .find(|label| label.name() == "category")
-                    .unwrap()
-                    .value()
-                    .to_owned();
-                (category, metric.get_gauge().get_value())
-            })
-            .collect::<Vec<_>>();
-        values.sort_by(|left, right| left.0.cmp(&right.0));
-        values
-    }
-
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn metrics_handle_is_one_pointer() {
@@ -7627,116 +7302,14 @@ mod tests {
         assert!(!text.contains("bgp_session_state_transitions_total"));
     }
 
-    #[derive(Debug)]
-    struct TestQueueDepthSource([AtomicU64; 6]);
-
-    impl TestQueueDepthSource {
-        fn new(values: [u64; 6]) -> Self {
-            Self(values.map(AtomicU64::new))
-        }
-    }
-
-    impl EventOutboxQueueDepthSource for TestQueueDepthSource {
-        fn snapshot(&self) -> [u64; 6] {
-            self.0.each_ref().map(|value| value.load(Ordering::Acquire))
-        }
-    }
-
-    #[test]
-    fn event_outbox_queue_depth_collector_tracks_only_the_bound_generation() {
-        let metrics = BgpMetrics::new();
-        assert_eq!(
-            event_outbox_queue_depths(&metrics),
-            [] as [(std::string::String, f64); 0]
-        );
-
-        let first = Arc::new(TestQueueDepthSource::new([0; 6]));
-        metrics.bind_event_outbox_queue_depth_source(first.clone());
-        assert_eq!(event_outbox_queue_depths(&metrics).len(), 6);
-        assert!(
-            event_outbox_queue_depths(&metrics)
-                .iter()
-                .all(|(_, depth)| *depth == 0.0)
-        );
-
-        first.0[0].store(EVENT_OUTBOX_QUEUE_CLOSED | 9, Ordering::Release);
-        assert!(event_outbox_queue_depths(&metrics).contains(&("route".to_owned(), 9.0)));
-        first.0[0].store(EVENT_OUTBOX_QUEUE_CLOSED, Ordering::Release);
-        assert!(event_outbox_queue_depths(&metrics).contains(&("route".to_owned(), 0.0)));
-
-        let second = Arc::new(TestQueueDepthSource::new([1, 2, 3, 4, 5, 6]));
-        metrics.bind_event_outbox_queue_depth_source(second);
-        assert_eq!(event_outbox_queue_depths(&metrics).len(), 6);
-        first.0[0].store(42, Ordering::Release);
-        let values = event_outbox_queue_depths(&metrics);
-        assert!(values.contains(&("route".to_owned(), 1.0)));
-        assert!(!values.contains(&("route".to_owned(), 42.0)));
-    }
-
-    #[test]
-    fn event_outbox_committed_single_and_bulk_paths_are_additive() {
-        let metrics = BgpMetrics::new();
-
-        metrics.record_event_outbox_committed_by("session", 0);
-        metrics.record_event_outbox_committed("route");
-        metrics.record_event_outbox_committed_by("route", 4);
-        metrics.record_event_outbox_committed_by("evpn", 3);
-
-        assert_eq!(
-            metrics
-                .0
-                .event_outbox_committed
-                .with_label_values(&["route"])
-                .get(),
-            5
-        );
-        assert_eq!(
-            metrics
-                .0
-                .event_outbox_committed
-                .with_label_values(&["evpn"])
-                .get(),
-            3
-        );
-        assert!(
-            !metrics
-                .0
-                .event_outbox_committed
-                .collect()
-                .iter()
-                .any(|family| family
-                    .get_metric()
-                    .iter()
-                    .flat_map(prometheus::proto::Metric::get_label)
-                    .any(|label| label.value() == "session"))
-        );
-
-        let isolated = BgpMetrics::new();
-        assert_eq!(
-            isolated
-                .0
-                .event_outbox_committed
-                .with_label_values(&["route"])
-                .get(),
-            0
-        );
-    }
-
     #[test]
     fn telemetry_loss_help_matches_exported_contracts() {
         let m = BgpMetrics::new();
         m.record_outbound_route_drop("192.0.2.1");
-        m.record_event_outbox_drop("route", "queue_full");
         let text = gather_text(&m);
 
         assert!(text.lines().any(|line| {
             line == "# HELP bgp_outbound_route_drops_total Outbound BGP work of any address family not handed to the peer writer because its channel was full or closed; the RIB marks the peer dirty and resyncs it."
-        }));
-        assert!(text.lines().any(|line| {
-            line == "# HELP bgp_event_outbox_dropped_total Events lost before durable storage, or committed events skipped during durable cursor delivery, by category and reason (ADR-0072)."
-        }));
-        assert!(text.lines().any(|line| {
-            line == "# HELP bgp_event_outbox_degraded 1 = latched durability-impacting loss, delivery skip, or DB open/recovery/quarantine failure since process start; expected shutdown reason=closed drops are excluded. 0 = no such failure observed."
         }));
     }
 
@@ -10627,7 +10200,6 @@ mod tests {
         m.record_state_transition("10.0.0.2", "idle", "connect");
         // Process-global counters must be untouched.
         m.record_fib_route_installed();
-        m.record_event_outbox_cursor_gap();
 
         m.reap_peer_series("10.0.0.1");
 
@@ -10640,7 +10212,6 @@ mod tests {
         assert!(text.contains(r#"bgp_max_prefix_exceeded_total{peer="10.0.0.2"} 1"#));
         assert!(text.contains(r#"peer="10.0.0.2""#));
         assert!(text.contains("bgp_fib_routes_installed_total 1"));
-        assert!(text.contains("bgp_event_outbox_cursor_gap_total 1"));
     }
 
     #[test]

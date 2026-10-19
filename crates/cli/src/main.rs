@@ -191,9 +191,10 @@ pub enum RouteAspaState {
 // - Empty results: JSON list output prints `[]` (or `{}` for
 //   objects), never nothing; human list output prints a one-line
 //   empty state ("No ... recorded/configured").
-// - Exit codes: parser/usage failures are 2; after parsing, 0 success /
-//   1 error by default, with detailed contracts only where documented. Any
-//   new detailed contract must be added to EXIT_CODES_HELP and after_help.
+// - Exit codes: parser/usage failures are 64 (EX_USAGE), so they never
+//   collide with a detailed code; after parsing, 0 success / 1 error by
+//   default, with detailed contracts only where documented. Any new detailed
+//   contract must be added to EXIT_CODES_HELP and after_help.
 // - Help text: list entries (`about`) are one terse line; details go
 //   in `long_about` (the doc-comment paragraph after a blank line).
 // - Verbs describe behavior: list/get inspect collections/one object; set
@@ -208,13 +209,15 @@ pub enum RouteAspaState {
 const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     0  success\n  \
     1  error (argument validation, declined confirmation, connection, daemon, or runtime failure)\n  \
-    2  parser or usage error\n\n\
+    64 parser or usage error (unknown flag or subcommand, missing or malformed argument)\n\n\
     Detailed contracts after parsing (also in each subcommand's --help):\n  \
     diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
     diff snapshot ...    0 snapshot emitted / 2 refused or malformed input\n  \
-    config diff          0 no changes / 1 error / 2 changes present\n  \
+    config diff          0 no changes / 1 error / 2 changes present / 3 rejected\n  \
     config plan          0 no changes / 1 error / 2 changes present / 3 rejected\n  \
     config apply         0 committed or noop / 1 error / 3 rejected\n  \
+    config confirm       0 confirmed / 1 error\n  \
+    config abort         0 aborted / 1 error\n  \
     config rollback      0 committed or noop / 1 error / 3 rejected\n  \
     config import        0 clean / 1 error / 2 warnings or skips / 3 nothing translatable\n  \
     doctor               0 all checks green / 1 error / 2 red checks found\n  \
@@ -2045,22 +2048,10 @@ enum EventsAction {
         event_types: Vec<String>,
 
         /// Print recent route history before tailing the live stream.
-        /// Applies only to route-capable event streams. Mutually
-        /// exclusive with `--from-event-id`; `--backfill` replays the
-        /// daemon's process-local route ring (resets on restart),
-        /// while `--from-event-id` replays the durable event outbox
-        /// (survives restart).
+        /// Applies only to route-capable event streams. Replays the
+        /// daemon's process-local route ring, which resets on restart.
         #[arg(long, default_value_t = 0)]
         backfill: u32,
-
-        /// Durable cursor: replay committed events with
-        /// `event_id > N` from the daemon's local event outbox,
-        /// then tail the live stream. `0` replays everything
-        /// retained. Survives daemon restart. Fails when the daemon
-        /// was started with `[event_history].enabled = false` or its
-        /// event history is unavailable.
-        #[arg(long, value_name = "EVENT_ID")]
-        from_event_id: Option<u64>,
     },
     /// Show recent session lifecycle events
     Sessions {
@@ -3415,9 +3406,26 @@ fn group_root_help(command: clap::Command) -> clap::Command {
         ))
 }
 
+/// `EX_USAGE` from sysexits(3). Clap's default of 2 would collide with the
+/// detailed "changes present" and "red checks" codes.
+const USAGE_EXIT_CODE: i32 = 64;
+
 fn parse_cli(binary_name: &'static str) -> Cli {
-    let matches = cli_command(binary_name).get_matches();
-    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+    cli_command(binary_name)
+        .try_get_matches()
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+        .unwrap_or_else(|error| {
+            // `--help` and `--version` arrive here too and still exit 0.
+            let code = if error.use_stderr() {
+                USAGE_EXIT_CODE
+            } else {
+                0
+            };
+            let _ = error.print();
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            std::process::exit(code)
+        })
 }
 
 #[derive(Debug)]
@@ -4605,13 +4613,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             Some(EventsAction::Watch {
                 categories,
                 event_types,
-                from_event_id,
                 ..
             }),
         ..
     } = &cli.command
     {
-        commands::watch::validate_events_watch_filter(categories, event_types, *from_event_id)?;
+        commands::watch::validate_events_watch_filter(categories, event_types)?;
     }
     confirm_daemon_wide(&cli.command, &cli.addr)?;
     let connection = connect_with_tls(&cli.addr, cli.token_file.as_deref(), &cli.tls).await?;
@@ -5451,7 +5458,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 prefix: watch_prefix,
                 event_types,
                 backfill,
-                from_event_id,
             }) => {
                 reject_events_parent_filters_for_subcommand(
                     "events watch",
@@ -5470,7 +5476,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         prefix: watch_prefix,
                         event_types,
                         backfill,
-                        from_event_id,
                         json,
                     },
                 )
@@ -6536,7 +6541,6 @@ mod tests {
         }
         let watch_names: Vec<_> = EventTypeScope::All.names().collect();
         assert!(watch_names.contains(&"policy_filtered"));
-        assert!(watch_names.contains(&"otc_route_blocked"));
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let mut generated = Vec::new();
             generate_completions(shell, BINARY_NAME, &mut generated).unwrap();
@@ -8191,7 +8195,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         assert_eq!(max_prefix_restart_seconds, Some(30));
         assert!(route_server_client);
         assert!(per_client_best);
-        assert_eq!(role.as_deref(), Some("rs"));
+        assert_eq!(role.as_deref(), Some("route_server"));
     }
 
     fn documented_continued_command(document: &str, marker: &str) -> String {
@@ -8325,7 +8329,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         assert_eq!(max_prefix_restart_seconds, Some(30));
         assert!(route_server_client);
         assert!(per_client_best);
-        assert_eq!(role.as_deref(), Some("rs"));
+        assert_eq!(role.as_deref(), Some("route_server"));
     }
 
     #[test]
@@ -10248,8 +10252,7 @@ printf '%s\n' "${COMPREPLY[@]}"
     async fn events_watch_rejects_impossible_filters_before_connect() {
         for tail in [
             "--category session --type added",
-            "--from-event-id 0 --category session --type added",
-            "--category session --type otc_route_blocked",
+            "--category policy --type stream_lagged",
         ] {
             let args = format!("rbgp --addr http://127.0.0.1:1 events watch {tail}");
             let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
@@ -10826,7 +10829,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             "help was: {help}"
         );
         assert!(
-            help.contains("2  parser or usage error"),
+            help.contains("64 parser or usage error"),
             "help was: {help}"
         );
         assert!(help.contains("config plan"), "help was: {help}");
@@ -10847,7 +10850,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             man.contains("1  error (argument validation,"),
             "man was: {man}"
         );
-        assert!(man.contains("2  parser or usage error"), "man was: {man}");
+        assert!(man.contains("64 parser or usage error"), "man was: {man}");
     }
 
     /// LAN-329 noun standardization: `--neighbor` is canonical,

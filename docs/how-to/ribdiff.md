@@ -75,6 +75,7 @@ prerequisites for the source inspection and capture requirements.
 | 0 | Both inputs complete, no semantic differences |
 | 1 | Both inputs complete, differences found (listed in the report) |
 | 2 | Incomplete / malformed / stale / mixed-generation / unsupported / over-limit input, or an operational error — equality refused |
+| 64 | Parser or usage error, such as an unknown flag or a missing argument — nothing was compared |
 
 ## Live comparison flags
 

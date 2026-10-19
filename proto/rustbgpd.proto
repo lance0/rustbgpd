@@ -601,7 +601,9 @@ message NeighborConfig {
   uint32 add_path_send_max = 12;
   // Optional interface name for IPv6 link-local / unnumbered neighbors.
   string interface = 13;
-  // Local BGP Role for RFC 9234 route-leak protection. Empty = disabled.
+  // Local BGP Role for RFC 9234 route-leak protection, spelled as in config:
+  // provider, route_server, route_server_client, customer, or peer. Empty =
+  // disabled. Requests also accept the config aliases rs and rs-client.
   string role = 14;
   // Require the peer to advertise a compatible BGP Role capability.
   bool strict_role = 15;
@@ -666,7 +668,7 @@ message NeighborState {
   // not an observed Idle/down state. Clients must check this flag before
   // treating `state` as authoritative; a stale row remains in the inventory.
   bool stale = 13;
-  // Locally configured BGP Role. Empty when disabled.
+  // Locally configured BGP Role, in the `role` spelling. Empty when disabled.
   string local_role = 14;
   // Remote BGP Role advertised in OPEN. Empty when absent or unknown.
   string remote_role = 15;
@@ -1244,7 +1246,7 @@ service PolicyService {
   // eval site. The cache is bounded, process-local, and resets on
   // peer session reset — see ADR-0073 ("Import policy explain via
   // per-session decision cache") for the contract, including the
-  // "not durable event history" scope and the operator-facing knob
+  // "not a persistent event log" scope and the operator-facing knob
   // [policy.explain] cache_size.
   //
   // Side-effect free read. Does not touch RIB, does not increment
@@ -1766,8 +1768,7 @@ message ImportExplainMatch {
   // operator parity.
   ExplainModifications modifications = 10;
 
-  // Evaluation wall-clock time as Unix nanoseconds — matches the
-  // durable event outbox's `timestamp_ns` convention rather than a
+  // Evaluation wall-clock time as Unix nanoseconds rather than a
   // string, so collectors don't have to parse. Zero for NOT_SEEN /
   // EVICTED outcomes (no decision was recorded).
   int64 evaluated_at_unix_ns   = 11;
@@ -1936,8 +1937,7 @@ message RejectedRoute {
   // snake_case string: "valid", "invalid", "unknown", "unverified".
   string aspa_validation = 12;
 
-  // Rejection wall-clock time as Unix nanoseconds (the durable event
-  // outbox's timestamp_ns convention).
+  // Rejection wall-clock time as Unix nanoseconds.
   int64 rejected_at_unix_ns = 13;
 }
 
@@ -2299,7 +2299,7 @@ service RibService {
   rpc ListFibTables(ListFibTablesRequest) returns (ListFibTablesResponse);
   rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
   // Live route deltas stream through EventService.WatchEvents
-  // (EVENT_CATEGORY_ROUTE); durable replay through SubscribeFromEvent.
+  // (EVENT_CATEGORY_ROUTE).
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
   // Deprecated whole-table best view; use bounded ListBestEvpnRoutes.
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse) {
@@ -2553,27 +2553,6 @@ service EventService {
   rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);
   rpc ListPolicyEvents(ListPolicyEventsRequest) returns (ListPolicyEventsResponse);
 
-  // SubscribeFromEvent — durable cursor replay then live (ADR-0072).
-  // Replays events with event_id > from_event_id, then transitions to
-  // live broadcast. The handoff is actor-ordered inside the daemon's
-  // EventHistoryManager: live subscriber registered first, high-water
-  // captured next, replay drained, live forwarded with the cursor floor
-  // enforced. The same payload bytes go to both halves of the stream
-  // (the byte-equality invariant from ADR-0072).
-  //
-  // The `from_event_id` field uses proto3 explicit-presence: absent ⇒ attach
-  // to the durable committed live tail without replay; value 0 ⇒ replay
-  // everything retained, then live (fresh-collector case); value N > 0 ⇒
-  // replay event_id > N, then live (normal reconnect case). Empty filters use
-  // SubscribeFromEvent semantics (all EHM-fed categories), not WatchEvents
-  // live-stream defaults.
-  //
-  // Returns FAILED_PRECONDITION at admission when durable history is disabled
-  // or startup fell back to live-only operation, and UNAVAILABLE at admission
-  // once the event-history storage has stopped. Replay storage interruption
-  // ends the stream with UNAVAILABLE unless post-admission producer loss takes
-  // DATA_LOSS precedence. Admission is checked before category/type validation.
-  rpc SubscribeFromEvent(SubscribeFromEventRequest) returns (stream BgpEvent);
 }
 
 message ListRoutesRequest {
@@ -3230,10 +3209,10 @@ enum BgpEventType {
   BGP_EVENT_TYPE_NOTIFICATION_SENT = 20;
   BGP_EVENT_TYPE_NOTIFICATION_RECEIVED = 21;
   BGP_EVENT_TYPE_POLICY_CHANGED = 22;
-  // OTC route-leak rule (RFC 9234 §5) blocked one or more unicast
-  // routes at either an ingress or egress decision site. Payload
-  // is OtcRouteBlockedEvent. Category: EVENT_CATEGORY_POLICY.
-  BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED = 23;
+  // 23 was BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED, produced only by the removed
+  // durable event history.
+  reserved 23;
+  reserved "BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED";
   BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED = 30;
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED = 31;
   BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN = 32;
@@ -3249,8 +3228,7 @@ enum BgpEventType {
   // max_prefix_action = "warning"); emitted once per crossing, no teardown.
   BGP_EVENT_TYPE_MAX_PREFIX_WARNING = 53;
   // A stream gap: WatchEvents reports a bounded-source gap and identifies
-  // that source category; SubscribeFromEvent reports a global committed-stream
-  // gap with both category and source_category UNSPECIFIED.
+  // that source category.
   BGP_EVENT_TYPE_STREAM_LAGGED = 100;
 }
 
@@ -3272,13 +3250,6 @@ message WatchEventsRequest {
   // those streams. Add EVENT_CATEGORY_POLICY or EVENT_CATEGORY_DATAPLANE
   // explicitly to combine them with the default route + session
   // categories.
-  //
-  // BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED is NOT served by this RPC: the
-  // OTC route-leak decision is published only through the durable
-  // outbox (ADR-0072). Filtering for it here would produce an empty
-  // live stream. Use SubscribeFromEvent with
-  // categories=[EVENT_CATEGORY_POLICY] and
-  // event_types=[BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED].
   repeated EventCategory categories = 1;
   // Empty = all event types for the selected categories.
   repeated BgpEventType event_types = 2;
@@ -3299,52 +3270,6 @@ message WatchEventsRequest {
   // summary events do not match a prefix-filtered request.
   string prefix = 5;
   uint32 prefix_length = 6;
-}
-
-// SubscribeFromEvent cursor request (ADR-0072).
-//
-// Carries the same filter field surface as WatchEventsRequest, plus
-// an explicit-presence cursor field. See the RPC doc on EventService
-// for the presence semantics.
-message SubscribeFromEventRequest {
-  // Explicit-presence cursor. proto3 `optional` distinguishes
-  // "field absent on the wire" (live-only subscription) from
-  // "value = 0" (replay all retained events, then live).
-  // See ADR-0072 § "Cursor API" for the contract.
-  optional uint64 from_event_id = 1;
-
-  // Filters. All set filters are AND-combined.
-  // Repeated categories/types are OR-matched within their dimension;
-  // combinations with no durable producer return INVALID_ARGUMENT.
-  //
-  // Default-filter semantics diverge from WatchEventsRequest on
-  // purpose: SubscribeFromEvent treats an empty `categories` +
-  // empty `event_types` as **all categories** — the natural
-  // default for a durable replay client that wants to see
-  // everything the outbox emits. WatchEventsRequest's empty-
-  // filter default of "route + session only" exists for
-  // historical live-stream ergonomics and would surprise a
-  // cursor-driven collector that loses non-route/non-session
-  // events on first connect. Clients that want to scope the
-  // stream name the categories explicitly.
-  //
-  // This default applies regardless of whether `from_event_id`
-  // is set. The cursor field above only changes replay behavior
-  // (absent ⇒ live-only, present ⇒ replay-then-live); it does
-  // NOT swap in WatchEventsRequest's category default for the
-  // live half of an absent-cursor subscription. Empty filters
-  // select all categories for this RPC in every case.
-  //
-  // An empty `categories` filter selects every EHM-fed category:
-  // route, EVPN, session, policy, BFD, and dataplane. All six are
-  // produced through the durable outbox when
-  // `[event_history].enabled = true`.
-  repeated EventCategory categories = 2;
-  repeated BgpEventType event_types = 3;
-  string neighbor_address = 4;
-  AddressFamily afi_safi = 5;
-  string prefix = 6;
-  uint32 prefix_length = 7;
 }
 
 message ListEvpnEventsRequest {
@@ -3428,12 +3353,9 @@ message SessionEvent {
 
 message StreamLagEvent {
   // WatchEvents mirrors the bounded source into this field and the top-level
-  // BgpEvent.category. SubscribeFromEvent uses UNSPECIFIED because its gap is
-  // global across the committed stream and bypasses the category filter.
+  // BgpEvent.category.
   EventCategory source_category = 1;
   // WatchEvents counts skipped source events before filtering.
-  // SubscribeFromEvent counts skipped committed global-outbox events, not the
-  // filtered subset.
   uint64 missed_count = 2;
   // Stable operator-facing reason/summary string for this event.
   string reason = 3;
@@ -3545,53 +3467,6 @@ message BfdSessionEvent {
   string reason = 7;
 }
 
-// Emitted whenever an OTC route-leak rule (RFC 9234 §5) blocks one
-// or more unicast routes at either an ingress or egress decision
-// site. The legacy `bgp_otc_routes_blocked_total{peer, reason}`
-// counter and the `otc_routes_blocked` scalar on NeighborState remain the
-// compatibility surfaces. Ingress remains per rejected UPDATE decision; egress
-// events emit once per peer/route transition into the blocked disposition
-// and re-arm after permit, withdrawal, or session reset.
-message OtcRouteBlockedEvent {
-  BgpEventType event_type = 1;
-  string peer_address = 2;
-  // Unix epoch seconds, matching existing RouteEvent timestamp shape.
-  string timestamp = 3;
-  // "ingress" | "egress" — which decision site fired.
-  string direction = 4;
-  // Bounded reason vocabulary, matching the
-  // `bgp_otc_routes_blocked_total{reason=…}` label:
-  //   - "ingress_from_customer_rsclient"
-  //   - "ingress_peer_mismatch"
-  //   - "malformed_length"
-  //   - "egress_to_upstream_via_otc"
-  string reason = 5;
-  // Wire-format prefix strings ("203.0.113.0/24"). For ingress this
-  // is every announced unicast prefix in the rejected UPDATE; for
-  // egress this is a single prefix (the loop runs per route).
-  repeated string prefixes = 6;
-  // Convenience count — `prefixes.size()` would also work, but
-  // collectors that filter on count without parsing the array benefit
-  // from the explicit field.
-  uint32 count = 7;
-  // Local BGP role at the moment of the decision (RFC 9234 §4 names:
-  // "provider", "route_server", "route_server_client", "customer",
-  // "peer"). Empty when no local role is configured.
-  string local_role = 8;
-  // Peer's negotiated BGP role. Empty when the peer did not advertise
-  // the Role capability.
-  string remote_role = 9;
-  // The OTC attribute value (ASN). Omitted on the malformed_length
-  // path because the attribute couldn't be decoded.
-  optional uint32 otc_value = 10;
-  // AS_PATH in the same wire-string form used by gRPC matchers
-  // (`{…}` notation preserves AS_SET / confederation segments).
-  // Empty when the UPDATE / route carried no AS_PATH attribute.
-  string as_path = 11;
-  // Stable operator-facing reason/summary string for this event.
-  string summary = 12;
-}
-
 message BgpEvent {
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 1;
@@ -3612,21 +3487,10 @@ message BgpEvent {
   // export-policy filtering. Empty for ordinary source-peer route events.
   string target_peer_address = 19;
 
-  // Durable monotonic event_id (ADR-0072). Carried at the envelope
-  // level rather than duplicated onto every nested payload — see
-  // the ADR's "Envelope strategy" section for the rationale.
-  //
-  // `optional uint64` (proto3 explicit-presence) so clients can tell whether
-  // the daemon emitted a committed SubscribeFromEvent envelope. Every
-  // committed envelope on that RPC sets the field. Synthetic durable lag
-  // frames and legacy WatchEvents / List*Events responses omit it. The
-  // allocator starts at 0 and the first committed event gets id 1, so a
-  // present-but-zero value should never appear on an emitted BgpEvent.
-  //
-  // RouteEvent.event_id continues to mirror this value for wire
-  // backwards-compatibility with route-only consumers, but the
-  // envelope-level field is the source of truth.
-  optional uint64 event_id = 21;
+  // 21 was the durable event_id and 22 the OTC route-blocked payload, both
+  // produced only by the removed durable event history.
+  reserved 21, 22;
+  reserved "event_id", "otc_route_blocked";
 
   oneof payload {
     RouteEvent route = 11;
@@ -3638,9 +3502,6 @@ message BgpEvent {
     EvpnRouteEvent evpn = 17;
     DataplaneRouteEvent dataplane_route = 18;
     BfdSessionEvent bfd = 20;
-    // Tag 21 is reserved at the message level for `event_id`; the
-    // next free oneof variant tag is 22.
-    OtcRouteBlockedEvent otc_route_blocked = 22;
   }
 }
 

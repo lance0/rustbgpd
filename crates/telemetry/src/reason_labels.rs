@@ -294,9 +294,6 @@ impl std::fmt::Display for SessionDownReason {
 ///
 /// - `bgp_otc_routes_blocked_total{peer, reason}` label values
 ///   ([`crate::BgpMetrics::record_otc_routes_blocked`]);
-/// - the `reason` field of the transport `OtcRouteBlockedEvent`
-///   structured payload (and through it the gRPC
-///   `OTC_ROUTE_BLOCKED` event surface);
 /// - the `reason` token on the transport warn/debug log lines;
 /// - the documented values in `docs/reference/operations.md` and ADR-0071.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

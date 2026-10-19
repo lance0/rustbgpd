@@ -19,8 +19,9 @@ proposal, such as ADR-0106). A Proposed record is Unstated unless its own text
 establishes another lifecycle, such as ADR-0100 (Parked as an unscheduled
 research blueprint) and ADR-0138 (Active for shipped preparation; runtime
 enablement remains gated). [ROADMAP's deferred follow-ups](../project/roadmap.md#deferred-with-rationale)
-do not establish the lifecycle of their associated ADRs. No record currently
-states that the whole decision is Superseded.
+do not establish the lifecycle of their associated ADRs. A record whose own
+status says the whole decision is Superseded, such as ADR-0072 (the durable
+event history was removed), is Superseded.
 
 | ADR | Title | Status | Date | Lifecycle |
 |-----|-------|--------|------|-----------|
@@ -96,7 +97,7 @@ states that the whole decision is Superseded.
 | [0069](0069-bgp-unnumbered.md) | BGP unnumbered and IPv6 link-local peering | Accepted | 2026-05-25 | Active |
 | [0070](0070-gnmi-openconfig-telemetry.md) | gNMI / OpenConfig telemetry and Set adapter | Accepted | 2026-05-25 | Active |
 | [0071](0071-bgp-roles-otc.md) | BGP Roles and Only-to-Customer (RFC 9234) | Accepted | 2026-05-26 | Active |
-| [0072](0072-durable-event-history.md) | Durable event history (local outbox) | Accepted | 2026-05-26 | Active |
+| [0072](0072-durable-event-history.md) | Durable event history (local outbox) | Superseded | 2026-05-26 | Superseded |
 | [0073](0073-import-policy-explain.md) | Import policy explain via per-session decision cache | Accepted | 2026-05-28 | Active |
 | [0074](0074-fib-table-crud-authz-tier.md) | Runtime FIB-table CRUD authorization tier | Accepted | 2026-06-01 | Active |
 | [0075](0075-outbound-route-filtering.md) | Receive-side Address-Prefix Outbound Route Filtering (ORF) | Accepted | 2026-06-03 | Active |

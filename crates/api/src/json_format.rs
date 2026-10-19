@@ -1,17 +1,14 @@
-//! Shared JSON-lines formatter for `BgpEvent` (ADR-0072 PR5).
+//! Shared JSON-lines formatter for `BgpEvent`.
 //!
 //! Prost-generated types don't carry `serde::Serialize` impls without
 //! the optional `serde` feature on prost (which we don't enable to
-//! avoid an extra build-graph dep). The CLI's existing
-//! `JsonRouteEvent` shape is route-only and pre-dates the envelope-
-//! level `event_id`. This module is the single hand-rolled formatter
-//! both `rbgp watch --from-event-id` and the
-//! `examples/event-bridge/` reference binary call into.
+//! avoid an extra build-graph dep). This module is the single
+//! hand-rolled envelope formatter.
 //!
 //! Compact line shape (one event per line, newline-terminated):
 //!
 //! ```text
-//! {"event_id":42,"timestamp":"1748305...","category":"route",
+//! {"timestamp":"1748305...","category":"route",
 //!  "event_type":"BGP_EVENT_TYPE_ROUTE_ADDED","severity":"info","peer":"10.0.0.1",
 //!  "previous_peer":"","target_peer":"","prefix":"10.1.0.0",
 //!  "prefix_length":24,"afi_safi":"ipv4_unicast","summary":"…",
@@ -37,9 +34,6 @@ use crate::proto;
 pub fn bgp_event_to_json_line(event: &proto::BgpEvent) -> String {
     let mut obj = Map::new();
 
-    if let Some(id) = event.event_id {
-        obj.insert("event_id".into(), json!(id));
-    }
     obj.insert("timestamp".into(), json!(event.timestamp));
     obj.insert("category".into(), json!(category_name(event.category)));
     obj.insert(
@@ -189,19 +183,6 @@ fn render_payload(payload: &proto::bgp_event::Payload) -> Value {
             "missed_count": l.missed_count,
             "reason": l.reason,
         }),
-        proto::bgp_event::Payload::OtcRouteBlocked(o) => json!({
-            "type": "otc_route_blocked",
-            "peer": o.peer_address,
-            "direction": o.direction,
-            "reason": o.reason,
-            "prefixes": o.prefixes,
-            "count": o.count,
-            "local_role": o.local_role,
-            "remote_role": o.remote_role,
-            "otc_value": o.otc_value,
-            "as_path": o.as_path,
-            "summary": o.summary,
-        }),
     }
 }
 
@@ -221,12 +202,10 @@ mod tests {
             prefix_length: 24,
             afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
             summary: "route added 10.1.0.0/24".to_string(),
-            event_id: Some(42),
             ..Default::default()
         };
 
         let value: Value = serde_json::from_str(&bgp_event_to_json_line(&event)).unwrap();
-        assert_eq!(value["event_id"], 42);
         assert_eq!(value["category"], "route");
         assert_eq!(value["event_type"], "BGP_EVENT_TYPE_ROUTE_ADDED");
         assert_eq!(value["severity"], "info");
