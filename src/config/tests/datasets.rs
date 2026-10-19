@@ -717,3 +717,75 @@ fn chain_dataset_bindings_over_the_pin_frame_reject_reload() {
         rustbgpd_policy::PolicyAction::Permit
     );
 }
+
+/// Only bindings the retained IR probes count toward the chain bound: an
+/// empty `if` allocates its dataset slot during lowering but emits no term,
+/// and the composed chain drops that slot.
+#[test]
+fn chain_dataset_bound_ignores_slots_without_a_retained_probe() {
+    use std::fmt::Write as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("allow.list"), "64500\n").expect("write dataset");
+    let mut toml = String::from(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[policy]
+rpol_files = ["policies/a.rpol", "policies/b.rpol"]
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["a-empty", "b-guard"]
+"#,
+    );
+    let mut empty = String::new();
+    let mut policy = String::from("policy a-empty {\n");
+    for index in 0..16 {
+        writeln!(empty, "dataset asn-set a{index}").unwrap();
+        writeln!(
+            policy,
+            "    term t{index} {{ if route.origin-as in a{index} {{ }} }}"
+        )
+        .unwrap();
+        writeln!(toml, "[policy.datasets.a{index}]\npath = \"allow.list\"").unwrap();
+    }
+    policy.push_str("}\n");
+    empty.push_str(&policy);
+    fs::write(dir.path().join("policies/a.rpol"), empty).expect("write rpol");
+    fs::write(
+        dir.path().join("policies/b.rpol"),
+        "dataset asn-set b0\n\
+         policy b-guard { term t { if !(route.origin-as in b0) { reject } } term rest { accept } }\n",
+    )
+    .expect("write rpol");
+    toml.push_str("[policy.datasets.b0]\npath = \"allow.list\"\n");
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(&toml),
+    )
+    .expect("write config");
+
+    let config = load_dir(&dir).expect("one retained binding loads");
+    let (import, _) = config
+        .effective_policy_chains_for_neighbor(&config.neighbors[0])
+        .expect("chains resolve");
+    let import = import.expect("import chain");
+    assert_eq!(import.compiled().datasets.len(), 1);
+    assert_eq!(
+        import.evaluate(&origin_ctx(64500)).action,
+        rustbgpd_policy::PolicyAction::Permit
+    );
+    assert_eq!(
+        import.evaluate(&origin_ctx(64999)).action,
+        rustbgpd_policy::PolicyAction::Deny
+    );
+}

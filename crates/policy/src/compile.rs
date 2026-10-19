@@ -109,15 +109,30 @@ impl ChainNodeBudget {
     /// Charge one named member using the same IR accounting for both frontends.
     /// TOML statements compile individually so oversized inline policies do not
     /// require an oversized compiled chain or populate its lazy evaluation cache.
-    /// An `.rpol` member's dataset bindings join the chain's merged table with
-    /// the same deduplication [`compile_chain`] applies.
+    /// An `.rpol` member's probed dataset bindings join the chain's merged
+    /// table with the same deduplication [`compile_chain`] applies.
     ///
     /// # Errors
     /// Returns a diagnostic when the cumulative chain exceeds the node cap, or
     /// references more datasets than one evaluation pins.
     pub fn add_named(&mut self, named: &NamedPolicy, store: &mut SetStore) -> Result<(), String> {
         if let Some(chain) = named.rpol.as_deref() {
-            for slot in &chain.datasets {
+            // Lowering can allocate a slot whose probe emits no term (an empty
+            // `if` body); splicing keeps only slots a retained guard probes.
+            let probed = vec![Cell::new(false); chain.datasets.len()];
+            for term in chain.policies.iter().flat_map(|policy| &policy.terms) {
+                term.any_term(&|term| {
+                    term.guard.any_node(&|expr| {
+                        if let MatchExpr::InDataset { id, .. } = expr
+                            && let Some(probed) = probed.get(id.0 as usize)
+                        {
+                            probed.set(true);
+                        }
+                        false
+                    })
+                });
+            }
+            for (slot, _) in chain.datasets.iter().zip(&probed).filter(|(_, p)| p.get()) {
                 if !self.datasets.iter().any(|seen| same_binding(seen, slot)) {
                     self.datasets.push(slot.clone());
                 }
@@ -926,7 +941,10 @@ policy bogon-filter {
     fn chain_budget_bounds_merged_dataset_bindings() {
         use super::ChainNodeBudget;
         use crate::datasets::{DatasetData, DatasetHandle, DatasetKind, MAX_UNIT_DATASETS};
-        use crate::ir::{CompiledChain, DatasetSlot};
+        use crate::ir::{
+            CompiledChain, CompiledPolicy, DatasetId, DatasetProbe, DatasetSlot, ForEachNode,
+            LoopSource, MatchExpr, PolicySource, Term, TermAction,
+        };
         use crate::sets::AsnSet;
 
         let slots: Vec<DatasetSlot> = (0..=MAX_UNIT_DATASETS)
@@ -943,11 +961,42 @@ policy bogon-filter {
                 }
             })
             .collect();
-        let member = |slots: &[DatasetSlot]| {
+        let probe = |index: usize| {
+            MatchExpr::Not(Box::new(MatchExpr::InDataset {
+                probe: DatasetProbe::OriginAs,
+                id: DatasetId(u32::try_from(index).unwrap()),
+            }))
+        };
+        // Probes every slot, the last only inside a loop body; an unprobed
+        // member keeps its slots in the donor table but no guard reads them.
+        let build = |slots: &[DatasetSlot], probed: bool| {
             let mut chain = CompiledChain::empty();
             chain.datasets = slots.to_vec();
+            if probed {
+                let last = slots.len() - 1;
+                chain.policies.push(CompiledPolicy {
+                    name: None,
+                    terms: vec![Term {
+                        name: None,
+                        guard: MatchExpr::And((0..last).map(probe).collect()),
+                        action: TermAction::ForEach(Box::new(ForEachNode {
+                            source: LoopSource::Communities,
+                            slot: 0,
+                            var: "c".into(),
+                            body: vec![Term {
+                                name: None,
+                                guard: probe(last),
+                                action: TermAction::Deny,
+                            }],
+                        })),
+                    }],
+                    default_action: PolicyAction::Permit,
+                    source: PolicySource::Rpol,
+                });
+            }
             NamedPolicy::from_rpol("m".to_string(), Arc::new(chain))
         };
+        let member = |slots: &[DatasetSlot]| build(slots, true);
         let charge = |members: &[NamedPolicy]| {
             let mut budget = ChainNodeBudget::default();
             members
@@ -973,5 +1022,7 @@ policy bogon-filter {
         let mut fifteen = slots[1..MAX_UNIT_DATASETS].to_vec();
         fifteen.push(rebound);
         assert!(charge(&[member(&slots[..1]), member(&fifteen)]).is_err());
+        // Unprobed donor slots are not chain bindings.
+        charge(&[build(&slots[..16], false), member(&slots[16..])]).expect("one probed binding");
     }
 }
