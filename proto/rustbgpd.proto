@@ -749,19 +749,14 @@ message NeighborState {
   UpdateGroupComparison update_group_comparison = 40;
   // Authoritative O(1) unique-prefix accounting from the session actor.
   // prefixes_received remains the aggregate across every counted family;
-  // these two fields are the IPv4/IPv6 unicast subsets.
+  // these two fields are the IPv4/IPv6 unicast subsets. Max-prefix limits
+  // and headroom are reported per scope in inbound_prefix_limits.
   uint64 prefixes_received_ipv4 = 41;
   uint64 prefixes_received_ipv6 = 42;
-  // Effective finite max-prefix bounds. Absence means unlimited, including
-  // for aggregate max_prefixes (whose legacy NeighborConfig field uses 0).
-  optional uint32 effective_max_prefixes = 43;
-  optional uint32 effective_max_prefixes_ipv4 = 44;
-  optional uint32 effective_max_prefixes_ipv6 = 45;
-  // Remaining capacity before each finite bound is exceeded. Absent when the
-  // corresponding limit is unlimited or this NeighborState is stale.
-  optional uint32 max_prefix_headroom = 46;
-  optional uint32 max_prefix_headroom_ipv4 = 47;
-  optional uint32 max_prefix_headroom_ipv6 = 48;
+  reserved 43 to 48;
+  reserved "effective_max_prefixes", "effective_max_prefixes_ipv4",
+      "effective_max_prefixes_ipv6", "max_prefix_headroom",
+      "max_prefix_headroom_ipv4", "max_prefix_headroom_ipv6";
   // Presence distinguishes an older daemon that does not expose negotiation
   // state from a current daemon reporting no Established session.
   optional bool negotiation_available = 49;

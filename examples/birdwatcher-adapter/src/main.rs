@@ -821,8 +821,12 @@ fn protocol_row(state: &AppState, n: &proto::NeighborState) -> Result<(String, V
         },
         "route_limit_at": n.prefixes_received
     });
-    if let Some(limit) = n.effective_max_prefixes {
-        row["import_limit"] = Value::from(limit);
+    if let Some(aggregate) = n
+        .inbound_prefix_limits
+        .iter()
+        .find(|limit| limit.scope == "aggregate")
+    {
+        row["import_limit"] = Value::from(aggregate.limit);
         row["limit_action"] = Value::from(n.max_prefix_action.clone());
     }
     if let Some(negotiated) = &n.negotiated_session {
@@ -3114,9 +3118,27 @@ mod tests {
             older["bgp_session"],
             serde_json::json!(["external", "route-server"])
         );
-        for field in ["source_address", "keepalive"] {
+        for field in ["source_address", "keepalive", "import_limit"] {
             assert!(older.get(field).is_none(), "{field}");
         }
+        // Only the aggregate row is BIRD's import limit; a per-family row is not.
+        neighbor.inbound_prefix_limits = vec![
+            proto::InboundPrefixLimitState {
+                scope: "ipv4_unicast".to_string(),
+                limit: 50,
+                ..Default::default()
+            },
+            proto::InboundPrefixLimitState {
+                scope: "aggregate".to_string(),
+                limit: 100,
+                ..Default::default()
+            },
+        ];
+        neighbor.max_prefix_action = "block".to_string();
+        let (_, limited) = protocol_row(&state, &neighbor).unwrap();
+        assert_eq!(limited["import_limit"], 100);
+        assert_eq!(limited["limit_action"], "block");
+        neighbor.inbound_prefix_limits.clear();
         neighbor
             .negotiated_session
             .as_mut()

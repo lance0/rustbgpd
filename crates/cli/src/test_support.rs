@@ -1291,12 +1291,6 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             update_group_comparison: None,
             prefixes_received_ipv4: 0,
             prefixes_received_ipv6: 0,
-            effective_max_prefixes: None,
-            effective_max_prefixes_ipv4: None,
-            effective_max_prefixes_ipv6: None,
-            max_prefix_headroom: None,
-            max_prefix_headroom_ipv4: None,
-            max_prefix_headroom_ipv6: None,
             negotiation_available: Some(true),
             negotiated_session: Some(server_proto::NegotiatedSessionState {
                 local_address: Some("127.0.0.1".to_string()),

@@ -456,8 +456,9 @@ async fn effective_posture_snapshot_keeps_dynamic_inheritance_at_static_parity()
     }
 }
 
-/// Load-bearing: sourcing live counts from config or deriving stale headroom
-/// from zero placeholders makes at least one exact snapshot assertion fail.
+/// Load-bearing: sourcing live counts from config, dropping the actor's
+/// inbound limit rows, or deriving stale rows from config makes at least one
+/// exact snapshot assertion fail.
 #[tokio::test]
 async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom() {
     let mut mgr = test_peer_manager();
@@ -480,11 +481,22 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
     state.rejected_routes_retained = 4;
     state.max_prefix.prefix_count_ipv4 = 7;
     state.max_prefix.prefix_count_ipv6 = 3;
-    state.max_prefix.max_prefixes = Some(25);
-    state.max_prefix.max_prefixes_ipv4 = Some(15);
-    state.max_prefix.max_prefixes_ipv6 = None;
-    state.max_prefix.headroom = Some(14);
-    state.max_prefix.headroom_ipv4 = Some(8);
+    state.max_prefix.scopes = vec![
+        rustbgpd_transport::handle::MaxPrefixScopeState {
+            scope: "aggregate",
+            usage: 11,
+            limit: 25,
+            headroom: 14,
+            blocking: false,
+        },
+        rustbgpd_transport::handle::MaxPrefixScopeState {
+            scope: "ipv4_unicast",
+            usage: 7,
+            limit: 15,
+            headroom: 8,
+            blocking: true,
+        },
+    ];
 
     let live = super::snapshot::build_peer_info(&peer_key, managed, Some(&state), false);
     assert_eq!(
@@ -495,27 +507,31 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
         ),
         (11, 7, 3)
     );
-    assert_eq!(live.max_prefixes_effective, Some(25));
-    assert_eq!(live.max_prefixes_ipv4_effective, Some(15));
-    assert_eq!(live.max_prefixes_ipv6_effective, None);
-    assert_eq!(live.max_prefix_headroom, Some(14));
-    assert_eq!(live.max_prefix_headroom_ipv4, Some(8));
-    assert_eq!(live.max_prefix_headroom_ipv6, None);
+    let rows: Vec<_> = live
+        .inbound_prefix_limits
+        .iter()
+        .map(|row| {
+            (
+                row.scope.as_str(),
+                row.usage,
+                row.limit,
+                row.headroom,
+                row.blocking,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("aggregate", 11, 25, 14, false),
+            ("ipv4_unicast", 7, 15, 8, true)
+        ]
+    );
     assert_eq!(live.rejected_routes_retained, Some(4));
 
     let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None, false);
-    assert_eq!(stale_info.max_prefixes_effective, Some(30));
-    assert_eq!(stale_info.max_prefixes_ipv4_effective, Some(20));
-    assert_eq!(stale_info.max_prefixes_ipv6_effective, Some(10));
     assert_eq!(stale_info.rejected_routes_retained, None);
-    assert_eq!(
-        (
-            stale_info.max_prefix_headroom,
-            stale_info.max_prefix_headroom_ipv4,
-            stale_info.max_prefix_headroom_ipv6,
-        ),
-        (None, None, None)
-    );
+    assert_eq!(stale_info.inbound_prefix_limits, Vec::new());
 
     let managed = mgr.peers.remove(&peer_key).unwrap();
     managed.into_parts().0.shutdown().await.unwrap().unwrap();

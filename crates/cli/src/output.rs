@@ -437,18 +437,6 @@ pub struct JsonNeighborDetail {
     pub retention_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_dynamic_range: Option<JsonAcceptedDynamicRange>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_max_prefixes: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_max_prefixes_ipv4: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_max_prefixes_ipv6: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_prefix_headroom: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_prefix_headroom_ipv4: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_prefix_headroom_ipv6: Option<u32>,
     pub max_prefix_action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_prefix_restart_seconds: Option<u32>,
@@ -2013,12 +2001,6 @@ mod tests {
                 prefix: "10.0.0.0/24".to_string(),
                 peer_group: "rs-clients".to_string(),
             }),
-            effective_max_prefixes: Some(20),
-            effective_max_prefixes_ipv4: Some(10),
-            effective_max_prefixes_ipv6: None,
-            max_prefix_headroom: Some(9),
-            max_prefix_headroom_ipv4: Some(3),
-            max_prefix_headroom_ipv6: None,
             max_prefix_action: "restart".to_string(),
             max_prefix_restart_seconds: Some(30),
             max_prefix_restart_remaining_millis: Some(15_000),
@@ -2197,12 +2179,20 @@ mod tests {
         assert!(value.get("reconnect_in_seconds").is_none());
         assert_eq!(value["prefixes_received_ipv4"], 7);
         assert_eq!(value["prefixes_received_ipv6"], 3);
-        assert_eq!(value["effective_max_prefixes"], 20);
-        assert_eq!(value["effective_max_prefixes_ipv4"], 10);
-        assert!(value.get("effective_max_prefixes_ipv6").is_none());
-        assert_eq!(value["max_prefix_headroom"], 9);
-        assert_eq!(value["max_prefix_headroom_ipv4"], 3);
-        assert!(value.get("max_prefix_headroom_ipv6").is_none());
+        // Inbound capacity is reported only as scope rows.
+        assert_eq!(value["inbound_prefix_limits"][0]["scope"], "ipv4_unicast");
+        assert_eq!(value["inbound_prefix_limits"][0]["limit"], 4);
+        assert_eq!(value["inbound_prefix_limits"][0]["headroom"], 0);
+        for removed in [
+            "effective_max_prefixes",
+            "effective_max_prefixes_ipv4",
+            "effective_max_prefixes_ipv6",
+            "max_prefix_headroom",
+            "max_prefix_headroom_ipv4",
+            "max_prefix_headroom_ipv6",
+        ] {
+            assert!(value.get(removed).is_none(), "{removed}");
+        }
         // ADR-0113: an unlimited outbound family reports usage without
         // inventing a numeric limit or headroom.
         assert_eq!(value["outbound_prefix_limits"][0]["limit"], 8);
@@ -2332,16 +2322,12 @@ mod tests {
         assert_inventory_json_contract(&value, "neighbor-detail-v1");
         assert!(value.get("effective_posture").is_none());
 
-        detail.effective_max_prefixes = None;
-        detail.max_prefix_headroom = None;
         detail.negotiation_available = None;
         detail.negotiated_session = None;
         detail.is_dynamic = false;
         detail.accepted_dynamic_range = None;
         let value = serde_json::to_value(&detail).expect("JSON serialize");
         assert!(value.get("graceful_shutdown_advertise_intent").is_none());
-        assert!(value.get("effective_max_prefixes").is_none());
-        assert!(value.get("max_prefix_headroom").is_none());
         assert!(value.get("negotiation_available").is_none());
         assert!(value.get("negotiated_session").is_none());
         assert_eq!(value["is_dynamic"], false);
