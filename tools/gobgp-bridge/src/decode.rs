@@ -79,6 +79,18 @@ pub fn decode(request: &gobgp::AddPathRequest) -> Result<Decoded, Status> {
             "structured nlri/pattrs are not supported; send nlri_binary and pattrs_binary",
         ));
     }
+    // GoBGP keys paths by these fields as well. The injection API has a single
+    // local source per (prefix, path id), so honouring a request that sets
+    // them would let one source replace or remove another's route.
+    if path.no_implicit_withdraw
+        || path.source_asn != 0
+        || !path.source_id.is_empty()
+        || path.is_from_external
+    {
+        return Err(unsupported(
+            "no_implicit_withdraw, source_asn, source_id and is_from_external are not supported",
+        ));
+    }
     let family = path
         .family
         .as_ref()
@@ -204,6 +216,22 @@ fn decode_attributes(afi: Afi, prefix: Prefix, raw: &[Vec<u8>]) -> Result<Attrib
         if std::mem::replace(&mut seen[usize::from(type_code)], true) {
             return Err(invalid(format!(
                 "duplicate path attribute type {type_code}"
+            )));
+        }
+        // The entry must be one attribute, its header and value, and nothing
+        // after it: the wire decoder would skip a trailing unknown optional
+        // non-transitive attribute without an error.
+        let framed = match bytes[0] {
+            flags if flags & 0x10 != 0 => bytes
+                .get(2..4)
+                .map(|len| 4 + usize::from(u16::from_be_bytes([len[0], len[1]]))),
+            _ => bytes.get(2).map(|len| 3 + usize::from(*len)),
+        };
+        if framed != Some(bytes.len()) {
+            return Err(invalid(format!(
+                "each pattrs_binary entry must hold exactly one attribute; \
+                 the type {type_code} entry is {} bytes",
+                bytes.len()
             )));
         }
         // GoBGP's binary path attributes use four-octet AS numbers.
@@ -547,10 +575,56 @@ mod tests {
     }
 
     #[test]
+    fn rejects_source_identity_fields() {
+        let cases: [fn(&mut gobgp::Path); 4] = [
+            |p| p.no_implicit_withdraw = true,
+            |p| p.source_asn = 65001,
+            |p| p.source_id = "192.0.2.9".into(),
+            |p| p.is_from_external = true,
+        ];
+        for (index, set) in cases.into_iter().enumerate() {
+            let mut req = request(IP, NLRI_V4_HOST, &[NEXT_HOP_V4], false);
+            set(req.path.as_mut().unwrap());
+            assert_eq!(code(&req), tonic::Code::Unimplemented, "case {index}");
+        }
+    }
+
+    #[test]
     fn rejects_structured_any_form() {
         let mut req = request(IP, NLRI_V4_HOST, &[NEXT_HOP_V4], false);
         req.path.as_mut().unwrap().nlri = Some(prost_types::Any::default());
         assert_eq!(code(&req), tonic::Code::Unimplemented);
+    }
+
+    #[test]
+    fn extended_length_attribute() {
+        let community = [0xd0, 8, 0, 4, 0xff, 0xff, 0x02, 0x9a];
+        let req = announce(
+            decode(&request(
+                IP,
+                NLRI_V4_HOST,
+                &[NEXT_HOP_V4, &community],
+                false,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(req.communities, vec![0xffff_029a]);
+    }
+
+    #[test]
+    fn rejects_trailing_attribute_in_one_entry() {
+        // NEXT_HOP followed by an unknown optional non-transitive type 200,
+        // which the wire decoder alone would drop silently.
+        let hidden = [0x40, 3, 4, 192, 0, 2, 1, 0x80, 200, 1, 0];
+        assert_eq!(
+            code(&request(IP, NLRI_V4_HOST, &[&hidden], false)),
+            tonic::Code::InvalidArgument
+        );
+        let hidden_ext = [0x50, 3, 0, 4, 192, 0, 2, 1, 0x80, 200, 1, 0];
+        assert_eq!(
+            code(&request(IP, NLRI_V4_HOST, &[&hidden_ext], false)),
+            tonic::Code::InvalidArgument
+        );
     }
 
     #[test]
