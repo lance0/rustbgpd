@@ -118,3 +118,28 @@ pub fn unix_timestamp_now() -> String {
         .as_secs()
         .to_string()
 }
+
+/// Converts an event timestamp from [`unix_timestamp_now`] to Unix epoch
+/// milliseconds. Returns 0 for an empty or unparseable timestamp.
+#[must_use]
+pub fn unix_timestamp_ms(timestamp: &str) -> i64 {
+    timestamp
+        .parse::<i64>()
+        .map_or(0, |seconds| seconds.saturating_mul(1000))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_timestamp_ms_scales_seconds_and_rejects_garbage() {
+        assert_eq!(unix_timestamp_ms("1783915200"), 1_783_915_200_000);
+        assert_eq!(unix_timestamp_ms("0"), 0);
+        assert_eq!(unix_timestamp_ms(""), 0);
+        assert_eq!(unix_timestamp_ms("2026-08-31T12:00:00Z"), 0);
+        assert_eq!(unix_timestamp_ms(&i64::MAX.to_string()), i64::MAX);
+        let now = unix_timestamp_now();
+        assert_eq!(unix_timestamp_ms(&now), now.parse::<i64>().unwrap() * 1000);
+    }
+}
