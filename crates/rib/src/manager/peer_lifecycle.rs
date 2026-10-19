@@ -585,15 +585,21 @@ impl RibManager {
                 .map(crate::route::RtcRibRoute::key)
                 .collect();
             debug!(%peer, cleared = count, "peer adj-rib-in cleared");
+            crate::manager::helpers::set_rib_prefixes(
+                &manager.metrics,
+                &peer.to_string(),
+                crate::manager::helpers::UNICAST_FAMILIES,
+                [0, 0],
+            );
             manager
                 .metrics
-                .set_rib_prefixes(&peer.to_string(), "all", 0);
-            manager
-                .metrics
-                .set_rib_prefixes(&peer.to_string(), "evpn", 0);
-            manager
-                .metrics
-                .set_rib_prefixes(&peer.to_string(), "flowspec", 0);
+                .set_rib_prefixes(&peer.to_string(), "l2vpn_evpn", 0);
+            crate::manager::helpers::set_rib_prefixes(
+                &manager.metrics,
+                &peer.to_string(),
+                crate::manager::helpers::FLOWSPEC_FAMILIES,
+                [0, 0],
+            );
             let mut changed = manager.recompute_best(&affected);
             manager.distribute_changes(&changed, &affected);
             if !fs_affected.is_empty() {
@@ -856,7 +862,7 @@ impl RibManager {
         // the hold window; this series carries what we would actually
         // re-advertise, which is nothing until the peer returns.
         let peer_label = peer.to_string();
-        for family in ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"] {
+        for &(family, ..) in rustbgpd_wire::CONFIGURED_FAMILIES {
             self.metrics
                 .set_adj_rib_out_prefixes(&peer_label, family, 0);
         }
@@ -1554,11 +1560,12 @@ impl RibManager {
             self.retire_evpn_recovery(peer);
         }
         let peer_label = peer.to_string();
-        self.metrics.set_rib_prefixes(&peer_label, "all", 0);
+        let unicast = crate::manager::helpers::UNICAST_FAMILIES;
+        crate::manager::helpers::set_rib_prefixes(&self.metrics, &peer_label, unicast, [0, 0]);
         // Selective steady-state refresh relies on every family series already
         // existing. Eager zeroes also keep scrape shape stable for a peer that
         // never advertises one of the negotiated families.
-        for family in ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"] {
+        for &(family, ..) in rustbgpd_wire::CONFIGURED_FAMILIES {
             self.metrics
                 .set_adj_rib_out_prefixes(&peer_label, family, 0);
         }

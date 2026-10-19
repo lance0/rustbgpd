@@ -26,9 +26,9 @@ superseded campaigns remain below with their original provenance.
 
 | Evaluation question | Current evidence | Boundary |
 |---|---|---|
-| How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt](perf/competitive-bgperf2-v0680-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0680-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-30: exact rustbgpd v0.68.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. All 80 cells reached the exact expected route count across the fixed 10×1k, 2×10k, 2×100k, 30×1k, and 100×1k shapes. IPv4 import/convergence only — not a full-table, policy, reload, churn, restart, IPv6, or OpenBGPD claim. A [2026-10-19 spot-check](#2026-10-19-comparator-spot-check) ([24 raw rows](perf/artifacts/competitive-bgperf2-spot-check-2026-10/results.csv)) measured unreleased rustbgpd, BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with two repetitions per cell. In it, both BIRD lines had a lower median total time than rustbgpd at 10×1k. BIRD 2.20.0 and BIRD 3.4.0, both released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. |
+| How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt](perf/competitive-bgperf2-v0680-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0680-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-30: exact rustbgpd v0.68.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. All 80 cells reached the exact expected route count across the fixed 10×1k, 2×10k, 2×100k, 30×1k, and 100×1k shapes. IPv4 import/convergence only — not a full-table, policy, reload, churn, restart, IPv6, or OpenBGPD claim. A [2026-10-19 paired-read rerun](#2026-10-19-paired-read-rerun) ([36 raw rows](perf/artifacts/competitive-bgperf2-paired-s2-2026-10-19/bgperf2-results.csv)) measured unreleased rustbgpd `3e3fba0de`, BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with three repetitions per cell. rustbgpd had the lowest median total time in all three shapes on this host; at 10×1k it was within one sampling step of BIRD 2. The [earlier spot-check](#2026-10-19-comparator-spot-check) that day, with two repetitions per cell, had both BIRD lines ahead at 10×1k; its harness revision lacked the rerun's target-read pairing. BIRD 2.20.0 and BIRD 3.4.0, both released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. |
 | How do the refreshed comparator pins compare at IRR 0%? | [Current-source IRR receipt](perf/irr-reload-current-comparators-2026-10-06.md), with 36 verifier-checked rows | Measured 2026-10-06: unreleased rustbgpd `dcc9b6384`, BIRD 3.3.3 and OpenBGPD 9.3 at 320 members × 183,040 generated IPv4 prefixes, 0% received-view overlap. Completion p50 was 0.578–0.606 s, 12.493–14.490 s and 44.429–59.541 s respectively. Three independent process runs per daemon, each with four correlated reloads; fixed daemon order. All sessions remained up with zero parse errors. No IXP S1/S2/S3 refresh, other overlaps, grouped control, GoBGP arm or pin-only attribution. |
-| What is the current IRR reload result? | [v0.75.0 cross-daemon receipt](perf/cross-daemon-v0750-2026-10.md), with 108 verifier-checked rows | Latest released-source campaign: rustbgpd v0.75.0, BIRD 3.3.2, and OpenBGPD 9.3 in the same night, measured 2026-10-04 to 2026-10-05 at 320 members × 183,040 generated IPv4 prefixes, three roots per overlap, four reloads, and 0%/10%/50% received-view overlap. All sessions remained up with zero parse errors. One fixed shape on one host; the v0.68.0 receipt keeps the grouped control. BIRD 3.3.3, released 2026-10-01, is re-measured only at 0% in the current-source refresh above. |
+| What is the current IRR reload result? | [v0.75.0 cross-daemon receipt](perf/cross-daemon-v0750-2026-10.md), with 108 verifier-checked rows | Latest cross-daemon released-source campaign (v0.75.0; later releases not yet re-measured): rustbgpd v0.75.0, BIRD 3.3.2, and OpenBGPD 9.3 in the same night, measured 2026-10-04 to 2026-10-05 at 320 members × 183,040 generated IPv4 prefixes, three roots per overlap, four reloads, and 0%/10%/50% received-view overlap. All sessions remained up with zero parse errors. One fixed shape on one host; the v0.68.0 receipt keeps the grouped control. BIRD 3.3.3, released 2026-10-01, is re-measured only at 0% in the current-source refresh above. |
 | What current high-N shapes have run? | [v0.68.0 high-N receipt](perf/high-n-route-server-v0680-2026-08.md) | Exact-source one-run observations measured 2026-08-30 at 2,500 and 5,000 route-server peers. No interpolation or larger-fleet extrapolation. |
 | What happens at IXP route-server scale under reload and member churn? | [v0.75.0 cross-daemon receipt](perf/cross-daemon-v0750-2026-10.md), the [v0.74.0 cross-daemon receipt](perf/cross-daemon-v0740-2026-10.md) and the [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. rustbgpd v0.75.0 and OpenBGPD 9.3 were measured in the same night, 2026-10-04 to 2026-10-05, three runs each. BIRD 3.3.2's rows are from the v0.74.0 night, 2026-10-03 to 2026-10-04; BIRD 3.3.3, released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet measured in the matrix. The matrix's earlier rows are dated. |
 | Can an IRR-scale candidate use the transactional apply path? | [IRR transactional-apply receipt](perf/irr-transactional-apply-2026-08.md) and [compact evidence](perf/artifacts/irr-transactional-apply-2026-08/README.md) | Two independent single-host runs measured 2026-08-04 at clean, then-current `origin/main` commit `02c752408b2336061da050d3396c3f7a538d3389`. Each completed 4/4 streamed Plan → token-bound Apply → commit-confirm cycles for a ~295.6 MB candidate at 320 members × 183,040 routes and 3,218,965 IRR filter entries, with 320/320 sessions and zero parse errors. Explicit abort and 10 s timeout auto-revert restored disk and runtime byte-exactly; rollback completed 69.5 s / 69.0 s after the deadline under a 600 s ceiling. One fleet shape, two fixed-order repeats; not a cross-daemon comparison. |
@@ -100,7 +100,9 @@ MP_REACH borrowed-attribute exact-export controlled A/B: 2026-08-25; current
 v0.68.0 cross-stack bgperf2 campaign: 2026-08-30; v0.73.0 release-tag bgperf2
 spot-check (rustbgpd only, same host): 2026-09-28; bgperf2 comparator
 spot-check (unreleased rustbgpd after v0.78.0, BIRD 2.19.3, BIRD 3.3.3 and
-GoBGP 4.10.0; three shapes, same host): 2026-10-19.
+GoBGP 4.10.0; three shapes, same host): 2026-10-19; bgperf2 paired-read rerun
+(rustbgpd `3e3fba0de`, the same comparators and shapes, three repetitions per
+cell): 2026-10-19.
 
 | Field | Value |
 |-------|-------|
@@ -1159,7 +1161,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
 | `AdjRibIn` | 1552 bytes |
-| `LocRib` | 1064 bytes |
+| `LocRib` | 1104 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
 doc: new attribute variants (RFC 6514 `PmsiTunnel`, RFC 9234
@@ -1181,6 +1183,11 @@ core-isolation read off the full EVPN table; see
 `crates/rib/src/adj_rib_in.rs` and `crates/rib/src/loc_rib.rs`). Confirmed
 via `std::mem::size_of` against the current struct definitions; these two
 rows aren't in the allocator-tracked harness JSON.
+
+`LocRib` then grew from 1064 to 1104 bytes: five inline counters of the
+second family in each mixed-AFI table (IPv6 unicast, FlowSpec, VPN and
+labeled unicast, plus BGP-LS VPN), so the per-family `bgp_rib_loc_prefixes`
+series are published without walking a table.
 
 Of the 1384 bytes, 48 are two inline, allocation-free
 `RpkiValidationCounts` values, one for each unicast family. They keep the
@@ -1626,8 +1633,8 @@ and may include anonymous, file/cache, kernel, and socket memory.
 **Freshest full cross-stack campaign: v0.68.0, measured 2026-08-30.** A
 counterbalanced 80-cell campaign rebuilt and pinned exact rustbgpd v0.68.0, BIRD
 2.19.2, FRR 10.7.0, and GoBGP 4.8.0 (BIRD 2.19.3 and GoBGP v4.10.0 were later
-measured only in the three-shape [2026-10-19
-spot-check](#2026-10-19-comparator-spot-check); BIRD 2.20.0, released 2026-10-12,
+measured only in the three-shape [2026-10-19 paired-read
+rerun](#2026-10-19-paired-read-rerun) and the spot-check before it; BIRD 2.20.0, released 2026-10-12,
 and FRR 10.7.1, released 2026-08-31, are not yet measured), stopped each cell's samplers before
 starting the next cell, and
 retained all raw rows in the [same cross-stack bgperf2
@@ -1648,7 +1655,10 @@ successful repetitions.
 
 In this 2026-08-30 campaign, rustbgpd had the lowest median total time in all
 five shapes and tied or had the lowest median convergence time. The 2026-10-19
-spot-check below does not reproduce that at 10p × 1k. No CPU or memory ranking
+spot-check below did not reproduce that at 10p × 1k; the [paired-read
+rerun](#2026-10-19-paired-read-rerun) the same day, on a harness that pairs the
+monitor and target reads, again had rustbgpd lowest by median total time in the
+three shapes it measured, at 10p × 1k within one sampling step of BIRD 2. No CPU or memory ranking
 is claimed. These
 same-host IPv4 import results
 do not cover policy, reload, churn, restart, or absolute behavior on another
@@ -1669,7 +1679,58 @@ like-for-like comparison. Single run, rustbgpd only; the four-daemon medians
 above are unchanged. The rows are retained in the
 [v0.73.0 headline refresh bundle](perf/artifacts/headline-refresh-v0730-2026-09/bgperf2-spot-check.csv).*
 
+#### 2026-10-19 paired-read rerun
+
+The same day as the spot-check below, a rerun in a quiet window measured the
+same three shapes with three repetitions per cell. The targets were unreleased
+rustbgpd at commit `3e3fba0de` (after v0.78.0), BIRD 2.19.3, BIRD 3.3.3 and
+GoBGP 4.10.0, using the spot-check's comparator images, BIRD 2.19.2 testers and
+a GoBGP 4.8.0 monitor. Repetitions 1 and 3 ran rustbgpd, BIRD 2.19.3, BIRD
+3.3.3 and GoBGP for each shape; repetition 2 ran them in reverse. All 36 runs
+reached the expected route count.
+
+The harness was bgperf2 fork commit
+[`1a2648d`](https://github.com/lance0/bgperf2/commit/1a2648da73b4e89e2a6ad0ce00367ca8f665eb73),
+which pairs each monitor sample with a target read. Earlier revisions,
+including `4a13f8d0c` used by the spot-check, polled the monitor and the target
+in two free-running one-second loops and decided each monitor sample on
+whichever target read had been dequeued first. Both reads finish within about
+a millisecond of each other, so a target whose read landed just after the
+monitor's counted its full route set one tick later, costing about one second
+of total time. With `1a2648d`, each monitor sample is decided against the target
+read that started between half a poll before it and 50 ms after it, waiting for
+that read if needed. The rule is the same for every target. Every run paired
+every sample, except one GoBGP run at 10p × 1k that left 8 samples unpaired.
+
+Values are **convergence seconds / total seconds**: the median of three runs,
+with the total's minimum–maximum in parentheses.
+
+| Shape | rustbgpd `3e3fba0de` | BIRD 2.19.3 | BIRD 3.3.3 | GoBGP 4.10.0 |
+|---|---:|---:|---:|---:|
+| 10p × 1k | 2 / 8.35 (8.32–9.35) | 2 / 9.27 (8.30–9.30) | 2 / 9.32 (9.30–9.35) | 3 / 10.43 (9.34–11.37) |
+| 2p × 10k | 2 / 8.35 (8.34–8.39) | 2 / 9.33 (9.33–9.34) | 2 / 9.34 (9.33–10.37) | 3 / 10.44 (9.43–10.47) |
+| 2p × 100k | 3 / 12.62 (12.57–12.70) | 3 / 13.65 (13.58–13.67) | 3 / 13.61 (13.61–13.68) | 4 / 14.72 (14.72–14.74) |
+
+rustbgpd had the lowest median total time in all three shapes on this host. At
+10p × 1k it was within one sampling step of BIRD 2. Total time moves in roughly
+one-second steps, set by the monitor's poll and stability wait. rustbgpd and
+BIRD 2.19.3 traded places by repetition: 8.35 against 8.30 s, 9.35 against
+9.30 s, then 8.32 against 9.27 s. At 2p × 10k and 2p × 100k, rustbgpd's total
+was lower than every other target's in every repetition.
+
+This is n=3 per cell, three of five shapes, and one host. It does not cover
+the 30p × 1k and 100p × 1k shapes or FRR, makes no CPU or memory ranking, and
+does not measure BIRD 2.20.0 or BIRD 3.4.0. The per-run rows, pairing counts
+and image provenance are in the [2026-10-19 rerun
+bundle](perf/artifacts/competitive-bgperf2-paired-s2-2026-10-19/README.md).
+
 #### 2026-10-19 comparator spot-check
+
+> **Superseded by the [paired-read rerun](#2026-10-19-paired-read-rerun).**
+> This spot-check ran bgperf2 `4a13f8d0c`, which decided each monitor sample
+> on whichever of two free-running polls finished first. Its 10p × 1k
+> rustbgpd result reflects that poll race, not a daemon delay. The text below
+> is kept as measured.
 
 A same-host spot-check on 2026-10-19 ran three of the five shapes, with two
 repetitions per cell. The targets were unreleased rustbgpd at commit `090022493`

@@ -496,15 +496,23 @@ impl RibManager {
                     rtc_affected.insert(route.key());
                 }
             }
-            self.metrics
-                .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer.to_string(),
+                crate::manager::helpers::UNICAST_FAMILIES,
+                rib.unicast_lens(),
+            );
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer.to_string(),
+                crate::manager::helpers::FLOWSPEC_FAMILIES,
+                rib.flowspec_lens(),
+            );
             self.metrics.set_rib_prefixes(
                 &peer.to_string(),
-                "flowspec",
-                gauge_val(rib.flowspec_len()),
+                "l2vpn_evpn",
+                gauge_val(rib.evpn_len()),
             );
-            self.metrics
-                .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(rib.evpn_len()));
         }
 
         let changed = self.recompute_best(&affected);
@@ -808,7 +816,7 @@ impl RibManager {
         let mut l3vpn_swept = Vec::new();
         let mut labeled_swept = Vec::new();
         let mut rtc_swept = Vec::new();
-        let mut rib_len = 0;
+        let mut rib_len = [0; 2];
         let mut evpn_len = 0;
         if let Some(rib) = self.ribs.get_mut(&peer) {
             swept = rib.sweep_stale();
@@ -821,9 +829,13 @@ impl RibManager {
             self.attr_intern.gc();
             self.metrics
                 .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
-            self.metrics
-                .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
-            rib_len = rib.len();
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer_label,
+                crate::manager::helpers::FLOWSPEC_FAMILIES,
+                rib.flowspec_lens(),
+            );
+            rib_len = rib.unicast_lens();
             evpn_len = rib.evpn_len();
         }
         let had_swept = !swept.is_empty();
@@ -836,8 +848,12 @@ impl RibManager {
         if had_swept {
             info!(%peer, count = swept.len(), "swept stale routes");
             let affected: HashSet<Prefix> = swept.into_iter().collect();
-            self.metrics
-                .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer_label,
+                crate::manager::helpers::UNICAST_FAMILIES,
+                rib_len,
+            );
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
         }
@@ -848,7 +864,7 @@ impl RibManager {
         if had_evpn_swept {
             let evpn_affected: HashSet<EvpnRouteKey> = evpn_swept.into_iter().collect();
             self.metrics
-                .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
+                .set_rib_prefixes(&peer_label, "l2vpn_evpn", gauge_val(evpn_len));
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
         if had_bgpls_swept {
@@ -943,7 +959,7 @@ impl RibManager {
         let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
         let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
         let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
-        let mut rib_len = 0;
+        let mut rib_len = [0; 2];
         let mut evpn_len = 0;
         if let Some(rib) = self.ribs.get_mut(&peer) {
             // Promote LLGR-negotiated families to LLGR-stale
@@ -997,9 +1013,13 @@ impl RibManager {
                 bgpls_affected.extend(rib.sweep_stale_family_bgpls(family));
                 rtc_affected.extend(rib.sweep_stale_family_rtc(family));
             }
-            self.metrics
-                .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
-            rib_len = rib.len();
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer_label,
+                crate::manager::helpers::FLOWSPEC_FAMILIES,
+                rib.flowspec_lens(),
+            );
+            rib_len = rib.unicast_lens();
             evpn_len = rib.evpn_len();
             // First GC catches interned sets made unreachable by direct
             // Adj-RIB-In mutation (LLGR COW promotion or non-LLGR family
@@ -1057,10 +1077,14 @@ impl RibManager {
             // no-ops.
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
         self.metrics
-            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
-        self.metrics
-            .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
+            .set_rib_prefixes(&peer_label, "l2vpn_evpn", gauge_val(evpn_len));
 
         // Set the LLGR timer per family (RFC 9494 §4.3: stale time is
         // negotiated per AFI/SAFI): min(local config, the peer's
@@ -1137,7 +1161,7 @@ impl RibManager {
         let mut l3vpn_swept = Vec::new();
         let mut labeled_swept = Vec::new();
         let mut rtc_swept = Vec::new();
-        let mut rib_len = 0;
+        let mut rib_len = [0; 2];
         let mut evpn_len = 0;
         for &(afi, safi) in families {
             self.llgr_stale_deadlines.remove(&(peer, afi, safi));
@@ -1159,9 +1183,13 @@ impl RibManager {
             self.attr_intern.gc();
             self.metrics
                 .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
-            self.metrics
-                .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
-            rib_len = rib.len();
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer_label,
+                crate::manager::helpers::FLOWSPEC_FAMILIES,
+                rib.flowspec_lens(),
+            );
+            rib_len = rib.unicast_lens();
             evpn_len = rib.evpn_len();
         }
         let had_swept = !swept.is_empty();
@@ -1174,8 +1202,12 @@ impl RibManager {
         if had_swept {
             info!(%peer, count = swept.len(), "swept LLGR-stale routes");
             let affected: HashSet<Prefix> = swept.into_iter().collect();
-            self.metrics
-                .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer_label,
+                crate::manager::helpers::UNICAST_FAMILIES,
+                rib_len,
+            );
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
         }
@@ -1186,7 +1218,7 @@ impl RibManager {
         if had_evpn_swept {
             let evpn_affected: HashSet<EvpnRouteKey> = evpn_swept.into_iter().collect();
             self.metrics
-                .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
+                .set_rib_prefixes(&peer_label, "l2vpn_evpn", gauge_val(evpn_len));
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
         if had_bgpls_swept {

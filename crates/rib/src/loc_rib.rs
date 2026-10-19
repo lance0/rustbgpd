@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::net::IpAddr;
 use std::time::SystemTime;
 
-use rustbgpd_wire::{AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
+use rustbgpd_wire::{Afi, AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
@@ -15,8 +15,8 @@ use crate::best_path::{best_path_cmp, best_path_cmp_ranked, compare_bgp_identifi
 use crate::fast_hash::{FastMap as HashMap, FastState};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute, Route,
-    RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
+    LabeledRibRoute, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
 };
 use crate::update::{RouteQueryKey, route_query_key};
 
@@ -91,6 +91,52 @@ pub struct LocRib {
     labeled_routes: HashMap<Prefix, LabeledRibRoute>,
     /// RT-Constrain Loc-RIB: best route per RFC 4684 RT membership identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
+    /// Second-family counts for the mixed-AFI maps, maintained at every
+    /// insert/remove so per-family gauges never walk a table: IPv6 unicast,
+    /// IPv6 `FlowSpec`, VPN-IPv6, IPv6 labeled unicast, and BGP-LS VPN.
+    second_family: SecondFamilyCounts,
+}
+
+/// Per-family-pair table sizes; see [`LocRib::family_lens`] and
+/// [`crate::adj_rib_out::AdjRibOut::family_lens`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyLens {
+    /// `[ipv4_unicast, ipv6_unicast]`.
+    pub unicast: [usize; 2],
+    /// `[ipv4_flowspec, ipv6_flowspec]`.
+    pub flowspec: [usize; 2],
+    /// `[l3vpn_ipv4_unicast, l3vpn_ipv6_unicast]`.
+    pub vpn: [usize; 2],
+    /// `[ipv4_labeled_unicast, ipv6_labeled_unicast]`.
+    pub labeled: [usize; 2],
+    /// `[linkstate, linkstate_vpn]`.
+    pub bgpls: [usize; 2],
+}
+
+/// Count of the second (`IPv6` / BGP-LS VPN) family in each mixed-AFI map.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SecondFamilyCounts {
+    pub(crate) unicast: usize,
+    pub(crate) flowspec: usize,
+    pub(crate) vpn: usize,
+    pub(crate) labeled: usize,
+    pub(crate) bgpls: usize,
+}
+
+/// Adjust one second-family count after a map insert (`added`) or remove.
+pub(crate) fn track(count: &mut usize, second: bool, added: bool, removed: bool) {
+    if second {
+        if added {
+            *count += 1;
+        }
+        if removed {
+            *count -= 1;
+        }
+    }
+}
+
+pub(crate) fn split(total: usize, second: usize) -> [usize; 2] {
+    [total - second, second]
 }
 
 impl LocRib {
@@ -118,6 +164,7 @@ impl LocRib {
             vpn_routes: crate::fast_hash::ShardedMap::default(),
             labeled_routes: HashMap::default(),
             rtc_routes: HashMap::default(),
+            second_family: SecondFamilyCounts::default(),
         }
     }
 
@@ -161,6 +208,8 @@ impl LocRib {
                     .routes
                     .insert(prefix, (new_best, SystemTime::now()))
                     .is_none();
+                let v6 = matches!(prefix, Prefix::V6(_));
+                track(&mut self.second_family.unicast, v6, was_absent, false);
                 if was_absent {
                     self.note_membership_change(prefix);
                 }
@@ -168,6 +217,8 @@ impl LocRib {
             changed
         } else {
             let removed = self.routes.remove(&prefix).is_some();
+            let v6 = matches!(prefix, Prefix::V6(_));
+            track(&mut self.second_family.unicast, v6, false, removed);
             if removed {
                 self.note_membership_change(prefix);
             }
@@ -303,6 +354,21 @@ impl LocRib {
         self.routes.len()
     }
 
+    /// Best routes per family pair, `[first, second]`: unicast, `FlowSpec`,
+    /// VPN and labeled split `[IPv4, IPv6]`; BGP-LS splits
+    /// `[linkstate, linkstate_vpn]`. O(1) from maintained counts.
+    #[must_use]
+    pub fn family_lens(&self) -> FamilyLens {
+        let second = self.second_family;
+        FamilyLens {
+            unicast: split(self.routes.len(), second.unicast),
+            flowspec: split(self.flowspec_routes.len(), second.flowspec),
+            vpn: split(self.vpn_routes.len(), second.vpn),
+            labeled: split(self.labeled_routes.len(), second.labeled),
+            bgpls: split(self.bgpls_routes.len(), second.bgpls),
+        }
+    }
+
     /// Return the backing capacity of the unicast best-path map.
     ///
     /// Exposed only to benchmark / memory-profile harnesses so they can
@@ -427,11 +493,13 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.flowspec_routes.insert(key, new_best);
+                    let v6 = key.afi == Afi::Ipv6;
+                    let added = self.flowspec_routes.insert(key, new_best).is_none();
+                    track(&mut self.second_family.flowspec, v6, added, false);
                 }
                 changed
             }
-            None => self.flowspec_routes.remove(&key).is_some(),
+            None => self.remove_flowspec(&key),
         }
     }
 
@@ -454,7 +522,14 @@ impl LocRib {
 
     /// Remove the best `FlowSpec` route for a rule. Returns `true` if it existed.
     pub fn remove_flowspec(&mut self, key: &FlowSpecKey) -> bool {
-        self.flowspec_routes.remove(key).is_some()
+        let removed = self.flowspec_routes.remove(key).is_some();
+        track(
+            &mut self.second_family.flowspec,
+            key.afi == Afi::Ipv6,
+            false,
+            removed,
+        );
+        removed
     }
 
     // --- EVPN methods (RFC 7432) ---
@@ -564,17 +639,22 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.bgpls_routes.insert(key, new_best);
+                    let vpn = key.family == BgpLsFamily::LinkStateVpn;
+                    let added = self.bgpls_routes.insert(key, new_best).is_none();
+                    track(&mut self.second_family.bgpls, vpn, added, false);
                 }
                 changed
             }
-            None => self.bgpls_routes.remove(&key).is_some(),
+            None => self.remove_bgpls(&key),
         }
     }
 
     /// Insert or replace the selected BGP-LS route for a key.
     pub fn insert_bgpls(&mut self, route: BgpLsRibRoute) {
-        self.bgpls_routes.insert(route.key(), route);
+        let key = route.key();
+        let vpn = key.family == BgpLsFamily::LinkStateVpn;
+        let added = self.bgpls_routes.insert(key, route).is_none();
+        track(&mut self.second_family.bgpls, vpn, added, false);
     }
 
     /// Look up the selected BGP-LS route for a key.
@@ -596,7 +676,10 @@ impl LocRib {
 
     /// Remove the selected BGP-LS route for a key. Returns `true` if it existed.
     pub fn remove_bgpls(&mut self, key: &BgpLsRouteKey) -> bool {
-        self.bgpls_routes.remove(key).is_some()
+        let removed = self.bgpls_routes.remove(key).is_some();
+        let vpn = key.family == BgpLsFamily::LinkStateVpn;
+        track(&mut self.second_family.bgpls, vpn, false, removed);
+        removed
     }
 
     /// Recompute the best VPNv4/VPNv6 route for `key` from the candidates.
@@ -632,18 +715,27 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.vpn_routes.insert(key, (new_best, SystemTime::now()));
+                    self.store_vpn(key, new_best);
                 }
                 changed
             }
-            None => self.vpn_routes.remove(&key).is_some(),
+            None => self.remove_vpn(&key),
         }
     }
 
     /// Insert or replace the selected VPN route for a key.
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
-        self.vpn_routes
-            .insert(route.nlri.key(), (route, SystemTime::now()));
+        self.store_vpn(route.nlri.key(), route);
+    }
+
+    /// The one VPN insert path, keeping the VPN-IPv6 count in step.
+    fn store_vpn(&mut self, key: rustbgpd_wire::VpnRouteKey, route: VpnRibRoute) {
+        let v6 = matches!(key.prefix, rustbgpd_wire::VpnPrefix::V6 { .. });
+        let added = self
+            .vpn_routes
+            .insert(key, (route, SystemTime::now()))
+            .is_none();
+        track(&mut self.second_family.vpn, v6, added, false);
     }
 
     /// Look up the selected VPN route for an RD+prefix identity.
@@ -687,7 +779,10 @@ impl LocRib {
 
     /// Remove the selected VPN route for a key. Returns `true` if it existed.
     pub fn remove_vpn(&mut self, key: &rustbgpd_wire::VpnRouteKey) -> bool {
-        self.vpn_routes.remove(key).is_some()
+        let removed = self.vpn_routes.remove(key).is_some();
+        let v6 = matches!(key.prefix, rustbgpd_wire::VpnPrefix::V6 { .. });
+        track(&mut self.second_family.vpn, v6, false, removed);
+        removed
     }
 
     /// Recompute the best labeled-unicast route for `key` from the
@@ -721,17 +816,22 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.labeled_routes.insert(key, new_best);
+                    let v6 = matches!(key, Prefix::V6(_));
+                    let added = self.labeled_routes.insert(key, new_best).is_none();
+                    track(&mut self.second_family.labeled, v6, added, false);
                 }
                 changed
             }
-            None => self.labeled_routes.remove(&key).is_some(),
+            None => self.remove_labeled(&key),
         }
     }
 
     /// Insert or replace the selected labeled route for a key.
     pub fn insert_labeled(&mut self, route: LabeledRibRoute) {
-        self.labeled_routes.insert(route.nlri.key(), route);
+        let key = route.nlri.key();
+        let v6 = matches!(key, Prefix::V6(_));
+        let added = self.labeled_routes.insert(key, route).is_none();
+        track(&mut self.second_family.labeled, v6, added, false);
     }
 
     /// Look up the selected labeled route for a prefix identity.
@@ -754,7 +854,14 @@ impl LocRib {
     /// Remove the selected labeled route for a key. Returns `true` if it
     /// existed.
     pub fn remove_labeled(&mut self, key: &Prefix) -> bool {
-        self.labeled_routes.remove(key).is_some()
+        let removed = self.labeled_routes.remove(key).is_some();
+        track(
+            &mut self.second_family.labeled,
+            matches!(key, Prefix::V6(_)),
+            false,
+            removed,
+        );
+        removed
     }
 
     /// Recompute the best RT-Constrain route for `key` from the candidates.
@@ -1599,6 +1706,53 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, peer_oct),
             local_pref,
         )
+    }
+
+    /// The per-family gauges read these counts instead of walking a table:
+    /// dropping either the insert or the remove adjustment makes this red.
+    #[test]
+    fn family_lens_follow_each_afi_through_install_replace_and_withdraw() {
+        let mut loc = LocRib::new();
+        let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
+        let v6 = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            "2001:db8::".parse().unwrap(),
+            32,
+        ));
+        let mut v4_route = make_route(1, Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8), 100);
+        let mut v6_route = v4_route.clone();
+        v6_route.prefix = v6;
+        assert!(loc.recompute(v4, std::iter::once(&v4_route)));
+        assert!(loc.recompute(v6, std::iter::once(&v6_route)));
+        assert_eq!(loc.family_lens().unicast, [1, 1]);
+        // A replacement best is not a new member.
+        v4_route.path_id = 7;
+        v6_route.path_id = 7;
+        assert!(loc.recompute(v4, std::iter::once(&v4_route)));
+        assert!(loc.recompute(v6, std::iter::once(&v6_route)));
+        assert_eq!(loc.family_lens().unicast, [1, 1]);
+        assert!(loc.recompute(v6, std::iter::empty()));
+        assert!(!loc.recompute(v6, std::iter::empty()));
+        assert_eq!(loc.family_lens().unicast, [1, 0]);
+        assert!(loc.recompute(v4, std::iter::empty()));
+        assert_eq!(loc.family_lens().unicast, [0, 0]);
+    }
+
+    /// `insert_vpn` must share the selection path's VPN-IPv6 accounting:
+    /// a bypass reports a VPN-IPv6 route as `[1, 0]` and the remove underflows.
+    #[test]
+    fn family_lens_follow_vpnv6_through_insert_vpn_replace_and_remove() {
+        let mut loc = LocRib::new();
+        let mut nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        nlri.prefix = VpnPrefix::v6("2001:db8::".parse().unwrap(), 32).unwrap();
+        let key = nlri.key();
+        loc.insert_vpn(make_vpn_route(nlri.clone(), 1, 100));
+        assert_eq!(loc.family_lens().vpn, [0, 1]);
+        // A replacement is not a new member.
+        loc.insert_vpn(make_vpn_route(nlri, 2, 200));
+        assert_eq!(loc.family_lens().vpn, [0, 1]);
+        assert!(loc.remove_vpn(&key));
+        assert!(!loc.remove_vpn(&key));
+        assert_eq!(loc.family_lens().vpn, [0, 0]);
     }
 
     #[test]

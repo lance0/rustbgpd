@@ -10,7 +10,7 @@ watch, and the failure modes with the explain commands that debug them.
 The configs are derived from the interop fixtures under
 [`tests/interop/configs/`](../../tests/interop/configs/) that the
 M-series receipts run against real peer stacks — every recipe cites the
-receipts that prove its scenario ([`RECEIPTS.md`](../receipts.md)).
+receipts that prove its scenario ([`receipts.md`](../receipts.md)).
 
 ## Find the route-server path
 

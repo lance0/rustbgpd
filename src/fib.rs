@@ -350,6 +350,16 @@ pub(crate) enum FibDrop {
         /// Unsupported next-hop.
         next_hop: IpAddr,
     },
+    /// The selected next hop is unspecified: a locally injected route asking
+    /// for next-hop self, which has no gateway to install.
+    NextHopUnspecified {
+        /// Table that would have received the route.
+        table_name: String,
+        /// Destination prefix.
+        prefix: Prefix,
+        /// The unspecified next-hop.
+        next_hop: IpAddr,
+    },
     /// An IPv6 link-local next-hop was selected without the egress interface
     /// needed to resolve it in the Linux FIB.
     LinkLocalNextHopScopeMissing {
@@ -464,12 +474,18 @@ fn eligible_next_hops(
 pub(crate) enum FibNextHopIneligible {
     FamilyUnsupported,
     LinkLocalScopeMissing,
+    Unspecified,
 }
 
 pub(crate) fn fib_next_hop_installable(
     prefix: Prefix,
     next_hop: &FibNextHop,
 ) -> Result<(), FibNextHopIneligible> {
+    // `0.0.0.0` / `::` is next-hop self for an injected route; installing it
+    // as a gateway would make the prefix look directly connected.
+    if next_hop.addr.is_unspecified() {
+        return Err(FibNextHopIneligible::Unspecified);
+    }
     if is_ipv6_link_local(next_hop.addr) && next_hop.scope.is_none() {
         return Err(FibNextHopIneligible::LinkLocalScopeMissing);
     }
@@ -809,6 +825,11 @@ fn push_next_hop_ineligible_drop(
             next_hop: route.next_hop,
         },
         FibNextHopIneligible::LinkLocalScopeMissing => FibDrop::LinkLocalNextHopScopeMissing {
+            table_name: table_name.to_string(),
+            prefix: route.prefix,
+            next_hop: route.next_hop,
+        },
+        FibNextHopIneligible::Unspecified => FibDrop::NextHopUnspecified {
             table_name: table_name.to_string(),
             prefix: route.prefix,
             next_hop: route.next_hop,
@@ -1334,6 +1355,26 @@ mod tests {
             vec![(ip("192.0.2.1"), None)]
         );
         assert_eq!(intent.drops.len(), 0);
+    }
+
+    #[test]
+    fn unspecified_next_hop_is_dropped_explicitly() {
+        let tables = vec![table("edge", 1000, 200, &["ipv4_unicast"])];
+        let routes = vec![route(
+            v4_prefix(2, 24),
+            ip("0.0.0.0"),
+            RouteOrigin::Local,
+            0,
+        )];
+
+        let intent = project_fib_intent(&tables, &candidates(routes));
+
+        assert!(intent.routes.is_empty());
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::NextHopUnspecified { table_name, next_hop, .. }]
+                if table_name == "edge" && *next_hop == ip("0.0.0.0")
+        ));
     }
 
     #[test]

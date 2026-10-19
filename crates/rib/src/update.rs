@@ -712,8 +712,8 @@ impl ExactExportKey {
             Self::FlowSpec(key) if key.afi == Afi::Ipv4 => "ipv4_flowspec",
             Self::FlowSpec(_) => "ipv6_flowspec",
             Self::Evpn(_) => "l2vpn_evpn",
-            Self::BgpLs(key) if key.family == crate::route::BgpLsFamily::LinkState => "bgpls",
-            Self::BgpLs(_) => "bgpls_vpn",
+            Self::BgpLs(key) if key.family == crate::route::BgpLsFamily::LinkState => "linkstate",
+            Self::BgpLs(_) => "linkstate_vpn",
             Self::Vpn(key) if key.afi_safi().0 == Afi::Ipv4 => "l3vpn_ipv4_unicast",
             Self::Vpn(_) => "l3vpn_ipv6_unicast",
             Self::Labeled(key) if key.afi_safi().0 == Afi::Ipv4 => "ipv4_labeled_unicast",
@@ -1234,16 +1234,16 @@ pub struct ExportPolicyTermHits {
     pub terms: Vec<rustbgpd_policy::TermHitRow>,
 }
 
-/// Outcome of a local `FlowSpec` injection, decided against the local
-/// Adj-RIB-In rather than Loc-RIB, so a received rule that out-selects the
-/// local one cannot mask a real replacement.
+/// Outcome of a local unicast or `FlowSpec` injection, decided against the
+/// local Adj-RIB-In rather than Loc-RIB, so a received route that out-selects
+/// the local one cannot mask a real replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlowSpecInjectOutcome {
-    /// No local rule had this `(afi, rule)` key.
+pub enum InjectOutcome {
+    /// No local route had this key.
     Created,
-    /// A local rule with this key existed with a different payload.
+    /// A local route with this key existed with a different payload.
     Replaced,
-    /// An identical local rule existed; nothing changed.
+    /// An identical local route existed; nothing changed.
     Unchanged,
 }
 
@@ -2566,8 +2566,8 @@ pub enum RibUpdate {
     InjectRoute {
         /// The route to inject.
         route: Route,
-        /// Completion reply.
-        reply: oneshot::Sender<Result<(), RibCommandError>>,
+        /// Completion reply with the local Adj-RIB-In outcome.
+        reply: oneshot::Sender<Result<InjectOutcome, RibCommandError>>,
     },
     /// Withdraw a locally-injected route.
     WithdrawInjected {
@@ -2575,8 +2575,10 @@ pub enum RibUpdate {
         prefix: Prefix,
         /// Add-Path path identifier (0 = default path).
         path_id: u32,
-        /// Completion reply.
-        reply: oneshot::Sender<Result<(), RibCommandError>>,
+        /// Reply `Ok(false)` instead of `NotFound` when no local route matches.
+        allow_missing: bool,
+        /// Completion reply: `true` when a local route was removed.
+        reply: oneshot::Sender<Result<bool, RibCommandError>>,
     },
     /// Query: one bounded page of a resumable route listing. Filtering
     /// and pagination run inside the RIB task with per-page bounded
@@ -3285,7 +3287,7 @@ pub enum RibUpdate {
         /// The `FlowSpec` route to inject.
         route: FlowSpecRoute,
         /// Completion reply, carrying the local Adj-RIB-In outcome.
-        reply: oneshot::Sender<Result<FlowSpecInjectOutcome, RibCommandError>>,
+        reply: oneshot::Sender<Result<InjectOutcome, RibCommandError>>,
     },
     /// Withdraw a locally-injected `FlowSpec` route.
     WithdrawFlowSpec {

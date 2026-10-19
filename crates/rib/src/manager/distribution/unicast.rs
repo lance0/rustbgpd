@@ -7,11 +7,12 @@ use super::{
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
     RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, debug,
-    evaluate_chain_with_attribution, family_label, gauge_val, policy_label_with_term,
-    prefix_family, record_export_policy_eval, route_type, route_type_label, route_type_message,
+    evaluate_chain_with_attribution, family_label, policy_label_with_term, prefix_family,
+    record_export_policy_eval, route_type, route_type_label, route_type_message,
     rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
     validate_route_aspa, validate_route_rpki,
 };
+use crate::update::InjectOutcome;
 
 /// Gate code and message for an export-policy deny.
 ///
@@ -1590,14 +1591,22 @@ impl RibManager {
                 }
             }
             debug!(%peer, routes = rib.len(), "rib updated");
-            (rib.len(), rib.flowspec_len())
+            (rib.unicast_lens(), rib.flowspec_lens())
         };
 
         let peer_label = peer.to_string();
-        self.metrics
-            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
-        self.metrics
-            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            flowspec_len,
+        );
         for ((afi, safi), count) in removed_stale_counts {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
@@ -1612,7 +1621,7 @@ impl RibManager {
             let changed = self.recompute_best_after_withdraw(&affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
-            if rib_len == 0 {
+            if rib_len == [0, 0] {
                 self.gc_attr_intern();
             } else {
                 self.defer_unicast_attr_gc(removed);
@@ -1689,14 +1698,22 @@ impl RibManager {
                 }
             }
             debug!(%peer, routes = rib.len(), "rib updated");
-            (rib.len(), rib.flowspec_len())
+            (rib.unicast_lens(), rib.flowspec_lens())
         };
 
         let peer_label = peer.to_string();
-        self.metrics
-            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
-        self.metrics
-            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            flowspec_len,
+        );
         for ((afi, safi), count) in removed_stale_counts {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
@@ -1725,21 +1742,54 @@ impl RibManager {
     pub(in crate::manager) fn handle_inject_route(
         &mut self,
         route: crate::route::Route,
-        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+        reply: tokio::sync::oneshot::Sender<Result<InjectOutcome, RibCommandError>>,
     ) {
         let prefix = route.prefix;
         let mut route = route;
         self.attr_intern.intern(&mut route.attributes);
+        // Validate against the current VRP table, as session routes are on
+        // insert and as cache revalidation later does for the local
+        // Adj-RIB-In; otherwise a replacement would reset the origin state to
+        // NotFound until the next covering VRP change.
+        if let Some(table) = self.vrp_table.as_deref() {
+            route.validation_state = validate_route_rpki(&route, table);
+        }
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        // Decide from the local Adj-RIB-In, not Loc-RIB, as for FlowSpec: a
+        // received route that out-selects the local one leaves Loc-RIB
+        // unchanged even when the local route really was replaced. These are
+        // the fields a controller sets. An identical re-add returns before
+        // touching the stored route, keeping its derived state (RPKI
+        // validation, receipt time) and selection exactly as they were.
+        let outcome = match rib.get(&prefix, route.path_id) {
+            None => InjectOutcome::Created,
+            Some(old)
+                if old.next_hop == route.next_hop
+                    && old.link_local_next_hop == route.link_local_next_hop
+                    && old.attributes == route.attributes =>
+            {
+                InjectOutcome::Unchanged
+            }
+            Some(_) => InjectOutcome::Replaced,
+        };
+        if outcome == InjectOutcome::Unchanged {
+            debug!(%prefix, ?outcome, "injected local route");
+            let _ = reply.send(Ok(outcome));
+            return;
+        }
         let replaced = rib.insert(route);
-        debug!(%prefix, "injected local route");
-        let rib_len = rib.len();
+        debug!(%prefix, ?outcome, "injected local route");
+        let rib_len = rib.unicast_lens();
         self.register_unicast_announcer(LOCAL_PEER, prefix);
-        self.metrics
-            .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib_len));
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &LOCAL_PEER.to_string(),
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
 
         let mut affected = HashSet::new();
         affected.insert(prefix);
@@ -1748,14 +1798,15 @@ impl RibManager {
         self.defer_unicast_attr_gc(usize::from(replaced));
         self.sync_attr_intern_gauge();
 
-        let _ = reply.send(Ok(()));
+        let _ = reply.send(Ok(outcome));
     }
 
     pub(in crate::manager) fn handle_withdraw_injected(
         &mut self,
         prefix: Prefix,
         path_id: u32,
-        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+        allow_missing: bool,
+        reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
     ) {
         let rib = self
             .ribs
@@ -1763,22 +1814,28 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw(&prefix, path_id) {
             debug!(%prefix, "withdrawn injected route");
-            let rib_len = rib.len();
-            self.metrics
-                .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib_len));
+            let rib_len = rib.unicast_lens();
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &LOCAL_PEER.to_string(),
+                crate::manager::helpers::UNICAST_FAMILIES,
+                rib_len,
+            );
             let mut affected = HashSet::new();
             affected.insert(prefix);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
             // Same rule as a session withdrawal: the final source withdrawal
             // collects immediately; anything else stays bounded and deferred.
-            if rib_len == 0 {
+            if rib_len == [0, 0] {
                 self.gc_attr_intern();
             } else {
                 self.defer_unicast_attr_gc(1);
             }
             self.sync_attr_intern_gauge();
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(Ok(true));
+        } else if allow_missing {
+            let _ = reply.send(Ok(false));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
                 "prefix {prefix} not found"

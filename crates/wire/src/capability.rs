@@ -82,8 +82,7 @@ impl Safi {
 /// supported by rustbgpd.
 ///
 /// BGP-LS deliberately uses the operator-facing `linkstate` spelling here.
-/// Metrics retain their existing `bgpls` labels independently so dashboards
-/// and alerts do not acquire a label-cardinality fork.
+/// Metric `family` labels use the same values.
 pub const CONFIGURED_FAMILIES: &[(&str, Afi, Safi)] = &[
     ("ipv4_unicast", Afi::Ipv4, Safi::Unicast),
     ("ipv6_unicast", Afi::Ipv6, Safi::Unicast),
@@ -1059,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_family_labels_keep_metric_aliases_out_of_the_parser() {
+    fn configured_family_labels_reject_retired_bgpls_spellings() {
         assert_eq!(parse_family("bgpls"), None);
         assert_eq!(parse_family("bgpls_vpn"), None);
         assert_eq!(family_label(Afi::BgpLs, Safi::BgpLs), Some("linkstate"));

@@ -49,6 +49,8 @@ pub mod runtime_config_settlement;
 pub mod server;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod watch_handoff_tests;
 
 pub use config_service::{
     ConfigService, MAX_CONFIRM_ID_CHARS, MAX_CONFIRM_TIMEOUT_SECONDS, update_group_impact_to_proto,

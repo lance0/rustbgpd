@@ -40,7 +40,7 @@ impl RibManager {
             rib.evpn_len()
         };
         self.metrics
-            .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(evpn_len));
+            .set_rib_prefixes(&peer.to_string(), "l2vpn_evpn", gauge_val(evpn_len));
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
@@ -86,7 +86,7 @@ impl RibManager {
             rib.evpn_len()
         };
         self.metrics
-            .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(evpn_len));
+            .set_rib_prefixes(&peer.to_string(), "l2vpn_evpn", gauge_val(evpn_len));
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
@@ -757,7 +757,7 @@ impl RibManager {
         }
 
         self.metrics
-            .set_loc_rib_prefixes("evpn", gauge_val(self.loc_rib.evpn_len()));
+            .set_loc_rib_prefixes("l2vpn_evpn", gauge_val(self.loc_rib.evpn_len()));
 
         let peers: Vec<IpAddr> = self
             .outbound_peers

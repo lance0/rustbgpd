@@ -1025,8 +1025,21 @@ async fn route_event_carries_best_path_id() {
 
 // --- Prometheus gauge tests ---
 
-const ADJ_RIB_OUT_FAMILIES: [&str; 7] =
-    ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"];
+/// Every canonical family, in `CONFIGURED_FAMILIES` order.
+const ADJ_RIB_OUT_FAMILIES: [&str; 12] = [
+    "ipv4_unicast",
+    "ipv6_unicast",
+    "ipv4_flowspec",
+    "ipv6_flowspec",
+    "l2vpn_evpn",
+    "linkstate",
+    "linkstate_vpn",
+    "l3vpn_ipv4_unicast",
+    "l3vpn_ipv6_unicast",
+    "ipv4_labeled_unicast",
+    "ipv6_labeled_unicast",
+    "rtc",
+];
 
 #[test]
 fn peer_up_initializes_every_adj_rib_out_family_series() {
@@ -1075,7 +1088,7 @@ fn peer_up_initializes_every_adj_rib_out_family_series() {
                     && metric
                         .get_label()
                         .iter()
-                        .any(|label| label.name() == "afi_safi" && label.value() == family)
+                        .any(|label| label.name() == "family" && label.value() == family)
             })
             .unwrap_or_else(|| panic!("PeerUp omitted the {family} Adj-RIB-Out series"))
             .get_gauge()
@@ -1094,7 +1107,7 @@ fn peer_up_initializes_every_adj_rib_out_family_series() {
 fn commit_family_gauge_fixture(
     announce: Vec<Route>,
     vpn_announce: Vec<VpnRibRoute>,
-) -> (AdjRibOutCommitStats, [i64; 7]) {
+) -> (AdjRibOutCommitStats, [i64; 12]) {
     let metrics = BgpMetrics::new();
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
@@ -1140,7 +1153,7 @@ fn commit_family_gauge_fixture(
                     .iter()
                     .any(|label| label.name() == "peer" && label.value() == peer_label)
                     && metric.get_label().iter().any(|label| {
-                        label.name() == "afi_safi" && label.value() == ADJ_RIB_OUT_FAMILIES[index]
+                        label.name() == "family" && label.value() == ADJ_RIB_OUT_FAMILIES[index]
                     })
             })
             .unwrap_or_else(|| {
@@ -1166,7 +1179,7 @@ fn adj_rib_out_commit_refreshes_only_touched_family_gauges() {
     assert_eq!(vpn_only.last_family_gauge_write_mask, 0x10);
     assert_eq!(
         vpn_only_values,
-        [10, 11, 12, 13, 1, 15, 16],
+        [10, 11, 12, 13, 14, 15, 16, 1, 0, 19, 20, 21],
         "VPN-only commit changes VPN truth and preserves every untouched sentinel"
     );
 
@@ -1184,7 +1197,7 @@ fn adj_rib_out_commit_refreshes_only_touched_family_gauges() {
     assert_eq!(mixed.last_family_gauge_write_mask, 0x11);
     assert_eq!(
         mixed_values,
-        [1, 11, 12, 13, 1, 15, 16],
+        [1, 0, 12, 13, 14, 15, 16, 1, 0, 19, 20, 21],
         "mixed commit changes unicast/VPN truth and preserves untouched sentinels"
     );
 }
@@ -1230,7 +1243,7 @@ fn peer_down_zeroes_all_adj_rib_out_family_gauges() {
                     && metric
                         .get_label()
                         .iter()
-                        .any(|label| label.name() == "afi_safi" && label.value() == family)
+                        .any(|label| label.name() == "family" && label.value() == family)
             })
             .unwrap_or_else(|| panic!("PeerDown removed the {family} Adj-RIB-Out series"))
             .get_gauge()
@@ -1305,7 +1318,7 @@ fn graceful_restart_zeroes_all_adj_rib_out_family_gauges() {
                     && metric
                         .get_label()
                         .iter()
-                        .any(|label| label.name() == "afi_safi" && label.value() == family)
+                        .any(|label| label.name() == "family" && label.value() == family)
             })
             .unwrap_or_else(|| panic!("graceful restart removed the {family} Adj-RIB-Out series"))
             .get_gauge()
@@ -1359,7 +1372,18 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
         .iter()
         .find(|f| f.name() == "bgp_rib_prefixes")
         .expect("bgp_rib_prefixes metric not found");
-    let sample = rib_gauge.get_metric()[0].get_gauge().get_value();
+    let sample = rib_gauge
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "family" && label.value() == "ipv4_unicast")
+        })
+        .expect("ipv4_unicast series")
+        .get_gauge()
+        .get_value();
     assert_eq!(sample as i64, 1);
 
     // PeerDown should zero the gauge
@@ -1383,7 +1407,18 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
         .iter()
         .find(|f| f.name() == "bgp_rib_prefixes")
         .expect("bgp_rib_prefixes metric not found");
-    let sample = rib_gauge.get_metric()[0].get_gauge().get_value();
+    let sample = rib_gauge
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "family" && label.value() == "ipv4_unicast")
+        })
+        .expect("ipv4_unicast series")
+        .get_gauge()
+        .get_value();
     assert_eq!(sample as i64, 0);
 
     drop(tx);
@@ -1431,7 +1466,18 @@ async fn loc_rib_gauge_tracks_best() {
         .iter()
         .find(|f| f.name() == "bgp_rib_loc_prefixes")
         .expect("bgp_loc_rib_prefixes metric not found");
-    let sample = loc_gauge.get_metric()[0].get_gauge().get_value();
+    let sample = loc_gauge
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "family" && label.value() == "ipv4_unicast")
+        })
+        .expect("ipv4_unicast series")
+        .get_gauge()
+        .get_value();
     assert_eq!(sample as i64, 1);
 
     drop(tx);
@@ -1503,7 +1549,18 @@ async fn adj_rib_out_gauge_tracks_advertised() {
         .iter()
         .find(|f| f.name() == "bgp_rib_adj_out_prefixes")
         .expect("bgp_adj_rib_out_prefixes metric not found");
-    let sample = out_gauge.get_metric()[0].get_gauge().get_value();
+    let sample = out_gauge
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "family" && label.value() == "ipv4_unicast")
+        })
+        .expect("ipv4_unicast series")
+        .get_gauge()
+        .get_value();
     assert_eq!(sample as i64, 1);
 
     drop(tx);

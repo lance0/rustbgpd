@@ -365,17 +365,17 @@ demand-gated.
 ## Watch
 
 Prometheus (`prometheus_addr`, `/metrics`; dashboards in
-[`GRAFANA.md`](../how-to/grafana.md)):
+[`grafana.md`](../how-to/grafana.md)):
 
 | Metric | Healthy shape |
 |--------|---------------|
 | `bgp_session_state_transitions_total` | flat outside member churn |
 | `bgp_rpki_cache_connected{cache}` | `1` for each configured RTR cache; `0` means that session is down, which shows before the VRP count moves because retained data keeps serving until it expires |
-| `sum without (af) (bgp_rpki_vrp_count)` | per-target IPv4 + IPv6 total; non-zero once the RTR cache syncs (`rbgp doctor` warns when configured caches have no visible VRPs) |
+| `sum without (afi) (bgp_rpki_vrp_count)` | per-target IPv4 + IPv6 total; non-zero once the RTR cache syncs (`rbgp doctor` warns when configured caches have no visible VRPs) |
 | `bgp_update_group_fallback_peers` | ≥ your Add-Path send member count (Add-Path distributes per-peer; shareable-chain unicast-only `per_client_best` members group instead, ADR-0126) |
 | `bgp_update_group_runner_up_entries` | tracks announcement overlap across per-client-best groups (O(overlapped prefixes)); a climb toward the table size means heavy overlap, never member-count growth |
 | `bgp_rib_outbound_registered_peers` | = established member count |
-| `bgp_policy_generation_loaded_timestamp_seconds` | recent — ages past your render/SIGHUP cadence when the filter pipeline is stuck; see "Policy artifact freshness" in [`OPERATIONS.md`](../reference/operations.md) for the alert expressions |
+| `bgp_policy_generation_loaded_timestamp_seconds` | recent — ages past your render/SIGHUP cadence when the filter pipeline is stuck; see "Policy artifact freshness" in [`operations.md`](../reference/operations.md) for the alert expressions |
 
 Groups of one are the silent degradation shape: distinct per-member
 export-chain *content* — most commonly per-member literal chains from
@@ -415,7 +415,7 @@ and `bgp_rejected_routes_retained{peer}` gauges it for proactive "your
 filters are eating this member's routes" alerting. For the
 statement-level *why* on a specific prefix, follow up with
 `rbgp policy explain`. See the runbook in
-[`OPERATIONS.md`](../reference/operations.md).
+[`operations.md`](../reference/operations.md).
 
 ## Failure modes
 
@@ -432,7 +432,7 @@ The first command works on a stock route server. The second needs
 `[policy.explain] enabled = true` — import explain is opt-in and the
 route-server starter turns it off explicitly, because the decision cache
 is per session and its cost multiplies by member count
-([CONFIGURATION.md](../reference/configuration.md#import-decision-explain-policyexplain)).
+([configuration.md](../reference/configuration.md#import-decision-explain-policyexplain)).
 Enable it and reload so future sessions adopt the setting; the target
 member must then re-establish before you query the statement-level trace.
 The rejected-route view above needs no such switch.

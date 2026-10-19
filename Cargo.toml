@@ -23,6 +23,7 @@ members = [
     "examples/peer-loop",
     "tools/rs-config-render",
     "tools/mcp",
+    "tools/gobgp-bridge",
 ]
 default-members = [
     ".",
@@ -45,6 +46,7 @@ default-members = [
     "examples/peer-loop",
     "tools/rs-config-render",
     "tools/mcp",
+    "tools/gobgp-bridge",
 ]
 resolver = "2"
 
@@ -96,6 +98,7 @@ tokio-stream = { version = "0.1", features = ["sync", "net"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 axum = "0.8"
 tower = "0.5"
+hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 x509-parser = "0.18"
 serde = { version = "1", features = ["derive"] }

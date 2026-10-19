@@ -59,7 +59,7 @@ not by itself make it v1-stable.
 |---------|------|---------|
 | `GlobalService` | `GetGlobal` | Daemon identity |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `StreamApplyConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetLastSighupReload`, `GetEffectiveConfig`, `ListConfigHistory`, `PreviewConfigRollback`, `RollbackConfigTransaction` | Candidate-vs-live config diff, effective running config with defaults resolved (selected default-empty policy lists omitted) and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, status, and the bounded recorded config history with Junos-style `rollback N` through the same transaction executor; outside-v1 reads include the latest SIGHUP receipt, while streams provide bounded large-candidate plan and apply ingress |
-| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ReplayOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
+| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ReplayOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `ComparePolicy`, `GetPolicyStats`, `GetValidationPolicyPosture`, `ListConditionalAdvertisements` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, bounded invalid-validation disposition posture, and conditional-advertisement state |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrTopologyNodes`, `ListOrrTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes`, `ListBgpLsRibRoutes`, `ListBestEvpnRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` |
@@ -114,7 +114,7 @@ values until the daemon is restarted.
 Native gNMI is available on the local UDS listener and on TCP listeners only
 when mTLS is configured. Plaintext or bearer-token-only TCP listeners serve the
 native `rustbgpd.v1` API but do not register `gnmi.gNMI`. See
-[GNMI.md](gnmi.md) for the operator-facing OpenConfig path list and `gnmic`
+[gnmi.md](gnmi.md) for the operator-facing OpenConfig path list and `gnmic`
 examples.
 
 ```bash
@@ -316,14 +316,14 @@ translated into full candidate TOML and fed through `PlanConfigTransaction` /
 `ApplyConfigTransaction`; the standard gNMI commit-confirmed extension maps to
 the same confirm / abort lifecycle as native config transactions. Unsupported
 paths return `UNIMPLEMENTED` instead of bypassing the transaction model. See
-[GNMI.md](gnmi.md) for the full `ON_CHANGE` v1 scope (initial sync,
+[gnmi.md](gnmi.md) for the full `ON_CHANGE` v1 scope (initial sync,
 reconnect-no-replay, lag → `DATA_LOSS`) and Set path matrix.
 
 Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
 the service as a local-only extension.
 
 For the full supported path list, setup guidance, troubleshooting table, and
-tested `gnmic` commands, see [GNMI.md](gnmi.md).
+tested `gnmic` commands, see [gnmi.md](gnmi.md).
 
 ```bash
 gnmic \
@@ -361,7 +361,7 @@ rejected load never advances it (the prior generation stays live and the
 timestamp freezes), so a caller can prove a reload was *accepted* rather than
 merely attempted. It is the same value the
 `bgp_policy_generation_loaded_timestamp_seconds` Prometheus gauge exports; see
-"Policy artifact freshness" in [`OPERATIONS.md`](operations.md) for the staleness
+"Policy artifact freshness" in [`operations.md`](operations.md) for the staleness
 alert expressions.
 
 `tcp_ao_support` is a read-only Linux capability probe for RFC 5925 TCP-AO. It
@@ -532,7 +532,9 @@ a peer with no finite inbound bound — and equally empty from a daemon that
 does not expose the field and from a stale peer-session snapshot. Absence is
 therefore never proof that no bound is configured. Counts come from the
 session actor's O(1) enforcement accounting, never from the RIB, whose rows
-carry different Add-Path and lifecycle semantics.
+carry different Add-Path and lifecycle semantics. These rows are the only
+inbound limit and headroom report; `prefixes_received_ipv4` and
+`prefixes_received_ipv6` remain the unconditional per-family counts.
 
 `NeighborState.gr_retention` reports RFC 4724 / RFC 9494 helper-side
 stale-route retention, one `GracefulRestartRetentionState` per family the RIB
@@ -1036,7 +1038,7 @@ added at runtime.
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
 | `RefreshOutbound` | Re-emit one peer's current exportable outbound inventory across all negotiated families, without resetting the session |
 | `ReplayOutbound` | Schedule one Established peer's negotiated IPv4/IPv6 unicast replay with terminal UPDATE EoRs; outside the v1 contract |
-| `ResetNeighbor` | Administratively reset one enabled peer's session (Cease/Administrative Reset with an optional shutdown communication); outside v1 |
+| `ResetNeighbor` | Administratively reset one enabled peer's session (Cease/Administrative Reset with an optional shutdown communication) |
 | `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; persists the accepted change atomically before returning and rolls back runtime on persistence failure |
 | `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle); waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
@@ -2641,7 +2643,7 @@ block is configured. `state` is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALL
 `FIB_ROUTE_STATE_REJECTED`, `FIB_ROUTE_STATE_FAILED`, or
 `FIB_ROUTE_STATE_UNRESOLVED`); `reason`
 carries values such as `owned`, `foreign_route_exists`,
-`next_hop_family_unsupported`, `peer_not_allowed`,
+`next_hop_family_unsupported`, `next_hop_unspecified`, `peer_not_allowed`,
 `route_limit_exceeded`, `owned_route_drifted`, `next_hop_unresolved`, `dump_failed:DETAIL`,
 or a kernel apply error such as `install_failed:DETAIL`. When a pre-kernel
 planning query fails, this RPC preserves the last successful status snapshot;
@@ -2996,7 +2998,51 @@ The `prefix` and `next_hop` fields accept both IPv4 and IPv6 addresses. Prefix
 length is validated against the address family (max 32 for IPv4, 128 for IPv6).
 An IPv4 prefix takes either next-hop family (RFC 8950). An IPv6 prefix requires
 an IPv6 next hop; an IPv4 `next_hop` is rejected with `INVALID_ARGUMENT`.
+Multicast and broadcast next hops are rejected.
 `path_id` defaults to `0` (default path) when omitted.
+
+#### Next-hop self
+
+An unspecified `next_hop` (`0.0.0.0` or `::`, for either prefix family) means
+next-hop self, the usual default for a remotely triggered blackhole (RTBH)
+controller that lets the edge's own policy map a community to a discard
+route. The daemon resolves it per session at export, like `set next-hop self`
+in export policy, for eBGP, iBGP and route-server-client sessions alike; an
+explicit export-policy next-hop action still wins. An export-policy IPv6 next
+hop cannot apply to an IPv4 route toward a peer without Extended Next Hop; as
+for any route, the default next hop is used instead, which for this route is
+self.
+
+| Prefix | Next hop sent on each session |
+|---|---|
+| IPv4 | The session's local IPv4 address (the router ID on an IPv6-only session without Extended Next Hop), or the session's local address in `MP_REACH_NLRI` when Extended Next Hop (RFC 8950) is negotiated |
+| IPv6 | The neighbor's `local_ipv6_nexthop`, else the session's local IPv6 address |
+
+An IPv6 route on a session with neither, for example IPv6 unicast over an
+IPv4-only session without `local_ipv6_nexthop`, is not sent to that peer: the
+exact-export preflight refuses it with reason `missing_ipv6_next_hop`, as for
+any other route without a usable IPv6 next hop. The daemon never sends an
+unspecified next hop.
+
+The route is stored with the unspecified next hop, so `ListBestRoutes`,
+`ListReceivedRoutes`, BMP Loc-RIB and MRT show `0.0.0.0` or `::`, and a
+`[[fib_tables]]` table rejects it with reason `next_hop_unspecified` rather
+than installing a gateway. GoBGP (v3.37.0 and v4.10.0) also treats an
+unspecified `AddPath` next hop as the session's local address for eBGP and
+iBGP peers, but sends it unchanged to route-server clients.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "prefix": "198.51.100.7",
+    "prefix_length": 32,
+    "next_hop": "0.0.0.0",
+    "communities": [4294902426]
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddPath
+```
+
+`4294902426` is `65535:666`, the RFC 7999 BLACKHOLE community.
 
 ### Withdraw a route
 
@@ -3010,7 +3056,108 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"prefix": "2001:db8:ff::", "prefix_length": 48}' \
   localhost:50051 rustbgpd.v1.InjectionService/DeletePath
+
+# Treat an already absent route as success
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "10.99.0.0", "prefix_length": 24, "allow_missing": true}' \
+  localhost:50051 rustbgpd.v1.InjectionService/DeletePath
 ```
+
+#### Unicast injection contract
+
+A local route is identified by `(prefix, prefix_length, path_id)`. `AddPath`
+is an upsert on that key, so a controller can re-announce its whole route set
+on every reconcile pass:
+
+| `AddPathResponse.outcome` | Meaning |
+|---|---|
+| `PATH_INJECT_OUTCOME_CREATED` | No local route had this key. |
+| `PATH_INJECT_OUTCOME_REPLACED` | A local route with this key had a different next hop or attributes; the new route replaced it. |
+| `PATH_INJECT_OUTCOME_UNCHANGED` | An identical local route already existed. The stored route, including its RPKI validation state, is kept and nothing is redistributed. |
+| `PATH_INJECT_OUTCOME_UNSPECIFIED` | The daemon predates the field. |
+
+The outcome compares the new route with the previous *local* route only, as
+for FlowSpec: replacing a local route that a received route out-selects still
+reports `REPLACED`, although nothing changes on the wire. `0.0.0.0` and `::`
+are the same next-hop-self route.
+
+`OK` confirms that the route was accepted into the local Adj-RIB-In (peer
+`0.0.0.0`). Selection and outbound distribution normally run in the same RIB
+turn, before the reply, but are deferred while Graceful Restart selection
+deferral is active for the family. `OK` does not mean that a peer received or
+installed the route.
+
+`DeletePath` removes only a route added through `AddPath`; it never removes a
+received route. A key with no local route returns `NOT_FOUND` by default. Set
+`allow_missing: true` to get `OK` with outcome `NOT_PRESENT` instead, so a
+controller's withdraw is idempotent across retries and daemon restarts.
+
+| `DeletePathResponse.outcome` | Meaning |
+|---|---|
+| `PATH_DELETE_OUTCOME_DELETED` | A local route with this key was removed from the local Adj-RIB-In. |
+| `PATH_DELETE_OUTCOME_NOT_PRESENT` | No local route had this key; returned only with `allow_missing`. |
+| `PATH_DELETE_OUTCOME_UNSPECIFIED` | The daemon predates the field. |
+
+A daemon that predates these fields ignores `allow_missing`: a missing route
+returns `NOT_FOUND`, and a present route is deleted with outcome
+`UNSPECIFIED`.
+
+Injected routes are process-local. They are not written to the config and do
+not survive a daemon restart. A restart can fall between two polls of any
+signal, so a controller does not rely on detecting it. It reconciles
+periodically and idempotently: it re-adds its whole desired route set, where
+routes still present report `UNCHANGED` and cost no redistribution, and
+withdraws what it no longer wants with `allow_missing: true`. It always
+reconciles after reconnecting to the daemon. A `ControlService.GetHealth`
+`uptime_seconds` lower than on the previous poll is an extra trigger to
+reconcile at once, not the detector: a poll can see a restarted daemon whose
+uptime has already passed the previous reading. The owner leases in
+[ADR-0141](../adr/0141-injection-owner-lease.md), once available, add a
+stronger signal: renewing a lease generation from before the restart fails.
+To list exactly the injected routes, call `RibService.ListReceivedRoutes` with
+`neighbor_address: "0.0.0.0"`.
+
+#### Connecting a controller
+
+Injection RPCs are `operator_only` in the
+[method inventory](grpc-method-inventory.md), so the controller's principal
+needs the `operator` role. The daemon rejects a TCP listener without
+authentication at config load, so a client that only knows plaintext gRPC
+uses one of these transports:
+
+- **Owner-only Unix socket.** Run the controller as the daemon's user and
+  connect to `unix:///var/lib/rustbgpd/grpc.sock` with insecure channel
+  credentials. Such a socket authorizes its clients as the implicit
+  `local-operator` principal; no token or roles entry is needed. Set the
+  channel's default authority to a host name such as `localhost`: gRPC
+  otherwise sends the socket path as the HTTP/2 `:authority`, which the
+  daemon resets.
+- **Loopback TCP with a bearer token.** Configure
+  `[global.telemetry.grpc_tcp]` on `127.0.0.1` with `token_file` and a
+  `principal` mapped to `operator` in `[security.grpc.roles]`, and send
+  `authorization: Bearer <token>` as metadata on every call. Add it to each
+  call directly: gRPC attaches call credentials such as an access token only
+  to a channel it considers secure, and whether local loopback credentials
+  qualify depends on the gRPC version.
+
+In C++ these are, for example:
+
+```cpp
+// Owner-only Unix socket.
+grpc::ChannelArguments args;
+args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, "localhost");
+auto uds = grpc::CreateCustomChannel("unix:///var/lib/rustbgpd/grpc.sock",
+                                     grpc::InsecureChannelCredentials(), args);
+
+// Loopback TCP with a bearer token, added to every call.
+auto tcp = grpc::CreateChannel("127.0.0.1:50051",
+                               grpc::InsecureChannelCredentials());
+grpc::ClientContext context;
+context.AddMetadata("authorization", "Bearer " + token);
+```
+
+Do not expose the listener beyond loopback to reach a remote controller;
+see [security](security.md) for the remote mTLS posture.
 
 ### Inject a FlowSpec rule
 
@@ -3793,7 +3940,7 @@ fail-stop on a later primitive convergence failure as described above.
 Read-only inspection of single-hop and multihop BFD sessions (ADR-0067,
 RFC 5880/5881/5883).
 Sessions themselves are configured via `[[bfd_profiles]]` + `[neighbors.bfd]`
-(see [CONFIGURATION.md](configuration.md)). Member attachments apply on SIGHUP;
+(see [configuration.md](configuration.md)). Member attachments apply on SIGHUP;
 profile definitions require a restart. There is no mutating BFD RPC, and config
 transactions do not apply BFD attachment changes.
 

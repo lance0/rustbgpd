@@ -79,8 +79,8 @@ fn exact_export_families() -> [((Afi, Safi), &'static str); 12] {
         ((Afi::Ipv4, Safi::FlowSpec), "ipv4_flowspec"),
         ((Afi::Ipv6, Safi::FlowSpec), "ipv6_flowspec"),
         ((Afi::L2Vpn, Safi::Evpn), "l2vpn_evpn"),
-        ((Afi::BgpLs, Safi::BgpLs), "bgpls"),
-        ((Afi::BgpLs, Safi::BgpLsVpn), "bgpls_vpn"),
+        ((Afi::BgpLs, Safi::BgpLs), "linkstate"),
+        ((Afi::BgpLs, Safi::BgpLsVpn), "linkstate_vpn"),
         ((Afi::Ipv4, Safi::MplsVpn), "l3vpn_ipv4_unicast"),
         ((Afi::Ipv6, Safi::MplsVpn), "l3vpn_ipv6_unicast"),
         ((Afi::Ipv4, Safi::LabeledUnicast), "ipv4_labeled_unicast"),
@@ -536,10 +536,19 @@ fn max_prefix_gauge(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "peer" && label.value() == peer);
-                let has_scope = metric
-                    .get_label()
-                    .iter()
-                    .any(|label| label.name() == "scope" && label.value() == scope);
+                // The session scope splits into the `family` and `stage` labels.
+                let (family, stage) = scope
+                    .strip_suffix("_received")
+                    .map_or((scope, "accepted"), |family| (family, "received"));
+                let has_scope =
+                    [("family", family), ("stage", stage)]
+                        .iter()
+                        .all(|(name, value)| {
+                            metric
+                                .get_label()
+                                .iter()
+                                .any(|label| label.name() == *name && label.value() == *value)
+                        });
                 (has_peer && has_scope).then(|| metric.get_gauge().get_value())
             })
         })

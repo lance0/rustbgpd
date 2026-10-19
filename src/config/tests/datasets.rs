@@ -589,3 +589,203 @@ fn config_diff_emits_no_changes_only_when_no_datasets_declared() {
     assert!(!diff.has_any_changes());
     assert_eq!(format_config_diff(&diff), "No changes.\n");
 }
+
+/// Two `.rpol` units composed into one chain: unit `a` probes nine datasets
+/// and unit `b` probes `b_count`, so the chain carries `9 + b_count` dataset
+/// bindings. Every dataset holds AS 64500 only; each term rejects a route
+/// whose origin is outside one dataset.
+fn two_unit_dataset_dir(b_count: usize) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_two_unit_dataset_config(&dir, b_count);
+    dir
+}
+
+fn write_two_unit_dataset_config(dir: &tempfile::TempDir, b_count: usize) {
+    use std::fmt::Write as _;
+
+    fs::create_dir_all(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("allow.list"), "64500\n").expect("write dataset");
+    let mut toml = String::from(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[policy]
+rpol_files = ["policies/a.rpol", "policies/b.rpol"]
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["a-guard", "b-guard"]
+"#,
+    );
+    for (unit, count) in [("a", 9), ("b", b_count)] {
+        let mut source = String::new();
+        let mut policy = format!("policy {unit}-guard {{\n");
+        for index in 0..count {
+            let name = format!("{unit}{index}");
+            writeln!(source, "dataset asn-set {name}").unwrap();
+            writeln!(
+                policy,
+                "    term t{index} {{ if !(route.origin-as in {name}) {{ reject }} }}"
+            )
+            .unwrap();
+            writeln!(toml, "[policy.datasets.{name}]\npath = \"allow.list\"").unwrap();
+        }
+        policy.push_str("    term rest { accept }\n}\n");
+        source.push_str(&policy);
+        fs::write(dir.path().join(format!("policies/{unit}.rpol")), source).expect("write rpol");
+    }
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(&toml),
+    )
+    .expect("write config");
+}
+
+/// A composed chain's dataset table must fit the evaluation pin frame: a
+/// binding past it would fail every probe of that slot closed, denying routes
+/// the guard permits. Exactly the frame loads and its last slot evaluates.
+#[test]
+fn chain_dataset_bindings_bounded_by_the_pin_frame_at_load() {
+    let dir = two_unit_dataset_dir(7);
+    let config = load_dir(&dir).expect("16-binding chain loads");
+    let (import, _) = config
+        .effective_policy_chains_for_neighbor(&config.neighbors[0])
+        .expect("chains resolve");
+    let import = import.expect("import chain");
+    assert_eq!(import.compiled().datasets.len(), 16);
+    let (result, evaluation) = import.evaluate_with_attribution(&origin_ctx(64500));
+    assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
+    assert_eq!(evaluation.eval_error, None);
+    assert_eq!(
+        import.evaluate(&origin_ctx(64999)).action,
+        rustbgpd_policy::PolicyAction::Deny
+    );
+
+    write_two_unit_dataset_config(&dir, 8);
+    let error = load_dir(&dir).expect_err("17-binding chain is refused");
+    assert!(
+        error.contains(r#"import chain member "b-guard""#)
+            && error.contains("references 17 datasets")
+            && error.contains("MAX_UNIT_DATASETS (16)"),
+        "{error}"
+    );
+}
+
+/// A reload that grows the chain past the pin frame is rejected before any
+/// live effect: the running snapshot and its dataset handles are unchanged.
+#[test]
+fn chain_dataset_bindings_over_the_pin_frame_reject_reload() {
+    let dir = two_unit_dataset_dir(7);
+    let path = dir.path().join("config.toml");
+    let prior = crate::config::AcceptedConfigSnapshot::load(&path, None).expect("initial load");
+    let live = std::sync::Arc::clone(
+        prior
+            .config_ref()
+            .policy
+            .dataset_bindings
+            .get("b6")
+            .unwrap(),
+    );
+
+    write_two_unit_dataset_config(&dir, 8);
+    let Err(error) = crate::config::AcceptedConfigSnapshot::load_for_reload(
+        &path,
+        &prior,
+        &prior.config_ref().policy.dataset_bindings,
+    ) else {
+        panic!("a 17-binding chain must not reload");
+    };
+    assert!(error.contains("references 17 datasets"), "{error}");
+    assert_eq!(live.pin().generation, 1);
+    let config = prior.config_ref();
+    assert!(config.policy.dataset_bindings.get("b7").is_none());
+    let (import, _) = config
+        .effective_policy_chains_for_neighbor(&config.neighbors[0])
+        .expect("prior chains resolve");
+    assert_eq!(
+        import
+            .expect("import chain")
+            .evaluate(&origin_ctx(64500))
+            .action,
+        rustbgpd_policy::PolicyAction::Permit
+    );
+}
+
+/// Only bindings the retained IR probes count toward the chain bound: an
+/// empty `if` allocates its dataset slot during lowering but emits no term,
+/// and the composed chain drops that slot.
+#[test]
+fn chain_dataset_bound_ignores_slots_without_a_retained_probe() {
+    use std::fmt::Write as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("allow.list"), "64500\n").expect("write dataset");
+    let mut toml = String::from(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[policy]
+rpol_files = ["policies/a.rpol", "policies/b.rpol"]
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["a-empty", "b-guard"]
+"#,
+    );
+    let mut empty = String::new();
+    let mut policy = String::from("policy a-empty {\n");
+    for index in 0..16 {
+        writeln!(empty, "dataset asn-set a{index}").unwrap();
+        writeln!(
+            policy,
+            "    term t{index} {{ if route.origin-as in a{index} {{ }} }}"
+        )
+        .unwrap();
+        writeln!(toml, "[policy.datasets.a{index}]\npath = \"allow.list\"").unwrap();
+    }
+    policy.push_str("}\n");
+    empty.push_str(&policy);
+    fs::write(dir.path().join("policies/a.rpol"), empty).expect("write rpol");
+    fs::write(
+        dir.path().join("policies/b.rpol"),
+        "dataset asn-set b0\n\
+         policy b-guard { term t { if !(route.origin-as in b0) { reject } } term rest { accept } }\n",
+    )
+    .expect("write rpol");
+    toml.push_str("[policy.datasets.b0]\npath = \"allow.list\"\n");
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(&toml),
+    )
+    .expect("write config");
+
+    let config = load_dir(&dir).expect("one retained binding loads");
+    let (import, _) = config
+        .effective_policy_chains_for_neighbor(&config.neighbors[0])
+        .expect("chains resolve");
+    let import = import.expect("import chain");
+    assert_eq!(import.compiled().datasets.len(), 1);
+    assert_eq!(
+        import.evaluate(&origin_ctx(64500)).action,
+        rustbgpd_policy::PolicyAction::Permit
+    );
+    assert_eq!(
+        import.evaluate(&origin_ctx(64999)).action,
+        rustbgpd_policy::PolicyAction::Deny
+    );
+}

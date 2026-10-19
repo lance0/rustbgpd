@@ -170,7 +170,7 @@ diff the two hosts' render receipts and reload timestamps first.
 Taking RS1 down (upgrade, host maintenance) without a member-visible
 routing gap — RFC 8326 graceful shutdown, initiator side (full
 semantics and verification in
-[OPERATIONS.md](../reference/operations.md#rfc-8326-graceful-shutdown-community-planned-maintenance)):
+[operations.md](../reference/operations.md#rfc-8326-graceful-shutdown-community-planned-maintenance)):
 
 1. **Confirm RS2 is healthy and consistent** (the diff above, all
    member sessions established). Two-instance redundancy means never

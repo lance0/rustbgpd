@@ -2317,6 +2317,25 @@ impl RibManager {
             .collect()
     }
 
+    /// Mark the peer that [`Self::bench_join_route_reflector_peer`]
+    /// registered at `index` dirty through the production seam, which
+    /// captures a grouped member's admitted-key proof. Returns whether the
+    /// peer is now dirty.
+    pub fn bench_mark_joined_peer_dirty(&mut self, index: usize) -> bool {
+        self.mark_outbound_dirty(Self::bench_peer_address(index))
+    }
+
+    /// Run production resync-timer ticks until no dirty peer remains
+    /// runnable. Returns the dirty peers and recovery-proof entries left.
+    pub fn bench_resync_dirty_peers(&mut self) -> (usize, usize) {
+        while self.resync_tick_pending() && self.resync_dirty_peers_bounded() {}
+        (
+            self.dirty_peers.len(),
+            self.pending_group_admitted
+                .entries_with_checkpoint(&mut |_| {}),
+        )
+    }
+
     /// Deliver one IPv4 unicast ROUTE-REFRESH from the peer that
     /// [`Self::bench_join_route_reflector_peer`] registered at `index`,
     /// through the production `RouteRefreshRequest` dispatch.
@@ -2673,7 +2692,16 @@ impl RibManager {
         reason = "benchmark fixture gauge counts are exact small nonnegative integers"
     )]
     fn bench_adj_rib_out_family_values(&self, peer: IpAddr) -> [i64; 7] {
-        const FAMILIES: [&str; 7] = ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"];
+        // One slot per table, summing its canonical families.
+        const FAMILIES: [&[&str]; 7] = [
+            &crate::manager::helpers::UNICAST_FAMILIES,
+            &crate::manager::helpers::FLOWSPEC_FAMILIES,
+            &["l2vpn_evpn"],
+            &crate::manager::helpers::LINKSTATE_FAMILIES,
+            &crate::manager::helpers::L3VPN_FAMILIES,
+            &crate::manager::helpers::LABELED_FAMILIES,
+            &["rtc"],
+        ];
         let peer_label = peer.to_string();
         let gathered = self.metrics.registry().gather();
         let Some(gauge) = gathered
@@ -2686,16 +2714,17 @@ impl RibManager {
             gauge
                 .get_metric()
                 .iter()
-                .find(|metric| {
+                .filter(|metric| {
                     metric
                         .get_label()
                         .iter()
                         .any(|label| label.name() == "peer" && label.value() == peer_label)
                         && metric.get_label().iter().any(|label| {
-                            label.name() == "afi_safi" && label.value() == FAMILIES[index]
+                            label.name() == "family" && FAMILIES[index].contains(&label.value())
                         })
                 })
-                .map_or(0, |metric| metric.get_gauge().get_value() as i64)
+                .map(|metric| metric.get_gauge().get_value() as i64)
+                .sum()
         })
     }
 

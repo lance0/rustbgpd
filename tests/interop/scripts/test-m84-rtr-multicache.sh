@@ -200,7 +200,7 @@ test_initial_load() {
         "rtr-v2 epoch established at validated EoD (full table)"
 
     # Merged tables reflect exactly the three EoD-completed snapshots.
-    assert_metric 'bgp_rpki_vrp_count{af="ipv4"}' 3 \
+    assert_metric 'bgp_rpki_vrp_count{afi="ipv4"}' 3 \
         "merged VRP table = 1 VRP per cache"
     assert_metric 'bgp_aspa_records' 1 \
         "merged ASPA table = 1 customer record (rtr-v2)"
@@ -367,7 +367,7 @@ test_aspa_phases() {
     # Phase 2: incremental VRP announce — epoch advances at incremental EoD.
     set_rtr_phase 2
     assert_route_field 198.18.9.0 24 validationState valid
-    assert_metric 'bgp_rpki_vrp_count{af="ipv4"}' 4 \
+    assert_metric 'bgp_rpki_vrp_count{afi="ipv4"}' 4 \
         "merged VRP table grew by the incremental announce"
 
     # Phase 3: ASPA announce 65004 -> [65099] must REPLACE the provider
@@ -426,7 +426,7 @@ test_serial_regression() {
     # The phase-2 VRP does not exist at the regressed serial: a client
     # that splices instead of replacing would keep it as a stale VRP.
     assert_route_field 198.18.9.0 24 validationState not_found
-    assert_metric 'bgp_rpki_vrp_count{af="ipv4"}' 3 \
+    assert_metric 'bgp_rpki_vrp_count{afi="ipv4"}' 3 \
         "stale VRP purged; other caches' data intact"
     # The surviving rtr-v2 base VRP still validates.
     assert_route_field 192.0.2.0 24 validationState invalid

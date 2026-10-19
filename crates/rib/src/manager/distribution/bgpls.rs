@@ -1,8 +1,7 @@
 use super::{
     AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, NeighborPolicyStats,
     OutboundCommitBatch, PolicyChain, Prefix, RibManager, RouteContext, Safi, bgpls_route_family,
-    bgpls_routes_equal, gauge_val, record_export_policy_eval, route_type,
-    should_suppress_ibgp_inner, warn,
+    bgpls_routes_equal, record_export_policy_eval, route_type, should_suppress_ibgp_inner, warn,
 };
 use crate::attr_set::AttrSet;
 
@@ -262,8 +261,11 @@ impl RibManager {
             return;
         }
 
-        self.metrics
-            .set_loc_rib_prefixes("bgpls", gauge_val(self.loc_rib.bgpls_len()));
+        crate::manager::helpers::set_loc_rib_prefixes(
+            &self.metrics,
+            crate::manager::helpers::LINKSTATE_FAMILIES,
+            self.loc_rib.family_lens().bgpls,
+        );
 
         let peers: Vec<IpAddr> = self
             .outbound_peers

@@ -42,12 +42,6 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         rejected_routes_retained: Some(0),
         prefix_count_ipv4: 0,
         prefix_count_ipv6: 0,
-        max_prefixes_effective: None,
-        max_prefixes_ipv4_effective: None,
-        max_prefixes_ipv6_effective: None,
-        max_prefix_headroom: None,
-        max_prefix_headroom_ipv4: None,
-        max_prefix_headroom_ipv6: None,
         inbound_prefix_limits: Vec::new(),
         hold_time: None,
         min_hold_time: None,
@@ -467,6 +461,7 @@ pub(crate) fn dataplane_route_event(
     };
     proto::BgpEvent {
         timestamp: "123".to_string(),
+        timestamp_unix_ms: 123_000,
         category: proto::EventCategory::Dataplane as i32,
         event_type: event_type as i32,
         severity: proto::EventSeverity::Info as i32,

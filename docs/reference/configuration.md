@@ -2766,6 +2766,9 @@ a local one.
 
 ### Local re-evaluation (RFC 9324)
 
+A fragment, not a complete configuration: add the key to the `[rpki]` section
+that configures the cache sources.
+
 ```toml
 [rpki]
 local_revalidation = true
@@ -2834,7 +2837,7 @@ Prometheus metrics exposed at the configured metrics endpoint:
 
 | Metric | Description |
 |--------|-------------|
-| `bgp_rpki_vrp_count{af="ipv4\|ipv6"}` | Current VRP entries by address family |
+| `bgp_rpki_vrp_count{afi="ipv4\|ipv6"}` | Current VRP entries by address family identifier |
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective expire interval per cache after the two-day maximum and `max_expire_interval` are applied |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Retained validated End-of-Data readiness per cache; includes empty tables and remains ready through reconnect until flush or expiry |
 | `bgp_rpki_cache_connected{cache}` | Whether an RTR session to the cache is established; `0` whenever it is down, including while an ordinary disconnect's retained contribution is still in use |
@@ -3306,7 +3309,9 @@ path = "/var/lib/rustbgpd/datasets/customers.list"
   effect; see the
   [reload matrix](reload-matrix.md#sighup-reload-routes).
 - Bounds: 64 MiB and 1,000,000 records per file; at most 16 datasets
-  per `.rpol` compilation unit.
+  per `.rpol` compilation unit, and at most 16 distinct datasets across
+  the members of one composed policy chain. A chain over that bound is
+  refused at load and reload.
 - Producers should write-temp-then-rename so a refresh never reads a
   torn file. Full format, semantics, and the operator how-to:
   [`rpol-language.md`](rpol-language.md) § Datasets.
@@ -5443,7 +5448,7 @@ recovery rather than leaving the authority ambiguous.
 
 When a peer's effective import chain changes, the peer manager issues
 `soft_reset_in` (gated on Established) so routes already in `AdjRibIn` are
-re-evaluated. Operators do not need to follow up with a manual `softreset`
+re-evaluated. Operators do not need to follow up with a manual `refresh-in`
 after a chain swap.
 
 `[global]` identity and daemon-wide flags (ASN, router-id, listen

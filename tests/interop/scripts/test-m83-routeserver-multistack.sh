@@ -1061,7 +1061,7 @@ test_rtr_vrps() {
     log "Assertion 1: StayRTR VRPs loaded over RTR"
     local count=""
     for _ in $(seq 1 30); do
-        count=$(prom_value "$RUSTBGPD" 'bgp_rpki_vrp_count{af="ipv4"}')
+        count=$(prom_value "$RUSTBGPD" 'bgp_rpki_vrp_count{afi="ipv4"}')
         [ "${count:-0}" = "2" ] && break
         sleep 2
     done

@@ -1168,12 +1168,6 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         update_group_comparison: None,
         prefixes_received_ipv4: info.prefix_count_ipv4 as u64,
         prefixes_received_ipv6: info.prefix_count_ipv6 as u64,
-        effective_max_prefixes: info.max_prefixes_effective,
-        effective_max_prefixes_ipv4: info.max_prefixes_ipv4_effective,
-        effective_max_prefixes_ipv6: info.max_prefixes_ipv6_effective,
-        max_prefix_headroom: info.max_prefix_headroom,
-        max_prefix_headroom_ipv4: info.max_prefix_headroom_ipv4,
-        max_prefix_headroom_ipv6: info.max_prefix_headroom_ipv6,
         inbound_prefix_limits: info
             .inbound_prefix_limits
             .iter()
@@ -2740,12 +2734,22 @@ mod tests {
         assert!(source.contains("optional uint64 max_prefix_restart_remaining_millis = 39;"));
         assert!(source.contains("uint64 prefixes_received_ipv4 = 41;"));
         assert!(source.contains("uint64 prefixes_received_ipv6 = 42;"));
-        assert!(source.contains("optional uint32 effective_max_prefixes = 43;"));
-        assert!(source.contains("optional uint32 effective_max_prefixes_ipv4 = 44;"));
-        assert!(source.contains("optional uint32 effective_max_prefixes_ipv6 = 45;"));
-        assert!(source.contains("optional uint32 max_prefix_headroom = 46;"));
-        assert!(source.contains("optional uint32 max_prefix_headroom_ipv4 = 47;"));
-        assert!(source.contains("optional uint32 max_prefix_headroom_ipv6 = 48;"));
+        // The legacy per-scope limit/headroom scalars were removed in favour
+        // of inbound_prefix_limits; their numbers and names stay reserved.
+        assert!(source.contains("reserved 43 to 48;"));
+        for name in [
+            "effective_max_prefixes",
+            "effective_max_prefixes_ipv4",
+            "effective_max_prefixes_ipv6",
+            "max_prefix_headroom",
+            "max_prefix_headroom_ipv4",
+            "max_prefix_headroom_ipv6",
+        ] {
+            assert!(
+                source.contains(&format!("\"{name}\"")),
+                "{name} not reserved"
+            );
+        }
         assert!(source.contains("optional bool peer_route_refresh = 6;"));
         assert!(source.contains("optional bool peer_enhanced_route_refresh = 7;"));
         assert!(source.contains("optional bool peer_extended_message = 8;"));
@@ -4817,12 +4821,22 @@ mod tests {
         info.rejected_routes_retained = Some(6);
         info.prefix_count_ipv4 = 7;
         info.prefix_count_ipv6 = 3;
-        info.max_prefixes_effective = Some(20);
-        info.max_prefixes_ipv4_effective = Some(10);
-        info.max_prefixes_ipv6_effective = None;
-        info.max_prefix_headroom = Some(9);
-        info.max_prefix_headroom_ipv4 = Some(3);
-        info.max_prefix_headroom_ipv6 = None;
+        info.inbound_prefix_limits = vec![
+            crate::peer_types::InboundPrefixLimitState {
+                scope: "aggregate".to_string(),
+                usage: 11,
+                limit: 20,
+                headroom: 9,
+                blocking: false,
+            },
+            crate::peer_types::InboundPrefixLimitState {
+                scope: "ipv4_unicast".to_string(),
+                usage: 7,
+                limit: 10,
+                headroom: 3,
+                blocking: true,
+            },
+        ];
         info.reconnect_in_secs = 7;
 
         let state = peer_info_to_proto(&info);
@@ -4830,12 +4844,35 @@ mod tests {
         assert_eq!(state.rejected_routes_retained, Some(6));
         assert_eq!(state.prefixes_received_ipv4, 7);
         assert_eq!(state.prefixes_received_ipv6, 3);
-        assert_eq!(state.effective_max_prefixes, Some(20));
-        assert_eq!(state.effective_max_prefixes_ipv4, Some(10));
-        assert_eq!(state.effective_max_prefixes_ipv6, None);
-        assert_eq!(state.max_prefix_headroom, Some(9));
-        assert_eq!(state.max_prefix_headroom_ipv4, Some(3));
-        assert_eq!(state.max_prefix_headroom_ipv6, None);
+        let rows: Vec<_> = state
+            .inbound_prefix_limits
+            .iter()
+            .map(|row| {
+                (
+                    row.scope.as_str(),
+                    row.usage,
+                    row.limit,
+                    row.headroom,
+                    row.blocking,
+                    row.reason.as_deref(),
+                )
+            })
+            .collect();
+        // An unlimited ipv6_unicast scope has no row.
+        assert_eq!(
+            rows,
+            [
+                ("aggregate", 11, 20, 9, false, None),
+                (
+                    "ipv4_unicast",
+                    7,
+                    10,
+                    3,
+                    true,
+                    Some(crate::peer_types::INBOUND_PREFIX_LIMIT_REACHED)
+                ),
+            ]
+        );
         assert_eq!(state.reconnect_in_seconds, Some(7));
         info.rejected_routes_retained = None;
         assert_eq!(peer_info_to_proto(&info).rejected_routes_retained, None);

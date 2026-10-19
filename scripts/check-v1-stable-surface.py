@@ -1048,6 +1048,10 @@ def label_function_values(sources: dict[str, str], function: str) -> set[str]:
                 end += 1
             body = text[match.end() : end]
             values.update(re.findall(r"=>\s*\"([^\"]+)\"", body))
+            # A label function that delegates to the wire table returns the
+            # canonical configuration family labels.
+            if re.search(r"\brustbgpd_wire::family_label\s*\(", body):
+                values.update(canonical_family_labels())
     return values
 
 

@@ -879,21 +879,7 @@ fn send_hold_duration(config: &TransportConfig) -> Option<Duration> {
 /// Bounded family vocabulary shared with exact-export rejection telemetry.
 /// Multicast and invalid AFI/SAFI pairs have no exact-export candidate type.
 fn configured_exact_export_family_label((afi, safi): (Afi, Safi)) -> Option<&'static str> {
-    match (afi, safi) {
-        (Afi::Ipv4, Safi::Unicast) => Some("ipv4_unicast"),
-        (Afi::Ipv6, Safi::Unicast) => Some("ipv6_unicast"),
-        (Afi::Ipv4, Safi::FlowSpec) => Some("ipv4_flowspec"),
-        (Afi::Ipv6, Safi::FlowSpec) => Some("ipv6_flowspec"),
-        (Afi::L2Vpn, Safi::Evpn) => Some("l2vpn_evpn"),
-        (Afi::BgpLs, Safi::BgpLs) => Some("bgpls"),
-        (Afi::BgpLs, Safi::BgpLsVpn) => Some("bgpls_vpn"),
-        (Afi::Ipv4, Safi::MplsVpn) => Some("l3vpn_ipv4_unicast"),
-        (Afi::Ipv6, Safi::MplsVpn) => Some("l3vpn_ipv6_unicast"),
-        (Afi::Ipv4, Safi::LabeledUnicast) => Some("ipv4_labeled_unicast"),
-        (Afi::Ipv6, Safi::LabeledUnicast) => Some("ipv6_labeled_unicast"),
-        (Afi::Ipv4, Safi::RtConstrain) => Some("rtc"),
-        _ => None,
-    }
+    rustbgpd_wire::family_label(afi, safi)
 }
 
 fn initialize_route_safety_metric_series(

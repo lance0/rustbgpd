@@ -2754,6 +2754,7 @@ pub async fn delete_route(
             prefix: addr,
             prefix_length: len,
             path_id: path_id.unwrap_or(0),
+            allow_missing: false,
         }),
     )
     .await?;

@@ -10,8 +10,7 @@ use crate::route_distinguisher::parse_rd;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{
-    EvpnRibRoute, FlowSpecInjectOutcome, FlowSpecRoute, RibCommandError, RibUpdate, Route,
-    RouteOrigin,
+    EvpnRibRoute, FlowSpecRoute, InjectOutcome, RibCommandError, RibUpdate, Route, RouteOrigin,
 };
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, BitmaskMatch, EthernetSegmentIdentifier, EthernetTagId, EvpnImet,
@@ -41,6 +40,10 @@ impl InjectionService {
 pub(crate) const LOCAL_PEER: std::net::IpAddr = std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 /// Parse a prefix address + length + next-hop from a gRPC request.
+///
+/// An unspecified next hop of either family means next-hop self; it is
+/// stored as the prefix family's unspecified address, which export resolves
+/// per session.
 fn parse_prefix_and_nexthop(
     prefix_str: &str,
     prefix_length: u32,
@@ -49,7 +52,17 @@ fn parse_prefix_and_nexthop(
     let addr: IpAddr = prefix_str
         .parse()
         .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
-    let nh = parse_unicast_nexthop(next_hop_str)?;
+    let nh: IpAddr = next_hop_str
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
+    let nh = if nh.is_unspecified() {
+        match addr {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        }
+    } else {
+        parse_unicast_nexthop(next_hop_str)?
+    };
     match addr {
         IpAddr::V4(v4) => {
             let len = u8::try_from(prefix_length)
@@ -310,12 +323,19 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .await
             .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
-        reply_rx
+        let outcome = match reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|error| map_rib_command_error("inject failed", error))?;
+            .map_err(|error| map_rib_command_error("inject failed", error))?
+        {
+            InjectOutcome::Created => proto::PathInjectOutcome::Created,
+            InjectOutcome::Replaced => proto::PathInjectOutcome::Replaced,
+            InjectOutcome::Unchanged => proto::PathInjectOutcome::Unchanged,
+        };
 
-        Ok(Response::new(proto::AddPathResponse {}))
+        Ok(Response::new(proto::AddPathResponse {
+            outcome: outcome as i32,
+        }))
     }
 
     async fn delete_path(
@@ -354,17 +374,25 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .send(RibUpdate::WithdrawInjected {
                 prefix,
                 path_id: req.path_id,
+                allow_missing: req.allow_missing,
                 reply: reply_tx,
             })
             .await
             .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
-        reply_rx
+        let deleted = reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
             .map_err(|error| map_rib_command_error("withdraw failed", error))?;
+        let outcome = if deleted {
+            proto::PathDeleteOutcome::Deleted
+        } else {
+            proto::PathDeleteOutcome::NotPresent
+        };
 
-        Ok(Response::new(proto::DeletePathResponse {}))
+        Ok(Response::new(proto::DeletePathResponse {
+            outcome: outcome as i32,
+        }))
     }
 
     async fn add_flow_spec(
@@ -433,9 +461,9 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
             .map_err(|error| map_rib_command_error("FlowSpec inject failed", error))?;
         let outcome = match outcome {
-            FlowSpecInjectOutcome::Created => proto::FlowSpecInjectOutcome::Created,
-            FlowSpecInjectOutcome::Replaced => proto::FlowSpecInjectOutcome::Replaced,
-            FlowSpecInjectOutcome::Unchanged => proto::FlowSpecInjectOutcome::Unchanged,
+            InjectOutcome::Created => proto::FlowSpecInjectOutcome::Created,
+            InjectOutcome::Replaced => proto::FlowSpecInjectOutcome::Replaced,
+            InjectOutcome::Unchanged => proto::FlowSpecInjectOutcome::Unchanged,
         };
 
         Ok(Response::new(proto::AddFlowSpecResponse {
@@ -1321,25 +1349,66 @@ mod tests {
         assert_eq!(err.message(), "RIB manager unavailable");
     }
 
+    /// An unspecified next hop of either family is next-hop self: it reaches
+    /// the RIB as the prefix family's unspecified address, with a stored
+    /// `NEXT_HOP` only for an IPv4 prefix. EVPN injection still rejects it.
     #[tokio::test]
-    async fn add_path_rejects_zero_next_hop() {
-        let svc = make_service();
-        let req = Request::new(proto::AddPathRequest {
-            prefix: "10.0.0.0".into(),
-            prefix_length: 24,
-            next_hop: "0.0.0.0".into(),
-            origin: 0,
-            as_path: vec![],
-            local_pref: None,
-            med: None,
-            communities: vec![],
-            extended_communities: vec![],
-            large_communities: vec![],
-            path_id: 0,
+    async fn add_path_accepts_unspecified_next_hop_as_self() {
+        let (svc, mut rx) = make_service_with_rx();
+        let responder = tokio::spawn(async move {
+            let mut routes = Vec::new();
+            while let Some(update) = rx.recv().await {
+                let RibUpdate::InjectRoute { route, reply } = update else {
+                    panic!("expected InjectRoute");
+                };
+                reply.send(Ok(InjectOutcome::Created)).ok();
+                routes.push(route);
+            }
+            routes
         });
-        let err = svc.add_path(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("0.0.0.0"));
+        let cases = [
+            ("10.0.0.0", 24, "0.0.0.0", "0.0.0.0"),
+            ("10.0.0.0", 24, "::", "0.0.0.0"),
+            ("2001:db8:ff::", 48, "::", "::"),
+            ("2001:db8:ff::", 48, "0.0.0.0", "::"),
+        ];
+        for (prefix, prefix_length, next_hop, _) in cases {
+            svc.add_path(Request::new(proto::AddPathRequest {
+                prefix: prefix.into(),
+                prefix_length,
+                next_hop: next_hop.into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("{prefix} via {next_hop}: {error}"));
+        }
+        let evpn = svc
+            .add_evpn_route(Request::new(proto::AddEvpnRouteRequest {
+                route_type: 2,
+                rd: "65000:100".into(),
+                mac: "02:00:00:00:00:01".into(),
+                next_hop: "0.0.0.0".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(evpn.code(), tonic::Code::InvalidArgument);
+        drop(svc);
+        let routes = responder.await.unwrap();
+        assert_eq!(routes.len(), cases.len());
+        for (route, (prefix, _, next_hop, stored)) in routes.iter().zip(cases) {
+            let stored: IpAddr = stored.parse().unwrap();
+            assert_eq!(route.next_hop, stored, "{prefix} via {next_hop}");
+            let body = route
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    PathAttribute::NextHop(next_hop) => Some(IpAddr::V4(*next_hop)),
+                    _ => None,
+                });
+            let expected_body = stored.is_ipv4().then_some(stored);
+            assert_eq!(body, expected_body, "{prefix} via {next_hop}");
+        }
     }
 
     #[tokio::test]
@@ -1434,7 +1503,7 @@ mod tests {
                 let RibUpdate::InjectRoute { route, reply } = update else {
                     panic!("expected InjectRoute");
                 };
-                reply.send(Ok(())).ok();
+                reply.send(Ok(InjectOutcome::Created)).ok();
                 routes.push(route);
             }
             routes
@@ -1478,7 +1547,7 @@ mod tests {
             let reply_task = tokio::spawn(async move {
                 match rx.recv().await.expect("one RibUpdate") {
                     RibUpdate::InjectRoute { route, reply } => {
-                        reply.send(Ok(())).ok();
+                        reply.send(Ok(InjectOutcome::Created)).ok();
                         route
                     }
                     _ => panic!("expected InjectRoute"),
@@ -1568,6 +1637,7 @@ mod tests {
                 prefix: "10.0.0.0".into(),
                 prefix_length: 24,
                 path_id: 0,
+                allow_missing: false,
             }))
             .await
             .unwrap_err();
@@ -2849,6 +2919,98 @@ mod tests {
         }
 
         drop((svc, rib, rib_tx));
+        manager_task.await.unwrap();
+    }
+
+    async fn add_unicast(
+        svc: &InjectionService,
+        next_hop: &str,
+        communities: Vec<u32>,
+    ) -> proto::PathInjectOutcome {
+        svc.add_path(Request::new(proto::AddPathRequest {
+            prefix: "203.0.113.0".into(),
+            prefix_length: 24,
+            next_hop: next_hop.into(),
+            communities,
+            ..Default::default()
+        }))
+        .await
+        .expect("add accepted")
+        .into_inner()
+        .outcome()
+    }
+
+    async fn delete_unicast(
+        svc: &InjectionService,
+        allow_missing: bool,
+    ) -> Result<proto::PathDeleteOutcome, Status> {
+        svc.delete_path(Request::new(proto::DeletePathRequest {
+            prefix: "203.0.113.0".into(),
+            prefix_length: 24,
+            path_id: 0,
+            allow_missing,
+        }))
+        .await
+        .map(|response| response.into_inner().outcome())
+    }
+
+    /// The unicast controller contract against a real RIB: add reports
+    /// created / replaced / unchanged, an unspecified next hop is a distinct
+    /// payload from a specific one, and a missing delete is `NOT_FOUND`
+    /// unless `allow_missing` is set.
+    #[tokio::test]
+    async fn unicast_injection_reports_local_outcomes() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+
+        assert_eq!(
+            add_unicast(&svc, "0.0.0.0", vec![1]).await,
+            proto::PathInjectOutcome::Created
+        );
+        assert_eq!(
+            add_unicast(&svc, "::", vec![1]).await,
+            proto::PathInjectOutcome::Unchanged,
+            "both unspecified forms are the same next-hop-self route"
+        );
+        assert_eq!(
+            add_unicast(&svc, "0.0.0.0", vec![2]).await,
+            proto::PathInjectOutcome::Replaced
+        );
+        assert_eq!(
+            add_unicast(&svc, "192.0.2.1", vec![2]).await,
+            proto::PathInjectOutcome::Replaced
+        );
+
+        assert_eq!(
+            delete_unicast(&svc, false).await.unwrap(),
+            proto::PathDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            delete_unicast(&svc, false).await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            delete_unicast(&svc, true).await.unwrap(),
+            proto::PathDeleteOutcome::NotPresent
+        );
+        assert_eq!(
+            add_unicast(&svc, "0.0.0.0", vec![]).await,
+            proto::PathInjectOutcome::Created
+        );
+        assert_eq!(
+            delete_unicast(&svc, true).await.unwrap(),
+            proto::PathDeleteOutcome::Deleted
+        );
+
+        drop((svc, rib_tx));
         manager_task.await.unwrap();
     }
 }

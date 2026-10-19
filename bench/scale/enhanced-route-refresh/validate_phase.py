@@ -108,20 +108,25 @@ def actor_sum(metrics, operation):
 
 def require_phase_state(phase, metrics):
     rib, active, stale, _, _, _ = EXPECTED[phase]
-    require(metrics, "bgp_rib_prefixes", {"afi_safi": "all", "peer": PEER}, rib)
-    for scope in ("aggregate", "ipv4_unicast"):
-        require(metrics, "bgp_max_prefix_usage", {"peer": PEER, "scope": scope}, rib)
+    require(metrics, "bgp_rib_prefixes", {"family": FAMILY, "peer": PEER}, rib)
+    for scope in ("aggregate", FAMILY):
+        require(
+            metrics,
+            "bgp_max_prefix_usage",
+            {"family": scope, "peer": PEER, "stage": "accepted"},
+            rib,
+        )
     require(
         metrics,
         "bgp_route_refresh_in_progress",
-        {"afi_safi": FAMILY, "peer": PEER},
+        {"family": FAMILY, "peer": PEER},
         active,
         absent_zero=True,
     )
     require(
         metrics,
         "bgp_route_refresh_stale_entries",
-        {"afi_safi": FAMILY, "peer": PEER},
+        {"family": FAMILY, "peer": PEER},
         stale,
         absent_zero=True,
     )

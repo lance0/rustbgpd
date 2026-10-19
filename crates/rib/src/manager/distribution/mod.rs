@@ -2503,11 +2503,14 @@ impl RibManager {
                                 ..OutboundRouteUpdate::default()
                             });
                         }
-                        let advertised = manager.grouped_advertised_count(member.peer).unwrap_or(0);
-                        manager.metrics.set_adj_rib_out_prefixes(
+                        let advertised = manager
+                            .grouped_advertised_unicast_lens(member.peer)
+                            .unwrap_or_default();
+                        crate::manager::helpers::set_adj_rib_out_prefixes(
+                            &manager.metrics,
                             &member.peer.to_string(),
-                            "all",
-                            gauge_val(advertised),
+                            crate::manager::helpers::UNICAST_FAMILIES,
+                            advertised,
                         );
                     }
                     flushed += batch;
@@ -4281,7 +4284,9 @@ impl RibManager {
         // Recompute grouped projections after the sparse overlay mutation;
         // these counts drive both metrics and query/BMP truth.
         let grouped_unicast_count = self.grouped_advertised_count(peer);
+        let grouped_unicast_lens = self.grouped_advertised_unicast_lens(peer);
         let grouped_vpn_count = self.grouped_vpn_advertised_count(peer);
+        let grouped_vpn_lens = self.grouped_vpn_advertised_lens(peer);
 
         // Local outbound capacity policy (ADR-0113) is the LAST gate before
         // the commit: every earlier reason this peer must not receive a route
@@ -4348,10 +4353,13 @@ impl RibManager {
         }
         // A limited grouped member's advertised count is its admitted
         // projection, which enforcement above just moved.
-        let grouped_unicast_count = if limited {
-            self.grouped_advertised_count(peer)
+        let (grouped_unicast_count, grouped_unicast_lens) = if limited {
+            (
+                self.grouped_advertised_count(peer),
+                self.grouped_advertised_unicast_lens(peer),
+            )
         } else {
-            grouped_unicast_count
+            (grouped_unicast_count, grouped_unicast_lens)
         };
 
         // Derive metric work from the final post-OTC, post-exact-export
@@ -4531,24 +4539,27 @@ impl RibManager {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
                 rib_out.remove_rtc(key);
             }
+            let lens = rib_out.family_lens();
             if unicast_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "all",
-                    gauge_val(grouped_unicast_count.unwrap_or_else(|| rib_out.len())),
+                    crate::manager::helpers::UNICAST_FAMILIES,
+                    grouped_unicast_lens.unwrap_or(lens.unicast),
                 );
             }
             if flowspec_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "flowspec",
-                    gauge_val(rib_out.flowspec_len()),
+                    crate::manager::helpers::FLOWSPEC_FAMILIES,
+                    lens.flowspec,
                 );
             }
             if evpn_changed {
                 self.metrics.set_adj_rib_out_prefixes(
                     &peer_label,
-                    "evpn",
+                    "l2vpn_evpn",
                     gauge_val(if evpn_group_owned {
                         evpn_admitted_count
                     } else {
@@ -4557,24 +4568,27 @@ impl RibManager {
                 );
             }
             if bgpls_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "bgpls",
-                    gauge_val(rib_out.bgpls_len()),
+                    crate::manager::helpers::LINKSTATE_FAMILIES,
+                    lens.bgpls,
                 );
             }
             if vpn_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "vpn",
-                    gauge_val(grouped_vpn_count.unwrap_or_else(|| rib_out.vpn_len())),
+                    crate::manager::helpers::L3VPN_FAMILIES,
+                    grouped_vpn_lens.unwrap_or(lens.vpn),
                 );
             }
             if labeled_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "labeled",
-                    gauge_val(rib_out.labeled_len()),
+                    crate::manager::helpers::LABELED_FAMILIES,
+                    lens.labeled,
                 );
             }
             if rtc_changed {
@@ -4640,12 +4654,14 @@ impl RibManager {
                         .iter()
                         .map(|key| Key::Vpn(key.nlri_key, key.path_id)),
                 );
-            if let Err(error) = self.pending_group_admitted.apply_admitted_with_checkpoint(
-                peer,
-                admitted,
-                removed,
-                &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
-            ) {
+            // The pre-send reservation above covered every candidate; this
+            // batch only filtered them, so the commit skips a second count.
+            if let Err(error) = self
+                .pending_group_admitted
+                .apply_reserved_admitted_with_checkpoint(peer, admitted, removed, &mut |force| {
+                    super::replacement_readiness_checkpoint(&readiness, force);
+                })
+            {
                 self.record_group_recovery_refusal(peer, error, false);
             }
             self.refresh_group_recovery_gauges();
@@ -5730,9 +5746,15 @@ impl RibManager {
             super::retire_hash_set(&mut current, &mut || checkpoint());
             self.replacement_checkpoint(true);
             receipt.filtered_scope_member_visits += filtered_scope.len();
-            let advertised = self.grouped_advertised_count(peer).unwrap_or(0);
-            self.metrics
-                .set_adj_rib_out_prefixes(&peer.to_string(), "all", gauge_val(advertised));
+            let advertised = self
+                .grouped_advertised_unicast_lens(peer)
+                .unwrap_or_default();
+            crate::manager::helpers::set_adj_rib_out_prefixes(
+                &self.metrics,
+                &peer.to_string(),
+                crate::manager::helpers::UNICAST_FAMILIES,
+                advertised,
+            );
         }
         receipt.member_emit_state_us = receipt
             .member_emit_state_us
@@ -7002,8 +7024,11 @@ impl RibManager {
             }
             self.selection_readiness_checkpoint();
         }
-        self.metrics
-            .set_loc_rib_prefixes("all", gauge_val(self.loc_rib.len()));
+        crate::manager::helpers::set_loc_rib_prefixes(
+            &self.metrics,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            self.loc_rib.family_lens().unicast,
+        );
         changed
     }
 
@@ -7392,6 +7417,8 @@ impl RibManager {
                     #[cfg(feature = "bench-internals")]
                     let bench_enumeration_started =
                         bench_per_client_best_resync.then(std::time::Instant::now);
+                    let group_resync_assembles =
+                        resync && member_of.is_some_and(|gid| self.group_ribs.contains_key(&gid));
                     let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
                         let mut capacity = self.loc_rib.len();
                         if let Some(gid) = member_of {
@@ -7491,7 +7518,12 @@ impl RibManager {
                                     .map(|(prefix, _)| *prefix),
                             );
                         }
-                        if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                        // A grouped resync adds its admitted prefixes after
+                        // assembly instead: retained keys are staged in the group
+                        // table above, and the rest become its withdrawals.
+                        if !group_resync_assembles
+                            && let Some(admitted) = self.pending_group_admitted.get(&peer)
+                        {
                             let keys = admitted.iter_with_checkpoint(|_| checkpoint());
                             all.extend(keys.filter_map(|key| match key {
                                 crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
@@ -7953,6 +7985,16 @@ impl RibManager {
                         effective_rtc_keys.capacity(),
                     );
                     if effective_prefixes.is_empty()
+                        && !(group_resync_assembles
+                            && self
+                                .pending_group_admitted
+                                .get(&peer)
+                                .is_some_and(|admitted| {
+                                    admitted.iter_with_checkpoint(|_| checkpoint()).any(|key| {
+                                    matches!(key, crate::update::ExactExportKey::Unicast(prefix, _)
+                                        if !self.selection_deferred(prefix_family(&prefix)))
+                                })
+                                }))
                         && effective_flowspec_rules.is_empty()
                         && effective_evpn_keys.is_empty()
                         && effective_bgpls_keys.is_empty()
@@ -8089,6 +8131,20 @@ impl RibManager {
                                         super::replacement_readiness_checkpoint(&readiness, force);
                                     },
                                 );
+                                // The admitted prefixes the enumeration skipped:
+                                // every unretained admitted key is a withdrawal.
+                                if let Cow::Owned(prefixes) = &mut effective_prefixes {
+                                    prefixes.extend(
+                                        unicast
+                                            .withdraw
+                                            .iter()
+                                            .inspect(|_| checkpoint())
+                                            .map(|(prefix, _)| *prefix)
+                                            .filter(|prefix| {
+                                                !self.selection_deferred(prefix_family(prefix))
+                                            }),
+                                    );
+                                }
                                 // VPN portion of the resync, from the group's VPN
                                 // maps under the member's Φ; the per-peer VPN
                                 // staging below is skipped for these members
@@ -8859,8 +8915,14 @@ impl RibManager {
                         let defer_clean_group_prior = lazy_group_prior.is_some();
                         let group_prior = if let Some(gid) = member_of {
                             let mut prior = FastSet::default();
+                            // Every reader consults a complete proof before this
+                            // prior, and a refused proof leaves a fallback in its
+                            // place. Copy the proof only when a refusal could not
+                            // be recorded as that fallback.
                             if is_dirty || is_force {
-                                if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                                if !self.group_recovery_fallback_durable(peer)
+                                    && let Some(admitted) = self.pending_group_admitted.get(&peer)
+                                {
                                     self.replacement_checkpoint(true);
                                     prior.reserve(admitted.len());
                                     self.replacement_checkpoint(true);

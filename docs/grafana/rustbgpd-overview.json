@@ -882,7 +882,7 @@
             "uid": "${datasource}"
           },
           "expr": "bgp_rib_loc_prefixes{instance=~\"$instance\"}",
-          "legendFormat": "{{afi_safi}}",
+          "legendFormat": "{{family}}",
           "refId": "A"
         }
       ]
@@ -931,8 +931,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (afi_safi) (bgp_rib_prefixes{instance=~\"$instance\",peer=~\"$peer\"})",
-          "legendFormat": "{{afi_safi}}",
+          "expr": "sum by (family) (bgp_rib_prefixes{instance=~\"$instance\",peer=~\"$peer\"})",
+          "legendFormat": "{{family}}",
           "refId": "A"
         }
       ]
@@ -1392,7 +1392,7 @@
       "id": 37,
       "type": "timeseries",
       "title": "Adj-RIB-Out VPN prefixes per peer",
-      "description": "bgp_rib_adj_out_prefixes{afi_safi=\"vpn\"}: VPNv4/VPNv6 advertised-route counts per peer. For update-grouped members (ADR-0099) this is synthesized from the group table under the member's RFC 4684 RT filter.",
+      "description": "bgp_rib_adj_out_prefixes{family=~\"l3vpn_ipv4_unicast|l3vpn_ipv6_unicast\"}: VPNv4/VPNv6 advertised-route counts per peer. For update-grouped members (ADR-0099) this is synthesized from the group table under the member's RFC 4684 RT filter.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1432,7 +1432,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (peer) (bgp_rib_adj_out_prefixes{instance=~\"$instance\",peer=~\"$peer\",afi_safi=\"vpn\"})",
+          "expr": "sum by (peer) (bgp_rib_adj_out_prefixes{instance=~\"$instance\",peer=~\"$peer\",family=~\"l3vpn_ipv4_unicast|l3vpn_ipv6_unicast\"})",
           "legendFormat": "{{peer}}",
           "refId": "A"
         }
@@ -1568,8 +1568,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (peer, afi_safi) (bgp_route_refresh_in_progress{instance=~\"$instance\",peer=~\"$peer\"})",
-          "legendFormat": "refresh {{peer}} {{afi_safi}}",
+          "expr": "sum by (peer, family) (bgp_route_refresh_in_progress{instance=~\"$instance\",peer=~\"$peer\"})",
+          "legendFormat": "refresh {{peer}} {{family}}",
           "refId": "A"
         },
         {
@@ -1577,8 +1577,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (peer, afi_safi) (bgp_route_refresh_stale_entries{instance=~\"$instance\",peer=~\"$peer\"})",
-          "legendFormat": "stale {{peer}} {{afi_safi}}",
+          "expr": "sum by (peer, family) (bgp_route_refresh_stale_entries{instance=~\"$instance\",peer=~\"$peer\"})",
+          "legendFormat": "stale {{peer}} {{family}}",
           "refId": "B"
         },
         {
@@ -2333,7 +2333,7 @@
             "uid": "${datasource}"
           },
           "expr": "bgp_rpki_vrp_count{instance=~\"$instance\"}",
-          "legendFormat": "{{af}}",
+          "legendFormat": "{{afi}}",
           "refId": "A"
         }
       ]
@@ -2849,7 +2849,7 @@
       "id": 55,
       "type": "timeseries",
       "title": "Max-prefix usage and finite limit",
-      "description": "Authoritative live session-actor usage and finite configured limit by bounded scope. Limit series are absent for unlimited scopes; every series is absent while disconnected.",
+      "description": "Authoritative live session-actor usage and finite configured limit by family and policy stage (accepted after import policy, received before it). Limit series are absent for unlimited bounds; every series is absent while disconnected.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 152 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
@@ -2858,13 +2858,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "bgp_max_prefix_usage{instance=~\"$instance\",peer=~\"$peer\"}",
-          "legendFormat": "{{peer}} {{scope}} usage",
+          "legendFormat": "{{peer}} {{family}} {{stage}} usage",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "bgp_max_prefix_limit{instance=~\"$instance\",peer=~\"$peer\"}",
-          "legendFormat": "{{peer}} {{scope}} limit",
+          "legendFormat": "{{peer}} {{family}} {{stage}} limit",
           "refId": "B"
         }
       ]
@@ -2873,7 +2873,7 @@
       "id": 56,
       "type": "timeseries",
       "title": "Max-prefix remaining headroom",
-      "description": "Saturating finite-limit headroom by live peer and scope. No data means unlimited or disconnected, not zero headroom.",
+      "description": "Saturating finite-limit headroom by live peer, family and stage. No data means unlimited or disconnected, not zero headroom.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 152 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
@@ -2882,7 +2882,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "bgp_max_prefix_headroom{instance=~\"$instance\",peer=~\"$peer\"}",
-          "legendFormat": "{{peer}} {{scope}}",
+          "legendFormat": "{{peer}} {{family}} {{stage}}",
           "refId": "A"
         }
       ]
@@ -2938,13 +2938,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "bgp_selection_deferral_active{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} {{afi_safi}} active",
+          "legendFormat": "{{instance}} {{family}} active",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "bgp_selection_deferral_waiters{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} {{afi_safi}} waiters",
+          "legendFormat": "{{instance}} {{family}} waiters",
           "refId": "B"
         }
       ]
@@ -2961,14 +2961,14 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (instance, afi_safi) (rate(bgp_selection_deferral_timeouts_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
-          "legendFormat": "{{instance}} {{afi_safi}} timeout",
+          "expr": "sum by (instance, family) (rate(bgp_selection_deferral_timeouts_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{instance}} {{family}} timeout",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (instance, afi_safi) (rate(bgp_selection_deferral_ledger_overflows_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
-          "legendFormat": "{{instance}} {{afi_safi}} ledger overflow",
+          "expr": "sum by (instance, family) (rate(bgp_selection_deferral_ledger_overflows_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{instance}} {{family}} ledger overflow",
           "refId": "B"
         }
       ]

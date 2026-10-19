@@ -22,12 +22,6 @@
     "prefix": "prefix-value",
     "peer_group": "peer_group-value"
   },
-  "effective_max_prefixes": 143,
-  "effective_max_prefixes_ipv4": 144,
-  "effective_max_prefixes_ipv6": 145,
-  "max_prefix_headroom": 146,
-  "max_prefix_headroom_ipv4": 147,
-  "max_prefix_headroom_ipv6": 148,
   "max_prefix_action": "max_prefix_action-value",
   "max_prefix_restart_remaining_millis": 139,
   "tcp_ao_desired_generation": 132,

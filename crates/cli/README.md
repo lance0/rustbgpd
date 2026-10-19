@@ -180,7 +180,7 @@ rbgp neighbor <addr> add --remote-asn <asn> [--peer-group <name>] [--families <l
 rbgp neighbor <addr> enable
 rbgp neighbor <addr> disable --reason "maintenance"
 rbgp neighbor <addr> reset [--reason "maintenance"]   # Cease/Administrative Reset; static peers retry, dynamic peers reconnect inbound
-rbgp neighbor <addr> softreset
+rbgp neighbor <addr> refresh-in             # re-apply import policy via inbound route refresh (alias: softreset)
 rbgp neighbor <addr> refresh-out            # re-send this peer's current exportable outbound routes
 rbgp neighbor <addr> replay-out             # explicit unicast replay; scheduling acknowledgement only
 rbgp neighbor <addr> delete
@@ -504,6 +504,13 @@ cheaper, guarantee arbitrary table sizes, or change third-party gRPC clients.
 Paginated unicast listings, streams, and control RPCs keep tonic's 4 MiB
 default. `rib fib --limit N [--page-token T]` returns one bounded page instead;
 the older `--page-size` spelling remains a hidden alias.
+A `received`/`advertised` view, `--limit`, `--page-token`, `--prefix`
+(`vpn`, `labeled`), `--rd` (`vpn`), `--route-target` or `--origin-as` (`rtc`)
+selects the bounded `List*RibRoutes` query. Without one of them,
+`rib vpn|labeled|rtc` calls the deprecated whole-table `ListVpnRoutes`,
+`ListLabeledRoutes`, or `ListRtcRoutes` RPC (outside v1), even when `--family`
+or `--neighbor` is set; add `--limit N` to page a family-only or
+neighbor-only request.
 
 `--age` appends an `Age` column to the human best, received, or advertised
 route table. It is the age of the original RIB receive event, including in the

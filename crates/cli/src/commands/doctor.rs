@@ -1158,7 +1158,6 @@ fn inbound_prefix_bound_check(
         || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
-        || neighbor.effective_max_prefixes.is_some()
         || has_inbound_scope(neighbor, "aggregate")
     {
         return None;
@@ -1212,11 +1211,6 @@ fn has_inbound_scope(neighbor: &crate::proto::NeighborState, scope: &str) -> boo
 fn family_bounded(neighbor: &crate::proto::NeighborState, family: &str) -> bool {
     has_inbound_scope(neighbor, family)
         || has_inbound_scope(neighbor, &format!("{family}_received"))
-        || match family {
-            "ipv4_unicast" => neighbor.effective_max_prefixes_ipv4.is_some(),
-            "ipv6_unicast" => neighbor.effective_max_prefixes_ipv6.is_some(),
-            _ => false,
-        }
 }
 
 /// The per-family keys that can bound `family`, besides the aggregate.
@@ -5086,17 +5080,9 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let check = inbound_prefix_bound_check("10.0.0.2", &family_only, Some(65001))
             .expect("a family-only bound must not satisfy the unicast check");
         assert_eq!(check.status, CheckStatus::Warn);
-        for case in 0..4 {
-            let mut bounded = peer.clone();
-            match case {
-                0 => bounded.effective_max_prefixes = Some(0),
-                1 => bounded.effective_max_prefixes_ipv4 = Some(100),
-                2 => bounded.effective_max_prefixes_ipv6 = Some(100),
-                3 => bounded.config.as_mut().unwrap().max_prefixes = 100,
-                _ => unreachable!(),
-            }
-            assert!(inbound_prefix_bound_check("10.0.0.2", &bounded, Some(65001)).is_none());
-        }
+        let mut configured = peer.clone();
+        configured.config.as_mut().unwrap().max_prefixes = 100;
+        assert!(inbound_prefix_bound_check("10.0.0.2", &configured, Some(65001)).is_none());
     }
 
     fn bound_peer(families: &[&str], scopes: &[&str]) -> crate::proto::NeighborState {
@@ -5172,19 +5158,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     }
 
     #[test]
-    fn inbound_prefix_bound_warns_on_ipv4_only_effective_field_for_dual_stack_peer() {
-        let mut peer = bound_peer(&DUAL_STACK_PEER, &[]);
-        peer.effective_max_prefixes_ipv4 = Some(100);
-        let detail = bound_warning(&peer).expect("the negotiated IPv6 unicast feed is unbounded");
-        assert!(
-            detail.contains(
-                "negotiated families ipv6_unicast (max_prefixes_ipv6_unicast or max_prefixes_received_ipv6_unicast);"
-            ),
-            "{detail}"
-        );
-    }
-
-    #[test]
     fn inbound_prefix_bound_warns_on_linkstate_without_aggregate() {
         // BGP-LS has no per-family key; only the aggregate covers it.
         let detail = bound_warning(&bound_peer(
@@ -5206,11 +5179,12 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             bound_warning(&bound_peer(&["linkstate"], &["aggregate"])),
             None
         );
-        let mut aggregate = bound_peer(&DUAL_STACK_PEER, &[]);
-        aggregate.effective_max_prefixes = Some(100);
-        assert_eq!(bound_warning(&aggregate), None);
+        assert_eq!(
+            bound_warning(&bound_peer(&DUAL_STACK_PEER, &["aggregate"])),
+            None
+        );
         // A per-family bound on every negotiated family passes, through
-        // accepted rows, received-only rows, or the legacy effective fields.
+        // accepted rows or received-only rows.
         assert_eq!(
             bound_warning(&bound_peer(
                 &VPN_PEER,
@@ -5225,10 +5199,13 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             )),
             None
         );
-        let mut legacy_both = bound_peer(&DUAL_STACK_PEER, &[]);
-        legacy_both.effective_max_prefixes_ipv4 = Some(100);
-        legacy_both.effective_max_prefixes_ipv6 = Some(100);
-        assert_eq!(bound_warning(&legacy_both), None);
+        assert_eq!(
+            bound_warning(&bound_peer(
+                &DUAL_STACK_PEER,
+                &["ipv4_unicast", "ipv6_unicast"]
+            )),
+            None
+        );
         // With every family unbounded, the detail still names each key.
         let detail = bound_warning(&bound_peer(&DUAL_STACK_PEER, &[])).unwrap();
         for key in [
@@ -6212,8 +6189,8 @@ paths = ["x"]
             "192.0.2.1:8282".to_string(),
             "[2001:0db8::1]:8282".to_string(),
         ];
-        let metrics = "bgp_rpki_vrp_count{af=\"ipv4\"} 10\n\
-                       bgp_rpki_vrp_count{af=\"ipv6\"} 20\n\
+        let metrics = "bgp_rpki_vrp_count{afi=\"ipv4\"} 10\n\
+                       bgp_rpki_vrp_count{afi=\"ipv6\"} 20\n\
                        bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 1\n\
                        bgp_rpki_cache_end_of_data_ready{cache=\"[2001:db8::1]:8282\"} 1";
         assert_eq!(
@@ -6445,8 +6422,8 @@ paths = ["x"]
         let nonzero = rpki_vrp_table_check(
             &caches,
             Some(
-                "bgp_rpki_vrp_count{af=\"ipv4\"} 1\n\
-                 bgp_rpki_vrp_count{af=\"ipv6\"} 2\n\
+                "bgp_rpki_vrp_count{afi=\"ipv4\"} 1\n\
+                 bgp_rpki_vrp_count{afi=\"ipv6\"} 2\n\
                  bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 1",
             ),
         )
@@ -6455,7 +6432,7 @@ paths = ["x"]
 
         let zero = rpki_vrp_table_check(
             &caches,
-            Some("bgp_rpki_vrp_count{af=\"ipv4\"} 0\nbgp_rpki_vrp_count{af=\"ipv6\"} 0"),
+            Some("bgp_rpki_vrp_count{afi=\"ipv4\"} 0\nbgp_rpki_vrp_count{afi=\"ipv6\"} 0"),
         )
         .unwrap();
         assert_eq!(zero.status, CheckStatus::Warn);
@@ -6479,8 +6456,8 @@ paths = ["x"]
             "192.0.2.1:8282".to_string(),
             "[2001:db8::1]:8282".to_string(),
         ];
-        let base = "bgp_rpki_vrp_count{af=\"ipv4\"} 1\n\
-                    bgp_rpki_vrp_count{af=\"ipv6\"} 2\n";
+        let base = "bgp_rpki_vrp_count{afi=\"ipv4\"} 1\n\
+                    bgp_rpki_vrp_count{afi=\"ipv6\"} 2\n";
         let not_ready = rpki_vrp_table_check(
             &caches,
             Some(&format!(
@@ -8609,7 +8586,7 @@ paths = ["x"]
             state = state_dir.path().display()
         ));
         *server.state.metrics_text.lock().await = Some(
-            "bgp_rpki_vrp_count{af=\"ipv4\"} 0\nbgp_rpki_vrp_count{af=\"ipv6\"} 0\n".to_string(),
+            "bgp_rpki_vrp_count{afi=\"ipv4\"} 0\nbgp_rpki_vrp_count{afi=\"ipv6\"} 0\n".to_string(),
         );
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
