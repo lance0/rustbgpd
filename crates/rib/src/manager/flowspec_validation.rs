@@ -1859,7 +1859,7 @@ mod tests {
                         metric
                             .get_label()
                             .iter()
-                            .any(|label| label.value() == "flowspec")
+                            .any(|label| label.value() == "ipv4_flowspec")
                             && metric.get_gauge().get_value() >= 1.0
                     });
                 if selected {

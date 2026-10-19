@@ -269,6 +269,20 @@ static POLICY_ROUTES_REAP_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// every policy/action tuple that the installed chains can still emit.
 pub type PolicyRoutesReachability = BTreeMap<(String, String), BTreeSet<(String, String)>>;
 
+/// Split a session max-prefix scope (`ipv4_unicast_received`, `aggregate`,
+/// a canonical family) into the `family` and `stage` metric labels. Only the
+/// unicast received bounds count before import policy.
+fn max_prefix_labels(scope: &str) -> (&str, &'static str) {
+    scope
+        .strip_suffix("_received")
+        .map_or((scope, "accepted"), |family| (family, "received"))
+}
+
+fn max_prefix_label_values<'a>(peer: &'a str, scope: &'a str) -> [&'a str; 3] {
+    let (family, stage) = max_prefix_labels(scope);
+    [peer, family, stage]
+}
+
 /// Current unix time in whole seconds, saturating at the `i64` gauge
 /// range (0 if the clock reads before the epoch).
 fn unix_now_seconds() -> i64 {
@@ -1140,30 +1154,30 @@ impl BgpMetrics {
         let rib_prefixes = IntGaugeVec::new(
             Opts::new(
                 "bgp_rib_prefixes",
-                "Paths in a peer's Adj-RIB-In, by table. afi_safi=\"all\" is \
-                 IPv4 and IPv6 unicast combined, with each Add-Path path counted \
-                 individually; \"evpn\" and \"flowspec\" are those tables. Other \
-                 families are not counted.",
+                "Paths in a peer's Adj-RIB-In by canonical family, with each \
+                 Add-Path path counted individually. Covers ipv4_unicast, \
+                 ipv6_unicast, l2vpn_evpn, ipv4_flowspec and ipv6_flowspec; \
+                 other families are not counted.",
             ),
-            &["peer", "afi_safi"],
+            &["peer", "family"],
         )
         .expect("valid metric definition");
 
         let rib_adj_out_prefixes = IntGaugeVec::new(
             Opts::new(
                 "bgp_rib_adj_out_prefixes",
-                "Number of prefixes in Adj-RIB-Out per peer and AFI/SAFI",
+                "Number of prefixes in Adj-RIB-Out per peer and canonical family",
             ),
-            &["peer", "afi_safi"],
+            &["peer", "family"],
         )
         .expect("valid metric definition");
 
         let rib_loc_prefixes = IntGaugeVec::new(
             Opts::new(
                 "bgp_rib_loc_prefixes",
-                "Number of prefixes in the Loc-RIB per AFI/SAFI",
+                "Number of prefixes in the Loc-RIB per canonical family",
             ),
-            &["afi_safi"],
+            &["family"],
         )
         .expect("valid metric definition");
 
@@ -1411,27 +1425,27 @@ impl BgpMetrics {
         let max_prefix_blocking = IntGaugeVec::new(
             Opts::new(
                 "bgp_max_prefix_blocking",
-                "1 while an inbound max-prefix block episode is open for this peer and scope.",
+                "1 while an inbound max-prefix block episode is open for this peer, family and stage.",
             ),
-            &["peer", "scope"],
+            &["peer", "family", "stage"],
         )
         .expect("valid metric definition");
 
         let max_prefix_blocked = IntCounterVec::new(
             Opts::new(
                 "bgp_max_prefix_blocked_total",
-                "Inbound max-prefix block episodes opened for this peer and scope, counted once when the first net-new prefix is withheld.",
+                "Inbound max-prefix block episodes opened for this peer, family and stage, counted once when the first net-new prefix is withheld.",
             ),
-            &["peer", "scope"],
+            &["peer", "family", "stage"],
         )
         .expect("valid metric definition");
 
         let max_prefix_warning = IntCounterVec::new(
             Opts::new(
                 "bgp_max_prefix_warning_total",
-                "Max-prefix warning-threshold crossings, one per crossing per scope.",
+                "Max-prefix warning-threshold crossings, one per crossing per family and stage.",
             ),
-            &["peer", "scope"],
+            &["peer", "family", "stage"],
         )
         .expect("valid metric definition");
 
@@ -1449,7 +1463,7 @@ impl BgpMetrics {
                 "bgp_max_prefix_usage",
                 "Accepted NLRI identities currently counted toward max-prefix enforcement.",
             ),
-            &["peer", "scope"],
+            &["peer", "family", "stage"],
         )
         .expect("valid metric definition");
 
@@ -1458,7 +1472,7 @@ impl BgpMetrics {
                 "bgp_max_prefix_limit",
                 "Finite configured maximum for max-prefix enforcement; absent when unlimited.",
             ),
-            &["peer", "scope"],
+            &["peer", "family", "stage"],
         )
         .expect("valid metric definition");
 
@@ -1467,7 +1481,7 @@ impl BgpMetrics {
                 "bgp_max_prefix_headroom",
                 "Remaining accepted NLRI identities before the finite max-prefix limit; absent when unlimited.",
             ),
-            &["peer", "scope"],
+            &["peer", "family", "stage"],
         )
         .expect("valid metric definition");
 
@@ -2240,7 +2254,7 @@ impl BgpMetrics {
                 "bgp_selection_deferral_active",
                 "Whether RFC 4724 restarting-speaker route selection is deferred for an address family.",
             ),
-            &["afi_safi"],
+            &["family"],
         )
         .expect("valid metric definition");
 
@@ -2249,7 +2263,7 @@ impl BgpMetrics {
                 "bgp_selection_deferral_waiters",
                 "Startup-frozen peers whose current-session End-of-RIB is still required before selecting an address family.",
             ),
-            &["afi_safi"],
+            &["family"],
         )
         .expect("valid metric definition");
 
@@ -2258,7 +2272,7 @@ impl BgpMetrics {
                 "bgp_selection_deferral_releases_total",
                 "RFC 4724 selection-deferral releases by address family and bounded reason.",
             ),
-            &["afi_safi", "reason"],
+            &["family", "reason"],
         )
         .expect("valid metric definition");
 
@@ -2267,7 +2281,7 @@ impl BgpMetrics {
                 "bgp_selection_deferral_timeouts_total",
                 "RFC 4724 selection-deferral timer expirations by address family.",
             ),
-            &["afi_safi"],
+            &["family"],
         )
         .expect("valid metric definition");
 
@@ -2276,16 +2290,16 @@ impl BgpMetrics {
                 "bgp_selection_deferral_ledger_overflows_total",
                 "RFC 4724 selection-deferral families that exceeded the bounded identity ledger and required a complete release sweep.",
             ),
-            &["afi_safi"],
+            &["family"],
         )
         .expect("valid metric definition");
 
         let rpki_vrp_count = IntGaugeVec::new(
             Opts::new(
                 "bgp_rpki_vrp_count",
-                "Number of RPKI VRP entries by address family",
+                "Number of RPKI VRP entries by address family identifier (ipv4 or ipv6)",
             ),
-            &["af"],
+            &["afi"],
         )
         .expect("valid metric definition");
 
@@ -2414,7 +2428,7 @@ impl BgpMetrics {
                 "bgp_route_refresh_in_progress",
                 "Active inbound Enhanced Route Refresh windows by peer and AFI/SAFI (1 = active, 0 = inactive).",
             ),
-            &["peer", "afi_safi"],
+            &["peer", "family"],
         )
         .expect("valid metric definition");
 
@@ -2423,7 +2437,7 @@ impl BgpMetrics {
                 "bgp_route_refresh_stale_entries",
                 "Routes still awaiting replacement during an inbound Enhanced Route Refresh window by peer and AFI/SAFI.",
             ),
-            &["peer", "afi_safi"],
+            &["peer", "family"],
         )
         .expect("valid metric definition");
 
@@ -4620,18 +4634,18 @@ impl BgpMetrics {
     }
 
     /// Set the number of prefixes in Adj-RIB-In for a peer/AFI-SAFI.
-    pub fn set_rib_prefixes(&self, peer: &str, afi_safi: &str, count: i64) {
+    pub fn set_rib_prefixes(&self, peer: &str, family: &str, count: i64) {
         self.0
             .rib_prefixes
-            .with_label_values(&[peer, afi_safi])
+            .with_label_values(&[peer, family])
             .set(count);
     }
 
     /// Set the number of prefixes in Adj-RIB-Out for a peer/AFI-SAFI.
-    pub fn set_adj_rib_out_prefixes(&self, peer: &str, afi_safi: &str, count: i64) {
+    pub fn set_adj_rib_out_prefixes(&self, peer: &str, family: &str, count: i64) {
         self.0
             .rib_adj_out_prefixes
-            .with_label_values(&[peer, afi_safi])
+            .with_label_values(&[peer, family])
             .set(count);
     }
 
@@ -4777,10 +4791,10 @@ impl BgpMetrics {
     }
 
     /// Set the number of prefixes in the Loc-RIB for an AFI/SAFI.
-    pub fn set_loc_rib_prefixes(&self, afi_safi: &str, count: i64) {
+    pub fn set_loc_rib_prefixes(&self, family: &str, count: i64) {
         self.0
             .rib_loc_prefixes
-            .with_label_values(&[afi_safi])
+            .with_label_values(&[family])
             .set(count);
     }
 
@@ -5029,7 +5043,7 @@ impl BgpMetrics {
                 | "ipv6_flowspec"
                 | "rtc"
         ));
-        let labels = [peer, scope];
+        let labels = max_prefix_label_values(peer, scope);
         let usage = i64::try_from(usage).unwrap_or(i64::MAX);
         self.0
             .max_prefix_usage
@@ -5057,7 +5071,7 @@ impl BgpMetrics {
     /// received scopes use this while their bound is unset: without one the
     /// session does not track rejected identities, so no usage is published.
     pub fn remove_max_prefix_capacity(&self, peer: &str, scope: &str) {
-        let labels = [peer, scope];
+        let labels = max_prefix_label_values(peer, scope);
         let _ = self.0.max_prefix_usage.remove_label_values(&labels);
         let _ = self.0.max_prefix_limit.remove_label_values(&labels);
         let _ = self.0.max_prefix_headroom.remove_label_values(&labels);
@@ -5068,7 +5082,7 @@ impl BgpMetrics {
     pub fn set_max_prefix_blocking(&self, peer: &str, scope: &str, blocking: bool) {
         self.0
             .max_prefix_blocking
-            .with_label_values(&[peer, scope])
+            .with_label_values(&max_prefix_label_values(peer, scope))
             .set(i64::from(blocking));
     }
 
@@ -5078,7 +5092,7 @@ impl BgpMetrics {
     pub fn record_max_prefix_blocked(&self, peer: &str, scope: &str) {
         self.0
             .max_prefix_blocked
-            .with_label_values(&[peer, scope])
+            .with_label_values(&max_prefix_label_values(peer, scope))
             .inc();
     }
 
@@ -5086,7 +5100,7 @@ impl BgpMetrics {
     pub fn record_max_prefix_warning(&self, peer: &str, scope: &str) {
         self.0
             .max_prefix_warning
-            .with_label_values(&[peer, scope])
+            .with_label_values(&max_prefix_label_values(peer, scope))
             .inc();
     }
 
@@ -5371,8 +5385,8 @@ impl BgpMetrics {
             | "ipv4_flowspec"
             | "ipv6_flowspec"
             | "l2vpn_evpn"
-            | "bgpls"
-            | "bgpls_vpn"
+            | "linkstate"
+            | "linkstate_vpn"
             | "l3vpn_ipv4_unicast"
             | "l3vpn_ipv6_unicast"
             | "ipv4_labeled_unicast"
@@ -5900,56 +5914,56 @@ impl BgpMetrics {
     }
 
     /// Set whether restarting-speaker route selection is deferred for a family.
-    pub fn set_selection_deferral_active(&self, afi_safi: &str, active: bool) {
+    pub fn set_selection_deferral_active(&self, family: &str, active: bool) {
         self.0
             .selection_deferral_active
-            .with_label_values(&[afi_safi])
+            .with_label_values(&[family])
             .set(i64::from(active));
     }
 
     /// Set the number of startup-frozen peers still blocking a family.
-    pub fn set_selection_deferral_waiters(&self, afi_safi: &str, count: i64) {
+    pub fn set_selection_deferral_waiters(&self, family: &str, count: i64) {
         self.0
             .selection_deferral_waiters
-            .with_label_values(&[afi_safi])
+            .with_label_values(&[family])
             .set(count);
     }
 
     /// Record release of one family gate (`all_eor`, `collision_refresh`,
     /// `all_excluded`, or `timer`).
-    pub fn record_selection_deferral_release(&self, afi_safi: &str, reason: &str) {
+    pub fn record_selection_deferral_release(&self, family: &str, reason: &str) {
         self.0
             .selection_deferral_releases
-            .with_label_values(&[afi_safi, reason])
+            .with_label_values(&[family, reason])
             .inc();
     }
 
     /// Record expiry of one family `Selection_Deferral_Timer`.
-    pub fn record_selection_deferral_timeout(&self, afi_safi: &str) {
+    pub fn record_selection_deferral_timeout(&self, family: &str) {
         self.0
             .selection_deferral_timeouts
-            .with_label_values(&[afi_safi])
+            .with_label_values(&[family])
             .inc();
     }
 
     /// Record a family entering bounded-ledger release fallback.
-    pub fn record_selection_deferral_ledger_overflow(&self, afi_safi: &str) {
+    pub fn record_selection_deferral_ledger_overflow(&self, family: &str) {
         self.0
             .selection_deferral_ledger_overflows
-            .with_label_values(&[afi_safi])
+            .with_label_values(&[family])
             .inc();
     }
 
     /// Materialize zero-valued timeout and ledger-overflow children for one
     /// active selection-deferral family.
-    pub fn initialize_selection_deferral_failure_series(&self, afi_safi: &str) {
+    pub fn initialize_selection_deferral_failure_series(&self, family: &str) {
         self.0
             .selection_deferral_timeouts
-            .with_label_values(&[afi_safi])
+            .with_label_values(&[family])
             .inc_by(0);
         self.0
             .selection_deferral_ledger_overflows
-            .with_label_values(&[afi_safi])
+            .with_label_values(&[family])
             .inc_by(0);
     }
 
@@ -6163,12 +6177,12 @@ impl BgpMetrics {
 
     /// Set whether an inbound Enhanced Route Refresh window is active.
     ///
-    /// `afi_safi` is expected to be a bounded family label such as
+    /// `family` is expected to be a bounded family label such as
     /// `"ipv4_unicast"`, `"ipv6_flowspec"`, or `"l2vpn_evpn"`.
-    pub fn set_route_refresh_in_progress(&self, peer: &str, afi_safi: &str, active: bool) {
+    pub fn set_route_refresh_in_progress(&self, peer: &str, family: &str, active: bool) {
         self.0
             .route_refresh_in_progress
-            .with_label_values(&[peer, afi_safi])
+            .with_label_values(&[peer, family])
             .set(i64::from(active));
     }
 
@@ -6286,10 +6300,10 @@ impl BgpMetrics {
 
     /// Set how many entries are still awaiting replacement in an inbound
     /// Enhanced Route Refresh window.
-    pub fn set_route_refresh_stale_entries(&self, peer: &str, afi_safi: &str, count: i64) {
+    pub fn set_route_refresh_stale_entries(&self, peer: &str, family: &str, count: i64) {
         self.0
             .route_refresh_stale_entries
-            .with_label_values(&[peer, afi_safi])
+            .with_label_values(&[peer, family])
             .set(count);
     }
 
@@ -8849,7 +8863,7 @@ mod tests {
         let text = gather_text(&m);
         assert!(text.contains("bgp_route_refresh_in_progress"));
         assert!(text.contains("bgp_route_refresh_stale_entries"));
-        assert!(text.contains(r#"afi_safi="ipv4_unicast""#));
+        assert!(text.contains(r#"family="ipv4_unicast""#));
     }
 
     #[test]
@@ -10453,19 +10467,64 @@ mod tests {
         m.set_max_prefix_capacity(peer, "ipv4_unicast", 12, None);
 
         let text = gather_text(&m);
-        assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1",scope="aggregate"} 80"#));
-        assert!(text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1",scope="aggregate"} 100"#));
-        assert!(text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1",scope="aggregate"} 20"#));
-        assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1",scope="ipv4_unicast"} 12"#));
-        assert!(!text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1",scope="ipv4_unicast"}"#));
-        assert!(!text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1",scope="ipv4_unicast"}"#));
+        assert!(text.contains(
+            r#"bgp_max_prefix_usage{family="aggregate",peer="10.0.0.1",stage="accepted"} 80"#
+        ));
+        assert!(text.contains(
+            r#"bgp_max_prefix_limit{family="aggregate",peer="10.0.0.1",stage="accepted"} 100"#
+        ));
+        assert!(text.contains(
+            r#"bgp_max_prefix_headroom{family="aggregate",peer="10.0.0.1",stage="accepted"} 20"#
+        ));
+        assert!(text.contains(
+            r#"bgp_max_prefix_usage{family="ipv4_unicast",peer="10.0.0.1",stage="accepted"} 12"#
+        ));
+        assert!(!text.contains(
+            r#"bgp_max_prefix_limit{family="ipv4_unicast",peer="10.0.0.1",stage="accepted"}"#
+        ));
+        assert!(!text.contains(
+            r#"bgp_max_prefix_headroom{family="ipv4_unicast",peer="10.0.0.1",stage="accepted"}"#
+        ));
 
         m.set_max_prefix_capacity(peer, "aggregate", 101, None);
         let text = gather_text(&m);
-        assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1",scope="aggregate"} 101"#));
-        assert!(!text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1",scope="aggregate"}"#));
-        assert!(!text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1",scope="aggregate"}"#));
-        assert!(!text.contains(r#"bgp_max_prefix_blocking{peer="10.0.0.1",scope="aggregate"}"#));
+        assert!(text.contains(
+            r#"bgp_max_prefix_usage{family="aggregate",peer="10.0.0.1",stage="accepted"} 101"#
+        ));
+        assert!(!text.contains(
+            r#"bgp_max_prefix_limit{family="aggregate",peer="10.0.0.1",stage="accepted"}"#
+        ));
+        assert!(!text.contains(
+            r#"bgp_max_prefix_headroom{family="aggregate",peer="10.0.0.1",stage="accepted"}"#
+        ));
+        assert!(!text.contains(
+            r#"bgp_max_prefix_blocking{family="aggregate",peer="10.0.0.1",stage="accepted"}"#
+        ));
+    }
+
+    /// The pre-policy unicast bounds keep the canonical family and move the
+    /// policy stage into its own label, so they join RIB gauges on `family`.
+    #[test]
+    fn max_prefix_received_scope_splits_into_family_and_stage() {
+        let m = BgpMetrics::new();
+        let peer = "10.0.0.1";
+        m.set_max_prefix_capacity(peer, "ipv6_unicast_received", 7, Some(10));
+        m.record_max_prefix_warning(peer, "ipv6_unicast_received");
+        m.set_max_prefix_capacity(peer, "l2vpn_evpn", 3, Some(5));
+
+        let text = gather_text(&m);
+        for line in [
+            r#"bgp_max_prefix_usage{family="ipv6_unicast",peer="10.0.0.1",stage="received"} 7"#,
+            r#"bgp_max_prefix_headroom{family="ipv6_unicast",peer="10.0.0.1",stage="received"} 3"#,
+            r#"bgp_max_prefix_warning_total{family="ipv6_unicast",peer="10.0.0.1",stage="received"} 1"#,
+            r#"bgp_max_prefix_limit{family="l2vpn_evpn",peer="10.0.0.1",stage="accepted"} 5"#,
+        ] {
+            assert!(text.contains(line), "missing {line}");
+        }
+        assert!(!text.contains("_received\""));
+
+        m.remove_max_prefix_capacity(peer, "ipv6_unicast_received");
+        assert!(!gather_text(&m).contains(r#"bgp_max_prefix_usage{family="ipv6_unicast""#));
     }
 
     /// Load-bearing session-reap proof: replacing the narrow reap with a zero

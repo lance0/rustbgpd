@@ -1705,8 +1705,12 @@ pub(super) fn counter_value(
     counter_samples(metrics, name)
         .into_iter()
         .find(|(labels, _)| {
+            let (family, stage) = scope
+                .strip_suffix("_received")
+                .map_or((scope, "accepted"), |family| (family, "received"));
             labels.get("peer").map(String::as_str) == Some(peer)
-                && labels.get("scope").map(String::as_str) == Some(scope)
+                && labels.get("family").map(String::as_str) == Some(family)
+                && labels.get("stage").map(String::as_str) == Some(stage)
         })
         .map(|(_, value)| value)
 }

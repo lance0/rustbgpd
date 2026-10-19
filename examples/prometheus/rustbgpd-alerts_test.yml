@@ -264,7 +264,7 @@ tests:
         values: "1x30"
       - series: 'bgp_session_established_total{peer="192.0.2.1", instance="edge1:9179"}'
         values: "2x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.1", afi_safi="all", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.1", family="ipv4_unicast", instance="edge1:9179"}'
         values: "0x30"
       - series: 'bgp_peer_session_established{peer="192.0.2.2", interface="", instance="edge1:9179"}'
         values: "1x30"
@@ -272,7 +272,7 @@ tests:
         values: "0x30"
       - series: 'bgp_session_established_total{peer="192.0.2.2", instance="edge1:9179"}'
         values: "1x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.2", afi_safi="all", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.2", family="ipv4_unicast", instance="edge1:9179"}'
         values: "0x30"
       # An IPv6 peer alongside the IPv4 ones — pins that the join
       # matches for both address families.
@@ -282,7 +282,7 @@ tests:
         values: "0x30"
       - series: 'bgp_session_established_total{peer="2001:db8::2", instance="edge1:9179"}'
         values: "1x30"
-      - series: 'bgp_rib_prefixes{peer="2001:db8::2", afi_safi="all", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="2001:db8::2", family="ipv4_unicast", instance="edge1:9179"}'
         values: "0x30"
       - series: 'bgp_session_flaps_total{peer="192.0.2.3", instance="edge1:9179"}'
         values: "0+1x30"
@@ -292,23 +292,23 @@ tests:
         values: "1x30"
       - series: 'bgp_session_established_total{peer="192.0.2.4", instance="edge1:9179"}'
         values: "1x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.4", afi_safi="all", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.4", family="ipv4_unicast", instance="edge1:9179"}'
         values: "100x30"
       # One Established scoped sibling makes the peer currently up.
       - series: 'bgp_peer_session_established{peer="fe80::1", interface="eth0", instance="edge1:9179"}'
         values: "0x30"
       - series: 'bgp_peer_session_established{peer="fe80::1", interface="eth1", instance="edge1:9179"}'
         values: "1x30"
-      - series: 'bgp_rib_prefixes{peer="fe80::1", afi_safi="all", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="fe80::1", family="ipv4_unicast", instance="edge1:9179"}'
         values: "0x30"
       # All scoped siblings down must not fabricate a peer-level alert.
       - series: 'bgp_peer_session_established{peer="fe80::2", interface="eth0", instance="edge1:9179"}'
         values: "0x30"
       - series: 'bgp_peer_session_established{peer="fe80::2", interface="eth1", instance="edge1:9179"}'
         values: "0x30"
-      - series: 'bgp_rib_prefixes{peer="fe80::2", afi_safi="all", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="fe80::2", family="ipv4_unicast", instance="edge1:9179"}'
         values: "0x30"
-      # The daemon zeroes only afi_safi="all" at session up; the "evpn"
+      # The daemon zeroes only family="ipv4_unicast" at session up; the "evpn"
       # and "flowspec" series appear once that family is updated. So
       # 192.0.2.2 and 2001:db8::2 above (no such series) are the empty
       # unicast-only peers that must still fire.
@@ -316,27 +316,27 @@ tests:
       # outside the unicast table, so it must not fire.
       - series: 'bgp_peer_session_established{peer="192.0.2.5", interface="", instance="edge1:9179"}'
         values: "1x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.5", afi_safi="all", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.5", family="ipv4_unicast", instance="edge1:9179"}'
         values: "0x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.5", afi_safi="evpn", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.5", family="l2vpn_evpn", instance="edge1:9179"}'
         values: "12x30"
       # FlowSpec-only peer: must not fire either.
       - series: 'bgp_peer_session_established{peer="192.0.2.6", interface="", instance="edge1:9179"}'
         values: "1x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.6", afi_safi="all", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.6", family="ipv4_unicast", instance="edge1:9179"}'
         values: "0x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.6", afi_safi="flowspec", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.6", family="ipv4_flowspec", instance="edge1:9179"}'
         values: "3x30"
       # Zero-valued family series (as left by a session reset) still sum
       # to zero and fire. The job label pins that the sum keeps the RIB
-      # series' native labels other than afi_safi.
+      # series' native labels other than family.
       - series: 'bgp_peer_session_established{peer="192.0.2.7", interface="", job="rustbgpd", instance="edge1:9179"}'
         values: "1x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.7", afi_safi="all", job="rustbgpd", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.7", family="ipv4_unicast", job="rustbgpd", instance="edge1:9179"}'
         values: "0x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.7", afi_safi="evpn", job="rustbgpd", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.7", family="l2vpn_evpn", job="rustbgpd", instance="edge1:9179"}'
         values: "0x30"
-      - series: 'bgp_rib_prefixes{peer="192.0.2.7", afi_safi="flowspec", job="rustbgpd", instance="edge1:9179"}'
+      - series: 'bgp_rib_prefixes{peer="192.0.2.7", family="ipv4_flowspec", job="rustbgpd", instance="edge1:9179"}'
         values: "0x30"
     alert_rule_test:
       # Pending, not yet firing (for: 2m).
@@ -609,15 +609,15 @@ tests:
 
   # ── BgpMaxPrefixBlocking ──────────────────────────────────────
   # Load-bearing: pending at 4m30s and firing at 5m30s pins the 5-minute
-  # hold. The finite nonblocking scope (gauge present at 0) and a transient
+  # hold. The finite nonblocking bound (gauge present at 0) and a transient
   # episode shorter than the hold stay silent.
   - interval: 30s
     input_series:
-      - series: 'bgp_max_prefix_blocking{peer="192.0.2.50", scope="ipv4_unicast", instance="edge1:9179"}'
+      - series: 'bgp_max_prefix_blocking{peer="192.0.2.50", family="ipv4_unicast", stage="accepted", instance="edge1:9179"}'
         values: "1x14"
-      - series: 'bgp_max_prefix_blocking{peer="192.0.2.51", scope="ipv6_unicast", instance="edge1:9179"}'
+      - series: 'bgp_max_prefix_blocking{peer="192.0.2.51", family="ipv6_unicast", stage="accepted", instance="edge1:9179"}'
         values: "0x14"
-      - series: 'bgp_max_prefix_blocking{peer="192.0.2.52", scope="ipv4_unicast", instance="edge1:9179"}'
+      - series: 'bgp_max_prefix_blocking{peer="192.0.2.52", family="ipv4_unicast", stage="accepted", instance="edge1:9179"}'
         values: "1 1 1 1 1 1 0x8"
     alert_rule_test:
       - eval_time: 4m30s
@@ -629,14 +629,15 @@ tests:
           - exp_labels:
               severity: warning
               peer: 192.0.2.50
-              scope: ipv4_unicast
+              family: ipv4_unicast
+              stage: accepted
               instance: edge1:9179
             exp_annotations:
               summary: >-
-                Inbound max-prefix blocking for 192.0.2.50 (ipv4_unicast)
+                Inbound max-prefix blocking for 192.0.2.50 (ipv4_unicast, accepted)
               description: >-
                 The inbound max-prefix blocking gauge for 192.0.2.50
-                (ipv4_unicast) on edge1:9179 has remained 1 for 5 minutes;
+                (ipv4_unicast, accepted) on edge1:9179 has remained 1 for 5 minutes;
                 net-new prefixes from this peer are withheld until its usage
                 falls back under the bound.
 
@@ -646,15 +647,15 @@ tests:
   # The no-limit peer pins unlimited-as-absence: usage alone must not alert.
   - interval: 1m
     input_series:
-      - series: 'bgp_max_prefix_usage{peer="192.0.2.7", scope="aggregate", instance="edge1:9179"}'
+      - series: 'bgp_max_prefix_usage{peer="192.0.2.7", family="aggregate", stage="accepted", instance="edge1:9179"}'
         values: "80x15"
-      - series: 'bgp_max_prefix_limit{peer="192.0.2.7", scope="aggregate", instance="edge1:9179"}'
+      - series: 'bgp_max_prefix_limit{peer="192.0.2.7", family="aggregate", stage="accepted", instance="edge1:9179"}'
         values: "100x15"
-      - series: 'bgp_max_prefix_usage{peer="192.0.2.8", scope="ipv4_unicast", instance="edge1:9179"}'
+      - series: 'bgp_max_prefix_usage{peer="192.0.2.8", family="ipv4_unicast", stage="accepted", instance="edge1:9179"}'
         values: "79x15"
-      - series: 'bgp_max_prefix_limit{peer="192.0.2.8", scope="ipv4_unicast", instance="edge1:9179"}'
+      - series: 'bgp_max_prefix_limit{peer="192.0.2.8", family="ipv4_unicast", stage="accepted", instance="edge1:9179"}'
         values: "100x15"
-      - series: 'bgp_max_prefix_usage{peer="192.0.2.9", scope="ipv6_unicast", instance="edge1:9179"}'
+      - series: 'bgp_max_prefix_usage{peer="192.0.2.9", family="ipv6_unicast", stage="accepted", instance="edge1:9179"}'
         values: "100x15"
     alert_rule_test:
       - eval_time: 9m
@@ -666,14 +667,15 @@ tests:
           - exp_labels:
               severity: warning
               peer: 192.0.2.7
-              scope: aggregate
+              family: aggregate
+              stage: accepted
               instance: edge1:9179
             exp_annotations:
               summary: >-
-                Peer 192.0.2.7 max-prefix aggregate usage is high
+                Peer 192.0.2.7 max-prefix aggregate (accepted) usage is high
               description: >-
                 Peer 192.0.2.7 on edge1:9179 has remained at or above 80%
-                of its finite aggregate max-prefix limit for 10 minutes.
+                of its finite aggregate (accepted) max-prefix limit for 10 minutes.
                 Continued accepted-route growth can exhaust
                 bgp_max_prefix_headroom and eventually trigger Cease / Maximum
                 Number of Prefixes Reached.
@@ -1001,11 +1003,11 @@ tests:
   # ── RpkiVrpTableEmpty ─────────────────────────────────────────
   - interval: 1m
     input_series:
-      - series: 'bgp_rpki_vrp_count{af="ipv4", instance="edge1:9179", job="rustbgpd"}'
+      - series: 'bgp_rpki_vrp_count{afi="ipv4", instance="edge1:9179", job="rustbgpd"}'
         values: "0x40"
-      - series: 'bgp_rpki_vrp_count{af="ipv6", instance="edge1:9179", job="rustbgpd"}'
+      - series: 'bgp_rpki_vrp_count{afi="ipv6", instance="edge1:9179", job="rustbgpd"}'
         values: "0x40"
-      - series: 'bgp_rpki_vrp_count{af="ipv4", instance="edge2:9179", job="rustbgpd"}'
+      - series: 'bgp_rpki_vrp_count{afi="ipv4", instance="edge2:9179", job="rustbgpd"}'
         values: "250000x40"
     alert_rule_test:
       # Pending, not yet firing (for: 30m).
@@ -1769,19 +1771,19 @@ tests:
   # active/waiter/all-EoR state makes this test red.
   - interval: 1m
     input_series:
-      - series: 'bgp_selection_deferral_timeouts_total{afi_safi="ipv4_unicast", instance="edge1:9179"}'
+      - series: 'bgp_selection_deferral_timeouts_total{family="ipv4_unicast", instance="edge1:9179"}'
         values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_selection_deferral_timeouts_total{afi_safi="ipv6_flowspec", instance="edge2:9179"}'
+      - series: 'bgp_selection_deferral_timeouts_total{family="ipv6_flowspec", instance="edge2:9179"}'
         values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_selection_deferral_timeouts_total{afi_safi="ipv6_unicast", instance="edge2:9179"}'
+      - series: 'bgp_selection_deferral_timeouts_total{family="ipv6_unicast", instance="edge2:9179"}'
         values: "4x17"
       # Normal state transitions and an ordinary all-EoR release are controls,
       # not alert inputs. They make metric-substitution mutations fail red.
-      - series: 'bgp_selection_deferral_active{afi_safi="ipv4_unicast", instance="edge3:9179"}'
+      - series: 'bgp_selection_deferral_active{family="ipv4_unicast", instance="edge3:9179"}'
         values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_selection_deferral_waiters{afi_safi="ipv4_unicast", instance="edge3:9179"}'
+      - series: 'bgp_selection_deferral_waiters{family="ipv4_unicast", instance="edge3:9179"}'
         values: "0 0 0 0 0 2 2 2 2 2 2 2 2 2 2 2 2"
-      - series: 'bgp_selection_deferral_releases_total{afi_safi="ipv4_unicast", reason="all_eor", instance="edge3:9179"}'
+      - series: 'bgp_selection_deferral_releases_total{family="ipv4_unicast", reason="all_eor", instance="edge3:9179"}'
         values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
     alert_rule_test:
       - eval_time: 2m
@@ -1792,7 +1794,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              afi_safi: ipv4_unicast
+              family: ipv4_unicast
               instance: edge1:9179
             exp_annotations:
               summary: >-
@@ -1804,7 +1806,7 @@ tests:
                 planned-restart convergence signals arrived.
           - exp_labels:
               severity: warning
-              afi_safi: ipv6_flowspec
+              family: ipv6_flowspec
               instance: edge2:9179
             exp_annotations:
               summary: >-
@@ -1823,19 +1825,19 @@ tests:
   # catches the raw-counter query.
   - interval: 1m
     input_series:
-      - series: 'bgp_selection_deferral_ledger_overflows_total{afi_safi="ipv6_unicast", instance="edge1:9179"}'
+      - series: 'bgp_selection_deferral_ledger_overflows_total{family="ipv6_unicast", instance="edge1:9179"}'
         values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_selection_deferral_ledger_overflows_total{afi_safi="l2vpn_evpn", instance="edge2:9179"}'
+      - series: 'bgp_selection_deferral_ledger_overflows_total{family="l2vpn_evpn", instance="edge2:9179"}'
         values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_selection_deferral_ledger_overflows_total{afi_safi="ipv4_unicast", instance="edge2:9179"}'
+      - series: 'bgp_selection_deferral_ledger_overflows_total{family="ipv4_unicast", instance="edge2:9179"}'
         values: "3x17"
       # Normal state transitions and an ordinary all-EoR release are controls,
       # not alert inputs. They make metric-substitution mutations fail red.
-      - series: 'bgp_selection_deferral_active{afi_safi="ipv6_unicast", instance="edge3:9179"}'
+      - series: 'bgp_selection_deferral_active{family="ipv6_unicast", instance="edge3:9179"}'
         values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_selection_deferral_waiters{afi_safi="ipv6_unicast", instance="edge3:9179"}'
+      - series: 'bgp_selection_deferral_waiters{family="ipv6_unicast", instance="edge3:9179"}'
         values: "0 0 0 0 0 3 3 3 3 3 3 3 3 3 3 3 3"
-      - series: 'bgp_selection_deferral_releases_total{afi_safi="ipv6_unicast", reason="all_eor", instance="edge3:9179"}'
+      - series: 'bgp_selection_deferral_releases_total{family="ipv6_unicast", reason="all_eor", instance="edge3:9179"}'
         values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
     alert_rule_test:
       - eval_time: 2m
@@ -1846,7 +1848,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              afi_safi: ipv6_unicast
+              family: ipv6_unicast
               instance: edge1:9179
             exp_annotations:
               summary: >-
@@ -1859,7 +1861,7 @@ tests:
                 retained-key pressure.
           - exp_labels:
               severity: warning
-              afi_safi: l2vpn_evpn
+              family: l2vpn_evpn
               instance: edge2:9179
             exp_annotations:
               summary: >-

@@ -141,10 +141,13 @@ def peer_rows(data, name, extra=()):
     return found
 def family_rows(data, name, identities, families):
     found = rows(data, name, peers * len(families)); expected = {(peer, family) for peer in identities for family in families}
-    actual = {(labels.get("peer"), labels.get("afi_safi")) for labels, _ in found}
-    if actual != expected or any(set(labels) != {"peer", "afi_safi"} for labels, _ in found):
+    actual = {(labels.get("peer"), labels.get("family")) for labels, _ in found}
+    if actual != expected or any(set(labels) != {"peer", "family"} for labels, _ in found):
         raise ValueError(f"{name}: family/peer roster mismatch")
-    return {(labels["peer"], labels["afi_safi"]): value for labels, value in found}
+    return {(labels["peer"], labels["family"]): value for labels, value in found}
+UNICAST = ("ipv4_unicast", "ipv6_unicast")
+OUT_FAMILIES = ("ipv4_unicast", "ipv6_unicast", "ipv4_flowspec", "ipv6_flowspec", "l2vpn_evpn", "linkstate", "linkstate_vpn",
+                "l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast", "ipv4_labeled_unicast", "ipv6_labeled_unicast", "rtc")
 text = pathlib.Path(config).read_text()
 if "[neighbors.add_path]" in text:
     raise ValueError("memory legs require Add-Path disabled")
@@ -161,16 +164,19 @@ for data in scrapes:
     queues = peer_rows(data, "bgp_peer_outbound_queue_depth")
     if {labels["peer"] for labels, _ in queues} != peer_ids or [value for _, value in queues] != [0.0] * peers:
         raise ValueError("every outbound queue must be zero")
-    loc = rows(data, "bgp_rib_loc_prefixes", 1)
-    if loc[0] != ({"afi_safi": "all"}, float(total)): raise ValueError("Loc-RIB aggregate mismatch")
-    adj_in = family_rows(data, "bgp_rib_prefixes", peer_ids, ("all", "flowspec"))
-    if any(adj_in[(peer, "all")] != total // peers or adj_in[(peer, "flowspec")] != 0 for peer in peer_ids):
-        raise ValueError("Adj-RIB-In aggregate/non-all roster mismatch")
+    loc = rows(data, "bgp_rib_loc_prefixes", 2)
+    if sorted(labels.get("family") for labels, _ in loc) != list(UNICAST) or any(set(labels) != {"family"} for labels, _ in loc) \
+            or sum(value for _, value in loc) != float(total): raise ValueError("Loc-RIB unicast mismatch")
+    in_families = (*UNICAST, "ipv4_flowspec", "ipv6_flowspec")
+    adj_in = family_rows(data, "bgp_rib_prefixes", peer_ids, in_families)
+    if any(sum(adj_in[(peer, family)] for family in UNICAST) != total // peers
+           or any(adj_in[(peer, family)] != 0 for family in in_families[2:]) for peer in peer_ids):
+        raise ValueError("Adj-RIB-In unicast/non-unicast roster mismatch")
     expected_out = total - total // peers
-    out_families = ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")
-    adj_out = family_rows(data, "bgp_rib_adj_out_prefixes", peer_ids, out_families)
-    if any(adj_out[(peer, family)] != (expected_out if family == "all" else 0) for peer in peer_ids for family in out_families):
-        raise ValueError("Adj-RIB-Out aggregate/non-all roster mismatch")
+    adj_out = family_rows(data, "bgp_rib_adj_out_prefixes", peer_ids, OUT_FAMILIES)
+    if any(sum(adj_out[(peer, family)] for family in UNICAST) != expected_out
+           or any(adj_out[(peer, family)] != 0 for family in OUT_FAMILIES[2:]) for peer in peer_ids):
+        raise ValueError("Adj-RIB-Out unicast/non-unicast roster mismatch")
     peer_groups = peer_rows(data, "bgp_peer_update_group")
     if {labels["peer"] for labels, _ in peer_groups} != peer_ids: raise ValueError("group peer roster mismatch")
     if mode == "private":
@@ -358,7 +364,8 @@ import pathlib, sys
 root=pathlib.Path(sys.argv[1])
 def metrics(mode, bad=None, step=0):
     lines=["bgp_rib_outbound_registered_peers 2e0 -3982045", "bgp_rib_ingest_channel_depth 0",
-           "bgp_rib_policy_transition_in_progress 0", f"bgp_rib_loc_prefixes{{afi_safi=\"all\"}} {'NaN' if bad=='nonfinite' else 7 if bad=='wrong-routes' else 8}"]
+           "bgp_rib_policy_transition_in_progress 0", f"bgp_rib_loc_prefixes{{family=\"ipv4_unicast\"}} {'NaN' if bad=='nonfinite' else 7 if bad=='wrong-routes' else 8}",
+           'bgp_rib_loc_prefixes{family="ipv6_unicast"} 0']
     for n in range(2):
         peer = "p0" if bad=="duplicate-peer" and n==1 else f"p{n}"
         queue_labels = f'peer="{peer}"'
@@ -368,8 +375,10 @@ def metrics(mode, bad=None, step=0):
         if bad=="missing-label" and n==0: queue_labels = 'extra="x"'
         lines += [rf'bgp_peer_session_established{{interface="ether\\net\n\"quoted\"",peer="p{n}"}} 1e0 +123',
                   f'bgp_peer_outbound_queue_depth{{{queue_labels}}} {1 if bad=="queue" and n==1 else 0}']
-        lines += [f'bgp_rib_prefixes{{afi_safi="{family}",peer="p{n}"}} {4 if family=="all" else int(bad=="family" and n==1)}' for family in ("all","flowspec")]
-        lines += [f'bgp_rib_adj_out_prefixes{{afi_safi="{family}",peer="p{n}"}} {4 if family=="all" else int(bad=="adj-out-family" and n==1 and family=="vpn")}' for family in ("all","bgpls","evpn","flowspec","labeled","rtc","vpn")]
+        # Unicast splits 3 + 1 so the checks prove they sum both AFIs.
+        split = {"ipv4_unicast": 3, "ipv6_unicast": 1}
+        lines += [f'bgp_rib_prefixes{{family="{family}",peer="p{n}"}} {split.get(family, int(bad=="family" and n==1 and family=="ipv4_flowspec"))}' for family in ("ipv4_unicast","ipv6_unicast","ipv4_flowspec","ipv6_flowspec")]
+        lines += [f'bgp_rib_adj_out_prefixes{{family="{family}",peer="p{n}"}} {split.get(family, int(bad=="adj-out-family" and n==1 and family=="l3vpn_ipv4_unicast"))}' for family in ("ipv4_unicast","ipv6_unicast","ipv4_flowspec","ipv6_flowspec","l2vpn_evpn","linkstate","linkstate_vpn","l3vpn_ipv4_unicast","l3vpn_ipv6_unicast","ipv4_labeled_unicast","ipv6_labeled_unicast","rtc")]
     if mode=="private":
         lines += ["bgp_update_groups 0", "bgp_update_group_fallback_peers 2"]
         lines += [f'bgp_peer_update_group{{peer="p{n}"}} -1' for n in range(2)]

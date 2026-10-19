@@ -513,8 +513,8 @@ test_administrative_reset_notification_and_backoff() {
 
 test_block_action_withholds_and_recovers() {
     log "Test 8: block action withholds beyond the bound and recovers by one ROUTE-REFRESH"
-    local blocking="bgp_max_prefix_blocking{peer=\"$BLOCK_PEER\",scope=\"ipv4_unicast\"}"
-    local blocked_total="bgp_max_prefix_blocked_total{peer=\"$BLOCK_PEER\",scope=\"ipv4_unicast\"}"
+    local blocking="bgp_max_prefix_blocking{family=\"ipv4_unicast\",peer=\"$BLOCK_PEER\",stage=\"accepted\"}"
+    local blocked_total="bgp_max_prefix_blocked_total{family=\"ipv4_unicast\",peer=\"$BLOCK_PEER\",stage=\"accepted\"}"
     local refresh_sent="bgp_messages_sent_total{peer=\"$BLOCK_PEER\",type=\"route_refresh\"}"
     local p1="172.16.1.0/24" p2="172.16.2.0/24" p3="172.16.3.0/24"
     local p4="172.16.4.0/24" p5="172.16.5.0/24"
@@ -614,9 +614,9 @@ test_block_action_withholds_and_recovers() {
 
 test_warning_action_reports_and_keeps_accepting() {
     log "Test 9: warning action withholds nothing and reports one crossing"
-    local warning_total="bgp_max_prefix_warning_total{peer=\"$WARN_PEER\",scope=\"ipv4_unicast\"}"
-    local blocking="bgp_max_prefix_blocking{peer=\"$WARN_PEER\",scope=\"ipv4_unicast\"}"
-    local blocked_total="bgp_max_prefix_blocked_total{peer=\"$WARN_PEER\",scope=\"ipv4_unicast\"}"
+    local warning_total="bgp_max_prefix_warning_total{family=\"ipv4_unicast\",peer=\"$WARN_PEER\",stage=\"accepted\"}"
+    local blocking="bgp_max_prefix_blocking{family=\"ipv4_unicast\",peer=\"$WARN_PEER\",stage=\"accepted\"}"
+    local blocked_total="bgp_max_prefix_blocked_total{family=\"ipv4_unicast\",peer=\"$WARN_PEER\",stage=\"accepted\"}"
     local refresh_sent="bgp_messages_sent_total{peer=\"$WARN_PEER\",type=\"route_refresh\"}"
     local q="172.17.1.0/24 172.17.2.0/24"
 

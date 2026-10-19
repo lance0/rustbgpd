@@ -2677,7 +2677,16 @@ impl RibManager {
         reason = "benchmark fixture gauge counts are exact small nonnegative integers"
     )]
     fn bench_adj_rib_out_family_values(&self, peer: IpAddr) -> [i64; 7] {
-        const FAMILIES: [&str; 7] = ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"];
+        // One slot per table, summing its canonical families.
+        const FAMILIES: [&[&str]; 7] = [
+            &crate::manager::helpers::UNICAST_FAMILIES,
+            &crate::manager::helpers::FLOWSPEC_FAMILIES,
+            &["l2vpn_evpn"],
+            &crate::manager::helpers::LINKSTATE_FAMILIES,
+            &crate::manager::helpers::L3VPN_FAMILIES,
+            &crate::manager::helpers::LABELED_FAMILIES,
+            &["rtc"],
+        ];
         let peer_label = peer.to_string();
         let gathered = self.metrics.registry().gather();
         let Some(gauge) = gathered
@@ -2690,16 +2699,17 @@ impl RibManager {
             gauge
                 .get_metric()
                 .iter()
-                .find(|metric| {
+                .filter(|metric| {
                     metric
                         .get_label()
                         .iter()
                         .any(|label| label.name() == "peer" && label.value() == peer_label)
                         && metric.get_label().iter().any(|label| {
-                            label.name() == "afi_safi" && label.value() == FAMILIES[index]
+                            label.name() == "family" && FAMILIES[index].contains(&label.value())
                         })
                 })
-                .map_or(0, |metric| metric.get_gauge().get_value() as i64)
+                .map(|metric| metric.get_gauge().get_value() as i64)
+                .sum()
         })
     }
 

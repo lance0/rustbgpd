@@ -1285,8 +1285,8 @@ serves `/livez` and `/readyz` for orchestrators. Key counters operators watch:
   (RFC 9234 / ADR-0071), `bgp_role_mismatch_total{peer, local_role,
   remote_role}`. Canonical `reason` values are documented in
   `docs/reference/operations.md` ("Ingress rejection / route-leak detection").
-- **Route processing** — `bgp_rib_prefixes{peer, afi_safi}`,
-  `bgp_rib_loc_prefixes{afi_safi}`, `bgp_max_prefix_exceeded_total`.
+- **Route processing** — `bgp_rib_prefixes{peer, family}`,
+  `bgp_rib_loc_prefixes{family}`, `bgp_max_prefix_exceeded_total`.
 - **GR / FIB** — `bgp_gr_active_peers`, `bgp_gr_stale_routes`,
   `bgp_fib_routes_installed_total`, `bgp_fib_kernel_failures_total`.
 - **Allocator** — `jemalloc_allocated_bytes`, `jemalloc_active_bytes`,

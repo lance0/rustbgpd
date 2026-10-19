@@ -6209,8 +6209,8 @@ paths = ["x"]
             "192.0.2.1:8282".to_string(),
             "[2001:0db8::1]:8282".to_string(),
         ];
-        let metrics = "bgp_rpki_vrp_count{af=\"ipv4\"} 10\n\
-                       bgp_rpki_vrp_count{af=\"ipv6\"} 20\n\
+        let metrics = "bgp_rpki_vrp_count{afi=\"ipv4\"} 10\n\
+                       bgp_rpki_vrp_count{afi=\"ipv6\"} 20\n\
                        bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 1\n\
                        bgp_rpki_cache_end_of_data_ready{cache=\"[2001:db8::1]:8282\"} 1";
         assert_eq!(
@@ -6442,8 +6442,8 @@ paths = ["x"]
         let nonzero = rpki_vrp_table_check(
             &caches,
             Some(
-                "bgp_rpki_vrp_count{af=\"ipv4\"} 1\n\
-                 bgp_rpki_vrp_count{af=\"ipv6\"} 2\n\
+                "bgp_rpki_vrp_count{afi=\"ipv4\"} 1\n\
+                 bgp_rpki_vrp_count{afi=\"ipv6\"} 2\n\
                  bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 1",
             ),
         )
@@ -6452,7 +6452,7 @@ paths = ["x"]
 
         let zero = rpki_vrp_table_check(
             &caches,
-            Some("bgp_rpki_vrp_count{af=\"ipv4\"} 0\nbgp_rpki_vrp_count{af=\"ipv6\"} 0"),
+            Some("bgp_rpki_vrp_count{afi=\"ipv4\"} 0\nbgp_rpki_vrp_count{afi=\"ipv6\"} 0"),
         )
         .unwrap();
         assert_eq!(zero.status, CheckStatus::Warn);
@@ -6476,8 +6476,8 @@ paths = ["x"]
             "192.0.2.1:8282".to_string(),
             "[2001:db8::1]:8282".to_string(),
         ];
-        let base = "bgp_rpki_vrp_count{af=\"ipv4\"} 1\n\
-                    bgp_rpki_vrp_count{af=\"ipv6\"} 2\n";
+        let base = "bgp_rpki_vrp_count{afi=\"ipv4\"} 1\n\
+                    bgp_rpki_vrp_count{afi=\"ipv6\"} 2\n";
         let not_ready = rpki_vrp_table_check(
             &caches,
             Some(&format!(
@@ -8606,7 +8606,7 @@ paths = ["x"]
             state = state_dir.path().display()
         ));
         *server.state.metrics_text.lock().await = Some(
-            "bgp_rpki_vrp_count{af=\"ipv4\"} 0\nbgp_rpki_vrp_count{af=\"ipv6\"} 0\n".to_string(),
+            "bgp_rpki_vrp_count{afi=\"ipv4\"} 0\nbgp_rpki_vrp_count{afi=\"ipv6\"} 0\n".to_string(),
         );
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();

@@ -306,10 +306,11 @@ prom_get() {
         END { if (!found) print "nan" }' <"$PROM_TMP"
 }
 
-# One peer+scope-labeled gauge value (nan when absent).
-prom_peer_scope() {
-    awk -v m="$1" -v p="peer=\"$2\"" -v s="scope=\"$3\"" '
-        $0 ~ "^"m"\\{" && index($0, p) && index($0, s) { print $NF; found=1; exit }
+# One peer+family-labeled post-policy (stage="accepted") max-prefix gauge
+# value (nan when absent).
+prom_peer_family() {
+    awk -v m="$1" -v p="peer=\"$2\"" -v s="family=\"$3\"" -v t='stage="accepted"' '
+        $0 ~ "^"m"\\{" && index($0, p) && index($0, s) && index($0, t) { print $NF; found=1; exit }
         END { if (!found) print "nan" }' <"$PROM_TMP"
 }
 
@@ -407,9 +408,9 @@ trip_evidence_tick() {
     if ((TRIP_HEADROOM_PENDING == 1)); then
         if prom_scrape; then
             local usage limit headroom
-            usage=$(prom_peer_scope bgp_max_prefix_usage "$DESIGNATED_ADDR" aggregate)
-            limit=$(prom_peer_scope bgp_max_prefix_limit "$DESIGNATED_ADDR" aggregate)
-            headroom=$(prom_peer_scope bgp_max_prefix_headroom "$DESIGNATED_ADDR" aggregate)
+            usage=$(prom_peer_family bgp_max_prefix_usage "$DESIGNATED_ADDR" aggregate)
+            limit=$(prom_peer_family bgp_max_prefix_limit "$DESIGNATED_ADDR" aggregate)
+            headroom=$(prom_peer_family bgp_max_prefix_headroom "$DESIGNATED_ADDR" aggregate)
             if [[ $usage == "$SOAK_ROUTES_PER_PEER" && $limit == "$MAX_PREFIXES" ]]; then
                 cycle_log "trip $TRIP_N complete usage=$usage limit=$limit headroom=$headroom"
                 TRIP_N=""

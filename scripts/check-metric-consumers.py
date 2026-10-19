@@ -127,6 +127,9 @@ BLACKHOLE = "src/blackhole.rs"
 BLACKHOLE_LIMITS = "src/blackhole/limits.rs"
 POLICY_EVAL = "crates/policy/src/eval.rs"
 RIB_DISTRIBUTION = "crates/rib/src/manager/distribution/mod.rs"
+WIRE_CAPABILITY = "crates/wire/src/capability.rs"
+# Every `family` label value is a canonical configuration family label.
+CANONICAL_FAMILIES = (("const", WIRE_CAPABILITY, "CONFIGURED_FAMILIES"),)
 SETTLEMENT_FAMILIES = (
     "bgp_runtime_config_settlement_active",
     "bgp_runtime_config_settlement_elapsed_seconds",
@@ -152,6 +155,8 @@ OPEN_LABELS = frozenset({"instance", "job", "peer", "vrf"})
 #       telemetry method whose body writes the family
 #   ("buckets", file, const): the f64 bounds the histogram is built with,
 #       spelled as the daemon emits them
+#   ("const", file, const): every string literal of one const table, such as
+#       the canonical family labels every family-labeled series draws from
 CLOSED_LABEL_SOURCES = (
     (
         ("bgp_sighup_reload_outcomes_total",),
@@ -203,13 +208,11 @@ CLOSED_LABEL_SOURCES = (
             ("fn", BLACKHOLE_LIMITS, None, "admit"),
         ),
     ),
-    (("bgp_rib_prefixes",), "afi_safi", (("call", "set_rib_prefixes", 1),)),
     (
-        ("bgp_rib_adj_out_prefixes",),
-        "afi_safi",
-        (("call", "set_adj_rib_out_prefixes", 1),),
+        ("bgp_rib_prefixes", "bgp_rib_adj_out_prefixes", "bgp_rib_loc_prefixes"),
+        "family",
+        CANONICAL_FAMILIES,
     ),
-    (("bgp_rib_loc_prefixes",), "afi_safi", (("call", "set_loc_rib_prefixes", 0),)),
     (
         ("bgp_messages_received_total",),
         "type",
@@ -1224,6 +1227,20 @@ def closed_label_vocabularies(
                             f"gained {sorted(body - found - set(others))}, "
                             f"lost {sorted((found | set(others)) - body)}"
                         )
+                elif kind == "const":
+                    relative, constant = location
+                    syntax, strings = rust_lexed(production_source(sources[relative]))
+                    table = re.search(
+                        rf"\bconst\s+{re.escape(constant)}\s*:[^=]*=\s*&?\[(.*?)\];",
+                        syntax,
+                        re.S,
+                    )
+                    if table is None:
+                        raise ValueError(f"{where}: no const {constant} in {relative}")
+                    found = {
+                        strings[int(index)]
+                        for index in RUST_STRING.findall(table.group(1))
+                    }
                 elif kind == "call":
                     method, position = location
                     variable, _ = family_constructor(sources[TELEMETRY], family)

@@ -623,6 +623,15 @@ impl AdjRibIn {
         self.routes.len()
     }
 
+    /// Unicast routes stored per AFI as `[IPv4, IPv6]`, read from the RPKI
+    /// buckets every stored path identity is counted in.
+    #[must_use]
+    pub fn unicast_lens(&self) -> [usize; 2] {
+        [self.rpki_counts_v4, self.rpki_counts_v6].map(|counts| {
+            usize::try_from(counts.invalid + counts.valid + counts.not_found).unwrap_or(usize::MAX)
+        })
+    }
+
     /// Return the backing capacity of the unicast route map.
     ///
     /// Exposed only to benchmark / memory-profile harnesses so they can
@@ -2574,6 +2583,19 @@ impl AdjRibIn {
         self.flowspec_routes.len()
     }
 
+    /// `FlowSpec` routes stored per AFI as `[IPv4, IPv6]`.
+    // ponytail: O(FlowSpec routes) walk per publish; FlowSpec tables are
+    // small rule sets. Maintain a per-AFI counter if they grow large.
+    #[must_use]
+    pub fn flowspec_lens(&self) -> [usize; 2] {
+        let v6 = self
+            .flowspec_routes
+            .values()
+            .filter(|route| route.afi == Afi::Ipv6)
+            .count();
+        [self.flowspec_routes.len() - v6, v6]
+    }
+
     /// Mark `FlowSpec` routes matching the given address family as stale.
     ///
     /// A route that is *already* stale (GR or LLGR) when a new mark arrives
@@ -2926,6 +2948,24 @@ mod tests {
 
     use crate::route::BgpLsFamily;
     use crate::test_support::{make_flowspec_route, make_route, make_v6_route};
+
+    /// `unicast_lens` reads the RPKI buckets; this pins that every stored
+    /// path identity is counted once in its own AFI.
+    #[test]
+    fn unicast_lens_split_paths_by_afi() {
+        let mut rib = AdjRibIn::new("192.0.2.1".parse().unwrap());
+        let v4 = Prefix::V4(Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 8));
+        let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
+        for (prefix, path_id) in [(v4, 0), (v6, 1), (v6, 2), (v6, 2)] {
+            rib.insert(crate::test_support::make_route_with_path_id(
+                prefix, path_id,
+            ));
+        }
+        assert_eq!(rib.unicast_lens(), [1, 2]);
+        assert!(rib.withdraw(&v6, 1));
+        assert_eq!(rib.unicast_lens(), [1, 1]);
+        assert_eq!(rib.unicast_lens().iter().sum::<usize>(), rib.len());
+    }
 
     #[test]
     fn llgr_stale_mutation_preserves_partial_and_removes_empty_state() {

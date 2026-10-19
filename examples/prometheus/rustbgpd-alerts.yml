@@ -220,17 +220,17 @@ groups:
       - alert: BgpPeerAdjRibInEmpty
         # At least one current scoped session is Established, but the
         # peer holds no counted Adj-RIB-In paths. The sum covers every
-        # afi_safi the daemon emits for this gauge: "all" (IPv4 and IPv6
-        # unicast combined), "evpn" and "flowspec", so an EVPN-only or
-        # FlowSpec-only peer does not fire. VPN, labeled-unicast, BGP-LS
-        # and RTC paths are not counted, so a peer sending only those
-        # families still fires. Summing without afi_safi keeps the other
+        # family the daemon emits for this gauge: ipv4_unicast,
+        # ipv6_unicast, l2vpn_evpn, ipv4_flowspec and ipv6_flowspec, so an
+        # EVPN-only or FlowSpec-only peer does not fire. VPN, labeled-unicast,
+        # BGP-LS and RTC paths are not counted, so a peer sending only those
+        # families still fires. Summing without family keeps the other
         # native labels of the RIB series; aggregating the session gauge
         # by peer handles link-local siblings. Expected for send-only
         # peers and peers of the uncounted families — silence or drop
         # this rule for those.
         expr: >-
-          sum without (afi_safi) (bgp_rib_prefixes) == 0
+          sum without (family) (bgp_rib_prefixes) == 0
           and on (instance, peer)
           max by (instance, peer) (bgp_peer_session_established) == 1
         for: 10m
@@ -293,8 +293,8 @@ groups:
         # Inbound sibling of BgpOutboundPrefixBlocking. Under
         # max_prefix_action = "block" the session stays Established while
         # net-new prefixes from the peer are withheld from every other peer.
-        # The gauge exists at 0 for every finite scope, so a nonblocking
-        # scope cannot fire.
+        # The gauge exists at 0 for every finite bound, so a nonblocking
+        # bound cannot fire.
         expr: bgp_max_prefix_blocking == 1
         for: 5m
         labels:
@@ -302,16 +302,16 @@ groups:
         annotations:
           summary: >-
             Inbound max-prefix blocking for {{ $labels.peer }}
-            ({{ $labels.scope }})
+            ({{ $labels.family }}, {{ $labels.stage }})
           description: >-
             The inbound max-prefix blocking gauge for {{ $labels.peer }}
-            ({{ $labels.scope }}) on {{ $labels.instance }} has remained 1
+            ({{ $labels.family }}, {{ $labels.stage }}) on {{ $labels.instance }} has remained 1
             for 5 minutes; net-new prefixes from this peer are withheld until
             its usage falls back under the bound.
 
       - alert: BgpMaxPrefixNearLimit
         # Limit series exist only for finite configured bounds. Unlimited
-        # scopes are absent rather than represented by a fake zero, and
+        # bounds are absent rather than represented by a fake zero, and
         # disconnected sessions reap all three capacity series.
         expr: bgp_max_prefix_usage / bgp_max_prefix_limit >= 0.8
         for: 10m
@@ -319,10 +319,12 @@ groups:
           severity: warning
         annotations:
           summary: >-
-            Peer {{ $labels.peer }} max-prefix {{ $labels.scope }} usage is high
+            Peer {{ $labels.peer }} max-prefix {{ $labels.family }}
+            ({{ $labels.stage }}) usage is high
           description: >-
             Peer {{ $labels.peer }} on {{ $labels.instance }} has remained at
-            or above 80% of its finite {{ $labels.scope }} max-prefix limit for
+            or above 80% of its finite {{ $labels.family }} ({{ $labels.stage }})
+            max-prefix limit for
             10 minutes. Continued accepted-route growth can exhaust
             bgp_max_prefix_headroom and eventually trigger Cease / Maximum
             Number of Prefixes Reached.
@@ -883,10 +885,10 @@ groups:
           severity: warning
         annotations:
           summary: >-
-            Selection deferral timed out for {{ $labels.afi_safi }}
+            Selection deferral timed out for {{ $labels.family }}
           description: >-
             bgp_selection_deferral_timeouts_total for
-            {{ $labels.afi_safi }} on {{ $labels.instance }} increased by
+            {{ $labels.family }} on {{ $labels.instance }} increased by
             {{ $value | printf "%.0f" }} in the last 15 minutes. The family
             gate used its bounded timer fallback before all planned-restart
             convergence signals arrived.
@@ -900,10 +902,10 @@ groups:
           severity: warning
         annotations:
           summary: >-
-            Selection-deferral ledger overflow for {{ $labels.afi_safi }}
+            Selection-deferral ledger overflow for {{ $labels.family }}
           description: >-
             bgp_selection_deferral_ledger_overflows_total for
-            {{ $labels.afi_safi }} on {{ $labels.instance }} increased by
+            {{ $labels.family }} on {{ $labels.instance }} increased by
             {{ $value | printf "%.0f" }} in the last 15 minutes. The family
             exceeded the bounded identity ledger and used a complete release
             sweep; inspect table scale and retained-key pressure.

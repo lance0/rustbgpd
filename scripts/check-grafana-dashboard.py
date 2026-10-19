@@ -164,7 +164,7 @@ EVPN_REQUIRED_PANELS = {
 # zero-fill fallbacks load-bearing without implementing a PromQL parser.
 EVPN_TARGETS: dict[tuple[str, str], tuple[str, str]] = {
     ("EVPN Loc-RIB (all route types)", "A"): (
-        'sum by (instance) (bgp_rib_loc_prefixes{instance=~"$instance",afi_safi="evpn"})',
+        'sum by (instance) (bgp_rib_loc_prefixes{instance=~"$instance",family="l2vpn_evpn"})',
         "{{instance}} all EVPN types",
     ),
     ("Type-2 local origination actions, errors, and drops", "A"): (
@@ -470,11 +470,11 @@ TARGETS = {
         'bgp_selection_deferral_waiters{instance=~"$instance"}'
     ),
     ("Selection-deferral exceptional events", "A"): (
-        "sum by (instance, afi_safi) (rate(bgp_selection_deferral_timeouts_total"
+        "sum by (instance, family) (rate(bgp_selection_deferral_timeouts_total"
         '{instance=~"$instance"}[$__rate_interval])) > 0'
     ),
     ("Selection-deferral exceptional events", "B"): (
-        "sum by (instance, afi_safi) "
+        "sum by (instance, family) "
         "(rate(bgp_selection_deferral_ledger_overflows_total"
         '{instance=~"$instance"}[$__rate_interval])) > 0'
     ),
@@ -560,11 +560,11 @@ REQUIRED_LEGENDS = {
     ("Export rejections / malformed UPDATEs / inbound attribute discards", "C"): (
         "discard {{instance}} {{peer}} type {{type_code}}"
     ),
-    ("Selection-deferral state", "A"): "{{instance}} {{afi_safi}} active",
-    ("Selection-deferral state", "B"): "{{instance}} {{afi_safi}} waiters",
-    ("Selection-deferral exceptional events", "A"): "{{instance}} {{afi_safi}} timeout",
+    ("Selection-deferral state", "A"): "{{instance}} {{family}} active",
+    ("Selection-deferral state", "B"): "{{instance}} {{family}} waiters",
+    ("Selection-deferral exceptional events", "A"): "{{instance}} {{family}} timeout",
     ("Selection-deferral exceptional events", "B"): (
-        "{{instance}} {{afi_safi}} ledger overflow"
+        "{{instance}} {{family}} ledger overflow"
     ),
     ("RFC 8212 missing policy", "A"): "{{peer}} missing import",
     ("RFC 8212 missing policy", "B"): "{{peer}} missing export",

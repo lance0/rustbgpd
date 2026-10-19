@@ -675,7 +675,7 @@ capacity for thousands of VTEPs. See the
   delete-mac-ip / delete-imet / delete-ip-prefix`.
 - **gRPC observability** — `ListEvpnRoutes(route_type, peer, rd)` for
   filtered EVPN RIB queries; Prometheus metrics per peer include
-  `bgp_rib_adj_out_prefixes{afi_safi="evpn"}`. Max-prefix accounting counts
+  `bgp_rib_adj_out_prefixes{family="l2vpn_evpn"}`. Max-prefix accounting counts
   EVPN keys alongside unicast prefixes.
 - **RT-based policy** — existing `match_community` against Route Target
   extended communities filters EVPN routes the same way unicast RT

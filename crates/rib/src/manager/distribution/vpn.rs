@@ -1,6 +1,6 @@
 use super::{
     Afi, HashSet, IpAddr, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi,
-    gauge_val, route_type, should_suppress_ibgp_inner, vpn_route_family, vpn_routes_equal, warn,
+    route_type, should_suppress_ibgp_inner, vpn_route_family, vpn_routes_equal, warn,
 };
 use crate::attr_set::AttrSet;
 use crate::loc_rib::vpn_tiebreak_orr;
@@ -865,8 +865,11 @@ impl RibManager {
         }
 
         if !changed_keys.is_empty() {
-            self.metrics
-                .set_loc_rib_prefixes("vpn", gauge_val(self.loc_rib.vpn_len()));
+            crate::manager::helpers::set_loc_rib_prefixes(
+                &self.metrics,
+                crate::manager::helpers::L3VPN_FAMILIES,
+                self.loc_rib.family_lens().vpn,
+            );
         }
         self.distribute_vpn_changes(&changed_keys, &affected_nlri, None);
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
