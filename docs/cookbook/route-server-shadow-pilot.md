@@ -454,7 +454,7 @@ member count.
 
 The [route-server cookbook's watch table](route-server.md#watch)
 applies unchanged; the Grafana overview dashboard and alert rules are
-in [`GRAFANA.md`](../how-to/grafana.md). Pilot-specific notes:
+in [`grafana.md`](../how-to/grafana.md). Pilot-specific notes:
 
 - `bgp_session_state_transitions_total` flat outside member churn is
   the primary health signal — a shadow that flaps its taps is
@@ -468,7 +468,7 @@ in [`GRAFANA.md`](../how-to/grafana.md). Pilot-specific notes:
 - Route pilot alerts to whoever runs the pilot, not the production
   on-call — nothing here can page-worthily affect members.
 - Bracket the pilot with support bundles: `rbgp doctor --output ...`
-  ([OPERATIONS.md](../reference/operations.md#support-bundles-and-triage-checks-rbgp-doctor))
+  ([operations.md](../reference/operations.md#support-bundles-and-triage-checks-rbgp-doctor))
   at start, on a weekly cadence, and at every incident. The bundle is
   redacted at collection (no raw config file, no secrets; metrics,
   events, and descriptions scrubbed client-side) — review it anyway
@@ -550,12 +550,12 @@ What stands behind this pilot today:
   arouteserver/BIRD and `rs-config-render`/rustbgpd, **11/11**
   accept/reject verdicts and explain terms agree, with a rust-only policy
   mutation proving the differential can go red
-  ([`INTEROP.md`](../interop.md)). This is the receipt behind "render
+  ([`interop.md`](../interop.md)). This is the receipt behind "render
   the shadow's filters from your `clients.yml`".
 - **M96 / M97** — the IXP Manager render → atomic activation → lifecycle
   stack, against real pinned v7.4 and MD5-authenticated FRR, including
   pre-effect restoration and two handles on one host
-  ([`INTEROP.md`](../interop.md#ixp-manager-v74-manual-configuration-oracle)).
+  ([`interop.md`](../interop.md#ixp-manager-v74-manual-configuration-oracle)).
   Local gates, not hosted CI.
 - **The IXP receipt matrix** and the **24 h route-server flagship soak**
   — the shapes and numbers in the resource envelope above, wins and

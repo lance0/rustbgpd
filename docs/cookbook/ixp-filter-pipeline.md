@@ -321,7 +321,7 @@ emitted and the daemon keeps serving the last good generation.
 Alert on the age of `render-receipt.json` — a pipeline stuck for more
 than a couple of refresh intervals should page. The matching
 daemon-side signal is `bgp_policy_generation_loaded_timestamp_seconds`
-("Policy artifact freshness" in [OPERATIONS.md](../reference/operations.md)),
+("Policy artifact freshness" in [operations.md](../reference/operations.md)),
 which deliberately stays frozen when a reload is rejected — file
 mtimes can lie about what the daemon actually accepted.
 

@@ -346,8 +346,8 @@ exist. The proto itself remains the definitive schema.
 **Shape B — link the codec + FSM and speak BGP directly.** A sidecar that does
 not want a full daemon in the loop (e.g. a minimal speaker in a constrained
 k8s pod) links `rustbgpd-wire` + `rustbgpd-fsm` and owns one or a few sessions.
-It does *not* get a RIB or best-path — it is a speaker, not a router. This is
-the gap Cilium fills by embedding GoBGP today. Links: `rustbgpd-wire` +
+It does *not* get a RIB or best-path — it is a speaker, not a router. Cilium
+covers this niche by embedding the GoBGP library. Links: `rustbgpd-wire` +
 `rustbgpd-fsm` + `tokio`. If it needs origin validation, add the RPKI crate as a
 registry dependency (§3.4); its changelog records which wire line it pairs
 with (§7).
@@ -413,7 +413,7 @@ notes itemize the migration for each breaking wire line.
 |---|----------|-------------------|-----------------------------|----------------------|--------------|
 | 1 | **BGP test harness / fuzzer** (à la GoBGP's `internal/testing`, or a Rust peer for FRR interop CI) | Replays PCAPs/MRT, speaks BGP to a device under test, asserts on received UPDATEs | `rustbgpd-wire` (decode/encode), `rustbgpd-fsm` (drive a peer) | `decode_message`, `encode_message`, `Message`/`ParsedUpdate`, `Session::handle_event` | **Highest-leverage, lowest-friction.** Pure codec + pure FSM. No network state, no RIB. The checked-in `examples/peer-loop/` proves this embedding boundary. |
 | 2 | **MRT route collector / analyzer** (à la BGPKIT-parser use case, but with *encode* too) | Reads RFC 6396 dumps, decodes UPDATEs, builds reports; some also synthesize test traffic | `rustbgpd-wire` for decode; optionally `rustbgpd-mrt` later for the dump container | `decode_message`, `ParsedUpdate`, `PathAttribute`, `Prefix`, EVPN/FlowSpec/BGP-LS NLRI types | **Strong fit.** The wire crate already decodes everything BGPKIT-parser parses *plus* BGP-LS, ORF, PMSI, OTC. The gap is the MRT container — `rustbgpd-mrt` closes it but is not yet published. |
-| 3 | **k8s BGP sidecar / minimal speaker** (the Cilium-embeds-GoBGP niche, in Rust) | Advertises pod/service CIDRs to a top-of-rack router; needs a *speaker*, not a router | `rustbgpd-wire` + `rustbgpd-fsm` (+ `rustbgpd-rpki` for origin validation) | `Session`, `PeerConfig`, `Action`, `encode_message`, `VrpTable` | **Real but hard.** This is GoBGP's library-reach moat: Cilium embeds the full GoBGP library (not just the codec) to get a session runtime + RIB + policy. rustbgpd offers only codec+FSM as a library today; the sidecar would have to own the RIB-less "speaker" path itself. Honest: we are not displacing Cilium's GoBGP embedding in 2026; we are the option for a *Rust-native* sidecar that wants no CGo and a smaller blast radius. |
+| 3 | **k8s BGP sidecar / minimal speaker** (the Cilium-embeds-GoBGP niche, in Rust) | Advertises pod/service CIDRs to a top-of-rack router; needs a *speaker*, not a router | `rustbgpd-wire` + `rustbgpd-fsm` (+ `rustbgpd-rpki` for origin validation) | `Session`, `PeerConfig`, `Action`, `encode_message`, `VrpTable` | **Real but hard.** GoBGP (Apache-2.0) is a Go library as well as a daemon, so Cilium embeds the full library (not just the codec) to get a session runtime + RIB + policy. rustbgpd offers only codec+FSM as a library; the sidecar would have to own the RIB-less "speaker" path itself. These crates do not replace an in-process GoBGP embedding; they are the option for a *Rust-native* sidecar that wants no CGo and a smaller blast radius. |
 | 4 | **RPKI validator / RTR cache client** (à la Routinator consumer, or a VRP-driven policy gate) | Maintains a VRP table from one or more RTR caches; validates origins | `rustbgpd-rpki` (`VrpTable`, `RtrClient`, `VrpManager`), `rustbgpd-wire` (`RpkiValidation`) | `VrpTable::validate`, `RtrClient` async session, `VrpManager` merge | **Strong fit, resolvable from crates.io today.** Table validation is synchronous; cache acquisition and merging are Tokio-coupled. The validation-state type lives in the compatible wire line. |
 | 5 | **BMP monitor / telemetry sink** (à la OpenBMP, or a Rust BMP collector) | Receives RFC 7854 BMP messages, decodes per-peer UPDATEs, exports metrics | `rustbgpd-wire` (decode embedded UPDATEs), `rustbgpd-bmp` later | `decode_message`, `PathAttribute`, `MpReachNlri` | **Medium.** BMP message framing is small; the value is the embedded UPDATE decode, which `wire` already does. `rustbgpd-bmp` is the container/framing; publish it once a collector asks. |
 
@@ -421,10 +421,10 @@ notes itemize the migration for each breaking wire line.
 
 ## 6. Becoming the de facto Rust BGP codec — what's missing vs GoBGP's library reach
 
-GoBGP's library moat is not its codec; it is that the *whole daemon* is a Go
-library (`github.com/osrg/gobgp`), so Cilium imports the package and gets a
-session runtime + RIB + policy + gRPC server in-process. rustbgpd's
-complementary moat is the opposite and narrower: a *pure, memory-safe,
+GoBGP's library distribution model is not just a codec: the *whole daemon* is
+an Apache-2.0 Go library (`github.com/osrg/gobgp`), so Cilium imports the
+package and gets a session runtime + RIB + policy + gRPC server in-process.
+rustbgpd's library offer is the opposite and narrower: a *pure, memory-safe,
 runtime-free codec with no internal-crate dependencies* that any Rust project
 can link without dragging in the daemon stack.
 

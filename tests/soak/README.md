@@ -1,5 +1,7 @@
 # Cross-cutting — host mutex (bench vs. soak)
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 Every soak entrypoint in this directory acquires an exclusive `flock` on
 `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before
 doing real work. `bench/compare-criterion.sh`, the other bench compare

@@ -114,7 +114,7 @@ values until the daemon is restarted.
 Native gNMI is available on the local UDS listener and on TCP listeners only
 when mTLS is configured. Plaintext or bearer-token-only TCP listeners serve the
 native `rustbgpd.v1` API but do not register `gnmi.gNMI`. See
-[GNMI.md](gnmi.md) for the operator-facing OpenConfig path list and `gnmic`
+[gnmi.md](gnmi.md) for the operator-facing OpenConfig path list and `gnmic`
 examples.
 
 ```bash
@@ -316,14 +316,14 @@ translated into full candidate TOML and fed through `PlanConfigTransaction` /
 `ApplyConfigTransaction`; the standard gNMI commit-confirmed extension maps to
 the same confirm / abort lifecycle as native config transactions. Unsupported
 paths return `UNIMPLEMENTED` instead of bypassing the transaction model. See
-[GNMI.md](gnmi.md) for the full `ON_CHANGE` v1 scope (initial sync,
+[gnmi.md](gnmi.md) for the full `ON_CHANGE` v1 scope (initial sync,
 reconnect-no-replay, lag → `DATA_LOSS`) and Set path matrix.
 
 Network gNMI is served only on mTLS TCP listeners. The UDS listener also exposes
 the service as a local-only extension.
 
 For the full supported path list, setup guidance, troubleshooting table, and
-tested `gnmic` commands, see [GNMI.md](gnmi.md).
+tested `gnmic` commands, see [gnmi.md](gnmi.md).
 
 ```bash
 gnmic \
@@ -361,7 +361,7 @@ rejected load never advances it (the prior generation stays live and the
 timestamp freezes), so a caller can prove a reload was *accepted* rather than
 merely attempted. It is the same value the
 `bgp_policy_generation_loaded_timestamp_seconds` Prometheus gauge exports; see
-"Policy artifact freshness" in [`OPERATIONS.md`](operations.md) for the staleness
+"Policy artifact freshness" in [`operations.md`](operations.md) for the staleness
 alert expressions.
 
 `tcp_ao_support` is a read-only Linux capability probe for RFC 5925 TCP-AO. It
@@ -532,7 +532,9 @@ a peer with no finite inbound bound — and equally empty from a daemon that
 does not expose the field and from a stale peer-session snapshot. Absence is
 therefore never proof that no bound is configured. Counts come from the
 session actor's O(1) enforcement accounting, never from the RIB, whose rows
-carry different Add-Path and lifecycle semantics.
+carry different Add-Path and lifecycle semantics. These rows are the only
+inbound limit and headroom report; `prefixes_received_ipv4` and
+`prefixes_received_ipv6` remain the unconditional per-family counts.
 
 `NeighborState.gr_retention` reports RFC 4724 / RFC 9494 helper-side
 stale-route retention, one `GracefulRestartRetentionState` per family the RIB
@@ -3793,7 +3795,7 @@ fail-stop on a later primitive convergence failure as described above.
 Read-only inspection of single-hop and multihop BFD sessions (ADR-0067,
 RFC 5880/5881/5883).
 Sessions themselves are configured via `[[bfd_profiles]]` + `[neighbors.bfd]`
-(see [CONFIGURATION.md](configuration.md)). Member attachments apply on SIGHUP;
+(see [configuration.md](configuration.md)). Member attachments apply on SIGHUP;
 profile definitions require a restart. There is no mutating BFD RPC, and config
 transactions do not apply BFD attachment changes.
 

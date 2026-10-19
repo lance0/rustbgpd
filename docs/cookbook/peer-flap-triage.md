@@ -84,7 +84,7 @@ points at the transport or the peer.
 - **TCP resets with no BGP NOTIFICATION** (`closed without NOTIFICATION`
   or a `TCP reader I/O failure`) — MD5/TCP-AO key mismatch or a
   middlebox; see "Debugging a session that won't establish" in
-  [`OPERATIONS.md`](../reference/operations.md).
+  [`operations.md`](../reference/operations.md).
 - **BFD down events** — if the neighbor has BFD, check
   `rbgp bfd` and the `bfd_session_flaps_total{peer}` counter before
   blaming BGP.
