@@ -19,9 +19,12 @@ routing suite. v1.0 is not on a timeline. Its intended contract is narrower
 than the complete daemon surface: stable IPv4/IPv6 route-server and
 route-reflector operation, policy, automation, and monitoring APIs, with the
 already-proven controller-feed/RR families explicitly scoped. EVPN VTEP/IRB
-and broader dataplane roles remain alpha outside that contract. Until real
-shadow/canary deployment feedback supports a freeze, the project keeps
-shipping focused v0.x cuts.
+and broader dataplane roles remain alpha outside that contract. The project
+keeps shipping focused v0.x cuts until the
+[ADR-0125](../adr/0125-v1-stability-contract.md) evidence bar is met. An
+external shadow pilot is the strongest evidence still sought, but under DR1 it
+is advisory rather than a tagging gate: a tag cut without one discloses the
+pilot's absence and that every receipt behind the contract is self-generated.
 
 ---
 
