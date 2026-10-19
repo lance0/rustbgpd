@@ -5479,6 +5479,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_change_delivers_a_transition_that_lands_during_the_snapshot_read() {
+        // Load-bearing break: subscribing to the session broadcast after the
+        // initial snapshot loses the transition, and the sentinel arrives
+        // first.
+        use crate::peer_types::SessionLifecycleEventType::{Lost, StateChanged};
+
+        let events = broadcast::channel(16).0;
+        let read_events = events.clone();
+        // The read observes ESTABLISHED; the session drops before the
+        // snapshot reaches the client.
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let mut peer = test_peer("10.0.0.2".parse().unwrap());
+            peer.state = SessionState::Established;
+            let _ = read_events.send(session_event(Lost, Some(SessionState::Idle)));
+            async move { Ok(vec![peer]) }
+        })
+        .with_test_session_events(&events);
+        let mut harness = serve(service).await;
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(
+                stream_on_change_list(neighbor_session_state_path("10.0.0.2")),
+            )]))
+            .await
+            .unwrap()
+            .into_inner();
+        let state = |response| {
+            let updates = subscribe_updates(response);
+            assert_eq!(updates.len(), 1);
+            updates[0].val.clone().unwrap().value
+        };
+        let json = |value: &[u8]| Some(gnmi::typed_value::Value::JsonIetfVal(value.to_vec()));
+
+        assert_eq!(
+            state(next_bounded(&mut stream).await.unwrap().unwrap()),
+            json(b"\"ESTABLISHED\"")
+        );
+        assert_sync(&mut stream).await;
+        events
+            .send(session_event(StateChanged, Some(SessionState::Connect)))
+            .unwrap();
+        assert_eq!(
+            state(next_bounded(&mut stream).await.unwrap().unwrap()),
+            json(b"\"IDLE\""),
+            "the transition behind the snapshot must follow sync_response"
+        );
+        assert_eq!(
+            state(next_bounded(&mut stream).await.unwrap().unwrap()),
+            json(b"\"CONNECT\"")
+        );
+    }
+
+    #[tokio::test]
     async fn subscribe_on_change_emits_initial_snapshot_then_sync() {
         // Initial sync contract: one Update per configured peer
         // (including non-Established peers), then sync_response. The

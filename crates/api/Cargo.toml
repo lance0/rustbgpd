@@ -53,6 +53,8 @@ tonic-prost-build.workspace = true
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
+hyper-util.workspace = true
+tower = { workspace = true, features = ["util"] }
 criterion.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
