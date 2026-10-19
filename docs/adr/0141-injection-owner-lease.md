@@ -124,8 +124,10 @@ current messages and behaviour.
 message InjectionLease {
   // 1-64 bytes of [A-Za-z0-9._-]. Used verbatim as a metric label and log field.
   string owner = 1;
-  // Required, 5..=3600. Starting or joining the owner's lease sets its
-  // deadline to now + lease_seconds.
+  // Required, 5..=3600. A leased add that starts the owner's lease sets its
+  // deadline to now + lease_seconds. A leased add that joins a live lease
+  // extends the deadline to max(current, now + lease_seconds) and never
+  // shortens it; only RenewLease can shorten a lease.
   uint32 lease_seconds = 2;
 }
 message LeaseGeneration { fixed64 incarnation = 1; uint64 sequence = 2; }
@@ -143,6 +145,7 @@ message AddLeasedFlowSpecResponse { AddFlowSpecResponse result = 1; LeaseGenerat
 //   bool override_owner;   // delete regardless of owner
 
 rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+// Sets the deadline to exactly now + lease_seconds, which may shorten it.
 message RenewLeaseRequest { string owner = 1; LeaseGeneration generation = 2; uint32 lease_seconds = 3; }
 message RenewLeaseResponse { LeaseGeneration generation = 1; uint32 lease_remaining_ms = 2; }
 
@@ -151,8 +154,13 @@ rpc ListInjectionLeases(ListInjectionLeasesRequest) returns (ListInjectionLeases
 ```
 
 A call to a leased RPC is a **leased add**. A leased add on an owner with a
-live lease joins the lease and renews it: the add is itself proof that the
-controller is alive. A missing `lease` returns `INVALID_ARGUMENT`. Remaining
+live lease joins the lease and extends it to
+`max(current deadline, now + lease_seconds)`: the add is itself proof that the
+controller is alive. An add never shortens the lease. Otherwise one add with a
+short `lease_seconds` would pull in the deadline for every route the owner
+holds. Only `RenewLease` sets the deadline exactly, and it may shorten it,
+because it is the one call whose purpose is to state the owner's whole
+lease. A missing `lease` returns `INVALID_ARGUMENT`. Remaining
 time is reported in milliseconds from the monotonic deadline, never as a
 wall-clock timestamp.
 
@@ -194,10 +202,17 @@ Every `FAILED_PRECONDITION` and `RESOURCE_EXHAUSTED` above leaves the RIB,
 the lease table and the wire unchanged. Moving a key between owners takes a
 delete followed by an add.
 
+Converting an unleased entry to a leased one is also delete-then-add; a
+leased add never adopts an unowned key. Adoption would let a controller
+claim, and later expire, routes that an operator installed by hand. The cost
+is that the key is withdrawn between the delete and the add. A controller
+that cannot accept that gap should use a fresh key, such as another
+`path_id`, and delete the unleased entry after the leased one is in place.
+
 ### 4. Where state lives
 
 - **Lease table** (`owner → {generation, deadline, lease_seconds}` plus a
-  pending-expiry queue). There is one daemon-wide instance behind a
+  pending-expiry queue of `(owner, generation, deadline)`). There is one daemon-wide instance behind a
   synchronous mutex, defined in `rustbgpd-rib` and shared by every
   `InjectionService` instance and the RIB manager. No lock is ever held
   across an `.await`. Every operation under it is O(1), or O(live owners)
@@ -218,7 +233,7 @@ attack its blackholes are mitigating.
 1. Check the ownership index and reject a mismatch.
 2. Take the table lock and join the live lease, or start a new generation.
    If the owner's previous lease is past its deadline but not yet reaped,
-   move it to the pending-expiry queue first.
+   first move it, with its deadline, to the pending-expiry queue.
 3. Insert the route and tag it with the generation.
 
 The liveness decision is taken at the commit instant, so there is no window
@@ -232,8 +247,14 @@ when the table changes. On waking, under the lock, it does two things. It
 moves every owner whose deadline is `<= now` from the table to the
 pending-expiry queue, so those generations are dead to renewals from that
 instant. It then drains the queue. After releasing the lock, it sends one
-`RibUpdate::ExpireInjectionLeases { leases: Vec<(owner, generation)> }`.
-The RIB withdraws every key of each owner whose tag is `<= generation`. It
+`RibUpdate::ExpireInjectionLeases { leases: Vec<(owner, generation, deadline)> }`.
+The deadline travels with the generation. Expiry has deleted the table
+record, and the owner may already hold a newer generation with a different
+deadline, so the RIB computes the deadline-to-apply lag reported in
+section 10 from the message, never from a lookup at apply time. The RIB
+withdraws every key of each owner whose tag is at or below the expired
+generation; within one process the incarnation is fixed, so this compares
+`sequence`. It
 then runs one unicast `recompute_best` + `distribute_changes`, and one
 `recompute_and_distribute_flowspec`, over the affected sets. Every generation
 leaves the table exactly once, through this queue.
@@ -417,6 +438,18 @@ Paused clock:
 - Expiry withdraws both families in one RIB update, and the withdrawal reaches
   a peer's outbound.
 - Renewal before the deadline prevents expiry.
+- Adds never shorten a lease. With a live 60 s lease, a leased add with
+  `lease_seconds = 5` leaves the deadline where it was. Advancing 10 s
+  expires nothing. A leased add with a longer value extends the deadline. A
+  `RenewLease` with `lease_seconds = 5` then sets the deadline to now + 5 s,
+  and the lease expires on schedule.
+- Delete-then-add conversion: a leased add on an unowned key returns
+  `FAILED_PRECONDITION` and leaves the entry unowned. After a delete, the same
+  leased add succeeds.
+- Expiry lag across generations: let generation g expire with the RIB
+  stalled, start generation g+1 with a different deadline, advance, then
+  release. The `WARN` line and its lag field report g's deadline-to-apply
+  lag, not one computed from g+1's deadline.
 - Unowned routes survive any advance.
 - Race: a late renewal of generation g after a re-add started g+1 gets
   `FAILED_PRECONDITION` and leaves g+1's deadline unchanged.
