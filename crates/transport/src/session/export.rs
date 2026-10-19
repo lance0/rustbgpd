@@ -111,10 +111,19 @@ fn local_self_next_hop<'a>(
     route: &Route,
     nh_override: Option<&'a rustbgpd_policy::NextHopAction>,
 ) -> Option<&'a rustbgpd_policy::NextHopAction> {
-    nh_override.or_else(|| {
-        (route.origin_type == rustbgpd_rib::RouteOrigin::Local && route.next_hop.is_unspecified())
-            .then_some(&rustbgpd_policy::NextHopAction::Self_)
-    })
+    nh_override
+        .or_else(|| is_injected_self_route(route).then_some(&rustbgpd_policy::NextHopAction::Self_))
+}
+
+/// Whether `route` was injected with next-hop self. Export policy can rewrite
+/// `route.next_hop` before export (the RIB's export memo) while the stored
+/// `NEXT_HOP` keeps the `0.0.0.0` sentinel, so either one carries the intent.
+fn is_injected_self_route(route: &Route) -> bool {
+    route.origin_type == rustbgpd_rib::RouteOrigin::Local
+        && (route.next_hop.is_unspecified()
+            || route.attributes.iter().any(
+                |attr| matches!(attr, PathAttribute::NextHop(next_hop) if next_hop.is_unspecified()),
+            ))
 }
 
 #[cfg(test)]
@@ -570,8 +579,7 @@ impl SessionExportProfile {
         // An injected next-hop-self route stores the unspecified sentinel;
         // when an inapplicable policy override falls back to the default next
         // hop, that default is self, never the sentinel.
-        let self_route = route.origin_type == rustbgpd_rib::RouteOrigin::Local
-            && route.next_hop.is_unspecified();
+        let self_route = is_injected_self_route(route);
         let is_ebgp = self.is_ebgp();
         let force_next_hop_self =
             matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));

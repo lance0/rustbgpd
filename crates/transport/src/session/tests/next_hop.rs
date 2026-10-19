@@ -4165,6 +4165,10 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
     });
     let v6: Ipv6Addr = "2001:db8::99".parse().unwrap();
     let v6_override = Some(NextHopAction::Specific(IpAddr::V6(v6)));
+    // The RIB's export memo writes the override into `next_hop` but leaves
+    // the stored `NEXT_HOP 0.0.0.0`.
+    let mut policy_applied = stored.clone();
+    policy_applied.next_hop = IpAddr::V6(v6);
 
     for (remote_asn, route_server_client) in [(65002, false), (65001, false), (65002, true)] {
         let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
@@ -4173,7 +4177,7 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
         let case = format!("remote AS {remote_asn}, route server client {route_server_client}");
         let profile = session.publish_export_profile();
         let local_ipv4 = profile.local_ipv4();
-        for route in [&stored, &bare] {
+        for route in [&stored, &bare, &policy_applied] {
             profile
                 .probe_announcement(ExportCandidate::Unicast {
                     route,
@@ -4204,7 +4208,7 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
 
         session.negotiated = Some(Arc::new(negotiated_session(remote_asn, true)));
         let profile = session.publish_export_profile();
-        for route in [&stored, &bare] {
+        for route in [&stored, &bare, &policy_applied] {
             export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
             let export::PreparedUnicastCandidate::Mp { next_hop, .. } = profile
                 .prepare_unicast_candidate(route, v6_override.as_ref())
