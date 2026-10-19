@@ -294,8 +294,8 @@ async fn family_limit_warning_reports_once_and_keeps_accepting() {
         assert!(
             matches!(
                 notify_rx.try_recv(),
-                Ok(SessionNotification::MaxPrefixWarning { scope, usage: 3, bound: 2, .. })
-                    if scope == family.label()
+                Ok(SessionNotification::MaxPrefixWarning { family: label, stage: "accepted", usage: 3, bound: 2, .. })
+                    if label == family.label()
             ),
             "{family:?}"
         );
