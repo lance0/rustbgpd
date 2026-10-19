@@ -25,15 +25,15 @@ initial, no-op, hot reload, and pre-effect restoration against
 MD5-authenticated FRR) and M97 (authenticated lock/fetch/callback lifecycle
 for two IPv4/IPv6 handles on one host, shared fence, MD5-FRR session
 continuity) — both local gates, described in
-[`INTEROP.md`](../interop.md#ixp-manager-v74-manual-configuration-oracle);
+[`interop.md`](../interop.md#ixp-manager-v74-manual-configuration-oracle);
 and the pinned IXP Manager / Bird's Eye contract oracle
 ([`tests/compat/ixp-manager-birdseye/`](../../tests/compat/ixp-manager-birdseye/README.md)),
 which runs the real IXP Manager v7.4.0 router-config generator, PHP
 looking-glass consumer, and MySQL fixture against the real renderer,
 checker, daemon, and adapter. Every "expected output" block below is a
 real run, on the checked-in v7.4 capture, of release-profile binaries built
-from the source tree (they report version 0.71.0); hashes and version strings
-change with the build.
+from the source tree when it was at 0.71.0, so the version strings below come
+from that capture; hashes and version strings change with the build.
 
 The pipeline:
 

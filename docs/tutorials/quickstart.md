@@ -216,7 +216,7 @@ authorization need no configuration here: the local socket is owner-only, so its
 clients are authorized as the implicit `local-operator` principal — even a
 config with no gRPC or `[security.grpc]` section at all gets this listener by
 default. Remote (TCP) or named access needs explicit principals and roles; see
-[CONFIGURATION.md](../reference/configuration.md#securitygrpc).
+[configuration.md](../reference/configuration.md#securitygrpc).
 
 <!-- rbgp-cli-conformance -->
 ```bash

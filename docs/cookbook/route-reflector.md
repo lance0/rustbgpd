@@ -190,7 +190,7 @@ external-incumbent Adj-RIB-Out qualification remains outstanding.
 ## Watch
 
 Prometheus (`prometheus_addr`, `/metrics`; dashboard import in
-[`GRAFANA.md`](../how-to/grafana.md) — the churn/distribution row carries the
+[`grafana.md`](../how-to/grafana.md) — the churn/distribution row carries the
 update-group gauges):
 
 | Metric | Healthy shape |

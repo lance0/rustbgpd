@@ -69,7 +69,7 @@ re-evaluates retained routes locally instead, as RFC 9324 asks. Details:
 [`[rpki]` reference](../reference/configuration.md#rpki),
 [ADR-0034](../adr/0034-rpki-origin-validation.md). Reject-at-import
 against a live RTR cache is exercised in the M83 interop lab
-([RECEIPTS.md](../receipts.md)).
+([receipts.md](../receipts.md)).
 
 ## IRR filtering: the pipeline
 

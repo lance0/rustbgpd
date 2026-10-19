@@ -113,7 +113,7 @@ rbgp config abort rr1-edit-...     # or roll back now
 If the timer expires unconfirmed — or the daemon restarts inside the
 window — the pre-commit config is re-applied. While a confirm is
 pending, SIGHUP and other config mutators are fenced off. Full
-lifecycle and failure states: [`OPERATIONS.md`](../reference/operations.md).
+lifecycle and failure states: [`operations.md`](../reference/operations.md).
 
 ## Draining an RR for maintenance
 

@@ -66,6 +66,9 @@ member; plain (non-RS) eBGP neighbors get that enforcement by default.
 # Validate the config and the rpol policy (both offline):
 rustbgpd --check --strict config.toml
 rbgp policy check hygiene.rpol
+# Both run the `test` blocks in hygiene.rpol. To have the daemon also refuse a
+# startup or SIGHUP reload whose policy fails them, set
+# `[policy] require_passing_tests = true`.
 
 # Run, then inspect a member:
 rbgp neighbor 198.51.100.3                 # Distribution Mode: per-client-best
