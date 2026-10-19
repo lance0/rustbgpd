@@ -16,6 +16,7 @@ export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR_A="clab-${TOPO}-frr-a"
 FRR_B="clab-${TOPO}-frr-b"
+FRR_C="clab-${TOPO}-frr-c"
 
 
 # Resolve rustbgpd container management IP for gRPC access
@@ -253,6 +254,161 @@ test_delete_path() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Test 6: next-hop self — AddPath with next_hop 0.0.0.0 reaches each FRR peer
+# with that session's local address, and the controller contract holds:
+# created / unchanged outcomes, NOT_FOUND by default, NOT_PRESENT with
+# allow_missing.
+# ---------------------------------------------------------------------------
+frr_next_hop() {
+    local container=$1 prefix=$2
+    docker exec "$container" vtysh -c "show bgp ipv4 unicast $prefix json" 2>/dev/null \
+        | python3 -c '
+import json, sys
+text = sys.stdin.read()
+start = text.find("{")
+paths = json.loads(text[start:]).get("paths", []) if start >= 0 else []
+print(paths[0]["nexthops"][0]["ip"] if paths else "")
+'
+}
+
+grpc_delete_path_allow_missing() {
+    local prefix=$1 prefix_len=$2
+    grpcurl_call \
+        -d "{\"prefix\": \"$prefix\", \"prefix_length\": $prefix_len, \"allow_missing\": true}" \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath 2>/dev/null
+}
+
+# Pre-policy Adj-RIB-In next hop FRR-C recorded from rustbgpd (iBGP).
+frr_c_received_next_hop() {
+    local afi=$1 prefix=$2
+    docker exec "$FRR_C" vtysh -c "show bgp $afi unicast neighbors 10.0.2.1 received-routes json" 2>/dev/null \
+        | python3 -c '
+import json, sys
+route = json.load(sys.stdin).get("receivedRoutes", {}).get(sys.argv[1], {})
+print(route.get("nextHopGlobal") or route.get("nextHop") or "")
+' "$prefix"
+}
+
+expect_frr_next_hop() {
+    local container=$1 prefix=$2 expected=$3 actual=""
+    for _ in $(seq 1 15); do
+        actual=$(frr_next_hop "$container" "$prefix")
+        [ "$actual" = "$expected" ] && break
+        sleep 1
+    done
+    if [ "$actual" = "$expected" ]; then
+        ok "$container: $prefix next hop $actual (session local address)"
+    else
+        fail "$container: $prefix next hop '$actual', expected $expected"
+    fi
+}
+
+test_next_hop_self_injection() {
+    log "Test 6: AddPath next hop 0.0.0.0 is next-hop self per session"
+
+    local result
+    result=$(grpc_add_path "172.17.0.0" 16 "0.0.0.0" 0 || echo "ERROR")
+    if echo "$result" | grep -q '"outcome": "PATH_INJECT_OUTCOME_CREATED"'; then
+        ok "AddPath 0.0.0.0 accepted (CREATED)"
+    else
+        fail "AddPath 0.0.0.0 not created: $result"
+    fi
+    result=$(grpc_add_path "172.17.0.0" 16 "0.0.0.0" 0 || echo "ERROR")
+    if echo "$result" | grep -q '"outcome": "PATH_INJECT_OUTCOME_UNCHANGED"'; then
+        ok "Identical AddPath reports UNCHANGED"
+    else
+        fail "Identical AddPath did not report UNCHANGED: $result"
+    fi
+
+    expect_frr_next_hop "$FRR_A" "172.17.0.0/16" "10.0.0.1"
+    expect_frr_next_hop "$FRR_B" "172.17.0.0/16" "10.0.1.1"
+    # iBGP keeps a received next hop, so only next-hop self puts 10.0.2.1 here;
+    # an unresolved 0.0.0.0 would show up as such in the Adj-RIB-In.
+    local actual=""
+    for _ in $(seq 1 15); do
+        actual=$(frr_c_received_next_hop ipv4 "172.17.0.0/16")
+        [ "$actual" = "10.0.2.1" ] && break
+        sleep 1
+    done
+    if [ "$actual" = "10.0.2.1" ]; then
+        ok "$FRR_C (iBGP): 172.17.0.0/16 received with next hop 10.0.2.1"
+    else
+        fail "$FRR_C (iBGP): 172.17.0.0/16 received next hop '$actual', expected 10.0.2.1"
+    fi
+
+    # IPv6 next-hop self over this IPv4-only session has no local IPv6
+    # address: the route is refused for FRR-C rather than sent with ::. The
+    # refusal is only evidence while IPv6 unicast is negotiated.
+    if docker exec "$FRR_C" vtysh -c "show bgp neighbors 10.0.2.1 json" 2>/dev/null \
+        | python3 -c '
+import json, sys
+caps = json.load(sys.stdin)["10.0.2.1"]["neighborCapabilities"]["multiprotocolExtensions"]
+sys.exit(caps.get("ipv6Unicast", {}).get("advertisedAndReceived") is not True)
+'; then
+        ok "$FRR_C negotiated IPv6 unicast with rustbgpd"
+    else
+        fail "$FRR_C did not negotiate IPv6 unicast; the IPv6 refusal check is vacuous"
+    fi
+    result=$(grpcurl_call \
+        -d '{"prefix": "2001:db8:3::", "prefix_length": 48, "next_hop": "::"}' \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath 2>/dev/null || echo "ERROR")
+    if echo "$result" | grep -q '"outcome": "PATH_INJECT_OUTCOME_CREATED"'; then
+        ok "AddPath :: accepted (CREATED)"
+    else
+        fail "AddPath :: not created: $result"
+    fi
+    sleep 3
+    actual=$(frr_c_received_next_hop ipv6 "2001:db8:3::/48")
+    if [ -z "$actual" ]; then
+        ok "$FRR_C: 2001:db8:3::/48 refused (no local IPv6 next hop)"
+    else
+        fail "$FRR_C: 2001:db8:3::/48 received with next hop '$actual'"
+    fi
+    if docker exec "$FRR_C" vtysh -c "show bgp neighbors 10.0.2.1 json" 2>/dev/null \
+        | python3 -c 'import json, sys; sys.exit(json.load(sys.stdin)["10.0.2.1"]["bgpState"] != "Established")'; then
+        ok "$FRR_C session stays Established"
+    else
+        fail "$FRR_C session is not Established"
+    fi
+    grpc_delete_path "2001:db8:3::" 48 >/dev/null || fail "DeletePath 2001:db8:3::/48 failed"
+
+    result=$(grpc_delete_path "172.17.0.0" 16 || echo "ERROR")
+    if echo "$result" | grep -q '"outcome": "PATH_DELETE_OUTCOME_DELETED"'; then
+        ok "DeletePath reports DELETED"
+    else
+        fail "DeletePath did not report DELETED: $result"
+    fi
+    local status
+    status=$(grpcurl_call -d '{"prefix": "172.17.0.0", "prefix_length": 16}' \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath 2>&1 || true)
+    if echo "$status" | grep -q "NotFound"; then
+        ok "Missing DeletePath without allow_missing is NOT_FOUND"
+    else
+        fail "Missing DeletePath without allow_missing: $status"
+    fi
+    result=$(grpc_delete_path_allow_missing "172.17.0.0" 16 || echo "ERROR")
+    if echo "$result" | grep -q '"outcome": "PATH_DELETE_OUTCOME_NOT_PRESENT"'; then
+        ok "Missing DeletePath with allow_missing is NOT_PRESENT"
+    else
+        fail "Missing DeletePath with allow_missing: $result"
+    fi
+
+    local gone=false
+    for _ in $(seq 1 15); do
+        if ! frr_b_has_prefix "172.17.0.0/16"; then
+            gone=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$gone" = true ]; then
+        ok "172.17.0.0/16 withdrawn from FRR-B"
+    else
+        fail "FRR-B still has 172.17.0.0/16 after DeletePath"
+    fi
+}
+
 # Start rustbgpd inside the container (CMD is sleep infinity)
 # Use the robust `start_rustbgpd` from test-lib.sh (10 s poll loop
 # rather than a 3 s fixed sleep) — required under parallel CI load.
@@ -272,6 +428,7 @@ main() {
     test_route_injection
     test_withdrawal_propagation
     test_delete_path
+    test_next_hop_self_injection
 
     echo ""
     log "Results: $pass passed, $fail failed"

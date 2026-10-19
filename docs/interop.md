@@ -317,7 +317,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 |------|---------|----------|--------|-------|--------------|------------------------|
 | FRR (bgpd) | 10.7.1 | `tests/interop/m0-frr.clab.yml` | Tested (M0) | All 5 tests pass | Needs `no bgp ebgp-requires-policy` | Cease on `clear bgp *` |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m1-frr.clab.yml` | Tested (M1, M2) | UPDATE/RIB + best-path | FRR advertises 3 prefixes via `network` | — |
-| FRR (bgpd) | 10.7.1 | `tests/interop/m3-frr.clab.yml` | Tested (M3) | 3-node redistribution | 2× FRR peers, route injection | — |
+| FRR (bgpd) | 10.7.1 | `tests/interop/m3-frr.clab.yml` | Tested (M3) | 4-node redistribution | 2× eBGP + 1× iBGP FRR peers, route injection, next-hop self for a `0.0.0.0` / `::` injected next hop | — |
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m4-frr.clab.yml` | Tested (M4) | 10-peer dynamic mgmt | 8 static + 2 dynamic peers | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m10-frr-ipv6.clab.yml` | Tested (M10) | Dual-stack MP-BGP | IPv4 session, IPv6 via MP_REACH_NLRI | — |
@@ -973,18 +973,24 @@ peer restart recovery all unaffected by M2 changes.
 ### Network Layout
 
 ```
-M3 FRR (3-node):
+M3 FRR (4-node):
 
   rustbgpd (AS 65001)
-  eth1: 10.0.0.1/24        eth2: 10.0.1.1/24
-       │                         │
-       │                         │
-  eth1: 10.0.0.2/24        eth1: 10.0.1.2/24
-  FRR-A (AS 65002)          FRR-B (AS 65003)
+  eth1: 10.0.0.1/24        eth2: 10.0.1.1/24        eth3: 10.0.2.1/24
+       │                         │                         │
+       │                         │                         │
+  eth1: 10.0.0.2/24        eth1: 10.0.1.2/24        eth1: 10.0.2.2/24
+  FRR-A (AS 65002)          FRR-B (AS 65003)          FRR-C (AS 65001, iBGP)
 ```
 
 FRR-A advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16 via `network` statements.
-FRR-B receives only (no route advertisements).
+FRR-B receives only (no route advertisements). FRR-C is an iBGP receiver with
+IPv4 and IPv6 unicast over IPv4 transport and no `local_ipv6_nexthop`. The
+script's last test injects `172.17.0.0/16` with next hop `0.0.0.0` and checks
+that each FRR peer receives that session's rustbgpd address as the next hop
+(FRR-C through its pre-policy Adj-RIB-In), that an injected IPv6 route with
+next hop `::` is refused for FRR-C while the session stays up, and the
+`AddPath` / `DeletePath` outcomes.
 
 The topology uses the repository's public test-only operator token. Load it
 before running any of the manual gRPC commands below:
