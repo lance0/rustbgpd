@@ -3845,7 +3845,19 @@ async fn oracle_dirty_source_excluded_sibling_has_no_shared_tombstone_withdraw()
                 .await;
             assert_eq!(pending.announce[0].prefix, Prefix::V4(pfx(1, 0)));
         }
-        tokio::time::advance(Duration::from_secs(2)).await;
+        // Retry until both members are clean before closing their recovery
+        // windows. A member's channel holds one message, so a resync the run
+        // loop paces across polls can leave its tail queued behind a full
+        // channel: the member stays dirty and the next tick sends the rest.
+        for tick in 1.. {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            o.quiesce().await;
+            o.drain_available();
+            if !o.peer_outbound_dirty(C).await && !o.peer_outbound_dirty(D).await {
+                break;
+            }
+            assert!(tick < 5, "C or D is still dirty after {tick} resync ticks");
+        }
         o.end_recovery(C).await;
         o.end_recovery(D).await;
     };
