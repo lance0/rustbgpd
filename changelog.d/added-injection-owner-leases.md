@@ -13,6 +13,5 @@
   table. `DeletePath` and `DeleteFlowSpec` gain `owner` and `override_owner`,
   and local route and FlowSpec read-back report `injection_owner`,
   `lease_generation` and `lease_remaining_ms`. Unowned injection is
-  unchanged. The new RPCs are outside the v1 inventory until their FRR
-  interop leg lands. See
+  unchanged. The new RPCs are outside the v1 inventory for now. See
   [leased injection](../docs/reference/api.md#leased-injection).
