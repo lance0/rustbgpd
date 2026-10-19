@@ -1265,7 +1265,7 @@ mod tests {
     async fn rpki_vrp_count_uses_the_exported_family() {
         let server = spawn_mock_server(None).await;
         *server.state.metrics_text.lock().await = Some(
-            "bgp_rpki_vrp_count{af=\"ipv4\"} 12\nbgp_rpki_vrp_count{af=\"ipv6\"} 3\n".to_string(),
+            "bgp_rpki_vrp_count{afi=\"ipv4\"} 12\nbgp_rpki_vrp_count{afi=\"ipv6\"} 3\n".to_string(),
         );
         let connection = connect(&server.addr, None).await.unwrap();
         let mut state = FetcherState::new();
@@ -1462,7 +1462,7 @@ mod tests {
     async fn metrics_failure_retains_last_good_vrp_count() {
         let server = spawn_mock_server(None).await;
         *server.state.metrics_text.lock().await = Some(
-            "bgp_rpki_vrp_count{af=\"ipv4\"} 12\nbgp_rpki_vrp_count{af=\"ipv6\"} 3\n".to_string(),
+            "bgp_rpki_vrp_count{afi=\"ipv4\"} 12\nbgp_rpki_vrp_count{afi=\"ipv6\"} 3\n".to_string(),
         );
         let connection = connect(&server.addr, None).await.unwrap();
         let mut state = FetcherState::new();
@@ -1488,7 +1488,7 @@ mod tests {
     async fn successful_metrics_without_rpki_family_clears_last_good_count() {
         let server = spawn_mock_server(None).await;
         *server.state.metrics_text.lock().await = Some(
-            "bgp_rpki_vrp_count{af=\"ipv4\"} 12\nbgp_rpki_vrp_count{af=\"ipv6\"} 3\n".to_string(),
+            "bgp_rpki_vrp_count{afi=\"ipv4\"} 12\nbgp_rpki_vrp_count{afi=\"ipv6\"} 3\n".to_string(),
         );
         let connection = connect(&server.addr, None).await.unwrap();
         let mut state = FetcherState::new();

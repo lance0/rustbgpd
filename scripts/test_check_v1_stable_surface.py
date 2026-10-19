@@ -277,26 +277,26 @@ class EvpnReflectorRoleTests(unittest.TestCase):
         inventory = copy.deepcopy(self.inventory)
         series = inventory["metrics"]["scoped_rr_only_series"]
         next(s for s in series if s["name"] == "bgp_rib_loc_prefixes")["label_values"] = {
-            "afi_safi": ["evpnn"]
+            "family": ["evpnn"]
         }
         self.rejected(
             lambda: checker.check_metrics(inventory, self.metric_source, self.emission_sources),
-            "pinned metric bgp_rib_loc_prefixes label afi_safi values ['evpnn']",
+            "pinned metric bgp_rib_loc_prefixes label family values ['evpnn']",
         )
 
     def test_changed_emission_fails_while_inventory_stays(self):
         cases = [
             (
                 "crates/rib/src/manager/distribution/evpn.rs",
-                '.set_loc_rib_prefixes("evpn"',
                 '.set_loc_rib_prefixes("l2vpn_evpn"',
-                "pinned metric bgp_rib_loc_prefixes label afi_safi values ['evpn']",
+                '.set_loc_rib_prefixes("evpn"',
+                "pinned metric bgp_rib_loc_prefixes label family values ['l2vpn_evpn']",
             ),
             (
                 "crates/rib/src/manager/helpers.rs",
-                '(Afi::L2Vpn, Safi::Evpn) => "l2vpn_evpn"',
-                '(Afi::L2Vpn, Safi::Evpn) => "evpn"',
-                "pinned metric bgp_route_refresh_stale_entries label afi_safi values ['l2vpn_evpn']",
+                "rustbgpd_wire::family_label(afi, safi)",
+                "None::<&str>",
+                "pinned metric bgp_route_refresh_stale_entries label family values ['l2vpn_evpn']",
             ),
         ]
         for path, old, new, expected in cases:
@@ -310,14 +310,14 @@ class EvpnReflectorRoleTests(unittest.TestCase):
                 )
 
     # Test-gated Rust is not production emission evidence for a pinned value.
-    HELPER ='fn helper(m: &Metrics) {\n    m.set_loc_rib_prefixes("evpn", 1);\n}\n'
-    MISSING = "pinned metric bgp_rib_loc_prefixes label afi_safi values ['evpn']"
+    HELPER ='fn helper(m: &Metrics) {\n    m.set_loc_rib_prefixes("l2vpn_evpn", 1);\n}\n'
+    MISSING = "pinned metric bgp_rib_loc_prefixes label family values ['l2vpn_evpn']"
 
     def without_live_loc_emitter(self):
         return self.emitted_by(
             "crates/rib/src/manager/distribution/evpn.rs",
-            '.set_loc_rib_prefixes("evpn"',
             '.set_loc_rib_prefixes("l2vpn_evpn"',
+            '.set_loc_rib_prefixes("evpn"',
         )
 
     def check_with(self, extra):

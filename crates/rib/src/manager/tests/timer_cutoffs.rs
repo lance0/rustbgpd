@@ -77,7 +77,7 @@ fn refresh_in_progress(metrics: &BgpMetrics) -> f64 {
     gauge_metric_value(
         metrics,
         "bgp_route_refresh_in_progress",
-        &[("peer", "10.0.0.1"), ("afi_safi", "ipv4_unicast")],
+        &[("peer", "10.0.0.1"), ("family", "ipv4_unicast")],
     )
 }
 
@@ -85,7 +85,7 @@ fn selection_deferral_timeouts(metrics: &BgpMetrics) -> f64 {
     counter_metric_value(
         metrics,
         "bgp_selection_deferral_timeouts_total",
-        &[("afi_safi", "ipv4_unicast")],
+        &[("family", "ipv4_unicast")],
     )
 }
 
@@ -315,7 +315,7 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
         counter_metric_value(
             &metrics,
             "bgp_selection_deferral_timeouts_total",
-            &[("afi_safi", "ipv6_unicast")],
+            &[("family", "ipv6_unicast")],
         ) > 0.5
     };
     // GR (2 s), selection deferral (10 s) and the refresh window (5 min)
@@ -377,7 +377,7 @@ async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
         counter_metric_value(
             &metrics,
             "bgp_selection_deferral_timeouts_total",
-            &[("afi_safi", "ipv6_unicast")],
+            &[("family", "ipv6_unicast")],
         ) > 0.5
     };
     let mut actor = Box::pin(manager.run());

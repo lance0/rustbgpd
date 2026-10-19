@@ -276,10 +276,11 @@ impl RibManager {
                 rib.sweep_stale_flowspec_family((afi, safi));
                 rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_stale_flowspec((afi, safi));
-                self.metrics.set_rib_prefixes(
+                crate::manager::helpers::set_rib_prefixes(
+                    &self.metrics,
                     &peer.to_string(),
-                    "flowspec",
-                    gauge_val(rib.flowspec_len()),
+                    crate::manager::helpers::FLOWSPEC_FAMILIES,
+                    rib.flowspec_lens(),
                 );
                 rib.sweep_stale_family_evpn((afi, safi));
                 rib.sweep_llgr_stale_family_evpn((afi, safi));
@@ -462,10 +463,11 @@ impl RibManager {
                 unicast_changed.extend(rib.clear_llgr_stale((afi, safi)));
                 rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_llgr_stale_flowspec((afi, safi));
-                self.metrics.set_rib_prefixes(
+                crate::manager::helpers::set_rib_prefixes(
+                    &self.metrics,
                     &peer.to_string(),
-                    "flowspec",
-                    gauge_val(rib.flowspec_len()),
+                    crate::manager::helpers::FLOWSPEC_FAMILIES,
+                    rib.flowspec_lens(),
                 );
                 rib.sweep_llgr_stale_family_evpn((afi, safi));
                 rib.clear_llgr_stale_evpn((afi, safi));
@@ -2283,15 +2285,23 @@ impl RibManager {
                 self.metrics
                     .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
             }
-            self.metrics
-                .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer.to_string(),
+                crate::manager::helpers::UNICAST_FAMILIES,
+                rib.unicast_lens(),
+            );
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer.to_string(),
+                crate::manager::helpers::FLOWSPEC_FAMILIES,
+                rib.flowspec_lens(),
+            );
             self.metrics.set_rib_prefixes(
                 &peer.to_string(),
-                "flowspec",
-                gauge_val(rib.flowspec_len()),
+                "l2vpn_evpn",
+                gauge_val(rib.evpn_len()),
             );
-            self.metrics
-                .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(rib.evpn_len()));
         }
 
         let clear_route_stale_entry = if let Some(stale) = self.refresh_stale_routes.get_mut(&peer)

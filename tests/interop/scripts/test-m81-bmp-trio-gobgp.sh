@@ -342,8 +342,8 @@ patch_runtime_addrs() {
 wait_rpki_vrps() {
     local v4 v6
     for i in $(seq 1 45); do
-        v4=$(prom_value "$RUSTBGPD" 'bgp_rpki_vrp_count{af="ipv4"}')
-        v6=$(prom_value "$RUSTBGPD" 'bgp_rpki_vrp_count{af="ipv6"}')
+        v4=$(prom_value "$RUSTBGPD" 'bgp_rpki_vrp_count{afi="ipv4"}')
+        v6=$(prom_value "$RUSTBGPD" 'bgp_rpki_vrp_count{afi="ipv6"}')
         if [ "${v4:-}" = 2 ] && [ "${v6:-}" = 2 ]; then
             ok "StayRTR VRP table loaded exactly (IPv4=2, IPv6=2; attempt $i)"
             return 0

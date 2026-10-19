@@ -1,7 +1,6 @@
 use super::{
     Afi, HashSet, IpAddr, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi,
-    gauge_val, labeled_route_family, labeled_routes_equal, route_type, should_suppress_ibgp_inner,
-    warn,
+    labeled_route_family, labeled_routes_equal, route_type, should_suppress_ibgp_inner, warn,
 };
 use crate::attr_set::AttrSet;
 use crate::loc_rib::labeled_tiebreak_orr;
@@ -790,8 +789,11 @@ impl RibManager {
         }
 
         if !changed_keys.is_empty() {
-            self.metrics
-                .set_loc_rib_prefixes("labeled", gauge_val(self.loc_rib.labeled_len()));
+            crate::manager::helpers::set_loc_rib_prefixes(
+                &self.metrics,
+                crate::manager::helpers::LABELED_FAMILIES,
+                self.loc_rib.family_lens().labeled,
+            );
         }
 
         let peers: Vec<IpAddr> = self

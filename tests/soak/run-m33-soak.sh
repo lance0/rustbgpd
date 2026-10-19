@@ -172,8 +172,8 @@ sample_metrics() {
         return
     }
     awk '
-        /^bgp_rib_loc_prefixes\{afi_safi="evpn"\}/                          { rib_loc=$2 }
-        /^bgp_rib_adj_out_prefixes\{.*afi_safi="evpn".*\}/                  { adj_out += $2 }
+        /^bgp_rib_loc_prefixes\{family="l2vpn_evpn"\}/                          { rib_loc=$2 }
+        /^bgp_rib_adj_out_prefixes\{.*family="l2vpn_evpn".*\}/                  { adj_out += $2 }
         /^bgp_session_flaps_total\{/                                        { flaps   += $2 }
         /^bgp_outbound_route_drops_total\{/                                 { drops   += $2 }
         /^bgp_messages_sent_total\{/                                        { sent    += $2 }
@@ -268,7 +268,7 @@ docker exec -d "$TESTER_B" sh -c "evpn-tester \
 # We can't gate on monitor.json — monitor.rs only emits its JSON report when
 # it exits, and with --observe-sec set to SOAK_SEC+60 that's 24h+ from now.
 # Poll the RR's Prometheus Loc-RIB gauge instead: when bgp_rib_loc_prefixes
-# {afi_safi="evpn"} reaches the expected total, the testers fired and the RR
+# {family="l2vpn_evpn"} reaches the expected total, the testers fired and the RR
 # absorbed the routes. As a backstop we also accept the monitor's "converged"
 # tracing event in /tmp/monitor.log.
 # ---------------------------------------------------------------------------
@@ -283,12 +283,12 @@ while true; do
         echo "ERROR: RR never reached ${EXPECTED_TOTAL} EVPN routes within $((CONVERGE_TIMEOUT + 30))s" >&2
         docker cp "${MONITOR}:/tmp/monitor.log" "$RUN_DIR/monitor-pre-converge.log" 2>/dev/null || true
         last_count=$(curl -s --max-time 5 "http://${RR_IP}:9179/metrics" 2>/dev/null \
-            | awk '/^bgp_rib_loc_prefixes\{afi_safi="evpn"\}/ { print $2; exit }')
+            | awk '/^bgp_rib_loc_prefixes\{family="l2vpn_evpn"\}/ { print $2; exit }')
         echo "ERROR: last observed Loc-RIB EVPN count: ${last_count:-<none>}" >&2
         exit 2
     fi
     rib_count=$(curl -s --max-time 5 "http://${RR_IP}:9179/metrics" 2>/dev/null \
-        | awk '/^bgp_rib_loc_prefixes\{afi_safi="evpn"\}/ { print $2; exit }')
+        | awk '/^bgp_rib_loc_prefixes\{family="l2vpn_evpn"\}/ { print $2; exit }')
     # Strip a Prometheus-style trailing ".0" for integer comparison.
     rib_count_int=${rib_count%.*}
     if [ -n "$rib_count_int" ] && [ "$rib_count_int" -ge "$EXPECTED_TOTAL" ] 2>/dev/null; then

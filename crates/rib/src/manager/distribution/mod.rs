@@ -2503,11 +2503,14 @@ impl RibManager {
                                 ..OutboundRouteUpdate::default()
                             });
                         }
-                        let advertised = manager.grouped_advertised_count(member.peer).unwrap_or(0);
-                        manager.metrics.set_adj_rib_out_prefixes(
+                        let advertised = manager
+                            .grouped_advertised_unicast_lens(member.peer)
+                            .unwrap_or_default();
+                        crate::manager::helpers::set_adj_rib_out_prefixes(
+                            &manager.metrics,
                             &member.peer.to_string(),
-                            "all",
-                            gauge_val(advertised),
+                            crate::manager::helpers::UNICAST_FAMILIES,
+                            advertised,
                         );
                     }
                     flushed += batch;
@@ -4281,7 +4284,9 @@ impl RibManager {
         // Recompute grouped projections after the sparse overlay mutation;
         // these counts drive both metrics and query/BMP truth.
         let grouped_unicast_count = self.grouped_advertised_count(peer);
+        let grouped_unicast_lens = self.grouped_advertised_unicast_lens(peer);
         let grouped_vpn_count = self.grouped_vpn_advertised_count(peer);
+        let grouped_vpn_lens = self.grouped_vpn_advertised_lens(peer);
 
         // Local outbound capacity policy (ADR-0113) is the LAST gate before
         // the commit: every earlier reason this peer must not receive a route
@@ -4348,10 +4353,13 @@ impl RibManager {
         }
         // A limited grouped member's advertised count is its admitted
         // projection, which enforcement above just moved.
-        let grouped_unicast_count = if limited {
-            self.grouped_advertised_count(peer)
+        let (grouped_unicast_count, grouped_unicast_lens) = if limited {
+            (
+                self.grouped_advertised_count(peer),
+                self.grouped_advertised_unicast_lens(peer),
+            )
         } else {
-            grouped_unicast_count
+            (grouped_unicast_count, grouped_unicast_lens)
         };
 
         // Derive metric work from the final post-OTC, post-exact-export
@@ -4531,24 +4539,27 @@ impl RibManager {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
                 rib_out.remove_rtc(key);
             }
+            let lens = rib_out.family_lens();
             if unicast_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "all",
-                    gauge_val(grouped_unicast_count.unwrap_or_else(|| rib_out.len())),
+                    crate::manager::helpers::UNICAST_FAMILIES,
+                    grouped_unicast_lens.unwrap_or(lens.unicast),
                 );
             }
             if flowspec_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "flowspec",
-                    gauge_val(rib_out.flowspec_len()),
+                    crate::manager::helpers::FLOWSPEC_FAMILIES,
+                    lens.flowspec,
                 );
             }
             if evpn_changed {
                 self.metrics.set_adj_rib_out_prefixes(
                     &peer_label,
-                    "evpn",
+                    "l2vpn_evpn",
                     gauge_val(if evpn_group_owned {
                         evpn_admitted_count
                     } else {
@@ -4557,24 +4568,27 @@ impl RibManager {
                 );
             }
             if bgpls_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "bgpls",
-                    gauge_val(rib_out.bgpls_len()),
+                    crate::manager::helpers::LINKSTATE_FAMILIES,
+                    lens.bgpls,
                 );
             }
             if vpn_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "vpn",
-                    gauge_val(grouped_vpn_count.unwrap_or_else(|| rib_out.vpn_len())),
+                    crate::manager::helpers::L3VPN_FAMILIES,
+                    grouped_vpn_lens.unwrap_or(lens.vpn),
                 );
             }
             if labeled_changed {
-                self.metrics.set_adj_rib_out_prefixes(
+                crate::manager::helpers::set_adj_rib_out_prefixes(
+                    &self.metrics,
                     &peer_label,
-                    "labeled",
-                    gauge_val(rib_out.labeled_len()),
+                    crate::manager::helpers::LABELED_FAMILIES,
+                    lens.labeled,
                 );
             }
             if rtc_changed {
@@ -5730,9 +5744,15 @@ impl RibManager {
             super::retire_hash_set(&mut current, &mut || checkpoint());
             self.replacement_checkpoint(true);
             receipt.filtered_scope_member_visits += filtered_scope.len();
-            let advertised = self.grouped_advertised_count(peer).unwrap_or(0);
-            self.metrics
-                .set_adj_rib_out_prefixes(&peer.to_string(), "all", gauge_val(advertised));
+            let advertised = self
+                .grouped_advertised_unicast_lens(peer)
+                .unwrap_or_default();
+            crate::manager::helpers::set_adj_rib_out_prefixes(
+                &self.metrics,
+                &peer.to_string(),
+                crate::manager::helpers::UNICAST_FAMILIES,
+                advertised,
+            );
         }
         receipt.member_emit_state_us = receipt
             .member_emit_state_us
@@ -7002,8 +7022,11 @@ impl RibManager {
             }
             self.selection_readiness_checkpoint();
         }
-        self.metrics
-            .set_loc_rib_prefixes("all", gauge_val(self.loc_rib.len()));
+        crate::manager::helpers::set_loc_rib_prefixes(
+            &self.metrics,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            self.loc_rib.family_lens().unicast,
+        );
         changed
     }
 

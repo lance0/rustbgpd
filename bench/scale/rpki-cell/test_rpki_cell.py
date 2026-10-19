@@ -27,7 +27,7 @@ def metrics(chunk_sum: float, chunk_count: int, vrps: int | None) -> str:
     lines = ["# HELP bgp_rpki_vrp_count Number of RPKI VRP entries by address family",
              CHUNK.format("sum", chunk_sum), CHUNK.format("count", chunk_count)]
     if vrps is not None:
-        lines += [f'bgp_rpki_vrp_count{{af="ipv4"}} {vrps}', 'bgp_rpki_vrp_count{af="ipv6"} 0']
+        lines += [f'bgp_rpki_vrp_count{{afi="ipv4"}} {vrps}', 'bgp_rpki_vrp_count{afi="ipv6"} 0']
     return "\n".join(lines) + "\n"
 
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use rustbgpd_policy::RouteFamily;
 use rustbgpd_rpki::{AspaInvalidHop, AspaTable, AspaVerificationResult, VrpTable};
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     Afi, AspaValidation, LlgrFamily, Prefix, RpkiValidation, Safi, VpnAddressFamily, VpnRouteKey,
 };
@@ -44,6 +45,45 @@ pub(super) struct LlgrPeerConfig {
 )]
 pub(super) fn gauge_val(n: usize) -> i64 {
     n as i64
+}
+
+/// Canonical family pairs, `[IPv4, IPv6]`, for tables that hold both AFIs.
+pub(super) const UNICAST_FAMILIES: [&str; 2] = ["ipv4_unicast", "ipv6_unicast"];
+pub(super) const FLOWSPEC_FAMILIES: [&str; 2] = ["ipv4_flowspec", "ipv6_flowspec"];
+pub(super) const L3VPN_FAMILIES: [&str; 2] = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"];
+pub(super) const LABELED_FAMILIES: [&str; 2] = ["ipv4_labeled_unicast", "ipv6_labeled_unicast"];
+/// BGP-LS pair, `[linkstate, linkstate_vpn]`.
+pub(super) const LINKSTATE_FAMILIES: [&str; 2] = ["linkstate", "linkstate_vpn"];
+
+/// Publish one `bgp_rib_prefixes` family pair for a peer.
+pub(super) fn set_rib_prefixes(
+    metrics: &BgpMetrics,
+    peer: &str,
+    families: [&str; 2],
+    counts: [usize; 2],
+) {
+    for (family, count) in families.into_iter().zip(counts) {
+        metrics.set_rib_prefixes(peer, family, gauge_val(count));
+    }
+}
+
+/// Publish one `bgp_rib_adj_out_prefixes` family pair for a peer.
+pub(super) fn set_adj_rib_out_prefixes(
+    metrics: &BgpMetrics,
+    peer: &str,
+    families: [&str; 2],
+    counts: [usize; 2],
+) {
+    for (family, count) in families.into_iter().zip(counts) {
+        metrics.set_adj_rib_out_prefixes(peer, family, gauge_val(count));
+    }
+}
+
+/// Publish one `bgp_rib_loc_prefixes` family pair.
+pub(super) fn set_loc_rib_prefixes(metrics: &BgpMetrics, families: [&str; 2], counts: [usize; 2]) {
+    for (family, count) in families.into_iter().zip(counts) {
+        metrics.set_loc_rib_prefixes(family, gauge_val(count));
+    }
 }
 
 /// Compare two routes for outbound equality (same attributes, next-hop, scope, peer).
@@ -226,27 +266,9 @@ pub(super) fn bgpls_route_family(family: BgpLsFamily) -> RouteFamily {
 
 #[must_use]
 pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
-    match (afi, safi) {
-        (Afi::Ipv4, Safi::Unicast) => "ipv4_unicast",
-        (Afi::Ipv6, Safi::Unicast) => "ipv6_unicast",
-        (Afi::Ipv4, Safi::FlowSpec) => "ipv4_flowspec",
-        (Afi::Ipv6, Safi::FlowSpec) => "ipv6_flowspec",
-        (Afi::L2Vpn, Safi::Evpn) => "l2vpn_evpn",
-        (Afi::BgpLs, Safi::BgpLs) => "bgpls",
-        (Afi::BgpLs, Safi::BgpLsVpn) => "bgpls_vpn",
-        (Afi::Ipv4, Safi::MplsVpn) => "l3vpn_ipv4_unicast",
-        (Afi::Ipv6, Safi::MplsVpn) => "l3vpn_ipv6_unicast",
-        // ADR-0077 §8 / OpenConfig identity names.
-        (Afi::Ipv4, Safi::LabeledUnicast) => "ipv4_labeled_unicast",
-        (Afi::Ipv6, Safi::LabeledUnicast) => "ipv6_labeled_unicast",
-        (Afi::Ipv4, Safi::Multicast) => "ipv4_multicast",
-        (Afi::Ipv6, Safi::Multicast) => "ipv6_multicast",
-        (Afi::Ipv4, Safi::RtConstrain) => "rtc",
-        // Everything else: invalid AFI/SAFI combinations (e.g. RT-Constrain
-        // is AFI 1 only, RFC 4684 §7) and families from future registry
-        // growth this build does not model.
-        _ => "unsupported",
-    }
+    // Canonical configuration labels; multicast and impossible pairs (e.g.
+    // RT-Constrain is AFI 1 only, RFC 4684 §7) have no configured family.
+    rustbgpd_wire::family_label(afi, safi).unwrap_or("unsupported")
 }
 
 /// iBGP split-horizon / RFC 4456 reflection logic, extracted as a free

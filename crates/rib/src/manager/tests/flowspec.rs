@@ -225,21 +225,23 @@ fn assert_flowspec_gauge(manager: &RibManager, peer: IpAddr, expected: u32) {
         .iter()
         .find(|metric| metric.name() == "bgp_rib_prefixes")
         .unwrap();
-    let sample = gauge
+    // FlowSpec is published per AFI; the fixtures mix both.
+    let total: f64 = gauge
         .get_metric()
         .iter()
-        .find(|metric| {
+        .filter(|metric| {
             metric
                 .get_label()
                 .iter()
                 .any(|label| label.name() == "peer" && label.value() == peer.to_string())
-                && metric
-                    .get_label()
-                    .iter()
-                    .any(|label| label.name() == "afi_safi" && label.value() == "flowspec")
+                && metric.get_label().iter().any(|label| {
+                    label.name() == "family"
+                        && matches!(label.value(), "ipv4_flowspec" | "ipv6_flowspec")
+                })
         })
-        .unwrap();
-    assert_eq!(sample.get_gauge().get_value(), f64::from(expected));
+        .map(|metric| metric.get_gauge().get_value())
+        .sum();
+    assert_eq!(total, f64::from(expected));
 }
 
 #[tokio::test]

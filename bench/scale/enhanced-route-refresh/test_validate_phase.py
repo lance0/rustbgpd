@@ -42,26 +42,27 @@ def metrics(
         "bgp_rib_prefixes",
         rib,
         peer=validate_phase.PEER,
-        afi_safi="all",
+        family=validate_phase.FAMILY,
     )
     for scope in ("aggregate", "ipv4_unicast"):
         text += line(
             "bgp_max_prefix_usage",
             rib,
             peer=validate_phase.PEER,
-            scope=scope,
+            family=scope,
+            stage="accepted",
         )
     text += line(
         "bgp_route_refresh_in_progress",
         active,
         peer=validate_phase.PEER,
-        afi_safi=validate_phase.FAMILY,
+        family=validate_phase.FAMILY,
     )
     text += line(
         "bgp_route_refresh_stale_entries",
         stale,
         peer=validate_phase.PEER,
-        afi_safi=validate_phase.FAMILY,
+        family=validate_phase.FAMILY,
     )
     text += line(
         "bgp_session_established_total",
@@ -178,7 +179,7 @@ class PhaseValidatorTests(unittest.TestCase):
             chain["eorr"],
             "bgp_rib_prefixes",
             validate_phase.PREFIXES,
-            afi_safi="all",
+            family=validate_phase.FAMILY,
             peer=validate_phase.PEER,
         )
         with self.assertRaisesRegex(AssertionError, "bgp_rib_prefixes"):

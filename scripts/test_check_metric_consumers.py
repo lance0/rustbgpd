@@ -976,17 +976,30 @@ groups:
         with self.assertRaisesRegex(ValueError, "a.rs: quote character literal"):
             CHECK.call_argument_literals(sources, "set_rib_prefixes", 1)
 
+    def test_family_vocabulary_is_the_canonical_configuration_table(self):
+        values = CHECK.closed_label_vocabularies(self.rust, self.inventory)
+        family = values[("bgp_rib_prefixes", "family")]
+        self.assertIn("ipv4_unicast", family)
+        self.assertIn("linkstate_vpn", family)
+        # Retired spellings must not be accepted in a shipped selector.
+        for retired in ("all", "evpn", "flowspec", "vpn", "bgpls"):
+            self.assertNotIn(retired, family)
+
     def test_closed_label_source_rows_are_verified_against_the_source(self):
         original = CHECK.CLOSED_LABEL_SOURCES
         cases = (
             ((("bgp_missing_total",), "x", ()), "does not emit"),
             (
-                (("bgp_rib_prefixes",), "afi_safi", (("call", "set_loc_rib_prefixes", 0),)),
+                (("bgp_rib_prefixes",), "family", (("call", "set_loc_rib_prefixes", 0),)),
                 "set_loc_rib_prefixes does not write bgp_rib_prefixes",
             ),
             (
                 (("evpn_df_role",), "role", (("fn", "src/moved.rs", None, "set"),)),
                 "src/moved.rs is not a production source",
+            ),
+            (
+                (("bgp_rib_prefixes",), "family", (("const", CHECK.TELEMETRY, "MISSING"),)),
+                "no const MISSING",
             ),
             (
                 (("evpn_df_role",), "role", (("fn", CHECK.TELEMETRY, None, "set_missing"),)),

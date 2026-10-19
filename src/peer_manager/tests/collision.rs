@@ -961,10 +961,19 @@ fn max_prefix_capacity_gauge(
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "peer" && label.value() == peer);
-                let has_scope = metric
-                    .get_label()
-                    .iter()
-                    .any(|label| label.name() == "scope" && label.value() == scope);
+                // The session scope splits into the `family` and `stage` labels.
+                let (family, stage) = scope
+                    .strip_suffix("_received")
+                    .map_or((scope, "accepted"), |family| (family, "received"));
+                let has_scope =
+                    [("family", family), ("stage", stage)]
+                        .iter()
+                        .all(|(name, value)| {
+                            metric
+                                .get_label()
+                                .iter()
+                                .any(|label| label.name() == *name && label.value() == *value)
+                        });
                 (has_peer && has_scope).then(|| metric.get_gauge().get_value())
             })
         })

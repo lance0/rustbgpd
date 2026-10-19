@@ -1,8 +1,8 @@
 use super::{
     AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
     NeighborPolicyStats, OutboundCommitBatch, PolicyChain, Prefix, RibCommandError, RibManager,
-    RouteContext, Safi, debug, flowspec_route_family, gauge_val, record_export_policy_eval,
-    route_type, should_suppress_ibgp_inner, warn,
+    RouteContext, Safi, debug, flowspec_route_family, record_export_policy_eval, route_type,
+    should_suppress_ibgp_inner, warn,
 };
 use crate::attr_set::AttrSet;
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
@@ -54,14 +54,22 @@ impl RibManager {
             }
 
             debug!(%peer, routes = rib.len(), "rib updated");
-            (rib.len(), rib.flowspec_len())
+            (rib.unicast_lens(), rib.flowspec_lens())
         };
 
         let peer_label = peer.to_string();
-        self.metrics
-            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
-        self.metrics
-            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            flowspec_len,
+        );
         for ((afi, safi), count) in removed_stale_counts {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
@@ -106,14 +114,22 @@ impl RibManager {
             }
 
             debug!(%peer, routes = rib.len(), "rib updated");
-            (rib.len(), rib.flowspec_len())
+            (rib.unicast_lens(), rib.flowspec_lens())
         };
 
         let peer_label = peer.to_string();
-        self.metrics
-            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
-        self.metrics
-            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            flowspec_len,
+        );
         for ((afi, safi), count) in removed_stale_counts {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
@@ -152,10 +168,11 @@ impl RibManager {
             Some(_) => InjectOutcome::Replaced,
         };
         rib.insert_flowspec(route);
-        self.metrics.set_rib_prefixes(
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
             &LOCAL_PEER.to_string(),
-            "flowspec",
-            gauge_val(rib.flowspec_len()),
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            rib.flowspec_lens(),
         );
         debug!(afi = ?key.afi, rule = %key.rule, ?outcome, "injected local FlowSpec route");
         let mut fs_affected = HashSet::new();
@@ -180,10 +197,11 @@ impl RibManager {
             path_id: 0,
         };
         let removed = rib.withdraw_flowspec(&route_key);
-        self.metrics.set_rib_prefixes(
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
             &LOCAL_PEER.to_string(),
-            "flowspec",
-            gauge_val(rib.flowspec_len()),
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            rib.flowspec_lens(),
         );
         if removed {
             debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
@@ -466,8 +484,11 @@ impl RibManager {
             return;
         }
 
-        self.metrics
-            .set_loc_rib_prefixes("flowspec", gauge_val(self.loc_rib.flowspec_len()));
+        crate::manager::helpers::set_loc_rib_prefixes(
+            &self.metrics,
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            self.loc_rib.family_lens().flowspec,
+        );
 
         // Distribute FlowSpec changes to outbound peers
         let peers: Vec<IpAddr> = self
