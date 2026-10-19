@@ -217,18 +217,14 @@ fn selection_deferral_construction_materializes_failure_counter_children() {
         ("ipv6_unicast".to_string(), 0.0),
     ]);
     assert_eq!(
-        counter_values_by_label(
-            &metrics,
-            "bgp_selection_deferral_timeouts_total",
-            "afi_safi"
-        ),
+        counter_values_by_label(&metrics, "bgp_selection_deferral_timeouts_total", "family"),
         expected
     );
     assert_eq!(
         counter_values_by_label(
             &metrics,
             "bgp_selection_deferral_ledger_overflows_total",
-            "afi_safi"
+            "family"
         ),
         expected
     );

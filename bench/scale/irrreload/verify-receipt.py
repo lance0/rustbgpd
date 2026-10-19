@@ -697,13 +697,43 @@ def peer_rows(data, name: str, peers: int, extra=()):
     return found
 
 
+RIB_UNICAST = ("ipv4_unicast", "ipv6_unicast")
+# Adj-RIB-In publishes these families; Adj-RIB-Out zero-initializes every
+# canonical family at PeerUp.
+RIB_IN_FAMILIES = (*RIB_UNICAST, "ipv4_flowspec", "ipv6_flowspec")
+RIB_OUT_FAMILIES = (
+    *RIB_UNICAST, "ipv4_flowspec", "ipv6_flowspec", "l2vpn_evpn", "linkstate", "linkstate_vpn",
+    "l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast", "ipv4_labeled_unicast", "ipv6_labeled_unicast", "rtc",
+)
+
+
 def family_rows(data, name: str, peers: set[str], families: tuple[str, ...]):
+    """Per-(peer, family) values plus a summed `(peer, "unicast")` entry."""
     found = rows(data, name, len(peers) * len(families))
     expected = {(peer, family) for peer in peers for family in families}
-    actual = {(labels.get("peer"), labels.get("afi_safi")) for labels, _ in found}
-    if actual != expected or any(set(labels) != {"peer", "afi_safi"} for labels, _ in found):
+    actual = {(labels.get("peer"), labels.get("family")) for labels, _ in found}
+    if actual != expected or any(set(labels) != {"peer", "family"} for labels, _ in found):
         fail(f"{name}: family/peer roster mismatch")
-    return {(labels["peer"], labels["afi_safi"]): value for labels, value in found}
+    values = {(labels["peer"], labels["family"]): value for labels, value in found}
+    for peer in peers:
+        values[(peer, "unicast")] = sum(values[(peer, family)] for family in RIB_UNICAST)
+    return values
+
+
+def family_metric_lines(name: str, peer: str, families: tuple[str, ...], unicast: int, other=None) -> list[str]:
+    """Fixture rows splitting `unicast` across both AFIs so checks must sum them."""
+    split = {"ipv4_unicast": unicast - unicast // 2, "ipv6_unicast": unicast // 2}
+    return [
+        f'{name}{{family="{family}",peer="{peer}"}} {split.get(family, other(family) if other else 0)}'
+        for family in families
+    ]
+
+
+def loc_metric_lines(total) -> list[str]:
+    return [
+        f'bgp_rib_loc_prefixes{{family="ipv4_unicast"}} {total - total // 2}',
+        f'bgp_rib_loc_prefixes{{family="ipv6_unicast"}} {total // 2}',
+    ]
 
 
 def member_addr(member: int) -> str:
@@ -815,27 +845,29 @@ def validate_topology(
             peer_roster = identities
         elif peer_roster != identities:
             fail("peer roster changed between topology scrapes")
-        loc = rows(data, "bgp_rib_loc_prefixes", 1)
-        if loc != [({"afi_safi": "all"}, float(total))]:
+        loc = rows(data, "bgp_rib_loc_prefixes", 2)
+        if (
+            sorted(labels.get("family") for labels, _ in loc) != list(RIB_UNICAST)
+            or any(set(labels) != {"family"} for labels, _ in loc)
+            or sum(value for _, value in loc) != float(total)
+        ):
             fail("Loc-RIB aggregate mismatch")
         per_peer = total // peers
-        adj_in = family_rows(data, "bgp_rib_prefixes", identities, ("all", "flowspec"))
-        if any(adj_in[(peer, "flowspec")] != 0 for peer in identities):
+        adj_in = family_rows(data, "bgp_rib_prefixes", identities, RIB_IN_FAMILIES)
+        if any(adj_in[(peer, family)] != 0 for peer in identities for family in RIB_IN_FAMILIES[2:]):
             fail("Adj-RIB-In aggregate/non-all roster mismatch")
-        out_families = ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")
-        adj_out = family_rows(data, "bgp_rib_adj_out_prefixes", identities, out_families)
+        adj_out = family_rows(data, "bgp_rib_adj_out_prefixes", identities, RIB_OUT_FAMILIES)
         if any(
             adj_out[(peer, family)] != 0
             for peer in identities
-            for family in out_families
-            if family != "all"
+            for family in RIB_OUT_FAMILIES[2:]
         ):
             fail("Adj-RIB-Out aggregate/non-all roster mismatch")
         if not overlap_pairs:
             # Disjoint announcements: the historical exact expectations.
-            if any(adj_in[(peer, "all")] != per_peer for peer in identities):
+            if any(adj_in[(peer, "unicast")] != per_peer for peer in identities):
                 fail("Adj-RIB-In aggregate/non-all roster mismatch")
-            if any(adj_out[(peer, "all")] != total - per_peer for peer in identities):
+            if any(adj_out[(peer, "unicast")] != total - per_peer for peer in identities):
                 fail("Adj-RIB-Out aggregate/non-all roster mismatch")
         else:
             # Overlap shape: per-member expectations from the manifest
@@ -845,14 +877,14 @@ def validate_topology(
                 fail("overlap topology requires the harness stub peer roster")
             for peer in identities:
                 member = member_of[peer]
-                if adj_in[(peer, "all")] != per_peer + announced_extra[member]:
+                if adj_in[(peer, "unicast")] != per_peer + announced_extra[member]:
                     fail("Adj-RIB-In does not reflect the manifest overlap allocation")
             if mode == "private":
                 # Per-client best must deliver the runner-up path for every
                 # overlapped prefix the observer itself announces: only
                 # exclusively-announced prefixes stay suppressed.
                 if any(
-                    adj_out[(peer, "all")]
+                    adj_out[(peer, "unicast")]
                     != total - (per_peer - own_overlapped[member_of[peer]])
                     for peer in identities
                 ):
@@ -865,7 +897,7 @@ def validate_topology(
                 suppressed = 0
                 for peer in identities:
                     member = member_of[peer]
-                    value = adj_out[(peer, "all")]
+                    value = adj_out[(peer, "unicast")]
                     lower = total - (per_peer + announced_extra[member])
                     upper = total - (per_peer - own_overlapped[member])
                     if not lower <= value <= upper:
@@ -873,7 +905,7 @@ def validate_topology(
                     suppressed += total - value
                 if suppressed != total:
                     fail("grouped suppression must total one best announcer per prefix")
-        achieved = sum(adj_in[(peer, "all")] for peer in identities) - total
+        achieved = sum(adj_in[(peer, "unicast")] for peer in identities) - total
         if achieved != len(overlap_pairs):
             fail(
                 f"achieved overlap ({achieved} second paths) does not match "
@@ -2427,12 +2459,12 @@ def make_fixture(
             (cdir / "received-view.tsv").write_text("\n".join(received_rows) + "\n")
             (cdir / "config.toml").write_text("per_client_best = true\n" * (320 if cell == "rustbgpd-sighup" else 0))
             (cdir / "topology.tsv").write_text("phase\tepoch_ns\nscrape1\t1000000000\nscrape2\t2000000000\nscrape3\t3000000000\n")
-            metrics = ["bgp_rib_outbound_registered_peers 320", "bgp_rib_ingest_channel_depth 0", "bgp_rib_policy_transition_in_progress 0", 'bgp_rib_loc_prefixes{afi_safi="all"} 183040']
+            metrics = ["bgp_rib_outbound_registered_peers 320", "bgp_rib_ingest_channel_depth 0", "bgp_rib_policy_transition_in_progress 0", *loc_metric_lines(183040)]
             for peer in range(320):
                 metrics += [f'bgp_peer_session_established{{interface="eth0",peer="p{peer}"}} 1', f'bgp_peer_outbound_queue_depth{{peer="p{peer}"}} 0']
                 metrics += [f'bgp_session_established_total{{peer="p{peer}"}} 1']
-                metrics += [f'bgp_rib_prefixes{{afi_safi="{family}",peer="p{peer}"}} {572 if family == "all" else 0}' for family in ("all", "flowspec")]
-                metrics += [f'bgp_rib_adj_out_prefixes{{afi_safi="{family}",peer="p{peer}"}} {182468 if family == "all" else 0}' for family in ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")]
+                metrics += family_metric_lines("bgp_rib_prefixes", f"p{peer}", RIB_IN_FAMILIES, 572)
+                metrics += family_metric_lines("bgp_rib_adj_out_prefixes", f"p{peer}", RIB_OUT_FAMILIES, 182468)
             metrics += ["bgp_update_groups 1", "bgp_update_group_fallback_peers 0", "bgp_update_group_runner_up_entries 0", 'bgp_update_group_members{group="7"} 320']
             metrics += [f'bgp_peer_update_group{{peer="p{peer}"}} 7' for peer in range(320)]
             for sample in range(1, 4):
@@ -3057,7 +3089,7 @@ def self_test() -> None:
                 "bgp_rib_outbound_registered_peers 2",
                 "bgp_rib_ingest_channel_depth 0",
                 "bgp_rib_policy_transition_in_progress 0",
-                f'bgp_rib_loc_prefixes{{afi_safi="all"}} {7 if bad == "route-gauge" else 8}',
+                *loc_metric_lines(7 if bad == "route-gauge" else 8),
             ]
             for peer in ("p0", "p1"):
                 established_peer = (
@@ -3075,16 +3107,11 @@ def self_test() -> None:
                         f'bgp_session_flaps_total{{peer="{flap_peer}"}} '
                         f'{1 if bad == "flapped" else 0}'
                     )
-                lines += [
-                    f'bgp_rib_prefixes{{afi_safi="{family}",peer="{peer}"}} '
-                    f'{4 if family == "all" else int(bad == "route-family" and peer == "p1")}'
-                    for family in ("all", "flowspec")
-                ]
-                lines += [
-                    f'bgp_rib_adj_out_prefixes{{afi_safi="{family}",peer="{peer}"}} '
-                    f'{4 if family == "all" else 0}'
-                    for family in ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")
-                ]
+                lines += family_metric_lines(
+                    "bgp_rib_prefixes", peer, RIB_IN_FAMILIES, 4,
+                    lambda family, peer=peer: int(bad == "route-family" and peer == "p1" and family == "ipv4_flowspec"),
+                )
+                lines += family_metric_lines("bgp_rib_adj_out_prefixes", peer, RIB_OUT_FAMILIES, 4)
             if bad == "counter-malformed":
                 lines.append('bgp_session_flaps_total{peer="p0"} broken')
             if bad == "preflip":
@@ -3166,21 +3193,18 @@ def self_test() -> None:
                 "bgp_rib_outbound_registered_peers 2",
                 "bgp_rib_ingest_channel_depth 0",
                 "bgp_rib_policy_transition_in_progress 0",
-                'bgp_rib_loc_prefixes{afi_safi="all"} 8',
+                *loc_metric_lines(8),
             ]
             for member, peer in enumerate(addr):
                 lines += [
                     f'bgp_peer_session_established{{interface="eth0",peer="{peer}"}} 1',
                     f'bgp_session_established_total{{peer="{peer}"}} 1',
                     f'bgp_peer_outbound_queue_depth{{peer="{peer}"}} 0',
-                    f'bgp_rib_prefixes{{afi_safi="all",peer="{peer}"}} {adj_in[member]}',
-                    f'bgp_rib_prefixes{{afi_safi="flowspec",peer="{peer}"}} 0',
+                    *family_metric_lines("bgp_rib_prefixes", peer, RIB_IN_FAMILIES, adj_in[member]),
                 ]
-                lines += [
-                    f'bgp_rib_adj_out_prefixes{{afi_safi="{family}",peer="{peer}"}} '
-                    f'{adj_out[member] if family == "all" else 0}'
-                    for family in ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")
-                ]
+                lines += family_metric_lines(
+                    "bgp_rib_adj_out_prefixes", peer, RIB_OUT_FAMILIES, adj_out[member]
+                )
             lines += [
                 "bgp_update_groups 1",
                 "bgp_update_group_fallback_peers 0",

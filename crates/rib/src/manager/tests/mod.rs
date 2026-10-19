@@ -930,7 +930,7 @@ fn assert_refresh_metrics(
     active: f64,
     stale: f64,
 ) {
-    let labels = &[("peer", peer), ("afi_safi", afi_safi)];
+    let labels = &[("peer", peer), ("family", afi_safi)];
     let observed_active = gauge_metric_value(metrics, "bgp_route_refresh_in_progress", labels);
     let observed_stale = gauge_metric_value(metrics, "bgp_route_refresh_stale_entries", labels);
     assert!(

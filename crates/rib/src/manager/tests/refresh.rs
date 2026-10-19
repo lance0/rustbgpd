@@ -627,7 +627,7 @@ async fn enhanced_route_refresh_bgpls_eorr_sweeps_unreplaced_route() {
     .unwrap();
     let before_refresh = query_bgpls_routes(&tx).await;
     assert_eq!(before_refresh.len(), 2);
-    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 1.0, 2.0);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "linkstate", 1.0, 2.0);
 
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
@@ -639,7 +639,7 @@ async fn enhanced_route_refresh_bgpls_eorr_sweeps_unreplaced_route() {
     .unwrap();
     let during_refresh = query_bgpls_routes(&tx).await;
     assert_eq!(during_refresh.len(), 2);
-    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 1.0, 1.0);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "linkstate", 1.0, 1.0);
 
     tx.send(RibUpdate::EndRouteRefresh {
         session_id: 0,
@@ -653,7 +653,7 @@ async fn enhanced_route_refresh_bgpls_eorr_sweeps_unreplaced_route() {
     let after_refresh = query_bgpls_routes(&tx).await;
     assert_eq!(after_refresh.len(), 1);
     assert_eq!(after_refresh[0].key(), key1);
-    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 0.0, 0.0);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "linkstate", 0.0, 0.0);
 
     drop(tx);
     handle.await.unwrap();
@@ -690,7 +690,7 @@ async fn enhanced_route_refresh_bgpls_withdraw_clears_stale_marker() {
     .unwrap();
     let before_withdraw = query_bgpls_routes(&tx).await;
     assert_eq!(before_withdraw.len(), 1);
-    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 1.0, 1.0);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "linkstate", 1.0, 1.0);
 
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
@@ -702,7 +702,7 @@ async fn enhanced_route_refresh_bgpls_withdraw_clears_stale_marker() {
     .unwrap();
     let after_withdraw = query_bgpls_routes(&tx).await;
     assert!(after_withdraw.is_empty());
-    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 1.0, 0.0);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "linkstate", 1.0, 0.0);
 
     tx.send(RibUpdate::EndRouteRefresh {
         session_id: 0,
@@ -715,7 +715,7 @@ async fn enhanced_route_refresh_bgpls_withdraw_clears_stale_marker() {
 
     let after_refresh = query_bgpls_routes(&tx).await;
     assert!(after_refresh.is_empty());
-    assert_refresh_metrics(&metrics, "10.0.0.1", "bgpls", 0.0, 0.0);
+    assert_refresh_metrics(&metrics, "10.0.0.1", "linkstate", 0.0, 0.0);
 
     drop(tx);
     handle.await.unwrap();

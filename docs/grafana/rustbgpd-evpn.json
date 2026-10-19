@@ -73,7 +73,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "expr": "sum by (instance) (bgp_rib_loc_prefixes{instance=~\"$instance\",afi_safi=\"evpn\"})",
+          "expr": "sum by (instance) (bgp_rib_loc_prefixes{instance=~\"$instance\",family=\"l2vpn_evpn\"})",
           "legendFormat": "{{instance}} all EVPN types",
           "refId": "A"
         }

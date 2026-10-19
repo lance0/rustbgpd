@@ -21,9 +21,9 @@ pub(crate) fn rpki_vrp_count_sum(prometheus_text: &str) -> Option<u64> {
         let Some(rest) = line.strip_prefix(NAME) else {
             continue;
         };
-        let family = if let Some(value) = rest.strip_prefix(r#"{af="ipv4"}"#) {
+        let family = if let Some(value) = rest.strip_prefix(r#"{afi="ipv4"}"#) {
             Some((0, value))
-        } else if let Some(value) = rest.strip_prefix(r#"{af="ipv6"}"#) {
+        } else if let Some(value) = rest.strip_prefix(r#"{afi="ipv6"}"#) {
             Some((1, value))
         } else if rest.is_empty()
             || rest.starts_with('{')
@@ -276,29 +276,29 @@ mod tests {
         let production = r#"
 # HELP bgp_rpki_vrp_count Number of RPKI VRP entries by address family
 # TYPE bgp_rpki_vrp_count gauge
-bgp_rpki_vrp_count{af="ipv4"} 120
-bgp_rpki_vrp_count{af="ipv6"} 30
-bgp_rpki_vrp_count_total{af="ipv4"} 9000
+bgp_rpki_vrp_count{afi="ipv4"} 120
+bgp_rpki_vrp_count{afi="ipv6"} 30
+bgp_rpki_vrp_count_total{afi="ipv4"} 9000
 unrelated_metric 7
 "#;
         assert_eq!(rpki_vrp_count_sum(production), Some(150));
         assert_eq!(
-            rpki_vrp_count_sum("bgp_rpki_vrp_counting 9\nbgp_rpki_vrp_count_extra{af=\"ipv4\"} 8"),
+            rpki_vrp_count_sum("bgp_rpki_vrp_counting 9\nbgp_rpki_vrp_count_extra{afi=\"ipv4\"} 8"),
             None
         );
         assert_eq!(
             rpki_vrp_count_sum(
-                "bgp_rpki_vrp_count{af=\"ipv4\"} 0\nbgp_rpki_vrp_count{af=\"ipv6\"} 0"
+                "bgp_rpki_vrp_count{afi=\"ipv4\"} 0\nbgp_rpki_vrp_count{afi=\"ipv6\"} 0"
             ),
             Some(0)
         );
         for invalid in [
-            "bgp_rpki_vrp_count{af=\"ipv4\"} 1",
-            "bgp_rpki_vrp_count{af=\"ipv4\"} 1\nbgp_rpki_vrp_count{af=\"ipv4\"} 2\nbgp_rpki_vrp_count{af=\"ipv6\"} 3",
-            "bgp_rpki_vrp_count{af=\"other\"} 1",
+            "bgp_rpki_vrp_count{afi=\"ipv4\"} 1",
+            "bgp_rpki_vrp_count{afi=\"ipv4\"} 1\nbgp_rpki_vrp_count{afi=\"ipv4\"} 2\nbgp_rpki_vrp_count{afi=\"ipv6\"} 3",
+            "bgp_rpki_vrp_count{afi=\"other\"} 1",
             "bgp_rpki_vrp_count 1",
-            "bgp_rpki_vrp_count{af=\"ipv4\" not-a-number",
-            "bgp_rpki_vrp_count{af=\"ipv4\"} 18446744073709551615\nbgp_rpki_vrp_count{af=\"ipv6\"} 1",
+            "bgp_rpki_vrp_count{afi=\"ipv4\" not-a-number",
+            "bgp_rpki_vrp_count{afi=\"ipv4\"} 18446744073709551615\nbgp_rpki_vrp_count{afi=\"ipv6\"} 1",
         ] {
             assert_eq!(rpki_vrp_count_sum(invalid), None, "{invalid}");
         }

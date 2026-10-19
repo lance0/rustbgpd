@@ -7,8 +7,8 @@ use super::{
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
     RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, debug,
-    evaluate_chain_with_attribution, family_label, gauge_val, policy_label_with_term,
-    prefix_family, record_export_policy_eval, route_type, route_type_label, route_type_message,
+    evaluate_chain_with_attribution, family_label, policy_label_with_term, prefix_family,
+    record_export_policy_eval, route_type, route_type_label, route_type_message,
     rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
     validate_route_aspa, validate_route_rpki,
 };
@@ -1590,14 +1590,22 @@ impl RibManager {
                 }
             }
             debug!(%peer, routes = rib.len(), "rib updated");
-            (rib.len(), rib.flowspec_len())
+            (rib.unicast_lens(), rib.flowspec_lens())
         };
 
         let peer_label = peer.to_string();
-        self.metrics
-            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
-        self.metrics
-            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            flowspec_len,
+        );
         for ((afi, safi), count) in removed_stale_counts {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
@@ -1612,7 +1620,7 @@ impl RibManager {
             let changed = self.recompute_best_after_withdraw(&affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
-            if rib_len == 0 {
+            if rib_len == [0, 0] {
                 self.gc_attr_intern();
             } else {
                 self.defer_unicast_attr_gc(removed);
@@ -1689,14 +1697,22 @@ impl RibManager {
                 }
             }
             debug!(%peer, routes = rib.len(), "rib updated");
-            (rib.len(), rib.flowspec_len())
+            (rib.unicast_lens(), rib.flowspec_lens())
         };
 
         let peer_label = peer.to_string();
-        self.metrics
-            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
-        self.metrics
-            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &peer_label,
+            crate::manager::helpers::FLOWSPEC_FAMILIES,
+            flowspec_len,
+        );
         for ((afi, safi), count) in removed_stale_counts {
             self.decrement_refresh_stale_count(peer, afi, safi, count);
         }
@@ -1736,10 +1752,14 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         let replaced = rib.insert(route);
         debug!(%prefix, "injected local route");
-        let rib_len = rib.len();
+        let rib_len = rib.unicast_lens();
         self.register_unicast_announcer(LOCAL_PEER, prefix);
-        self.metrics
-            .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib_len));
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &LOCAL_PEER.to_string(),
+            crate::manager::helpers::UNICAST_FAMILIES,
+            rib_len,
+        );
 
         let mut affected = HashSet::new();
         affected.insert(prefix);
@@ -1763,16 +1783,20 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw(&prefix, path_id) {
             debug!(%prefix, "withdrawn injected route");
-            let rib_len = rib.len();
-            self.metrics
-                .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib_len));
+            let rib_len = rib.unicast_lens();
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &LOCAL_PEER.to_string(),
+                crate::manager::helpers::UNICAST_FAMILIES,
+                rib_len,
+            );
             let mut affected = HashSet::new();
             affected.insert(prefix);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
             // Same rule as a session withdrawal: the final source withdrawal
             // collects immediately; anything else stays bounded and deferred.
-            if rib_len == 0 {
+            if rib_len == [0, 0] {
                 self.gc_attr_intern();
             } else {
                 self.defer_unicast_attr_gc(1);

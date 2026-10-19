@@ -12,10 +12,12 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 use smallvec::SmallVec;
 
 use crate::fast_hash::{FastMap as HashMap, FastState, ShardedMap};
+use crate::loc_rib::{FamilyLens, SecondFamilyCounts, split, track};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute,
-    LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
+    LabeledRibRoute, LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
+    VpnRibRouteKey,
 };
 use crate::slab::RouteSlab;
 use crate::update::{RouteQueryKey, route_query_key};
@@ -74,6 +76,9 @@ pub struct AdjRibOut {
     vpn_keys: VpnKeyVersion,
     /// Recent VPN key-set changes, kept only by tables that recovery pools index.
     vpn_key_log: Option<Box<VpnKeyLog>>,
+    /// Second-family counts for the mixed-AFI maps (see
+    /// [`crate::loc_rib::FamilyLens`]), maintained at every insert/remove.
+    second_family: SecondFamilyCounts,
 }
 
 /// The VPN key-set changes after version `base` of this table, oldest first:
@@ -277,6 +282,7 @@ impl AdjRibOut {
             rtc_routes: HashMap::default(),
             vpn_keys: VpnKeyVersion::new(),
             vpn_key_log: None,
+            second_family: SecondFamilyCounts::default(),
         }
     }
 
@@ -373,6 +379,8 @@ impl AdjRibOut {
             handle
         } else {
             checkpoint();
+            let v6 = matches!(key.0, Prefix::V6(_));
+            track(&mut self.second_family.unicast, v6, true, false);
             let handle = self.routes.insert(route);
             checkpoint();
             ids.push((key.1, handle));
@@ -465,6 +473,12 @@ impl AdjRibOut {
         self.set_self_next_hop(handle, false);
         let retired = self.routes.remove(handle);
         let removed = retired.is_some();
+        track(
+            &mut self.second_family.unicast,
+            matches!(prefix, Prefix::V6(_)),
+            false,
+            removed,
+        );
         drop(retired);
         checkpoint();
         removed
@@ -558,6 +572,7 @@ impl AdjRibOut {
     /// allocations for callers that expect the unicast table to refill.
     /// Use [`Self::release_unicast`] when ownership moves to an update group.
     pub fn clear_unicast(&mut self) {
+        self.second_family.unicast = 0;
         self.routes.clear();
         self.next_hop_overrides.clear();
         self.self_next_hop.clear();
@@ -575,6 +590,7 @@ impl AdjRibOut {
     /// flaps deliberately trade reallocation for lower grouped steady-state
     /// memory.
     pub fn release_unicast(&mut self) {
+        self.second_family.unicast = 0;
         self.routes = RouteSlab::default();
         self.next_hop_overrides = HashMap::default();
         self.self_next_hop = Vec::new();
@@ -585,6 +601,7 @@ impl AdjRibOut {
     /// Retire and release unicast state with checkpoints around every route,
     /// index entry, and final backing allocation.
     pub(crate) fn release_unicast_with(&mut self, checkpoint: &mut impl FnMut()) {
+        self.second_family.unicast = 0;
         self.routes.release_with(checkpoint);
         release_hash_map(&mut self.next_hop_overrides, checkpoint);
         self.self_next_hop = Vec::new();
@@ -613,6 +630,7 @@ impl AdjRibOut {
     /// callers that expect the VPN table to refill. Use [`Self::release_vpn`]
     /// when ownership moves to an update group.
     pub fn clear_vpn(&mut self) {
+        self.second_family.vpn = 0;
         self.vpn_keys_changed(None);
         self.vpn_routes.clear();
         self.vpn_key_path_ids.clear();
@@ -621,6 +639,7 @@ impl AdjRibOut {
     /// Remove only the VPN routes and their secondary key index, releasing
     /// their backing allocations while leaving every other family untouched.
     pub fn release_vpn(&mut self) {
+        self.second_family.vpn = 0;
         self.vpn_keys_released();
         self.vpn_routes = ShardedMap::default();
         self.vpn_key_path_ids = ShardedMap::default();
@@ -628,6 +647,7 @@ impl AdjRibOut {
 
     /// Retire and release VPN state while leaving every other family intact.
     pub(crate) fn release_vpn_with(&mut self, checkpoint: &mut impl FnMut()) {
+        self.second_family.vpn = 0;
         self.vpn_keys_released();
         release_sharded_map(&mut self.vpn_routes, checkpoint);
         release_sharded_map(&mut self.vpn_key_path_ids, checkpoint);
@@ -664,6 +684,7 @@ impl AdjRibOut {
     /// Remove every advertised route — unicast, `FlowSpec`, EVPN, BGP-LS,
     /// VPN, labeled-unicast, and RTC — and the secondary prefix index.
     pub fn clear(&mut self) {
+        self.second_family = SecondFamilyCounts::default();
         self.routes.clear();
         self.next_hop_overrides.clear();
         self.self_next_hop.clear();
@@ -682,6 +703,7 @@ impl AdjRibOut {
 
     /// Retire every advertised family while retaining its backing allocations.
     pub(crate) fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
+        self.second_family = SecondFamilyCounts::default();
         self.routes.retire_with(checkpoint);
         retire_hash_map(&mut self.next_hop_overrides, checkpoint);
         self.self_next_hop.clear();
@@ -702,6 +724,21 @@ impl AdjRibOut {
     #[must_use]
     pub fn len(&self) -> usize {
         self.routes.len()
+    }
+
+    /// Advertised routes per family pair (see [`FamilyLens`]), O(1) from
+    /// maintained counts. Private-table truth only; update-group members
+    /// publish their synthesized per-family counts instead.
+    #[must_use]
+    pub fn family_lens(&self) -> FamilyLens {
+        let second = self.second_family;
+        FamilyLens {
+            unicast: split(self.routes.len(), second.unicast),
+            flowspec: split(self.flowspec_routes.len(), second.flowspec),
+            vpn: split(self.vpn_routes.len(), second.vpn),
+            labeled: split(self.labeled_routes.len(), second.labeled),
+            bgpls: split(self.bgpls_routes.len(), second.bgpls),
+        }
     }
 
     /// Return the backing capacity of the unicast route map.
@@ -772,12 +809,24 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised `FlowSpec` route.
     pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
-        self.flowspec_routes.insert(route.selection_key(), route);
+        let v6 = route.afi == Afi::Ipv6;
+        let added = self
+            .flowspec_routes
+            .insert(route.selection_key(), route)
+            .is_none();
+        track(&mut self.second_family.flowspec, v6, added, false);
     }
 
     /// Remove a `FlowSpec` route by rule. Returns `true` if it existed.
     pub fn remove_flowspec(&mut self, key: &FlowSpecKey) -> bool {
-        self.flowspec_routes.remove(key).is_some()
+        let removed = self.flowspec_routes.remove(key).is_some();
+        track(
+            &mut self.second_family.flowspec,
+            key.afi == Afi::Ipv6,
+            false,
+            removed,
+        );
+        removed
     }
 
     /// Look up a `FlowSpec` route by rule.
@@ -799,6 +848,7 @@ impl AdjRibOut {
 
     /// Remove all advertised `FlowSpec` routes.
     pub fn clear_flowspec(&mut self) {
+        self.second_family.flowspec = 0;
         self.flowspec_routes.clear();
     }
 
@@ -845,12 +895,18 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised BGP-LS route.
     pub fn insert_bgpls(&mut self, route: BgpLsRibRoute) {
-        self.bgpls_routes.insert(route.key(), route);
+        let key = route.key();
+        let vpn = key.family == BgpLsFamily::LinkStateVpn;
+        let added = self.bgpls_routes.insert(key, route).is_none();
+        track(&mut self.second_family.bgpls, vpn, added, false);
     }
 
     /// Remove an advertised BGP-LS route by opaque key. Returns `true` if it existed.
     pub fn remove_bgpls(&mut self, key: &BgpLsRouteKey) -> bool {
-        self.bgpls_routes.remove(key).is_some()
+        let removed = self.bgpls_routes.remove(key).is_some();
+        let vpn = key.family == BgpLsFamily::LinkStateVpn;
+        track(&mut self.second_family.bgpls, vpn, false, removed);
+        removed
     }
 
     /// Look up an advertised BGP-LS route by opaque key.
@@ -876,6 +932,8 @@ impl AdjRibOut {
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
         let key = route.key();
         if self.vpn_routes.insert(key.clone(), route).is_none() {
+            let v6 = key.afi_safi().0 == Afi::Ipv6;
+            track(&mut self.second_family.vpn, v6, true, false);
             self.vpn_keys_changed(Some((key.clone(), true)));
             let ids = self.vpn_key_path_ids.entry(key.nlri_key).or_default();
             if !ids.contains(&key.path_id) {
@@ -887,6 +945,12 @@ impl AdjRibOut {
     /// Remove an advertised VPN route by key. Returns `true` if it existed.
     pub fn remove_vpn(&mut self, key: &VpnRibRouteKey) -> bool {
         let removed = self.vpn_routes.remove(key).is_some();
+        track(
+            &mut self.second_family.vpn,
+            key.afi_safi().0 == Afi::Ipv6,
+            false,
+            removed,
+        );
         if removed {
             self.vpn_keys_changed(Some((key.clone(), false)));
         }
@@ -946,6 +1010,8 @@ impl AdjRibOut {
     pub fn insert_labeled(&mut self, route: LabeledRibRoute) {
         let key = route.key();
         if self.labeled_routes.insert(key, route).is_none() {
+            let v6 = matches!(key.prefix, Prefix::V6(_));
+            track(&mut self.second_family.labeled, v6, true, false);
             let ids = self.labeled_key_path_ids.entry(key.prefix).or_default();
             if !ids.contains(&key.path_id) {
                 ids.push(key.path_id);
@@ -957,6 +1023,8 @@ impl AdjRibOut {
     /// existed.
     pub fn remove_labeled(&mut self, key: &LabeledRibRouteKey) -> bool {
         let removed = self.labeled_routes.remove(key).is_some();
+        let v6 = matches!(key.prefix, Prefix::V6(_));
+        track(&mut self.second_family.labeled, v6, false, removed);
         if removed && let Some(ids) = self.labeled_key_path_ids.get_mut(&key.prefix) {
             ids.retain(|id| *id != key.path_id);
             if ids.is_empty() {
@@ -1087,6 +1155,31 @@ mod tests {
     use crate::attr_set::AttrSet;
     use crate::route::BgpLsFamily;
     use crate::test_support::make_route_with_path_id as make_route;
+
+    /// The per-family gauges read these counts instead of walking a table:
+    /// dropping an insert, withdraw, or clear adjustment makes this red.
+    #[test]
+    fn family_lens_follow_each_afi_through_insert_withdraw_and_clear() {
+        let mut rib = AdjRibOut::new("192.0.2.1".parse().unwrap());
+        let v4 = prefix_a();
+        let v6 = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            "2001:db8::".parse().unwrap(),
+            32,
+        ));
+        rib.insert(make_route(v4, 0));
+        rib.insert(make_route(v6, 1));
+        rib.insert(make_route(v6, 2));
+        rib.insert(make_route(v6, 2));
+        assert_eq!(rib.family_lens().unicast, [1, 2]);
+        assert!(rib.withdraw(&v6, 2));
+        assert!(!rib.withdraw(&v6, 2));
+        assert_eq!(rib.family_lens().unicast, [1, 1]);
+        rib.clear_unicast();
+        assert_eq!(rib.family_lens().unicast, [0, 0]);
+        rib.insert(make_route(v6, 1));
+        rib.clear();
+        assert_eq!(rib.family_lens().unicast, [0, 0]);
+    }
 
     #[test]
     fn unicast_action_residue_follows_exact_admitted_key_lifecycle() {

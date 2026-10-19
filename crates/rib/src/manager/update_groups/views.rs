@@ -609,6 +609,70 @@ impl RibManager {
         Some(group.advertised_count_for(peer).saturating_sub(rejected))
     }
 
+    /// [`Self::grouped_advertised_count`] split `[IPv4, IPv6]` for the
+    /// per-family Adj-RIB-Out gauge; `None` for ungrouped peers.
+    pub(in crate::manager) fn grouped_advertised_unicast_lens(
+        &self,
+        peer: IpAddr,
+    ) -> Option<[usize; 2]> {
+        let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
+        if self.outbound_prefix_limits.contains_key(&peer) {
+            return Some(
+                crate::manager::outbound_prefix_limits::LIMITED_FAMILIES
+                    .map(|afi| self.outbound_family_usage(peer, afi, true)),
+            );
+        }
+        let mut lens = [0_usize; 2];
+        for ((afi, safi), count) in group.family_counts_for(peer) {
+            if safi == Safi::Unicast {
+                lens[usize::from(afi == Afi::Ipv6)] = usize::try_from(count).unwrap_or(usize::MAX);
+            }
+        }
+        for key in self.peer_unexportable.get(&peer).into_iter().flatten() {
+            self.replacement_checkpoint(false);
+            // Same double-subtraction rule as `grouped_advertised_count`.
+            if let ExactExportKey::Unicast(prefix, path_id) = key
+                && group
+                    .adv_entry_post_backstop(peer, prefix, *path_id)
+                    .is_some()
+            {
+                let slot = &mut lens[usize::from(matches!(prefix, Prefix::V6(_)))];
+                *slot = slot.saturating_sub(1);
+            }
+        }
+        Some(lens)
+    }
+
+    /// [`Self::grouped_vpn_advertised_count`] split `[VPN-IPv4, VPN-IPv6]`
+    /// for the per-family Adj-RIB-Out gauge; `None` for ungrouped peers.
+    pub(in crate::manager) fn grouped_vpn_advertised_lens(
+        &self,
+        peer: IpAddr,
+    ) -> Option<[usize; 2]> {
+        let gid = self.vpn_grouped_member_of(peer)?;
+        let group = self.group_ribs.get(&gid)?;
+        let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
+        let mut lens = [0_usize; 2];
+        for ((afi, safi), count) in group.family_counts_for(peer) {
+            if safi == Safi::MplsVpn {
+                lens[usize::from(afi == Afi::Ipv6)] = usize::try_from(count).unwrap_or(usize::MAX);
+            }
+        }
+        for key in self.peer_unexportable.get(&peer).into_iter().flatten() {
+            self.replacement_checkpoint(false);
+            if let ExactExportKey::Vpn(key) = key
+                && group
+                    .table
+                    .get_vpn(key)
+                    .is_some_and(|route| route.peer != peer && rt_passes(filter.as_ref(), route))
+            {
+                let slot = &mut lens[usize::from(key.afi_safi().0 == Afi::Ipv6)];
+                *slot = slot.saturating_sub(1);
+            }
+        }
+        Some(lens)
+    }
+
     /// Synthesized VPN count for a grouped member after applying its sparse
     /// exact-export rejection overlay. The group table and RTC membership
     /// counters remain shared truths; only this member-local projection is
