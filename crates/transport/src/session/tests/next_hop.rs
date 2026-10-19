@@ -4138,3 +4138,72 @@ async fn injected_unspecified_next_hop_resolves_to_self_per_session() {
         );
     }
 }
+
+/// An export-policy IPv6 next hop on an injected next-hop-self IPv4 route
+/// cannot apply without Extended Next Hop. It falls back to the default next
+/// hop, as for any route, and the default here is self: the stored `0.0.0.0`
+/// `NEXT_HOP` (or its absence) must never reach the wire. With Extended Next
+/// Hop the IPv6 override applies in `MP_REACH_NLRI`.
+#[tokio::test]
+async fn injected_self_route_never_exports_the_unspecified_sentinel() {
+    use rustbgpd_policy::NextHopAction;
+
+    let mut stored = make_route(100);
+    stored.origin_type = rustbgpd_rib::RouteOrigin::Local;
+    stored.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    stored.next_hop = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    AttrSet::edit(&mut stored.attributes, |attrs| {
+        for attr in attrs.iter_mut() {
+            if let PathAttribute::NextHop(next_hop) = attr {
+                *next_hop = Ipv4Addr::UNSPECIFIED;
+            }
+        }
+    });
+    let mut bare = stored.clone();
+    AttrSet::edit(&mut bare.attributes, |attrs| {
+        attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    });
+    let v6: Ipv6Addr = "2001:db8::99".parse().unwrap();
+    let v6_override = Some(NextHopAction::Specific(IpAddr::V6(v6)));
+
+    for (remote_asn, route_server_client) in [(65002, false), (65001, false), (65002, true)] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+        session.config.route_server_client = route_server_client;
+        session.negotiated = Some(Arc::new(negotiated_session(remote_asn, false)));
+        let case = format!("remote AS {remote_asn}, route server client {route_server_client}");
+        let profile = session.publish_export_profile();
+        let local_ipv4 = profile.local_ipv4();
+        for route in [&stored, &bare] {
+            profile
+                .probe_announcement(ExportCandidate::Unicast {
+                    route,
+                    next_hop_override: v6_override.as_ref(),
+                })
+                .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+            let export::PreparedUnicastCandidate::Ipv4Body { attrs, .. } = profile
+                .prepare_unicast_candidate(route, v6_override.as_ref())
+                .unwrap()
+            else {
+                panic!("{case}: IPv4 without Extended Next Hop must use body NLRI");
+            };
+            let next_hops: Vec<_> = attrs
+                .iter()
+                .filter_map(|attr| match attr {
+                    PathAttribute::NextHop(next_hop) => Some(*next_hop),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(next_hops, vec![local_ipv4], "{case}");
+        }
+
+        session.negotiated = Some(Arc::new(negotiated_session(remote_asn, true)));
+        let profile = session.publish_export_profile();
+        let export::PreparedUnicastCandidate::Mp { next_hop, .. } = profile
+            .prepare_unicast_candidate(&stored, v6_override.as_ref())
+            .unwrap()
+        else {
+            panic!("{case}: an IPv6 next hop with Extended Next Hop uses MP_REACH_NLRI");
+        };
+        assert_eq!(next_hop, IpAddr::V6(v6), "{case}");
+    }
+}

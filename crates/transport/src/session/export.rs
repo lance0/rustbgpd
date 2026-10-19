@@ -535,6 +535,11 @@ impl SessionExportProfile {
         nh_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> Vec<PathAttribute> {
         let nh_override = local_self_next_hop(route, nh_override);
+        // An injected next-hop-self route stores the unspecified sentinel;
+        // when an inapplicable policy override falls back to the default next
+        // hop, that default is self, never the sentinel.
+        let self_route = route.origin_type == rustbgpd_rib::RouteOrigin::Local
+            && route.next_hop.is_unspecified();
         let is_ebgp = self.is_ebgp();
         let force_next_hop_self =
             matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
@@ -575,9 +580,10 @@ impl SessionExportProfile {
                         nh_override
                     {
                         attrs.push(PathAttribute::NextHop(*next_hop));
-                    } else if policy_set_specific {
+                    } else if policy_set_specific && !self_route {
                         attrs.push(attr.clone());
-                    } else if force_next_hop_self || (is_ebgp && !route_server_client) {
+                    } else if force_next_hop_self || self_route || (is_ebgp && !route_server_client)
+                    {
                         attrs.push(PathAttribute::NextHop(local_ipv4));
                     } else {
                         attrs.push(attr.clone());
@@ -630,7 +636,7 @@ impl SessionExportProfile {
                         "export policy set IPv6 next-hop for classic IPv4 NLRI; \
                          requires Extended Next Hop (RFC 8950) — using default next-hop instead"
                     );
-                    if is_ebgp && !route_server_client {
+                    if self_route || (is_ebgp && !route_server_client) {
                         Some(local_ipv4)
                     } else {
                         match route.next_hop {
