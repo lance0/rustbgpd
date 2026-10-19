@@ -79,21 +79,27 @@ The controller contract requires that a renewal report when the lease has
 already expired, so that a renewal arriving just after expiry cannot look
 successful while the routes are gone.
 
-- Each owner's live lease has a **generation**: a `u64` from one daemon-wide
-  counter, increasing, never reused within a process. The counter is seeded
-  from wall-clock time at startup so a previous process's values are not
-  reused in practice; correctness relies only on uniqueness within a process.
-- Only an owned add can start a generation. It is returned by the add that
-  starts it, by every owned add, by `RenewLease` and by the read RPC.
-- `RenewLease(owner, generation, lease_seconds)` succeeds only if that
+- Each owner's live lease has a **generation**,
+  `LeaseGeneration { fixed64 incarnation; uint64 sequence; }`. The
+  `incarnation` is a random 64-bit value drawn once per process start from the
+  OS random source, through std's randomly keyed hasher, so no new dependency
+  is needed. `sequence` comes from one daemon-wide counter that only
+  increases. A renewal must match both fields. A generation from a previous
+  process therefore cannot match a lease started after a restart, even when
+  the new process's counter reaches the same `sequence`. No wall clock is
+  involved.
+- Only a leased add (section 3) can start a generation. The generation is
+  returned by the add that starts it, by every leased add, by `RenewLease` and
+  by the read RPC.
+- `RenewLease(owner, generation, lease_seconds)` succeeds only if the
   generation is the owner's live lease. Otherwise it returns
   **`FAILED_PRECONDITION`** and changes nothing. This covers an unknown owner,
   an expired lease (reaped or not yet reaped) and a superseded generation.
   Renewal never creates or resurrects a lease.
-- **Recovery:** after `FAILED_PRECONDITION`, or when an owned add returns a
+- **Recovery:** after `FAILED_PRECONDITION`, or when a leased add returns a
   generation other than the one the controller holds, the controller must
   assume its previous state is gone and re-add its full desired state. The
-  first owned add starts the new generation.
+  first leased add starts the new generation.
 
 `FAILED_PRECONDITION` was chosen over an `OK` response with an `EXPIRED`
 outcome. An `OK` reply that a client fails to inspect reads as success, which
@@ -104,13 +110,15 @@ malformed input is `INVALID_ARGUMENT`. Clients branch on the code, not on the
 message text. The rejection makes no mutation.
 
 **Liveness rule.** A lease is live at instant `t` if and only if
-`t < deadline`, on `tokio::time::Instant`. Renewal, owned add and expiry all
+`t < deadline`, on `tokio::time::Instant`. Renewal, leased add and expiry all
 evaluate it under the lease-table lock. A renewal at exactly the deadline
 loses, whether or not the expiry tick has run yet.
 
 ### 3. Proto shape
 
-All additions are optional fields or new methods.
+Leased injection uses **new RPCs** that wrap the existing request messages.
+It does not add a field to `AddPath` or `AddFlowSpec`, which keep their
+current messages and behaviour.
 
 ```proto
 message InjectionLease {
@@ -120,30 +128,53 @@ message InjectionLease {
   // deadline to now + lease_seconds.
   uint32 lease_seconds = 2;
 }
+message LeaseGeneration { fixed64 incarnation = 1; uint64 sequence = 2; }
 
-// AddPathRequest:      InjectionLease lease = 12;
-// AddFlowSpecRequest:  InjectionLease lease = 6;
-// AddPathResponse / AddFlowSpecResponse: uint64 lease_generation (0 = unowned).
-// DeletePathRequest / DeleteFlowSpecRequest:
+rpc AddLeasedPath(AddLeasedPathRequest) returns (AddLeasedPathResponse);
+message AddLeasedPathRequest { AddPathRequest path = 1; InjectionLease lease = 2; }
+message AddLeasedPathResponse { AddPathResponse result = 1; LeaseGeneration generation = 2; }
+
+rpc AddLeasedFlowSpec(AddLeasedFlowSpecRequest) returns (AddLeasedFlowSpecResponse);
+message AddLeasedFlowSpecRequest { AddFlowSpecRequest rule = 1; InjectionLease lease = 2; }
+message AddLeasedFlowSpecResponse { AddFlowSpecResponse result = 1; LeaseGeneration generation = 2; }
+
+// DeletePathRequest / DeleteFlowSpecRequest gain:
 //   string owner;          // must match the entry's owner ("" = unowned)
 //   bool override_owner;   // delete regardless of owner
 
 rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
-message RenewLeaseRequest { string owner = 1; uint64 generation = 2; uint32 lease_seconds = 3; }
-message RenewLeaseResponse { uint64 generation = 1; uint32 lease_remaining_ms = 2; }
+message RenewLeaseRequest { string owner = 1; LeaseGeneration generation = 2; uint32 lease_seconds = 3; }
+message RenewLeaseResponse { LeaseGeneration generation = 1; uint32 lease_remaining_ms = 2; }
 
 rpc ListInjectionLeases(ListInjectionLeasesRequest) returns (ListInjectionLeasesResponse);
 // Optional owner filter; each row: owner, generation, lease_seconds, lease_remaining_ms.
 ```
 
-A single `lease` message makes "owner and lease together or neither"
-structural. Adding with a lease makes the call an owned add. An owned add on
-an owner with a live lease joins the lease and renews it: the add is itself
-proof that the controller is alive. Remaining time is reported in
-milliseconds from the monotonic deadline, never as a wall-clock timestamp.
+A call to a leased RPC is a **leased add**. A leased add on an owner with a
+live lease joins the lease and renews it: the add is itself proof that the
+controller is alive. A missing `lease` returns `INVALID_ARGUMENT`. Remaining
+time is reported in milliseconds from the monotonic deadline, never as a
+wall-clock timestamp.
+
+**Why separate RPCs.** Proto3 servers ignore unknown fields. An older daemon
+would accept a `lease` field on `AddPath`, install permanent state and
+report success. Two alternatives were rejected:
+
+- **A mandatory capability probe** before injection. The daemon can be
+  downgraded and restarted between the probe and the add.
+- **A rule that the client deletes whatever came back with generation 0.**
+  That leaves permanent state if the client dies between the add and the
+  delete.
+
+An older daemon answers `UNIMPLEMENTED` to an unknown method and changes
+nothing. So a leased add either creates leased state or creates no state, on
+every server version, including across rollout and rollback. The controller
+contract forbids retrying a failed leased add through `AddPath` or
+`AddFlowSpec`.
 
 **Read-back.** `Route` and `FlowSpecRouteEntry` rows sourced from `0.0.0.0`
-gain `injection_owner`, `lease_generation` and `lease_remaining_ms`. These
+gain `injection_owner`, `lease_generation` (a `LeaseGeneration`) and
+`lease_remaining_ms`. These
 are unset for unowned entries. A remaining time of 0 means "expired,
 withdrawal pending".
 
@@ -153,8 +184,8 @@ outcomes):
 | Case | Status |
 |------|--------|
 | `owner` malformed; `lease_seconds` 0, below 5 or above 3600 | `INVALID_ARGUMENT` |
-| Owned add would create a 65th live owner | `RESOURCE_EXHAUSTED` |
-| Owned add on a key held by another owner, or by no owner | `FAILED_PRECONDITION` |
+| Leased add would create a 65th live owner | `RESOURCE_EXHAUSTED` |
+| Leased add on a key held by another owner, or by no owner | `FAILED_PRECONDITION` |
 | Unowned add on a key held by an owner | `FAILED_PRECONDITION` |
 | Delete with an `owner` that does not match the entry, including `""` on an owned entry, without `override_owner` | `FAILED_PRECONDITION` |
 | `RenewLease` of a generation that is not live | `FAILED_PRECONDITION` |
@@ -182,7 +213,7 @@ served from the lease table in the handler. A stalled or backlogged RIB does
 not delay renewal, so a loaded daemon does not expire leases during the
 attack its blackholes are mitigating.
 
-**Owned add** runs entirely in the RIB turn that commits it. The steps are:
+**Leased add** runs entirely in the RIB turn that commits it. The steps are:
 
 1. Check the ownership index and reject a mismatch.
 2. Take the table lock and join the live lease, or start a new generation.
@@ -237,15 +268,25 @@ Edges:
 
 ### 5. Failure direction
 
-Expiry always **withdraws**, which is fail-open for traffic. The proto
-comments state this per family:
+Expiry **removes local intent**: the daemon withdraws the owner's entries
+from the `0.0.0.0` Adj-RIB-In, and the normal selection and distribution
+paths follow. It never installs anything. Whether traffic then flows depends
+on what else the network holds. As in
+[ADR-0139](0139-flowspec-controller-contract.md), the daemon does not
+promise remote acceptance, forwarding or enforcement. The proto comments
+state this per family:
 
-- **Unicast:** the route disappears from Loc-RIB and peers. A blackhole
-  stops dropping the victim's traffic. An announcement for traffic
-  engineering or anycast stops attracting traffic, which is what a dead
-  controller's announcement should do.
-- **FlowSpec:** the rule is withdrawn. Discard, rate-limit, redirect and
-  marking actions stop applying, and traffic passes unfiltered.
+- **Unicast:** the local route leaves selection. If it was selected, peers
+  receive a withdrawal or the next-best path. A blackhole that only this
+  controller originated stops attracting the victim's traffic to the discard
+  next hop. An equal or better route from another source keeps applying.
+- **FlowSpec:** the local rule is withdrawn. A received rule with the same
+  key can already out-select the local one, and it then stays selected and
+  advertised
+  (`flowspec_injection_reports_local_outcomes_and_reconciles`,
+  `crates/api/src/injection_service.rs:2682-2775`). In that case filtering
+  continues after expiry. Expiry guarantees only that this owner's intent no
+  longer contributes.
 
 The lease bounds the lifetime of a dead *controller's* state. It does not
 cover the daemon dying: then peers drop the routes when the session closes,
@@ -254,10 +295,9 @@ if they are acting as helpers.
 
 ### 6. Clock
 
-`tokio::time::Instant` throughout, with no wall clock in any deadline. Tests
-use `#[tokio::test(start_paused = true)]` and `tokio::time::advance`. The
-wall-clock seed in section 2 only picks the generation counter's starting
-value.
+`tokio::time::Instant` throughout, with no wall clock in any deadline or
+generation. Tests use `#[tokio::test(start_paused = true)]` and
+`tokio::time::advance`.
 
 ### 7. Bounds
 
@@ -270,19 +310,38 @@ value.
 
 ### 8. Authorization
 
-- **`RenewLease` is `mutating`.** Adds stay `operator_only`, and
-  `ListInjectionLeases` is `sensitive_read`. Renewal creates nothing: it can
-  only delay the withdrawal of state an `operator_only` principal already
-  injected, and only for a caller that presents the live generation.
-  A controller renews every few seconds; at `operator_only` that would be one
-  `WARN` audit line per renewal. The controller's listener must still allow
-  `operator_only` for its adds.
+- **`RenewLease` is `operator_only`,** the same tier as the adds. A generation
+  is not a capability. The `automation` role reaches `sensitive_read` and
+  `mutating` (`crates/api/src/authz.rs:48-55`), so at `mutating` an
+  automation credential could list every owner and generation and keep a
+  dead controller's blackholes alive indefinitely. Delaying a withdrawal has
+  the same blast radius as the injection. `AddLeasedPath` and
+  `AddLeasedFlowSpec` are `operator_only`. `ListInjectionLeases` is
+  `sensitive_read`.
+- **Audit volume.** ADR-0064 §7 logs every `operator_only` call at `WARN`
+  (`crates/api/src/authz_runtime/decision.rs:128`). That would mean one WARN
+  per controller every few seconds. This ADR amends §7 for exactly one
+  method, using the shape the `read` tier already has, where `handler_ok`
+  logs at `DEBUG` (`decision.rs:146`):
+  - `RenewLease` with result `handler_ok` is logged at `INFO`;
+  - every other `RenewLease` result is logged at `WARN`, as today. That
+    covers authentication or role denial, `FAILED_PRECONDITION` and
+    `INVALID_ARGUMENT`.
+
+  Every call is still logged, with the same fields, and still counted in the
+  authorization decision metric. No other method's level changes.
 - **The owner is a label, not bound to a principal.** Handlers do not
   receive the principal today. A bearer-token listener has one principal for
-  every client, and every principal that can add already holds the operator
-  role, which can also call `Shutdown`. Owner checks prevent one controller
-  from changing another's state by mistake; they are not a security boundary
-  between operators.
+  every client, and every principal that can add or renew already holds the
+  operator role, which can also call `Shutdown`. Owner checks prevent one
+  controller from changing another's state by mistake; they are not a
+  security boundary between operators.
+- **Owner in the audit line.** Leased adds, `RenewLease`, deletes and every
+  `override_owner` use record the owner and the generation in the request
+  summary (`GrpcAuditHandle::set_summary`, `crates/api/src/audit.rs:18`).
+  The audit line already carries the caller's principal, role and listener.
+  Each line therefore ties a principal to the owner it acted on, and an
+  override names the owner it bypassed.
 - **Admin override:** `override_owner` on `DeletePath` and `DeleteFlowSpec`
   (both `operator_only`) removes an owned entry without knowing its owner.
   `rbgp`'s delete commands expose it as `--override-owner`. There is no bulk
@@ -297,8 +356,18 @@ value.
   controller's next `RenewLease` returns `FAILED_PRECONDITION`, which triggers
   the recovery in section 2. `GetHealth.uptime_seconds` resetting remains the
   restart signal for unowned injection.
-- **Shutdown:** the expiry task exits when the RIB sender closes and sends no
-  withdrawals. Sessions closing withdraw the routes at peers.
+- **Shutdown:** the expiry task holds a strong RIB sender. While that sender
+  exists, the RIB's receive loop never sees `None`
+  (`crates/rib/src/manager/mod.rs:6146-6162`). Shutdown therefore cancels
+  the expiry task explicitly, through a cancellation signal that its `select!`
+  observes both while sleeping and while waiting for RIB queue admission.
+  Shutdown then joins the task before it waits for RIB termination. A
+  cancelled expiry sends no withdrawal; sessions closing withdraw the routes
+  at peers.
+- **Expiry task failure:** if the task exits unexpectedly, leases stop
+  expiring and owned state becomes permanent without anyone seeing it.
+  `main` supervises the task beside the RIB handle (`src/main.rs:6445`), and
+  an unexpected exit starts shutdown as a component failure.
 
 ### 10. Observability
 
@@ -318,10 +387,14 @@ value.
 
 ### 11. Compatibility
 
-Additive. A request without `lease` behaves exactly as today, and unowned
-entries never expire. Owned entries are new, so rejecting an unowned delete
-of an owned entry breaks no existing client. The new fields and RPCs change
-the `InjectionService` signature and message-graph hashes in the v1 inventory.
+Additive. `AddPath` and `AddFlowSpec` are unchanged, and unowned entries
+never expire. Leased injection exists only on the new RPCs, which an older
+daemon rejects with `UNIMPLEMENTED` without creating state (section 3).
+Rolling back to such a daemon restarts it, so every owned entry is dropped
+as on any restart, and the controller's next renewal or leased add fails.
+Owned entries are new, so rejecting an unowned delete of an owned entry breaks
+no existing client. The new delete fields and RPCs change the
+`InjectionService` signature and message-graph hashes in the v1 inventory.
 That hash update lands in its own commit, and the surface enters the
 inventory with its implementation and the interop evidence below.
 
@@ -348,7 +421,7 @@ Paused clock:
 - Race: a late renewal of generation g after a re-add started g+1 gets
   `FAILED_PRECONDITION` and leaves g+1's deadline unchanged.
 - Race: expiry vs an in-flight add. Stall ingest with the existing hook, queue
-  an owned add, advance past the deadline, release. The add returns g+1,
+  a leased add, advance past the deadline, release. The add returns g+1,
   `Expire(g)` withdraws only g-tagged keys, and a re-added old key survives
   with `UNCHANGED` and no outbound change.
 - Race: renewal vs the tick. A renewal at `deadline - 1ns` is renewed and the
@@ -356,6 +429,36 @@ Paused clock:
   or not the tick has run.
 - Race: expiry vs delete in both orders.
 - With the RIB stalled, `RenewLease` completes within a bounded test timeout.
+- Restart fencing: build a lease table, take a lease (incarnation A, sequence
+  1), then build a second table standing in for the restarted process, with
+  the counter starting from the same value and a different incarnation B.
+  Re-add, which gives (B, 1), then renew with (A, 1): `FAILED_PRECONDITION`,
+  and (B, 1)'s deadline is unchanged. A companion test builds two tables at
+  the same paused-clock instant and asserts that their incarnations differ,
+  proving the incarnation does not come from the clock.
+
+Shutdown and supervision:
+
+- Shutdown with no live leases: the expiry task, parked with no deadline,
+  is cancelled and joined, and the RIB then terminates.
+- Shutdown with the expiry send blocked: fill the RIB channel and stall
+  ingest, let a lease expire so the task waits for queue admission, then shut
+  down. The task is cancelled out of the send, joined, and the RIB
+  terminates; nothing is withdrawn.
+- An unexpected exit of the expiry task starts shutdown as a component
+  failure.
+
+Authorization and audit:
+
+- `RenewLease`, `AddLeasedPath` and `AddLeasedFlowSpec` are `operator_only`
+  in the method inventory, so an `automation` principal is denied.
+- A successful `RenewLease` is audited at `INFO`. Denied and
+  `FAILED_PRECONDITION` renewals are audited at `WARN`. Every other
+  `operator_only` method still logs `handler_ok` at `WARN`.
+- Leased adds, renewals, deletes and overrides carry the owner and
+  generation in the audit summary.
+- Against a server without the leased RPCs, a leased add returns
+  `UNIMPLEMENTED` and creates no route.
 
 Interop, beside the FlowSpec controller leg on FRR:
 
