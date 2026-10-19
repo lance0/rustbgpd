@@ -363,6 +363,8 @@ pub async fn delete(
             afi_safi: family,
             components: parsed_components,
             allow_missing,
+            owner: String::new(),
+            override_owner: false,
         }),
     )
     .await?

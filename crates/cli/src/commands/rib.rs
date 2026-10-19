@@ -2755,6 +2755,8 @@ pub async fn delete_route(
             prefix_length: len,
             path_id: path_id.unwrap_or(0),
             allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
         }),
     )
     .await?;
@@ -3234,6 +3236,9 @@ mod tests {
             llgr_stale: false,
             aggregator: None,
             atomic_aggregate: false,
+            injection_owner: String::new(),
+            lease_generation: None,
+            lease_remaining_ms: None,
         }
     }
 

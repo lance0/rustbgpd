@@ -35,6 +35,8 @@ pub mod export_roster;
 mod fast_hash;
 /// Received `FlowSpec` feasibility against the unicast RIB.
 mod flowspec_validation;
+/// Owner-scoped leases on controller-injected routes (ADR-0141).
+pub mod injection_lease;
 /// Loc-RIB: best route per prefix.
 pub mod loc_rib;
 /// RIB manager task and submodules.

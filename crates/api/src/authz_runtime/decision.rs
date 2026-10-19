@@ -125,7 +125,8 @@ pub(super) fn record_audit_decision(
     let role = context.role_label(principal);
     let request_summary = request_summary.map_or("", GrpcRequestSummary::as_str);
 
-    if decision.tier == AuthTier::OperatorOnly {
+    let level = audit_level(decision.tier, path, result);
+    if level == tracing::Level::WARN {
         warn!(
             target: "grpc_authz",
             path,
@@ -143,7 +144,7 @@ pub(super) fn record_audit_decision(
             request_summary,
             "gRPC authorization audit decision"
         );
-    } else if decision.tier == AuthTier::Read && result == "handler_ok" {
+    } else if level == tracing::Level::DEBUG {
         debug!(
             target: "grpc_authz",
             path,
@@ -179,6 +180,22 @@ pub(super) fn record_audit_decision(
             request_summary,
             "gRPC authorization audit decision"
         );
+    }
+}
+
+/// The audit line's level (ADR-0064 §7). Every `operator_only` result logs
+/// at WARN except a successful `RenewLease`, which a controller sends every
+/// few seconds and which logs at INFO (ADR-0141 §8); a successful `read`
+/// logs at DEBUG; everything else at INFO.
+pub(super) fn audit_level(tier: AuthTier, path: &str, result: &str) -> tracing::Level {
+    const RENEW_LEASE: &str = "/rustbgpd.v1.InjectionService/RenewLease";
+    match tier {
+        AuthTier::OperatorOnly if path == RENEW_LEASE && result == "handler_ok" => {
+            tracing::Level::INFO
+        }
+        AuthTier::OperatorOnly => tracing::Level::WARN,
+        AuthTier::Read if result == "handler_ok" => tracing::Level::DEBUG,
+        _ => tracing::Level::INFO,
     }
 }
 

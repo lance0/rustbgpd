@@ -121,7 +121,7 @@ fn inject(manager: &mut RibManager, p: Ipv4Prefix, med: Option<u32>) {
 
 fn withdraw_injected(manager: &mut RibManager, p: Ipv4Prefix) {
     let (reply, _rx) = oneshot::channel();
-    manager.handle_withdraw_injected(Prefix::V4(p), 0, false, reply);
+    manager.handle_withdraw_injected(Prefix::V4(p), 0, false, "", false, reply);
 }
 
 fn peer_up(manager: &mut RibManager, source: IpAddr, session_id: u64) {

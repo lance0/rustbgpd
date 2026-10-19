@@ -1,14 +1,20 @@
 //! gRPC injection service — unicast, `FlowSpec`, and EVPN route add/delete RPCs.
 
+use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
+use crate::audit::{GrpcAuditHandle, GrpcRequestSummary, safe_summary_value, set_request_summary};
 use crate::proto;
 use crate::route_distinguisher::parse_rd;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
+use rustbgpd_rib::injection_lease::{
+    InjectionLeases, LeaseGeneration, validate_lease, validate_owner,
+};
 use rustbgpd_rib::{
     EvpnRibRoute, FlowSpecRoute, InjectOutcome, RibCommandError, RibUpdate, Route, RouteOrigin,
 };
@@ -24,6 +30,7 @@ use rustbgpd_wire::{
 pub struct InjectionService {
     access_mode: AccessMode,
     rib_tx: mpsc::Sender<RibUpdate>,
+    leases: Option<Arc<InjectionLeases>>,
 }
 
 impl InjectionService {
@@ -32,8 +39,68 @@ impl InjectionService {
         Self {
             access_mode,
             rib_tx,
+            leases: None,
         }
     }
+
+    /// Serve `RenewLease` and `ListInjectionLeases` from the daemon-wide
+    /// lease table the RIB manager owns (ADR-0141).
+    #[must_use]
+    pub fn with_injection_leases(mut self, leases: Arc<InjectionLeases>) -> Self {
+        self.leases = Some(leases);
+        self
+    }
+
+    fn leases(&self) -> Result<&InjectionLeases, Status> {
+        self.leases
+            .as_deref()
+            .ok_or_else(|| Status::unavailable("injection lease table unavailable"))
+    }
+}
+
+/// Validate a request's lease and return its owner and duration.
+fn parse_lease(lease: Option<proto::InjectionLease>) -> Result<(String, u32), Status> {
+    let lease = lease.ok_or_else(|| Status::invalid_argument("lease is required"))?;
+    validate_lease(&lease.owner, lease.lease_seconds).map_err(Status::invalid_argument)?;
+    Ok((lease.owner, lease.lease_seconds))
+}
+
+/// Validate a delete's expected owner; `""` means unowned.
+fn parse_delete_owner(owner: &str) -> Result<(), Status> {
+    if owner.is_empty() {
+        return Ok(());
+    }
+    validate_owner(owner).map_err(Status::invalid_argument)
+}
+
+fn generation_to_proto(generation: LeaseGeneration) -> proto::LeaseGeneration {
+    proto::LeaseGeneration {
+        incarnation: generation.incarnation,
+        sequence: generation.sequence,
+    }
+}
+
+fn millis(duration: std::time::Duration) -> u32 {
+    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+}
+
+fn lease_summary(
+    owner: &str,
+    generation: Option<LeaseGeneration>,
+    override_owner: bool,
+) -> GrpcRequestSummary {
+    let mut summary = format!("owner={}", safe_summary_value(owner));
+    if let Some(generation) = generation {
+        let _ = write!(
+            summary,
+            " generation={}:{}",
+            generation.incarnation, generation.sequence
+        );
+    }
+    if override_owner {
+        summary.push_str(" override_owner=true");
+    }
+    GrpcRequestSummary::new(summary)
 }
 
 /// Sentinel peer address for locally-injected routes.
@@ -204,6 +271,8 @@ fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
 fn map_rib_command_error(operation: &str, error: RibCommandError) -> Status {
     match error {
         RibCommandError::NotFound(message) => Status::not_found(message),
+        RibCommandError::FailedPrecondition(message) => Status::failed_precondition(message),
+        RibCommandError::ResourceExhausted(message) => Status::resource_exhausted(message),
         RibCommandError::Internal(message) => Status::internal(format!("{operation}: {message}")),
     }
 }
@@ -226,6 +295,133 @@ fn parse_large_community(s: &str) -> Result<LargeCommunity, String> {
     Ok(LargeCommunity::new(global_admin, local_data1, local_data2))
 }
 
+/// Build the local route an `AddPath` request describes.
+fn build_injected_route(req: proto::AddPathRequest) -> Result<Route, Status> {
+    let (prefix, next_hop_ip) =
+        parse_prefix_and_nexthop(&req.prefix, req.prefix_length, &req.next_hop)?;
+
+    let origin = match req.origin {
+        0 => Origin::Igp,
+        1 => Origin::Egp,
+        2 => Origin::Incomplete,
+        other => {
+            return Err(Status::invalid_argument(format!(
+                "origin must be 0 (igp), 1 (egp), or 2 (incomplete); got {other}"
+            )));
+        }
+    };
+
+    let mut attributes = vec![PathAttribute::Origin(origin)];
+
+    // NEXT_HOP attribute only for an IPv4 next hop, which parsing allows
+    // only on an IPv4 prefix; any IPv6 next hop uses MP_REACH_NLRI.
+    if let IpAddr::V4(nh) = next_hop_ip {
+        attributes.push(PathAttribute::NextHop(nh));
+    }
+
+    if req.as_path.is_empty() {
+        attributes.push(PathAttribute::AsPath(AsPath { segments: vec![] }));
+    } else {
+        attributes.push(PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(req.as_path)],
+        }));
+    }
+
+    if let Some(local_pref) = req.local_pref {
+        attributes.push(PathAttribute::LocalPref(local_pref));
+    }
+    if let Some(med) = req.med {
+        attributes.push(PathAttribute::Med(med));
+    }
+    if !req.communities.is_empty() {
+        attributes.push(PathAttribute::Communities(req.communities));
+    }
+    if !req.extended_communities.is_empty() {
+        attributes.push(PathAttribute::ExtendedCommunities(
+            req.extended_communities
+                .iter()
+                .map(|&v| ExtendedCommunity::new(v))
+                .collect(),
+        ));
+    }
+    if !req.large_communities.is_empty() {
+        let mut lcs = Vec::with_capacity(req.large_communities.len());
+        for s in &req.large_communities {
+            let lc = parse_large_community(s).map_err(|e| {
+                Status::invalid_argument(format!("invalid large_community {s:?}: {e}"))
+            })?;
+            lcs.push(lc);
+        }
+        attributes.push(PathAttribute::LargeCommunities(lcs));
+    }
+
+    Ok(Route {
+        prefix,
+        next_hop: next_hop_ip,
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: LOCAL_PEER,
+        attributes: AttrSet::new(attributes),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
+        origin_type: RouteOrigin::Local,
+        peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: req.path_id,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
+    })
+}
+
+/// Build the local rule an `AddFlowSpec` request describes.
+fn build_injected_flowspec(req: proto::AddFlowSpecRequest) -> Result<FlowSpecRoute, Status> {
+    let afi = parse_flowspec_afi(req.afi_safi)?;
+
+    let components = parse_flowspec_components(&req.components, afi)?;
+    let rule = FlowSpecRule { components };
+    rule.validate()
+        .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
+    validate_flowspec_rule_encoded_len(&rule, afi)?;
+
+    let mut attributes: Vec<PathAttribute> = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+    ];
+
+    // Build extended communities from FlowSpec actions
+    let mut ecs: Vec<ExtendedCommunity> = req
+        .extended_communities
+        .iter()
+        .map(|&v| ExtendedCommunity::new(v))
+        .collect();
+    for action in &req.actions {
+        if let Some(ec) = flowspec_action_to_ec(action)? {
+            ecs.push(ec);
+        }
+    }
+    if !ecs.is_empty() {
+        attributes.push(PathAttribute::ExtendedCommunities(ecs));
+    }
+    if !req.communities.is_empty() {
+        attributes.push(PathAttribute::Communities(req.communities));
+    }
+
+    Ok(FlowSpecRoute {
+        rule,
+        afi,
+        peer: LOCAL_PEER,
+        attributes,
+        received_at: std::time::Instant::now(),
+        origin_type: RouteOrigin::Local,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    })
+}
+
 #[tonic::async_trait]
 impl proto::injection_service_server::InjectionService for InjectionService {
     async fn add_path(
@@ -235,84 +431,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
-        let req = request.into_inner();
-
-        let (prefix, next_hop_ip) =
-            parse_prefix_and_nexthop(&req.prefix, req.prefix_length, &req.next_hop)?;
-
-        let origin = match req.origin {
-            0 => Origin::Igp,
-            1 => Origin::Egp,
-            2 => Origin::Incomplete,
-            other => {
-                return Err(Status::invalid_argument(format!(
-                    "origin must be 0 (igp), 1 (egp), or 2 (incomplete); got {other}"
-                )));
-            }
-        };
-
-        let mut attributes = vec![PathAttribute::Origin(origin)];
-
-        // NEXT_HOP attribute only for an IPv4 next hop, which parsing allows
-        // only on an IPv4 prefix; any IPv6 next hop uses MP_REACH_NLRI.
-        if let IpAddr::V4(nh) = next_hop_ip {
-            attributes.push(PathAttribute::NextHop(nh));
-        }
-
-        if req.as_path.is_empty() {
-            attributes.push(PathAttribute::AsPath(AsPath { segments: vec![] }));
-        } else {
-            attributes.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(req.as_path)],
-            }));
-        }
-
-        if let Some(local_pref) = req.local_pref {
-            attributes.push(PathAttribute::LocalPref(local_pref));
-        }
-        if let Some(med) = req.med {
-            attributes.push(PathAttribute::Med(med));
-        }
-        if !req.communities.is_empty() {
-            attributes.push(PathAttribute::Communities(req.communities));
-        }
-        if !req.extended_communities.is_empty() {
-            attributes.push(PathAttribute::ExtendedCommunities(
-                req.extended_communities
-                    .iter()
-                    .map(|&v| ExtendedCommunity::new(v))
-                    .collect(),
-            ));
-        }
-        if !req.large_communities.is_empty() {
-            let mut lcs = Vec::with_capacity(req.large_communities.len());
-            for s in &req.large_communities {
-                let lc = parse_large_community(s).map_err(|e| {
-                    Status::invalid_argument(format!("invalid large_community {s:?}: {e}"))
-                })?;
-                lcs.push(lc);
-            }
-            attributes.push(PathAttribute::LargeCommunities(lcs));
-        }
-
-        let route = Route {
-            prefix,
-            next_hop: next_hop_ip,
-            link_local_next_hop: None,
-            next_hop_scope: None,
-            peer: LOCAL_PEER,
-            attributes: AttrSet::new(attributes),
-            received_at: rustbgpd_rib::route::ReceivedAt::now(),
-            origin_type: RouteOrigin::Local,
-            peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
-            is_stale: false,
-            is_llgr_stale: false,
-            path_id: req.path_id,
-            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-            received_as_path: None,
-            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
-        };
+        let route = build_injected_route(request.into_inner())?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -345,6 +464,14 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
+        let req = request.get_ref();
+        parse_delete_owner(&req.owner)?;
+        if !req.owner.is_empty() || req.override_owner {
+            set_request_summary(
+                &request,
+                lease_summary(&req.owner, None, req.override_owner),
+            );
+        }
         let req = request.into_inner();
 
         let addr: IpAddr = req
@@ -375,6 +502,8 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 prefix,
                 path_id: req.path_id,
                 allow_missing: req.allow_missing,
+                owner: req.owner,
+                override_owner: req.override_owner,
                 reply: reply_tx,
             })
             .await
@@ -402,50 +531,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
-        let req = request.into_inner();
-        let afi = parse_flowspec_afi(req.afi_safi)?;
-
-        let components = parse_flowspec_components(&req.components, afi)?;
-        let rule = FlowSpecRule { components };
-        rule.validate()
-            .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
-        validate_flowspec_rule_encoded_len(&rule, afi)?;
-
-        let mut attributes: Vec<PathAttribute> = vec![
-            PathAttribute::Origin(Origin::Igp),
-            PathAttribute::AsPath(AsPath { segments: vec![] }),
-        ];
-
-        // Build extended communities from FlowSpec actions
-        let mut ecs: Vec<ExtendedCommunity> = req
-            .extended_communities
-            .iter()
-            .map(|&v| ExtendedCommunity::new(v))
-            .collect();
-        for action in &req.actions {
-            if let Some(ec) = flowspec_action_to_ec(action)? {
-                ecs.push(ec);
-            }
-        }
-        if !ecs.is_empty() {
-            attributes.push(PathAttribute::ExtendedCommunities(ecs));
-        }
-        if !req.communities.is_empty() {
-            attributes.push(PathAttribute::Communities(req.communities));
-        }
-
-        let route = FlowSpecRoute {
-            rule,
-            afi,
-            peer: LOCAL_PEER,
-            attributes,
-            received_at: std::time::Instant::now(),
-            origin_type: RouteOrigin::Local,
-            peer_router_id: Ipv4Addr::UNSPECIFIED,
-            is_stale: false,
-            is_llgr_stale: false,
-            path_id: 0,
-        };
+        let route = build_injected_flowspec(request.into_inner())?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -478,6 +564,14 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         if let Some(status) = read_only_rejection(self.access_mode) {
             return Err(status);
         }
+        let req = request.get_ref();
+        parse_delete_owner(&req.owner)?;
+        if !req.owner.is_empty() || req.override_owner {
+            set_request_summary(
+                &request,
+                lease_summary(&req.owner, None, req.override_owner),
+            );
+        }
         let req = request.into_inner();
         let afi = parse_flowspec_afi(req.afi_safi)?;
 
@@ -492,6 +586,8 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .send(RibUpdate::WithdrawFlowSpec {
                 key: rustbgpd_rib::FlowSpecKey { afi, rule },
                 allow_missing: req.allow_missing,
+                owner: req.owner,
+                override_owner: req.override_owner,
                 reply: reply_tx,
             })
             .await
@@ -511,6 +607,158 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         Ok(Response::new(proto::DeleteFlowSpecResponse {
             outcome: outcome as i32,
         }))
+    }
+
+    async fn add_leased_path(
+        &self,
+        request: Request<proto::AddLeasedPathRequest>,
+    ) -> Result<Response<proto::AddLeasedPathResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let (owner, lease_seconds) = parse_lease(request.get_ref().lease.clone())?;
+        set_request_summary(&request, lease_summary(&owner, None, false));
+        let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
+        let path = request
+            .into_inner()
+            .path
+            .ok_or_else(|| Status::invalid_argument("path is required"))?;
+        let route = build_injected_route(path)?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::InjectLeasedRoute {
+                route,
+                owner: owner.clone(),
+                lease_seconds,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
+        let (outcome, generation) = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|error| map_rib_command_error("leased inject failed", error))?;
+        if let Some(audit) = audit {
+            audit.set_summary(lease_summary(&owner, Some(generation), false));
+        }
+        let outcome = match outcome {
+            InjectOutcome::Created => proto::PathInjectOutcome::Created,
+            InjectOutcome::Replaced => proto::PathInjectOutcome::Replaced,
+            InjectOutcome::Unchanged => proto::PathInjectOutcome::Unchanged,
+        };
+        Ok(Response::new(proto::AddLeasedPathResponse {
+            result: Some(proto::AddPathResponse {
+                outcome: outcome as i32,
+            }),
+            generation: Some(generation_to_proto(generation)),
+        }))
+    }
+
+    async fn add_leased_flow_spec(
+        &self,
+        request: Request<proto::AddLeasedFlowSpecRequest>,
+    ) -> Result<Response<proto::AddLeasedFlowSpecResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let (owner, lease_seconds) = parse_lease(request.get_ref().lease.clone())?;
+        set_request_summary(&request, lease_summary(&owner, None, false));
+        let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
+        let rule = request
+            .into_inner()
+            .rule
+            .ok_or_else(|| Status::invalid_argument("rule is required"))?;
+        let route = build_injected_flowspec(rule)?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::InjectLeasedFlowSpec {
+                route,
+                owner: owner.clone(),
+                lease_seconds,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
+        let (outcome, generation) = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|error| map_rib_command_error("leased FlowSpec inject failed", error))?;
+        if let Some(audit) = audit {
+            audit.set_summary(lease_summary(&owner, Some(generation), false));
+        }
+        let outcome = match outcome {
+            InjectOutcome::Created => proto::FlowSpecInjectOutcome::Created,
+            InjectOutcome::Replaced => proto::FlowSpecInjectOutcome::Replaced,
+            InjectOutcome::Unchanged => proto::FlowSpecInjectOutcome::Unchanged,
+        };
+        Ok(Response::new(proto::AddLeasedFlowSpecResponse {
+            result: Some(proto::AddFlowSpecResponse {
+                outcome: outcome as i32,
+            }),
+            generation: Some(generation_to_proto(generation)),
+        }))
+    }
+
+    async fn renew_lease(
+        &self,
+        request: Request<proto::RenewLeaseRequest>,
+    ) -> Result<Response<proto::RenewLeaseResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.get_ref();
+        validate_lease(&req.owner, req.lease_seconds).map_err(Status::invalid_argument)?;
+        let generation = req
+            .generation
+            .as_ref()
+            .map(|generation| LeaseGeneration {
+                incarnation: generation.incarnation,
+                sequence: generation.sequence,
+            })
+            .ok_or_else(|| Status::invalid_argument("generation is required"))?;
+        set_request_summary(&request, lease_summary(&req.owner, Some(generation), false));
+        let remaining = self
+            .leases()?
+            .renew(
+                &req.owner,
+                generation,
+                req.lease_seconds,
+                tokio::time::Instant::now(),
+            )
+            .ok_or_else(|| {
+                tracing::debug!(owner = %req.owner, "injection lease renewal rejected");
+                Status::failed_precondition(
+                    "lease generation is not live; re-add the owner's desired state",
+                )
+            })?;
+        Ok(Response::new(proto::RenewLeaseResponse {
+            generation: Some(generation_to_proto(generation)),
+            lease_remaining_ms: millis(remaining),
+        }))
+    }
+
+    async fn list_injection_leases(
+        &self,
+        request: Request<proto::ListInjectionLeasesRequest>,
+    ) -> Result<Response<proto::ListInjectionLeasesResponse>, Status> {
+        let owner = request.into_inner().owner;
+        let leases = self
+            .leases()?
+            .list(
+                (!owner.is_empty()).then_some(owner.as_str()),
+                tokio::time::Instant::now(),
+            )
+            .into_iter()
+            .map(|row| proto::InjectionLeaseEntry {
+                owner: row.owner.to_string(),
+                generation: Some(generation_to_proto(row.generation)),
+                lease_seconds: row.lease_seconds,
+                lease_remaining_ms: millis(row.remaining),
+            })
+            .collect();
+        Ok(Response::new(proto::ListInjectionLeasesResponse { leases }))
     }
 
     async fn add_evpn_route(
@@ -1441,6 +1689,8 @@ mod tests {
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: vec![oversized_flowspec_component()],
                 allow_missing: false,
+                owner: String::new(),
+                override_owner: false,
             }))
             .await
             .unwrap_err();
@@ -1638,6 +1888,8 @@ mod tests {
                 prefix_length: 24,
                 path_id: 0,
                 allow_missing: false,
+                owner: String::new(),
+                override_owner: false,
             }))
             .await
             .unwrap_err();
@@ -1660,6 +1912,8 @@ mod tests {
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: Vec::new(),
                 allow_missing: false,
+                owner: String::new(),
+                override_owner: false,
             }))
             .await
             .unwrap_err();
@@ -2697,6 +2951,8 @@ mod tests {
             afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
             components: flowspec_rule_components(),
             allow_missing,
+            owner: String::new(),
+            override_owner: false,
         }))
         .await
         .map(Response::into_inner)
@@ -2949,6 +3205,8 @@ mod tests {
             prefix_length: 24,
             path_id: 0,
             allow_missing,
+            owner: String::new(),
+            override_owner: false,
         }))
         .await
         .map(|response| response.into_inner().outcome())
@@ -3011,6 +3269,235 @@ mod tests {
         );
 
         drop((svc, rib_tx));
+        manager_task.await.unwrap();
+    }
+
+    fn leased_path(owner: &str, lease_seconds: u32) -> proto::AddLeasedPathRequest {
+        proto::AddLeasedPathRequest {
+            path: Some(proto::AddPathRequest {
+                prefix: "198.51.100.7".into(),
+                prefix_length: 32,
+                next_hop: "0.0.0.0".into(),
+                communities: vec![0xFFFF_029A],
+                ..Default::default()
+            }),
+            lease: Some(proto::InjectionLease {
+                owner: owner.into(),
+                lease_seconds,
+            }),
+        }
+    }
+
+    /// Malformed leases are `INVALID_ARGUMENT` before anything reaches the
+    /// RIB: no lease, a bad owner, and a duration outside 5..=3600.
+    #[tokio::test]
+    async fn leased_add_validation_rejects_before_the_rib() {
+        let (svc, mut rx) = make_service_with_rx();
+        let mut missing = leased_path("ctl", 30);
+        missing.lease = None;
+        for (request, field) in [
+            (missing, "lease"),
+            (leased_path("", 30), "owner"),
+            (leased_path(&"x".repeat(65), 30), "owner"),
+            (leased_path("ctl/a", 30), "owner"),
+            (leased_path("ctl", 0), "lease_seconds"),
+            (leased_path("ctl", 4), "lease_seconds"),
+            (leased_path("ctl", 3601), "lease_seconds"),
+        ] {
+            // Bounded: a request that wrongly passes validation waits for a
+            // RIB reply that never comes.
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                svc.add_leased_path(Request::new(request)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{field}: reached the RIB"))
+            .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{field}");
+            assert!(error.message().contains(field), "{}", error.message());
+        }
+        let error = svc
+            .renew_lease(Request::new(proto::RenewLeaseRequest {
+                owner: "ctl".into(),
+                generation: Some(proto::LeaseGeneration::default()),
+                lease_seconds: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    /// Renewal and listing are served from the lease table and never wait
+    /// behind the RIB: they complete with the RIB channel full and unread.
+    #[tokio::test]
+    async fn renewal_never_waits_behind_the_rib() {
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(RibUpdate::ExpireInjectionLeases { leases: vec![] })
+            .unwrap();
+        let leases = Arc::new(InjectionLeases::new());
+        let generation = leases
+            .admit_leased_add(
+                "ctl",
+                30,
+                &rustbgpd_rib::injection_lease::InjectedKey::Unicast(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 7), 32)),
+                    0,
+                ),
+                false,
+                tokio::time::Instant::now(),
+            )
+            .unwrap();
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite)
+            .with_injection_leases(Arc::clone(&leases));
+        let renewed = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            svc.renew_lease(Request::new(proto::RenewLeaseRequest {
+                owner: "ctl".into(),
+                generation: Some(generation_to_proto(generation)),
+                lease_seconds: 10,
+            })),
+        )
+        .await
+        .expect("renewal does not wait for the RIB")
+        .unwrap();
+        assert_eq!(renewed.into_inner().lease_remaining_ms, 10_000);
+    }
+
+    /// The controller contract against a real RIB: a leased add returns the
+    /// owner's generation, renewal of that generation succeeds and of any
+    /// other is `FAILED_PRECONDITION`, the lease table lists it, and the
+    /// local read-back carries owner, generation and remaining lease.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one controller session: add, renew, stale renewals, list, read-back and delete"
+    )]
+    async fn leased_injection_renewal_and_read_back() {
+        use proto::rib_service_server::RibService as _;
+
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let leases = manager.injection_leases();
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite)
+            .with_injection_leases(Arc::clone(&leases));
+        let rib = crate::rib_service::RibService::new(rib_tx.clone())
+            .with_injection_leases(Arc::clone(&leases));
+
+        let added = svc
+            .add_leased_path(Request::new(leased_path("ctl", 30)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            added.result.unwrap().outcome(),
+            proto::PathInjectOutcome::Created
+        );
+        let generation = added.generation.unwrap();
+        assert_eq!(generation.incarnation, leases.incarnation());
+
+        let renewed = svc
+            .renew_lease(Request::new(proto::RenewLeaseRequest {
+                owner: "ctl".into(),
+                generation: Some(generation),
+                lease_seconds: 60,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(renewed.generation, Some(generation));
+        assert_eq!(renewed.lease_remaining_ms, 60_000);
+
+        for (owner, stale) in [
+            (
+                "ctl",
+                proto::LeaseGeneration {
+                    sequence: generation.sequence + 1,
+                    ..generation
+                },
+            ),
+            (
+                "ctl",
+                proto::LeaseGeneration {
+                    incarnation: generation.incarnation ^ 1,
+                    ..generation
+                },
+            ),
+            ("other", generation),
+        ] {
+            let error = svc
+                .renew_lease(Request::new(proto::RenewLeaseRequest {
+                    owner: owner.into(),
+                    generation: Some(stale),
+                    lease_seconds: 60,
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        }
+
+        let listed = svc
+            .list_injection_leases(Request::new(proto::ListInjectionLeasesRequest::default()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.leases.len(), 1);
+        assert_eq!(listed.leases[0].owner, "ctl");
+        assert_eq!(listed.leases[0].lease_seconds, 60);
+
+        let local = rib
+            .list_received_routes(Request::new(proto::ListRoutesRequest {
+                neighbor_address: "0.0.0.0".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(local.routes.len(), 1);
+        let row = &local.routes[0];
+        assert_eq!(row.injection_owner, "ctl");
+        assert_eq!(row.lease_generation, Some(generation));
+        assert!(
+            row.lease_remaining_ms
+                .is_some_and(|ms| ms > 0 && ms <= 60_000)
+        );
+
+        // An unowned delete of the owned route is refused; the owner's works.
+        let delete = |owner: &str| proto::DeletePathRequest {
+            prefix: "198.51.100.7".into(),
+            prefix_length: 32,
+            path_id: 0,
+            allow_missing: false,
+            owner: owner.into(),
+            override_owner: false,
+        };
+        assert_eq!(
+            svc.delete_path(Request::new(delete("")))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            svc.delete_path(Request::new(delete("ctl")))
+                .await
+                .unwrap()
+                .into_inner()
+                .outcome(),
+            proto::PathDeleteOutcome::Deleted
+        );
+
+        drop((svc, rib, rib_tx));
         manager_task.await.unwrap();
     }
 }

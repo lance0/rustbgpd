@@ -114,6 +114,8 @@ async fn advertised_flowspec_tracks_committed_policy_and_withdrawal() {
     tx.send(RibUpdate::WithdrawFlowSpec {
         key: route.selection_key(),
         allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
         reply,
     })
     .await

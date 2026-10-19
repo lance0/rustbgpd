@@ -3423,6 +3423,8 @@ async fn withdraw_injected_removes_and_distributes() {
         prefix: Prefix::V4(prefix),
         path_id: 0,
         allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
         reply: reply_tx,
     })
     .await
@@ -4398,6 +4400,8 @@ async fn withdraw_local_unicast(
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
         path_id: 0,
         allow_missing,
+        owner: String::new(),
+        override_owner: false,
         reply: reply_tx,
     })
     .await

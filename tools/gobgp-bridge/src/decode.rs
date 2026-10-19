@@ -124,6 +124,8 @@ pub fn decode(request: &gobgp::AddPathRequest) -> Result<Decoded, Status> {
                 prefix_length: u32::from(len),
                 path_id,
                 allow_missing: false,
+                owner: String::new(),
+                override_owner: false,
             }),
             uuid,
         });
@@ -494,6 +496,8 @@ mod tests {
                 prefix_length: 32,
                 path_id: 0,
                 allow_missing: false,
+                owner: String::new(),
+                override_owner: false,
             })
         );
         let mp = mp_reach_v6([0; 16], NLRI_V6_HOST);

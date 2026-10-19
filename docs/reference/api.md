@@ -66,7 +66,7 @@ not by itself make it v1-stable.
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
+| `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
@@ -241,7 +241,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `BfdService` | `GetBfdSessions` | None |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
-| `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `InjectionService` | `ListInjectionLeases` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
@@ -2961,6 +2961,9 @@ export policy).
 | `DeletePath` | Withdraw a previously injected route |
 | `AddFlowSpec` | Inject a FlowSpec rule with actions |
 | `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
+| `AddLeasedPath` / `AddLeasedFlowSpec` | Inject a route or FlowSpec rule under an owner's lease; see [leased injection](#leased-injection) |
+| `RenewLease` | Renew an owner's lease generation |
+| `ListInjectionLeases` | List the injection lease table |
 | `AddEvpnRoute` | Inject an EVPN Type 2 (MAC/IP), Type 3 (IMET), or Type 5 (IP Prefix) route; Type 5 may be interface-less or carry an overlay-index gateway |
 | `DeleteEvpnRoute` | Withdraw a previously injected EVPN route by its EVPN route key |
 
@@ -3111,11 +3114,79 @@ withdraws what it no longer wants with `allow_missing: true`. It always
 reconciles after reconnecting to the daemon. A `ControlService.GetHealth`
 `uptime_seconds` lower than on the previous poll is an extra trigger to
 reconcile at once, not the detector: a poll can see a restarted daemon whose
-uptime has already passed the previous reading. The owner leases in
-[ADR-0141](../adr/0141-injection-owner-lease.md), once available, add a
-stronger signal: renewing a lease generation from before the restart fails.
-To list exactly the injected routes, call `RibService.ListReceivedRoutes` with
+uptime has already passed the previous reading. A
+[leased](#leased-injection) controller gets a stronger signal: renewing a
+lease generation from before the restart fails. To list exactly the injected
+routes, call `RibService.ListReceivedRoutes` with
 `neighbor_address: "0.0.0.0"`.
+
+#### Leased injection
+
+Unowned injected state lives until it is deleted or the daemon stops, so a
+controller that stops while the daemon runs leaves its routes and rules in
+place. `AddLeasedPath` and `AddLeasedFlowSpec` take the same request as
+`AddPath` and `AddFlowSpec` plus an `InjectionLease { owner, lease_seconds }`,
+and return the same outcome plus the owner's `LeaseGeneration`
+([ADR-0141](../adr/0141-injection-owner-lease.md)). Every entry an owner adds
+shares that owner's one lease. When the lease's deadline passes without a
+renewal or a further leased add, the daemon withdraws all of the owner's
+routes and rules in one RIB turn, logs a WARN line with the counts and the
+lag from the deadline, and counts it in
+`bgp_injection_lease_expiries_total{owner}`.
+
+| Rule | Behaviour |
+|---|---|
+| `owner` | 1-64 bytes of `[A-Za-z0-9._-]`, else `INVALID_ARGUMENT` |
+| `lease_seconds` | 5-3600, else `INVALID_ARGUMENT` |
+| Leased add, owner has a live lease | Joins it; the deadline becomes `max(current, now + lease_seconds)` and never moves earlier |
+| Leased add, no live lease | Starts a new generation; at most 64 live owners, else `RESOURCE_EXHAUSTED` |
+| `RenewLease(owner, generation, lease_seconds)` | Sets the deadline to exactly `now + lease_seconds`, which may shorten it; `FAILED_PRECONDITION` unless `generation` is the owner's live lease |
+| Leased add on a key held by another owner or by no owner | `FAILED_PRECONDITION`; delete the unowned entry first, or add under another `path_id` |
+| Unowned add on an owned key | `FAILED_PRECONDITION` |
+| `DeletePath`/`DeleteFlowSpec` | `owner` must match the entry (`""` for unowned) unless `override_owner` is set, else `FAILED_PRECONDITION` |
+
+Every rejection above leaves the RIB, the lease table and the wire unchanged.
+A lease is live while `now < deadline` on the daemon's monotonic clock, so a
+renewal at exactly the deadline fails. A renewal never creates or resurrects a
+lease. A controller that gets `FAILED_PRECONDITION` from `RenewLease`, or a
+generation from a leased add other than the one it holds, assumes its state
+is gone and re-adds its full desired state; the first leased add starts the
+new generation. Renew well inside the lease, for example every third of it.
+`RenewLease` is served from the lease table and never waits behind RIB work.
+
+Expiry removes local intent only. An equal or better route from elsewhere, or
+a received FlowSpec rule with the same key, keeps applying, and the daemon
+makes no promise about remote acceptance or enforcement. The lease bounds how
+long a stopped controller's state outlives it; when the daemon itself stops,
+peers drop the routes as their sessions close or their Graceful Restart timers
+run out. SIGHUP does not touch leases. A daemon that predates these RPCs
+answers `UNIMPLEMENTED` and creates nothing, so never retry a failed leased
+add through `AddPath` or `AddFlowSpec`.
+
+`RibService.ListReceivedRoutes` with `neighbor_address: "0.0.0.0"` and
+`ListFlowSpecRoutes` with `received_peer_address: "0.0.0.0"` report each
+owned entry's `injection_owner`, `lease_generation` and `lease_remaining_ms`
+(0 means expired, withdrawal pending); unowned entries leave them unset.
+`InjectionService.ListInjectionLeases` lists the lease table. The leased adds
+and `RenewLease` are `operator_only`; a successful `RenewLease` is audited at
+INFO rather than WARN. The owner is a label that keeps controllers from
+changing each other's state by mistake, not a security boundary between
+operators.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "path": {"prefix": "198.51.100.7", "prefix_length": 32,
+             "next_hop": "0.0.0.0", "communities": [4294902426]},
+    "lease": {"owner": "rtbh-pop1", "lease_seconds": 30}
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddLeasedPath
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"owner": "rtbh-pop1", "generation": {"incarnation": "<from the add>",
+       "sequence": "<from the add>"}, "lease_seconds": 30}' \
+  localhost:50051 rustbgpd.v1.InjectionService/RenewLease
+```
 
 #### Connecting a controller
 

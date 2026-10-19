@@ -5,6 +5,7 @@ use super::{
     should_suppress_ibgp_inner, warn,
 };
 use crate::attr_set::AttrSet;
+use crate::injection_lease::{InjectedKey, LeaseGeneration};
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
 use crate::update::InjectOutcome;
 
@@ -144,11 +145,66 @@ impl RibManager {
         route: crate::route::FlowSpecRoute,
         reply: tokio::sync::oneshot::Sender<Result<InjectOutcome, RibCommandError>>,
     ) {
+        let result = self
+            .inject_local_flowspec(route, None)
+            .map(|(outcome, _)| outcome);
+        let _ = reply.send(result);
+    }
+
+    pub(in crate::manager) fn handle_inject_leased_flowspec(
+        &mut self,
+        route: crate::route::FlowSpecRoute,
+        owner: &str,
+        lease_seconds: u32,
+        reply: tokio::sync::oneshot::Sender<
+            Result<(InjectOutcome, LeaseGeneration), RibCommandError>,
+        >,
+    ) {
+        let result = self
+            .inject_local_flowspec(route, Some((owner, lease_seconds)))
+            .map(|(outcome, generation)| {
+                (
+                    outcome,
+                    generation.expect("a leased add returns its generation"),
+                )
+            });
+        let _ = reply.send(result);
+    }
+
+    /// Insert a local `FlowSpec` rule, unowned or under `lease`; see
+    /// `inject_local_route` for the ownership contract (ADR-0141).
+    fn inject_local_flowspec(
+        &mut self,
+        route: crate::route::FlowSpecRoute,
+        lease: Option<(&str, u32)>,
+    ) -> Result<(InjectOutcome, Option<LeaseGeneration>), RibCommandError> {
         let key = route.selection_key();
+        let owned_key = InjectedKey::FlowSpec(key.clone());
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        let present = rib.get_flowspec(&route.key()).is_some();
+        let generation = if let Some((owner, lease_seconds)) = lease {
+            let generation = self
+                .injection_leases
+                .admit_leased_add(
+                    owner,
+                    lease_seconds,
+                    &owned_key,
+                    present,
+                    tokio::time::Instant::now(),
+                )
+                .map_err(super::unicast::lease_rejection)?;
+            self.metrics
+                .set_injection_leases(super::gauge_val(self.injection_leases.owner_count()));
+            Some(generation)
+        } else {
+            self.injection_leases
+                .check_owner(&owned_key, "")
+                .map_err(super::unicast::lease_rejection)?;
+            None
+        };
         // Decide from the local Adj-RIB-In, not Loc-RIB: a received rule
         // that out-selects the local one leaves Loc-RIB unchanged even when
         // the local payload really was replaced. `received_at` is excluded,
@@ -178,15 +234,18 @@ impl RibManager {
         let mut fs_affected = HashSet::new();
         fs_affected.insert(key);
         self.recompute_and_distribute_flowspec(&fs_affected);
-        let _ = reply.send(Ok(outcome));
+        Ok((outcome, generation))
     }
 
     pub(in crate::manager) fn handle_withdraw_flowspec(
         &mut self,
         key: FlowSpecKey,
         allow_missing: bool,
+        owner: &str,
+        override_owner: bool,
         reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
     ) {
+        let owned_key = InjectedKey::FlowSpec(key.clone());
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
@@ -196,6 +255,13 @@ impl RibManager {
             rule: key.rule.clone(),
             path_id: 0,
         };
+        if !override_owner
+            && rib.get_flowspec(&route_key).is_some()
+            && let Err(rejection) = self.injection_leases.check_owner(&owned_key, owner)
+        {
+            let _ = reply.send(Err(super::unicast::lease_rejection(rejection)));
+            return;
+        }
         let removed = rib.withdraw_flowspec(&route_key);
         crate::manager::helpers::set_rib_prefixes(
             &self.metrics,
@@ -204,6 +270,7 @@ impl RibManager {
             rib.flowspec_lens(),
         );
         if removed {
+            self.injection_leases.forget(&owned_key);
             debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
             let mut fs_affected = HashSet::new();
             fs_affected.insert(key);

@@ -151,6 +151,9 @@ pub struct RibService {
     /// Resolves an empty peer-scoped listing to `NOT_FOUND` for an unknown
     /// peer. `None` (tests, benchmarks) leaves every listing unchecked.
     known_peers: Option<KnownPeerQueries>,
+    /// ADR-0141 lease table, for the owner and remaining lease on locally
+    /// injected rows. `None` leaves those fields unset.
+    injection_leases: Option<std::sync::Arc<rustbgpd_rib::injection_lease::InjectionLeases>>,
     #[cfg(feature = "bench-internals")]
     vpn_query_bench_receipts: Option<mpsc::Sender<VpnQueryServiceReceipt>>,
 }
@@ -177,6 +180,7 @@ impl RibService {
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
             known_peers: None,
+            injection_leases: None,
             #[cfg(feature = "bench-internals")]
             vpn_query_bench_receipts: None,
         }
@@ -195,6 +199,7 @@ impl RibService {
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
             known_peers: None,
+            injection_leases: None,
             #[cfg(feature = "bench-internals")]
             vpn_query_bench_receipts: None,
         }
@@ -230,6 +235,40 @@ impl RibService {
     #[must_use]
     pub(crate) fn with_known_peer_queries(mut self, known_peers: KnownPeerQueries) -> Self {
         self.known_peers = Some(known_peers);
+        self
+    }
+
+    /// Fill the lease owner and remaining lease on a locally injected rule.
+    fn annotate_flowspec_lease(
+        &self,
+        route: &FlowSpecRoute,
+        entry: &mut proto::FlowSpecRouteEntry,
+    ) {
+        if route.peer != LOCAL_INJECTION_PEER {
+            return;
+        }
+        if let Some(lease) = self.injection_leases.as_deref().and_then(|leases| {
+            leases.key_lease(
+                &rustbgpd_rib::injection_lease::InjectedKey::FlowSpec(route.selection_key()),
+                tokio::time::Instant::now(),
+            )
+        }) {
+            set_row_lease(
+                &mut entry.injection_owner,
+                &mut entry.lease_generation,
+                &mut entry.lease_remaining_ms,
+                &lease,
+            );
+        }
+    }
+
+    /// Report the lease owner and remaining lease on locally injected rows.
+    #[must_use]
+    pub fn with_injection_leases(
+        mut self,
+        leases: std::sync::Arc<rustbgpd_rib::injection_lease::InjectionLeases>,
+    ) -> Self {
+        self.injection_leases = Some(leases);
         self
     }
 
@@ -1877,12 +1916,31 @@ fn build_route_query_filter(
     }))
 }
 
+/// Source peer of locally injected routes and rules.
+const LOCAL_INJECTION_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+
+fn set_row_lease(
+    owner: &mut String,
+    generation: &mut Option<proto::LeaseGeneration>,
+    remaining_ms: &mut Option<u32>,
+    lease: &rustbgpd_rib::injection_lease::KeyLease,
+) {
+    *owner = lease.owner.to_string();
+    *generation = Some(proto::LeaseGeneration {
+        incarnation: lease.generation.incarnation,
+        sequence: lease.generation.sequence,
+    });
+    *remaining_ms = Some(u32::try_from(lease.remaining.as_millis()).unwrap_or(u32::MAX));
+}
+
 fn route_page_to_response(
     page: &RoutePage,
     scope: RouteQueryScope,
     query_identity: &str,
     best: bool,
+    leases: Option<&rustbgpd_rib::injection_lease::InjectionLeases>,
 ) -> proto::ListRoutesResponse {
+    let now = tokio::time::Instant::now();
     let next_page_token = if page.has_more {
         page.routes
             .last()
@@ -1903,7 +1961,28 @@ fn route_page_to_response(
         routes: page
             .routes
             .iter()
-            .map(|route| route_to_proto(route, best))
+            .map(|route| {
+                let mut row = route_to_proto(route, best);
+                if route.peer == LOCAL_INJECTION_PEER
+                    && let Some(lease) = leases.and_then(|leases| {
+                        leases.key_lease(
+                            &rustbgpd_rib::injection_lease::InjectedKey::Unicast(
+                                route.prefix,
+                                route.path_id,
+                            ),
+                            now,
+                        )
+                    })
+                {
+                    set_row_lease(
+                        &mut row.injection_owner,
+                        &mut row.lease_generation,
+                        &mut row.lease_remaining_ms,
+                        &lease,
+                    );
+                }
+                row
+            })
             .collect(),
         next_page_token,
         total_count: page.total,
@@ -2426,6 +2505,10 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
             .approx_wall_time(std::time::SystemTime::now())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_secs()),
+        // Filled from the lease table for locally injected rows.
+        injection_owner: String::new(),
+        lease_generation: None,
+        lease_remaining_ms: None,
     }
 }
 
@@ -2516,6 +2599,7 @@ impl proto::rib_service_server::RibService for RibService {
             scope,
             &query_identity,
             false,
+            self.injection_leases.as_deref(),
         )))
     }
 
@@ -2544,6 +2628,7 @@ impl proto::rib_service_server::RibService for RibService {
             scope,
             &query_identity,
             true,
+            self.injection_leases.as_deref(),
         )))
     }
 
@@ -2586,6 +2671,7 @@ impl proto::rib_service_server::RibService for RibService {
             scope,
             &query_identity,
             false,
+            self.injection_leases.as_deref(),
         )))
     }
 
@@ -2790,7 +2876,13 @@ impl proto::rib_service_server::RibService for RibService {
                 routes: Vec::new(),
                 received_routes: matched
                     .iter()
-                    .map(received_flowspec_route_to_proto)
+                    .map(|row| {
+                        let mut out = received_flowspec_route_to_proto(row);
+                        if let Some(entry) = out.route.as_mut() {
+                            self.annotate_flowspec_lease(&row.route, entry);
+                        }
+                        out
+                    })
                     .collect(),
                 received_view: true,
                 advertised_view: false,
@@ -2815,8 +2907,14 @@ impl proto::rib_service_server::RibService for RibService {
                 .await?;
         }
 
-        let routes: Vec<proto::FlowSpecRouteEntry> =
-            matched.iter().map(flowspec_route_to_proto).collect();
+        let routes: Vec<proto::FlowSpecRouteEntry> = matched
+            .iter()
+            .map(|route| {
+                let mut entry = flowspec_route_to_proto(route);
+                self.annotate_flowspec_lease(route, &mut entry);
+                entry
+            })
+            .collect();
 
         Ok(Response::new(proto::ListFlowSpecResponse {
             routes,
@@ -3879,6 +3977,9 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         as_path,
         communities,
         extended_communities,
+        injection_owner: String::new(),
+        lease_generation: None,
+        lease_remaining_ms: None,
     }
 }
 
@@ -8369,6 +8470,9 @@ mod tests {
                     as_path: Vec::new(),
                     communities: Vec::new(),
                     extended_communities: Vec::new(),
+                    injection_owner: String::new(),
+                    lease_generation: None,
+                    lease_remaining_ms: None,
                 }),
                 path_id: u32::MAX,
                 selected: false,
@@ -9594,6 +9698,7 @@ mod tests {
             RouteQueryScope::Best,
             &route_page_identity(&list_routes_request()),
             true,
+            None,
         );
 
         assert_eq!(response.routes.len(), 0);
