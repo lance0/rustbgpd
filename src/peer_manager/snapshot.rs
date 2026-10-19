@@ -185,12 +185,6 @@ fn manager_peer_info(
         rejected_routes_retained: None,
         prefix_count_ipv4: 0,
         prefix_count_ipv6: 0,
-        max_prefixes_effective: managed.max_prefixes,
-        max_prefixes_ipv4_effective: managed.transport_config.max_prefixes_ipv4,
-        max_prefixes_ipv6_effective: managed.transport_config.max_prefixes_ipv6,
-        max_prefix_headroom: None,
-        max_prefix_headroom_ipv4: None,
-        max_prefix_headroom_ipv6: None,
         inbound_prefix_limits: Vec::new(),
         hold_time: managed.hold_time,
         min_hold_time: managed.transport_config.peer.min_hold_time,
@@ -271,12 +265,6 @@ fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSe
     info.rejected_routes_retained = Some(state.rejected_routes_retained);
     info.prefix_count_ipv4 = state.max_prefix.prefix_count_ipv4;
     info.prefix_count_ipv6 = state.max_prefix.prefix_count_ipv6;
-    info.max_prefixes_effective = state.max_prefix.max_prefixes;
-    info.max_prefixes_ipv4_effective = state.max_prefix.max_prefixes_ipv4;
-    info.max_prefixes_ipv6_effective = state.max_prefix.max_prefixes_ipv6;
-    info.max_prefix_headroom = state.max_prefix.headroom;
-    info.max_prefix_headroom_ipv4 = state.max_prefix.headroom_ipv4;
-    info.max_prefix_headroom_ipv6 = state.max_prefix.headroom_ipv6;
     info.inbound_prefix_limits = inbound_prefix_limit_rows(state);
     info.negotiated_session
         .clone_from(&state.negotiated_session);

@@ -336,7 +336,6 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
     let cfg = n.config.as_ref();
     let distribution_mode = effective_distribution_mode_label(n.effective_distribution_mode);
     let max_prefix_action = max_prefix_action_label(&n.max_prefix_action);
-    let effective_max_prefixes = n.effective_max_prefixes;
     let (negotiation_available, negotiated_session) = negotiated_session_json(n);
     JsonNeighborDetail {
         address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
@@ -369,12 +368,6 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
         accepted_dynamic_range: output::json_accepted_dynamic_range(
             n.accepted_dynamic_range.as_ref(),
         ),
-        effective_max_prefixes,
-        effective_max_prefixes_ipv4: n.effective_max_prefixes_ipv4,
-        effective_max_prefixes_ipv6: n.effective_max_prefixes_ipv6,
-        max_prefix_headroom: n.max_prefix_headroom,
-        max_prefix_headroom_ipv4: n.max_prefix_headroom_ipv4,
-        max_prefix_headroom_ipv6: n.max_prefix_headroom_ipv6,
         max_prefix_action: max_prefix_action.to_string(),
         max_prefix_restart_seconds: cfg.and_then(|c| c.max_prefix_restart_seconds),
         max_prefix_restart_remaining_millis: n.max_prefix_restart_remaining_millis,
@@ -747,29 +740,6 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
     rows.field(0, "Prefixes Received", n.prefixes_received);
     rows.field(1, "IPv4 Unicast", n.prefixes_received_ipv4);
     rows.field(1, "IPv6 Unicast", n.prefixes_received_ipv6);
-    rows.field(
-        0,
-        "Max Prefixes",
-        max_prefix_capacity_label(n.effective_max_prefixes, n.max_prefix_headroom, n.stale),
-    );
-    rows.field(
-        1,
-        "IPv4 Unicast",
-        max_prefix_capacity_label(
-            n.effective_max_prefixes_ipv4,
-            n.max_prefix_headroom_ipv4,
-            n.stale,
-        ),
-    );
-    rows.field(
-        1,
-        "IPv6 Unicast",
-        max_prefix_capacity_label(
-            n.effective_max_prefixes_ipv6,
-            n.max_prefix_headroom_ipv6,
-            n.stale,
-        ),
-    );
     rows.field(0, "Prefixes Sent", prefixes_sent_label(n));
     if n.outbound_resync_pending == Some(true) {
         rows.field(
@@ -1204,15 +1174,6 @@ fn max_prefix_action_label(reported: &str) -> &str {
         "unknown"
     } else {
         reported
-    }
-}
-
-fn max_prefix_capacity_label(limit: Option<u32>, headroom: Option<u32>, stale: bool) -> String {
-    match (limit, headroom, stale) {
-        (None, _, _) => "unlimited".to_string(),
-        (Some(limit), _, true) => format!("{limit} (headroom unavailable: stale state)"),
-        (Some(limit), Some(headroom), false) => format!("{limit} ({headroom} remaining)"),
-        (Some(limit), None, false) => format!("{limit} (headroom unavailable)"),
     }
 }
 
@@ -1788,12 +1749,6 @@ mod tests {
             }),
             prefixes_received_ipv4: 141,
             prefixes_received_ipv6: 142,
-            effective_max_prefixes: Some(143),
-            effective_max_prefixes_ipv4: Some(144),
-            effective_max_prefixes_ipv6: Some(145),
-            max_prefix_headroom: Some(146),
-            max_prefix_headroom_ipv4: Some(147),
-            max_prefix_headroom_ipv6: Some(148),
             negotiation_available: Some(true),
             negotiated_session: Some(crate::proto::NegotiatedSessionState {
                 hold_time_seconds: Some(0),
@@ -2399,9 +2354,6 @@ Reconnect In:             00:02:37
 Prefixes Received:        104
   IPv4 Unicast:           141
   IPv6 Unicast:           142
-Max Prefixes:             143 (146 remaining)
-  IPv4 Unicast:           144 (147 remaining)
-  IPv6 Unicast:           145 (148 remaining)
 Prefixes Sent:            105 (pending outbound resync)
 Outbound Resync:          pending for 00:02:43
 Recovery Fallback:        update_group_recovery_fallback-value (resync withdraws conservatively)
@@ -2530,21 +2482,6 @@ Last Error:               last_error-value
         assert!(human.contains("\nPeer Source: dynamic (range unavailable)\n"));
         assert!(human.contains("\nEffective Posture: unknown (not exposed by daemon)\n"));
         assert_eq!(next_hop_ownership_label(i32::MAX), "unknown");
-    }
-
-    /// Load-bearing: collapsing protobuf absence into zero, or deriving
-    /// headroom from a stale zero count, changes these operator-facing labels.
-    #[test]
-    fn max_prefix_capacity_distinguishes_finite_unlimited_and_stale() {
-        assert_eq!(
-            max_prefix_capacity_label(Some(20), Some(9), false),
-            "20 (9 remaining)"
-        );
-        assert_eq!(max_prefix_capacity_label(None, None, false), "unlimited");
-        assert_eq!(
-            max_prefix_capacity_label(Some(20), None, true),
-            "20 (headroom unavailable: stale state)"
-        );
     }
 
     /// Load-bearing proof: collapsing protobuf presence, ignoring stale, or
