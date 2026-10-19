@@ -1,9 +1,11 @@
 ### Added
 
 - The [v1 inventory](../docs/reference/v1-stable-contract.md) now pins
-  `NeighborService.ResetNeighbor` and the everyday mutation command paths:
+  `NeighborService.ResetNeighbor` and the everyday command paths:
   `rbgp neighbor add`, `delete`, `enable`, `disable`, `reset`, `refresh-in`
-  and `refresh-out`; `rbgp peer-group set`, `attach` and `detach`; and
+  and `refresh-out`; `rbgp peer-group list`, `get`, `set`, `delete`,
+  `attach` and `detach`; `rbgp neighbor-set list`, `get`, `set` and
+  `delete`; `rbgp dynamic-neighbor list`, `add` and `delete`; and
   `rbgp policy chain` with its `show`, `set-import`, `set-export`,
   `clear-import` and `clear-export` subcommands.
   **Operator-visible:** `rbgp neighbor <addr> softreset` is now
