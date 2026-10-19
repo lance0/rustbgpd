@@ -3463,7 +3463,7 @@ ASPA verification is an IPv4/IPv6-unicast edge-ingress signal. eBGP routes
 are verified even when no BGP Role is configured; a Role selects verification
 direction. The first-AS check still applies when `route_server_client = true`:
 that flag identifies the remote peer as a route-server member. Only a local
-`rs-client` Role is exempt, because a remote route server transparently relays
+`route_server_client` Role is exempt, because a remote route server transparently relays
 the member's AS_PATH without adding its own ASN. RFC 6793 OLD peers are checked
 after AS_PATH reconstruction. Routes learned over iBGP
 always present `aspa = "unknown"` to import policy and keep that state across

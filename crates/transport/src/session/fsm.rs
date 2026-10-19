@@ -1349,10 +1349,11 @@ pub(super) fn hard_reset_notification_in_actions(actions: &[Action]) -> bool {
 /// Bounded label string for `bgp_role_mismatch_total{local_role, remote_role}`.
 ///
 /// Returns a static `&'static str` so the metric cardinality stays bounded
-/// (seven values: the five RFC 9234 roles, `"none"`, and `"unrecognized"`
-/// for registry values this build does not model). An absent role
-/// (peer did not advertise the Role capability, or we didn't configure one)
-/// is reported as `"none"`.
+/// (seven values: the five RFC 9234 roles in their config spelling, empty,
+/// and `"unrecognized"` for registry values this build does not model). An
+/// absent role (peer did not advertise the Role capability, or we didn't
+/// configure one) is the empty string, as on the gRPC API, which Prometheus
+/// treats as an absent label.
 const fn role_metric_label(role: Option<rustbgpd_wire::BgpRole>) -> &'static str {
     match role {
         Some(rustbgpd_wire::BgpRole::Provider) => "provider",
@@ -1361,16 +1362,16 @@ const fn role_metric_label(role: Option<rustbgpd_wire::BgpRole>) -> &'static str
         Some(rustbgpd_wire::BgpRole::Customer) => "customer",
         Some(rustbgpd_wire::BgpRole::Peer) => "peer",
         Some(_) => "unrecognized",
-        None => "none",
+        None => "",
     }
 }
 
 /// `remote_role` label for `bgp_role_mismatch_total`: an OPEN whose Role
 /// capabilities carry only unassigned or wrong-length values is
-/// `"unrecognized"`, distinct from `"none"` for an OPEN with no Role.
+/// `"unrecognized"`, distinct from the empty label for an OPEN with no Role.
 const fn received_role_metric_label(role: &rustbgpd_fsm::ReceivedRole) -> &'static str {
     match role {
-        rustbgpd_fsm::ReceivedRole::Absent => "none",
+        rustbgpd_fsm::ReceivedRole::Absent => "",
         rustbgpd_fsm::ReceivedRole::Assigned(role) => role_metric_label(Some(*role)),
         _ => "unrecognized",
     }

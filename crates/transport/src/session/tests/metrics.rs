@@ -548,7 +548,7 @@ async fn role_mismatch_labels_unrecognized_remote_role_apart_from_absent() {
         .collect();
     rows.sort_by(|a, b| a.2.cmp(&b.2));
     let expected = [
-        ("10.0.0.2", "customer", "none", 1.0),
+        ("10.0.0.2", "customer", "", 1.0),
         ("10.0.0.2", "customer", "provider", 1.0),
         ("10.0.0.2", "customer", "unrecognized", 2.0),
     ];

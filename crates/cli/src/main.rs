@@ -8191,7 +8191,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         assert_eq!(max_prefix_restart_seconds, Some(30));
         assert!(route_server_client);
         assert!(per_client_best);
-        assert_eq!(role.as_deref(), Some("rs"));
+        assert_eq!(role.as_deref(), Some("route_server"));
     }
 
     fn documented_continued_command(document: &str, marker: &str) -> String {
@@ -8325,7 +8325,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         assert_eq!(max_prefix_restart_seconds, Some(30));
         assert!(route_server_client);
         assert!(per_client_best);
-        assert_eq!(role.as_deref(), Some("rs"));
+        assert_eq!(role.as_deref(), Some("route_server"));
     }
 
     #[test]

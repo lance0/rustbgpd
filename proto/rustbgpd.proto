@@ -601,7 +601,9 @@ message NeighborConfig {
   uint32 add_path_send_max = 12;
   // Optional interface name for IPv6 link-local / unnumbered neighbors.
   string interface = 13;
-  // Local BGP Role for RFC 9234 route-leak protection. Empty = disabled.
+  // Local BGP Role for RFC 9234 route-leak protection, spelled as in config:
+  // provider, route_server, route_server_client, customer, or peer. Empty =
+  // disabled. Requests also accept the config aliases rs and rs-client.
   string role = 14;
   // Require the peer to advertise a compatible BGP Role capability.
   bool strict_role = 15;
@@ -666,7 +668,7 @@ message NeighborState {
   // not an observed Idle/down state. Clients must check this flag before
   // treating `state` as authoritative; a stale row remains in the inventory.
   bool stale = 13;
-  // Locally configured BGP Role. Empty when disabled.
+  // Locally configured BGP Role, in the `role` spelling. Empty when disabled.
   string local_role = 14;
   // Remote BGP Role advertised in OPEN. Empty when absent or unknown.
   string remote_role = 15;

@@ -561,8 +561,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcomma
 provider\t''
 customer\t''
 peer\t''
-route-server\t''
-rs-client\t''"
+route_server\t''
+route_server_client\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F

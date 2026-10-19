@@ -14322,7 +14322,7 @@ _rbgp() {
                     return 0
                     ;;
                 --role)
-                    COMPREPLY=($(compgen -W "none provider customer peer route-server rs-client" -- "${cur}"))
+                    COMPREPLY=($(compgen -W "none provider customer peer route_server route_server_client" -- "${cur}"))
                     return 0
                     ;;
                 --addr)

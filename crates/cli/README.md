@@ -218,8 +218,9 @@ for monitoring reset behavior, completion evidence, and the five-second bound.
 `rpki aspa` returns up to 256 sorted effective providers, retaining AS0 and
 explicit `found`, `complete`, and `omitted` fields in JSON. `rpki verify-path`
 requires the **local receiving role** (`none`, `provider`, `customer`, `peer`,
-`route-server`, or `rs-client`) and an explicit nonzero neighbor ASN. Only
-`rs-client` skips the first-AS check; `customer` selects downstream verification.
+`route_server`, or `route_server_client`; `route-server`, `rs` and `rs-client`
+are accepted aliases) and an explicit nonzero neighbor ASN. Only
+`route_server_client` skips the first-AS check; `customer` selects downstream verification.
 The literal path accepts nonzero decimal ASNs and `{ASN ASN}` sets, at most
 4096 ASNs and 65536 input bytes. Empty quoted paths and AS_SETs produce an
 `invalid` verdict; malformed braces, AS0, and missing context are usage errors.
