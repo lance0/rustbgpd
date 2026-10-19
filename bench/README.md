@@ -1,5 +1,7 @@
 # Benchmark tooling
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 This directory contains local tooling for repeatable performance checks.
 
 **Development tooling only.** Nothing in this directory is production
@@ -38,6 +40,7 @@ lock, quiet gates, provenance, and thresholds, and a lock or quiet-gate exit
 | `just bench-irr-reload [cells]` | `scale/irrreload/run-irr-reload.sh` (`SMOKE=1` for its pipeline check) |
 | `just bench-rpki-cell <out-dir> <base> <head>` | `scale/rpki-cell/run-rpki-cell.sh`: the reloadstall convergence cell, base against head, with a StayRTR-served VRP table (`DAEMON_CPUS` and `RTR_CPUS` required) |
 | `just bench-vpn-query <output> [--smoke] [--retry]` | `run-vpn-query-campaign.sh`, with `--cpu $RUSTBGPD_BENCH_CORE` unless `--cpu` is given |
+| `just bench-converged-rejoin <out-dir> <base> <head>` | `scale/reloadstall/run-converged-rejoin.sh`: the GR-helper converged-rejoin flapstorm, base against head at a low and a high K (`DAEMON_CPUS` and `ENGINE_CPUS` required; `SMOKE=1` and `DRY_RUN=1` supported) |
 | `just bench-headline <out-dir> <label>=<ref>...` | `scale/headline/run-campaign.sh`: the headline matrix, IRR, and RR1000 cells across several arms, in rotated order |
 | `just bench-headline-summary <dir> [--out DIR]` | `scale/headline/summarize.py`: re-extraction of a campaign or receipt bundle, no measurement |
 
@@ -46,6 +49,17 @@ and 63, and the right core depends on the host. `bench` and `bench-rrharness`
 refuse to start without it, and `bench-compare` refuses unless it or `--core`
 is given; `--no-taskset` remains the mechanics-only escape. The route-paging
 and rrharness A/B drivers keep their own `--core` default when it is unset.
+
+## Recovery memory and mass-dirty receipts
+
+The recovery qualifications have no `just` recipe and run directly; see each
+driver's header. `scale/compare-recovery-memory.sh` (checked by
+`scale/recovery_memory.py`) produces the memory receipt and the component
+capture scans, and `scale/reloadstall/run-recovery-mass-dirty.sh` runs the
+actual-daemon mass-dirty and dataset-reload qualifications. The hosted runs
+are `workflow_dispatch` runs of `ci.yml` with `recovery_memory_receipt` set and
+`recovery_receipt_mode` selecting the qualification. See
+[Writing a receipt](../docs/perf/README.md#writing-a-receipt).
 
 ## Pinned-kernel netns calibration
 

@@ -11,12 +11,13 @@ and v0.17.0; Gate 9 symmetric Interface-less IRB end-to-end in
 v0.18.0 — PRs #77 / #78 / #79; ADR-0059 aliasing dataplane ECMP
 via FDB nexthop groups fully landed in v0.19.0 — PRs
 #84 / #86 / #87 / #88 / #89). The branch landed the control-plane,
-kernel, L3, and aliasing-ECMP paths; this file tracks what we
-still need to retire residual alpha-VTEP risk before claiming
+kernel, L3, and aliasing-ECMP paths; this file tracked what was
+still needed to retire residual alpha-VTEP risk before claiming
 v1.0-grade production readiness.
 
-Items are checkboxed so individual slices can move independently;
-none of them block the current release on their own.
+Items were checkboxed so individual slices could move independently;
+none of them blocked a release on their own. The checkbox states are
+as last recorded here; current EVPN status is in the pages linked above.
 
 ## CI / observability
 
