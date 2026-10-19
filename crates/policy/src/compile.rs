@@ -20,6 +20,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
+use crate::datasets::MAX_UNIT_DATASETS;
 use crate::engine::{AsPathRegex, NamedPolicy, PolicyAction, PolicyChain, PolicyStatement};
 use crate::ir::{
     Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetSlot, ForEachNode, LoopSource, MatchExpr,
@@ -38,22 +39,30 @@ const CHAIN_NODE_LIMIT: &str = "compiled policy chain exceeds MAX_CHAIN_NODES (1
 ///
 /// Each policy, term, action, guard and value-expression node counts once.
 /// Loop bodies count once structurally, and repeated members count separately.
+/// [`Self::add_named`] also bounds the chain's merged dataset table by the
+/// [`MAX_UNIT_DATASETS`] slots one evaluation pins.
 /// Public infallible compilation and hand-built IR remain trusted embedding
 /// boundaries; callers accepting untrusted chains must check this budget.
 #[derive(Debug)]
-pub struct ChainNodeBudget(Cell<usize>);
+pub struct ChainNodeBudget {
+    nodes: Cell<usize>,
+    datasets: Vec<DatasetSlot>,
+}
 
 impl Default for ChainNodeBudget {
     fn default() -> Self {
-        Self(Cell::new(MAX_CHAIN_NODES))
+        Self {
+            nodes: Cell::new(MAX_CHAIN_NODES),
+            datasets: Vec::new(),
+        }
     }
 }
 
 impl ChainNodeBudget {
     fn exhausted(&self, nodes: usize) -> bool {
-        match self.0.get().checked_sub(nodes) {
+        match self.nodes.get().checked_sub(nodes) {
             Some(remaining) => {
-                self.0.set(remaining);
+                self.nodes.set(remaining);
                 false
             }
             None => true,
@@ -100,31 +109,49 @@ impl ChainNodeBudget {
     /// Charge one named member using the same IR accounting for both frontends.
     /// TOML statements compile individually so oversized inline policies do not
     /// require an oversized compiled chain or populate its lazy evaluation cache.
+    /// An `.rpol` member's dataset bindings join the chain's merged table with
+    /// the same deduplication [`compile_chain`] applies.
     ///
     /// # Errors
-    /// Returns a diagnostic when the cumulative chain exceeds the node cap.
-    pub fn add_named(
-        &mut self,
-        named: &NamedPolicy,
-        store: &mut SetStore,
-    ) -> Result<(), &'static str> {
+    /// Returns a diagnostic when the cumulative chain exceeds the node cap, or
+    /// references more datasets than one evaluation pins.
+    pub fn add_named(&mut self, named: &NamedPolicy, store: &mut SetStore) -> Result<(), String> {
         if let Some(chain) = named.rpol.as_deref() {
+            for slot in &chain.datasets {
+                if !self.datasets.iter().any(|seen| same_binding(seen, slot)) {
+                    self.datasets.push(slot.clone());
+                }
+            }
+            if self.datasets.len() > MAX_UNIT_DATASETS {
+                return Err(format!(
+                    "compiled policy chain references {} datasets; at most \
+                     MAX_UNIT_DATASETS ({MAX_UNIT_DATASETS}) fit one evaluation",
+                    self.datasets.len()
+                ));
+            }
             for policy in &chain.policies {
                 self.add_policy(policy)?;
             }
         } else {
             if self.exhausted(1) {
-                return Err(CHAIN_NODE_LIMIT);
+                return Err(CHAIN_NODE_LIMIT.to_owned());
             }
             for statement in &named.policy.entries {
                 let term = compile_statement(statement, store, &mut ChainSets::default());
                 if self.term_exhausted(&term) {
-                    return Err(CHAIN_NODE_LIMIT);
+                    return Err(CHAIN_NODE_LIMIT.to_owned());
                 }
             }
         }
         Ok(())
     }
+}
+
+/// One chain dataset slot per name and live handle: a composed chain can carry
+/// two bindings of one name (a dry-run candidate beside installed members), and
+/// each member must keep its own.
+fn same_binding(existing: &DatasetSlot, slot: &DatasetSlot) -> bool {
+    existing.name == slot.name && Arc::ptr_eq(&existing.handle, &slot.handle)
 }
 
 /// Compile a TOML policy chain into the IR, interning match sets and
@@ -492,12 +519,7 @@ impl ChainSets {
         let index = self
             .datasets
             .iter()
-            // Same name and same live handle: a composed chain can carry two
-            // bindings of one name (a dry-run candidate beside installed
-            // members), and each member must keep its own.
-            .position(|existing| {
-                existing.name == slot.name && Arc::ptr_eq(&existing.handle, &slot.handle)
-            })
+            .position(|existing| same_binding(existing, slot))
             .unwrap_or_else(|| {
                 self.datasets.push(slot.clone());
                 self.datasets.len() - 1
@@ -817,7 +839,10 @@ policy bogon-filter {
 
         // Empty policies still consume overhead, including repeated members.
         policy.terms.clear();
-        let mut budget = ChainNodeBudget(std::cell::Cell::new(1));
+        let mut budget = ChainNodeBudget {
+            nodes: std::cell::Cell::new(1),
+            ..ChainNodeBudget::default()
+        };
         budget.add_policy(&policy).unwrap();
         assert!(budget.add_policy(&policy).is_err());
     }
@@ -879,13 +904,74 @@ policy bogon-filter {
             source: PolicySource::Rpol,
         };
         // Policy 1 + outer term/action 2 + guard/value 10 + body (9 + 15).
-        ChainNodeBudget(std::cell::Cell::new(37))
-            .add_policy(&policy)
-            .unwrap();
+        ChainNodeBudget {
+            nodes: std::cell::Cell::new(37),
+            ..ChainNodeBudget::default()
+        }
+        .add_policy(&policy)
+        .unwrap();
         assert!(
-            ChainNodeBudget(std::cell::Cell::new(36))
-                .add_policy(&policy)
-                .is_err()
+            ChainNodeBudget {
+                nodes: std::cell::Cell::new(36),
+                ..ChainNodeBudget::default()
+            }
+            .add_policy(&policy)
+            .is_err()
         );
+    }
+
+    /// The merged dataset table is bounded by the evaluation pin frame,
+    /// counting each name/handle binding once across members.
+    #[test]
+    fn chain_budget_bounds_merged_dataset_bindings() {
+        use super::ChainNodeBudget;
+        use crate::datasets::{DatasetData, DatasetHandle, DatasetKind, MAX_UNIT_DATASETS};
+        use crate::ir::{CompiledChain, DatasetSlot};
+        use crate::sets::AsnSet;
+
+        let slots: Vec<DatasetSlot> = (0..=MAX_UNIT_DATASETS)
+            .map(|index| {
+                let name = format!("d{index}");
+                DatasetSlot {
+                    handle: Arc::new(DatasetHandle::new(
+                        &name,
+                        DatasetKind::Asn,
+                        DatasetData::Asn(AsnSet::new([64500])),
+                    )),
+                    name: name.into(),
+                    kind: DatasetKind::Asn,
+                }
+            })
+            .collect();
+        let member = |slots: &[DatasetSlot]| {
+            let mut chain = CompiledChain::empty();
+            chain.datasets = slots.to_vec();
+            NamedPolicy::from_rpol("m".to_string(), Arc::new(chain))
+        };
+        let charge = |members: &[NamedPolicy]| {
+            let mut budget = ChainNodeBudget::default();
+            members
+                .iter()
+                .try_for_each(|named| budget.add_named(named, &mut SetStore::new()))
+        };
+
+        let (first, second) = slots.split_at(9);
+        let exact = [member(first), member(&second[..7]), member(first)];
+        charge(&exact).expect("16 distinct bindings, one repeated member");
+        let error = charge(&[member(first), member(second)]).unwrap_err();
+        assert!(
+            error.contains("references 17 datasets") && error.contains("MAX_UNIT_DATASETS (16)"),
+            "{error}"
+        );
+        // Same name, different live handle: a second binding.
+        let mut rebound = slots[0].clone();
+        rebound.handle = Arc::new(DatasetHandle::new(
+            "d0",
+            DatasetKind::Asn,
+            DatasetData::Asn(AsnSet::new([64500])),
+        ));
+        let mut fifteen = slots[1..MAX_UNIT_DATASETS].to_vec();
+        fifteen.push(rebound);
+        assert!(charge(&[member(&slots[..1]), member(&fifteen)]).is_err());
     }
 }
