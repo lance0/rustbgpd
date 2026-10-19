@@ -128,8 +128,8 @@ fn max_prefix_restart_edit_is_hot_applicable() {
 fn per_family_max_prefix_edit_is_hot_applicable() {
     let old = test_neighbor("10.0.0.2", 65002);
     let mut hot = old.clone();
-    hot.max_prefixes_ipv4 = Some(10);
-    hot.max_prefixes_ipv6 = Some(20);
+    hot.max_prefixes_ipv4_unicast = Some(10);
+    hot.max_prefixes_ipv6_unicast = Some(20);
     assert!(super::neighbor_change_hot_applicable(&old, &hot));
     let changes = super::describe_neighbor_changes(&old, &hot);
     assert_eq!(changes.len(), 2);
@@ -861,8 +861,8 @@ max_prefixes_received_ipv4 = {value}
 fn received_max_prefix_edit_is_hot_applicable() {
     let old = test_neighbor("10.0.0.2", 65002);
     let mut hot = old.clone();
-    hot.max_prefixes_received_ipv4 = Some(10);
-    hot.max_prefixes_received_ipv6 = Some(20);
+    hot.max_prefixes_received_ipv4_unicast = Some(10);
+    hot.max_prefixes_received_ipv6_unicast = Some(20);
     assert!(super::neighbor_change_hot_applicable(&old, &hot));
     let changes = super::describe_neighbor_changes(&old, &hot);
     assert_eq!(changes.len(), 2);
@@ -1097,4 +1097,94 @@ fn tcp_mss_rejects_values_outside_the_kernel_range() {
     let ok =
         format!("{base}[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\ntcp_mss = 88\n");
     assert!(parse(&ok).is_ok());
+}
+
+/// Every legacy unicast max-prefix spelling still parses, on neighbors and
+/// peer groups, to the same value as its canonical key; only the canonical
+/// key is written back; and setting both spellings in one table is rejected.
+#[test]
+fn legacy_max_prefix_key_aliases_parse_and_round_trip_canonically() {
+    const BASE: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#;
+    let neighbor = |line: &str| {
+        format!("{BASE}\n[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\n{line}\n")
+    };
+    let group = |line: &str| {
+        format!(
+            "{BASE}\n[peer_groups.members]\n{line}\n\n[[neighbors]]\naddress = \"10.0.0.2\"\n\
+             remote_asn = 65002\npeer_group = \"members\"\n"
+        )
+    };
+    let neighbor_toml = |config: &Config| toml::to_string(&config.neighbors[0]).unwrap();
+    let group_toml = |config: &Config| toml::to_string(&config.peer_groups["members"]).unwrap();
+
+    assert_eq!(LEGACY_MAX_PREFIX_KEYS.len(), 6);
+    for (legacy, canonical) in LEGACY_MAX_PREFIX_KEYS {
+        for (scope, render, written) in [
+            (
+                "neighbor",
+                &neighbor as &dyn Fn(&str) -> String,
+                &neighbor_toml as &dyn Fn(&Config) -> String,
+            ),
+            ("peer group", &group, &group_toml),
+        ] {
+            let old = parse(&render(&format!("{legacy} = 7"))).unwrap();
+            let new = parse(&render(&format!("{canonical} = 7"))).unwrap();
+            let (old_out, new_out) = (written(&old), written(&new));
+            assert_eq!(
+                old_out, new_out,
+                "{scope}: `{legacy}` must parse like `{canonical}`"
+            );
+            assert!(
+                new_out
+                    .lines()
+                    .any(|line| line == format!("{canonical} = 7")),
+                "{scope}: `{canonical}` must be written back: {new_out}"
+            );
+            assert!(
+                !new_out
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{legacy} "))),
+                "{scope}: legacy `{legacy}` must not be written back: {new_out}"
+            );
+            let reparsed = parse(&render(
+                new_out.lines().find(|l| l.starts_with(*canonical)).unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(
+                written(&reparsed),
+                new_out,
+                "{scope}: `{canonical}` must round-trip"
+            );
+
+            let both = render(&format!("{legacy} = 7\n{canonical} = 7"));
+            assert!(
+                parse(&both).is_err(),
+                "{scope}: setting both `{legacy}` and `{canonical}` must be rejected"
+            );
+        }
+    }
+
+    let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
+    for definition in ["Neighbor", "PeerGroupConfig"] {
+        let properties = &schema["$defs"][definition]["properties"];
+        for (legacy, canonical) in LEGACY_MAX_PREFIX_KEYS {
+            assert_eq!(
+                properties[*legacy]["deprecated"], true,
+                "{definition}.{legacy}"
+            );
+            assert_eq!(
+                properties[*legacy]["type"], properties[*canonical]["type"],
+                "{definition}.{legacy} keeps the canonical key's type"
+            );
+        }
+    }
 }

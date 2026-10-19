@@ -1164,6 +1164,7 @@ macro_rules! define_neighbor_and_peer_group_configs {
     ) => {
         #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
         #[serde(deny_unknown_fields)]
+        #[schemars(transform = add_legacy_max_prefix_key_properties)]
         pub struct Neighbor {
             /// Peer IP address (IPv4 or IPv6).
             pub address: String,
@@ -1196,6 +1197,7 @@ macro_rules! define_neighbor_and_peer_group_configs {
 
         #[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
         #[serde(deny_unknown_fields)]
+        #[schemars(transform = add_legacy_max_prefix_key_properties)]
         pub struct PeerGroupConfig {
             $(
                 $(#[$before_peer_group_attr])*
@@ -1320,62 +1322,82 @@ define_neighbor_and_peer_group_configs! {
         }
         max_prefixes: Option<u32> {
             neighbor {
-                /// Maximum prefixes accepted from this peer before the session is
-                /// torn down. Unset = unlimited.
+                /// Maximum prefixes accepted from this peer, all families together.
+                /// Crossing it applies `max_prefix_action`: `"shutdown"` (default)
+                /// tears the session down with Cease/1, latched unless
+                /// `max_prefix_restart_seconds` is set; `"warning"` logs and keeps
+                /// accepting. `"block"` applies only to the per-family bounds and
+                /// is rejected while this is set. Unset = unlimited.
             }
             peer_group {
                 /// Prefix limit inherited by neighbors in this group. See the
                 /// neighbor-level `max_prefixes`.
             }
         }
-        max_prefixes_ipv4: Option<u32> {
+        max_prefixes_ipv4_unicast: Option<u32> {
             neighbor {
-                /// Maximum unique IPv4-unicast prefixes accepted from this peer
-                /// before the session is torn down with Cease/1. Enforced
+                /// Maximum unique accepted (post-import-policy) IPv4-unicast
+                /// prefixes from this peer before `max_prefix_action` applies
+                /// (Cease/1 carrying the AFI/SAFI under `shutdown`). Enforced
                 /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
+                /// The earlier spelling `max_prefixes_ipv4` is still accepted.
+                #[serde(alias = "max_prefixes_ipv4")]
             }
             peer_group {
                 /// IPv4-unicast prefix limit inherited by neighbors in this group.
-                /// See the neighbor-level `max_prefixes_ipv4`.
+                /// See the neighbor-level `max_prefixes_ipv4_unicast`.
+                #[serde(alias = "max_prefixes_ipv4")]
             }
         }
-        max_prefixes_ipv6: Option<u32> {
+        max_prefixes_ipv6_unicast: Option<u32> {
             neighbor {
-                /// Maximum unique IPv6-unicast prefixes accepted from this peer
-                /// before the session is torn down with Cease/1. Enforced
+                /// Maximum unique accepted (post-import-policy) IPv6-unicast
+                /// prefixes from this peer before `max_prefix_action` applies
+                /// (Cease/1 carrying the AFI/SAFI under `shutdown`). Enforced
                 /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
+                /// The earlier spelling `max_prefixes_ipv6` is still accepted.
+                #[serde(alias = "max_prefixes_ipv6")]
             }
             peer_group {
                 /// IPv6-unicast prefix limit inherited by neighbors in this group.
-                /// See the neighbor-level `max_prefixes_ipv6`.
+                /// See the neighbor-level `max_prefixes_ipv6_unicast`.
+                #[serde(alias = "max_prefixes_ipv6")]
             }
         }
-        max_prefixes_received_ipv4: Option<u32> {
+        max_prefixes_received_ipv4_unicast: Option<u32> {
             neighbor {
                 /// Maximum unique IPv4-unicast prefixes this peer may announce,
                 /// counted before import policy (accepted and rejected alike),
-                /// before the session is torn down with Cease/1. Enforced
-                /// independently of `max_prefixes_ipv4` (ADR-0108 amendment).
-                /// Unset = unlimited.
+                /// before `max_prefix_action` applies (Cease/1 carrying the
+                /// AFI/SAFI under `shutdown`). Enforced independently of
+                /// `max_prefixes_ipv4_unicast` (ADR-0108 amendment). Unset =
+                /// unlimited. The earlier spelling `max_prefixes_received_ipv4`
+                /// is still accepted.
+                #[serde(alias = "max_prefixes_received_ipv4")]
             }
             peer_group {
                 /// Pre-policy IPv4-unicast received-prefix limit inherited by
                 /// neighbors in this group. See the neighbor-level
-                /// `max_prefixes_received_ipv4`.
+                /// `max_prefixes_received_ipv4_unicast`.
+                #[serde(alias = "max_prefixes_received_ipv4")]
             }
         }
-        max_prefixes_received_ipv6: Option<u32> {
+        max_prefixes_received_ipv6_unicast: Option<u32> {
             neighbor {
                 /// Maximum unique IPv6-unicast prefixes this peer may announce,
                 /// counted before import policy (accepted and rejected alike),
-                /// before the session is torn down with Cease/1. Enforced
-                /// independently of `max_prefixes_ipv6` (ADR-0108 amendment).
-                /// Unset = unlimited.
+                /// before `max_prefix_action` applies (Cease/1 carrying the
+                /// AFI/SAFI under `shutdown`). Enforced independently of
+                /// `max_prefixes_ipv6_unicast` (ADR-0108 amendment). Unset =
+                /// unlimited. The earlier spelling `max_prefixes_received_ipv6`
+                /// is still accepted.
+                #[serde(alias = "max_prefixes_received_ipv6")]
             }
             peer_group {
                 /// Pre-policy IPv6-unicast received-prefix limit inherited by
                 /// neighbors in this group. See the neighbor-level
-                /// `max_prefixes_received_ipv6`.
+                /// `max_prefixes_received_ipv6_unicast`.
+                #[serde(alias = "max_prefixes_received_ipv6")]
             }
         }
         max_prefixes_l3vpn_ipv4_unicast: Option<u32> {
@@ -1514,25 +1536,31 @@ define_neighbor_and_peer_group_configs! {
                 #[schemars(range(min = 1, max = 100))]
             }
         }
-        max_prefixes_out_ipv4: Option<NonZeroU32> {
+        max_prefixes_out_ipv4_unicast: Option<NonZeroU32> {
             neighbor {
                 /// Maximum distinct IPv4-unicast prefixes advertised TO this peer
                 /// (ADR-0113). Excess net-new prefixes are withheld while the session
                 /// stays established; nothing already advertised is withdrawn. Unset =
-                /// unlimited.
+                /// unlimited. The earlier spelling `max_prefixes_out_ipv4` is still
+                /// accepted.
+                #[serde(alias = "max_prefixes_out_ipv4")]
             }
             peer_group {
                 /// Outbound IPv4-unicast prefix maximum inherited by neighbors in this
-                /// group. See the neighbor-level `max_prefixes_out_ipv4`.
+                /// group. See the neighbor-level `max_prefixes_out_ipv4_unicast`.
+                #[serde(alias = "max_prefixes_out_ipv4")]
             }
         }
-        max_prefixes_out_ipv6: Option<NonZeroU32> {
+        max_prefixes_out_ipv6_unicast: Option<NonZeroU32> {
             neighbor {
-                /// IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113).
+                /// IPv6-unicast sibling of `max_prefixes_out_ipv4_unicast` (ADR-0113).
+                /// The earlier spelling `max_prefixes_out_ipv6` is still accepted.
+                #[serde(alias = "max_prefixes_out_ipv6")]
             }
             peer_group {
                 /// Outbound IPv6-unicast prefix maximum inherited by neighbors in this
-                /// group. See the neighbor-level `max_prefixes_out_ipv6`.
+                /// group. See the neighbor-level `max_prefixes_out_ipv6_unicast`.
+                #[serde(alias = "max_prefixes_out_ipv6")]
             }
         }
         max_prefix_restart_seconds: Option<NonZeroU32> {
@@ -2000,15 +2028,15 @@ impl fmt::Debug for Neighbor {
             .field("slow_peer_duration", &self.slow_peer_duration)
             .field("slow_peer_isolation", &self.slow_peer_isolation)
             .field("max_prefixes", &self.max_prefixes)
-            .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
-            .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field("max_prefixes_ipv4_unicast", &self.max_prefixes_ipv4_unicast)
+            .field("max_prefixes_ipv6_unicast", &self.max_prefixes_ipv6_unicast)
             .field(
-                "max_prefixes_received_ipv4",
-                &self.max_prefixes_received_ipv4,
+                "max_prefixes_received_ipv4_unicast",
+                &self.max_prefixes_received_ipv4_unicast,
             )
             .field(
-                "max_prefixes_received_ipv6",
-                &self.max_prefixes_received_ipv6,
+                "max_prefixes_received_ipv6_unicast",
+                &self.max_prefixes_received_ipv6_unicast,
             )
             .field(
                 "max_prefixes_l3vpn_ipv4_unicast",
@@ -2041,8 +2069,14 @@ impl fmt::Debug for Neighbor {
                 "max_prefix_warning_percent",
                 &self.max_prefix_warning_percent,
             )
-            .field("max_prefixes_out_ipv4", &self.max_prefixes_out_ipv4)
-            .field("max_prefixes_out_ipv6", &self.max_prefixes_out_ipv6)
+            .field(
+                "max_prefixes_out_ipv4_unicast",
+                &self.max_prefixes_out_ipv4_unicast,
+            )
+            .field(
+                "max_prefixes_out_ipv6_unicast",
+                &self.max_prefixes_out_ipv6_unicast,
+            )
             .field(
                 "max_prefix_restart_seconds",
                 &self.max_prefix_restart_seconds,
@@ -2235,15 +2269,15 @@ impl fmt::Debug for PeerGroupConfig {
             .field("slow_peer_duration", &self.slow_peer_duration)
             .field("slow_peer_isolation", &self.slow_peer_isolation)
             .field("max_prefixes", &self.max_prefixes)
-            .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
-            .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field("max_prefixes_ipv4_unicast", &self.max_prefixes_ipv4_unicast)
+            .field("max_prefixes_ipv6_unicast", &self.max_prefixes_ipv6_unicast)
             .field(
-                "max_prefixes_received_ipv4",
-                &self.max_prefixes_received_ipv4,
+                "max_prefixes_received_ipv4_unicast",
+                &self.max_prefixes_received_ipv4_unicast,
             )
             .field(
-                "max_prefixes_received_ipv6",
-                &self.max_prefixes_received_ipv6,
+                "max_prefixes_received_ipv6_unicast",
+                &self.max_prefixes_received_ipv6_unicast,
             )
             .field(
                 "max_prefixes_l3vpn_ipv4_unicast",
@@ -2276,8 +2310,14 @@ impl fmt::Debug for PeerGroupConfig {
                 "max_prefix_warning_percent",
                 &self.max_prefix_warning_percent,
             )
-            .field("max_prefixes_out_ipv4", &self.max_prefixes_out_ipv4)
-            .field("max_prefixes_out_ipv6", &self.max_prefixes_out_ipv6)
+            .field(
+                "max_prefixes_out_ipv4_unicast",
+                &self.max_prefixes_out_ipv4_unicast,
+            )
+            .field(
+                "max_prefixes_out_ipv6_unicast",
+                &self.max_prefixes_out_ipv6_unicast,
+            )
             .field(
                 "max_prefix_restart_seconds",
                 &self.max_prefix_restart_seconds,
@@ -3730,6 +3770,46 @@ pub struct EthernetSegmentConfig {
     )]
     #[schemars(range(max = 3600))]
     pub recovery_delay_seconds: Option<u64>,
+}
+
+/// Earlier spellings of the unicast max-prefix keys, accepted as serde
+/// aliases on `Neighbor` and `PeerGroupConfig`, paired with their canonical
+/// `max_prefixes[_received|_out]_<family>` names.
+pub(crate) const LEGACY_MAX_PREFIX_KEYS: &[(&str, &str)] = &[
+    ("max_prefixes_ipv4", "max_prefixes_ipv4_unicast"),
+    ("max_prefixes_ipv6", "max_prefixes_ipv6_unicast"),
+    (
+        "max_prefixes_received_ipv4",
+        "max_prefixes_received_ipv4_unicast",
+    ),
+    (
+        "max_prefixes_received_ipv6",
+        "max_prefixes_received_ipv6_unicast",
+    ),
+    ("max_prefixes_out_ipv4", "max_prefixes_out_ipv4_unicast"),
+    ("max_prefixes_out_ipv6", "max_prefixes_out_ipv6_unicast"),
+];
+
+/// Publish the legacy max-prefix serde aliases as deprecated schema
+/// properties with the canonical keys' bounds, so `additionalProperties:
+/// false` does not flag existing configs that the daemon still accepts.
+fn add_legacy_max_prefix_key_properties(schema: &mut Schema) {
+    let properties = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("neighbor and peer-group schemas have properties");
+    for (legacy_key, canonical) in LEGACY_MAX_PREFIX_KEYS {
+        let mut legacy = properties
+            .get(*canonical)
+            .cloned()
+            .expect("canonical max-prefix key is in the schema");
+        legacy["description"] = format!(
+            "Deprecated spelling of `{canonical}`, still accepted. Set only one of the two."
+        )
+        .into();
+        legacy["deprecated"] = true.into();
+        properties.insert((*legacy_key).to_string(), legacy);
+    }
 }
 
 /// Publish the `recovery_delay_secs` serde alias as a deprecated schema

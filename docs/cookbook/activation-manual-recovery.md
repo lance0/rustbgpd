@@ -385,7 +385,7 @@ Reload-applied changes:
 
   Neighbors:
     ~ 10.1.0.10:
-        max_prefixes_ipv4: 900 → 1000  [hot-applied]
+        max_prefixes_ipv4_unicast: 900 → 1000  [hot-applied]
 
 SIGHUP reload route: generation (one owned runtime generation; a late failure restores the prior generation)
 

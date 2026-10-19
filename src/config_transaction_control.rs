@@ -1118,8 +1118,8 @@ impl ConfigTransactionController {
         // committed transaction.
         if confirmed_apply_loosens_outbound_limits(&rollback_config, &request.candidate_toml) {
             return Err(ConfigTransactionApplyError::FailedPrecondition(
-                "confirmed transactions may only tighten max_prefixes_out_ipv4 / \
-                 max_prefixes_out_ipv6: raising or removing one leaves an automatic undo \
+                "confirmed transactions may only tighten max_prefixes_out_ipv4_unicast / \
+                 max_prefixes_out_ipv6_unicast: raising or removing one leaves an automatic undo \
                  that could become an invalid lowering. Apply the loosening change as an \
                  ordinary committed transaction instead"
                     .to_string(),

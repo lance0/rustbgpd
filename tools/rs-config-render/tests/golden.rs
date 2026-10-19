@@ -381,10 +381,10 @@ fn receipt_carries_cardinalities_and_fingerprint() {
     assert_eq!(clients[0]["id"], "AS4242_1");
     assert_eq!(clients[0]["prefix_set_size"], 2);
     assert_eq!(clients[0]["origin_set_size"], 2);
-    assert_eq!(clients[0]["max_prefixes_ipv4"], 5000);
+    assert_eq!(clients[0]["max_prefixes_ipv4_unicast"], 5000);
     assert_eq!(clients[1]["id"], "AS197000_1");
     assert_eq!(clients[1]["prefix_set_size"], 1);
-    assert_eq!(clients[1]["max_prefixes_ipv6"], 1000);
+    assert_eq!(clients[1]["max_prefixes_ipv6_unicast"], 1000);
     assert!(receipt["rendered_at_utc"].as_str().unwrap().ends_with('Z'));
 }
 
@@ -902,7 +902,7 @@ route_server_client = true\nrole = \"route_server\"\n\
 # negotiates the extended next hop, and strict_peer accepts an IPv4 route\n\
 # only with this session's own IPv6 address as its next hop.\n\
 next_hop_ownership = \"strict_peer\"\nttl_security = true\nper_client_best = true\n\
-rs_control_communities = false\nmax_prefixes_ipv6 = 1000\n\
+rs_control_communities = false\nmax_prefixes_ipv6_unicast = 1000\n\
 import_policy_chain = [\"rs-hygiene\", \"client-as197000-1\"]\n";
     let config = &rendered.files["config.toml"];
     assert!(config.contains(expected), "{config}");
@@ -2399,8 +2399,8 @@ fn effective_max_prefix_action_controls_limit_emission() {
     );
     assert!(!disabled.files["config.toml"].contains("max_prefix_restart_seconds"));
     for client in disabled.receipt["clients"].as_array().unwrap() {
-        assert!(client["max_prefixes_ipv4"].is_null(), "{client}");
-        assert!(client["max_prefixes_ipv6"].is_null(), "{client}");
+        assert!(client["max_prefixes_ipv4_unicast"].is_null(), "{client}");
+        assert!(client["max_prefixes_ipv6_unicast"].is_null(), "{client}");
         assert!(client["max_prefix_restart_seconds"].is_null(), "{client}");
     }
 
@@ -2413,10 +2413,10 @@ fn effective_max_prefix_action_controls_limit_emission() {
     );
     let enabled = render(&to_yaml(&value), &rtr_options()).expect("inherited shutdown render");
     let toml = &enabled.files["config.toml"];
-    assert!(toml.contains("max_prefixes_ipv4 = 5000"), "{toml}");
-    assert!(toml.contains("max_prefixes_ipv6 = 1000"), "{toml}");
-    assert!(!toml.contains("max_prefixes_ipv4 = 0"), "{toml}");
-    assert!(!toml.contains("max_prefixes_ipv6 = 0"), "{toml}");
+    assert!(toml.contains("max_prefixes_ipv4_unicast = 5000"), "{toml}");
+    assert!(toml.contains("max_prefixes_ipv6_unicast = 1000"), "{toml}");
+    assert!(!toml.contains("max_prefixes_ipv4_unicast = 0"), "{toml}");
+    assert!(!toml.contains("max_prefixes_ipv6_unicast = 0"), "{toml}");
     assert!(!toml.contains("max_prefix_restart_seconds"), "{toml}");
     assert!(
         enabled.receipt["clients"]
@@ -2435,11 +2435,11 @@ fn effective_max_prefix_action_controls_limit_emission() {
     let restarted = render(&to_yaml(&value), &rtr_options()).expect("timed restart render");
     let toml = &restarted.files["config.toml"];
     assert!(
-        toml.contains("max_prefixes_ipv4 = 5000\nmax_prefix_restart_seconds = 120"),
+        toml.contains("max_prefixes_ipv4_unicast = 5000\nmax_prefix_restart_seconds = 120"),
         "{toml}"
     );
     assert!(
-        toml.contains("max_prefixes_ipv6 = 1000\nmax_prefix_restart_seconds = 2220"),
+        toml.contains("max_prefixes_ipv6_unicast = 1000\nmax_prefix_restart_seconds = 2220"),
         "{toml}"
     );
     let clients = restarted.receipt["clients"].as_array().unwrap();
@@ -2468,7 +2468,7 @@ fn client_shutdown_overrides_unsupported_general_max_prefix_action() {
     set_path(&mut value, &["clients"], clients);
     let rendered = render(&to_yaml(&value), &rtr_options()).expect("client override render");
     assert!(
-        rendered.files["config.toml"].contains("max_prefixes_ipv4 = 5000"),
+        rendered.files["config.toml"].contains("max_prefixes_ipv4_unicast = 5000"),
         "{}",
         rendered.files["config.toml"]
     );
@@ -2561,13 +2561,13 @@ fn rejected_route_counting_selects_the_received_prefix_keys() {
     let keys = client_keys(&rendered, "192.0.2.11");
     assert!(
         keys.iter()
-            .any(|key| key.starts_with("max_prefixes_received_ipv4 = ")),
+            .any(|key| key.starts_with("max_prefixes_received_ipv4_unicast = ")),
         "{keys:?}"
     );
     assert!(
         !keys
             .iter()
-            .any(|key| key.starts_with("max_prefixes_ipv4 = ")),
+            .any(|key| key.starts_with("max_prefixes_ipv4_unicast = ")),
         "{keys:?}"
     );
 
@@ -2581,16 +2581,16 @@ fn rejected_route_counting_selects_the_received_prefix_keys() {
     );
     let rendered = render(&to_yaml(&inherited), &rtr_options()).expect("inherited true renders");
     for client in rendered.receipt["clients"].as_array().expect("clients") {
-        if client["max_prefixes_received_ipv4"].is_null()
-            && client["max_prefixes_received_ipv6"].is_null()
+        if client["max_prefixes_received_ipv4_unicast"].is_null()
+            && client["max_prefixes_received_ipv6_unicast"].is_null()
         {
             continue;
         }
-        assert!(client["max_prefixes_ipv4"].is_null(), "{client}");
-        assert!(client["max_prefixes_ipv6"].is_null(), "{client}");
+        assert!(client["max_prefixes_ipv4_unicast"].is_null(), "{client}");
+        assert!(client["max_prefixes_ipv6_unicast"].is_null(), "{client}");
     }
     assert!(
-        rendered.files["config.toml"].contains("max_prefixes_received_ipv6 = "),
+        rendered.files["config.toml"].contains("max_prefixes_received_ipv6_unicast = "),
         "{}",
         rendered.files["config.toml"]
     );
@@ -2682,7 +2682,7 @@ fn rejected_route_counting_selects_the_received_prefix_keys() {
             .unwrap()
             .iter()
             .all(|client| client["max_prefix_restart_seconds"].is_null()
-                && client["max_prefixes_received_ipv4"].is_null())
+                && client["max_prefixes_received_ipv4_unicast"].is_null())
     );
 }
 
@@ -2703,25 +2703,29 @@ fn m90_member_with_rejected_route_counting_renders_received_limits() {
     let rendered = render(&to_yaml(&value), &Options::default()).expect("M90 variant renders");
     let config = &rendered.files["config.toml"];
     assert_eq!(
-        config.matches("\nmax_prefixes_ipv4 = 100\n").count(),
-        2,
-        "{config}"
-    );
-    assert_eq!(
-        config.matches("\nmax_prefixes_ipv6 = 12000\n").count(),
+        config
+            .matches("\nmax_prefixes_ipv4_unicast = 100\n")
+            .count(),
         2,
         "{config}"
     );
     assert_eq!(
         config
-            .matches("\nmax_prefixes_received_ipv4 = 100\n")
+            .matches("\nmax_prefixes_ipv6_unicast = 12000\n")
+            .count(),
+        2,
+        "{config}"
+    );
+    assert_eq!(
+        config
+            .matches("\nmax_prefixes_received_ipv4_unicast = 100\n")
             .count(),
         1,
         "{config}"
     );
     assert_eq!(
         config
-            .matches("\nmax_prefixes_received_ipv6 = 12000\n")
+            .matches("\nmax_prefixes_received_ipv6_unicast = 12000\n")
             .count(),
         1,
         "{config}"
@@ -2731,16 +2735,16 @@ fn m90_member_with_rejected_route_counting_renders_received_limits() {
         .iter()
         .find(|client| client["id"] == "AS64502_1")
         .expect("flipped member in receipt");
-    assert_eq!(flipped["max_prefixes_received_ipv4"], 100);
-    assert_eq!(flipped["max_prefixes_received_ipv6"], 12000);
-    assert!(flipped["max_prefixes_ipv4"].is_null());
-    assert!(flipped["max_prefixes_ipv6"].is_null());
+    assert_eq!(flipped["max_prefixes_received_ipv4_unicast"], 100);
+    assert_eq!(flipped["max_prefixes_received_ipv6_unicast"], 12000);
+    assert!(flipped["max_prefixes_ipv4_unicast"].is_null());
+    assert!(flipped["max_prefixes_ipv6_unicast"].is_null());
     let untouched = receipt
         .iter()
         .find(|client| client["id"] == "AS64500_1")
         .expect("untouched member in receipt");
-    assert_eq!(untouched["max_prefixes_ipv4"], 100);
-    assert!(untouched["max_prefixes_received_ipv4"].is_null());
+    assert_eq!(untouched["max_prefixes_ipv4_unicast"], 100);
+    assert!(untouched["max_prefixes_received_ipv4_unicast"].is_null());
 }
 
 #[test]
@@ -2769,7 +2773,10 @@ fn block_and_warning_actions_render_the_daemon_action_key() {
             block.contains(&format!("max_prefix_action = \"{action}\"")),
             "{action}: {block}"
         );
-        assert!(block.contains("max_prefixes_ipv4 = "), "{action}: {block}");
+        assert!(
+            block.contains("max_prefixes_ipv4_unicast = "),
+            "{action}: {block}"
+        );
         assert!(
             !block.contains("max_prefix_restart_seconds"),
             "{action} never emits a restart timer: {block}"
@@ -2835,7 +2842,9 @@ fn m90_member_with_block_action_renders_the_action_key() {
         "{config}"
     );
     assert_eq!(
-        config.matches("\nmax_prefixes_ipv4 = 100\n").count(),
+        config
+            .matches("\nmax_prefixes_ipv4_unicast = 100\n")
+            .count(),
         3,
         "{config}"
     );
@@ -2845,7 +2854,7 @@ fn m90_member_with_block_action_renders_the_action_key() {
         .find(|client| client["id"] == "AS64501_1")
         .expect("flipped member");
     assert_eq!(flipped["max_prefix_action"], "block");
-    assert_eq!(flipped["max_prefixes_ipv4"], 100);
+    assert_eq!(flipped["max_prefixes_ipv4_unicast"], 100);
     assert!(
         receipt
             .iter()

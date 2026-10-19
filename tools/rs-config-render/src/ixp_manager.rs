@@ -936,7 +936,11 @@ fn render_config(
             quoted(&client.name),
             quoted(family),
             !router.rfc1997_passthru,
-            if router.protocol == 4 { "ipv4" } else { "ipv6" },
+            if router.protocol == 4 {
+                "ipv4_unicast"
+            } else {
+                "ipv6_unicast"
+            },
             client.max_prefix,
             restart_seconds,
             client.vlan_interface_id

@@ -1036,10 +1036,10 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             slow_peer_duration: None,
             slow_peer_isolation: None,
             max_prefixes: None,
-            max_prefixes_ipv4: None,
-            max_prefixes_ipv6: None,
-            max_prefixes_received_ipv4: None,
-            max_prefixes_received_ipv6: None,
+            max_prefixes_ipv4_unicast: None,
+            max_prefixes_ipv6_unicast: None,
+            max_prefixes_received_ipv4_unicast: None,
+            max_prefixes_received_ipv6_unicast: None,
             max_prefixes_l3vpn_ipv4_unicast: None,
             max_prefixes_l3vpn_ipv6_unicast: None,
             max_prefixes_ipv4_labeled_unicast: None,
@@ -1050,8 +1050,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             max_prefixes_rtc: None,
             max_prefix_action: None,
             max_prefix_warning_percent: None,
-            max_prefixes_out_ipv4: None,
-            max_prefixes_out_ipv6: None,
+            max_prefixes_out_ipv4_unicast: None,
+            max_prefixes_out_ipv6_unicast: None,
             max_prefix_restart_seconds: None,
             md5_password: None,
             ttl_security: None,
@@ -1106,10 +1106,10 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         slow_peer_duration: None,
         slow_peer_isolation: None,
         max_prefixes: None,
-        max_prefixes_ipv4: None,
-        max_prefixes_ipv6: None,
-        max_prefixes_received_ipv4: None,
-        max_prefixes_received_ipv6: None,
+        max_prefixes_ipv4_unicast: None,
+        max_prefixes_ipv6_unicast: None,
+        max_prefixes_received_ipv4_unicast: None,
+        max_prefixes_received_ipv6_unicast: None,
         max_prefixes_l3vpn_ipv4_unicast: None,
         max_prefixes_l3vpn_ipv6_unicast: None,
         max_prefixes_ipv4_labeled_unicast: None,
@@ -1120,8 +1120,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes_rtc: None,
         max_prefix_action: None,
         max_prefix_warning_percent: None,
-        max_prefixes_out_ipv4: None,
-        max_prefixes_out_ipv6: None,
+        max_prefixes_out_ipv4_unicast: None,
+        max_prefixes_out_ipv6_unicast: None,
         max_prefix_restart_seconds: None,
         md5_password: None,
         bfd: None,
@@ -1186,10 +1186,10 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         slow_peer_duration: None,
         slow_peer_isolation: None,
         max_prefixes: None,
-        max_prefixes_ipv4: None,
-        max_prefixes_ipv6: None,
-        max_prefixes_received_ipv4: None,
-        max_prefixes_received_ipv6: None,
+        max_prefixes_ipv4_unicast: None,
+        max_prefixes_ipv6_unicast: None,
+        max_prefixes_received_ipv4_unicast: None,
+        max_prefixes_received_ipv6_unicast: None,
         max_prefixes_l3vpn_ipv4_unicast: None,
         max_prefixes_l3vpn_ipv6_unicast: None,
         max_prefixes_ipv4_labeled_unicast: None,
@@ -1200,8 +1200,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes_rtc: None,
         max_prefix_action: None,
         max_prefix_warning_percent: None,
-        max_prefixes_out_ipv4: None,
-        max_prefixes_out_ipv6: None,
+        max_prefixes_out_ipv4_unicast: None,
+        max_prefixes_out_ipv6_unicast: None,
         max_prefix_restart_seconds: None,
         md5_password: None,
         tcp_ao: None,
@@ -1275,10 +1275,10 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         slow_peer_duration: None,
         slow_peer_isolation: None,
         max_prefixes: None,
-        max_prefixes_ipv4: None,
-        max_prefixes_ipv6: None,
-        max_prefixes_received_ipv4: None,
-        max_prefixes_received_ipv6: None,
+        max_prefixes_ipv4_unicast: None,
+        max_prefixes_ipv6_unicast: None,
+        max_prefixes_received_ipv4_unicast: None,
+        max_prefixes_received_ipv6_unicast: None,
         max_prefixes_l3vpn_ipv4_unicast: None,
         max_prefixes_l3vpn_ipv6_unicast: None,
         max_prefixes_ipv4_labeled_unicast: None,
@@ -1289,8 +1289,8 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         max_prefixes_rtc: None,
         max_prefix_action: None,
         max_prefix_warning_percent: None,
-        max_prefixes_out_ipv4: None,
-        max_prefixes_out_ipv6: None,
+        max_prefixes_out_ipv4_unicast: None,
+        max_prefixes_out_ipv6_unicast: None,
         max_prefix_restart_seconds: None,
         md5_password: None,
         bfd: None,
@@ -2243,7 +2243,10 @@ fn reload_matrix_pins_load_bearing_field_classes() {
     // ADR-0113: the outbound maxima are hot-applied at field level, so a
     // maxima-only peer-group edit is an all-`live` change set and must not
     // be documented as a session reset on either row.
-    for field in ["max_prefixes_out_ipv4", "max_prefixes_out_ipv6"] {
+    for field in [
+        "max_prefixes_out_ipv4_unicast",
+        "max_prefixes_out_ipv6_unicast",
+    ] {
         let rows = reload_matrix_rows_for(&matrix, field);
         assert_eq!(
             rows.len(),
@@ -2268,11 +2271,11 @@ fn reload_matrix_pins_load_bearing_field_classes() {
     // The predicate the peer-group apply path consults, driven directly:
     // a maxima-only group edit must take the in-place cohort path.
     let old_group = PeerGroupConfig {
-        max_prefixes_out_ipv4: std::num::NonZeroU32::new(8),
+        max_prefixes_out_ipv4_unicast: std::num::NonZeroU32::new(8),
         ..Default::default()
     };
     let new_group = PeerGroupConfig {
-        max_prefixes_out_ipv4: std::num::NonZeroU32::new(64),
+        max_prefixes_out_ipv4_unicast: std::num::NonZeroU32::new(64),
         ..old_group.clone()
     };
     assert!(
