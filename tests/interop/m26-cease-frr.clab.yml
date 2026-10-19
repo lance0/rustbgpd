@@ -78,9 +78,9 @@ topology:
 # FRR:      10.0.0.2, AS 65002 (starts at 2; harness injects 3rd → Cease)
 #
 # Network: 10.0.1.0/24
-# rustbgpd:  10.0.1.1 (max_prefixes_ipv4 = 3, max_prefix_action = "block")
+# rustbgpd:  10.0.1.1 (max_prefixes_ipv4_unicast = 3, max_prefix_action = "block")
 # frr-block: 10.0.1.2, AS 65003 (starts at 2; harness injects up to 5)
 #
 # Network: 10.0.2.0/24
-# rustbgpd: 10.0.2.1 (max_prefixes_ipv4 = 3, max_prefix_action = "warning")
+# rustbgpd: 10.0.2.1 (max_prefixes_ipv4_unicast = 3, max_prefix_action = "warning")
 # frr-warn: 10.0.2.2, AS 65004 (starts at 2; harness injects up to 5)

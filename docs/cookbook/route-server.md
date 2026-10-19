@@ -334,6 +334,14 @@ end-to-end walkthrough — including the Alice-LG looking glass — is
 policy:
 [ADR-0110](../adr/0110-irr-peeringdb-filtering-pipeline.md).
 
+Every config key the renderer writes, in both arouteserver and IXP Manager
+mode, is in the [v1 stable surface](../reference/v1-stable-contract.md),
+including the per-family `max_prefixes_ipv4_unicast` /
+`max_prefixes_received_ipv4_unicast` bounds (and their IPv6 siblings),
+`max_prefix_action`, `max_prefix_restart_seconds`, `next_hop_ownership`,
+`rs_control_communities`, `interpret_rfc1997`, `honor_blackhole` and
+`listen_addresses`.
+
 The renderer states `rs_control_communities` on every member session: off
 when the arouteserver site configures no control community, on only when
 it configures exactly the matrix above (the daemon's matrix is fixed; any

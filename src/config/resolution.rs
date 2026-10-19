@@ -1030,17 +1030,17 @@ impl Config {
             .max_prefixes
             .or_else(|| group.and_then(|g| g.max_prefixes));
         transport.max_prefixes_ipv4 = neighbor
-            .max_prefixes_ipv4
-            .or_else(|| group.and_then(|g| g.max_prefixes_ipv4));
+            .max_prefixes_ipv4_unicast
+            .or_else(|| group.and_then(|g| g.max_prefixes_ipv4_unicast));
         transport.max_prefixes_ipv6 = neighbor
-            .max_prefixes_ipv6
-            .or_else(|| group.and_then(|g| g.max_prefixes_ipv6));
+            .max_prefixes_ipv6_unicast
+            .or_else(|| group.and_then(|g| g.max_prefixes_ipv6_unicast));
         transport.max_prefixes_received_ipv4 = neighbor
-            .max_prefixes_received_ipv4
-            .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv4));
+            .max_prefixes_received_ipv4_unicast
+            .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv4_unicast));
         transport.max_prefixes_received_ipv6 = neighbor
-            .max_prefixes_received_ipv6
-            .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6));
+            .max_prefixes_received_ipv6_unicast
+            .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6_unicast));
         // Indexed by `PrefixLimitFamily`, in `PrefixLimitFamily::ALL` order.
         transport.max_prefixes_family = rustbgpd_transport::FamilyPrefixLimits([
             neighbor
@@ -1291,10 +1291,10 @@ impl Config {
             slow_peer_duration: None,
             slow_peer_isolation: None,
             max_prefixes: None,
-            max_prefixes_ipv4: None,
-            max_prefixes_ipv6: None,
-            max_prefixes_received_ipv4: None,
-            max_prefixes_received_ipv6: None,
+            max_prefixes_ipv4_unicast: None,
+            max_prefixes_ipv6_unicast: None,
+            max_prefixes_received_ipv4_unicast: None,
+            max_prefixes_received_ipv6_unicast: None,
             max_prefixes_l3vpn_ipv4_unicast: None,
             max_prefixes_l3vpn_ipv6_unicast: None,
             max_prefixes_ipv4_labeled_unicast: None,
@@ -1305,8 +1305,8 @@ impl Config {
             max_prefixes_rtc: None,
             max_prefix_action: None,
             max_prefix_warning_percent: None,
-            max_prefixes_out_ipv4: None,
-            max_prefixes_out_ipv6: None,
+            max_prefixes_out_ipv4_unicast: None,
+            max_prefixes_out_ipv6_unicast: None,
             max_prefix_restart_seconds: None,
             md5_password: None,
             tcp_ao: None,
@@ -1475,15 +1475,15 @@ impl Config {
                 .neighbors
                 .iter()
                 .filter(|neighbor| {
-                    neighbor.max_prefixes_out_ipv4.is_some()
-                        || neighbor.max_prefixes_out_ipv6.is_some()
+                    neighbor.max_prefixes_out_ipv4_unicast.is_some()
+                        || neighbor.max_prefixes_out_ipv6_unicast.is_some()
                 })
                 .filter_map(|neighbor| {
                     Some((
                         neighbor.address.parse().ok()?,
                         pair(
-                            neighbor.max_prefixes_out_ipv4,
-                            neighbor.max_prefixes_out_ipv6,
+                            neighbor.max_prefixes_out_ipv4_unicast,
+                            neighbor.max_prefixes_out_ipv6_unicast,
                         ),
                     ))
                 })
@@ -1492,12 +1492,16 @@ impl Config {
                 .peer_groups
                 .iter()
                 .filter(|(_, group)| {
-                    group.max_prefixes_out_ipv4.is_some() || group.max_prefixes_out_ipv6.is_some()
+                    group.max_prefixes_out_ipv4_unicast.is_some()
+                        || group.max_prefixes_out_ipv6_unicast.is_some()
                 })
                 .map(|(name, group)| {
                     (
                         name.clone(),
-                        pair(group.max_prefixes_out_ipv4, group.max_prefixes_out_ipv6),
+                        pair(
+                            group.max_prefixes_out_ipv4_unicast,
+                            group.max_prefixes_out_ipv6_unicast,
+                        ),
                     )
                 })
                 .collect(),
@@ -1532,11 +1536,11 @@ pub fn outbound_prefix_limits_loosen(rollback: &Config, candidate: &Config) -> b
             .and_then(|name| config.peer_groups.get(name));
         (
             neighbor
-                .max_prefixes_out_ipv4
-                .or_else(|| group.and_then(|group| group.max_prefixes_out_ipv4)),
+                .max_prefixes_out_ipv4_unicast
+                .or_else(|| group.and_then(|group| group.max_prefixes_out_ipv4_unicast)),
             neighbor
-                .max_prefixes_out_ipv6
-                .or_else(|| group.and_then(|group| group.max_prefixes_out_ipv6)),
+                .max_prefixes_out_ipv6_unicast
+                .or_else(|| group.and_then(|group| group.max_prefixes_out_ipv6_unicast)),
         )
     }
 
@@ -1545,11 +1549,11 @@ pub fn outbound_prefix_limits_loosen(rollback: &Config, candidate: &Config) -> b
     let groups_loosen = candidate.peer_groups.iter().any(|(name, group)| {
         let prior = rollback.peer_groups.get(name);
         looser(
-            prior.and_then(|prior| prior.max_prefixes_out_ipv4),
-            group.max_prefixes_out_ipv4,
+            prior.and_then(|prior| prior.max_prefixes_out_ipv4_unicast),
+            group.max_prefixes_out_ipv4_unicast,
         ) || looser(
-            prior.and_then(|prior| prior.max_prefixes_out_ipv6),
-            group.max_prefixes_out_ipv6,
+            prior.and_then(|prior| prior.max_prefixes_out_ipv6_unicast),
+            group.max_prefixes_out_ipv6_unicast,
         )
     });
     groups_loosen
