@@ -5,7 +5,9 @@
 **Decision recorded:** 2026-08-08
 **Amended:** 2026-08-08 (DR1 revised: the external pilot is advisory
 evidence, not a hard tagging gate); 2026-09-21 (the RFC 8212 posture pair is
-promoted into the frozen config inventory — see the amendment below)
+promoted into the frozen config inventory — see the amendment below);
+2026-10-19 (the inventoried role set has grown beyond the original count — see
+the amendment below)
 
 ## Decisions recorded
 
@@ -58,7 +60,8 @@ release, comprising:
 
 - **Config schema for the pinned roles.** The stable
   `route-server-unicast` and `route-reflector-unicast` roles and the four
-  scoped RR-only roles (BGP-LS, L3VPN, labeled-unicast, RT-Constrain), at
+  scoped RR-only roles (BGP-LS, L3VPN, labeled-unicast, RT-Constrain) — the
+  set at acceptance; the 2026-10-19 amendment lists the current roles — at
   field granularity: the inventoried stable fields, types, and the pinned
   effective defaults, under the existing compatibility rules (additive
   optional siblings allowed; removal, rename, type, default, required-set,
@@ -237,6 +240,35 @@ What does not change: runtime resolution, the `--check --strict` readiness
 advisory for legacy omission (no iBGP-only exemption), raw-presence retention,
 canonicalization, and the restart-required boundary. The rest of `Global` and
 `Config` is not promoted by implication.
+
+## Amendment (2026-10-19): the current role set
+
+The "four scoped RR-only roles" under *What v1.0 freezes* were the inventory
+when this ADR was accepted. The role list in
+`docs/reference/v1-stable-surface.json` now holds three stable roles and five
+scoped RR-only roles:
+
+| Classification | Role | Families |
+|---|---|---|
+| Stable | `route-server-unicast` | IPv4/IPv6 unicast |
+| Stable | `route-reflector-unicast` | IPv4/IPv6 unicast |
+| Stable | `flowspec-controller` | IPv4/IPv6 FlowSpec |
+| Scoped RR-only | `route-reflector-bgp-ls` | BGP-LS, BGP-LS-VPN |
+| Scoped RR-only | `route-reflector-l3vpn` | VPNv4/VPNv6 unicast |
+| Scoped RR-only | `route-reflector-labeled-unicast` | IPv4/IPv6 labeled unicast |
+| Scoped RR-only | `route-reflector-rtc` | RT-Constrain |
+| Scoped RR-only | `route-reflector-evpn` | L2VPN EVPN, route Types 1–5 only |
+
+`flowspec-controller` is the controller boundary defined by
+[ADR-0139](0139-flowspec-controller-contract.md), which supersedes this ADR's
+FlowSpec exclusion for that boundary only. `route-reflector-evpn` covers
+receiving, reflecting and querying EVPN Types 1–5; Type 6, local EVI, Ethernet
+segment, VTEP, IRB and dataplane behavior stay in the alpha `evpn` role. The
+`evpn`, `linux-dataplane` and `paths-limit` roles remain alpha or experimental.
+
+The decision itself is unchanged: the frozen surface is exactly the inventory
+as of the tagging release, and adding a role is an explicit, reviewed act. The
+table records the set on this date; the inventory remains authoritative.
 
 ## Consequences
 
