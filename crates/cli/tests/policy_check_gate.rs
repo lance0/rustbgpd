@@ -87,7 +87,7 @@ fn every_exit_code_and_its_precedence() {
     assert!(text.contains("1 lint denied by --deny-lints"), "{text}");
     assert!(!text.contains("unreferenced-policy"), "{text}");
     let unknown = run(&path, &["--deny-lints=unreachable"]);
-    assert_eq!(unknown.status.code(), Some(2), "{unknown:?}");
+    assert_eq!(unknown.status.code(), Some(64), "{unknown:?}");
     assert!(unknown.stdout.is_empty());
     assert!(stderr(&unknown).contains("possible values: unused-set"));
 }

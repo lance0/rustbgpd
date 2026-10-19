@@ -191,9 +191,10 @@ pub enum RouteAspaState {
 // - Empty results: JSON list output prints `[]` (or `{}` for
 //   objects), never nothing; human list output prints a one-line
 //   empty state ("No ... recorded/configured").
-// - Exit codes: parser/usage failures are 2; after parsing, 0 success /
-//   1 error by default, with detailed contracts only where documented. Any
-//   new detailed contract must be added to EXIT_CODES_HELP and after_help.
+// - Exit codes: parser/usage failures are 64 (EX_USAGE), so they never
+//   collide with a detailed code; after parsing, 0 success / 1 error by
+//   default, with detailed contracts only where documented. Any new detailed
+//   contract must be added to EXIT_CODES_HELP and after_help.
 // - Help text: list entries (`about`) are one terse line; details go
 //   in `long_about` (the doc-comment paragraph after a blank line).
 // - Verbs describe behavior: list/get inspect collections/one object; set
@@ -208,13 +209,15 @@ pub enum RouteAspaState {
 const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     0  success\n  \
     1  error (argument validation, declined confirmation, connection, daemon, or runtime failure)\n  \
-    2  parser or usage error\n\n\
+    64 parser or usage error (unknown flag or subcommand, missing or malformed argument)\n\n\
     Detailed contracts after parsing (also in each subcommand's --help):\n  \
     diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
     diff snapshot ...    0 snapshot emitted / 2 refused or malformed input\n  \
-    config diff          0 no changes / 1 error / 2 changes present\n  \
+    config diff          0 no changes / 1 error / 2 changes present / 3 rejected\n  \
     config plan          0 no changes / 1 error / 2 changes present / 3 rejected\n  \
     config apply         0 committed or noop / 1 error / 3 rejected\n  \
+    config confirm       0 confirmed / 1 error\n  \
+    config abort         0 aborted / 1 error\n  \
     config rollback      0 committed or noop / 1 error / 3 rejected\n  \
     config import        0 clean / 1 error / 2 warnings or skips / 3 nothing translatable\n  \
     doctor               0 all checks green / 1 error / 2 red checks found\n  \
@@ -3415,9 +3418,26 @@ fn group_root_help(command: clap::Command) -> clap::Command {
         ))
 }
 
+/// `EX_USAGE` from sysexits(3). Clap's default of 2 would collide with the
+/// detailed "changes present" and "red checks" codes.
+const USAGE_EXIT_CODE: i32 = 64;
+
 fn parse_cli(binary_name: &'static str) -> Cli {
-    let matches = cli_command(binary_name).get_matches();
-    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+    cli_command(binary_name)
+        .try_get_matches()
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+        .unwrap_or_else(|error| {
+            // `--help` and `--version` arrive here too and still exit 0.
+            let code = if error.use_stderr() {
+                USAGE_EXIT_CODE
+            } else {
+                0
+            };
+            let _ = error.print();
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            std::process::exit(code)
+        })
 }
 
 #[derive(Debug)]
@@ -10826,7 +10846,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             "help was: {help}"
         );
         assert!(
-            help.contains("2  parser or usage error"),
+            help.contains("64 parser or usage error"),
             "help was: {help}"
         );
         assert!(help.contains("config plan"), "help was: {help}");
@@ -10847,7 +10867,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             man.contains("1  error (argument validation,"),
             "man was: {man}"
         );
-        assert!(man.contains("2  parser or usage error"), "man was: {man}");
+        assert!(man.contains("64 parser or usage error"), "man was: {man}");
     }
 
     /// LAN-329 noun standardization: `--neighbor` is canonical,

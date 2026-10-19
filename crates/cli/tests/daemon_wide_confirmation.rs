@@ -38,7 +38,7 @@ async fn omitted_chain_scope_is_a_usage_error_without_rpc() {
         vec!["policy", "chain", "clear-export", "-y"],
     ] {
         let output = rbgp(&server.addr, &args);
-        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert_eq!(output.status.code(), Some(64), "{args:?}: {output:?}");
         let error = stderr(&output);
         assert!(
             error.contains("the following required arguments were not provided"),
@@ -121,7 +121,7 @@ fn gshut_requires_an_explicit_scope_before_transport() {
         let output = rbgp(&absent, &args);
         // A connection attempt would report the absent socket; exit 2
         // without it proves the all-peers toggle never reached transport.
-        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert_eq!(output.status.code(), Some(64), "{args:?}: {output:?}");
         let error = stderr(&output);
         assert!(
             error.contains("<--neighbor <NEIGHBOR>|--all>"),
@@ -187,7 +187,7 @@ fn explicit_scope_flags_conflict_with_neighbor() {
         vec!["gshut", "--all", "--neighbor", "10.0.0.2"],
     ] {
         let output = rbgp(&absent, &args);
-        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert_eq!(output.status.code(), Some(64), "{args:?}: {output:?}");
         let error = stderr(&output);
         assert!(error.contains("cannot be used with"), "{args:?}: {error}");
         assert!(
@@ -219,7 +219,7 @@ async fn empty_scope_neighbor_is_a_usage_error_before_transport() {
             vec!["gshut", "--peer", neighbor, "--clear"],
         ] {
             let output = rbgp(&server.addr, &args);
-            assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+            assert_eq!(output.status.code(), Some(64), "{args:?}: {output:?}");
             let error = stderr(&output);
             assert!(
                 error.contains("'--neighbor <NEIGHBOR>': neighbor address must not be empty\n"),

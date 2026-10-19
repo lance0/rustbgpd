@@ -6,7 +6,8 @@ surface with human-readable and JSON output modes.
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 Parser and usage errors, such as an unknown flag or malformed neighbor address,
-exit with code `2` before connecting. Argument validation after parsing, such as
+exit with code `64` (`EX_USAGE`) before connecting, so they never collide with a
+detailed code such as `2` for "changes present". Argument validation after parsing, such as
 an out-of-range `top --interval` or an empty policy-chain list, keeps exit code
 `1`, as do connection and execution failures and a declined confirmation
 prompt. Commands with detailed exit codes document them in `--help`; those codes
@@ -19,7 +20,7 @@ name the target endpoint and scope and ask `[y/N]` first; any answer other than
 the prompt. Non-interactive runs, such as scripts and pipelines, never prompt.
 The policy-chain and `gshut` commands require an explicit scope: `--global`
 (policy chains) or `--all` (`gshut`) for the daemon-wide scope, or `--neighbor`
-for one peer. Omitting both is a usage error (exit code `2`) and nothing is
+for one peer. Omitting both is a usage error (exit code `64`) and nothing is
 sent to the daemon. `rbgp shutdown` is always daemon-wide and takes no scope
 flag.
 
