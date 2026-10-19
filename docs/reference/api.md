@@ -3022,9 +3022,9 @@ unspecified next hop.
 The route is stored with the unspecified next hop, so `ListBestRoutes`,
 `ListReceivedRoutes`, BMP Loc-RIB and MRT show `0.0.0.0` or `::`, and a
 `[[fib_tables]]` table rejects it with reason `next_hop_unspecified` rather
-than installing a gateway. GoBGP also treats an unspecified `AddPath` next
-hop as the session's local address for eBGP and iBGP peers, but sends it
-unchanged to route-server clients.
+than installing a gateway. GoBGP (v3.37.0 and v4.10.0) also treats an
+unspecified `AddPath` next hop as the session's local address for eBGP and
+iBGP peers, but sends it unchanged to route-server clients.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

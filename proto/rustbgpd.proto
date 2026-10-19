@@ -3571,12 +3571,13 @@ message AddPathRequest {
   // prefix takes the neighbor's local_ipv6_nexthop, else the session's
   // local IPv6 address; a session with neither refuses the route with
   // the exact-export reason missing_ipv6_next_hop rather than sending an
-  // unusable next hop. GoBGP also resolves an unspecified next hop to the
-  // session's local address for eBGP and iBGP peers, but sends it unchanged
-  // to route-server clients; rustbgpd resolves it for every peer type,
-  // route-server clients included. The route is stored with the
-  // unspecified next hop, so route listings, BMP and MRT show it as such,
-  // and FIB installation drops it with reason next_hop_unspecified.
+  // unusable next hop. GoBGP (v3.37.0, v4.10.0) also resolves an unspecified
+  // next hop to the session's local address for eBGP and iBGP peers, but
+  // sends it unchanged to route-server clients; rustbgpd resolves it for
+  // every peer type, route-server clients included. The route is stored
+  // with the unspecified next hop, so route listings, BMP and MRT show it
+  // as such, and FIB installation drops it with reason
+  // next_hop_unspecified.
   // Any other address is used as given; an IPv6 prefix requires an IPv6
   // next hop, and multicast or broadcast addresses are rejected.
   string next_hop = 3;
