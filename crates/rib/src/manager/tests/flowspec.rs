@@ -1614,7 +1614,7 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
 async fn inject_local_flowspec(
     tx: &mpsc::Sender<RibUpdate>,
     route: FlowSpecRoute,
-) -> crate::update::FlowSpecInjectOutcome {
+) -> crate::update::InjectOutcome {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectFlowSpec {
         route,
@@ -1700,7 +1700,7 @@ async fn local_flowspec_gauge_tracks_injected_intent() {
 /// `received_at` reports every identical re-add as `Replaced`.
 #[tokio::test]
 async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
-    use crate::update::FlowSpecInjectOutcome;
+    use crate::update::InjectOutcome;
 
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -1712,7 +1712,7 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
     let key = first.selection_key();
     assert_eq!(
         inject_local_flowspec(&tx, first.clone()).await,
-        FlowSpecInjectOutcome::Created
+        InjectOutcome::Created
     );
     let update = out_rx.try_recv().expect("created rule announces");
     assert_eq!(update.flowspec_announce.len(), 1);
@@ -1722,14 +1722,14 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
     again.received_at = Instant::now();
     assert_eq!(
         inject_local_flowspec(&tx, again).await,
-        FlowSpecInjectOutcome::Unchanged
+        InjectOutcome::Unchanged
     );
     assert!(out_rx.try_recv().is_err(), "identical re-add stays silent");
 
     let changed = local_flowspec_route(vec![(65000 << 16) | 2]);
     assert_eq!(
         inject_local_flowspec(&tx, changed.clone()).await,
-        FlowSpecInjectOutcome::Replaced
+        InjectOutcome::Replaced
     );
     let update = out_rx.try_recv().expect("replacement re-announces");
     assert_eq!(update.flowspec_announce.len(), 1);
@@ -1750,7 +1750,7 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
     let masked = local_flowspec_route(vec![(65000 << 16) | 3]);
     assert_eq!(
         inject_local_flowspec(&tx, masked.clone()).await,
-        FlowSpecInjectOutcome::Replaced
+        InjectOutcome::Replaced
     );
     assert!(
         out_rx.try_recv().is_err(),
@@ -1758,7 +1758,7 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
     );
     assert_eq!(
         inject_local_flowspec(&tx, masked).await,
-        FlowSpecInjectOutcome::Unchanged
+        InjectOutcome::Unchanged
     );
     assert!(out_rx.try_recv().is_err());
     let best = query_flowspec_routes(&tx).await;

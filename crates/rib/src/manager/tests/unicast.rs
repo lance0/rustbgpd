@@ -3422,6 +3422,7 @@ async fn withdraw_injected_removes_and_distributes() {
     tx.send(RibUpdate::WithdrawInjected {
         prefix: Prefix::V4(prefix),
         path_id: 0,
+        allow_missing: false,
         reply: reply_tx,
     })
     .await
@@ -4359,4 +4360,162 @@ async fn otc_tagged_unicast_is_advertised_toward_customer_and_route_server_clien
         drop(tx);
         handle.await.unwrap();
     }
+}
+
+async fn inject_local_unicast(
+    tx: &mpsc::Sender<RibUpdate>,
+    next_hop: IpAddr,
+    communities: Vec<u32>,
+) -> crate::update::InjectOutcome {
+    let mut route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        Ipv4Addr::UNSPECIFIED,
+    );
+    route.next_hop = next_hop;
+    route.peer = LOCAL_PEER;
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.peer_router_id = Ipv4Addr::UNSPECIFIED;
+    route.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::Communities(communities),
+    ]);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::InjectRoute {
+        route,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap().unwrap()
+}
+
+async fn withdraw_local_unicast(
+    tx: &mpsc::Sender<RibUpdate>,
+    allow_missing: bool,
+) -> Result<bool, crate::update::RibCommandError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawInjected {
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+        path_id: 0,
+        allow_missing,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
+}
+
+/// Unicast injection outcomes come from the local Adj-RIB-In and match what
+/// reaches the wire: an identical re-add is `Unchanged` and sends nothing, a
+/// next-hop or attribute change is `Replaced` and re-announces, and while a
+/// received route out-selects the local one, a local change is still
+/// `Replaced` although nothing moves on the wire. A missing withdrawal is
+/// `NotFound` unless `allow_missing` is set.
+#[tokio::test]
+async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
+    use crate::update::InjectOutcome;
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.91".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 0,
+        peer_asn: 65_100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let self_hop = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    let specific = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    assert_eq!(
+        inject_local_unicast(&tx, self_hop, vec![1]).await,
+        InjectOutcome::Created
+    );
+    let update = out_rx.try_recv().expect("created route announces");
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].next_hop, self_hop);
+
+    assert_eq!(
+        inject_local_unicast(&tx, self_hop, vec![1]).await,
+        InjectOutcome::Unchanged
+    );
+    let _ = query_best_routes(&tx).await;
+    assert!(out_rx.try_recv().is_err(), "identical re-add stays silent");
+
+    for (next_hop, communities) in [(self_hop, vec![2]), (specific, vec![2])] {
+        assert_eq!(
+            inject_local_unicast(&tx, next_hop, communities).await,
+            InjectOutcome::Replaced
+        );
+        let update = out_rx.try_recv().expect("replacement re-announces");
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].next_hop, next_hop);
+    }
+
+    // A received route with a higher LOCAL_PREF now owns Loc-RIB.
+    let source = Ipv4Addr::new(198, 51, 100, 91);
+    let mut received = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24), source);
+    received.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::LocalPref(200),
+    ]);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![received],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    let best = query_best_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert_eq!(best[0].peer, IpAddr::V4(source));
+    let update = out_rx.try_recv().expect("received route takes over");
+    assert_eq!(update.announce[0].peer, IpAddr::V4(source));
+
+    assert_eq!(
+        inject_local_unicast(&tx, specific, vec![3]).await,
+        InjectOutcome::Replaced
+    );
+    assert_eq!(
+        inject_local_unicast(&tx, specific, vec![3]).await,
+        InjectOutcome::Unchanged
+    );
+    let _ = query_best_routes(&tx).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "masked replacement stays silent"
+    );
+
+    assert_eq!(withdraw_local_unicast(&tx, false).await, Ok(true));
+    assert!(matches!(
+        withdraw_local_unicast(&tx, false).await,
+        Err(crate::update::RibCommandError::NotFound(_))
+    ));
+    assert_eq!(withdraw_local_unicast(&tx, true).await, Ok(false));
+
+    drop(tx);
+    handle.await.unwrap();
 }

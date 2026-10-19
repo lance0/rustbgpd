@@ -103,6 +103,20 @@ impl std::fmt::Debug for SessionExportProfile {
     }
 }
 
+/// An injected route with an unspecified next hop asks for next-hop self on
+/// every session, route-server clients included; an explicit export-policy
+/// next-hop action still wins. The stored next hop stays unspecified, so
+/// this is resolved here, per session, for live and probe paths alike.
+fn local_self_next_hop<'a>(
+    route: &Route,
+    nh_override: Option<&'a rustbgpd_policy::NextHopAction>,
+) -> Option<&'a rustbgpd_policy::NextHopAction> {
+    nh_override.or_else(|| {
+        (route.origin_type == rustbgpd_rib::RouteOrigin::Local && route.next_hop.is_unspecified())
+            .then_some(&rustbgpd_policy::NextHopAction::Self_)
+    })
+}
+
 impl SessionExportProfile {
     /// Whether two profiles produce identical bytes for the same candidate.
     ///
@@ -520,6 +534,7 @@ impl SessionExportProfile {
         local_ipv4: Ipv4Addr,
         nh_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> Vec<PathAttribute> {
+        let nh_override = local_self_next_hop(route, nh_override);
         let is_ebgp = self.is_ebgp();
         let force_next_hop_self =
             matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
@@ -1079,6 +1094,7 @@ impl SessionExportProfile {
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
         attrs: PreparedUnicastAttributes,
     ) -> Result<PreparedUnicastCandidate, ExportProbeError> {
+        let next_hop_override = local_self_next_hop(route, next_hop_override);
         let local_ipv4 = self.local_ipv4();
         let rewritten =
             next_hop_override.is_some() || (self.is_ebgp() && !self.route_server_client);
@@ -1162,8 +1178,9 @@ impl SessionExportProfile {
                     _ => route.next_hop,
                 };
                 // RFC 2545 §3: an IPv6 MP_REACH next hop is 16 or 32 octets.
-                // Refuse rather than encode a 4-octet one.
-                if next_hop.is_ipv4() {
+                // Refuse rather than encode a 4-octet one, or an unspecified
+                // one when next-hop self found no local IPv6 address.
+                if next_hop.is_ipv4() || next_hop.is_unspecified() {
                     return Err(ExportProbeError::MissingIpv6NextHop);
                 }
                 self.check_link_local_export(

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::attr_set::AttrSet;
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
-use crate::update::FlowSpecInjectOutcome;
+use crate::update::InjectOutcome;
 
 impl RibManager {
     pub(super) fn process_flowspec_withdraw_chunk(
@@ -126,7 +126,7 @@ impl RibManager {
     pub(in crate::manager) fn handle_inject_flowspec(
         &mut self,
         route: crate::route::FlowSpecRoute,
-        reply: tokio::sync::oneshot::Sender<Result<FlowSpecInjectOutcome, RibCommandError>>,
+        reply: tokio::sync::oneshot::Sender<Result<InjectOutcome, RibCommandError>>,
     ) {
         let key = route.selection_key();
         let rib = self
@@ -139,7 +139,7 @@ impl RibManager {
         // matching the Loc-RIB change test, so an identical re-add distributes
         // nothing.
         let outcome = match rib.get_flowspec(&route.key()) {
-            None => FlowSpecInjectOutcome::Created,
+            None => InjectOutcome::Created,
             Some(old)
                 if old.attributes == route.attributes
                     && old.origin_type == route.origin_type
@@ -147,9 +147,9 @@ impl RibManager {
                     && old.is_stale == route.is_stale
                     && old.is_llgr_stale == route.is_llgr_stale =>
             {
-                FlowSpecInjectOutcome::Unchanged
+                InjectOutcome::Unchanged
             }
-            Some(_) => FlowSpecInjectOutcome::Replaced,
+            Some(_) => InjectOutcome::Replaced,
         };
         rib.insert_flowspec(route);
         self.metrics.set_rib_prefixes(
