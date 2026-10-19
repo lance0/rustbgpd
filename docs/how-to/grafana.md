@@ -8,7 +8,7 @@ A ready-to-import overview dashboard lives at
 restart and slow-peer queues), RIB scale, update-group membership,
 policy-transition actor occupancy, accepted-policy age, policy decisions and
 engine errors, route-safety rejections and selection-deferral state,
-BMP/event-outbox health, RPKI/ASPA state, and core operations. Every panel
+BMP and event-stream health, RPKI/ASPA state, and core operations. Every panel
 references metrics the daemon actually exports from
 `crates/telemetry/src/metrics.rs` — no speculative series.
 
@@ -98,8 +98,7 @@ the query scan can grow even though the displayed result is aggregated.
 A ready-to-load Prometheus alert-rule pack (rules include daemon down and
 restarted, slow runtime-config settlement, session down/flapping,
 delayed outbound registration, empty Adj-RIB-In, max-prefix near-limit, breach, shutdown latch and sustained
-inbound blocking, empty RPKI VRP table, event-outbox
-degradation, update-group residue growth, update-group recovery fallback
+inbound blocking, empty RPKI VRP table, update-group residue growth, update-group recovery fallback
 under a resource limit, stalled outbound resync, stalled policy transition, a
 slow peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
 authoritative partial SIGHUP reloads and failed retained reload tasks,
@@ -163,7 +162,7 @@ the last increment ages out:
   sessions remain live, but the named `service`/`source` consumer missed
   incremental events. Treat that consumer's local view as desynchronized:
   take a fresh authoritative snapshot for the named service and source, then
-  restart the live watch. Use a durable cursor only when that API supports one.
+  restart the live watch.
 - `BgpSessionEventSourceDrops` is warning severity because a session event was
   lost before peer-manager publication. The `kind` label distinguishes
   `state_change` from `notification`; `reason` distinguishes a full source
@@ -291,7 +290,7 @@ inside the bounded window does.
   administrative/session truth panel above; state history remains available
   via `bgp_session_state_transitions_total`.
 - Panels for optional subsystems (BFD, BMP, RPKI/ASPA, update groups,
-  event outbox, graceful restart) stay empty until the corresponding
+  graceful restart) stay empty until the corresponding
   feature is configured; vector metrics only emit series once a label
   combination is touched.
 - The "Memory (jemalloc)" panel is populated on every default build:

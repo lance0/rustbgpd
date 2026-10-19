@@ -18,9 +18,9 @@ use super::schema::{
 };
 use super::schema::{OrrVantage, parse_orr_vantage, validate_orr_vantage_address};
 use super::{
-    ChunkedSetStore, Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig,
-    InboundAdmissionConfig, Neighbor, PeerGroupConfig, SecurityConfig, TcpAoConfig,
-    TcpAoKeyringConfig, dynamic_prefixes_intersect, is_unicast_nonzero_mac, parse_mac_address,
+    ChunkedSetStore, Config, ConfigError, DEFAULT_HOLD_TIME, InboundAdmissionConfig, Neighbor,
+    PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
+    is_unicast_nonzero_mac, parse_mac_address,
 };
 
 /// Canonical key for a dynamic-neighbor prefix: the network address with all
@@ -504,7 +504,6 @@ impl Config {
                 });
             }
         }
-        validate_event_history(&self.event_history)?;
         validate_inbound_admission(&self.inbound_admission)?;
         validate_grpc_security(&self.security)?;
         self.validate_no_redacted_secrets()?;
@@ -3243,55 +3242,6 @@ fn validate_peer_group(
         store,
     )?;
 
-    Ok(())
-}
-
-fn validate_event_history(cfg: &EventHistoryConfig) -> Result<(), ConfigError> {
-    if !cfg.enabled {
-        return Ok(());
-    }
-
-    if !matches!(cfg.synchronous.as_str(), "full" | "normal") {
-        return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: format!(
-                "synchronous = {:?} not supported; expected \"full\" or \"normal\"",
-                cfg.synchronous
-            ),
-        });
-    }
-    if cfg.overflow != "drop" {
-        return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: format!(
-                "overflow = {:?} not supported in v1; only \"drop\" is implemented (ADR-0072 reserves \"block\" for a future release)",
-                cfg.overflow
-            ),
-        });
-    }
-    if cfg.queue_capacity == 0 {
-        return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: "queue_capacity must be > 0".to_string(),
-        });
-    }
-    if cfg.batch_size == 0 {
-        return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: "batch_size must be > 0".to_string(),
-        });
-    }
-    if cfg.batch_interval_ms == 0 {
-        return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: "batch_interval_ms must be > 0".to_string(),
-        });
-    }
-    if cfg.max_events == 0 {
-        return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: "max_events must be > 0".to_string(),
-        });
-    }
-    if cfg.max_bytes == 0 {
-        return Err(ConfigError::InvalidEventHistoryConfig {
-            reason: "max_bytes must be > 0".to_string(),
-        });
-    }
     Ok(())
 }
 

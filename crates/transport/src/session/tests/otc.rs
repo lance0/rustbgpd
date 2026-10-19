@@ -610,7 +610,6 @@ fn rib_staged_otc_denial_publishes_existing_egress_diagnostics() {
     let mut session = make_test_session(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Customer);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    let sink = install_recording_sink(&mut session);
     let route = replace_route_attrs(
         &make_route(100),
         vec![
@@ -628,101 +627,21 @@ fn rib_staged_otc_denial_publishes_existing_egress_diagnostics() {
     session.send_route_update(update);
 
     assert_eq!(session.otc_routes_blocked, blocked_before + 1);
-    let events = sink.snapshot();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].direction, crate::event_sink::OtcDirection::Egress);
-    assert_eq!(events[0].reason.as_str(), "egress_to_upstream_via_otc");
-    assert_eq!(events[0].prefixes, vec![route.prefix.to_string()]);
-    assert_eq!(events[0].otc_value, Some(64512));
-}
-
-#[tokio::test]
-async fn otc_ingress_provider_publishes_structured_event() {
-    // I1: Provider/RouteServer receives OTC-tagged unicast from a
-    // Customer/RouteServerClient — the legacy counter increments and
-    // a single `OtcRouteBlockedEvent` should be published with the
-    // matching reason, the announced prefixes, both role labels, and
-    // the decoded OTC value.
-    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
-    session.config.peer.local_role = Some(BgpRole::Provider);
-    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    let sink = install_recording_sink(&mut session);
-    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-    let attrs = vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65002, 64999])],
-        }),
-        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-        otc(65002),
-    ];
-    let update = UpdateMessage::build(
-        &[Ipv4NlriEntry { path_id: 0, prefix }],
-        &[],
-        &attrs,
-        true,
-        false,
-        Ipv4UnicastMode::Body,
+    assert_eq!(
+        otc_routes_blocked_count(&session, "egress_to_upstream_via_otc"),
+        1
     );
-    session.process_update(update).await;
-    let events = sink.snapshot();
-    assert_eq!(events.len(), 1, "exactly one event per blocked UPDATE");
-    let event = &events[0];
-    assert_eq!(event.reason.as_str(), "ingress_from_customer_rsclient");
-    assert_eq!(event.direction, crate::event_sink::OtcDirection::Ingress);
-    assert_eq!(event.prefixes, vec![prefix.to_string()]);
-    assert_eq!(event.local_role, Some(BgpRole::Provider));
-    assert_eq!(event.otc_value, Some(65002));
-    // AS_PATH stays lossless via `to_aspath_string`.
-    assert_eq!(event.as_path, "65002 64999");
 }
 
 #[tokio::test]
-async fn otc_ingress_peer_mismatch_publishes_structured_event() {
-    // I2: Peer role with OTC ASN != peer ASN.
-    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
-    session.config.peer.local_role = Some(BgpRole::Peer);
-    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    let sink = install_recording_sink(&mut session);
-    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-    let attrs = vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65002])],
-        }),
-        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-        // OTC ASN 64512 disagrees with the peer's negotiated ASN
-        // (65002). RFC 9234 §5 says to reject.
-        otc(64512),
-    ];
-    let update = UpdateMessage::build(
-        &[Ipv4NlriEntry { path_id: 0, prefix }],
-        &[],
-        &attrs,
-        true,
-        false,
-        Ipv4UnicastMode::Body,
-    );
-    session.process_update(update).await;
-    let events = sink.snapshot();
-    assert_eq!(events.len(), 1);
-    let event = &events[0];
-    assert_eq!(event.reason.as_str(), "ingress_peer_mismatch");
-    assert_eq!(event.otc_value, Some(64512));
-    assert_eq!(event.local_role, Some(BgpRole::Peer));
-}
-
-#[tokio::test]
-async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
-    // Malformed OTC length: the codec cannot decode an ASN, so the
-    // event's otc_value field is None.
+async fn otc_ingress_malformed_length_without_role_counts_and_treats_as_withdraw() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = None;
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     rfc7606_drain(&mut rib_rx);
-    let sink = install_recording_sink(&mut session);
+    let malformed_counter_before = otc_routes_blocked_count(&session, "malformed_length");
     let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -749,15 +668,10 @@ async fn otc_ingress_malformed_publishes_structured_event_with_no_otc_value() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-    let events = sink.snapshot();
-    assert_eq!(events.len(), 1);
-    let event = &events[0];
-    assert_eq!(event.reason.as_str(), "malformed_length");
-    assert!(
-        event.otc_value.is_none(),
-        "malformed_length must not surface a decoded OTC value"
+    assert_eq!(
+        otc_routes_blocked_count(&session, "malformed_length"),
+        malformed_counter_before + 1
     );
-    assert_eq!(event.local_role, None);
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
@@ -777,7 +691,6 @@ async fn otc_ingress_truncated_framing_publishes_malformed_length_diagnostics() 
         session.test_install_stream(client);
         establish_test_session(&mut session, 65002).await;
         rfc7606_drain(&mut rib_rx);
-        let sink = install_recording_sink(&mut session);
         let prefix = Ipv4Prefix::new(
             Ipv4Addr::new(203, 0, 113, u8::try_from(index + 1).unwrap()),
             32,
@@ -815,31 +728,20 @@ async fn otc_ingress_truncated_framing_publishes_malformed_length_diagnostics() 
             malformed_counter_before + 1,
             "{case}"
         );
-        let events = sink.snapshot();
-        assert_eq!(events.len(), 1, "{case}");
-        assert_eq!(
-            events[0].reason,
-            rustbgpd_telemetry::reason_labels::OtcBlockReason::MalformedLength,
-            "{case}"
-        );
-        assert_eq!(events[0].prefixes, vec![prefix.to_string()], "{case}");
-        assert_eq!(events[0].local_role, None, "{case}");
-        assert_eq!(events[0].otc_value, None, "{case}");
         assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
         assert_single_malformed_disposition(&session, "treat_as_withdraw");
     }
 }
 
 #[tokio::test]
-async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
-    // Regression: the event's prefix list must include IPv6 unicast
+async fn otc_ingress_counts_mp_reach_v6_prefixes() {
+    // Regression: the blocked count must include IPv6 unicast
     // MP_REACH_NLRI announcements, not just IPv4 body NLRI. Otherwise
-    // an operator reading the event would see "blocked 0 prefixes" on
-    // an IPv6-only OTC violation.
+    // an IPv6-only OTC violation would record nothing.
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
     install_dual_stack_session(&mut session, false);
-    let sink = install_recording_sink(&mut session);
+    let blocked_before = session.otc_routes_blocked;
     let v6_prefix = Ipv6Prefix::new(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
     let mp_reach = rustbgpd_wire::MpReachNlri {
         afi: Afi::Ipv6,
@@ -868,23 +770,14 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
     session.process_update(update).await;
-    let events = sink.snapshot();
-    assert_eq!(events.len(), 1);
-    assert!(
-        events[0]
-            .prefixes
-            .iter()
-            .any(|p| p == &v6_prefix.to_string()),
-        "OtcRouteBlockedEvent must surface MP_REACH IPv6 announcements"
-    );
+    assert_eq!(session.otc_routes_blocked, blocked_before + 1);
 }
 
 #[tokio::test]
-async fn otc_ingress_event_excludes_unnegotiated_mp_unicast() {
+async fn otc_ingress_count_excludes_unnegotiated_mp_unicast() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    let sink = install_recording_sink(&mut session);
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48);
     let mp_reach = rustbgpd_wire::MpReachNlri {
@@ -933,28 +826,18 @@ async fn otc_ingress_event_excludes_unnegotiated_mp_unicast() {
         otc_routes_blocked_count(&session, "ingress_from_customer_rsclient"),
         otc_counter_before + 1
     );
-    let events = sink.snapshot();
-    assert_eq!(events.len(), 1);
-    assert_eq!(
-        events[0].reason,
-        rustbgpd_telemetry::reason_labels::OtcBlockReason::IngressFromCustomerRsclient
-    );
-    assert_eq!(events[0].prefixes, vec![v4_prefix.to_string()]);
-    assert!(!events[0].prefixes.contains(&v6_prefix.to_string()));
 }
 
 #[tokio::test]
-async fn otc_ingress_malformed_without_reachable_nlri_resets_without_block_event() {
+async fn otc_ingress_malformed_without_reachable_nlri_resets_without_block_count() {
     // RFC 7606 §5.2: a malformed-length OTC UPDATE with no reachable
     // NLRI must reset rather than applying a vacuous treat-as-withdraw.
-    // The OTC event contract still forbids a zero-prefix block event.
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = None;
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     rfc7606_drain(&mut rib_rx);
-    let sink = install_recording_sink(&mut session);
     let baseline_blocked = session.otc_routes_blocked;
     let baseline_malformed_counter = otc_routes_blocked_count(&session, "malformed_length");
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -967,10 +850,6 @@ async fn otc_ingress_malformed_without_reachable_nlri_resets_without_block_event
         nlri: Bytes::new(),
     };
     session.process_update(update).await;
-    assert!(
-        sink.snapshot().is_empty(),
-        "no announced unicast → no structured OtcRouteBlockedEvent"
-    );
     assert_eq!(
         session.otc_routes_blocked, baseline_blocked,
         "rejected=0 must not bump the per-peer counter"
@@ -988,13 +867,13 @@ async fn otc_ingress_malformed_without_reachable_nlri_resets_without_block_event
 }
 
 #[tokio::test]
-async fn otc_ingress_no_event_when_no_decision() {
+async fn otc_ingress_no_count_when_no_decision() {
     // Untagged UPDATE from a customer arrives at a Customer-role
-    // local — no OTC rule fires, so the sink must stay empty.
+    // local — no OTC rule fires, so nothing is recorded.
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Customer);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    let sink = install_recording_sink(&mut session);
+    let blocked_before = session.otc_routes_blocked;
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1012,10 +891,7 @@ async fn otc_ingress_no_event_when_no_decision() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-    assert!(
-        sink.snapshot().is_empty(),
-        "OTC sink must stay silent when no decision fired"
-    );
+    assert_eq!(session.otc_routes_blocked, blocked_before);
 }
 
 /// Load-bearing role-independent propagation proof: valid canonical and

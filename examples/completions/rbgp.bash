@@ -3876,7 +3876,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__events__subcmd__watch)
-            opts="-a -s -j -h --category --peer --neighbor --family --prefix --type --backfill --from-event-id --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
+            opts="-a -s -j -h --category --peer --neighbor --family --prefix --type --backfill --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3907,14 +3907,10 @@ _rbgp() {
                     return 0
                     ;;
                 --type)
-                    COMPREPLY=($(compgen -W "added withdrawn best_changed policy_filtered state_changed established lost peer_added peer_removed peer_enabled peer_disabled max_prefix_warning notification_sent notification_received policy_changed otc_route_blocked dataplane_status_changed dataplane_route_installed dataplane_route_withdrawn dataplane_route_failed evpn_added evpn_withdrawn evpn_best_changed bfd_up bfd_down bfd_state_changed stream_lagged" -- "${cur}"))
+                    COMPREPLY=($(compgen -W "added withdrawn best_changed policy_filtered state_changed established lost peer_added peer_removed peer_enabled peer_disabled max_prefix_warning notification_sent notification_received policy_changed dataplane_status_changed dataplane_route_installed dataplane_route_withdrawn dataplane_route_failed evpn_added evpn_withdrawn evpn_best_changed bfd_up bfd_down bfd_state_changed stream_lagged" -- "${cur}"))
                     return 0
                     ;;
                 --backfill)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --from-event-id)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

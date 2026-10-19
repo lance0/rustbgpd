@@ -248,12 +248,12 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   previously advertised and becomes OTC-blocked is withdrawn and removed from
   logical advertised state; a newly blocked route is never committed.
 - Transport retains the E2 check as a defense-in-depth encoder guard and owns
-  the established `bgp_otc_routes_blocked_total` / `OTC_ROUTE_BLOCKED`
-  diagnostic publication. The RIB passes rejected route context explicitly,
-  so metrics/events and export-explain reflect the same pre-commit decision.
+  the established `bgp_otc_routes_blocked_total` counter and log
+  diagnostics. The RIB passes rejected route context explicitly, so metrics,
+  logs, and export-explain reflect the same pre-commit decision.
   Backpressured grouped peers retain at most one pending diagnostic per route;
   resync rebuilds that residue from current denials so withdrawn sources do
-  not leak stale events into an unrelated later update.
+  not leak stale diagnostics into an unrelated later update.
 - RFC 9234 section 5 applies only to IPv4/IPv6 unicast SAFI 1 here. FlowSpec,
   EVPN, VPN, labeled-unicast, RTC, and BGP-LS are not subject to the OTC gate.
 

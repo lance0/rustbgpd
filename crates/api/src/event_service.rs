@@ -11,7 +11,6 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 pub(crate) mod convert;
-mod cursor;
 pub(crate) mod dataplane;
 mod filters;
 
@@ -62,12 +61,6 @@ pub struct EventService {
     dataplane_events: DataplaneEventBroadcaster,
     dataplane_route_events: DataplaneRouteEventBroadcaster,
     bfd_events: BfdEventBroadcaster,
-    /// Optional handle to the durable event outbox (ADR-0072). When
-    /// `None`, `SubscribeFromEvent` returns
-    /// `Status::failed_precondition`; the live `WatchEvents` /
-    /// `List*Events` surfaces continue to work unchanged
-    /// regardless of this field.
-    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
     metrics: BgpMetrics,
 }
 
@@ -157,23 +150,8 @@ impl EventService {
             dataplane_events,
             dataplane_route_events,
             bfd_events,
-            event_history: None,
             metrics,
         }
-    }
-
-    /// Install the durable event-outbox handle (ADR-0072). Called
-    /// once at daemon startup when `[event_history].enabled = true`.
-    /// `None` means `SubscribeFromEvent` returns
-    /// `Status::failed_precondition`; the rest of the live surface
-    /// is unaffected.
-    #[must_use]
-    pub fn with_event_history(
-        mut self,
-        handle: Option<rustbgpd_event_history::EventHistoryHandle>,
-    ) -> Self {
-        self.event_history = handle;
-        self
     }
 
     fn subscribe_dataplane_events(&self) -> broadcast::Receiver<proto::BgpEvent> {
@@ -189,19 +167,11 @@ impl EventService {
         *guard = Some(tx.clone());
         drop(guard);
 
-        // ADR-0072 PR-FU1: this lazy-spawn path runs when EHM is
-        // disabled (or pre-startup-spawn). The EHM-enabled startup
-        // spawn in `serve()` populates the broadcaster eagerly, so
-        // we never get here in that case. Pass None / a fresh
-        // metrics handle — the latter is used only for drop
-        // accounting which is a no-op without an EHM handle.
         spawn_dataplane_poller(
             tx,
             self.dataplane_events.clone(),
             self.blackhole_discard_snapshot.clone(),
             self.fib_route_snapshot.clone(),
-            None,
-            self.metrics.clone(),
         );
         rx
     }
@@ -574,50 +544,6 @@ impl proto::event_service_server::EventService for EventService {
             events: events.into_iter().map(policy_event_to_bgp_event).collect(),
         }))
     }
-
-    type SubscribeFromEventStream =
-        Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send + 'static>>;
-
-    /// `SubscribeFromEvent` — durable cursor replay + live (ADR-0072).
-    ///
-    /// Server-side replay-then-live join of the durable event outbox.
-    /// Cursor semantics on `from_event_id`:
-    ///
-    /// - `None` ⇒ live-only (no replay).
-    /// - `Some(0)` ⇒ replay everything retained, then live.
-    /// - `Some(N>0)` ⇒ replay events with `event_id > N`, then live.
-    ///
-    /// When the requested cursor is older than the retention floor,
-    /// the server emits a leading `StreamLagEvent` with the
-    /// missed count over the **global committed stream** (not the
-    /// filtered subset), then continues replay from the earliest
-    /// retained event. If retention evicts rows ahead of a replay
-    /// already in progress, another `StreamLagEvent` covering exactly
-    /// those ids precedes the next replayed event. Collectors continue
-    /// moving while observing the gap.
-    ///
-    /// When the daemon was started with `[event_history].enabled =
-    /// false` or EHM failed to start with `required = false`, returns
-    /// `Status::failed_precondition`. Replay storage interruption
-    /// returns `Status::unavailable` unless post-admission producer
-    /// loss takes `Status::data_loss` precedence. The live
-    /// `WatchEvents` / `List*Events` surfaces continue to work.
-    async fn subscribe_from_event(
-        &self,
-        request: Request<proto::SubscribeFromEventRequest>,
-    ) -> Result<Response<Self::SubscribeFromEventStream>, Status> {
-        let req = request.into_inner();
-        let handle = self.event_history.as_ref().ok_or_else(|| {
-            Status::failed_precondition(
-                "durable event history is not active; \
-                 set [event_history].enabled = true and restart the daemon if disabled. \
-                 If already enabled, inspect startup logs and the \
-                 bgp_event_outbox_degraded gauge",
-            )
-        })?;
-        let stream = cursor::subscribe(handle, &req, self.metrics.clone())?;
-        Ok(Response::new(stream))
-    }
 }
 
 #[cfg(test)]
@@ -638,12 +564,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::broadcast;
     use tokio_stream::StreamExt;
-
-    /// Only catches a hang: the tests below wait for an event to come back
-    /// through a `SynchronousMode::Full` (fsync per commit) event history
-    /// manager, and a commit that merely takes a few seconds under I/O
-    /// load is not a failure.
-    const DURABLE_COMMIT_HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
     #[derive(Clone, Copy, Debug)]
     enum ListEventRead {
@@ -702,48 +622,6 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), future)
             .await
             .expect("test operation timed out")
-    }
-
-    async fn cursor_test_service() -> (
-        tempfile::TempDir,
-        rustbgpd_event_history::EventHistoryManager,
-        EventService,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let manager = rustbgpd_event_history::EventHistoryManager::start(
-            rustbgpd_event_history::EventHistoryConfig {
-                path: dir.path().join("events.db"),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("EHM start");
-        let (rib_tx, _) = spawn_fake_rib();
-        let (peer_tx, _, _) = spawn_fake_peer_manager();
-        let service = EventService::new(rib_tx, peer_tx).with_event_history(Some(manager.handle()));
-        (dir, manager, service)
-    }
-
-    async fn cursor_test_stream(
-        service: &EventService,
-        from_event_id: Option<u64>,
-    ) -> cursor::SubscribeFromEventStream {
-        service
-            .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
-                from_event_id,
-                ..Default::default()
-            }))
-            .await
-            .expect("cursor admission")
-            .into_inner()
-    }
-
-    async fn assert_cursor_data_loss(stream: &mut cursor::SubscribeFromEventStream) {
-        let status = within_test_deadline(stream.next())
-            .await
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(status.code(), tonic::Code::DataLoss);
     }
 
     async fn invoke_watch_event_admission(
@@ -1273,247 +1151,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dataplane_poller_with_ehm_handle_outlives_watch_events_subscribers() {
-        // ADR-0072 PR-FU1: when EHM is enabled, the poller must
-        // stay alive even after every WatchEvents subscriber drops
-        // — `SubscribeFromEvent` collectors need durable summaries
-        // regardless of who else is watching.
-        let dir = tempfile::tempdir().unwrap();
-        let manager = rustbgpd_event_history::EventHistoryManager::start(
-            rustbgpd_event_history::EventHistoryConfig {
-                path: dir.path().join("events.db"),
-                max_events: 100,
-                max_bytes: 1_000_000,
-                synchronous: rustbgpd_event_history::SynchronousMode::Full,
-                required: false,
-                queue_capacity: 64,
-                batch_size: 4,
-                batch_interval: std::time::Duration::from_millis(20),
-                broadcast_capacity: 64,
-                retention_interval: std::time::Duration::from_mins(1),
-                sidecar_flush_interval_batches: 100,
-                metrics: None,
-            },
-        )
-        .await
-        .expect("EHM start");
-        let handle = manager.handle();
-
-        let shared = dataplane_event_broadcaster();
-        let (tx, initial_rx) = broadcast::channel(16);
-        {
-            let mut guard = shared.lock().unwrap();
-            *guard = Some(tx.clone());
-        }
-        dataplane::spawn_dataplane_poller(
-            tx,
-            shared.clone(),
-            Arc::new(Vec::new),
-            Arc::new(Vec::new),
-            Some(handle),
-            BgpMetrics::new(),
-        );
-
-        // Drop the only WatchEvents-side receiver.
-        drop(initial_rx);
-
-        // Wait for several poll intervals; the EHM-enabled poller
-        // must NOT reset the shared broadcaster to None.
-        for _ in 0..5 {
-            tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL).await;
-        }
-        assert!(
-            shared.lock().unwrap().is_some(),
-            "EHM-enabled dataplane poller must outlive WatchEvents subscribers"
-        );
-
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn dataplane_summary_durable_without_any_watch_events_subscriber() {
-        // ADR-0072 PR-FU1 review: the lifetime test pinned that
-        // the broadcaster's `Option` stays `Some` after WatchEvents
-        // drops, but didn't prove the poller is still doing useful
-        // work — i.e. still observing snapshot diffs and enqueuing
-        // to EHM. This test closes that gap: spawn the poller with
-        // an EHM handle but ZERO WatchEvents receivers, mutate the
-        // fib snapshot, then read through the EHM live broadcast
-        // and assert a durable dataplane event arrives.
-        let dir = tempfile::tempdir().unwrap();
-        let manager = rustbgpd_event_history::EventHistoryManager::start(
-            rustbgpd_event_history::EventHistoryConfig {
-                path: dir.path().join("events.db"),
-                max_events: 100,
-                max_bytes: 1_000_000,
-                synchronous: rustbgpd_event_history::SynchronousMode::Full,
-                required: false,
-                queue_capacity: 64,
-                batch_size: 1,
-                batch_interval: std::time::Duration::from_millis(10),
-                broadcast_capacity: 64,
-                retention_interval: std::time::Duration::from_mins(1),
-                sidecar_flush_interval_batches: 100,
-                metrics: None,
-            },
-        )
-        .await
-        .expect("EHM start");
-        let handle = manager.handle();
-        let mut ehm_live = handle.subscribe_live();
-
-        let fib_routes: Arc<Mutex<Vec<proto::FibRouteStatus>>> = Arc::new(Mutex::new(Vec::new()));
-        let fib_snapshot: FibRouteSnapshotFn = {
-            let fib_routes = fib_routes.clone();
-            Arc::new(move || fib_routes.lock().unwrap().clone())
-        };
-
-        let shared = dataplane_event_broadcaster();
-        let (tx, initial_rx) = broadcast::channel(16);
-        {
-            let mut guard = shared.lock().unwrap();
-            *guard = Some(tx.clone());
-        }
-        dataplane::spawn_dataplane_poller(
-            tx,
-            shared.clone(),
-            Arc::new(Vec::new),
-            fib_snapshot,
-            Some(handle.clone()),
-            BgpMetrics::new(),
-        );
-
-        // Wait for the poller's initial `previous` baseline to be
-        // captured (with empty fib), THEN drop the only
-        // WatchEvents-side receiver. Mutating the snapshot after
-        // that proves the poller continues to do useful work
-        // without any live broadcast subscriber.
-        tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL * 2).await;
-        drop(initial_rx);
-        assert_eq!(
-            shared
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(tokio::sync::broadcast::Sender::receiver_count),
-            Some(0),
-            "WatchEvents receiver count must be zero before the diff fires"
-        );
-        fib_routes.lock().unwrap().push(proto::FibRouteStatus {
-            state: proto::FibRouteState::Installed as i32,
-            ..Default::default()
-        });
-
-        let committed = tokio::time::timeout(DURABLE_COMMIT_HANG_BOUND, ehm_live.recv())
-            .await
-            .expect("committed event with no WatchEvents subscriber")
-            .expect("EHM broadcast still attached");
-        assert_eq!(
-            committed.envelope.category,
-            rustbgpd_event_history::Category::Dataplane,
-            "summary must be classified under Category::Dataplane"
-        );
-        // The broadcaster's `Option` must still be `Some` — the
-        // EHM-enabled poller is daemon-lifetime even though the
-        // only live receiver was dropped before the diff fired.
-        assert!(
-            shared.lock().unwrap().is_some(),
-            "shared broadcaster must stay Some when EHM is the consumer"
-        );
-
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn dataplane_summary_enqueued_to_ehm_handle_alongside_broadcast() {
-        // ADR-0072 PR-FU1: every dataplane summary that the poller
-        // broadcasts must also be enqueued into EHM so
-        // `SubscribeFromEvent` collectors see the same event the
-        // legacy `WatchEvents` consumer sees.
-        let dir = tempfile::tempdir().unwrap();
-        let manager = rustbgpd_event_history::EventHistoryManager::start(
-            rustbgpd_event_history::EventHistoryConfig {
-                path: dir.path().join("events.db"),
-                max_events: 100,
-                max_bytes: 1_000_000,
-                synchronous: rustbgpd_event_history::SynchronousMode::Full,
-                required: false,
-                queue_capacity: 64,
-                batch_size: 1,
-                batch_interval: std::time::Duration::from_millis(10),
-                broadcast_capacity: 64,
-                retention_interval: std::time::Duration::from_mins(1),
-                sidecar_flush_interval_batches: 100,
-                metrics: None,
-            },
-        )
-        .await
-        .expect("EHM start");
-        let handle = manager.handle();
-        let mut ehm_live = handle.subscribe_live();
-
-        // Empty snapshots at spawn time so the poller's initial
-        // `previous` baseline is "no rows." We mutate the fib
-        // snapshot AFTER spawning so the first tick diff sees a
-        // non-empty current and emits a DataplaneEvent.
-        let fib_routes: Arc<Mutex<Vec<proto::FibRouteStatus>>> = Arc::new(Mutex::new(Vec::new()));
-        let fib_snapshot: FibRouteSnapshotFn = {
-            let fib_routes = fib_routes.clone();
-            Arc::new(move || fib_routes.lock().unwrap().clone())
-        };
-
-        let shared = dataplane_event_broadcaster();
-        let (tx, mut watch_rx) = broadcast::channel(16);
-        {
-            let mut guard = shared.lock().unwrap();
-            *guard = Some(tx.clone());
-        }
-        dataplane::spawn_dataplane_poller(
-            tx,
-            shared,
-            Arc::new(Vec::new),
-            fib_snapshot,
-            Some(handle.clone()),
-            BgpMetrics::new(),
-        );
-
-        // The poller's `previous` baseline is captured at the
-        // start of its spawned task. Yield + wait one poll
-        // interval so the baseline definitely sees the empty
-        // snapshot BEFORE we mutate it; without this, the
-        // baseline can race with the push below and the poller
-        // initializes already in the "installed=1" steady state
-        // (no diff, no event ever).
-        tokio::time::sleep(DATAPLANE_EVENT_POLL_INTERVAL * 2).await;
-        fib_routes.lock().unwrap().push(proto::FibRouteStatus {
-            state: proto::FibRouteState::Installed as i32,
-            ..Default::default()
-        });
-
-        // The poller broadcasts the summary on the WatchEvents
-        // channel first — confirm we see it there so the test
-        // distinguishes "diff didn't fire" from "EHM enqueue
-        // didn't fire" if it ever regresses.
-        let _broadcast_event = tokio::time::timeout(DURABLE_COMMIT_HANG_BOUND, watch_rx.recv())
-            .await
-            .expect("WatchEvents broadcast")
-            .expect("WatchEvents receiver still attached");
-
-        // EHM commits it on the next batch interval (10ms).
-        let committed = tokio::time::timeout(DURABLE_COMMIT_HANG_BOUND, ehm_live.recv())
-            .await
-            .expect("committed event")
-            .expect("EHM broadcast still attached");
-        assert_eq!(
-            committed.envelope.category,
-            rustbgpd_event_history::Category::Dataplane,
-            "summary must be classified under Category::Dataplane"
-        );
-
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn dataplane_broadcaster_can_be_shared_across_services() {
         let shared = dataplane_event_broadcaster();
         let (rib_tx_a, _) = spawn_fake_rib();
@@ -1698,7 +1335,6 @@ mod tests {
             afi_safi: proto::AddressFamily::Unspecified as i32,
             summary: format!("bfd {peer}"),
             target_peer_address: String::new(),
-            event_id: None,
             payload: Some(proto::bgp_event::Payload::Bfd(proto::BfdSessionEvent {
                 event_type: event_type as i32,
                 peer_address: peer.to_string(),
@@ -1851,15 +1487,16 @@ mod tests {
     /// (prost oneof sized by its largest variant). Shrinking the never-used
     /// FIB (4096-slot) and BFD (1024-slot) proto rings to 1-slot placeholders
     /// removes 4095 + 1023 = 5118 slots of eager payload capacity per daemon:
-    /// 5118 × 976 B = 4,995,168 B of slot payload, before per-slot metadata.
+    /// 5118 × 960 B = 4,913,280 B of slot payload, before per-slot metadata.
     /// The boxed optional Prefix-SID and SMET views add 32 B to the earlier
     /// 944 B layout: 64 B across unused placeholders, or 163,840 B with both
     /// actors enabled. SMET adds 16 B per slot instead of 160 B unboxed.
+    /// Removing the envelope `event_id` took 16 B back out of each slot.
     /// Populated views allocate their boxes and retained attribute data
     /// outside this payload.
     #[test]
     fn watch_events_ring_slot_payload_size_pin() {
-        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 976);
+        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 960);
     }
 
     #[test]
@@ -2438,35 +2075,6 @@ mod tests {
         assert_eq!(events_tx.receiver_count(), 0);
     }
 
-    #[test]
-    fn cursor_gap_event_saturates_requested_cursor_before_subtracting() {
-        let event = cursor::build_cursor_gap_event(u64::MAX, u64::MAX, false);
-        let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
-            panic!("expected stream lag payload");
-        };
-        assert_eq!(
-            lag.missed_count, 0,
-            "u64::MAX cursor must not wrap before saturating the retained-floor gap"
-        );
-    }
-
-    #[test]
-    fn mid_replay_cursor_gap_event_counts_the_evicted_ids_and_says_so() {
-        // Replayed through 64, retention moved the floor to 151.
-        let event = cursor::build_cursor_gap_event(64, 151, true);
-        assert_eq!(event.event_type, proto::BgpEventType::StreamLagged as i32);
-        assert_eq!(event.category, proto::EventCategory::Unspecified as i32);
-        let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
-            panic!("expected stream lag payload");
-        };
-        assert_eq!(lag.missed_count, 86);
-        assert_eq!(
-            lag.reason,
-            "retention evicted events during replay; \
-             replayed_through_event_id=64 next_available_event_id=151"
-        );
-    }
-
     #[tokio::test]
     async fn route_lag_emits_missed_event_signal() {
         let (rib_tx, events_tx) = spawn_fake_rib();
@@ -2730,224 +2338,5 @@ mod tests {
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         );
         assert!(!filter.matches_route_event(&event));
-    }
-
-    // ── ADR-0072 PR5 — SubscribeFromEvent handler tests ────────
-
-    #[tokio::test]
-    async fn subscribe_from_event_keeps_existing_family_acceptance() {
-        let (_dir, manager, service) = cursor_test_service().await;
-        for afi_safi in 0..=7 {
-            let response = service
-                .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
-                    afi_safi,
-                    ..Default::default()
-                }))
-                .await
-                .expect("existing event families remain accepted");
-            drop(response);
-        }
-        for afi_safi in [8, 9, 10, 11, 12, -1, i32::MAX] {
-            let result = service
-                .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
-                    afi_safi,
-                    ..Default::default()
-                }))
-                .await;
-            let Err(error) = result else {
-                panic!("new RIB family {afi_safi} must not create an unsupported event stream");
-            };
-            assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        }
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn subscribe_from_event_quiet_stream_fails_on_producer_loss() {
-        // Load-bearing break: removing the producer-loss branch leaves the
-        // quiet stream pending until this test's deadline expires.
-        let (_dir, manager, service) = cursor_test_service().await;
-        let mut stream = cursor_test_stream(&service, None).await;
-
-        manager.state().record_loss();
-        assert_cursor_data_loss(&mut stream).await;
-        assert!(
-            within_test_deadline(stream.next()).await.is_none(),
-            "DATA_LOSS must terminate the admitted cursor"
-        );
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn subscribe_from_event_baselines_pre_admission_loss() {
-        // Load-bearing breaks: rejecting a prior loss terminates before the
-        // short quiet-window control; removing live loss detection leaves the
-        // second receive pending until the outer deadline.
-        let (_dir, manager, service) = cursor_test_service().await;
-        manager.state().record_loss();
-        let mut stream = cursor_test_stream(&service, None).await;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), stream.next())
-                .await
-                .is_err(),
-            "a pre-admission loss must not terminate the new stream"
-        );
-
-        manager.state().record_loss();
-        assert_cursor_data_loss(&mut stream).await;
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn subscribe_from_event_without_history_returns_failed_precondition() {
-        // EventService constructed without `with_event_history` ⇒
-        // handle is None ⇒ the handler returns FAILED_PRECONDITION
-        // and the legacy WatchEvents surface is unaffected.
-        let (rib_tx, _) = spawn_fake_rib();
-        let (peer_tx, _, _) = spawn_fake_peer_manager();
-        let service = EventService::new(rib_tx, peer_tx);
-
-        match service
-            .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
-                categories: vec![proto::EventCategory::Session as i32],
-                event_types: vec![proto::BgpEventType::OtcRouteBlocked as i32],
-                ..Default::default()
-            }))
-            .await
-        {
-            Ok(_) => panic!("subscribe_from_event must error when EHM is None"),
-            Err(status) => {
-                assert_eq!(
-                    status.code(),
-                    tonic::Code::FailedPrecondition,
-                    "expected FAILED_PRECONDITION when event_history handle is None"
-                );
-                assert!(status.message().contains("not active"));
-                assert!(status.message().contains("If already enabled"));
-            }
-        }
-
-        // Legacy WatchEvents is unaffected: it still returns a stream.
-        let response = service
-            .watch_events(Request::new(proto::WatchEventsRequest::default()))
-            .await
-            .expect("WatchEvents must still work when EHM is None");
-        drop(response);
-    }
-
-    #[tokio::test]
-    async fn subscribe_from_event_route_durable_id_overrides_nested_field() {
-        use prost::Message;
-        use rustbgpd_event_history::{
-            Category, EnvelopePeers, EventEnvelope, EventHistoryConfig, EventHistoryManager,
-            PayloadCodec, Severity, SynchronousMode,
-        };
-
-        // Spin up an EHM in a tempdir.
-        let dir = tempfile::tempdir().unwrap();
-        let ehm = EventHistoryManager::start(EventHistoryConfig {
-            path: dir.path().join("events.db"),
-            max_events: 100,
-            max_bytes: 1_000_000,
-            synchronous: SynchronousMode::Full,
-            required: false,
-            queue_capacity: 64,
-            batch_size: 4,
-            batch_interval: std::time::Duration::from_millis(20),
-            broadcast_capacity: 64,
-            retention_interval: std::time::Duration::from_mins(1),
-            sidecar_flush_interval_batches: 100,
-            metrics: None,
-        })
-        .await
-        .expect("EHM start");
-        let handle = ehm.handle();
-
-        // Enqueue one route event with a deliberately wrong
-        // process-local `event_id = 99` on the nested payload.
-        // The cursor handler must overwrite it with the durable
-        // id (which will be 1 since this is the first committed).
-        let route_payload = proto::RouteEvent {
-            event_id: 99,
-            event_type: proto::BgpEventType::RouteAdded as i32,
-            prefix: "10.0.0.0".to_string(),
-            prefix_length: 24,
-            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
-            peer_address: "10.0.0.1".to_string(),
-            previous_peer_address: String::new(),
-            target_peer_address: String::new(),
-            path_id: 0,
-            timestamp: "0".to_string(),
-            reason: String::new(),
-        };
-        let envelope_proto = proto::BgpEvent {
-            timestamp: "0".to_string(),
-            category: proto::EventCategory::Route as i32,
-            event_type: proto::BgpEventType::RouteAdded as i32,
-            severity: proto::EventSeverity::Info as i32,
-            peer_address: "10.0.0.1".to_string(),
-            previous_peer_address: String::new(),
-            prefix: "10.0.0.0".to_string(),
-            prefix_length: 24,
-            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
-            summary: String::new(),
-            target_peer_address: String::new(),
-            event_id: None,
-            payload: Some(proto::bgp_event::Payload::Route(route_payload)),
-        };
-        handle
-            .sender()
-            .try_send(EventEnvelope {
-                timestamp_ns: 0,
-                category: Category::Route,
-                event_type: "ROUTE_ADDED".to_string(),
-                peers: EnvelopePeers::default(),
-                afi_safi: Some("ipv4_unicast".to_string()),
-                prefix: Some("10.0.0.0/24".to_string()),
-                rd: None,
-                evpn_route_type: None,
-                severity: Severity::Info,
-                payload_codec: PayloadCodec::Proto,
-                payload: envelope_proto.encode_to_vec(),
-            })
-            .expect("try_send");
-
-        // Wait for the commit so the cursor query sees it.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Plumb the handle into a fresh EventService and subscribe
-        // from the start (cursor = Some(0)).
-        let (rib_tx, _) = spawn_fake_rib();
-        let (peer_tx, _, _) = spawn_fake_peer_manager();
-        let service = EventService::new(rib_tx, peer_tx).with_event_history(Some(handle.clone()));
-
-        let response = service
-            .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
-                from_event_id: Some(0),
-                ..Default::default()
-            }))
-            .await
-            .expect("subscribe_from_event must succeed");
-        let mut stream = response.into_inner();
-
-        let event = tokio::time::timeout(DURABLE_COMMIT_HANG_BOUND, stream.next())
-            .await
-            .expect("first event")
-            .expect("stream still attached")
-            .expect("no status error");
-
-        // Envelope-level event_id is set to the durable id.
-        assert_eq!(event.event_id, Some(1));
-        // Nested RouteEvent.event_id is overwritten from the
-        // durable id (was 99 before the handler stamped it).
-        let Some(proto::bgp_event::Payload::Route(ref route)) = event.payload else {
-            panic!("expected route payload");
-        };
-        assert_eq!(
-            route.event_id, 1,
-            "nested RouteEvent.event_id must mirror the durable envelope id"
-        );
-
-        ehm.shutdown().await;
     }
 }

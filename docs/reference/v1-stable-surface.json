@@ -95,7 +95,7 @@
   ],
   "config": {
     "stable_fields": [
-      {"definition": "Config", "fields": ["bmp", "config_epoch", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "6fc6d3cf324ab68cfa7fcb05f0aad791f8d0445073ac585409d0f4f12ea23279"},
+      {"definition": "Config", "fields": ["bmp", "config_epoch", "dynamic_neighbors", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "1b7cb522cd5f8cbe7aca9e79e614a1254432260f09bb11564a8ac3aefb4e11f2"},
       {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "ebgp_requires_policy", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry"], "schema_sha256": "49d2a01119f345d3d261757d82f6935c3c274a65413a5e673a1bfc0914814469"},
       {"definition": "TelemetryConfig", "fields": ["grpc_tcp", "grpc_uds", "log_format", "prometheus_addr"], "schema_sha256": "57dd4b53da31e8ee50be7491812f1bff0e813651635480084678a9e4017319ea"},
       {"definition": "GrpcTcpListenerConfig", "fields": ["access_mode", "address", "enabled", "max_tier", "principal", "tls_cert_file", "tls_client_ca_file", "tls_key_file", "token_file"], "schema_sha256": "2c5304b180fea247a211160087b6eed583e2834558faa02efc3473410a8695b2"},
@@ -117,8 +117,7 @@
       {"definition": "CacheServer", "fields": ["address", "expire_interval", "refresh_interval", "retry_interval"], "schema_sha256": "3f624c8949bcd250d4af61dc2c81f9a4c17652976736be2d3716e2bb0becaf1b"},
       {"definition": "BmpConfig", "fields": ["collectors", "sys_descr", "sys_name"], "schema_sha256": "276cacbbba180a48b3b7cff30730d8689d390758f28b1996c11dee745889efb4"},
       {"definition": "BmpCollector", "fields": ["address", "monitor", "reconnect_interval"], "schema_sha256": "2e237f8810604f2ccd0f683c1bb324e7739a0b6d4d9f79964ee17af40c5f0a98"},
-      {"definition": "MrtConfig", "fields": ["compress", "dump_interval", "file_prefix", "output_dir"], "schema_sha256": "5f4847a618512e32cbc1a11f7f8890e13fa59c88db0b80f3b2867e997c099a72"},
-      {"definition": "EventHistoryConfig", "fields": ["enabled", "max_bytes", "max_events", "path", "required"], "schema_sha256": "07227afb2fd18c166fc671f78689795afdb701783fd5f621beff0ab1664327de"}
+      {"definition": "MrtConfig", "fields": ["compress", "dump_interval", "file_prefix", "output_dir"], "schema_sha256": "5f4847a618512e32cbc1a11f7f8890e13fa59c88db0b80f3b2867e997c099a72"}
     ],
     "stable_types": [
       {"definition": "BgpRoleConfig", "schema_sha256": "405d48a461a859ace9cc394323b19985311b1e1c8ad6df52470d0f91e3edf45d"},
@@ -204,7 +203,7 @@
       {"service": "PolicyService", "methods": ["ListPolicies", "GetPolicy", "SetPolicy", "DeletePolicy", "ListNeighborSets", "GetNeighborSet", "SetNeighborSet", "DeleteNeighborSet", "GetGlobalPolicyChains", "SetGlobalImportChain", "SetGlobalExportChain", "ClearGlobalImportChain", "ClearGlobalExportChain", "GetNeighborPolicyChains", "SetNeighborImportChain", "SetNeighborExportChain", "ClearNeighborImportChain", "ClearNeighborExportChain", "ExplainImportPolicy", "TestPolicy", "GetPolicyStats"], "signature_sha256": "c119c0087b1dcaca56e21842eaedfc5154fee5c8a5f2fd9f9cd64463a723f8e3", "message_graph_sha256": "7edda08d3a2c4e55e22920a704f2a86a997b3a0cb5821190a2a636f4093d64e7"},
       {"service": "PeerGroupService", "methods": ["ListPeerGroups", "GetPeerGroup", "SetPeerGroup", "DeletePeerGroup", "SetNeighborPeerGroup", "ClearNeighborPeerGroup"], "signature_sha256": "069596cd50a6a472ad3ca3e1fa81e634219ede2b2e7fda99118d4ca7765b4106", "message_graph_sha256": "4d60f139e203a88eb2323efe9852057b63f1f0e9da54d7bd16cfbc995e93122b"},
       {"service": "RibService", "methods": ["ListReceivedRoutes", "ListBestRoutes", "ListAdvertisedRoutes", "ExplainAdvertisedRoute", "ExplainBestPath", "ListRouteEvents", "ListFlowSpecRoutes"], "signature_sha256": "784c122ee96b6f158bb725273a0724cde51fd1e62b5e36dee40a0373c83d7e5d", "message_graph_sha256": "5dc9d6cb22ae6ca219e37e7b13a300441e9d6eb9b7bbd93f96ba15de8a13e717"},
-      {"service": "EventService", "methods": ["WatchEvents", "ListSessionEvents", "ListPolicyEvents", "SubscribeFromEvent"], "signature_sha256": "26d5bc69120c05e728a2343cade242865705dd0e26f3e7e9b21dc521fe1a7ca3", "message_graph_sha256": "2ad674af4a11df2f9e4068d1b151fb37a536aff5acb191ff5e97f629656c98bb"},
+      {"service": "EventService", "methods": ["WatchEvents", "ListSessionEvents", "ListPolicyEvents"], "signature_sha256": "a79edabde518cf436fd6d60aab0d149d1f7e0aa215ce07c91413b922e2f9bd98", "message_graph_sha256": "599a012e0ad617092afbbf2724eadfb6a3658e419d10d0a918039a10d5fecad4"},
       {"service": "InjectionService", "methods": ["AddPath", "DeletePath", "AddFlowSpec", "DeleteFlowSpec"], "signature_sha256": "4f741ffa290bf681641dc90e7ac7425ff87fd564f52cdc13bf58da62819b7513", "message_graph_sha256": "124f466d84e8c2bddeab07666201cb17d245e9479f3c3763d1f58405c1628417"},
       {"service": "ControlService", "methods": ["Shutdown", "GetHealth", "GetMetrics", "TriggerMrtDump"], "signature_sha256": "2b1392bf21a2783f5829a0b7838af9285c10f2a59dc90f6d58083c35c5aaa684", "message_graph_sha256": "4495cd5ccf21ddb5d3f4cd79328bf118f9b458d28c2f78e24b62b0499b09bb50"}
     ],

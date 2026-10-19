@@ -281,29 +281,18 @@ fn gnmi_dialout_tls_pairing_rules_enforced() {
 }
 
 #[test]
-fn gnmi_dialout_on_change_requires_event_history() {
-    let err = parse(&gnmi_dialout_toml("mode = \"on_change\"")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidGnmiDialout { .. }));
-
-    // With the durable outbox enabled, ON_CHANGE on the session-state
-    // leaf is accepted.
-    let toml = format!(
-        "{}\n[event_history]\nenabled = true\n",
-        gnmi_dialout_toml("mode = \"on_change\"")
-    );
-    parse(&toml).unwrap();
+fn gnmi_dialout_on_change_accepted_with_default_config() {
+    // ON_CHANGE reads the live session-event stream; no opt-in section.
+    parse(&gnmi_dialout_toml("mode = \"on_change\"")).unwrap();
 }
 
 #[test]
 fn gnmi_dialout_on_change_unsupported_leaf_rejected() {
     // ON_CHANGE is only supported on the session-state leaf, exactly like
     // dial-in Subscribe.
-    let toml = format!(
-        "{}\n[event_history]\nenabled = true\n",
-        gnmi_dialout_toml("mode = \"on_change\"").replace(
-            DIALOUT_SESSION_STATE_PATH,
-            "network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/global/state/as",
-        )
+    let toml = gnmi_dialout_toml("mode = \"on_change\"").replace(
+        DIALOUT_SESSION_STATE_PATH,
+        "network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/global/state/as",
     );
     let err = parse(&toml).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidGnmiDialout { .. }));

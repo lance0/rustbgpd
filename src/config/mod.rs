@@ -1142,25 +1142,6 @@ impl Config {
         self.runtime_state_dir().join("grpc.sock")
     }
 
-    /// Resolved path for the durable event-history outbox (ADR-0072).
-    /// Honors `[event_history].path` when set; defaults to
-    /// `<runtime_state_dir>/events.db`. Consumed by the daemon when
-    /// it starts the `EventHistoryManager` actor.
-    #[must_use]
-    pub fn event_history_db_path(&self) -> PathBuf {
-        let configured = &self.event_history.path;
-        if configured.is_empty() {
-            self.runtime_state_dir().join("events.db")
-        } else {
-            let p = PathBuf::from(configured);
-            if p.is_absolute() {
-                p
-            } else {
-                self.runtime_state_dir().join(p)
-            }
-        }
-    }
-
     /// Resolve `[[evpn_instances]]` entries into a runtime
     /// [`EvpnInstanceTable`].
     ///
@@ -2535,10 +2516,6 @@ pub struct ConfigDiff {
     /// The authorization context is built once per listener at startup,
     /// so edits are restart-required and must remain visible in `--diff`.
     pub security_grpc_changed: bool,
-    /// `[event_history]` changed. The ADR-0072 durable outbox is
-    /// configured once at startup (all fields are restart-required per
-    /// the reload matrix), so edits must remain visible in `--diff`.
-    pub event_history_changed: bool,
     /// `[inbound_admission]` changed. The ADR-0120 accept-path limiter
     /// is built once at startup (all fields are restart-required per
     /// the reload matrix), so edits must remain visible in `--diff`.
@@ -2859,7 +2836,6 @@ impl ConfigDiff {
             || self.fib_tables_requires_restart
             || self.managed_netdevs_changed
             || self.security_grpc_changed
-            || self.event_history_changed
             || self.inbound_admission_changed
             || self.flowspec_changed
     }
@@ -4217,11 +4193,6 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[security.grpc]".to_string());
     }
-    if diff.event_history_changed {
-        class
-            .restart_required_sections
-            .push("[event_history]".to_string());
-    }
     if diff.flowspec_changed {
         class
             .restart_required_sections
@@ -4493,7 +4464,6 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "evpn_core_isolation_changed": diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_core_isolation_changed,
             "managed_netdevs_changed": diff.managed_netdevs_changed,
             "security_grpc_changed": diff.security_grpc_changed,
-            "event_history_changed": diff.event_history_changed,
             "inbound_admission_changed": diff.inbound_admission_changed,
             "flowspec_changed": diff.flowspec_changed,
             "fib_tables_requires_restart": diff.fib_tables_requires_restart,
@@ -4789,9 +4759,6 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     }
     if diff.security_grpc_changed {
         restart_sections.push("[security.grpc]");
-    }
-    if diff.event_history_changed {
-        restart_sections.push("[event_history]");
     }
     if diff.flowspec_changed {
         restart_sections.push("[flowspec]");
@@ -5092,7 +5059,6 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         evpn_core_isolation_changed: old.evpn_core_isolation != new.evpn_core_isolation,
         managed_netdevs_changed: old.managed_netdevs != new.managed_netdevs,
         security_grpc_changed: old.security != new.security,
-        event_history_changed: old.event_history != new.event_history,
         inbound_admission_changed: old.inbound_admission != new.inbound_admission,
         flowspec_changed: old.flowspec != new.flowspec,
         fib_tables_changed: old.fib_tables != new.fib_tables,
@@ -7658,13 +7624,6 @@ pub(crate) fn gnmi_dialout_targets(
             GnmiDialoutModeConfig::Sample => dialout::DialoutMode::Sample,
             GnmiDialoutModeConfig::OnChange => dialout::DialoutMode::OnChange,
         };
-        if mode == dialout::DialoutMode::OnChange && !config.event_history.enabled {
-            return Err(fail(
-                "mode = \"on_change\" requires [event_history].enabled = true \
-                 (the durable event outbox sources the transitions)"
-                    .to_string(),
-            ));
-        }
         let subscriptions = dialout::build_subscription_list(
             &target.paths,
             mode,

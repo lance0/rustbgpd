@@ -50,7 +50,6 @@ impl PeerManager {
             self.validation_rx.clone(),
             gshut,
             SessionIdentity::primary(new_session_id),
-            self.transport_event_sink.clone(),
             tcp_ao_generation,
         );
         let Some((aborted, _)) = self
@@ -370,7 +369,6 @@ impl PeerManager {
                                 self.validation_rx.clone(),
                                 managed.advertise_graceful_shutdown,
                                 SessionIdentity::primary(session_id),
-                                self.transport_event_sink.clone(),
                                 managed.tcp_ao_rotation.applied,
                             );
                             managed.enabled = false;

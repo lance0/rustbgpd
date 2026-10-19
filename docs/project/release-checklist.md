@@ -226,8 +226,7 @@ release:
       belongs at `sensitive_read`. A new method landing at `read` is the most
       likely under-tiering mistake; scrutinize it.
 - [ ] **Every event / explain / route-listing surface is
-      `sensitive_read`+** — `WatchEvents`, `SubscribeFromEvent`,
-      `List*Events`, `Explain*`, `List*Routes`, gNMI `Subscribe`. These
+      `sensitive_read`+** — `WatchEvents`, `List*Events`, `Explain*`, `List*Routes`, gNMI `Subscribe`. These
       disclose routing, topology, or decision detail and must never be
       `read`.
 - [ ] **Anything that injects into the dataplane/network, mutates
