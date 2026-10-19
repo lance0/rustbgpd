@@ -5,10 +5,10 @@ use serde::{Serialize, Serializer};
 
 use super::{
     BfdProfileConfig, BmpConfig, Config, ConfigEpoch, DynamicNeighborConfig, EthernetSegmentConfig,
-    EventHistoryConfig, EvpnCoreIsolationConfig, EvpnInstanceConfig, EvpnIpVrfConfig,
-    FibTableConfig, FlowSpecConfig, Global, GnmiDialoutConfig, InboundAdmissionConfig,
-    ManagedNetdevsConfig, MrtConfig, Neighbor, PeerGroupConfig, PolicyConfig, PolicyExplainConfig,
-    PolicyRejectRetentionConfig, PolicyStatementConfig, RpkiConfig, SecurityConfig,
+    EvpnCoreIsolationConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig, FlowSpecConfig,
+    Global, GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
+    PeerGroupConfig, PolicyConfig, PolicyExplainConfig, PolicyRejectRetentionConfig,
+    PolicyStatementConfig, RpkiConfig, SecurityConfig,
 };
 
 const STATEMENT_CHUNK_LEN: usize = 256;
@@ -440,8 +440,6 @@ struct CanonicalConfig<'a> {
     bfd_profiles: &'a [BfdProfileConfig],
     apply_bum_enforcement: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    event_history: Option<&'a EventHistoryConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     inbound_admission: Option<&'a InboundAdmissionConfig>,
 }
 
@@ -468,7 +466,6 @@ impl<'a> CanonicalConfig<'a> {
             managed_netdevs,
             bfd_profiles,
             apply_bum_enforcement,
-            event_history,
             inbound_admission,
             file_path: _,
         } = config;
@@ -502,7 +499,6 @@ impl<'a> CanonicalConfig<'a> {
             managed_netdevs: optional_section(managed_netdevs, optional_sections),
             bfd_profiles,
             apply_bum_enforcement: *apply_bum_enforcement,
-            event_history: optional_section(event_history, optional_sections),
             inbound_admission: optional_section(inbound_admission, optional_sections),
         }
     }

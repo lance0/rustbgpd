@@ -112,7 +112,7 @@ fn invalid_peer_view_arguments_fail_before_connecting() {
         vec!["evpn", "advertised", "192.0.2.1", "--limit", "1001"],
     ] {
         let output = run("http://127.0.0.1:1", &args);
-        let expected = if args.contains(&"--limit") { 2 } else { 1 };
+        let expected = if args.contains(&"--limit") { 64 } else { 1 };
         assert_eq!(output.status.code(), Some(expected), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty());
         assert!(

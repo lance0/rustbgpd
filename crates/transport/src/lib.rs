@@ -11,7 +11,6 @@
 
 pub mod config;
 pub mod error;
-pub mod event_sink;
 mod fast_hash;
 pub mod framing;
 pub mod handle;
@@ -62,9 +61,6 @@ pub use config::{
     TcpAoSessionSelection, TransportAuthSecret, TransportConfig,
 };
 pub use error::TransportError;
-pub use event_sink::{
-    NoopTransportEventSink, OtcDirection, OtcRouteBlockedEvent, TransportEventSink,
-};
 pub use handle::PeerRuntimeConfigUpdate;
 pub use handle::{
     ImportPolicyTermHits, ImportRevalidation, NegotiatedGracefulRestartState,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# M56 interop test — ADR-0070 deferred / ADR-0072 follow-up:
-# `Subscribe ON_CHANGE` for neighbor/state/session-state.
+# M56 interop test — `Subscribe ON_CHANGE` for
+# neighbor/state/session-state with the default configuration.
 #
 # Validates the v1 contract:
 #
@@ -53,7 +53,7 @@ gnmic_mtls_timeout() {
 }
 
 start_rustbgpd_gnmi() {
-    log "Starting rustbgpd (mTLS gNMI + EHM)..."
+    log "Starting rustbgpd (mTLS gNMI)..."
     docker exec -d "$RUSTBGPD" sh -c "/usr/local/bin/start-rustbgpd.sh"
 
     local up=0
@@ -239,9 +239,8 @@ main() {
         --stream-mode on-change \
         --path "$OC_BGP/neighbors/neighbor[neighbor-address=*]/state/session-state" 2>&1 || true)
     # Fresh snapshot: ESTABLISHED appears at least once for the
-    # currently-up peer. We don't try to assert "no replay" via
-    # counting (the previous transitions live in EHM and SubscribeFromEvent
-    # would replay them, but gNMI ON_CHANGE intentionally does not).
+    # currently-up peer. gNMI ON_CHANGE does not replay the
+    # disconnected-window transitions.
     if printf '%s' "$reconnect_log" | grep -Fq 'ESTABLISHED'; then
         ok "Reconnect delivered a fresh initial snapshot with current state"
     else

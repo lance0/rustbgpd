@@ -24,7 +24,6 @@ mod connect_info;
 mod control_service;
 pub mod credentials;
 pub mod dampening_control;
-pub mod event_history_sinks;
 mod event_service;
 pub mod evpn_service;
 mod global_service;
@@ -58,21 +57,9 @@ pub use evpn_service::EvpnService;
 pub use neighbor_service::NeighborService;
 pub use policy_service::PolicyService;
 
-/// Public-facing alias for the proto-encoding helpers used by the
-/// binary's peer-manager + BFD bridge to construct
-/// [`crate::proto::BgpEvent`] envelopes for the durable outbox
-/// (ADR-0072 PR5).
-///
-/// Re-exported through a dedicated `event_converters` module rather
-/// than via the private `event_service` so the binary doesn't need
-/// to know which submodule owns the encoders. The encoders' wire
-/// shape is part of the public API surface as of PR5; renaming
-/// requires bumping the api crate's version.
+/// The `BgpEvent` conversion `ListSessionEvents` applies to each row.
 pub mod event_converters {
-    pub use crate::event_service::convert::{
-        evpn_event_to_bgp_event, otc_route_blocked_event_to_bgp_event, policy_event_to_bgp_event,
-        route_event_to_bgp_event, session_event_to_bgp_event,
-    };
+    pub use crate::event_service::convert::session_event_to_bgp_event;
 }
 
 /// Generated protobuf/gRPC types.

@@ -183,6 +183,15 @@ the spec makes it the fallback when a client omits the encoding.
     Counter leaves (`messages/*`) and the `enabled` leaf
     remain SAMPLE/POLL-only — counters need a separate event source,
     and `enabled` is not on the lifecycle-event payload today.
+  - **Update, 2026-10-18:** the durable event history was removed
+    ([ADR-0072](0072-durable-event-history.md) is superseded). `ON_CHANGE`
+    and dial-out `mode = "on_change"` now subscribe to the peer manager's
+    live session-event stream through the operator query lane and work with
+    the default configuration; the `FailedPrecondition` gate and the
+    producer-loss generation are gone. Snapshot, `sync_response`, presence,
+    heartbeat and reconnect semantics are unchanged. A lagged live
+    broadcast still closes the stream with `DataLoss`, and recovery is a
+    reconnect without `updates_only`. There is no historical replay RPC.
 
 Wildcard / subtree `Get` and `Subscribe` requests are bounded so a broad path
 cannot turn into an accidental full route-table dump (v1 does not stream the RIB).

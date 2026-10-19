@@ -708,7 +708,8 @@ async fn down_dynamic_neighbor_retention_row_lasts_until_sweep() {
                 PeerManagerOperatorQuery::GetPeerState { reply, .. } => {
                     let _ = reply.send(None);
                 }
-                PeerManagerOperatorQuery::HasPeerAddress { .. } => {
+                PeerManagerOperatorQuery::HasPeerAddress { .. }
+                | PeerManagerOperatorQuery::SubscribeSessionEvents { .. } => {
                     panic!("unexpected operator query")
                 }
             }

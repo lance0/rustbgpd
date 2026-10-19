@@ -248,17 +248,16 @@ collectors emit) and the no-key shorthand `…/neighbor/state/session-state`
 lower to "all configured neighbors"; a concrete address is also
 accepted.
 
-- **EHM required.** `Subscribe ON_CHANGE` sources transitions from the
-  durable event broadcast (ADR-0072). When `[event_history]` is
-  disabled or EHM is in pass-through, the RPC returns
-  `FAILED_PRECONDITION` immediately on subscribe.
+- **Source.** `Subscribe ON_CHANGE` follows the peer manager's live
+  session-event stream and works with the default configuration; no
+  extra config section is needed.
 - **Initial sync.** The handler emits one OpenConfig leaf `Update`
   per configured peer (including non-Established peers — `IDLE` /
   `CONNECT` / `ACTIVE` / `OPENSENT` / `OPENCONFIRM` / `ESTABLISHED`)
   followed by `sync_response`. With `updates_only`, it emits the sync
   without an initial peer snapshot; later events and heartbeats remain active.
-- **Live stream.** For every FSM transition committed to EHM under
-  `EVENT_CATEGORY_SESSION`, the handler emits a single
+- **Live stream.** For every session-state transition on the live
+  session-event stream, the handler emits a single
   `session-state` leaf `Update` with the new short-form state. An authoritative
   peer removal emits that exact leaf in `Notification.delete`; the producer
   emits one removal per managed-peer lifecycle, and a later peer add or state
@@ -281,19 +280,17 @@ accepted.
   scales with its delivered/current roster rather than lifetime address churn.
 - **Reconnect.** gNMI carries no cursor on reconnect, so a fresh
   subscription gets a fresh initial snapshot — the disconnect
-  window is **not** replayed. Collectors that need historical
-  replay use `EventService.SubscribeFromEvent` directly.
+  window is **not** replayed. For a durable record, pair the stream
+  with BMP to a collector, Prometheus, or the daemon logs.
 - **Unsupported leaves.** Any other path under `ON_CHANGE` returns
   `UNIMPLEMENTED` with a message naming the supported leaf. The
   counter leaves (`messages/*`) and the `enabled` leaf stay
   SAMPLE/POLL-only.
-- **Loss.** Broadcast lag or a later producer-side EHM loss closes the stream
-  with `DATA_LOSS`, including during the initial snapshot or `sync_response`.
-  To repair the gap, reconnect without `updates_only` and consume a full initial
-  snapshot. A fresh subscription baselines prior loss; it is not permanently
-  poisoned by the process-lifetime degraded latch.
-  The producer signal is service-wide, so loss in any event category closes
-  every ON_CHANGE stream rather than risking a silently incomplete view.
+- **Loss.** If the stream falls behind the live session-event broadcast, it
+  closes with `DATA_LOSS`. To repair the gap, reconnect without `updates_only`
+  and consume a full initial snapshot. A transition dropped before it reaches
+  the peer manager (`bgp_session_event_source_dropped_total`) never enters the
+  broadcast; a `heartbeat_interval` re-renders current state on its cadence.
 - **Mixed-mode subscriptions.** A `SubscriptionList` that mixes
   `SAMPLE` and `ON_CHANGE` subscriptions is rejected with
   `UNIMPLEMENTED` — the current dispatch picks one mode per stream.

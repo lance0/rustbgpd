@@ -1680,6 +1680,10 @@ pub enum PeerManagerOperatorQuery {
         address: IpAddr,
         reply: oneshot::Sender<bool>,
     },
+    /// Subscribe to live session lifecycle events.
+    SubscribeSessionEvents {
+        reply: oneshot::Sender<broadcast::Receiver<Arc<SessionEvent>>>,
+    },
 }
 
 /// One operator query stamped with its send instant, so the peer manager can
@@ -1709,6 +1713,9 @@ impl From<PeerManagerOperatorQuery> for PeerManagerCommand {
             }
             PeerManagerOperatorQuery::HasPeerAddress { address, reply } => {
                 Self::HasPeerAddress { address, reply }
+            }
+            PeerManagerOperatorQuery::SubscribeSessionEvents { reply } => {
+                Self::SubscribeSessionEvents { reply }
             }
         }
     }

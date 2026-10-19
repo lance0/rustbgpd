@@ -656,8 +656,8 @@ fn remove_private_as_to_string(mode: RemovePrivateAs) -> String {
 fn bgp_role_to_string(role: Option<BgpRole>) -> String {
     match role {
         Some(BgpRole::Provider) => "provider".to_string(),
-        Some(BgpRole::RouteServer) => "rs".to_string(),
-        Some(BgpRole::RouteServerClient) => "rs-client".to_string(),
+        Some(BgpRole::RouteServer) => "route_server".to_string(),
+        Some(BgpRole::RouteServerClient) => "route_server_client".to_string(),
         Some(BgpRole::Customer) => "customer".to_string(),
         Some(BgpRole::Peer) => "peer".to_string(),
         // Non-exhaustive registry enum: label future roles honestly.
@@ -673,12 +673,13 @@ fn parse_bgp_role_proto(role: &str) -> Result<Option<BgpRole>, Status> {
     }
     match role {
         "provider" => Ok(Some(BgpRole::Provider)),
-        "rs" | "route_server" => Ok(Some(BgpRole::RouteServer)),
-        "rs-client" | "route_server_client" => Ok(Some(BgpRole::RouteServerClient)),
+        // `rs` and `rs-client` are input aliases, as in config.
+        "route_server" | "rs" => Ok(Some(BgpRole::RouteServer)),
+        "route_server_client" | "rs-client" => Ok(Some(BgpRole::RouteServerClient)),
         "customer" => Ok(Some(BgpRole::Customer)),
         "peer" => Ok(Some(BgpRole::Peer)),
         other => Err(Status::invalid_argument(format!(
-            "unknown BGP role {other:?}, expected provider, rs, rs-client, customer, or peer"
+            "unknown BGP role {other:?}, expected provider, route_server, route_server_client, customer, or peer"
         ))),
     }
 }
@@ -4643,6 +4644,27 @@ mod tests {
     }
 
     #[test]
+    fn bgp_role_output_is_canonical_and_old_spellings_stay_input_aliases() {
+        for (canonical, alias, role) in [
+            ("route_server", "rs", BgpRole::RouteServer),
+            (
+                "route_server_client",
+                "rs-client",
+                BgpRole::RouteServerClient,
+            ),
+        ] {
+            for input in [canonical, alias] {
+                let parsed = parse_bgp_role_proto(input).unwrap();
+                assert_eq!(parsed, Some(role), "{input}");
+                assert_eq!(bgp_role_to_string(parsed), canonical, "{input}");
+            }
+        }
+        // Absent is empty, as an omitted config key is.
+        assert_eq!(parse_bgp_role_proto("").unwrap(), None);
+        assert_eq!(bgp_role_to_string(None), "");
+    }
+
+    #[test]
     fn peer_info_to_proto_includes_families() {
         // Mutation-red for min_hold_time: deleting proto projection yields
         // None instead of the configured 30.
@@ -4667,10 +4689,10 @@ mod tests {
         assert_eq!(config.min_hold_time, Some(30));
         assert_eq!(config.required_families, vec!["ipv6_unicast"]);
         assert_eq!(config.remove_private_as, "all");
-        assert_eq!(config.role, "rs");
+        assert_eq!(config.role, "route_server");
         assert!(config.strict_role);
-        assert_eq!(state.local_role, "rs");
-        assert_eq!(state.remote_role, "rs-client");
+        assert_eq!(state.local_role, "route_server");
+        assert_eq!(state.remote_role, "route_server_client");
         assert!(state.role_negotiated);
         assert_eq!(state.otc_routes_blocked, 3);
         assert_eq!(state.import_policy_routes_permitted, 11);

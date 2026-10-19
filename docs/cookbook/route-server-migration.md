@@ -558,7 +558,7 @@ snapshots, daemon versions/configurations, and report for qualification.
 
 5. Validate the path-hiding mitigation per member: for Add-Path members,
    verify multiple candidate paths are present; for non-Add-Path members,
-   verify `Distribution Mode: per-client-best` (`rbgp neighbor <member>`)
+   verify `Distribution Mode: per_client_best` (`rbgp neighbor <member>`)
    and inspect the candidate ladder with `--explain`.
 
 6. Confirm counters stay quiet after convergence:

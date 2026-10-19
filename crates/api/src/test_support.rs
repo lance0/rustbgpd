@@ -475,7 +475,6 @@ pub(crate) fn dataplane_route_event(
         },
         summary: format!("dataplane fib route {action} {prefix}/{prefix_length}"),
         target_peer_address: String::new(),
-        event_id: None,
         payload: Some(proto::bgp_event::Payload::DataplaneRoute(
             proto::DataplaneRouteEvent {
                 source: "fib".to_string(),

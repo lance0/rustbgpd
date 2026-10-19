@@ -886,10 +886,8 @@ fn peer_presence_source_ordering_contracts() {
         .split_once("pub(super) fn publish_lifecycle_event")
         .unwrap()
         .0;
-    assert!(publisher.find("push_back").unwrap() < publisher.find("try_send_envelope").unwrap());
     assert!(
-        publisher.find("try_send_envelope").unwrap()
-            < publisher.find("session_events_tx.send").unwrap()
+        publisher.find("push_back").unwrap() < publisher.find("session_events_tx.send").unwrap()
     );
 }
 

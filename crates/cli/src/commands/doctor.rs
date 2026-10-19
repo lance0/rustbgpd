@@ -112,7 +112,7 @@ const PROBE_TIMEOUT_SECS: u64 = 2;
 const HEALTH_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Free-space thresholds for `runtime_state_dir`: below WARN the check is
-/// yellow, below FAIL it is red (journal/MRT/crash/event-history writes
+/// yellow, below FAIL it is red (journal/MRT/crash writes
 /// are about to start failing).
 const STATE_DIR_DISK_WARN_BYTES: u64 = 1024 * 1024 * 1024;
 const STATE_DIR_DISK_FAIL_BYTES: u64 = 100 * 1024 * 1024;
@@ -2438,7 +2438,7 @@ fn state_dir_checks(dir: &Path) -> Vec<Check> {
             status: CheckStatus::Fail,
             detail: format!(
                 "runtime state dir {} is not writable by this user — commit-confirm journal, \
-                 MRT dumps, crash reports, and event-history writes fail without it; check \
+                 MRT dumps, and crash reports fail without it; check \
                  ownership (and ReadWritePaths= under systemd)",
                 dir.display()
             ),
@@ -2460,8 +2460,7 @@ fn state_dir_checks(dir: &Path) -> Vec<Check> {
             } else if free < STATE_DIR_DISK_WARN_BYTES {
                 (
                     CheckStatus::Warn,
-                    "low — journal, MRT dumps, crash reports, and the event-history DB write \
-                     here",
+                    "low — journal, MRT dumps, and crash reports write here",
                 )
             } else {
                 (CheckStatus::Ok, "ok")
