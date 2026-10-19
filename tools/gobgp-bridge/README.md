@@ -46,6 +46,7 @@ rustbgpd-gobgp-bridge \
 | `--daemon ENDPOINT` | Required. `unix:///absolute/path` or `http://host:port`. |
 | `--token-file PATH` | Bearer token for the daemon listener. |
 | `--allow-non-loopback` | Serve on a non-loopback address. Read the security section first. |
+| `--reconcile-interval-secs N` | Seconds between reconcile passes (default 30). See [restart behaviour](#restart-behaviour). |
 
 The bridge starts while the daemon is down and connects on the next request.
 It logs each applied or refused request to stderr, with the daemon's outcome
@@ -131,18 +132,25 @@ requests outside the subset are `UNIMPLEMENTED`.
 
 ## Restart behaviour
 
-Injected routes live only in the daemon process, and the bridge keeps no
-state. The integration test (`tests/daemon.rs`) runs each case below against a
-real rustbgpd binary. It has no BGP peers and stops the daemon cleanly, so the
+Injected routes live only in the daemon process. The bridge keeps, in memory,
+the last acknowledged announcement for each path the detector has not
+withdrawn, and any withdrawal the daemon has not acknowledged. Every reconcile
+interval it retries those withdrawals, then re-adds every tracked
+announcement. An unchanged re-add is a no-op in the daemon; after a daemon
+restart it restores the ban. The bridge tracks at most 65,536 paths, and a new
+ban beyond that is refused with `RESOURCE_EXHAUSTED` before the daemon sees it.
+
+The integration test (`tests/daemon.rs`) runs each case below against a real
+rustbgpd binary. It has no BGP peers and stops the daemon cleanly, so the
 table describes rustbgpd's local state only.
 
 | Event | Result | Local blackhole state | Recovery |
 |-------|--------|-----------------------|----------|
-| Daemon restart | The daemon starts with no injected routes. The bridge reconnects on the next request. | Every active ban is lost, and the restarted daemon does not announce it again. | Re-announce the active bans. A detector that announces each ban once does not do this itself. Watch `GetHealth.uptime_seconds` or the daemon's restart, then re-issue bans from the detector or a script. |
-| Bridge restart | Daemon routes are untouched. A new bridge process withdraws them normally. | None while the bridge is up. A ban or unban sent while it is down fails at the detector and is not retried. | Restart the bridge. Re-send any ban or unban the detector logged as failed. |
+| Daemon restart | The daemon starts with no injected routes. The bridge reconnects, and its next reconcile pass re-adds every tracked ban. | Bans are missing from the restart until that pass, at most one reconcile interval after the daemon answers again. | None needed. |
+| Bridge restart | Daemon routes are untouched. A new bridge process withdraws them normally. | The new process tracks nothing, so bans made before the restart are not replayed after a later daemon restart. A ban or unban sent while the bridge is down fails at the detector and is not retried. | Restart the bridge. Re-send any ban or unban the detector logged as failed, and any ban that must survive a later daemon restart. |
 | Duplicate ban | Succeeds and returns the same UUID. The daemon keeps one route. | None. | None. |
 | Duplicate unban | Succeeds as a no-op. | None. | None. |
-| Unban while the daemon is unavailable | Fails with `UNAVAILABLE`. The detector logs it and does not retry. | If the daemon was stopped, its injected routes went with it. If the daemon is still running but the bridge cannot reach it (socket permissions, token, an API that does not answer before the detector's deadline), the blackhole stays announced. | Withdraw it by hand: `rbgp rib delete 203.0.113.7/32`. Check with `rbgp rib --prefix 203.0.113.7/32`. |
+| Unban while the daemon is unavailable | Fails with `UNAVAILABLE`, saying the bridge retries the withdrawal. The bridge stops replaying the ban at once and retries the withdrawal each pass until the daemon acknowledges it. | If the daemon was stopped, its injected routes went with it, and the ban is not replayed when it returns. If the daemon is still running but the bridge cannot reach it (socket permissions, token, an API that does not answer before the detector's deadline), the blackhole stays announced until a retry succeeds. | None needed once the daemon is reachable. Check with `rbgp rib --prefix 203.0.113.7/32`. |
 
 Losing the daemon's local state is not the same as peers withdrawing the
 route. A peer without Graceful Restart withdraws the daemon's routes when the

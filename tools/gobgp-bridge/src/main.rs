@@ -8,10 +8,11 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 use rustbgpd_gobgp_bridge::{
-    Bridge, DaemonEndpoint, check_listen, daemon_channel, load_token, serve,
+    Bridge, DEFAULT_MAX_TRACKED, DaemonEndpoint, check_listen, daemon_channel, load_token, serve,
 };
 
 #[derive(Parser, Debug)]
@@ -39,6 +40,11 @@ struct Args {
     /// Allow serving the unauthenticated GoBGP API on a non-loopback address.
     #[arg(long)]
     allow_non_loopback: bool,
+
+    /// Seconds between passes that re-add every tracked ban and retry
+    /// pending withdrawals, so a restarted daemon gets its bans back.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
+    reconcile_interval_secs: u64,
 }
 
 async fn run(args: Args) -> Result<(), String> {
@@ -52,7 +58,9 @@ async fn run(args: Args) -> Result<(), String> {
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
-    serve(listener, Bridge::new(channel, bearer), shutdown)
+    let bridge = Bridge::new(channel, bearer, DEFAULT_MAX_TRACKED);
+    bridge.spawn_reconcile(Duration::from_secs(args.reconcile_interval_secs));
+    serve(listener, bridge, shutdown)
         .await
         .map_err(|e| format!("gRPC server failed: {e}"))
 }
