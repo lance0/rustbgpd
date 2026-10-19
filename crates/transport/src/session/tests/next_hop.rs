@@ -4180,12 +4180,18 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
                     next_hop_override: v6_override.as_ref(),
                 })
                 .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+            export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
             let export::PreparedUnicastCandidate::Ipv4Body { attrs, .. } = profile
                 .prepare_unicast_candidate(route, v6_override.as_ref())
                 .unwrap()
             else {
                 panic!("{case}: IPv4 without Extended Next Hop must use body NLRI");
             };
+            assert_eq!(
+                export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+                1,
+                "{case}: the dropped override is reported once"
+            );
             let next_hops: Vec<_> = attrs
                 .iter()
                 .filter_map(|attr| match attr {
@@ -4198,12 +4204,20 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
 
         session.negotiated = Some(Arc::new(negotiated_session(remote_asn, true)));
         let profile = session.publish_export_profile();
-        let export::PreparedUnicastCandidate::Mp { next_hop, .. } = profile
-            .prepare_unicast_candidate(&stored, v6_override.as_ref())
-            .unwrap()
-        else {
-            panic!("{case}: an IPv6 next hop with Extended Next Hop uses MP_REACH_NLRI");
-        };
-        assert_eq!(next_hop, IpAddr::V6(v6), "{case}");
+        for route in [&stored, &bare] {
+            export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
+            let export::PreparedUnicastCandidate::Mp { next_hop, .. } = profile
+                .prepare_unicast_candidate(route, v6_override.as_ref())
+                .unwrap()
+            else {
+                panic!("{case}: an IPv6 next hop with Extended Next Hop uses MP_REACH_NLRI");
+            };
+            assert_eq!(next_hop, IpAddr::V6(v6), "{case}");
+            assert_eq!(
+                export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+                0,
+                "{case}: an applied override is not reported as dropped"
+            );
+        }
     }
 }
