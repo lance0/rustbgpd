@@ -422,3 +422,43 @@ async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
         "{answered} updates queued after the deferral deadline ran before it expired"
     );
 }
+
+/// Idle time between runs is not poll time. A lone update after an idle gap
+/// longer than the budget must not yield: a yield there lets a caller act
+/// before the run loop's own due-timer check, so a timer that fell due during
+/// the gap would trail a message that arrived after it.
+#[test]
+fn primary_run_budget_does_not_charge_idle_time_to_the_next_run() {
+    let budget = Duration::from_millis(25);
+    let t0 = std::time::Instant::now();
+    let mut run = PrimaryRunBudget::default();
+
+    let started = run.start(t0);
+    assert!(!run.should_yield(started, t0 + Duration::from_millis(1), budget, 0));
+
+    // 40 ms idle, then one more update with nothing queued behind it.
+    let next = t0 + Duration::from_millis(40);
+    let started = run.start(next);
+    assert_eq!(started, next, "the drained backlog ended the previous run");
+    assert!(!run.should_yield(started, next + Duration::from_millis(1), budget, 0));
+}
+
+/// Under sustained ingress the backlog never drains, so one run still spans
+/// back-to-back updates and yields once the budget is spent.
+#[test]
+fn primary_run_budget_still_bounds_a_sustained_backlog() {
+    let budget = Duration::from_millis(25);
+    let t0 = std::time::Instant::now();
+    let mut run = PrimaryRunBudget::default();
+
+    let started = run.start(t0);
+    assert!(!run.should_yield(started, t0 + Duration::from_millis(10), budget, 5));
+    assert_eq!(
+        run.start(t0 + Duration::from_millis(10)),
+        t0,
+        "the run continues"
+    );
+    assert!(run.should_yield(t0, t0 + Duration::from_millis(26), budget, 5));
+    let after = t0 + Duration::from_millis(27);
+    assert_eq!(run.start(after), after, "a yield ends the run");
+}

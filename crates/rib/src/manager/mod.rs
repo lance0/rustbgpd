@@ -1174,6 +1174,44 @@ impl ExpiryTimer {
 #[derive(Debug, Default)]
 struct ExpiryCutoffs([Option<usize>; ExpiryTimer::COUNT]);
 
+/// Wall-clock bound on one run of primary updates the run loop applies
+/// back to back without yielding.
+///
+/// The run ends when the budget is spent (the loop yields) or when the
+/// primary backlog drains (the loop parks in `select!` next, which already
+/// lets other tasks run). Idle time between runs is therefore never charged:
+/// a lone update after an idle gap does not yield ahead of the loop's own
+/// due-timer check.
+#[derive(Debug, Default)]
+struct PrimaryRunBudget {
+    started: Option<std::time::Instant>,
+}
+
+impl PrimaryRunBudget {
+    /// The start of the current run, beginning one at `now` if none is open.
+    fn start(&mut self, now: std::time::Instant) -> std::time::Instant {
+        *self.started.get_or_insert(now)
+    }
+
+    /// Account one applied update; `true` means yield before the next one.
+    fn should_yield(
+        &mut self,
+        started: std::time::Instant,
+        now: std::time::Instant,
+        budget: std::time::Duration,
+        backlog: usize,
+    ) -> bool {
+        if now.duration_since(started) >= budget {
+            self.started = None;
+            return true;
+        }
+        if backlog == 0 {
+            self.started = None;
+        }
+        false
+    }
+}
+
 impl ExpiryCutoffs {
     /// Capture `backlog` the first time `timer` is seen due; forget it once
     /// the timer is no longer due.
@@ -5633,8 +5671,7 @@ impl RibManager {
         tokio::pin!(resync_sleep);
         let mut resync_armed = false;
         let mut query_rx_open = true;
-        // Start of the current run of primary updates applied without a yield.
-        let mut primary_run_started: Option<std::time::Instant> = None;
+        let mut primary_run = PrimaryRunBudget::default();
 
         // A deferred attribute sweep must also run when UPDATE traffic stops.
         let attr_gc_sleep = tokio::time::sleep(ATTR_INTERN_GC_INTERVAL);
@@ -6065,8 +6102,7 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                let started =
-                                    *primary_run_started.get_or_insert_with(std::time::Instant::now);
+                                let started = primary_run.start(std::time::Instant::now());
                                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                                     manager.handle_update(update);
                                 });
@@ -6078,8 +6114,12 @@ impl RibManager {
                                 // reply's probe) waits behind it on this
                                 // worker. Yielding after every update instead
                                 // measurably slowed bulk VPN ingest.
-                                if started.elapsed() >= self.flush_poll_budget {
-                                    primary_run_started = None;
+                                if primary_run.should_yield(
+                                    started,
+                                    std::time::Instant::now(),
+                                    self.flush_poll_budget,
+                                    self.primary_backlog(),
+                                ) {
                                     tokio::task::yield_now().await;
                                 }
                             }
@@ -6147,15 +6187,18 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                let started =
-                                    *primary_run_started.get_or_insert_with(std::time::Instant::now);
+                                let started = primary_run.start(std::time::Instant::now());
                                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                                     manager.handle_update(update);
                                 });
                                 self.drain_general_queries_if_unfenced();
                                 // Same poll bound as the timer-aware wait above.
-                                if started.elapsed() >= self.flush_poll_budget {
-                                    primary_run_started = None;
+                                if primary_run.should_yield(
+                                    started,
+                                    std::time::Instant::now(),
+                                    self.flush_poll_budget,
+                                    self.primary_backlog(),
+                                ) {
                                     tokio::task::yield_now().await;
                                 }
                             }
