@@ -566,9 +566,10 @@ gRPC consumer gains from the recent proto additions
   explicit enable.
 
 **The event contract is watch, then snapshot.** `WatchEvents` is a live stream
-with no replay. After a connect or reconnect, open `WatchEvents` and buffer
-it, read the state the integration needs, then apply the buffered events,
-reconciling any the snapshot already reflects. The separate RPCs give no
+with no replay. After a connect or reconnect, open `WatchEvents`, wait for its
+response headers (sent only after the daemon has subscribed to every requested
+source) and buffer the stream, read the state the integration needs, then
+apply the buffered events, reconciling any the snapshot already reflects. The separate RPCs give no
 atomic handoff, so reading state before opening the watch loses changes in
 between with no lag signal. gNMI `Subscribe` ON_CHANGE subscribes before its
 snapshot internally. A `stream_lagged` warning means a bounded source dropped

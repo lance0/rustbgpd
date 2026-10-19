@@ -709,6 +709,9 @@ rbgp man                # man page (roff) on stdout: rbgp man | man -l -
 missed while disconnected. A collector that needs to resynchronize after a
 reconnect restarts the watch first, then re-reads current state and reconciles
 the overlap; reading state before the watch starts loses changes in between.
+The CLI prints nothing when its stream is established, so a backgrounded
+`events watch` gives no handoff signal; a client that needs one waits for the
+`WatchEvents` response headers before reading state.
 gNMI `Subscribe` does both in order, sending a full snapshot before changes.
 
 Human event lines print timestamps as RFC 3339 UTC, the format `config history`

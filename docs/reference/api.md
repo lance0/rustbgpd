@@ -2766,8 +2766,10 @@ history block followed by the live tail; it does not server-side merge the two
 streams by wall-clock timestamp.
 
 There is no durable event cursor. A client that reconnects opens and buffers a
-new live stream first, then re-reads the state it needs and applies the
-buffered events, reconciling any overlap. The separate RPCs give no atomic
+new live stream first, waits for the `WatchEvents` response headers (sent only
+after the daemon has subscribed to every requested source; no event is sent at
+stream start), then re-reads the state it needs and applies the buffered
+events, reconciling any overlap. The separate RPCs give no atomic
 handoff: a change between a state read and a later stream open is lost with no
 lag signal. gNMI `Subscribe` ON_CHANGE subscribes before its snapshot
 internally. BMP to a collector, Prometheus, and the daemon logs

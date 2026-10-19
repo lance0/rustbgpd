@@ -207,8 +207,13 @@ $ rbgp -j events watch --category route,session > events.ndjson &
 $ rbgp -j neighbor
 ```
 
-The same pattern over raw gRPC opens `EventService.WatchEvents` before the
-state read. The separate RPCs give no atomic handoff: reading state first and
+That shell pair is illustrative only: backgrounding the watch does not wait
+for the subscription to exist, `rbgp events watch` prints nothing when its
+stream is established, and the snapshot can finish first. A client that needs
+a gap-free handoff calls `EventService.WatchEvents` and waits for its response
+headers, which the daemon sends only after it has subscribed to every
+requested source, and only then requests state. No event is sent at stream
+start, so do not wait for a first message. The separate RPCs give no atomic handoff: reading state first and
 opening the watch afterwards loses any change in between, with no lag signal.
 gNMI `Subscribe` ON_CHANGE on neighbor `session-state` does the
 subscribe-before-snapshot step internally: every subscription starts with a
