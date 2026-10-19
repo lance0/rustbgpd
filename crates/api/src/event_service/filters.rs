@@ -431,7 +431,6 @@ fn bgp_event_type_to_session_event_type(
         | proto::BgpEventType::BfdSessionUp
         | proto::BgpEventType::BfdSessionDown
         | proto::BgpEventType::BfdSessionStateChanged
-        | proto::BgpEventType::OtcRouteBlocked
         | proto::BgpEventType::StreamLagged => None,
     }
 }
@@ -491,7 +490,6 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::BfdSessionUp
             | proto::BgpEventType::BfdSessionDown
             | proto::BgpEventType::BfdSessionStateChanged
-            | proto::BgpEventType::OtcRouteBlocked
             | proto::BgpEventType::StreamLagged => {
                 parsed.insert(event_type as i32);
             }
@@ -533,21 +531,6 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
             .map_err(|_| Status::invalid_argument("unknown event type"))?;
         match event_type {
             proto::BgpEventType::PolicyChanged => {}
-            // OtcRouteBlocked is a sibling under EVENT_CATEGORY_POLICY
-            // but it is published only through the durable outbox
-            // (ADR-0072 follow-up); the in-memory policy ring this
-            // RPC drains carries only config-mutation `PolicyChanged`
-            // events. Accepting the filter here would silently
-            // return unrelated policy mutations — reject and point
-            // at the right RPC.
-            proto::BgpEventType::OtcRouteBlocked => {
-                return Err(Status::invalid_argument(
-                    "BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED is published only through \
-                     the durable event outbox; use SubscribeFromEvent with \
-                     categories=[EVENT_CATEGORY_POLICY] and \
-                     event_types=[BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED]",
-                ));
-            }
             proto::BgpEventType::Unspecified => {
                 return Err(Status::invalid_argument(
                     "BGP_EVENT_TYPE_UNSPECIFIED is not a valid filter",
@@ -629,7 +612,6 @@ fn parse_evpn_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<RouteEve
             | proto::BgpEventType::BfdSessionUp
             | proto::BgpEventType::BfdSessionDown
             | proto::BgpEventType::BfdSessionStateChanged
-            | proto::BgpEventType::OtcRouteBlocked
             | proto::BgpEventType::StreamLagged => {
                 return Err(Status::invalid_argument(
                     "ListEvpnEvents only supports EVPN event types",
@@ -743,7 +725,7 @@ fn category_mask(category: proto::EventCategory) -> u8 {
 
 fn live_event_type_mask(event_type: proto::BgpEventType) -> u8 {
     match event_type {
-        proto::BgpEventType::Unspecified | proto::BgpEventType::OtcRouteBlocked => 0,
+        proto::BgpEventType::Unspecified => 0,
         proto::BgpEventType::RouteAdded
         | proto::BgpEventType::RouteWithdrawn
         | proto::BgpEventType::RouteBestChanged

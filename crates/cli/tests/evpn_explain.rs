@@ -488,7 +488,7 @@ fn malformed_keys_fail_before_connecting() {
         args.extend(fields);
         args.extend(["--rd", "65000:100"]);
         let result = run("http://127.0.0.1:1", &args);
-        assert_eq!(result.status.code(), Some(2), "{args:?}: {result:?}");
+        assert_eq!(result.status.code(), Some(64), "{args:?}: {result:?}");
         assert!(
             !String::from_utf8(result.stderr)
                 .unwrap()
@@ -508,7 +508,7 @@ fn malformed_keys_fail_before_connecting() {
                 "192.0.2.3",
             ],
         );
-        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert_eq!(result.status.code(), Some(64), "{result:?}");
     }
     let result = run(
         "http://127.0.0.1:1",
@@ -557,7 +557,7 @@ fn invalid_argument_pairs_fail_before_connecting() {
         ],
     ] {
         let result = run("http://127.0.0.1:1", &[base.to_vec(), fields].concat());
-        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert_eq!(result.status.code(), Some(64), "{result:?}");
         assert!(
             !String::from_utf8(result.stderr)
                 .unwrap()
@@ -580,7 +580,7 @@ fn invalid_argument_pairs_fail_before_connecting() {
             esi,
         ],
     );
-    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    assert_eq!(result.status.code(), Some(64), "{result:?}");
     let result = run(
         "http://127.0.0.1:1",
         &[

@@ -927,14 +927,6 @@ pub struct RibManager {
     /// operator timeline queries. Live streaming still uses
     /// `evpn_events_tx`.
     evpn_route_event_history: VecDeque<Arc<crate::event::EvpnRouteEvent>>,
-    /// Sink for the durable event outbox (ADR-0072). Fires AFTER the
-    /// process-local ring + broadcast at every publish site. Defaults
-    /// to [`crate::event_sink::NoopRibEventSink`] so callers that
-    /// don't care about durable history (tests, daemons with
-    /// `[event_history].enabled = false`) need not change anything.
-    /// The binary installs an EHM-backed sink via
-    /// [`Self::with_event_sink`] when `[event_history]` is enabled.
-    event_sink: std::sync::Arc<dyn crate::event_sink::RibEventSink>,
     /// RFC 9069 Loc-RIB BMP tap. When set, every Loc-RIB best-path
     /// change on a streamed family (unicast + VPN) is synthesized into
     /// an UPDATE PDU and sent as a `LocRibRouteMonitoring` event; `None`
@@ -2375,7 +2367,6 @@ impl RibManager {
             route_event_id_exhausted: false,
             evpn_events_tx,
             evpn_route_event_history: VecDeque::new(),
-            event_sink: std::sync::Arc::new(crate::event_sink::NoopRibEventSink),
             bmp_tx: None,
             metrics,
             rx,
@@ -2734,21 +2725,6 @@ impl RibManager {
             );
             tokio::time::sleep(stall).await;
         }
-    }
-
-    /// Install an out-of-crate event sink. Called once at startup by
-    /// the daemon binary when `[event_history].enabled = true`. The
-    /// sink fires from the route and EVPN publish helpers alongside
-    /// the existing process-local rings and legacy broadcasts. The
-    /// durable cursor contract is owned by `SubscribeFromEvent`; the
-    /// legacy watch/list surfaces keep their pre-existing behavior.
-    #[must_use]
-    pub fn with_event_sink(
-        mut self,
-        sink: std::sync::Arc<dyn crate::event_sink::RibEventSink>,
-    ) -> Self {
-        self.event_sink = sink;
-        self
     }
 
     /// Install the RFC 9069 Loc-RIB BMP tap. Called at startup by the
@@ -4994,17 +4970,6 @@ impl RibManager {
         self.metrics.set_route_event_history_depth(
             i64::try_from(self.route_event_history.len()).unwrap_or(i64::MAX),
         );
-        // Hand a snapshot to the durable outbox sink BEFORE the
-        // legacy broadcast send. The legacy broadcast consumes
-        // `event`, so the sink call has to happen first; ADR-0072
-        // explicitly does NOT claim "no-live-without-durable" for
-        // the live surface (`WatchEvents`),
-        // only for the EHM-owned broadcast that backs
-        // `SubscribeFromEvent`. The order at this site is therefore
-        // not load-bearing for correctness; pick the order that
-        // avoids the second clone (sink first, then move into
-        // broadcast).
-        self.event_sink.publish_route_event(&event);
         let _ = self.route_events_tx.send(event);
     }
 
@@ -5075,9 +5040,6 @@ impl RibManager {
         }
         let event = Arc::new(event);
         self.evpn_route_event_history.push_back(Arc::clone(&event));
-        // ADR-0072: durable outbox sink fires alongside the legacy
-        // broadcast. See `publish_route_event` for the ordering note.
-        self.event_sink.publish_evpn_event(&event);
         let _ = self.evpn_events_tx.send(event);
     }
 

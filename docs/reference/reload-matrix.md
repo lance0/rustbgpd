@@ -578,28 +578,6 @@ SIGHUP outcomes.
 | `[security.grpc] enforcement` | restart-required | `tier` is the sole typed value, consumed by the gRPC interceptor at server bind time. Retired `legacy` is invalid config and receives migration guidance rather than a runtime class. |
 | `[security.grpc.roles]` | restart-required | Principal → role (`observer` / `automation` / `operator`) map read at bind. The per-method tier matrix is compiled into `crates/api/src/authz.rs` and is not runtime-configurable. |
 
-## `[event_history]` (ADR-0072)
-
-The durable event-history outbox is configured once at startup and
-its lifecycle (open / quarantine / diagnostic sidecar) is fixed for the
-process. Hot-reload of the outbox config is a P1 nice-to-have;
-v1 pins every field as restart-required and surfaces the change as
-an `ERROR`-level log line during reload so operators see exactly
-what's deferred.
-
-| Field | Class | Notes |
-|---|---|---|
-| `enabled` | restart-required | Off ⇒ EHM does not open `events.db`; live event broadcast paths remain possible, but no durable outbox/replay state is created. (See ADR-0072 for the live-only startup fallback on `required = false` recovery failures, which is distinct from `enabled = false`.) |
-| `required` | restart-required | If `true`, the daemon fails to start when the events DB cannot be opened or recovered. Default `false`: continue in live-only mode with `bgp_event_outbox_degraded = 1`. |
-| `path` | restart-required | Relative to `runtime_state_dir`. Empty ⇒ `<runtime_state_dir>/events.db`. |
-| `max_events` | restart-required | Count retention target; default 100,000. Each 60s pass evaluates this first and evicts at most 5,000 oldest events above the target. |
-| `max_bytes` | restart-required | Byte retention target on `events.db` + WAL combined; default 256 MB. After the count phase, a pass removes up to ten additional 5,000-event batches while oversized. A busy or heavily oversized store can remain above either target after a bounded pass, and SQLite may reuse freed pages rather than shrink the main DB immediately. |
-| `synchronous` | restart-required | SQLite `PRAGMA synchronous` mode. `full` (default) fsyncs per commit; `normal` checkpoints periodically and trades a small crash window for throughput. |
-| `overflow` | restart-required | v1 only supports `drop`; `block` is reserved for a future ADR. |
-| `queue_capacity` | restart-required | Per-producer mpsc capacity. |
-| `batch_size` | restart-required | Batch-commit size threshold. |
-| `batch_interval_ms` | restart-required | Batch-commit time threshold. |
-
 ## `[flowspec]` (ADR-0135)
 
 The RIB's receive-side feasibility mode is fixed at startup. SIGHUP retains

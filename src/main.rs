@@ -899,7 +899,6 @@ fn fib_runtime_event_to_bgp_event(
             event.reason
         ),
         target_peer_address: String::new(),
-        event_id: None,
         payload: Some(rustbgpd_api::proto::bgp_event::Payload::DataplaneRoute(
             route,
         )),
@@ -909,64 +908,18 @@ fn fib_runtime_event_to_bgp_event(
 fn spawn_fib_dataplane_event_bridge(
     mut fib_events: broadcast::Receiver<fib_runtime::FibRuntimeEvent>,
     bgp_events: broadcast::Sender<rustbgpd_api::proto::BgpEvent>,
-    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
-    metrics: rustbgpd_telemetry::BgpMetrics,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match fib_events.recv().await {
                 Ok(event) => {
-                    // Capture the typed peer before consuming `event`
-                    // into the proto converter. The proto envelope's
-                    // peer field is a stringified IpAddr, so parsing
-                    // it back is wasted work when the source struct
-                    // already carries `Option<IpAddr>` directly.
-                    let envelope_peer = event.peer;
-                    let proto_event = fib_runtime_event_to_bgp_event(event);
-                    // ADR-0072 PR-FU1: durable outbox enqueue. The
-                    // legacy `bgp_events` broadcast (consumed by
-                    // WatchEvents) stays unchanged. Per-route FIB
-                    // events carry peer (when sourced from a
-                    // BGP path) and prefix on the envelope so
-                    // collectors can filter by either.
-                    if let Some(handle) = &event_history {
-                        let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
-                            &proto_event,
-                            rustbgpd_event_history::Category::Dataplane,
-                            envelope_peer,
-                            None,
-                        );
-                        rustbgpd_api::event_history_sinks::try_send_envelope(
-                            handle, &metrics, envelope,
-                        );
-                    }
-                    let _ = bgp_events.send(proto_event);
+                    let _ = bgp_events.send(fib_runtime_event_to_bgp_event(event));
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    // The bridge consumes `fib_events` via a bounded
-                    // tokio broadcast; if the bridge falls behind the
-                    // FIB runtime, those `missed` events never reach
-                    // the bridge body and therefore never reach EHM.
-                    // When EHM is the durable producer for this
-                    // category, that's a real cursor gap — call
-                    // `record_source_lag` so the drop counter, the
-                    // Prometheus degraded gauge, AND EHM's in-process
-                    // degraded state are all flipped together. When
-                    // EHM is disabled the lag is purely a live-stream
-                    // concern (matches pre-ADR-0072 behavior); leave
-                    // the bookkeeping alone in that case.
                     warn!(
                         missed,
                         "FIB dataplane event bridge lagged; dropping stale route events"
                     );
-                    if let Some(handle) = &event_history {
-                        rustbgpd_api::event_history_sinks::record_source_lag(
-                            handle,
-                            &metrics,
-                            "dataplane",
-                            missed,
-                        );
-                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -1014,7 +967,6 @@ fn bfd_runtime_event_to_bgp_event(
         afi_safi: proto::AddressFamily::Unspecified as i32,
         summary,
         target_peer_address: String::new(),
-        event_id: None,
         payload: Some(proto::bgp_event::Payload::Bfd(proto::BfdSessionEvent {
             event_type: event_type as i32,
             peer_address,
@@ -1027,85 +979,21 @@ fn bfd_runtime_event_to_bgp_event(
     }
 }
 
-/// Translate the operator-facing `[event_history]` TOML block into
-/// the `EventHistoryConfig` shape the `rustbgpd-event-history` crate
-/// understands. The validation pass on the parent `Config` has
-/// already enforced the field invariants (synchronous / overflow
-/// values, positive sizes).
-fn build_event_history_config(
-    config: &Config,
-    metrics: &BgpMetrics,
-) -> rustbgpd_event_history::EventHistoryConfig {
-    let block = &config.event_history;
-    let synchronous = if block.synchronous.eq_ignore_ascii_case("normal") {
-        rustbgpd_event_history::SynchronousMode::Normal
-    } else {
-        rustbgpd_event_history::SynchronousMode::Full
-    };
-    rustbgpd_event_history::EventHistoryConfig {
-        path: config.event_history_db_path(),
-        max_events: block.max_events,
-        max_bytes: block.max_bytes,
-        synchronous,
-        required: block.required,
-        queue_capacity: block.queue_capacity,
-        batch_size: block.batch_size,
-        batch_interval: std::time::Duration::from_millis(block.batch_interval_ms),
-        metrics: Some(metrics.clone()),
-        ..rustbgpd_event_history::EventHistoryConfig::default()
-    }
-}
-
 fn spawn_bfd_event_bridge(
     mut bfd_events: broadcast::Receiver<bfd_runtime::BfdRuntimeEvent>,
     bgp_events: broadcast::Sender<rustbgpd_api::proto::BgpEvent>,
-    event_history: Option<rustbgpd_event_history::EventHistoryHandle>,
-    metrics: rustbgpd_telemetry::BgpMetrics,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match bfd_events.recv().await {
                 Ok(event) => {
-                    let proto_event = bfd_runtime_event_to_bgp_event(&event);
-                    // ADR-0072 durable outbox enqueue. The legacy live
-                    // `bgp_events` broadcast (consumed by WatchEvents +
-                    // the EVPN service) stays unchanged.
-                    if let Some(handle) = &event_history {
-                        let envelope = rustbgpd_api::event_history_sinks::envelope_from_bgp_event(
-                            &proto_event,
-                            rustbgpd_event_history::Category::Bfd,
-                            // BFD events are keyed by peer address;
-                            // pull it from the proto envelope so the
-                            // payload->envelope mapping stays in one
-                            // place (the proto field is the source of
-                            // truth for outbox-side filtering by peer).
-                            proto_event.peer_address.parse().ok(),
-                            None,
-                        );
-                        rustbgpd_api::event_history_sinks::try_send_envelope(
-                            handle, &metrics, envelope,
-                        );
-                    }
-                    let _ = bgp_events.send(proto_event);
+                    let _ = bgp_events.send(bfd_runtime_event_to_bgp_event(&event));
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    // See FIB bridge above: when EHM is the durable
-                    // producer for this category, broadcast lag at
-                    // the bridge boundary is a real cursor gap.
-                    // `record_source_lag` flips the drop counter,
-                    // the Prometheus degraded gauge, AND EHM's
-                    // in-process degraded state together. Pre-PR
-                    // behavior (no EHM) leaves the bookkeeping
-                    // alone.
                     warn!(
                         missed,
                         "BFD event bridge lagged; dropping stale session events"
                     );
-                    if let Some(handle) = &event_history {
-                        rustbgpd_api::event_history_sinks::record_source_lag(
-                            handle, &metrics, "bfd", missed,
-                        );
-                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -4500,58 +4388,12 @@ async fn run<T>(
     } else {
         None
     };
-    // ── ADR-0072: Durable event outbox (EventHistoryManager) ───────
-    //
-    // Spawned before any producer so the handle is available when
-    // constructing the RIB sink + plumbing into PeerManager,
-    // EventService, and the BFD bridge. On start failure the
-    // behavior depends on `[event_history].required`: required=true
-    // bails out; required=false logs an error, flips the degraded
-    // gauge, and continues in live-only mode (SubscribeFromEvent
-    // returns FAILED_PRECONDITION while the rest of the live
-    // surface keeps working).
-    let (event_history_manager, event_history_handle) = if config.event_history.enabled {
-        let ehm_config = build_event_history_config(&config, &metrics);
-        match rustbgpd_event_history::EventHistoryManager::start(ehm_config).await {
-            Ok(mgr) => {
-                let handle = mgr.handle();
-                info!(
-                    path = %config.event_history_db_path().display(),
-                    "event history manager started",
-                );
-                (Some(mgr), Some(handle))
-            }
-            Err(e) if config.event_history.required => {
-                error!(
-                    error = %e,
-                    path = %config.event_history_db_path().display(),
-                    "[event_history].required = true but EHM failed to start"
-                );
-                process::exit(1);
-            }
-            Err(e) => {
-                error!(
-                    error = %e,
-                    path = %config.event_history_db_path().display(),
-                    "event_history open failed; continuing in live-only mode"
-                );
-                metrics.record_event_outbox_open_failure();
-                (None, None)
-            }
-        }
-    } else {
-        info!("event history disabled via [event_history].enabled = false");
-        (None, None)
-    };
-
     // ── STARTUP TEARDOWN-OWNERSHIP BOUNDARY ───────────────────────
-    // EventHistoryManager above is the first actor that can require bounded
-    // shutdown. All remaining fatal startup arms are the configured-peer add
-    // transaction, which LAN-1210 intentionally leaves for the next tranche.
+    // Every startup preflight above runs before the first actor that can
+    // require bounded shutdown. All remaining fatal startup arms are the
+    // configured-peer add transaction.
 
-    // Spawn RIB manager. When EHM is enabled, install an EHM-backed
-    // event sink so route + EVPN events flow into the durable
-    // outbox alongside the existing process-local ring + broadcast.
+    // Spawn RIB manager.
     let cluster_id = config.cluster_id();
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(resolve_rib_channel_capacity());
     let (rib_query_tx, rib_query_rx) = mpsc::channel::<RibUpdate>(256);
@@ -4740,14 +4582,6 @@ async fn run<T>(
     if let Some(tx) = bmp_loc_rib_tx {
         rib_manager = rib_manager.with_bmp_tx(tx);
     }
-    let rib_event_stage = if let Some(handle) = event_history_handle.clone() {
-        let (sink, stage) =
-            rustbgpd_api::event_history_sinks::make_rib_event_sink(handle, metrics.clone());
-        rib_manager = rib_manager.with_event_sink(sink);
-        Some(stage)
-    } else {
-        None
-    };
     let mut rib_handle = tokio::spawn(rib_manager.run());
 
     // Validation snapshot channel: broadcast VRP + ASPA tables to transport
@@ -5037,11 +4871,7 @@ async fn run<T>(
     )
     .with_local_forwarding_state(local_forwarding_state.clone())
     .with_readiness_queries(peer_mgr_readiness_rx)
-    .with_operator_queries(peer_mgr_operator_rx)
-    .with_event_history(event_history_handle.clone())
-    .with_transport_event_sink(event_history_handle.clone().map(|handle| {
-        rustbgpd_api::event_history_sinks::make_transport_event_sink(handle, metrics.clone())
-    }));
+    .with_operator_queries(peer_mgr_operator_rx);
     let peer_mgr = if let Some((_, accepted_identity_rx)) = &accepted_watch {
         peer_mgr.with_accepted_identity(accepted_identity_rx.clone())
     } else {
@@ -5634,12 +5464,8 @@ async fn run<T>(
         tokio::sync::broadcast::channel::<fib_runtime::FibRuntimeEvent>(fib_ring_capacity);
     let (fib_bgp_event_tx, _) =
         tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(fib_ring_capacity);
-    let _fib_event_bridge_handle = spawn_fib_dataplane_event_bridge(
-        fib_event_rx,
-        fib_bgp_event_tx.clone(),
-        event_history_handle.clone(),
-        metrics.clone(),
-    );
+    let _fib_event_bridge_handle =
+        spawn_fib_dataplane_event_bridge(fib_event_rx, fib_bgp_event_tx.clone());
     let fib_runtime_shutdown = tokio_util::sync::CancellationToken::new();
     let fib_runtime_handle = fib_runtime::spawn(
         fib_runtime::FibRuntimeConfig {
@@ -5686,12 +5512,7 @@ async fn run<T>(
         tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(bfd_ring_capacity);
     let (bfd_bgp_event_tx, _) =
         tokio::sync::broadcast::channel::<rustbgpd_api::proto::BgpEvent>(bfd_ring_capacity);
-    let _bfd_event_bridge = spawn_bfd_event_bridge(
-        bfd_event_rx,
-        bfd_bgp_event_tx.clone(),
-        event_history_handle.clone(),
-        metrics.clone(),
-    );
+    let _bfd_event_bridge = spawn_bfd_event_bridge(bfd_event_rx, bfd_bgp_event_tx.clone());
     // The desired-set receiver + state-change sender are the actor's ends of the
     // coupling channels created above (PeerManager owns the other ends).
     let bfd_runtime_shutdown = tokio_util::sync::CancellationToken::new();
@@ -6158,7 +5979,6 @@ async fn run<T>(
             Arc::new(move || rx.borrow().iter().map(bfd_status_to_proto).collect())
         },
         bfd_events: Some(bfd_bgp_event_tx),
-        event_history: event_history_handle.clone(),
     };
     let (grpc_startup_tx, grpc_startup_rx) = oneshot::channel();
     let mut grpc_handle = tokio::spawn(async move {
@@ -6516,7 +6336,7 @@ async fn run<T>(
 
     // gNMI dial-out (LAN-471): device-initiated telemetry push. The manager
     // reuses the dial-in Subscribe machinery via its own GnmiService handle
-    // (same peer-manager snapshot source + event outbox as the served gNMI
+    // (same peer-manager snapshot and session-event source as the served gNMI
     // surface) and reconciles targets again after every successful SIGHUP
     // reload in the outcome arm below. A collector being down never affects
     // the daemon: each target retries independently with capped backoff.
@@ -6529,8 +6349,7 @@ async fn run<T>(
                 rustbgpd_api::server::AccessMode::ReadOnly,
                 peer_mgr_tx.clone(),
                 Some(peer_mgr_operator_tx.clone()),
-            )
-            .with_event_history(event_history_handle.clone()),
+            ),
             metrics.clone(),
         ),
     ));
@@ -7405,32 +7224,10 @@ async fn run<T>(
 
     // 4. Stop the gRPC server
     let _ = grpc_shutdown_tx.send(());
-    // The server owns its bounded listener drain and UDS cleanup. Join it
-    // before closing EHM so active streams cannot outlive their dependencies.
+    // The server owns its bounded listener drain and UDS cleanup.
     if !grpc_exited && let Err(error) = grpc_handle.await {
         error!(%error, "gRPC server task panicked during shutdown");
         component_failed = true;
-    }
-
-    // 5. Shut down the durable event outbox (ADR-0072) after the
-    // producers and gRPC have drained. The RIB-event conversion stage
-    // drains its snapshot queue into EHM first, so route/EVPN events
-    // accepted before shutdown still reach EHM's drain-then-commit
-    // shutdown. EHM closes admission and owns one absolute 5-second
-    // deadline for accepted-event commits plus storage finalization;
-    // a wedged SQLite must not stall daemon exit. Holding EHM alive
-    // across the producer + gRPC drain lets final subscribers observe
-    // every accepted event whose commit is confirmed before that bound.
-    if let Some(stage) = rib_event_stage
-        && let Some(reason) = shutdown_wait(None, &stop_waiting, stage.shutdown())
-            .await
-            .abandoned()
-    {
-        warn!(reason, "stopped waiting for the RIB event conversion stage");
-    }
-    if let Some(manager) = event_history_manager {
-        info!("flushing event history outbox");
-        manager.shutdown().await;
     }
 
     runtime_probe.shutdown(&stop_waiting).await;
@@ -8142,9 +7939,6 @@ mod tests {
     fn startup_preflight_precedes_first_owned_actor_and_late_activation() {
         let source = include_str!("main.rs");
         let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
-        let ehm = production
-            .find("EventHistoryManager::start(ehm_config).await")
-            .expect("first teardown-owned actor must remain explicit");
         let boundary = production
             .find("// ── STARTUP TEARDOWN-OWNERSHIP BOUNDARY")
             .expect("startup ownership boundary must remain explicit");
@@ -8162,9 +7956,11 @@ mod tests {
             let position = production
                 .find(preflight)
                 .unwrap_or_else(|| panic!("missing startup preflight: {preflight}"));
-            assert!(position < ehm, "{preflight} follows EventHistoryManager");
+            assert!(
+                position < boundary,
+                "{preflight} follows the ownership boundary"
+            );
         }
-        assert!(ehm < boundary);
 
         for activation in [
             "bfd_runtime::spawn_prepared_with_reload(",
@@ -11141,7 +10937,6 @@ peer_group = "plain"
             fib_tables: Vec::new(),
             bfd_profiles: Vec::new(),
             apply_bum_enforcement: false,
-            event_history: crate::config::EventHistoryConfig::default(),
             inbound_admission: crate::config::InboundAdmissionConfig::default(),
         };
 

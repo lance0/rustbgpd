@@ -3227,23 +3227,10 @@ async fn subscribe_evpn_events(
     reply_rx.await.unwrap()
 }
 
-#[derive(Default)]
-struct SharedEvpnCapture(std::sync::Mutex<Option<Arc<crate::event::EvpnRouteEvent>>>);
-
-impl crate::event_sink::RibEventSink for SharedEvpnCapture {
-    fn publish_route_event(&self, _event: &Arc<crate::event::RouteEvent>) {}
-
-    fn publish_evpn_event(&self, event: &Arc<crate::event::EvpnRouteEvent>) {
-        *self.0.lock().unwrap() = Some(Arc::clone(event));
-    }
-}
-
 #[test]
 fn evpn_history_and_live_broadcast_share_arc() {
     let (_tx, rx) = mpsc::channel(1);
-    let capture = Arc::new(SharedEvpnCapture::default());
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_event_sink(capture.clone());
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let mut live = manager.evpn_events_tx.subscribe();
     let route = make_evpn_macip(
         Ipv4Addr::new(10, 0, 0, 1),
@@ -3262,12 +3249,10 @@ fn evpn_history_and_live_broadcast_share_arc() {
     });
 
     let broadcast = live.try_recv().unwrap();
-    let captured = capture.0.lock().unwrap().take().unwrap();
     assert!(Arc::ptr_eq(
         manager.evpn_route_event_history.back().unwrap(),
         &broadcast
     ));
-    assert!(Arc::ptr_eq(&captured, &broadcast));
 
     let (reply, result) = oneshot::channel();
     manager.handle_query_evpn_route_event_history(None, None, None, &BTreeSet::new(), 0, reply);

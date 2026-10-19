@@ -41,6 +41,31 @@ async fn session_history_queries_return_owned_events() {
     );
 }
 
+/// Load-bearing: answering the operator-lane subscription with any receiver
+/// other than one on the manager's session broadcast leaves it empty.
+#[tokio::test]
+async fn operator_lane_session_subscription_receives_published_events() {
+    let mut manager = test_peer_manager();
+    let (reply, receiver) = oneshot::channel();
+    manager
+        .answer_operator_query(
+            rustbgpd_api::peer_types::PeerManagerOperatorQuery::SubscribeSessionEvents { reply },
+        )
+        .await;
+    let mut events = receiver.await.unwrap();
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    manager.publish_peer_lifecycle_event(
+        &key(peer),
+        SessionLifecycleEventType::PeerEnabled,
+        "enabled".to_string(),
+    );
+    let SessionEvent::Lifecycle(event) = events.try_recv().unwrap().as_ref().clone() else {
+        panic!("expected a lifecycle event");
+    };
+    assert_eq!(event.peer, peer);
+    assert_eq!(event.event_type, SessionLifecycleEventType::PeerEnabled);
+}
+
 fn test_policy_event(target: &str, peer: Option<IpAddr>) -> PolicyEvent {
     PolicyEvent {
         operation: "set",

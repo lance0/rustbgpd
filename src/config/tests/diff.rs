@@ -613,35 +613,12 @@ fn diff_config_flags_security_grpc_as_restart_required() {
 }
 
 #[test]
-fn diff_config_flags_event_history_as_restart_required() {
-    // LAN-286: every `[event_history]` field is restart-required (the
-    // ADR-0072 outbox is configured once at startup) — an edit must
-    // classify as restart-required, not vanish from the diff.
-    let old = parse(valid_toml()).unwrap();
-    let mut new = old.clone();
-    new.event_history.enabled = !new.event_history.enabled;
-
-    let diff = super::diff_config(&old, &new);
-    assert!(diff.event_history_changed);
-    assert!(diff.has_restart_required_changes());
-    assert!(
-        !diff.has_reload_applied_changes(),
-        "an event-history-only edit does not hot-apply"
-    );
-
-    let json = super::config_diff_json_value(&diff);
-    assert_eq!(json["restart_required"]["event_history_changed"], true);
-
-    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
-    assert!(text.contains("[event_history]"), "{text}");
-
-    let sections = super::classify_config_transaction_v1(&diff);
-    assert!(
-        sections
-            .restart_required_sections
-            .contains(&"[event_history]".to_string()),
-        "{sections:?}"
-    );
+fn removed_event_history_section_is_rejected() {
+    // The durable event history was removed; a leftover section must fail
+    // the load instead of being silently ignored.
+    let toml = format!("{}\n[event_history]\nenabled = false\n", valid_toml());
+    let err = parse(&toml).unwrap_err().to_string();
+    assert!(err.contains("event_history"), "{err}");
 }
 
 #[test]

@@ -49,22 +49,6 @@
         "$ref": "#/$defs/EthernetSegmentConfig"
       }
     },
-    "event_history": {
-      "description": "Durable event-history outbox (ADR-0072). **Opt-in (default off)\nas of v0.32.0**; set `[event_history].enabled = true` for\nrestart-safe event replay. All fields are restart-required.",
-      "$ref": "#/$defs/EventHistoryConfig",
-      "default": {
-        "batch_interval_ms": 50,
-        "batch_size": 1024,
-        "enabled": false,
-        "max_bytes": 256000000,
-        "max_events": 100000,
-        "overflow": "drop",
-        "path": "",
-        "queue_capacity": 4096,
-        "required": false,
-        "synchronous": "full"
-      }
-    },
     "evpn_core_isolation": {
       "description": "ADR-0140 core-isolation hold for bound Ethernet Segments. Absent\nby default; `enabled = true` lets rustbgpd take the CE-facing\nmembers of each bound segment administratively down while the PE\nis core-isolated and at startup until EVPN syncs.",
       "anyOf": [
@@ -769,73 +753,6 @@
         "originator_ip"
       ]
     },
-    "EventHistoryConfig": {
-      "description": "Durable event-history outbox configuration (ADR-0072).\n\nAll fields are restart-required — toggling the outbox or its\nbounds requires a daemon restart. The reload matrix documents the\nclassification.",
-      "type": "object",
-      "properties": {
-        "batch_interval_ms": {
-          "description": "Batch-commit time threshold (milliseconds).",
-          "type": "integer",
-          "format": "uint64",
-          "default": 50,
-          "minimum": 0
-        },
-        "batch_size": {
-          "description": "Batch-commit size threshold.",
-          "type": "integer",
-          "format": "uint",
-          "default": 1024,
-          "minimum": 0
-        },
-        "enabled": {
-          "description": "Enable the durable outbox. **Default `false` (opt-in as of\nv0.32.0).** When `false`, the daemon does not start EHM;\nlive broadcasts remain available without persistence, and\n`SubscribeFromEvent` returns `FAILED_PRECONDITION`. Set `true`\nfor restart-safe event replay — it costs memory / CPU / disk\n(see `docs/benchmarks.md`).",
-          "type": "boolean",
-          "default": false
-        },
-        "max_bytes": {
-          "description": "Byte retention target on `events.db` + WAL combined. After the count\nphase, each pass removes up to ten 5,000-event batches while oversized.\n`SQLite` may reuse freed pages rather than shrink the main DB immediately.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 256000000,
-          "minimum": 0
-        },
-        "max_events": {
-          "description": "Count retention target. Each scheduled pass evicts at most 5,000\noldest events above the target before evaluating the byte target.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 100000,
-          "minimum": 0
-        },
-        "overflow": {
-          "description": "Behavior on full producer queue. v1 only supports `drop`;\n`block` is reserved for a future ADR. ADR-0072 documents the\nrationale for uniform best-effort drop.",
-          "type": "string",
-          "default": "drop"
-        },
-        "path": {
-          "description": "Path of `events.db` relative to `runtime_state_dir`.\nEmpty string ⇒ `<runtime_state_dir>/events.db`.",
-          "type": "string",
-          "default": ""
-        },
-        "queue_capacity": {
-          "description": "Per-producer mpsc capacity.",
-          "type": "integer",
-          "format": "uint",
-          "default": 4096,
-          "minimum": 0
-        },
-        "required": {
-          "description": "Fail to start if the events DB cannot be opened or recovered.\nDefault `false` — continue in live-only mode with the\n`bgp_event_outbox_degraded` flag set.",
-          "type": "boolean",
-          "default": false
-        },
-        "synchronous": {
-          "description": "`SQLite` `PRAGMA synchronous` mode. `full` (default) fsyncs\nper commit; `normal` checkpoints periodically and trades a\nsmall crash window for throughput.",
-          "type": "string",
-          "default": "full"
-        }
-      },
-      "additionalProperties": false
-    },
     "EvpnCoreIsolationConfig": {
       "description": "`[evpn_core_isolation]` (ADR-0140): hold the CE-facing links of\nbound Ethernet Segments administratively down while this PE is\ncore-isolated, and at startup until EVPN has synced.\n\nOpt-in. Enabling it gives rustbgpd ownership of the admin state of\nevery member of each bound bond (or the bound link itself). Accepted\nonly with at least one `[[ethernet_segments]]` entry that has an\n`interface`, on Linux.",
       "type": "object",
@@ -1472,7 +1389,7 @@
           "const": "sample"
         },
         {
-          "description": "Event-driven updates from the durable event outbox.",
+          "description": "Event-driven updates from the live session-event stream.",
           "type": "string",
           "const": "on_change"
         }
@@ -1501,7 +1418,7 @@
           "minimum": 0
         },
         "mode": {
-          "description": "Delivery mode: `\"sample\"` (periodic resample, default) or\n`\"on_change\"` (event-driven; v1 supports the `session-state` leaf\nand requires `[event_history].enabled = true`).",
+          "description": "Delivery mode: `\"sample\"` (periodic resample, default) or\n`\"on_change\"` (event-driven; v1 supports the `session-state` leaf).",
           "$ref": "#/$defs/GnmiDialoutModeConfig",
           "default": "sample"
         },

@@ -7,13 +7,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use prost::Message;
-use rustbgpd_event_history::{Category, EventHistoryHandle, PayloadCodec};
 use rustbgpd_fsm::SessionState;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
-use tracing::debug;
 
 use crate::actor_read::peer_manager_operator_read;
 use crate::audit::{gnmi_set_summary, set_request_summary};
@@ -21,9 +19,9 @@ use crate::gnmi;
 use crate::gnmi_ext;
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
-    EnqueuedOperatorQuery, PeerInfo, PeerManagerCommand, PeerManagerOperatorQuery,
+    EnqueuedOperatorQuery, PeerInfo, PeerManagerCommand, PeerManagerOperatorQuery, SessionEvent,
+    SessionLifecycleEventType,
 };
-use crate::proto;
 use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
     AccessMode, GnmiSetCommitAction, GnmiSetFn, GnmiSetOperation, GnmiSetTransaction,
@@ -107,6 +105,9 @@ fn next_heartbeat_deadline(
 
 type PeerSnapshotFuture = Pin<Box<dyn Future<Output = Result<Vec<PeerInfo>, Status>> + Send>>;
 type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
+type SessionEventsFuture =
+    Pin<Box<dyn Future<Output = Result<broadcast::Receiver<Arc<SessionEvent>>, Status>> + Send>>;
+type SessionEventsFn = Arc<dyn Fn() -> SessionEventsFuture + Send + Sync>;
 type HeartbeatSnapshotFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<gnmi::SubscribeResponse>, Status>> + Send + 'a>>;
 
@@ -150,11 +151,9 @@ pub struct GnmiService {
     /// Bounds concurrent `Subscribe` streams; a permit is held for the lifetime
     /// of each open stream.
     subscribe_slots: Arc<tokio::sync::Semaphore>,
-    /// Optional handle to the durable event outbox (ADR-0072). Wired
-    /// in by `ServeConfig` when `[event_history]` is enabled and EHM
-    /// started cleanly. `Subscribe ON_CHANGE` is the only consumer
-    /// today; it returns `FailedPrecondition` when this is `None`.
-    event_history: Option<EventHistoryHandle>,
+    /// Subscribes to the peer manager's live session-event broadcast for
+    /// `Subscribe ON_CHANGE`.
+    session_events: SessionEventsFn,
     /// Optional daemon-owned transaction bridge for gNMI Set. When unset, Set
     /// remains fail-closed with `UNIMPLEMENTED`; production wires this to the
     /// OpenConfig-to-candidate-TOML bridge.
@@ -183,38 +182,6 @@ async fn forward_responses(
     true
 }
 
-async fn send_on_change_response(
-    response: Result<gnmi::SubscribeResponse, Status>,
-    tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
-    loss_rx: &mut tokio::sync::watch::Receiver<u64>,
-) -> bool {
-    tokio::select! {
-        biased;
-        changed = loss_rx.changed() => {
-            if changed.is_ok() {
-                let _ = tx.send(Err(on_change_loss_status())).await;
-            }
-            false
-        }
-        permit = tx.reserve() => {
-            let Ok(permit) = permit else {
-                return false;
-            };
-            match loss_rx.has_changed() {
-                Ok(true) => {
-                    permit.send(Err(on_change_loss_status()));
-                    false
-                }
-                Ok(false) => {
-                    permit.send(response);
-                    true
-                }
-                Err(_) => false,
-            }
-        }
-    }
-}
-
 impl GnmiService {
     /// Create a gNMI service backed by the daemon's peer manager.
     #[must_use]
@@ -237,12 +204,24 @@ impl GnmiService {
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
         operator_tx: Option<tokio::sync::mpsc::Sender<EnqueuedOperatorQuery>>,
     ) -> Self {
+        let session_peer_mgr_tx = peer_mgr_tx.clone();
+        let session_operator_tx = operator_tx.clone();
         let mut service = Self::with_peer_snapshot(asn, router_id, move || {
             let peer_mgr_tx = peer_mgr_tx.clone();
             let operator_tx = operator_tx.clone();
             Box::pin(async move {
                 peer_manager_operator_read(&peer_mgr_tx, operator_tx.as_ref(), |reply| {
                     PeerManagerOperatorQuery::ListPeers { reply }
+                })
+                .await
+            })
+        });
+        service.session_events = Arc::new(move || {
+            let peer_mgr_tx = session_peer_mgr_tx.clone();
+            let operator_tx = session_operator_tx.clone();
+            Box::pin(async move {
+                peer_manager_operator_read(&peer_mgr_tx, operator_tx.as_ref(), |reply| {
+                    PeerManagerOperatorQuery::SubscribeSessionEvents { reply }
                 })
                 .await
             })
@@ -263,19 +242,15 @@ impl GnmiService {
             peer_snapshot: Arc::new(move || Box::pin(peer_snapshot())),
             initial_roster_gate: None,
             subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
-            event_history: None,
+            session_events: Arc::new(|| {
+                Box::pin(async {
+                    Err(Status::unavailable(
+                        "gNMI ON_CHANGE session event source is not wired",
+                    ))
+                })
+            }),
             set_handler: None,
         }
-    }
-
-    /// Install the durable event-outbox handle (ADR-0072) used by
-    /// `Subscribe ON_CHANGE` to source live session-state transitions.
-    /// Called once at startup by `ServeConfig` when
-    /// `[event_history].enabled = true`.
-    #[must_use]
-    pub fn with_event_history(mut self, handle: Option<EventHistoryHandle>) -> Self {
-        self.event_history = handle;
-        self
     }
 
     /// Install the daemon-owned gNMI Set transaction bridge.
@@ -730,20 +705,17 @@ impl GnmiService {
         }
     }
 
-    /// `STREAM` / `ON_CHANGE` task (ADR-0070 deferred → ADR-0072 follow-up):
-    /// emit an initial snapshot of the session-state leaf for every
-    /// peer the subscription targets, a `sync_response` marker, then
-    /// stream a fresh leaf Update for every committed session-state
-    /// transition until the client disconnects or the durable
+    /// `STREAM` / `ON_CHANGE` task: emit an initial snapshot of the
+    /// session-state leaf for every peer the subscription targets, a
+    /// `sync_response` marker, then stream a fresh leaf Update for every live
+    /// session-state transition until the client disconnects or the live
     /// broadcast lags.
     ///
-    /// Reconnect semantics: gNMI carries no cursor on reconnect, so a
-    /// fresh subscription starts a fresh initial snapshot. The
-    /// disconnect window is intentionally NOT replayed — collectors
-    /// that need historical replay use `SubscribeFromEvent` directly.
-    /// Broadcast lag or producer-side loss closes with `DataLoss` so the
-    /// collector reconnects without `updates_only` and resyncs from a full
-    /// initial snapshot.
+    /// Reconnect semantics: gNMI carries no cursor on reconnect, so a fresh
+    /// subscription starts a fresh initial snapshot and the disconnect window
+    /// is not replayed. Broadcast lag closes with `DataLoss` so the collector
+    /// reconnects without `updates_only` and resyncs from a full initial
+    /// snapshot.
     #[expect(
         clippy::too_many_lines,
         reason = "presence-aware live events and heartbeat reconciliation share one select loop"
@@ -753,34 +725,15 @@ impl GnmiService {
         mut plan: SubscriptionPlan,
         tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) {
-        // FailedPrecondition when EHM is unavailable — matches the
-        // SubscribeFromEvent path so collectors get the same signal
-        // regardless of which RPC they're driving.
-        let Some(handle) = self.event_history.as_ref() else {
-            let _ = tx
-                .send(Err(Status::failed_precondition(
-                    "gNMI Subscribe ON_CHANGE requires the durable event outbox; \
-                     set [event_history].enabled = true and restart the daemon \
-                     (off by default since v0.32.0)",
-                )))
-                .await;
-            return;
+        // Subscribe before the initial snapshot so no transition that lands
+        // between the snapshot read and the first receive is lost.
+        let mut broadcast_rx = match (self.session_events)().await {
+            Ok(rx) => rx,
+            Err(error) => {
+                let _ = tx.send(Err(error)).await;
+                return;
+            }
         };
-        if handle.state().pass_through() {
-            let _ = tx
-                .send(Err(Status::failed_precondition(
-                    "gNMI Subscribe ON_CHANGE requires the durable event outbox; \
-                     the outbox is in pass-through mode — see the daemon log and \
-                     bgp_event_outbox_degraded",
-                )))
-                .await;
-            return;
-        }
-
-        // Subscribe to loss and live events before the initial snapshot. The watch
-        // baselines prior loss; the next loss or transition must wake this stream.
-        let mut loss_rx = handle.state().subscribe_loss_generation();
-        let mut broadcast_rx = handle.subscribe_live();
 
         // Initial snapshot — one Update per configured peer (including
         // non-Established peers; the contract is "baseline the world,
@@ -788,33 +741,14 @@ impl GnmiService {
         // sync_response still flushes downstream.
         let started_updates_only = plan.updates_only;
         let mut presence = HashMap::new();
-        tokio::select! {
-            biased;
-            changed = loss_rx.changed() => {
-                if changed.is_ok() {
-                    let _ = tx.send(Err(on_change_loss_status())).await;
-                }
-                return;
-            }
-            completed = self.forward_on_change_snapshot(&plan, &tx, &mut presence) => {
-                if !completed {
-                    return;
-                }
-            }
+        if !self
+            .forward_on_change_snapshot(&plan, &tx, &mut presence)
+            .await
+        {
+            return;
         }
-        tokio::select! {
-            biased;
-            changed = loss_rx.changed() => {
-                if changed.is_ok() {
-                    let _ = tx.send(Err(on_change_loss_status())).await;
-                }
-                return;
-            }
-            sent = tx.send(Ok(sync_response())) => {
-                if sent.is_err() {
-                    return;
-                }
-            }
+        if tx.send(Ok(sync_response())).await.is_err() {
+            return;
         }
         plan.updates_only = false;
 
@@ -827,15 +761,8 @@ impl GnmiService {
                 next_heartbeat_deadline(heartbeat_snapshot.is_some(), &heartbeat_deadlines);
             tokio::select! {
                 event = broadcast_rx.recv() => match event {
-                    Ok(committed) => {
-                        if committed.envelope.category != Category::Session {
-                            continue;
-                        }
-                        if committed.envelope.payload_codec != PayloadCodec::Proto {
-                            continue;
-                        }
-                        match build_session_state_on_change(&plan, &committed, self.asn) {
-                            Ok(Some(observation)) => {
+                    Ok(event) => {
+                        if let Some(observation) = build_session_state_on_change(&plan, &event) {
                                 let (path, update) = match observation {
                                     SessionStateObservation::Update(update) => (
                                         update.path.clone().expect("session-state Update has a path"),
@@ -857,7 +784,7 @@ impl GnmiService {
                                     }
                                     None => continue,
                                 };
-                                if !send_on_change_response(Ok(response), &tx, &mut loss_rx).await {
+                                if tx.send(Ok(response)).await.is_err() {
                                     return;
                                 }
                                 if is_update {
@@ -865,19 +792,12 @@ impl GnmiService {
                                 } else {
                                     presence.remove(&identity);
                                 }
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                debug!(error = %e, "decoding session event payload failed");
-                            }
                         }
                     }
                     Err(RecvError::Lagged(missed)) => {
-                        // Per the contract, ON_CHANGE does not paper
-                        // over gaps. Close with DataLoss so the
-                        // collector reconnects without updates_only and
-                        // gets a full initial snapshot. SubscribeFromEvent
-                        // is the RPC for historical replay.
+                        // ON_CHANGE does not paper over gaps. Close with
+                        // DataLoss so the collector reconnects without
+                        // updates_only and gets a full initial snapshot.
                         let _ = tx
                             .send(Err(Status::data_loss(format!(
                                 "gNMI ON_CHANGE broadcast lagged by {missed} events; \
@@ -898,7 +818,7 @@ impl GnmiService {
                     let mut responses = match rendered {
                         Ok(responses) => responses,
                         Err(error) => {
-                            let _ = send_on_change_response(Err(error), &tx, &mut loss_rx).await;
+                            let _ = tx.send(Err(error)).await;
                             return;
                         }
                     };
@@ -916,7 +836,7 @@ impl GnmiService {
                         responses.push(update_response(Vec::new(), paths));
                     }
                     for response in responses {
-                        if !send_on_change_response(Ok(response), &tx, &mut loss_rx).await {
+                        if tx.send(Ok(response)).await.is_err() {
                             return;
                         }
                     }
@@ -944,12 +864,6 @@ impl GnmiService {
                         &plan,
                         heartbeat_due.clone(),
                     ));
-                },
-                changed = loss_rx.changed() => {
-                    if changed.is_ok() {
-                        let _ = tx.send(Err(on_change_loss_status())).await;
-                    }
-                    return;
                 },
                 () = tx.closed() => return,
             }
@@ -2105,83 +2019,42 @@ fn session_state_name(state: SessionState) -> &'static str {
     }
 }
 
-/// Parse a lowercase `SessionState::as_str()` value back into a
-/// [`SessionState`]. The proto BGP-event envelope carries the
-/// lowercase form (the producer is `SessionState::as_str()`), but
-/// `OpenConfig` wants the uppercase short form, so the `ON_CHANGE`
-/// emitter round-trips through this helper.
-fn parse_session_state_lowercase(s: &str) -> Option<SessionState> {
-    match s {
-        "idle" => Some(SessionState::Idle),
-        "connect" => Some(SessionState::Connect),
-        "active" => Some(SessionState::Active),
-        "open_sent" | "opensent" => Some(SessionState::OpenSent),
-        "open_confirm" | "openconfirm" => Some(SessionState::OpenConfirm),
-        "established" => Some(SessionState::Established),
-        _ => None,
-    }
-}
-
 enum SessionStateObservation {
     Update(gnmi::Update),
     Delete(gnmi::Path),
 }
 
-/// Classify one committed session event as a leaf Update or authoritative
+/// Classify one live session event as a leaf Update or authoritative
 /// peer-removal delete, returning `None` when it is outside the plan's peer
-/// scope or does not change the supported leaf. Decode errors map to debug-log
-/// plus skip; a later event or configured heartbeat can resync the leaf.
+/// scope or does not change the supported leaf.
 fn build_session_state_on_change(
     plan: &SubscriptionPlan,
-    committed: &rustbgpd_event_history::CommittedEvent,
-    _local_as: u32,
-) -> Result<Option<SessionStateObservation>, prost::DecodeError> {
-    // Peer scope filter — quick check before paying the prost decode.
-    // The envelope's `EnvelopePeers.peer` carries the IP for the
-    // session that changed. The plan's paths target either one
-    // concrete peer or all peers; build the filter once.
-    let Some(peer) = committed.envelope.peers.peer else {
-        return Ok(None);
+    event: &SessionEvent,
+) -> Option<SessionStateObservation> {
+    // NOTIFICATION events do not carry a session-state transition.
+    let SessionEvent::Lifecycle(event) = event else {
+        return None;
     };
-    let mut targets_peer = false;
-    for query in &plan.paths {
-        match query {
-            SupportedPath::Neighbor { address, .. } if *address == peer => {
-                targets_peer = true;
-                break;
-            }
-            SupportedPath::AllNeighbors { .. } => {
-                targets_peer = true;
-                break;
-            }
-            _ => {}
-        }
-    }
+    let peer = event.peer;
+    let targets_peer = plan.paths.iter().any(|query| match query {
+        SupportedPath::Neighbor { address, .. } => *address == peer,
+        SupportedPath::AllNeighbors { .. } => true,
+        SupportedPath::Global { .. } => false,
+    });
     if !targets_peer {
-        return Ok(None);
+        return None;
     }
-
-    let bgp_event = proto::BgpEvent::decode(committed.envelope.payload.as_slice())?;
-    let Some(proto::bgp_event::Payload::Session(session)) = bgp_event.payload.as_ref() else {
-        // Notification events also live under Category::Session but
-        // do not carry a session-state transition.
-        return Ok(None);
-    };
     let path = neighbor_leaf_path(peer, NeighborLeaf::SessionState);
-    let removed = proto::BgpEventType::PeerRemoved as i32;
-    if (bgp_event.event_type, session.event_type) == (removed, removed) {
-        return Ok(Some(SessionStateObservation::Delete(path)));
+    if event.event_type == SessionLifecycleEventType::PeerRemoved {
+        return Some(SessionStateObservation::Delete(path));
     }
-    let Some(new_state) = parse_session_state_lowercase(session.new_state.as_str()) else {
-        return Ok(None);
-    };
-
+    let new_state = event.new_state?;
     let update = leaf_update(
-        path.clone(),
+        path,
         &LeafValue::Str(session_state_name(new_state).to_string()),
         plan.encoding,
     );
-    Ok(Some(SessionStateObservation::Update(update)))
+    Some(SessionStateObservation::Update(update))
 }
 
 fn global_leaf_path(leaf: &str) -> gnmi::Path {
@@ -2468,12 +2341,6 @@ fn sync_response() -> gnmi::SubscribeResponse {
         response: Some(gnmi::subscribe_response::Response::SyncResponse(true)),
         extension: Vec::new(),
     }
-}
-
-fn on_change_loss_status() -> Status {
-    Status::data_loss(
-        "gNMI ON_CHANGE event history lost producer events; reconnect without updates_only to resync from a full initial snapshot",
-    )
 }
 
 fn now_nanos() -> i64 {
@@ -4127,10 +3994,8 @@ mod tests {
 
     /// Hang preventer for waits on something that must eventually happen: a
     /// Subscribe response, a terminal status, a fixture or task finishing. It
-    /// is not a latency bound. `ON_CHANGE` fixtures ride a real SQLite commit
-    /// whose storage thread fsyncs, so this has to outlast fsync latency on a
-    /// loaded host. The module's `SAMPLE` cadence windows are timing properties
-    /// and keep their own bounds; those tests have no storage on their path.
+    /// is not a latency bound. The module's `SAMPLE` cadence windows are
+    /// timing properties and keep their own bounds.
     const HANG_GUARD: Duration = Duration::from_secs(30);
 
     /// Load-bearing hang guard: removing a timer or terminal status makes callers red.
@@ -4259,25 +4124,31 @@ mod tests {
         let (operator_tx, mut operator_rx) = tokio::sync::mpsc::channel::<EnqueuedOperatorQuery>(1);
         let actor = tokio::spawn(async move {
             // Get plus the four subscription bootstrap paths all share this
-            // live snapshot callback. The ordinary receiver stays parked.
-            for _ in 0..5 {
+            // live snapshot callback, and ON_CHANGE also subscribes to session
+            // events. The ordinary receiver stays parked.
+            let (session_events, _) = broadcast::channel(1);
+            for _ in 0..6 {
                 let query = operator_rx.recv().await.expect("expected operator read");
-                let PeerManagerOperatorQuery::ListPeers { reply } = query.query else {
-                    panic!("expected live ListPeers query");
-                };
-                let peer = test_peer("203.0.113.2".parse().unwrap());
-                reply.send(vec![peer]).unwrap();
+                match query.query {
+                    PeerManagerOperatorQuery::ListPeers { reply } => {
+                        let peer = test_peer("203.0.113.2".parse().unwrap());
+                        reply.send(vec![peer]).unwrap();
+                    }
+                    PeerManagerOperatorQuery::SubscribeSessionEvents { reply } => {
+                        reply.send(session_events.subscribe()).unwrap();
+                    }
+                    _ => panic!("expected live ListPeers or SubscribeSessionEvents query"),
+                }
             }
+            session_events
         });
-        let manager = event_history_manager().await;
         let service = GnmiService::new_with_operator_queries(
             65001,
             "192.0.2.1".into(),
             crate::server::AccessMode::ReadOnly,
             peer_tx,
             Some(operator_tx),
-        )
-        .with_event_history(Some(manager.handle()));
+        );
         let mut harness = serve(service).await;
         let path = neighbor_session_state_wildcard_path();
         let response = harness.client.get(get_request(path.clone())).await.unwrap();
@@ -4320,9 +4191,8 @@ mod tests {
             peer_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
-        actor.await.unwrap();
+        let _session_events = actor.await.unwrap();
         drop(harness);
-        manager.shutdown().await;
     }
 
     #[tokio::test]
@@ -4333,12 +4203,15 @@ mod tests {
                 tokio::sync::mpsc::channel::<EnqueuedOperatorQuery>(1);
             let actor = tokio::spawn(async move {
                 if drop_reply {
+                    // Get, ONCE, POLL and SAMPLE read peers; ON_CHANGE fails
+                    // on its session-event subscription first.
                     for _ in 0..5 {
                         let query = operator_rx.recv().await.expect("expected operator read");
-                        let PeerManagerOperatorQuery::ListPeers { reply } = query.query else {
-                            panic!("expected live ListPeers query");
-                        };
-                        drop(reply);
+                        assert!(matches!(
+                            query.query,
+                            PeerManagerOperatorQuery::ListPeers { .. }
+                                | PeerManagerOperatorQuery::SubscribeSessionEvents { .. }
+                        ));
                     }
                 }
             });
@@ -4347,15 +4220,13 @@ mod tests {
             if !drop_reply {
                 operator_tx.closed().await;
             }
-            let manager = event_history_manager().await;
             let service = GnmiService::new_with_operator_queries(
                 65001,
                 "192.0.2.1".into(),
                 crate::server::AccessMode::ReadOnly,
                 peer_tx,
                 Some(operator_tx),
-            )
-            .with_event_history(Some(manager.handle()));
+            );
             assert_peer_snapshot_outage(
                 service,
                 if drop_reply {
@@ -4367,7 +4238,6 @@ mod tests {
             .await;
             assert!(peer_rx.try_recv().is_err());
             actor.await.unwrap();
-            manager.shutdown().await;
         }
     }
 
@@ -4377,16 +4247,13 @@ mod tests {
         // mapping makes Get and all four Subscribe surfaces fail this matrix.
         let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(1);
         drop(peer_rx);
-        let manager = event_history_manager().await;
         let service = GnmiService::new(
             65001,
             "192.0.2.1".to_string(),
             crate::server::AccessMode::ReadWrite,
             peer_tx,
-        )
-        .with_event_history(Some(manager.handle()));
+        );
         assert_peer_snapshot_outage(service, "peer manager unavailable").await;
-        manager.shutdown().await;
     }
 
     #[tokio::test]
@@ -4396,27 +4263,25 @@ mod tests {
         let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(5);
         let actor = tokio::spawn(async move {
             for _ in 0..5 {
-                let command = peer_rx.recv().await.expect("expected ListPeers command");
-                let PeerManagerCommand::ListPeers { reply } = command else {
-                    panic!("expected ListPeers command");
-                };
-                drop(reply);
+                let command = peer_rx.recv().await.expect("expected peer-manager read");
+                assert!(matches!(
+                    command,
+                    PeerManagerCommand::ListPeers { .. }
+                        | PeerManagerCommand::SubscribeSessionEvents { .. }
+                ));
             }
         });
-        let manager = event_history_manager().await;
         let service = GnmiService::new(
             65001,
             "192.0.2.1".to_string(),
             crate::server::AccessMode::ReadWrite,
             peer_tx,
-        )
-        .with_event_history(Some(manager.handle()));
+        );
         assert_peer_snapshot_outage(service, "peer manager dropped reply").await;
         tokio::time::timeout(HANG_GUARD, actor)
             .await
             .expect("peer-manager fixture did not finish")
             .expect("peer-manager fixture failed");
-        manager.shutdown().await;
     }
 
     #[tokio::test]
@@ -5324,14 +5189,6 @@ mod tests {
             .expect("ON_CHANGE stream closed without status")
     }
 
-    fn assert_on_change_loss(error: &Status) {
-        assert_eq!(error.code(), tonic::Code::DataLoss);
-        assert_eq!(
-            error.message(),
-            "gNMI ON_CHANGE event history lost producer events; reconnect without updates_only to resync from a full initial snapshot"
-        );
-    }
-
     #[test]
     fn path_parser_accepts_wildcard_neighbor_address() {
         // Regression: gnmic and most OpenConfig collectors emit
@@ -5467,109 +5324,158 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Unimplemented);
     }
 
-    #[tokio::test]
-    async fn subscribe_on_change_returns_failed_precondition_without_event_history() {
-        // gNMI ON_CHANGE needs the durable outbox as its in-process
-        // event source. Without an EventHistoryHandle, the client
-        // must see FailedPrecondition — same shape as
-        // SubscribeFromEvent's EHM-disabled path.
-        let mut harness = serve(test_service(vec![test_peer("10.0.0.2".parse().unwrap())])).await;
-        let mut stream = harness
-            .client
-            .subscribe(tokio_stream::iter(vec![subscribe_msg(
-                stream_on_change_list(neighbor_session_state_wildcard_path()),
-            )]))
-            .await
-            .unwrap()
-            .into_inner();
-
-        let err = stream
-            .message()
-            .await
-            .expect_err("expected FailedPrecondition status, got a message");
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    impl GnmiService {
+        fn with_test_session_events(
+            mut self,
+            events: &broadcast::Sender<Arc<SessionEvent>>,
+        ) -> Self {
+            let events = events.clone();
+            self.session_events = Arc::new(move || {
+                let rx = events.subscribe();
+                Box::pin(async move { Ok(rx) })
+            });
+            self
+        }
     }
 
-    /// Start the real EHM required to reach the `ON_CHANGE` snapshot seam.
-    /// This goes red if outage tests accidentally stop exercising `ON_CHANGE`'s
-    /// actor-backed initial snapshot and fail earlier on missing event history.
-    async fn event_history_manager() -> rustbgpd_event_history::EventHistoryManager {
-        use rustbgpd_event_history::{EventHistoryConfig, EventHistoryManager, SynchronousMode};
-        let dir = tempfile::tempdir().unwrap();
-        let manager = EventHistoryManager::start(EventHistoryConfig {
-            path: dir.path().join("events.db"),
-            max_events: 100,
-            max_bytes: 1_000_000,
-            // NORMAL, not FULL: this fixture exercises gNMI subscription
-            // plumbing, not outbox durability. FULL puts two fsyncs on the
-            // temp filesystem inside every commit the tests' bounded waits
-            // cover, which is where the old 2s-timeout flake came from.
-            synchronous: SynchronousMode::Normal,
-            required: false,
-            queue_capacity: 64,
-            batch_size: 1,
-            batch_interval: Duration::from_millis(10),
-            broadcast_capacity: 64,
-            retention_interval: Duration::from_mins(1),
-            sidecar_flush_interval_batches: 100,
-            metrics: None,
-        })
-        .await
-        .expect("EHM start");
-        // Keep tempdir alive for the manager lifetime by leaking — tests are short.
-        std::mem::forget(dir);
-        manager
-    }
-
-    fn session_envelope(
+    fn session_event(
         event_type: crate::peer_types::SessionLifecycleEventType,
         new_state: Option<SessionState>,
-    ) -> rustbgpd_event_history::EventEnvelope {
-        use crate::peer_types::{SessionEvent, SessionLifecycleEvent};
-        use rustbgpd_event_history::{EnvelopePeers, EventEnvelope, Severity};
-
-        let peer = "10.0.0.2".parse().unwrap();
-        let event = crate::event_service::convert::session_event_to_bgp_event(
-            SessionEvent::Lifecycle(SessionLifecycleEvent {
+    ) -> Arc<SessionEvent> {
+        Arc::new(SessionEvent::Lifecycle(
+            crate::peer_types::SessionLifecycleEvent {
                 event_type,
-                peer,
+                peer: "10.0.0.2".parse().unwrap(),
                 peer_label: None,
                 timestamp: "1".to_string(),
                 old_state: Some(SessionState::Established),
                 new_state,
                 session_role: Some("primary".to_string()),
                 reason: "gNMI test event".to_string(),
-            }),
-        );
-        EventEnvelope {
-            timestamp_ns: 1,
-            category: Category::Session,
-            event_type: format!("{event_type:?}"),
-            peers: EnvelopePeers {
-                peer: Some(peer),
-                previous_peer: None,
-                target_peer: None,
             },
-            afi_safi: None,
-            prefix: None,
-            rd: None,
-            evpn_route_type: None,
-            severity: Severity::Info,
-            payload_codec: PayloadCodec::Proto,
-            payload: event.encode_to_vec(),
-        }
+        ))
     }
 
-    async fn ehm_service(
-        peers: Vec<PeerInfo>,
-    ) -> (GnmiService, rustbgpd_event_history::EventHistoryManager) {
-        let manager = event_history_manager().await;
+    fn live_service(peers: Vec<PeerInfo>) -> (GnmiService, broadcast::Sender<Arc<SessionEvent>>) {
+        let events = broadcast::channel(64).0;
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
             let peers = peers.clone();
             async move { Ok(peers) }
         })
-        .with_event_history(Some(manager.handle()));
-        (service, manager)
+        .with_test_session_events(&events);
+        (service, events)
+    }
+
+    #[tokio::test]
+    async fn subscribe_on_change_works_through_the_production_constructor() {
+        // Load-bearing break: requiring an optional event store (or any
+        // opt-in wiring beyond the peer-manager channel) before ON_CHANGE
+        // starts fails this stream before the snapshot.
+        use crate::peer_types::SessionLifecycleEventType::Lost;
+
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(4);
+        let events = broadcast::channel(16).0;
+        let actor_events = events.clone();
+        let actor = tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::ListPeers { reply } => {
+                        let mut peer = test_peer("10.0.0.2".parse().unwrap());
+                        peer.state = SessionState::Established;
+                        let _ = reply.send(vec![peer]);
+                    }
+                    PeerManagerCommand::SubscribeSessionEvents { reply } => {
+                        let _ = reply.send(actor_events.subscribe());
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let service = GnmiService::new(
+            65001,
+            "192.0.2.1".to_string(),
+            crate::server::AccessMode::ReadOnly,
+            peer_tx,
+        );
+        let mut harness = serve(service).await;
+        let path = neighbor_session_state_path("10.0.0.2");
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(
+                stream_on_change_list(path.clone()),
+            )]))
+            .await
+            .unwrap()
+            .into_inner();
+        let updates = subscribe_updates(next_bounded(&mut stream).await.unwrap().unwrap());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0].val.as_ref().unwrap().value,
+            Some(gnmi::typed_value::Value::JsonIetfVal(
+                b"\"ESTABLISHED\"".to_vec()
+            ))
+        );
+        assert_sync(&mut stream).await;
+
+        events
+            .send(session_event(Lost, Some(SessionState::Idle)))
+            .unwrap();
+        let updates = subscribe_updates(next_bounded(&mut stream).await.unwrap().unwrap());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].path, Some(path));
+        assert_eq!(
+            updates[0].val.as_ref().unwrap().value,
+            Some(gnmi::typed_value::Value::JsonIetfVal(b"\"IDLE\"".to_vec()))
+        );
+        drop(stream);
+        drop(harness);
+        actor.abort();
+    }
+
+    #[tokio::test]
+    async fn on_change_broadcast_lag_closes_with_data_loss() {
+        // Load-bearing break: skipping a lagged receive and continuing
+        // delivers the newest transition instead of DATA_LOSS.
+        use crate::peer_types::SessionLifecycleEventType::StateChanged;
+
+        let events = broadcast::channel(1).0;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", || async {
+            Ok(vec![test_peer("10.0.0.2".parse().unwrap())])
+        })
+        .with_test_session_events(&events);
+        let plan = parse_subscription_list(&stream_on_change_list(
+            neighbor_session_state_wildcard_path(),
+        ))
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        let task = tokio::spawn(service.run_on_change(plan, tx));
+        assert!(matches!(
+            next_on_change(&mut rx).await.unwrap().response,
+            Some(gnmi::subscribe_response::Response::Update(_))
+        ));
+        assert!(matches!(
+            next_on_change(&mut rx).await.unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        ));
+
+        // The current-thread runtime cannot poll the subscriber between these
+        // sends, so the one-slot broadcast overwrites two transitions.
+        for state in [
+            SessionState::Connect,
+            SessionState::Active,
+            SessionState::Idle,
+        ] {
+            events
+                .send(session_event(StateChanged, Some(state)))
+                .unwrap();
+        }
+        let error = next_on_change(&mut rx).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DataLoss);
+        assert!(error.message().contains("lagged by 2 events"), "{error}");
+        tokio::time::timeout(HANG_GUARD, task)
+            .await
+            .expect("ON_CHANGE stream did not terminate after lag")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -5581,7 +5487,7 @@ mod tests {
         peer_a.state = SessionState::Established;
         let mut peer_b = test_peer("10.0.0.3".parse().unwrap());
         peer_b.state = SessionState::Idle;
-        let (service, manager) = ehm_service(vec![peer_a, peer_b]).await;
+        let (service, _events) = live_service(vec![peer_a, peer_b]);
         let mut harness = serve(service).await;
 
         let mut stream = harness
@@ -5624,172 +5530,6 @@ mod tests {
 
         drop(stream);
         drop(harness);
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn on_change_baselines_prior_loss_and_fails_on_the_next_loss() {
-        // Load-bearing breaks: rejecting the degraded baseline suppresses the
-        // snapshot; removing the live loss arm leaves the final receive pending.
-        let (service, manager) = ehm_service(vec![test_peer("10.0.0.2".parse().unwrap())]).await;
-        let state = manager.state();
-        state.record_loss();
-        let prior_loss = state.subscribe_loss_generation();
-        assert_eq!(*prior_loss.borrow(), 1);
-        assert!(!prior_loss.has_changed().unwrap());
-        let plan = parse_subscription_list(&stream_on_change_list(
-            neighbor_session_state_wildcard_path(),
-        ))
-        .unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
-        let task = tokio::spawn(service.run_on_change(plan, tx));
-
-        assert!(matches!(
-            next_on_change(&mut rx).await.unwrap().response,
-            Some(gnmi::subscribe_response::Response::Update(_))
-        ));
-        assert!(matches!(
-            next_on_change(&mut rx).await.unwrap().response,
-            Some(gnmi::subscribe_response::Response::SyncResponse(true))
-        ));
-        state.record_loss();
-        assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
-        tokio::time::timeout(HANG_GUARD, task)
-            .await
-            .expect("ON_CHANGE stream did not terminate after producer loss")
-            .unwrap();
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn on_change_loss_preempts_a_blocked_initial_snapshot() {
-        // Load-bearing break: subscribing after or not racing the snapshot lets
-        // the hang guard expire without a terminal status.
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let snapshot_entered = Arc::clone(&entered);
-        let snapshot_release = Arc::clone(&release);
-        let manager = event_history_manager().await;
-        let state = manager.state();
-        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
-            let entered = Arc::clone(&snapshot_entered);
-            let release = Arc::clone(&snapshot_release);
-            async move {
-                entered.notify_one();
-                release.notified().await;
-                Ok(vec![test_peer("10.0.0.2".parse().unwrap())])
-            }
-        })
-        .with_event_history(Some(manager.handle()));
-        let plan = parse_subscription_list(&stream_on_change_list(
-            neighbor_session_state_wildcard_path(),
-        ))
-        .unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
-        let task = tokio::spawn(service.run_on_change(plan, tx));
-        tokio::time::timeout(HANG_GUARD, entered.notified())
-            .await
-            .expect("initial snapshot did not start");
-
-        state.record_loss();
-        assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
-        release.notify_waiters();
-        tokio::time::timeout(HANG_GUARD, task)
-            .await
-            .expect("ON_CHANGE stream did not terminate after snapshot loss")
-            .unwrap();
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn on_change_loss_preempts_a_blocked_updates_only_sync() {
-        // Load-bearing break: removing the sync race emits sync_response after
-        // the filler drains instead of the terminal DATA_LOSS status.
-        let (service, manager) = ehm_service(Vec::new()).await;
-        let state = manager.state();
-        let mut list = stream_on_change_list(neighbor_session_state_wildcard_path());
-        list.updates_only = true;
-        let plan = parse_subscription_list(&list).unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        tx.try_send(Ok(sync_response())).unwrap();
-        let mut run = Box::pin(service.run_on_change(plan, tx));
-        std::future::poll_fn(|cx| {
-            assert!(std::future::Future::poll(run.as_mut(), cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
-
-        state.record_loss();
-        assert!(matches!(
-            next_on_change(&mut rx).await.unwrap().response,
-            Some(gnmi::subscribe_response::Response::SyncResponse(true))
-        ));
-        let task = tokio::spawn(run);
-        assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
-        tokio::time::timeout(HANG_GUARD, task)
-            .await
-            .expect("ON_CHANGE stream did not terminate after blocked sync loss")
-            .unwrap();
-        manager.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn on_change_loss_preempts_a_blocked_live_delivery() {
-        // Load-bearing break: replacing the loss-aware send with a plain
-        // `tx.send` delivers the committed IDLE update before DATA_LOSS.
-        use crate::peer_types::SessionLifecycleEventType::Lost;
-
-        let (service, manager) = ehm_service(Vec::new()).await;
-        let state = manager.state();
-        let mut list = stream_on_change_list(neighbor_session_state_wildcard_path());
-        list.updates_only = true;
-        let plan = parse_subscription_list(&list).unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let filler_tx = tx.clone();
-        let mut run = Box::pin(service.run_on_change(plan, tx));
-        std::future::poll_fn(|cx| {
-            assert!(std::future::Future::poll(run.as_mut(), cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
-        assert!(matches!(
-            next_on_change(&mut rx).await.unwrap().response,
-            Some(gnmi::subscribe_response::Response::SyncResponse(true))
-        ));
-
-        manager
-            .handle()
-            .sender()
-            .try_send(session_envelope(Lost, Some(SessionState::Idle)))
-            .unwrap();
-        // EHM rides a real SQLite commit whose storage thread still fsyncs
-        // under NORMAL, so this is a generous hang guard, not a latency bound.
-        tokio::time::timeout(HANG_GUARD, async {
-            while state.latest_event_id() == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("session event was not committed");
-        filler_tx.try_send(Ok(sync_response())).unwrap();
-        std::future::poll_fn(|cx| {
-            assert!(std::future::Future::poll(run.as_mut(), cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
-
-        state.record_loss();
-        assert!(matches!(
-            next_on_change(&mut rx).await.unwrap().response,
-            Some(gnmi::subscribe_response::Response::SyncResponse(true))
-        ));
-        let task = tokio::spawn(run);
-        assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
-        tokio::time::timeout(HANG_GUARD, task)
-            .await
-            .expect("ON_CHANGE stream did not terminate after blocked live loss")
-            .unwrap();
-        manager.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -5805,13 +5545,13 @@ mod tests {
             test_peer("10.0.0.2".parse().unwrap()),
             test_peer("10.0.0.3".parse().unwrap()),
         ];
-        let manager = event_history_manager().await;
+        let events = broadcast::channel(64).0;
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
             snapshot_calls.fetch_add(1, Ordering::SeqCst);
             let peers = peers.clone();
             async move { Ok(peers) }
         })
-        .with_event_history(Some(manager.handle()));
+        .with_test_session_events(&events);
         let fast_path = neighbor_session_state_path("10.0.0.2");
         let slow_path = neighbor_session_state_path("10.0.0.3");
         let mut list = stream_on_change_list(fast_path.clone());
@@ -5870,7 +5610,6 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 5);
         drop(rx);
-        manager.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -5885,7 +5624,7 @@ mod tests {
             test_peer("10.0.0.2".parse().unwrap()),
             test_peer("10.0.0.3".parse().unwrap()),
         ];
-        let manager = event_history_manager().await;
+        let events = broadcast::channel(64).0;
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
             let peers = if snapshot_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 initial.clone()
@@ -5894,7 +5633,7 @@ mod tests {
             };
             async move { Ok(peers) }
         })
-        .with_event_history(Some(manager.handle()));
+        .with_test_session_events(&events);
         let fast = neighbor_session_state_path("10.0.0.2");
         let slow = neighbor_session_state_path("10.0.0.3");
         let mut list = stream_on_change_list(fast.clone());
@@ -5930,7 +5669,6 @@ mod tests {
         assert!(rx.try_recv().is_err(), "1s path delete repeated at 2s");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         drop(rx);
-        manager.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -5942,13 +5680,13 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let snapshot_calls = Arc::clone(&calls);
         let peer = test_peer("10.0.0.2".parse().unwrap());
-        let manager = event_history_manager().await;
+        let events = broadcast::channel(64).0;
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
             snapshot_calls.fetch_add(1, Ordering::SeqCst);
             let peer = peer.clone();
             async move { Ok(vec![peer]) }
         })
-        .with_event_history(Some(manager.handle()));
+        .with_test_session_events(&events);
         let path = neighbor_session_state_path("10.0.0.2");
         let mut list = stream_on_change_list(path.clone());
         list.updates_only = true;
@@ -5971,16 +5709,15 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         drop(rx);
-        manager.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn on_change_heartbeat_preserves_actor_error_status() {
-        let manager = event_history_manager().await;
+        let events = broadcast::channel(64).0;
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", || async {
             Err(Status::unavailable("heartbeat snapshot unavailable"))
         })
-        .with_event_history(Some(manager.handle()));
+        .with_test_session_events(&events);
         let mut list = stream_on_change_list(neighbor_session_state_path("10.0.0.2"));
         list.updates_only = true;
         list.subscription[0].heartbeat_interval = 1_000_000_000;
@@ -5999,7 +5736,6 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert_eq!(error.message(), "heartbeat snapshot unavailable");
         assert!(rx.recv().await.is_none());
-        manager.shutdown().await;
     }
 
     #[tokio::test]
@@ -6011,13 +5747,13 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let snapshot_calls = Arc::clone(&calls);
         let peer = test_peer("10.0.0.2".parse().unwrap());
-        let manager = event_history_manager().await;
+        let events = broadcast::channel(64).0;
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
             snapshot_calls.fetch_add(1, Ordering::SeqCst);
             let peer = peer.clone();
             async move { Ok(vec![peer]) }
         })
-        .with_event_history(Some(manager.handle()));
+        .with_test_session_events(&events);
         let path = neighbor_session_state_path("10.0.0.2");
         let mut list = stream_on_change_list(path.clone());
         list.subscription[0].heartbeat_interval = 1_000_000_000;
@@ -6041,7 +5777,6 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         drop(stream);
         drop(harness);
-        manager.shutdown().await;
     }
 
     #[tokio::test]
@@ -6091,10 +5826,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one end-to-end presence lifecycle receipt"
-    )]
     async fn tcp_removal_presence_is_bounded_and_rearms_after_add() {
         // Load-bearing breaks: removing Unknown+updates_only suppresses the
         // first delete; retaining Present after it queues another heartbeat
@@ -6105,7 +5836,7 @@ mod tests {
             PeerAdded, PeerDisabled, PeerRemoved, StateChanged,
         };
 
-        let manager = event_history_manager().await;
+        let events = broadcast::channel(64).0;
         // Heartbeat renders block on this gate. Without it, any wall-clock
         // stall that leaves a heartbeat due while the peer is Present lets
         // the render reconcile presence against the always-empty snapshot
@@ -6119,7 +5850,7 @@ mod tests {
                 Ok(Vec::new())
             }
         })
-        .with_event_history(Some(manager.handle()));
+        .with_test_session_events(&events);
         let path = neighbor_session_state_path("10.0.0.2");
         let mut list = stream_on_change_list(path.clone());
         list.updates_only = true;
@@ -6133,20 +5864,14 @@ mod tests {
             .into_inner();
         assert_sync(&mut stream).await;
 
-        manager
-            .handle()
-            .sender()
-            .try_send(session_envelope(PeerRemoved, None))
-            .unwrap();
+        events.send(session_event(PeerRemoved, None)).unwrap();
         assert_eq!(
             subscribe_deletes(next_bounded(&mut stream).await.unwrap().unwrap()),
             vec![path.clone()]
         );
 
-        manager
-            .handle()
-            .sender()
-            .try_send(session_envelope(PeerAdded, Some(SessionState::Idle)))
+        events
+            .send(session_event(PeerAdded, Some(SessionState::Idle)))
             .unwrap();
         let updates = subscribe_updates(next_bounded(&mut stream).await.unwrap().unwrap());
         assert_eq!(updates.len(), 1);
@@ -6158,11 +5883,11 @@ mod tests {
         };
         assert_eq!(value, b"\"IDLE\"");
 
-        for envelope in [
-            session_envelope(PeerDisabled, None),
-            session_envelope(StateChanged, Some(SessionState::Established)),
+        for event in [
+            session_event(PeerDisabled, None),
+            session_event(StateChanged, Some(SessionState::Established)),
         ] {
-            manager.handle().sender().try_send(envelope).unwrap();
+            events.send(event).unwrap();
         }
         let updates = subscribe_updates(next_bounded(&mut stream).await.unwrap().unwrap());
         assert_eq!(updates.len(), 1);
@@ -6173,11 +5898,7 @@ mod tests {
         };
         assert_eq!(value, b"\"ESTABLISHED\"");
 
-        manager
-            .handle()
-            .sender()
-            .try_send(session_envelope(PeerRemoved, None))
-            .unwrap();
+        events.send(session_event(PeerRemoved, None)).unwrap();
         assert_eq!(
             subscribe_deletes(next_bounded(&mut stream).await.unwrap().unwrap()),
             vec![path.clone()]
@@ -6185,10 +5906,8 @@ mod tests {
         // One permit: the absent-phase heartbeat this sleep proves silent.
         render_permits.add_permits(1);
         tokio::time::sleep(Duration::from_millis(1_100)).await;
-        manager
-            .handle()
-            .sender()
-            .try_send(session_envelope(PeerAdded, Some(SessionState::Idle)))
+        events
+            .send(session_event(PeerAdded, Some(SessionState::Idle)))
             .unwrap();
         assert_eq!(
             subscribe_paths(next_bounded(&mut stream).await.unwrap().unwrap()),
@@ -6208,28 +5927,23 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_sync(&mut stream).await;
-        for envelope in [
-            session_envelope(PeerRemoved, None),
-            session_envelope(PeerAdded, Some(SessionState::Idle)),
+        for event in [
+            session_event(PeerRemoved, None),
+            session_event(PeerAdded, Some(SessionState::Idle)),
         ] {
-            manager.handle().sender().try_send(envelope).unwrap();
+            events.send(event).unwrap();
         }
         assert_eq!(
             subscribe_paths(next_bounded(&mut stream).await.unwrap().unwrap()),
             vec![Some(path.clone())]
         );
-        manager
-            .handle()
-            .sender()
-            .try_send(session_envelope(PeerRemoved, None))
-            .unwrap();
+        events.send(session_event(PeerRemoved, None)).unwrap();
         assert_eq!(
             subscribe_deletes(next_bounded(&mut stream).await.unwrap().unwrap()),
             vec![path]
         );
         drop(stream);
         drop(harness);
-        manager.shutdown().await;
     }
 
     #[tokio::test]
@@ -6245,7 +5959,7 @@ mod tests {
         let snapshot_started = Arc::clone(&render_started);
         let release_render = Arc::new(tokio::sync::Notify::new());
         let snapshot_release = Arc::clone(&release_render);
-        let manager = event_history_manager().await;
+        let events = broadcast::channel(64).0;
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
             let call = snapshot_calls.fetch_add(1, Ordering::SeqCst);
             let started = Arc::clone(&snapshot_started);
@@ -6266,7 +5980,7 @@ mod tests {
                 Ok(vec![peer])
             }
         })
-        .with_event_history(Some(manager.handle()));
+        .with_test_session_events(&events);
         let mut harness = serve(service).await;
 
         let mut list = stream_on_change_list(neighbor_session_state_path("10.0.0.2"));
@@ -6288,15 +6002,12 @@ mod tests {
             .expect("heartbeat snapshot did not start");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
-        manager
-            .handle()
-            .sender()
-            .try_send(session_envelope(Lost, Some(SessionState::Idle)))
+        events
+            .send(session_event(Lost, Some(SessionState::Idle)))
             .unwrap();
 
         // The event must remain deliverable while the actor-backed heartbeat
-        // snapshot is deliberately held. EHM rides a real SQLite commit, so
-        // this is a generous hang guard rather than a latency assertion.
+        // snapshot is deliberately held.
         let response = tokio::time::timeout(HANG_GUARD, stream.message())
             .await
             .expect("ON_CHANGE Update did not arrive (hang guard)")
@@ -6334,7 +6045,6 @@ mod tests {
 
         drop(stream);
         drop(harness);
-        manager.shutdown().await;
     }
 
     #[tokio::test]

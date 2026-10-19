@@ -167,7 +167,7 @@ fn coverage_thresholds_reject_invalid_percentages_before_loading_file() {
             let option = format!("{flag}={threshold}");
             for path in [&valid, &missing] {
                 let output = run(path, &[&option, "-j"]);
-                assert_eq!(output.status.code(), Some(2), "{option}: {output:?}");
+                assert_eq!(output.status.code(), Some(64), "{option}: {output:?}");
                 assert!(output.stdout.is_empty(), "{output:?}");
                 assert!(
                     String::from_utf8_lossy(&output.stderr)

@@ -191,11 +191,6 @@ pub struct Config {
     /// the flip.
     #[serde(default = "default_enabled")]
     pub apply_bum_enforcement: bool,
-    /// Durable event-history outbox (ADR-0072). **Opt-in (default off)
-    /// as of v0.32.0**; set `[event_history].enabled = true` for
-    /// restart-safe event replay. All fields are restart-required.
-    #[serde(default)]
-    pub event_history: EventHistoryConfig,
     /// Per-source inbound accept-rate limiting (ADR-0120). **Opt-in
     /// (default off)** — existing deployments keep their accept behavior
     /// unchanged. All fields are restart-required.
@@ -422,112 +417,6 @@ fn default_inbound_admission_table_capacity() -> usize {
     4096
 }
 
-/// Durable event-history outbox configuration (ADR-0072).
-///
-/// All fields are restart-required — toggling the outbox or its
-/// bounds requires a daemon restart. The reload matrix documents the
-/// classification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct EventHistoryConfig {
-    /// Enable the durable outbox. **Default `false` (opt-in as of
-    /// v0.32.0).** When `false`, the daemon does not start EHM;
-    /// live broadcasts remain available without persistence, and
-    /// `SubscribeFromEvent` returns `FAILED_PRECONDITION`. Set `true`
-    /// for restart-safe event replay — it costs memory / CPU / disk
-    /// (see `docs/benchmarks.md`).
-    #[serde(default = "default_event_history_enabled")]
-    pub enabled: bool,
-    /// Fail to start if the events DB cannot be opened or recovered.
-    /// Default `false` — continue in live-only mode with the
-    /// `bgp_event_outbox_degraded` flag set.
-    #[serde(default)]
-    pub required: bool,
-    /// Path of `events.db` relative to `runtime_state_dir`.
-    /// Empty string ⇒ `<runtime_state_dir>/events.db`.
-    #[serde(default = "default_event_history_path")]
-    pub path: String,
-    /// Count retention target. Each scheduled pass evicts at most 5,000
-    /// oldest events above the target before evaluating the byte target.
-    #[serde(default = "default_event_history_max_events")]
-    pub max_events: u64,
-    /// Byte retention target on `events.db` + WAL combined. After the count
-    /// phase, each pass removes up to ten 5,000-event batches while oversized.
-    /// `SQLite` may reuse freed pages rather than shrink the main DB immediately.
-    #[serde(default = "default_event_history_max_bytes")]
-    pub max_bytes: u64,
-    /// `SQLite` `PRAGMA synchronous` mode. `full` (default) fsyncs
-    /// per commit; `normal` checkpoints periodically and trades a
-    /// small crash window for throughput.
-    #[serde(default = "default_event_history_synchronous")]
-    pub synchronous: String,
-    /// Behavior on full producer queue. v1 only supports `drop`;
-    /// `block` is reserved for a future ADR. ADR-0072 documents the
-    /// rationale for uniform best-effort drop.
-    #[serde(default = "default_event_history_overflow")]
-    pub overflow: String,
-    /// Per-producer mpsc capacity.
-    #[serde(default = "default_event_history_queue_capacity")]
-    pub queue_capacity: usize,
-    /// Batch-commit size threshold.
-    #[serde(default = "default_event_history_batch_size")]
-    pub batch_size: usize,
-    /// Batch-commit time threshold (milliseconds).
-    #[serde(default = "default_event_history_batch_interval_ms")]
-    pub batch_interval_ms: u64,
-}
-
-impl Default for EventHistoryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_event_history_enabled(),
-            required: false,
-            path: default_event_history_path(),
-            max_events: default_event_history_max_events(),
-            max_bytes: default_event_history_max_bytes(),
-            synchronous: default_event_history_synchronous(),
-            overflow: default_event_history_overflow(),
-            queue_capacity: default_event_history_queue_capacity(),
-            batch_size: default_event_history_batch_size(),
-            batch_interval_ms: default_event_history_batch_interval_ms(),
-        }
-    }
-}
-
-// Default-OFF as of v0.32.0: the durable outbox is opt-in. v0.32.0 bgperf2
-// benchmarking showed the always-on cost was material — ~62 MB RSS and roughly
-// double the peak CPU at 2p/100k — a tax every operator paid before asking for
-// replay semantics. A routing daemon should be fast and lean by default;
-// operators who want restart-safe event replay set `[event_history].enabled =
-// true`. The ADR-0072 implementation is unchanged — only the default posture.
-fn default_event_history_enabled() -> bool {
-    false
-}
-fn default_event_history_path() -> String {
-    String::new()
-}
-fn default_event_history_max_events() -> u64 {
-    100_000
-}
-fn default_event_history_max_bytes() -> u64 {
-    256_000_000
-}
-fn default_event_history_synchronous() -> String {
-    "full".to_string()
-}
-fn default_event_history_overflow() -> String {
-    "drop".to_string()
-}
-fn default_event_history_queue_capacity() -> usize {
-    4096
-}
-fn default_event_history_batch_size() -> usize {
-    1024
-}
-fn default_event_history_batch_interval_ms() -> u64 {
-    50
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
@@ -736,8 +625,7 @@ pub struct GnmiDialoutTarget {
     /// `network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=*]/state/session-state`.
     pub paths: Vec<String>,
     /// Delivery mode: `"sample"` (periodic resample, default) or
-    /// `"on_change"` (event-driven; v1 supports the `session-state` leaf
-    /// and requires `[event_history].enabled = true`).
+    /// `"on_change"` (event-driven; v1 supports the `session-state` leaf).
     #[serde(default)]
     pub mode: GnmiDialoutModeConfig,
     /// SAMPLE resample interval in seconds. Default 10; values from 1
@@ -772,7 +660,7 @@ pub enum GnmiDialoutModeConfig {
     /// Periodic resample of the subscribed paths.
     #[default]
     Sample,
-    /// Event-driven updates from the durable event outbox.
+    /// Event-driven updates from the live session-event stream.
     OnChange,
 }
 
@@ -4076,8 +3964,6 @@ pub enum ConfigError {
     InvalidRuntimeStateDir { value: String, reason: String },
     #[error("invalid BLACKHOLE discard limits: {reason}")]
     InvalidBlackholeDiscardLimits { reason: String },
-    #[error("invalid event_history config: {reason}")]
-    InvalidEventHistoryConfig { reason: String },
     #[error("invalid inbound_admission config: {reason}")]
     InvalidInboundAdmissionConfig { reason: String },
     #[error("invalid RPKI config: {reason}")]

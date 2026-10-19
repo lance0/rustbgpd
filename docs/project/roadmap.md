@@ -19,9 +19,12 @@ routing suite. v1.0 is not on a timeline. Its intended contract is narrower
 than the complete daemon surface: stable IPv4/IPv6 route-server and
 route-reflector operation, policy, automation, and monitoring APIs, with the
 already-proven controller-feed/RR families explicitly scoped. EVPN VTEP/IRB
-and broader dataplane roles remain alpha outside that contract. Until real
-shadow/canary deployment feedback supports a freeze, the project keeps
-shipping focused v0.x cuts.
+and broader dataplane roles remain alpha outside that contract. The project
+keeps shipping focused v0.x cuts until the
+[ADR-0125](../adr/0125-v1-stability-contract.md) evidence bar is met. An
+external shadow pilot is the strongest evidence still sought, but under DR1 it
+is advisory rather than a tagging gate: a tag cut without one discloses the
+pilot's absence and that every receipt behind the contract is self-generated.
 
 ---
 
@@ -56,7 +59,7 @@ those.
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation; opt-in RFC 8212 explicit-policy enforcement (`ebgp_requires_policy`, ADR-0112) and per-peer outbound prefix limits (ADR-0113) shipped in v0.61.0 |
 | Policy: `.rpol` typed compiled language (ADR-0096) | Shipped | Named sets, `u32` parameters, in-language tests (`rbgp policy check`), live-RIB dry run (`rbgp policy test`), per-term explain traces + live hit counters (`rbgp policy stats`); M80 FRR route-map parity receipt |
 | BFD async + RFC 5882 coupling | Partial | M51 receipt revalidated green on current main by #1093 (`8b8f76e8`); receive-work budgeting and remote-AdminDown coupling corrections shipped; RFC 5883 multihop shipped with the M108 routed-loopback FRR receipt; authentication remains demand/interoperability gated by ADR-0117 |
-| Observability & API: gRPC (13 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
+| Observability & API: gRPC (13 services), Prometheus, structured logs, live event stream | Shipped | `WatchEvents` plus bounded in-memory `List*Events` history; the ADR-0072 durable outbox was removed (watch, then snapshot; BMP, Prometheus, and logs are the durable record) |
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
 | BMP trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) + BMPv4 TLV draft, MRT dump (6396) | Shipped | Per-collector views + `version = 3\|4`; Path Marking temporarily unavailable pending a non-colliding TLV type; ADR-0097, M81 receipt |
 | FlowSpec (8955/8956, IPv4/IPv6) | Shipped | All 13 component types; [scoped controller contract](../reference/v1-stable-contract.md#flowspec-controller-boundary) for local origination, reconciliation and committed advertisements; receive-side RFC 9117 feasibility stays opt-in and alpha |
@@ -1368,7 +1371,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
 - **Dataplane-aware readiness.** The shipped `/readyz` (and the bounded
   `GetHealth`) probe scopes readiness to the **control-plane core** — PeerManager
   + RIB responsiveness within a 200 ms deadline — and deliberately excludes the
-  dataplane actors (FIB / EVPN / event-history). So a wedged `fib_runtime` does
+  dataplane actors (FIB / EVPN). So a wedged `fib_runtime` does
   not fail `/readyz`: routes are no longer reaching the kernel even though the
   RIB stays responsive. A future `/readyz?detailed=true` or a separate
   `/dp-readyz` could surface per-dataplane-actor liveness for orchestrators that

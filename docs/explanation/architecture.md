@@ -20,12 +20,11 @@ rpki           ──► wire
 bmp            ──► telemetry, wire
 mrt            ──► wire, rib, telemetry
 telemetry      (no internal deps)
-event-history  ──► telemetry
 evpn           ──► wire
 evpn-linux     ──► evpn
 rib            ──► wire, policy, telemetry, rpki, bmp
 transport      ──► wire, fsm, rib, policy, rpki, telemetry, bmp
-api            ──► wire, fsm, rib, policy, transport, telemetry, evpn, event-history, rpki
+api            ──► wire, fsm, rib, policy, transport, telemetry, evpn, rpki
 cli            ──► wire, policy    (dev tests also use api, evpn, bmp)
 ```
 
@@ -53,7 +52,6 @@ feature dependency tree excludes that test-only feature.
 | `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
 | `rustbgpd-bmp` | BMP exporter: RFC 7854 codec, collector clients, manager fan-out. |
 | `rustbgpd-mrt` | MRT dump: RFC 6396 TABLE_DUMP_V2 codec, atomic writer, periodic manager. Depends on `telemetry` to export the dump-health gauges and counters (`mrt_dump_*`); see the crate README for the metric list. |
-| `rustbgpd-event-history` | Durable local event outbox (ADR-0072): SQLite WAL store with monotonic `event_id`, `EventHistoryManager` actor + storage thread, in-process `subscribe_live()` broadcast, retention by count + bytes, payload-opaque (producer-encoded bytes are persisted and broadcast byte-identically). Producers (RIB, EVPN, PeerManager session lifecycle, policy, BFD bridge, dataplane FIB / blackhole) enqueue prost-encoded `BgpEvent` envelopes; the gRPC `SubscribeFromEvent` cursor in `api` does the replay → live handoff. |
 | `rustbgpd-evpn` | EVPN local VTEP domain model: `EvpnInstance` / `EvpnInstanceTable` / `RouteTarget` / `IpVrf` / `IpVrfTable` (RFC 7432 / RFC 8365 / RFC 9136). Includes the `LocalMacOriginator` / `LocalMacIpOriginator` / `LocalEsOriginator` / `LocalEadPerEs*` state machines (RFC 7432 §15.1 mobility + §8 multi-homing), the `DataplaneIntent` / `RemoteMacTable` snapshot types with `RemoteMacEntry::alias_group_key` for ADR-0059 aliasing-ECMP wire intent, the IP-VRF readiness probe (Gate 9), and the pure-logic Type 5 origination + projection helpers (RFC 9136 §4.4.2 Interface-less IRB). Aliasing module (`aliasing::group_members`) produces the canonical alias VTEP set for a multi-homed Type 2. Domain-only, kernel-free. See ADR-0052, ADR-0054, ADR-0055, ADR-0057, ADR-0058, ADR-0059. |
 | `rustbgpd-evpn-linux` | Linux kernel dataplane for EVPN VTEP mode (`cfg(target_os = "linux")`). Reconciles remote-MAC FDB programming via rtnetlink, surfaces local-MAC observations from `RTNLGRP_NEIGH` upward (plus `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` for slice 6a sub-second IP-VRF route observation), supplies Linux rtnetlink dumps for VRF / L3VXLAN inventory (Gate 9), implements the `Dataplane::probe_ip_vrfs` IRB readiness call, and programs FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` for aliasing-ECMP receive paths (ADR-0059). `linux::nexthop_raw` is the raw-netlink primitive (rtnetlink 0.23 still exposes no nexthop API); `linux::fdb_nhg` is the apply primitive with the CVE-2025-39851 guard; `group_state` + `nh_id_alloc` carry the refcount + NHID-tagging state the reconcile coordinator uses. Consumes domain types from `rustbgpd-evpn`; never imports `rib` or `transport`. See ADR-0054, ADR-0055, ADR-0058, ADR-0059. |
 | `rustbgpd-api` | gRPC server (tonic). Thirteen services (twelve native, plus the vendored OpenConfig `gnmi.gNMI` service — Capabilities/Get/Set/Subscribe), proto codegen at build time. |
@@ -138,7 +136,6 @@ Each component is the single source of truth for its domain. No overlapping auth
 | **EVPN dataplane supervisor** | EVPN kernel intent (`src/evpn_dataplane.rs` → `crates/evpn-linux`) | The `DataplaneIntent` projected from EVPN best paths, and the FDB / neighbor / nexthop-group / IP-VRF state the reconcile actor owns in the kernel. The supervisor is daemon-owned glue precisely because ADR-0054 forbids `evpn-linux` from depending on `rib` or `transport` |
 | **Config transaction controller** | Transaction execution, confirmed-commit state, rollback orchestration (`src/config_transaction_control.rs`, `src/confirm_journal.rs`) | Which candidate TOML changes can commit atomically and when runtime config mutations are fenced |
 | **BMP manager** | Collector connections and monitoring feed (`crates/bmp`) | What each collector has been told: per-peer up/down, pre- and post-policy PDUs, and Loc-RIB instance state (RFC 7854 / 8671 / 9069). Unidirectional — never a routing input |
-| **Event history manager** | Durable event outbox (`crates/event-history`) | `event_id` assignment and cursor durability; producer payload bytes pass through unchanged (ADR-0072) |
 | **API** | Request/response adaptation (`crates/api`) | Nothing — it translates gRPC into commands and queries |
 | **EVPN originator** | MAC / IP-VRF route generation counters (`src/evpn_originator`, `src/evpn_l3_originator.rs`) | EVPN origination generation/sequence numbers; uses `Arc<RwLock>` by design — lower-frequency kernel-observation glue, outside the RIB hot-path "no shared mutable routing state / no locks" invariant |
 
@@ -280,24 +277,22 @@ of taking its default process action. The ordering is a contract, asserted by
    binds the BGP listener socket(s) and optional metrics/readiness socket. This
    reserves every configured address and fails fast, but neither accept loop is
    running yet.
-3. It starts EventHistoryManager before any event producer, when durable event
-   history is enabled.
-4. It wires and starts the optional BMP manager and collector clients, then
+3. It wires and starts the optional BMP manager and collector clients, then
    RibManager, the optional RPKI VRP/ASPA manager and RTR clients, the optional
    MRT manager, and PeerManager.
-5. It starts the remaining pre-gRPC runtime actors, then the gRPC API server.
+4. It starts the remaining pre-gRPC runtime actors, then the gRPC API server.
    BFD uses its prepared sockets, or waits without sockets until SIGHUP enables
    the first member.
-6. It sends every configured neighbor to PeerManager in one
+5. It sends every configured neighbor to PeerManager in one
    `AddConfiguredPeers` command and waits for the result, so the complete
    configured-peer roster is installed, and the import roster published once,
    before inbound BGP can be admitted.
-7. It activates BGP ingress by starting the accept loop and its PeerManager
+6. It activates BGP ingress by starting the accept loop and its PeerManager
    forwarder, then starts the optional metrics/readiness server on its own
    thread and single-threaded runtime, which it stops last in coordinated
    teardown. A configured-peer failure suppresses both activations and enters
    coordinated teardown.
-8. It constructs the gNMI dial-out manager and applies the configured targets
+7. It constructs the gNMI dial-out manager and applies the configured targets
    after metrics/readiness activation. An initial configured-peer failure also
    suppresses this dial-out activation.
 
@@ -397,7 +392,7 @@ Daemon restart-required fields stay pinned to their live values on every route.
 5. BLACKHOLE discard routes, general FIB routes, BFD sessions, and the EVPN
    Linux dataplane drain.
 6. The BMP manager sends Termination messages to collectors and drains.
-7. The gRPC server stops, then the durable event-history outbox flushes.
+7. The gRPC server stops.
 
 [Coordinated Shutdown](design.md#coordinated-shutdown) covers the bounds and
 ordering rationale.

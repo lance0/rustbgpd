@@ -177,8 +177,9 @@ best-path change, export-policy filtered) wrapped in `BgpEvent`. A bounded
 broadcast channel prevents a slow consumer from becoming a DoS vector. If a
 consumer falls behind, the missed events are skipped,
 `bgp_event_stream_lagged_total` increments, and the stream stays connected
-with an in-band `stream_lagged` event. Clients that need durable replay use
-`SubscribeFromEvent` with event history enabled.
+with an in-band `stream_lagged` event. There is no durable replay: after a
+reconnect a client reopens and buffers the stream before re-reading state, and
+BMP, Prometheus, and logs are the durable record.
 
 **Recent event history.** `ListRouteEvents` exposes the same unicast
 best-path event shape from a bounded in-memory RIB ring for after-the-fact

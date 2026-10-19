@@ -7,10 +7,7 @@
 //! out and nothing here is reachable.
 //!
 //! The fanout driver registers synthetic outbound peers, seeds the Loc-RIB, and
-//! runs `distribute_changes` directly. The event-history driver calls the same
-//! private publish helpers as the manager actor so the API crate can compare
-//! the default no-op sink with its concrete EHM sink without widening the
-//! normal public API or duplicating manager-side ring/broadcast work.
+//! runs `distribute_changes` directly.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
@@ -23,7 +20,6 @@ use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
 
 use super::RibManager;
-use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::Route;
 use crate::update::{
     BestRoutesPage, DataplanePageError, ExactExportEncoder, FibInstallCandidatesPage,
@@ -2907,28 +2903,6 @@ impl RibManager {
         response
             .try_recv()
             .expect("FIB dataplane page handler replies synchronously")
-    }
-
-    /// Publish an owned batch through the production route-event helper.
-    ///
-    /// Input construction belongs in the benchmark setup closure. Consuming
-    /// the batch here keeps event cloning out of the timed manager phase while
-    /// retaining the real process-local ID, ring, sink, and legacy-broadcast
-    /// work performed by `RibManager::publish_route_event`.
-    pub fn bench_publish_route_events(&mut self, events: impl IntoIterator<Item = RouteEvent>) {
-        for event in events {
-            self.publish_route_event(event);
-        }
-    }
-
-    /// Publish an owned batch through the production EVPN-event helper.
-    ///
-    /// Like [`Self::bench_publish_route_events`], this method exists only under
-    /// `bench-internals` and deliberately adds no alternate production path.
-    pub fn bench_publish_evpn_events(&mut self, events: impl IntoIterator<Item = EvpnRouteEvent>) {
-        for event in events {
-            self.publish_evpn_route_event(event);
-        }
     }
 }
 

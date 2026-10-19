@@ -1480,29 +1480,6 @@ impl rustbgpd_rib::ExactExportSnapshot for ForeignExactExportSnapshot {
     }
 }
 
-// ---------------------------------------------------------------------
-// ADR-0072 follow-up — structured OTC route-leak event publishing
-// ---------------------------------------------------------------------
-#[derive(Default)]
-struct RecordingTransportSink {
-    events: std::sync::Mutex<Vec<crate::event_sink::OtcRouteBlockedEvent>>,
-}
-impl RecordingTransportSink {
-    fn snapshot(&self) -> Vec<crate::event_sink::OtcRouteBlockedEvent> {
-        self.events.lock().unwrap().clone()
-    }
-}
-impl crate::event_sink::TransportEventSink for RecordingTransportSink {
-    fn publish_otc_route_blocked(&self, event: &crate::event_sink::OtcRouteBlockedEvent) {
-        self.events.lock().unwrap().push(event.clone());
-    }
-}
-fn install_recording_sink(session: &mut PeerSession) -> Arc<RecordingTransportSink> {
-    let sink = Arc::new(RecordingTransportSink::default());
-    session.set_event_sink(sink.clone());
-    sink
-}
-
 /// Negotiate IPv4+IPv6 unicast on an established fixture session.
 fn install_dual_stack_session(session: &mut PeerSession, add_path: bool) {
     let mut negotiated = negotiated_session(65002, false);

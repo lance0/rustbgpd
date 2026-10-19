@@ -2,7 +2,7 @@
 # Canonical file-descriptor headroom guard for the bare-host flagship soaks.
 #
 # A scaled daemon holds one socket per peer plus the gRPC/metrics listeners,
-# their accepted connections, the event-history store, and the MRT/journal
+# their accepted connections, and the MRT/journal
 # files. Launched from a bare shell it inherits the caller's `RLIMIT_NOFILE`
 # and raises its soft limit to the inherited hard limit at startup, so the
 # hard limit is the ceiling. With a hard limit near 1024, the 1000-peer

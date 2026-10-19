@@ -557,10 +557,10 @@ async fn versioned_json_rejects_other_formats_before_dispatch() {
     }
     for (args, code) in [
         (&["--json-version", "1", "health"][..], 1),
-        (&["--json", "--json-version", "2", "health"][..], 2),
+        (&["--json", "--json-version", "2", "health"][..], 64),
         (
             &["--json", "--json-version", "1", "--json-lines", "rib"][..],
-            2,
+            64,
         ),
     ] {
         let output = finish(start("unix:///nonexistent/rbgp.sock", args)).await;

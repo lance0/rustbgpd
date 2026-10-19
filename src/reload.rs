@@ -2351,14 +2351,6 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         );
         new_config.security = current.security.clone();
     }
-    if new_config.event_history != current.event_history {
-        error!(
-            "[event_history] changed — the ADR-0072 durable event outbox is \
-             configured once at startup. Restart rustbgpd to apply; the running \
-             outbox keeps its startup configuration until then."
-        );
-        new_config.event_history = current.event_history.clone();
-    }
     if new_config.inbound_admission != current.inbound_admission {
         error!(
             "[inbound_admission] changed — the ADR-0120 accept-path limiter is \
@@ -11206,32 +11198,6 @@ hold_time = 90
         assert_eq!(
             returned.desired.security.grpc.roles.len(),
             2,
-            "desired TOML must preserve the operator's edit for restart"
-        );
-    }
-
-    #[tokio::test]
-    async fn reload_pins_event_history_edits_to_startup_snapshot() {
-        // LAN-286: every [event_history] field is restart-required (the
-        // ADR-0072 outbox is configured once at startup). A SIGHUP must
-        // pin the runtime snapshot back to the startup outbox config —
-        // but keep the operator's edit in the desired TOML.
-        let initial = baseline_toml();
-        let new_toml = format!("{}\n[event_history]\nenabled = true\n", baseline_toml());
-
-        let (returned, tags) = drive_reload(initial, &new_toml).await;
-        let returned = returned.expect("reload should return pinned runtime config");
-
-        assert!(
-            tags.is_empty(),
-            "event-history-only edits are restart-required and must not reconcile peers: {tags:?}"
-        );
-        assert!(
-            !returned.event_history.enabled,
-            "runtime snapshot must keep the startup (disabled) outbox config"
-        );
-        assert!(
-            returned.desired.event_history.enabled,
             "desired TOML must preserve the operator's edit for restart"
         );
     }

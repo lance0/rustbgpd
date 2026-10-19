@@ -71,7 +71,7 @@ releases rather than carried forward from older measurements.
 | Extended Nexthop (RFC 8950) | Yes | Yes | IPv4 unicast over IPv6 next hop |
 | BGP unnumbered (interface-scoped IPv6 link-local) | Yes | Yes | Both carry IPv4 unicast over RFC 8950 on link-local interface neighbors. GoBGP uses interface autodiscovery (`neighbor-interface`, derives the peer from the link-local); rustbgpd v1 uses static `address` + `interface` (FRR-style autodiscovery deferred) and additionally installs the scoped Linux FIB next-hop with the egress `dev`. M53 validates rustbgpd against FRR. ADR-0069 |
 | Admin Shutdown Comm (RFC 9003, obsoletes 8203) | Yes | Yes | Reason text in NOTIFICATION |
-| BGP Roles + Only-to-Customer (RFC 9234) | No | Yes | rustbgpd negotiates the OPEN Role capability, applies §5 strict-mode rejection on mismatch, and enforces OTC ingress / egress rules per §6 with a structured `OtcRouteBlockedEvent` payload on `SubscribeFromEvent` alongside the `bgp_otc_routes_blocked_total{peer, reason}` counter and per-peer scalar. GoBGP does not implement RFC 9234 (no Role capability in `bgp.go`; open feature request osrg/gobgp#3244). ADR-0071, M55. |
+| BGP Roles + Only-to-Customer (RFC 9234) | No | Yes | rustbgpd negotiates the OPEN Role capability, applies §5 strict-mode rejection on mismatch, and enforces OTC ingress / egress rules per §6, reported through the `bgp_otc_routes_blocked_total{peer, reason}` counter, the per-peer scalar, and log lines. GoBGP does not implement RFC 9234 (no Role capability in `bgp.go`; open feature request osrg/gobgp#3244). ADR-0071, M55. |
 
 ## Path Attributes
 
@@ -132,7 +132,7 @@ releases rather than carried forward from older measurements.
 | Streaming path injection | Yes | No | AddPathStream |
 | List paths (Adj-In/Loc/Adj-Out) | Yes | Yes | |
 | Watch events (streaming) | Yes | Yes | WatchEvents |
-| gNMI / OpenConfig telemetry | No | Partial | `Capabilities` / `Get` / `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled) on a strict OpenConfig BGP state subset; `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). ADR-0070 / M54; ON_CHANGE wired in ADR-0072 / M56. |
+| gNMI / OpenConfig telemetry | No | Partial | `Capabilities` / `Get` / `Subscribe` (ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state`) on a strict OpenConfig BGP state subset; `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). ADR-0070 / M54; ON_CHANGE validated by M56. |
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
@@ -156,9 +156,8 @@ releases rather than carried forward from older measurements.
 | BMP Adj-RIB-Out (RFC 8671) | No | **Yes** | rustbgpd exports post-policy, byte-exact wire PDUs ([ADR-0097](../adr/0097-bmp-monitoring.md)). GoBGP 4.9.0 already exports Loc-RIB; RFC 8671 Adj-RIB-Out is the differentiator in this comparison[^bmp-views] |
 | BMPv4 framing (draft, pre-IANA) | No | **Yes** | Per-collector `version = 4` opt-in follows draft-ietf-grow-bmp-tlv-21; Path Marking is temporarily unavailable because its draft type 5 collides with Sequence Number (ADR-0097) |
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
-| WatchEvent streaming | Yes | Yes | `WatchEvents` (live broadcast) plus `SubscribeFromEvent` with a durable monotonic-`event_id` cursor that survives daemon restart and post-incident reconnect; backed by the SQLite-WAL event outbox (ADR-0072). `rbgp events watch --from-event-id N` and the `examples/event-bridge` reference binary consume the cursor. |
-| Durable event history / cursor replay | No | Yes | ADR-0072: producers across RIB, EVPN, PeerManager session lifecycle, policy, BFD, and dataplane FIB / blackhole all enqueue durable events; the `[event_history]` config block controls retention by count + bytes. `bgp_event_outbox_cursor_gap_total` counts subscribe requests where the requested cursor was older than the retention floor. |
-| gNMI / OpenConfig telemetry | No | Partial | Native `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
+| WatchEvent streaming | Yes | Yes | `WatchEvents` (live broadcast with in-band `stream_lagged` warnings) plus bounded in-memory `List*Events` history. No durable cursor: the ADR-0072 outbox was removed, so consumers reopen the watch and then re-read state after a reconnect. |
+| gNMI / OpenConfig telemetry | No | Partial | Native `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state`). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
 | Sentry integration | Yes | No | |
 
 [^bmp-views]: Checked 2026-09-09: GoBGP 4.9.0's
@@ -297,10 +296,12 @@ target. Remaining gaps are narrower:
    applies, confirms, and aborts runtime config transactions under the shared
    runtime-config coordinator, and the gNMI `Set` subset commits through the
    same executor.
-4. ~~**Durable event replay**~~ — *shipped in v0.30.0 (ADR-0072 + ADR-0072
-   follow-up sprint).* `SubscribeFromEvent` with monotonic-`event_id` cursor
-   carries the post-incident debugging story; gNMI `ON_CHANGE` v1 for
-   neighbor `session-state` consumes the same in-process broadcast.
+4. **Durable event replay** — shipped in v0.30.0 (ADR-0072) and later
+   removed; not planned. Reconnecting consumers open and buffer
+   `WatchEvents`, then read state and apply the buffered events (separate
+   RPCs give no atomic handoff), or use gNMI `Subscribe` ON_CHANGE, which
+   subscribes before its snapshot internally; BMP, Prometheus, and logs are
+   the durable record.
 
 ### General-Purpose BGP Speaker
 

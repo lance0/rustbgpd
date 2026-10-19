@@ -717,35 +717,6 @@ impl PeerSession {
             rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
             1,
         );
-        if !self.event_sink().wants_otc_route_blocked() {
-            return;
-        }
-        let otc_value = route
-            .attributes
-            .iter()
-            .find_map(PathAttribute::only_to_customer);
-        let as_path_string = route
-            .attributes
-            .iter()
-            .find_map(|attribute| match attribute {
-                PathAttribute::AsPath(path) => Some(path.to_aspath_string()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        self.event_sink()
-            .publish_otc_route_blocked(&crate::event_sink::OtcRouteBlockedEvent {
-                peer: self.peer_ip,
-                direction: crate::event_sink::OtcDirection::Egress,
-                reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
-                prefixes: vec![route.prefix.to_string()],
-                local_role: self.config.peer.local_role,
-                remote_role: self
-                    .negotiated
-                    .as_ref()
-                    .and_then(|session| session.remote_role),
-                otc_value,
-                as_path: as_path_string,
-            });
     }
     /// Validate the original envelope before admitting any payload or marker.
     fn outbound_snapshot(

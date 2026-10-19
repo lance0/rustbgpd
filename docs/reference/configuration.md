@@ -3374,8 +3374,7 @@ bounds retained decisions per session, not total daemon memory.
 
 This is **diagnostic state only** — it never affects which routes are
 accepted. Scope is IPv4 / IPv6 unicast. The cache resets on peer session
-reset and is **not durable across restart** (for durable history use the
-event-history outbox, ADR-0072). Both fields are **restart-required
+reset and is **not durable across restart**. Both fields are **restart-required
 per-peer** on reload — a session already established keeps its current
 behavior until it re-establishes; see
 [`reload-matrix.md`](reload-matrix.md) and the "Explain an import
@@ -3470,7 +3469,7 @@ ASPA verification is an IPv4/IPv6-unicast edge-ingress signal. eBGP routes
 are verified even when no BGP Role is configured; a Role selects verification
 direction. The first-AS check still applies when `route_server_client = true`:
 that flag identifies the remote peer as a route-server member. Only a local
-`rs-client` Role is exempt, because a remote route server transparently relays
+`route_server_client` Role is exempt, because a remote route server transparently relays
 the member's AS_PATH without adding its own ASN. RFC 6793 OLD peers are checked
 after AS_PATH reconstruction. Routes learned over iBGP
 always present `aspa = "unknown"` to import policy and keep that state across
@@ -3984,7 +3983,7 @@ tls_key_file = "/etc/rustbgpd/client.key"    # required with tls_cert_file
 | `name` | string | yes | -- | Unique target name; the `gnmi_dialout_connected{target}` metric label and log key |
 | `address` | string | yes | -- | Collector `host:port` (DNS names allowed; bracket IPv6 literals) |
 | `paths` | array | yes | -- | OpenConfig gNMI paths in xpath form — the same path surface the dial-in Subscribe server supports (see `docs/reference/gnmi.md`) |
-| `mode` | string | no | `"sample"` | `"sample"` (periodic resample) or `"on_change"` (event-driven; v1 covers the `session-state` leaf and requires `[event_history].enabled = true`) |
+| `mode` | string | no | `"sample"` | `"sample"` (periodic resample) or `"on_change"` (event-driven from the live session-event stream; covers the `session-state` leaf) |
 | `sample_interval` | u64 | no | 10 | Seconds between samples in SAMPLE mode; values from 1 through 3600 are retained, while zero and values above 3600 are rejected |
 | `backoff_initial` | u64 | no | 1 | First reconnect delay in seconds; doubles per consecutive failure |
 | `backoff_max` | u64 | no | 30 | Reconnect delay cap in seconds |
@@ -5300,196 +5299,26 @@ Status states:
 
 ---
 
-## `[event_history]`
+## `[event_history]` (removed)
 
-Durable event-history outbox (ADR-0072). A daemon-local SQLite WAL
-store that survives daemon restart with a monotonic `event_id`
-cursor. External collectors bridge to their own bus (Kafka, NATS,
-Vector, journald, custom) over the existing gRPC event-stream
-RPCs; rustbgpd itself does not try to be an event bus.
+<a id="recovery-and-degraded-health"></a>
 
-**Opt-in — default off as of v0.32.0.** The outbox is disabled by
-default; operators who want restart-safe event replay set
-`enabled = true` and restart. It is off by default because v0.32.0
-benchmarking measured a material always-on cost (~62 MB RSS and roughly
-double the peak CPU at 2p/100k); a routing daemon should be lean by
-default. While disabled, `SubscribeFromEvent` and gNMI `Subscribe
-ON_CHANGE` return `FAILED_PRECONDITION`; the live `WatchEvents` /
-`List*Events` surfaces are unaffected. When enabled, the
-outbox applies scheduled, bounded retention passes against a `max_events`
-count target and a `max_bytes` size target. Each pass first removes at most
-5,000 oldest events above the count target, then removes up to ten additional
-5,000-event batches while the database remains above the size target. A busy
-or heavily oversized store can therefore remain above either target between
-passes or after one pass. Sustained event production above the maximum
-per-pass eviction throughput can make the store continue growing without a
-hard ceiling. SQLite reuses freed pages after DELETE and does not guarantee
-that the main database file immediately shrinks without a future compaction
-pass.
-
-All fields are restart-required; see
-[reload-matrix.md](reload-matrix.md#event_history-adr-0072) for
-the per-field classification.
-
-```toml
-[event_history]
-enabled = false                 # default (v0.32.0); set true for durable event replay
-required = false                # if true, daemon fails to start when DB unrecoverable
-path = ""                       # relative to runtime_state_dir; "" = events.db
-max_events = 100_000            # count retention target; bounded work per pass
-max_bytes = 256_000_000         # byte retention target (events.db + WAL)
-synchronous = "full"            # full = fsync per commit; normal trades crash window for throughput
-overflow = "drop"               # v1 only supports "drop"; "block" reserved for a future ADR
-queue_capacity = 4096           # per-producer mpsc capacity
-batch_size = 1024               # batch-commit size threshold
-batch_interval_ms = 50          # batch-commit time threshold
-```
-
-### Recovery and degraded health
-
-When the events DB fails to open or is corrupted:
-
-- EHM retries the open once after 200 ms, so a brief lock or I/O error
-  does not quarantine a healthy store.
-- If the retry also fails because of the store's content (SQLite reports
-  the file corrupt or not a database, or its metadata is malformed), the
-  database and its `-wal` / `-shm` files are renamed to `events.db.stale` (matches the `*.json.stale` convention from
-  `fib-owned.json`). An earlier quarantine is never overwritten: its files
-  first move to `events.db.stale.1`, or the next unused number, so the
-  highest number is the most recent earlier copy. Each copy is a full
-  store; delete old copies once you no longer need them.
-- The allocator anchor is recovered via authoritative DB metadata:
-  primary DB metadata, then quarantine fallback. `events.last_id` is
-  written as a diagnostic hint, but it may lag committed events and is
-  not used to resume allocation in v1.
-- If both authoritative sources fail AND prior allocation evidence
-  exists (`events.db.stale` or `events.last_id`), EHM enters
-  pass-through (`required = false`) or refuses to start
-  (`required = true`). The allocator never restarts at 1 silently.
-- `bgp_event_outbox_degraded` flips to `1` and does not auto-
-  clear in v1; operator restarts to clear.
-- Prior allocation evidence means `events.db.stale` or `events.last_id`.
-  Numbered copies (`events.db.stale.<n>`) are archives and are not consulted.
-
-A store written by a newer daemon is not corruption and is never quarantined.
-When `schema_version` in `events.db` is higher than the daemon supports, the
-open fails with `events.db schema version <on disk> is newer than the
-supported version <supported>; upgrade the daemon or move the store aside
-before starting`. With `required = true` the daemon exits 1; with
-`required = false` it logs the error and continues in live-only mode. Either
-way the store stays in place: upgrade the daemon again, or move `events.db`
-and its `-wal` / `-shm` files aside by hand (for example to
-`events.db.stale-downgrade`) before starting the older daemon.
-
-A store the host will not let the daemon open or write is not corruption
-either, and is never quarantined. A full filesystem, a read-only mount,
-files the daemon's user cannot write (for example after a manual run as
-root), I/O errors, or a lock held elsewhere fail the open with the SQLite
-error, such as `unable to open database file`, `attempt to write a readonly
-database`, or `database or disk is full`. Startup also stages one write and
-rolls it back, so a store the daemon can read but not write fails here rather
-than at the first event. As with a newer schema, `required = true` exits 1,
-`required = false` continues in live-only mode, and the files stay in place.
-Fix the ownership, space, or mount (for a read-only `events.db`, the `-wal`
-and `-shm` files SQLite created beside it too) and restart.
-
-If the storage thread stops while the daemon runs (for example, after a
-panic), the outbox closes producer admission, refuses new `SubscribeFromEvent`
-requests with `UNAVAILABLE`, ends open durable streams with `DATA_LOSS`, and
-sets `bgp_event_outbox_storage_failed` and `bgp_event_outbox_degraded` to `1`.
-Events produced from then until a restart are lost. Restart the daemon to
-recover.
-
-#### Restoring a quarantined store
-
-EHM does not restore a quarantined store automatically. If the quarantined
-copy is intact and you want its history back, restore it by hand. Run these
-commands in the directory that holds `events.db`:
-
-1. Stop the daemon.
-2. Check the copy. This must print `ok`:
-   `sqlite3 -readonly events.db.stale 'PRAGMA integrity_check;'`
-3. Note the `last_event_id` of both stores. Skip `events.db` if it does not
-   exist:
-   `sqlite3 -readonly events.db.stale "SELECT value FROM metadata WHERE key = 'last_event_id';"`
-   `sqlite3 -readonly events.db "SELECT value FROM metadata WHERE key = 'last_event_id';"`
-4. Move the replacement files (`events.db`, `events.db-wal`,
-   `events.db-shm`) to another name.
-5. Rename `events.db.stale`, `events.db.stale-wal`, and
-   `events.db.stale-shm` (whichever exist) to `events.db`, `events.db-wal`,
-   and `events.db-shm`.
-6. If the replacement store's value from step 3 is higher, set the restored
-   store to that value so that no `event_id` is reused:
-   `sqlite3 events.db "UPDATE metadata SET value = '<value>' WHERE key = 'last_event_id';"`
-7. Start the daemon.
-
-Events committed only to the replacement store are not in the restored
-history; they remain in the files moved aside in step 4.
-
-### Best-effort under overload
-
-On a full producer queue, EHM drops the event, increments
-`bgp_event_outbox_dropped_total{category, reason="queue_full"}`,
-and flips the degraded flag. Drops are **observable but lie
-outside the committed cursor sequence by design**. The outbox is
-not a compliance-grade audit log; operators wanting that should
-treat it as a transport to their external bus, which is the
-system of record.
-
-### External-bus integration
-
-The documented pattern is `SubscribeFromEvent(from_event_id)` —
-a server-side replay-then-live join over the durable outbox.
-Cursor semantics on `from_event_id`:
-
-- absent ⇒ live-only (no replay), like `WatchEvents`.
-- `0` ⇒ replay everything retained, then live (fresh-collector
-  case).
-- `N > 0` ⇒ replay events with `event_id > N`, then live (the
-  normal reconnect case).
-
-When the requested cursor is older than the retention floor,
-the server emits a leading `StreamLagEvent` with the missed
-count over the global committed stream (not the filtered
-subset) and then resumes replay from the earliest retained
-event. If retention evicts events ahead of a replay that is
-still in progress, the server emits another `StreamLagEvent`
-for exactly those ids before the next replayed event. Every
-retained event that matches the subscription is delivered, and
-every evicted id is covered by a gap event's `missed_count`,
-which counts over the global committed stream rather than the
-filtered subset (so it can exceed the number of matching events
-lost). The
-`bgp_event_outbox_cursor_gap_total` counter
-tracks how often either fires — alert on non-zero to know your
-retention is undersized for the collector reconnect SLA.
-
-The CLI `rbgp events watch --from-event-id <N>` drives
-the same RPC and is mutually exclusive with `--backfill`
-(`--backfill` replays the daemon's process-local route ring,
-which resets on restart; `--from-event-id` replays the
-durable outbox, which survives restart).
-
-`examples/event-bridge/` is the reference workspace binary
-that streams `BgpEvent` as JSON-lines to stdout. Operators
-copy it and replace the stdout writer with their Kafka /
-NATS / Vector / journald sink, then persist
-`last_seen_event_id` after their downstream sink confirms
-durable receipt. See `OPERATIONS.md` "Durable Event Cursor"
-for the alert + sizing playbook.
-
-When `enabled = false` or EHM failed to start with
-`required = false`, `SubscribeFromEvent` returns
-`FAILED_PRECONDITION`. The live `WatchEvents`
-and `List*Events` surfaces are byte-identical
-to pre-ADR-0072 behavior in both cases — they're
-backed by the existing in-memory rings.
-
-**Producer set:** route, EVPN, session-lifecycle,
-session-notification, policy, dataplane, and BFD. Dataplane
-summary rollups and per-route FIB apply outcomes stay available
-live through `WatchEvents`, and are also replayable through
-`SubscribeFromEvent` when event history is enabled.
+The optional durable event history (a SQLite outbox under
+`runtime_state_dir`, replayed through `SubscribeFromEvent`) has been removed.
+A config that still contains an `[event_history]` section fails to load:
+delete the section, and delete any leftover `events.db` (with its `-wal` and
+`-shm` files) under `runtime_state_dir`. Settle any pending commit-confirm
+transaction with the previous release before upgrading (`rbgp config confirm`
+or `rbgp config abort`), and never edit its retained prior: boot recovery
+checks that file's length, identity and SHA-256. If the prior still holds
+`[event_history]`, an upgraded daemon exits at startup with "v3 commit-confirm
+boot authority is invalid or unavailable" and leaves the locator, pending
+files and config untouched. To recover, reinstall the previous release and
+start it (its boot recovery restores the prior and ends the transaction),
+remove the section, then upgrade again. For reconnecting automation, open and
+buffer `WatchEvents` before reading state, or use gNMI `Subscribe` ON_CHANGE,
+which subscribes before its snapshot internally. BMP to a collector,
+Prometheus, and logs are the durable record.
 
 ## Config Persistence
 
@@ -5521,7 +5350,7 @@ equivalent canonical rendering:
   default values (`dynamic_neighbors = []`, `evpn_instances = []`, and the
   full `[global]` field set). Optional sections still at their defaults
   (`[security]`, `[policy]`, `[flowspec]`, `[managed_netdevs]`,
-  `[event_history]`, `[inbound_admission]`) are omitted, so a routine runtime
+  `[inbound_admission]`) are omitted, so a routine runtime
   change does not add unused feature tables; once you configure one it is
   kept. Selected default-empty collections are also omitted, including
   inline-policy `match_community`, `set_community_add`, and
@@ -5623,7 +5452,7 @@ limits and multipath knobs; `dynamic_neighbor_limit`, `honor_graceful_shutdown`
 and `honor_blackhole` are the reload-applied exceptions),
 `[global.telemetry]` `prometheus_addr`, `dataplane_readiness` and `log_format`,
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
-`[mrt]`, `[flowspec]`, `[event_history]`, `[inbound_admission]`,
+`[mrt]`, `[flowspec]`, `[inbound_admission]`,
 `[security.grpc]`, `[managed_netdevs]`, `[[bfd_profiles]]` definitions, and
 `apply_bum_enforcement` are
 **restart-required** — they're surfaced under "Restart-required" in
