@@ -166,6 +166,7 @@ event history was removed), is Superseded.
 | [0138](0138-route-flap-dampening.md) | Route flap dampening | Proposed (preparation pulled forward 2026-10-09 and shipped; runtime enablement NO-GO, demand-gated) | 2026-10-08 | Active |
 | [0139](0139-flowspec-controller-contract.md) | Scoped FlowSpec controller compatibility contract | Accepted | 2026-10-10 | Active |
 | [0140](0140-evpn-core-isolation-es-hold.md) | EVPN core isolation and startup hold for bound Ethernet Segments | Accepted (implemented; M121 interop cell) | 2026-10-12 | Active |
+| [0141](0141-injection-owner-lease.md) | Owner-scoped lease on controller-injected routes | Proposed | 2026-10-19 | Unstated |
 
 ## Supporting records
 
