@@ -236,7 +236,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   `remote_role="customer"`. When the OPEN carries Role capabilities but no
   assigned value, only unassigned or wrong-length ones, the label is
   `remote_role="unrecognized"` and the warning log carries the first raw value
-  as `remote_role_raw`, for example `[7]`. An empty `remote_role` means the OPEN
+  as `remote_role_raw`, for example `[7]`. `remote_role="none"` means the OPEN
   carried no Role capability, as with an absent Role under `strict_role`.
 - The configured local Role is session-stamped into the RIB before `PeerUp`,
   so the first Adj-RIB-Out build and every subsequent export use the same

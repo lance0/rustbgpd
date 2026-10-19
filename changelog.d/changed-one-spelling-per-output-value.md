@@ -3,12 +3,12 @@
 - Output now uses one spelling per value, the one configuration uses. The
   gRPC `NeighborConfig.role`, `NeighborState.local_role` and
   `NeighborState.remote_role` report `route_server` and `route_server_client`
-  instead of `rs` and `rs-client`, so `rbgp neighbor` shows the same names.
-  The neighbor detail's distribution mode is `single_best`, `add_path` or
-  `per_client_best` instead of the kebab-case forms. An absent Role is empty
-  everywhere: `bgp_role_mismatch_total` and its warning log carry an empty
-  `local_role` or `remote_role` instead of `none`, matching the API and an
-  omitted `role` key. `rbgp rpki verify-path --role` lists `route_server` and
+  instead of `rs` and `rs-client`, so `rbgp neighbor` shows the same names
+  as config, events and the `bgp_role_mismatch_total` labels. An absent Role
+  stays an empty string on the API and `none` in that metric. The neighbor
+  detail's distribution mode is `single_best`, `add_path` or
+  `per_client_best` instead of the kebab-case forms.
+  `rbgp rpki verify-path --role` lists `route_server` and
   `route_server_client`. The old spellings stay accepted as input aliases in
   configuration, the gRPC role field and the CLI.
 - `rbgp` parser and usage errors (an unknown flag or subcommand, or a missing

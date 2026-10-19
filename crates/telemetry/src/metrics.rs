@@ -2185,10 +2185,9 @@ impl BgpMetrics {
                 "bgp_role_mismatch_total",
                 "RFC 9234 OPEN-time Role-Mismatch rejections (NOTIFICATION 2/11). \
                  local_role + remote_role ∈ {provider, route_server, \
-                 route_server_client, customer, peer}, or empty when no Role \
-                 is configured or advertised; remote_role is unrecognized \
-                 when the OPEN carries only unassigned or wrong-length Role \
-                 values.",
+                 route_server_client, customer, peer, none}; remote_role is \
+                 unrecognized when the OPEN carries only unassigned or \
+                 wrong-length Role values.",
             ),
             &["peer", "local_role", "remote_role"],
         )
@@ -5803,9 +5802,9 @@ impl BgpMetrics {
     /// Record RFC 9234 OPEN-time Role-Mismatch rejection.
     ///
     /// `local_role` and `remote_role` are bounded strings — one of
-    /// `{provider, route_server, route_server_client, customer, peer}` or
-    /// empty. The label cardinality is bounded per peer; absent roles (peer
-    /// didn't advertise, or we didn't configure) are the empty string.
+    /// `{provider, route_server, route_server_client, customer, peer, none}`.
+    /// The label cardinality is fixed at 6×6 = 36 per peer; absent roles
+    /// (peer didn't advertise, or we didn't configure) become `"none"`.
     pub fn record_role_mismatch(&self, peer: &str, local_role: &str, remote_role: &str) {
         self.0
             .role_mismatch
@@ -9292,7 +9291,7 @@ mod tests {
         m.record_role_mismatch("10.0.0.7", "provider", "provider");
         m.record_role_mismatch("10.0.0.7", "provider", "provider");
         // Strict mode: we configured Customer but peer didn't advertise Role.
-        m.record_role_mismatch("10.0.0.8", "customer", "");
+        m.record_role_mismatch("10.0.0.8", "customer", "none");
 
         assert_eq!(
             m.0.role_mismatch
@@ -9302,7 +9301,7 @@ mod tests {
         );
         assert_eq!(
             m.0.role_mismatch
-                .with_label_values(&["10.0.0.8", "customer", ""])
+                .with_label_values(&["10.0.0.8", "customer", "none"])
                 .get(),
             1
         );
@@ -9311,7 +9310,7 @@ mod tests {
         let text = gather_text(&m);
         assert!(text.contains("bgp_role_mismatch_total"));
         assert!(text.contains(r#"local_role="provider""#));
-        assert!(text.contains(r#"remote_role="""#));
+        assert!(text.contains(r#"remote_role="none""#));
     }
 
     #[test]
