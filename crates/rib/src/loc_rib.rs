@@ -715,12 +715,7 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    let v6 = matches!(key.prefix, rustbgpd_wire::VpnPrefix::V6 { .. });
-                    let added = self
-                        .vpn_routes
-                        .insert(key, (new_best, SystemTime::now()))
-                        .is_none();
-                    track(&mut self.second_family.vpn, v6, added, false);
+                    self.store_vpn(key, new_best);
                 }
                 changed
             }
@@ -730,8 +725,17 @@ impl LocRib {
 
     /// Insert or replace the selected VPN route for a key.
     pub fn insert_vpn(&mut self, route: VpnRibRoute) {
-        self.vpn_routes
-            .insert(route.nlri.key(), (route, SystemTime::now()));
+        self.store_vpn(route.nlri.key(), route);
+    }
+
+    /// The one VPN insert path, keeping the VPN-IPv6 count in step.
+    fn store_vpn(&mut self, key: rustbgpd_wire::VpnRouteKey, route: VpnRibRoute) {
+        let v6 = matches!(key.prefix, rustbgpd_wire::VpnPrefix::V6 { .. });
+        let added = self
+            .vpn_routes
+            .insert(key, (route, SystemTime::now()))
+            .is_none();
+        track(&mut self.second_family.vpn, v6, added, false);
     }
 
     /// Look up the selected VPN route for an RD+prefix identity.
@@ -1731,6 +1735,24 @@ mod tests {
         assert_eq!(loc.family_lens().unicast, [1, 0]);
         assert!(loc.recompute(v4, std::iter::empty()));
         assert_eq!(loc.family_lens().unicast, [0, 0]);
+    }
+
+    /// `insert_vpn` must share the selection path's VPN-IPv6 accounting:
+    /// a bypass reports a VPN-IPv6 route as `[1, 0]` and the remove underflows.
+    #[test]
+    fn family_lens_follow_vpnv6_through_insert_vpn_replace_and_remove() {
+        let mut loc = LocRib::new();
+        let mut nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        nlri.prefix = VpnPrefix::v6("2001:db8::".parse().unwrap(), 32).unwrap();
+        let key = nlri.key();
+        loc.insert_vpn(make_vpn_route(nlri.clone(), 1, 100));
+        assert_eq!(loc.family_lens().vpn, [0, 1]);
+        // A replacement is not a new member.
+        loc.insert_vpn(make_vpn_route(nlri, 2, 200));
+        assert_eq!(loc.family_lens().vpn, [0, 1]);
+        assert!(loc.remove_vpn(&key));
+        assert!(!loc.remove_vpn(&key));
+        assert_eq!(loc.family_lens().vpn, [0, 0]);
     }
 
     #[test]
