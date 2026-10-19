@@ -2317,6 +2317,25 @@ impl RibManager {
             .collect()
     }
 
+    /// Mark the peer that [`Self::bench_join_route_reflector_peer`]
+    /// registered at `index` dirty through the production seam, which
+    /// captures a grouped member's admitted-key proof. Returns whether the
+    /// peer is now dirty.
+    pub fn bench_mark_joined_peer_dirty(&mut self, index: usize) -> bool {
+        self.mark_outbound_dirty(Self::bench_peer_address(index))
+    }
+
+    /// Run production resync-timer ticks until no dirty peer remains
+    /// runnable. Returns the dirty peers and recovery-proof entries left.
+    pub fn bench_resync_dirty_peers(&mut self) -> (usize, usize) {
+        while self.resync_tick_pending() && self.resync_dirty_peers_bounded() {}
+        (
+            self.dirty_peers.len(),
+            self.pending_group_admitted
+                .entries_with_checkpoint(&mut |_| {}),
+        )
+    }
+
     /// Deliver one IPv4 unicast ROUTE-REFRESH from the peer that
     /// [`Self::bench_join_route_reflector_peer`] registered at `index`,
     /// through the production `RouteRefreshRequest` dispatch.
