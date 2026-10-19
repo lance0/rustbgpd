@@ -994,18 +994,6 @@ pub struct MaxPrefixState {
     pub prefix_count_ipv4: usize,
     /// Number of accepted unique IPv6-unicast prefixes from this peer.
     pub prefix_count_ipv6: usize,
-    /// Effective aggregate max-prefix limit (`None` = unlimited).
-    pub max_prefixes: Option<u32>,
-    /// Effective IPv4-unicast max-prefix limit (`None` = unlimited).
-    pub max_prefixes_ipv4: Option<u32>,
-    /// Effective IPv6-unicast max-prefix limit (`None` = unlimited).
-    pub max_prefixes_ipv6: Option<u32>,
-    /// Aggregate capacity remaining before the effective limit is exceeded.
-    pub headroom: Option<u32>,
-    /// IPv4-unicast capacity remaining before the effective limit is exceeded.
-    pub headroom_ipv4: Option<u32>,
-    /// IPv6-unicast capacity remaining before the effective limit is exceeded.
-    pub headroom_ipv6: Option<u32>,
 }
 
 /// Graceful Restart values negotiated for the current Established session.

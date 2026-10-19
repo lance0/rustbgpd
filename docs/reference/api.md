@@ -532,7 +532,9 @@ a peer with no finite inbound bound — and equally empty from a daemon that
 does not expose the field and from a stale peer-session snapshot. Absence is
 therefore never proof that no bound is configured. Counts come from the
 session actor's O(1) enforcement accounting, never from the RIB, whose rows
-carry different Add-Path and lifecycle semantics.
+carry different Add-Path and lifecycle semantics. These rows are the only
+inbound limit and headroom report; `prefixes_received_ipv4` and
+`prefixes_received_ipv6` remain the unconditional per-family counts.
 
 `NeighborState.gr_retention` reports RFC 4724 / RFC 9494 helper-side
 stale-route retention, one `GracefulRestartRetentionState` per family the RIB

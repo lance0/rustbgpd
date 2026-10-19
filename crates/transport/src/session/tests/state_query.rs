@@ -263,12 +263,20 @@ async fn query_state_reports_exact_max_prefix_counts_limits_and_headroom() {
     assert_eq!(state.prefix_count, 2);
     assert_eq!(state.max_prefix.prefix_count_ipv4, 1);
     assert_eq!(state.max_prefix.prefix_count_ipv6, 1);
-    assert_eq!(state.max_prefix.max_prefixes, Some(9));
-    assert_eq!(state.max_prefix.max_prefixes_ipv4, Some(4));
-    assert_eq!(state.max_prefix.max_prefixes_ipv6, Some(6));
-    assert_eq!(state.max_prefix.headroom, Some(7));
-    assert_eq!(state.max_prefix.headroom_ipv4, Some(3));
-    assert_eq!(state.max_prefix.headroom_ipv6, Some(5));
+    let rows: Vec<_> = state
+        .max_prefix
+        .scopes
+        .iter()
+        .map(|row| (row.scope, row.usage, row.limit, row.headroom))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("aggregate", 2, 9, 7),
+            ("ipv4_unicast", 1, 4, 3),
+            ("ipv6_unicast", 1, 6, 5)
+        ]
+    );
 }
 
 #[tokio::test]
