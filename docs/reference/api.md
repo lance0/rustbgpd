@@ -2765,9 +2765,12 @@ live route events whose `event_id` was already printed. The command prints a
 history block followed by the live tail; it does not server-side merge the two
 streams by wall-clock timestamp.
 
-There is no durable event cursor. A client that reconnects re-reads the state
-it needs (or uses gNMI `Subscribe`, which starts with a fresh snapshot) and then
-opens a new live stream. BMP to a collector, Prometheus, and the daemon logs
+There is no durable event cursor. A client that reconnects opens and buffers a
+new live stream first, then re-reads the state it needs and applies the
+buffered events, reconciling any overlap. The separate RPCs give no atomic
+handoff: a change between a state read and a later stream open is lost with no
+lag signal. gNMI `Subscribe` ON_CHANGE subscribes before its snapshot
+internally. BMP to a collector, Prometheus, and the daemon logs
 are the durable record.
 
 Filters compose AND-wise across category, type, peer, family, and exact prefix.

@@ -2075,10 +2075,12 @@ structured daemon logs for the corresponding BGP NOTIFICATION or local
 teardown cause.
 `WatchEvents` is a live tail, not a durable queue. Non-zero
 `bgp_event_stream_lagged_total` means at least one live subscriber fell behind
-after the event reached the peer manager; combine a fresh snapshot or `ListRouteEvents`
-query with a new live watch. There is no durable event cursor: a consumer that
-reconnects re-reads state (or uses gNMI `Subscribe`, which starts with a fresh
-snapshot) and then resumes the live stream. BMP to a collector, Prometheus,
+after the event reached the peer manager; open a new live watch, then take a fresh
+snapshot or `ListRouteEvents` query. There is no durable event cursor: a
+consumer that reconnects opens and buffers a new watch before re-reading state,
+because separate RPCs give no atomic handoff and a change between a state read
+and a later watch is lost with no lag signal. gNMI `Subscribe` ON_CHANGE
+subscribes before its snapshot internally. BMP to a collector, Prometheus,
 and the daemon logs are the durable record.
 
 ### gNMI dial-out

@@ -5300,10 +5300,18 @@ The optional durable event history (a SQLite outbox under
 `runtime_state_dir`, replayed through `SubscribeFromEvent`) has been removed.
 A config that still contains an `[event_history]` section fails to load:
 delete the section, and delete any leftover `events.db` (with its `-wal` and
-`-shm` files) under `runtime_state_dir`. For reconnecting automation, read a
-snapshot and then follow the live stream — gNMI `Subscribe` ON_CHANGE, or a
-state read followed by `WatchEvents`. BMP to a collector, Prometheus, and
-logs are the durable record.
+`-shm` files) under `runtime_state_dir`. Settle any pending commit-confirm
+transaction with the previous release before upgrading (`rbgp config confirm`
+or `rbgp config abort`), and never edit its retained prior: boot recovery
+checks that file's length, identity and SHA-256. If the prior still holds
+`[event_history]`, an upgraded daemon exits at startup with "v3 commit-confirm
+boot authority is invalid or unavailable" and leaves the locator, pending
+files and config untouched. To recover, reinstall the previous release and
+start it (its boot recovery restores the prior and ends the transaction),
+remove the section, then upgrade again. For reconnecting automation, open and
+buffer `WatchEvents` before reading state, or use gNMI `Subscribe` ON_CHANGE,
+which subscribes before its snapshot internally. BMP to a collector,
+Prometheus, and logs are the durable record.
 
 ## Config Persistence
 

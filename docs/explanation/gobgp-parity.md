@@ -156,7 +156,7 @@ releases rather than carried forward from older measurements.
 | BMP Adj-RIB-Out (RFC 8671) | No | **Yes** | rustbgpd exports post-policy, byte-exact wire PDUs ([ADR-0097](../adr/0097-bmp-monitoring.md)). GoBGP 4.9.0 already exports Loc-RIB; RFC 8671 Adj-RIB-Out is the differentiator in this comparison[^bmp-views] |
 | BMPv4 framing (draft, pre-IANA) | No | **Yes** | Per-collector `version = 4` opt-in follows draft-ietf-grow-bmp-tlv-21; Path Marking is temporarily unavailable because its draft type 5 collides with Sequence Number (ADR-0097) |
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
-| WatchEvent streaming | Yes | Yes | `WatchEvents` (live broadcast with in-band `stream_lagged` warnings) plus bounded in-memory `List*Events` history. No durable cursor: the ADR-0072 outbox was removed, so consumers re-read state after a reconnect. |
+| WatchEvent streaming | Yes | Yes | `WatchEvents` (live broadcast with in-band `stream_lagged` warnings) plus bounded in-memory `List*Events` history. No durable cursor: the ADR-0072 outbox was removed, so consumers reopen the watch and then re-read state after a reconnect. |
 | gNMI / OpenConfig telemetry | No | Partial | Native `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state`). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
 | Sentry integration | Yes | No | |
 
@@ -297,10 +297,11 @@ target. Remaining gaps are narrower:
    runtime-config coordinator, and the gNMI `Set` subset commits through the
    same executor.
 4. **Durable event replay** — shipped in v0.30.0 (ADR-0072) and later
-   removed; not planned. Reconnecting consumers read a snapshot and then
-   follow the live stream (gNMI `Subscribe` ON_CHANGE, or a state read
-   followed by `WatchEvents`); BMP, Prometheus, and logs are the durable
-   record.
+   removed; not planned. Reconnecting consumers open and buffer
+   `WatchEvents`, then read state and apply the buffered events (separate
+   RPCs give no atomic handoff), or use gNMI `Subscribe` ON_CHANGE, which
+   subscribes before its snapshot internally; BMP, Prometheus, and logs are
+   the durable record.
 
 ### General-Purpose BGP Speaker
 

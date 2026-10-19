@@ -707,8 +707,9 @@ rbgp man                # man page (roff) on stdout: rbgp man | man -l -
 
 `events watch` is one-shot: it ends with the stream and does not replay events
 missed while disconnected. A collector that needs to resynchronize after a
-reconnect re-reads current state, for example with gNMI `Subscribe`, which sends
-a full snapshot before changes.
+reconnect restarts the watch first, then re-reads current state and reconciles
+the overlap; reading state before the watch starts loses changes in between.
+gNMI `Subscribe` does both in order, sending a full snapshot before changes.
 
 Human event lines print timestamps as RFC 3339 UTC, the format `config history`
 uses. JSON event records keep `timestamp`, the daemon's decimal Unix-seconds

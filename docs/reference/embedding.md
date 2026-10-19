@@ -565,11 +565,14 @@ gRPC consumer gains from the recent proto additions
   surfaces. Omit it to retain the fail-closed max-prefix shutdown until an
   explicit enable.
 
-**The event contract is snapshot-then-watch.** `WatchEvents` is a live stream
-with no replay: after a connect or reconnect, read the state the integration
-needs (or use gNMI `Subscribe`, which starts with a fresh snapshot), then
-follow the live stream. A `stream_lagged` warning means a bounded source
-dropped events; re-read state before trusting later deltas. For a durable
+**The event contract is watch, then snapshot.** `WatchEvents` is a live stream
+with no replay. After a connect or reconnect, open `WatchEvents` and buffer
+it, read the state the integration needs, then apply the buffered events,
+reconciling any the snapshot already reflects. The separate RPCs give no
+atomic handoff, so reading state before opening the watch loses changes in
+between with no lag signal. gNMI `Subscribe` ON_CHANGE subscribes before its
+snapshot internally. A `stream_lagged` warning means a bounded source dropped
+events; reopen the watch and re-read state before trusting later deltas. For a durable
 record, use BMP to a collector, Prometheus, or the daemon logs.
 
 **Reference consumer in-tree:** `examples/birdwatcher-adapter/` (a

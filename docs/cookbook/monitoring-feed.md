@@ -197,19 +197,22 @@ connection generation's peak. The `collector` value is the configured socket
 address including port. A high-water mark near the fixed 8192-row bound means
 the collector or dump path needs investigation before the next burst.
 
-**Events (snapshot, then watch):** the event stream is live only. A
-controller reads the state it needs, then follows the stream; after any
-reconnect it does the same again:
+**Events (watch, then snapshot):** the event stream is live only. A
+controller opens the watch first and buffers it, then reads the state it
+needs, then applies the buffered events, skipping any the snapshot already
+reflects. After any reconnect it does the same again:
 
 ```console
-$ rbgp neighbor
-$ rbgp events watch --category route,session
+$ rbgp -j events watch --category route,session > events.ndjson &
+$ rbgp -j neighbor
 ```
 
-The same pattern over raw gRPC is a state read followed by
-`EventService.WatchEvents`. gNMI `Subscribe` ON_CHANGE on neighbor
-`session-state` combines both: every subscription starts with a fresh
-snapshot and `sync_response`, then streams changes. Neither replays the
+The same pattern over raw gRPC opens `EventService.WatchEvents` before the
+state read. The separate RPCs give no atomic handoff: reading state first and
+opening the watch afterwards loses any change in between, with no lag signal.
+gNMI `Subscribe` ON_CHANGE on neighbor `session-state` does the
+subscribe-before-snapshot step internally: every subscription starts with a
+fresh snapshot and `sync_response`, then streams changes. Neither replays the
 disconnected window. rustbgpd deliberately is not an event bus: the BMP feed
 above, Prometheus, and the JSON logs are the durable record.
 
@@ -241,7 +244,7 @@ configured. Key series:
 
 | Metric | Meaning |
 |--------|---------|
-| `bgp_event_stream_lagged_total{service,source}` | events missed by a slow live subscriber; that consumer re-reads state and restarts its watch |
+| `bgp_event_stream_lagged_total{service,source}` | events missed by a slow live subscriber; that consumer reopens its watch, then re-reads state |
 | `bmp_collector_drops_total` | per-collector queue/dump failures; live fan-out Full/Closed automatically resets only that collector generation, replays cached Peer Up state, and rebuilds configured Loc-RIB state after the one-second reconnect |
 | `bmp_source_drops_total` | per-peer BMP events dropped at the source tap, including a periodic stats report whose session-state query timed out |
 | `bmp_replay_attempts_total` | PeerUp-cache replays on collector reconnect |
@@ -252,8 +255,8 @@ configured. Key series:
 **The controller missed events during a burst.** Live streams emit
 `stream_lagged` warnings when a bounded source dropped events for a
 slow consumer, and gNMI ON_CHANGE ends with `DATA_LOSS`. Either is the
-signal to re-read state (or resubscribe without `updates_only`) before
-trusting later deltas.
+signal to reopen the watch and then re-read state (or resubscribe without
+`updates_only`) before trusting later deltas.
 
 **A BMP collector shows nothing after a network blip.** The daemon
 redials with backoff capped by `reconnect_interval` and replays cached Peer Up
