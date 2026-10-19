@@ -4654,12 +4654,14 @@ impl RibManager {
                         .iter()
                         .map(|key| Key::Vpn(key.nlri_key, key.path_id)),
                 );
-            if let Err(error) = self.pending_group_admitted.apply_admitted_with_checkpoint(
-                peer,
-                admitted,
-                removed,
-                &mut |force| super::replacement_readiness_checkpoint(&readiness, force),
-            ) {
+            // The pre-send reservation above covered every candidate; this
+            // batch only filtered them, so the commit skips a second count.
+            if let Err(error) = self
+                .pending_group_admitted
+                .apply_reserved_admitted_with_checkpoint(peer, admitted, removed, &mut |force| {
+                    super::replacement_readiness_checkpoint(&readiness, force);
+                })
+            {
                 self.record_group_recovery_refusal(peer, error, false);
             }
             self.refresh_group_recovery_gauges();
@@ -7415,6 +7417,8 @@ impl RibManager {
                     #[cfg(feature = "bench-internals")]
                     let bench_enumeration_started =
                         bench_per_client_best_resync.then(std::time::Instant::now);
+                    let group_resync_assembles =
+                        resync && member_of.is_some_and(|gid| self.group_ribs.contains_key(&gid));
                     let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
                         let mut capacity = self.loc_rib.len();
                         if let Some(gid) = member_of {
@@ -7514,7 +7518,12 @@ impl RibManager {
                                     .map(|(prefix, _)| *prefix),
                             );
                         }
-                        if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                        // A grouped resync adds its admitted prefixes after
+                        // assembly instead: retained keys are staged in the group
+                        // table above, and the rest become its withdrawals.
+                        if !group_resync_assembles
+                            && let Some(admitted) = self.pending_group_admitted.get(&peer)
+                        {
                             let keys = admitted.iter_with_checkpoint(|_| checkpoint());
                             all.extend(keys.filter_map(|key| match key {
                                 crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
@@ -7976,6 +7985,16 @@ impl RibManager {
                         effective_rtc_keys.capacity(),
                     );
                     if effective_prefixes.is_empty()
+                        && !(group_resync_assembles
+                            && self
+                                .pending_group_admitted
+                                .get(&peer)
+                                .is_some_and(|admitted| {
+                                    admitted.iter_with_checkpoint(|_| checkpoint()).any(|key| {
+                                    matches!(key, crate::update::ExactExportKey::Unicast(prefix, _)
+                                        if !self.selection_deferred(prefix_family(&prefix)))
+                                })
+                                }))
                         && effective_flowspec_rules.is_empty()
                         && effective_evpn_keys.is_empty()
                         && effective_bgpls_keys.is_empty()
@@ -8112,6 +8131,20 @@ impl RibManager {
                                         super::replacement_readiness_checkpoint(&readiness, force);
                                     },
                                 );
+                                // The admitted prefixes the enumeration skipped:
+                                // every unretained admitted key is a withdrawal.
+                                if let Cow::Owned(prefixes) = &mut effective_prefixes {
+                                    prefixes.extend(
+                                        unicast
+                                            .withdraw
+                                            .iter()
+                                            .inspect(|_| checkpoint())
+                                            .map(|(prefix, _)| *prefix)
+                                            .filter(|prefix| {
+                                                !self.selection_deferred(prefix_family(prefix))
+                                            }),
+                                    );
+                                }
                                 // VPN portion of the resync, from the group's VPN
                                 // maps under the member's Φ; the per-peer VPN
                                 // staging below is skipped for these members
@@ -8882,8 +8915,14 @@ impl RibManager {
                         let defer_clean_group_prior = lazy_group_prior.is_some();
                         let group_prior = if let Some(gid) = member_of {
                             let mut prior = FastSet::default();
+                            // Every reader consults a complete proof before this
+                            // prior, and a refused proof leaves a fallback in its
+                            // place. Copy the proof only when a refusal could not
+                            // be recorded as that fallback.
                             if is_dirty || is_force {
-                                if let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                                if !self.group_recovery_fallback_durable(peer)
+                                    && let Some(admitted) = self.pending_group_admitted.get(&peer)
+                                {
                                     self.replacement_checkpoint(true);
                                     prior.reserve(admitted.len());
                                     self.replacement_checkpoint(true);

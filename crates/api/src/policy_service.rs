@@ -2293,6 +2293,12 @@ fn exported_attributes(
 
     let mut attributes: Vec<_> = route.attributes_except_next_hop().cloned().collect();
     let next_hop = match rustbgpd_policy::apply_modifications(&mut attributes, mods) {
+        // An injected route's unspecified next hop is next-hop self at export.
+        None if route.origin_type == rustbgpd_rib::RouteOrigin::Local
+            && route.next_hop.is_unspecified() =>
+        {
+            None
+        }
         None => Some(route.next_hop),
         Some(NextHopAction::Specific(address)) => Some(address),
         Some(NextHopAction::Self_) => None,
@@ -3929,6 +3935,28 @@ policy customer-in(peer_lp: u32) {
             received_as_path: None,
             aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         }
+    }
+
+    /// An injected route's unspecified next hop is already next-hop self, so
+    /// adding `set next-hop self` does not change what it exports; a received
+    /// route keeps the distinction.
+    #[test]
+    fn exported_attributes_treat_injected_unspecified_next_hop_as_self() {
+        let self_mods = rustbgpd_policy::RouteModifications {
+            set_next_hop: Some(rustbgpd_policy::NextHopAction::Self_),
+            ..Default::default()
+        };
+        let mut route = test_route("203.0.113.0", 24);
+        route.next_hop = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+        assert_ne!(
+            exported_attributes(&route, &rustbgpd_policy::RouteModifications::default()),
+            exported_attributes(&route, &self_mods)
+        );
+        route.origin_type = rustbgpd_rib::RouteOrigin::Local;
+        assert_eq!(
+            exported_attributes(&route, &rustbgpd_policy::RouteModifications::default()),
+            exported_attributes(&route, &self_mods)
+        );
     }
 
     fn customer_route(index: u32) -> rustbgpd_rib::Route {
