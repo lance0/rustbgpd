@@ -71,7 +71,7 @@ rbgp policy check hygiene.rpol
 # `[policy] require_passing_tests = true`.
 
 # Run, then inspect a member:
-rbgp neighbor 198.51.100.3                 # Distribution Mode: per-client-best
+rbgp neighbor 198.51.100.3                 # Distribution Mode: per_client_best
 rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.3 --explain
 ```
 
@@ -81,7 +81,7 @@ denied by which policy term, and which one was advertised).
 
 Members can be added atomically as they join — see
 `rbgp neighbor 198.51.100.4 add --remote-asn 64503 --route-server-client \
---per-client-best --role rs --families ipv4_unicast,ipv6_unicast --max-prefixes 50000 \
+--per-client-best --role route_server --families ipv4_unicast,ipv6_unicast --max-prefixes 50000 \
 --max-prefix-restart-seconds 30`.
 
 Omit inherited fields when adding through a peer group; use the matching

@@ -4679,11 +4679,11 @@ mod tests {
     #[test]
     fn released_v075_owned_state_loads_and_future_version_is_quarantined() {
         let bytes = include_str!("../tests/fixtures/state/v0.75.0/fib-owned.json");
-        let released = crate::config::Config::load_toml_with_diagnostics(
-            include_str!("../tests/fixtures/state/v0.75.0/config.toml"),
-            "test",
-        )
-        .unwrap();
+        // The released config enabled the since-removed `[event_history]`.
+        let released_toml = include_str!("../tests/fixtures/state/v0.75.0/config.toml")
+            .replace("[event_history]\nenabled = true\n", "");
+        let released =
+            crate::config::Config::load_toml_with_diagnostics(&released_toml, "test").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fib-owned.json");
         let config = FibRuntimeConfig {

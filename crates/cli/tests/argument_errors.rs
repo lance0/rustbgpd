@@ -12,8 +12,11 @@ fn run(args: &[&str]) -> Output {
         .expect("run rbgp against an absent socket")
 }
 
+/// `EX_USAGE`: the parser's code, distinct from every detailed exit code.
+const USAGE: i32 = 64;
+
 #[test]
-fn parser_and_neighbor_usage_errors_exit_two_before_transport() {
+fn parser_and_neighbor_usage_errors_exit_usage_before_transport() {
     for args in [
         vec!["--unknown-flag"],
         vec!["unknown-command"],
@@ -27,7 +30,7 @@ fn parser_and_neighbor_usage_errors_exit_two_before_transport() {
         vec!["neighbor", "192.0.2.1%eth0"],
     ] {
         let output = run(&args);
-        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert_eq!(output.status.code(), Some(USAGE), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty(), "{args:?}");
         let error = String::from_utf8(output.stderr).unwrap();
         assert!(error.contains("error:"), "{args:?}: {error}");
@@ -92,9 +95,41 @@ fn help_and_man_distinguish_parsing_from_argument_validation() {
             "{args:?}: {text}"
         );
         assert!(
-            text.contains("2  parser or usage error"),
+            text.contains("64 parser or usage error"),
             "{args:?}: {text}"
         );
+    }
+}
+
+/// A script gating on `config diff`/`plan` (2 = changes present) or `doctor`
+/// (2 = red checks) must never read a renamed flag or a missing argument as
+/// that outcome.
+#[test]
+fn usage_errors_never_exit_with_a_detailed_code() {
+    for args in [
+        vec!["config", "diff", "--bogus", "candidate.toml"],
+        vec!["config", "diff", "--history", "not-a-number"],
+        vec!["config", "plan", "--bogus", "candidate.toml"],
+        vec!["config", "plan"],
+        vec!["config", "apply", "--bogus", "candidate.toml"],
+        vec!["config", "apply"],
+        vec!["config", "confirm", "--bogus", "deploy-1"],
+        vec!["config", "confirm"],
+        vec!["config", "abort", "--bogus", "deploy-1"],
+        vec!["config", "abort"],
+        vec!["doctor", "--bogus"],
+        vec!["doctor", "--output"],
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(USAGE), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("error:"), "{args:?}: {error}");
+    }
+    // Help is not an error.
+    for args in [vec!["config", "plan", "--help"], vec!["doctor", "--help"]] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
     }
 }
 

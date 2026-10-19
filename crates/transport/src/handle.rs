@@ -21,7 +21,6 @@ use tracing::Instrument;
 
 use crate::config::TransportConfig;
 use crate::error::TransportError;
-use crate::event_sink::TransportEventSink;
 use crate::session::PeerSession;
 use crate::session::import_decision_cache::{AllPathMatchLimitExceeded, ImportExplainReply};
 use crate::session::rejected_routes::RejectedRoutesReply;
@@ -1455,49 +1454,6 @@ impl PeerHandle {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
     ) -> Self {
-        Self::spawn_with_event_sink_and_identity_and_lifecycle(
-            config,
-            metrics,
-            rib_tx,
-            import_policy,
-            export_policy,
-            session_notify_tx,
-            session_event_tx,
-            session_lifecycle_tx,
-            bmp_tx,
-            validation_rx,
-            advertise_graceful_shutdown,
-            session_identity,
-            None,
-        )
-    }
-
-    /// Spawn variant that also installs an out-of-crate
-    /// [`TransportEventSink`] for ADR-0072 structured event
-    /// publishing. `event_sink = None` is equivalent to the legacy
-    /// spawn (no-op sink), so the binary's wiring layer can pass
-    /// `None` when `[event_history]` is disabled without branching
-    /// at every call site.
-    #[must_use]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
-    )]
-    pub fn spawn_with_event_sink_and_identity_and_lifecycle(
-        config: TransportConfig,
-        metrics: BgpMetrics,
-        rib_tx: mpsc::Sender<RibUpdate>,
-        import_policy: Option<PolicyChain>,
-        export_policy: Option<PolicyChain>,
-        session_notify_tx: Option<SessionNotificationSender>,
-        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
-        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
-        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
-        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
-        advertise_graceful_shutdown: bool,
-        session_identity: SessionIdentity,
-        event_sink: Option<Arc<dyn TransportEventSink>>,
-    ) -> Self {
         Self::spawn_at_tcp_ao_generation(
             config,
             metrics,
@@ -1511,7 +1467,6 @@ impl PeerHandle {
             validation_rx,
             advertise_graceful_shutdown,
             session_identity,
-            event_sink,
             crate::TcpAoRotationGeneration::STARTUP,
         )
     }
@@ -1537,7 +1492,6 @@ impl PeerHandle {
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
-        event_sink: Option<Arc<dyn TransportEventSink>>,
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
@@ -1565,9 +1519,6 @@ impl PeerHandle {
                     tcp_ao_generation,
                 );
                 session.set_import_policy_counters(import_publication);
-                if let Some(sink) = event_sink {
-                    session.set_event_sink(sink);
-                }
                 session.run().await
             }
             .instrument(span),
@@ -1675,53 +1626,6 @@ impl PeerHandle {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
     ) -> Self {
-        Self::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
-            config,
-            metrics,
-            rib_tx,
-            import_policy,
-            export_policy,
-            stream,
-            session_notify_tx,
-            session_event_tx,
-            session_lifecycle_tx,
-            bmp_tx,
-            validation_rx,
-            advertise_graceful_shutdown,
-            session_identity,
-            None,
-            None,
-            None,
-        )
-    }
-
-    /// Inbound spawn variant that also installs an out-of-crate
-    /// [`TransportEventSink`] (ADR-0072). See
-    /// [`Self::spawn_with_event_sink_and_identity_and_lifecycle`]
-    /// for the lifetime contract.
-    #[must_use]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
-    )]
-    pub fn spawn_inbound_with_event_sink_and_identity_and_lifecycle(
-        config: TransportConfig,
-        metrics: BgpMetrics,
-        rib_tx: mpsc::Sender<RibUpdate>,
-        import_policy: Option<PolicyChain>,
-        export_policy: Option<PolicyChain>,
-        stream: TcpStream,
-        session_notify_tx: Option<SessionNotificationSender>,
-        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
-        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
-        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
-        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
-        advertise_graceful_shutdown: bool,
-        session_identity: SessionIdentity,
-        event_sink: Option<Arc<dyn TransportEventSink>>,
-        tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
-        tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
-    ) -> Self {
         Self::spawn_inbound_at_tcp_ao_generation(
             config,
             metrics,
@@ -1736,9 +1640,8 @@ impl PeerHandle {
             validation_rx,
             advertise_graceful_shutdown,
             session_identity,
-            event_sink,
-            tcp_ao_info,
-            tcp_ao_selected_owner,
+            None,
+            None,
             crate::TcpAoRotationGeneration::STARTUP,
         )
     }
@@ -1764,7 +1667,6 @@ impl PeerHandle {
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
-        event_sink: Option<Arc<dyn TransportEventSink>>,
         tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
         tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
         tcp_ao_generation: crate::TcpAoRotationGeneration,
@@ -1797,9 +1699,6 @@ impl PeerHandle {
                     tcp_ao_generation,
                 );
                 session.set_import_policy_counters(import_publication);
-                if let Some(sink) = event_sink {
-                    session.set_event_sink(sink);
-                }
                 session.run().await
             }
             .instrument(span),

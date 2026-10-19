@@ -1248,10 +1248,10 @@ pub(crate) fn rfc8212_policy_status_label(value: i32) -> &'static str {
 
 fn effective_distribution_mode_label(value: i32) -> &'static str {
     match crate::proto::EffectiveDistributionMode::try_from(value) {
-        Ok(crate::proto::EffectiveDistributionMode::SingleBest) => "single-best",
-        Ok(crate::proto::EffectiveDistributionMode::AddPath) => "add-path",
+        Ok(crate::proto::EffectiveDistributionMode::SingleBest) => "single_best",
+        Ok(crate::proto::EffectiveDistributionMode::AddPath) => "add_path",
         Ok(crate::proto::EffectiveDistributionMode::Orr) => "orr",
-        Ok(crate::proto::EffectiveDistributionMode::PerClientBest) => "per-client-best",
+        Ok(crate::proto::EffectiveDistributionMode::PerClientBest) => "per_client_best",
         Ok(
             crate::proto::EffectiveDistributionMode::Unspecified
             | crate::proto::EffectiveDistributionMode::Unknown,
@@ -1692,7 +1692,7 @@ mod tests {
                 add_path_send: false,
                 add_path_send_max: 112,
                 interface: "eth0".to_string(),
-                role: "rs".to_string(),
+                role: "route_server".to_string(),
                 strict_role: false,
                 send_hold_time: Some(116),
                 per_client_best: true,
@@ -2259,13 +2259,13 @@ mod tests {
             effective_distribution_mode_label(
                 crate::proto::EffectiveDistributionMode::AddPath as i32
             ),
-            "add-path"
+            "add_path"
         );
         assert_eq!(
             effective_distribution_mode_label(
                 crate::proto::EffectiveDistributionMode::PerClientBest as i32
             ),
-            "per-client-best"
+            "per_client_best"
         );
         assert_eq!(
             effective_distribution_mode_label(
@@ -2284,7 +2284,7 @@ mod tests {
             effective_distribution_mode_label(
                 crate::proto::EffectiveDistributionMode::SingleBest as i32
             ),
-            "single-best"
+            "single_best"
         );
         assert_eq!(
             effective_distribution_mode_label(crate::proto::EffectiveDistributionMode::Orr as i32),
@@ -2381,8 +2381,8 @@ Effective Posture:
   Interpret RFC 1997:     true
   RS Control Communities: false
   ORR Vantage:            orr_vantage-value
-Distribution Mode:        add-path
-BGP Role:                 rs
+Distribution Mode:        add_path
+BGP Role:                 route_server
 Strict Role:              false
 Remote Role:              remote_role-value
 Role Negotiated:          true

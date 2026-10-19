@@ -253,7 +253,7 @@ async fn aspa_bad_arguments_fail_before_connecting() {
         let output = run("http://127.0.0.1:0", &args).await;
         assert_eq!(
             output.status.code(),
-            Some(2),
+            Some(64),
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );

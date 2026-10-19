@@ -220,7 +220,7 @@ shape itself does not raise the tier.
 | `VerifyAsPath` | `sensitive_read` | Literal AS_PATH diagnostic with explicit local role and neighbor ASN; outside the narrow v1 contract. |
 | `ListCaches` | `sensitive_read` | Bounded configured-cache inventory with connection state and the latest atomically accepted RTR epoch; outside the narrow v1 contract. |
 
-### EventService (5 RPCs)
+### EventService (4 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -228,7 +228,6 @@ shape itself does not raise the tier.
 | `ListSessionEvents` | `sensitive_read` | Bounded session lifecycle history per peer. |
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
 | `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
-| `SubscribeFromEvent` (stream) | `sensitive_read` | ADR-0072 durable cursor replay + live. Same disclosure scope as `WatchEvents` plus historical events from the durable outbox. Returns `FAILED_PRECONDITION` when `[event_history].enabled = false` or startup fell back to live-only operation, `UNAVAILABLE` at admission once event-history storage has stopped, and terminal `UNAVAILABLE` if storage fails during replay without observed producer loss; resume from the last received `event_id`. Post-admission producer loss retains `DATA_LOSS` precedence. The live `WatchEvents` and bounded `List*Events` surfaces are unaffected. |
 
 ### InjectionService (6 RPCs)
 
@@ -281,10 +280,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.8% |
-| `sensitive_read` | 79 | 62.7% |
-| `mutating` | 22 | 17.5% |
-| `operator_only` | 24 | 19.0% |
-| **Total** | **126** | **100%** |
+| `sensitive_read` | 78 | 62.4% |
+| `mutating` | 22 | 17.6% |
+| `operator_only` | 24 | 19.2% |
+| **Total** | **125** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`
@@ -320,7 +319,7 @@ specific method if the model warrants it.
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.
 4. **Streaming methods need session-establishment authorization, not
-   per-message.** `WatchEvents` and `SubscribeFromEvent` open once and live
+   per-message.** `WatchEvents` and gNMI `Subscribe` open once and live
    for the connection lifetime. The enforcement model needs to
    reject at handshake, not pretend to filter per-event.
 5. **Credential ingress is bounded but not `AddNeighbor`.** Static

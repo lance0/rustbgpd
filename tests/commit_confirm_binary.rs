@@ -145,7 +145,7 @@ fn actual_binary_rejects_retired_config_from_file_aliases() {
         ],
     ] {
         let output = rbgp("http://127.0.0.1:1", &args);
-        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        assert_eq!(output.status.code(), Some(64), "args: {args:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--from-file'"),
             "args: {args:?}\nstderr:\n{}",

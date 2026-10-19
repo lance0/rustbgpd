@@ -503,7 +503,6 @@ crates/
   evpn-linux/            # Linux kernel dataplane for EVPN VTEP mode (#[cfg(target_os = "linux")]): rtnetlink reconciler, FDB / link / IP-VRF dumps, RTNLGRP_NEIGH classifier, RTNLGRP_IPV4_ROUTE / RTNLGRP_IPV6_ROUTE route observer (Gate 9 slice 6), L3 FIB programming (Gate 9 slice 6 PR B), nexthop_raw raw-netlink FDB-NHG primitive + group_state refcount + nh_id_alloc tag bits (ADR-0059 aliasing-ECMP)
   api/                   # gRPC server (tonic) — thirteen services (twelve native rustbgpd.v1 + vendored gnmi.gNMI)
   telemetry/             # Prometheus metrics + structured tracing
-  event-history/         # Durable local event outbox (ADR-0072): SQLite WAL store + broadcast
   cli/                   # rbgp — gRPC CLI with human-readable and JSON output
 proto/                   # gRPC proto definitions (rustbgpd.v1)
 tests/interop/           # Containerlab topologies and configs

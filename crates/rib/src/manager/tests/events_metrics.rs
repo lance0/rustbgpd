@@ -1,17 +1,5 @@
 use super::*;
-use crate::event_sink::RibEventSink;
 use crate::manager::distribution::OutboundCommitBatch;
-
-#[derive(Default)]
-struct SharedRouteCapture(std::sync::Mutex<Option<Arc<crate::event::RouteEvent>>>);
-
-impl RibEventSink for SharedRouteCapture {
-    fn publish_route_event(&self, event: &Arc<crate::event::RouteEvent>) {
-        *self.0.lock().unwrap() = Some(Arc::clone(event));
-    }
-
-    fn publish_evpn_event(&self, _event: &Arc<crate::event::EvpnRouteEvent>) {}
-}
 
 #[cfg(target_pointer_width = "64")]
 #[test]
@@ -35,9 +23,7 @@ fn event_storage_layout_and_lazy_history_capacity_are_pinned() {
 #[tokio::test]
 async fn route_history_and_live_broadcast_share_arc_but_queries_are_owned() {
     let (_tx, rx) = mpsc::channel(1);
-    let capture = Arc::new(SharedRouteCapture::default());
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_event_sink(capture.clone());
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let mut live = manager.route_events_tx.subscribe();
     manager.publish_route_event(crate::event::RouteEvent {
         event_id: 0,
@@ -52,12 +38,10 @@ async fn route_history_and_live_broadcast_share_arc_but_queries_are_owned() {
     });
 
     let broadcast = live.try_recv().unwrap();
-    let captured = capture.0.lock().unwrap().take().unwrap();
     assert!(Arc::ptr_eq(
         manager.route_event_history.back().unwrap(),
         &broadcast
     ));
-    assert!(Arc::ptr_eq(&captured, &broadcast));
 
     let (reply, result) = oneshot::channel();
     manager.handle_query_route_event_history(None, None, None, 0, reply);

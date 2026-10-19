@@ -1299,30 +1299,6 @@ serves `/livez` and `/readyz` for orchestrators. Key counters operators watch:
   jemalloc build takes run-time options from `_RJEM_MALLOC_CONF`, not
   `MALLOC_CONF`; see
   [heap profiling with jemalloc](../benchmarks.md#heap-profiling-with-jemalloc).
-- **Durable event outbox** (ADR-0072) —
-  `bgp_event_outbox_committed_total{category}`,
-  `bgp_event_outbox_dropped_total{category, reason}`,
-  `bgp_event_outbox_db_size_bytes`,
-  `bgp_event_outbox_latest_event_id`,
-  `bgp_event_outbox_degraded`,
-  `bgp_event_outbox_storage_failed`,
-  `bgp_event_outbox_cursor_gap_total`. The degraded gauge is
-  the alert-on-this signal — flips to `1` on a durability-impacting
-  drop, decode/codec failure, or open failure since process start;
-  does not auto-clear in v1, so any non-zero value warrants
-  investigation. The
-  cursor-gap counter alerts on collectors whose persisted
-  `last_seen_event_id` fell below the daemon's retention
-  floor — typically a sign the collector was offline longer
-  than `[event_history].max_events` / `max_bytes` planned for.
-  External collectors stream the cursor via the
-  `SubscribeFromEvent` gRPC RPC; `examples/event-bridge/` is
-  the reference skeleton — copy and replace the stdout writer
-  with your Kafka / NATS / Vector / journald sink, persisting
-  `last_seen_event_id` after the sink confirms durable receipt.
-  See `[event_history]` in `CONFIGURATION.md` for tuning and
-  recovery semantics, and the "Durable Event Cursor" section
-  in `OPERATIONS.md` for the alert + sizing playbook.
 
 **Policy filtering visibility — Prometheus.** `bgp_policy_routes_total
 {peer, policy, direction, action}` attributes each import and export
@@ -1648,9 +1624,7 @@ processes is unsupported even when their configuration files differ.
 | `fib-owned.json` | FIB ownership receipt — which kernel routes the daemon installed (ADR-0061). Used to drain orphan installs on next start. | Yes |
 | `fib-owned.json.stale` | Evidence set aside from a FIB ownership receipt at startup. An unsupported (newer) version or a payload shape that contradicts its version renames the receipt here, and the daemon starts owning nothing. A changed `[[fib_tables]]` signature copies the receipt here instead and keeps the live `fib-owned.json`, so unchanged tables keep their owned routes. Diagnostic only; never read back. | Yes; replaced by the next one |
 | `blackhole-owned.json` | Exact BLACKHOLE prefix authority. Mode `0600`; adoption and deletion require this receipt plus the kernel marker. | Yes |
-| `events.db`, `events.db-wal`, `events.db-shm` | Durable event history (SQLite, ADR-0072), created and used while `[event_history].enabled = true`. Disabling the feature later leaves the files in place unopened. `[event_history].path` can move it; the files below always sit beside it. | Yes |
-| `events.last_id` | Event-ID allocator hint written beside `events.db`. Diagnostic only; not authoritative for allocator recovery. | Yes |
-| `events.db.stale`, `events.db.stale-wal`, `events.db.stale-shm`; `events.db.stale.<n>`, `events.db.stale.<n>-wal`, `events.db.stale.<n>-shm` | Quarantined event store whose content was corrupt, moved together with its `-wal`/`-shm` files. A new quarantine moves the previous set, all three files, to the lowest unused `<n>`. Never read back as the live store. | Yes; not pruned |
+| `events.db`, `events.db-wal`, `events.db-shm`, `events.last_id`, `events.db.stale*` | Left behind by the removed durable event history. Current releases never open them; delete them after upgrading. Settle any pending commit-confirm with the previous release first: a retained prior that still holds `[event_history]` stops the upgraded daemon at startup (see [the removal note](../reference/configuration.md#event_history-removed)). | Not used |
 | `crash/panic-*.toml` | Panic reports (message, location, thread, binary version, timestamp; never environment or arguments), written through a temporary file and renamed into place. Write-only; the newest 10 are kept, and `rbgp doctor` includes them in support bundles. An interrupted write can leave a `panic-*.toml.tmp` file, which retention and `rbgp doctor` ignore. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
 

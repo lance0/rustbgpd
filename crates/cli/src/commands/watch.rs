@@ -6,15 +6,11 @@ use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddressFamily, BgpEvent, BgpEventType, EventCategory, EvpnRouteEntry, ListEvpnEventsRequest,
     ListPolicyEventsRequest, ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent,
-    RouteEventType, StreamLagEvent, SubscribeFromEventRequest, WatchEventsRequest,
+    RouteEventType, StreamLagEvent, WatchEventsRequest,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
-use std::future::Future;
-use std::io::Write;
 use std::net::IpAddr;
-use std::time::Duration;
-use tonic::Code;
 
 pub struct EventsWatchOptions {
     pub categories: Vec<String>,
@@ -23,14 +19,6 @@ pub struct EventsWatchOptions {
     pub prefix: Option<String>,
     pub event_types: Vec<String>,
     pub backfill: u32,
-    /// ADR-0072 durable cursor (`--from-event-id`). When `Some`,
-    /// the CLI subscribes via `SubscribeFromEvent` instead of
-    /// `WatchEvents`, replays committed events with
-    /// `event_id > N` from the daemon's local outbox, then attaches
-    /// the live stream. `Some(0)` replays everything retained. Mutually
-    /// exclusive with `--backfill` because the two operate on
-    /// independent ID spaces (process-local vs durable).
-    pub from_event_id: Option<u64>,
     pub json: bool,
 }
 
@@ -163,7 +151,6 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "bfd_state_changed" | "bfd_session_state_changed" => {
             Ok(BgpEventType::BfdSessionStateChanged as i32)
         }
-        "otc_route_blocked" => Ok(BgpEventType::OtcRouteBlocked as i32),
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
             "unsupported event type {other:?}; expected {}",
@@ -190,7 +177,6 @@ const BGP_EVENT_TYPE_NAMES: &[&str] = &[
     "notification_sent",
     "notification_received",
     "policy_changed",
-    "otc_route_blocked",
     "dataplane_status_changed",
     "dataplane_route_installed",
     "dataplane_route_withdrawn",
@@ -368,7 +354,6 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::BfdSessionUp) => "bfd_session_up",
         Ok(BgpEventType::BfdSessionDown) => "bfd_session_down",
         Ok(BgpEventType::BfdSessionStateChanged) => "bfd_session_state_changed",
-        Ok(BgpEventType::OtcRouteBlocked) => "otc_route_blocked",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -401,7 +386,6 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::BfdSessionUp) => "bfd_up",
         Ok(BgpEventType::BfdSessionDown) => "bfd_down",
         Ok(BgpEventType::BfdSessionStateChanged) => "bfd_state_changed",
-        Ok(BgpEventType::OtcRouteBlocked) => "otc_route_blocked",
         Ok(BgpEventType::StreamLagged) => "stream_lagged",
         _ => "unknown",
     }
@@ -526,9 +510,7 @@ impl Serialize for JsonBgpEvent<'_> {
         use crate::proto::bgp_event::Payload;
         let event = self.0;
         let payload = event.payload.as_ref();
-        let event_id = event
-            .event_id
-            .or_else(|| route_event_id(event).filter(|id| *id > 0));
+        let event_id = route_event_id(event).filter(|id| *id > 0);
         // Keys are emitted in a single flattened alphabetical sequence so the
         // streamed bytes match the pre-#515 serde_json::Value (BTreeMap) output
         // exactly — envelope and payload keys interleave by key, not
@@ -543,27 +525,15 @@ impl Serialize for JsonBgpEvent<'_> {
             map.serialize_entry("action", &route.action)?;
         }
         map.serialize_entry("afi_safi", &JsonAddressFamily(event.afi_safi))?;
-        if let Some(Payload::OtcRouteBlocked(otc)) = payload {
-            map.serialize_entry("as_path", &otc.as_path)?;
-        }
         map.serialize_entry("category", event_category_json_label(event.category))?;
         if let Some(Payload::Notification(notification)) = payload {
             map.serialize_entry("code", &notification.code)?;
         }
-        if let Some(Payload::OtcRouteBlocked(otc)) = payload {
-            map.serialize_entry("count", &otc.count)?;
-        }
         if let Some(Payload::Notification(notification)) = payload {
             map.serialize_entry("description", &notification.description)?;
         }
-        match payload {
-            Some(Payload::Notification(notification)) => {
-                map.serialize_entry("direction", &notification.direction)?;
-            }
-            Some(Payload::OtcRouteBlocked(otc)) => {
-                map.serialize_entry("direction", &otc.direction)?;
-            }
-            _ => {}
+        if let Some(Payload::Notification(notification)) = payload {
+            map.serialize_entry("direction", &notification.direction)?;
         }
         if let Some(event_id) = event_id {
             map.serialize_entry("event_id", &event_id)?;
@@ -574,9 +544,6 @@ impl Serialize for JsonBgpEvent<'_> {
         }
         if let Some(Payload::Dataplane(dataplane)) = payload {
             map.serialize_entry("installed", &dataplane.installed)?;
-        }
-        if let Some(Payload::OtcRouteBlocked(otc)) = payload {
-            map.serialize_entry("local_role", &otc.local_role)?;
         }
         if let Some(Payload::DataplaneRoute(route)) = payload {
             map.serialize_entry("metric", &route.metric)?;
@@ -596,14 +563,8 @@ impl Serialize for JsonBgpEvent<'_> {
         if let Some(Payload::Policy(policy)) = payload {
             map.serialize_entry("operation", &policy.operation)?;
         }
-        if let Some(Payload::OtcRouteBlocked(otc)) = payload {
-            map.serialize_entry("otc_value", &otc.otc_value)?;
-        }
         map.serialize_entry("peer_address", &event.peer_address)?;
         map.serialize_entry("prefix", &JsonEventPrefix(event))?;
-        if let Some(Payload::OtcRouteBlocked(otc)) = payload {
-            map.serialize_entry("prefixes", &otc.prefixes)?;
-        }
         map.serialize_entry("previous_peer_address", &event.previous_peer_address)?;
         if let Some(Payload::Evpn(evpn)) = payload {
             map.serialize_entry(
@@ -624,15 +585,11 @@ impl Serialize for JsonBgpEvent<'_> {
                 map.serialize_entry("reason", &route.reason)?;
             }
             Some(Payload::Evpn(evpn)) => map.serialize_entry("reason", &evpn.reason)?,
-            Some(Payload::OtcRouteBlocked(otc)) => map.serialize_entry("reason", &otc.reason)?,
             Some(Payload::StreamLag(lag)) => map.serialize_entry("reason", &lag.reason)?,
             _ => {}
         }
         if let Some(Payload::Dataplane(dataplane)) = payload {
             map.serialize_entry("rejected", &dataplane.rejected)?;
-        }
-        if let Some(Payload::OtcRouteBlocked(otc)) = payload {
-            map.serialize_entry("remote_role", &otc.remote_role)?;
         }
         if let Some(Payload::Evpn(evpn)) = payload {
             map.serialize_entry("route", &JsonOptionalEvpnRouteEntry(evpn.route.as_ref()))?;
@@ -715,14 +672,8 @@ fn route_event_id(event: &BgpEvent) -> Option<u64> {
 }
 
 fn format_bgp_event_line(event: &BgpEvent) -> String {
-    // Envelope-level `event_id` (ADR-0072) takes precedence — it
-    // exists for every category on the SubscribeFromEvent path and
-    // is the durable cursor source. Fall back to the nested
-    // `RouteEvent.event_id` for live `WatchEvents` route events that
-    // don't carry an envelope id.
-    let event_id = event
-        .event_id
-        .or_else(|| route_event_id(event).filter(|id| *id > 0))
+    let event_id = route_event_id(event)
+        .filter(|id| *id > 0)
         .map_or_else(String::new, |id| format!(" id={id}"));
     let mut line = format!(
         "[{}] {} {}{}",
@@ -752,97 +703,6 @@ fn print_bgp_event(event: &BgpEvent, json: bool) -> Result<(), CliError> {
 
     outln!("{}", format_bgp_event_line(event))?;
     Ok(())
-}
-
-fn write_bgp_event<W: Write + ?Sized>(
-    writer: &mut W,
-    event: &BgpEvent,
-    json: bool,
-) -> Result<(), CliError> {
-    if json {
-        output::write_json_line(writer, &JsonBgpEvent(event))
-    } else {
-        output::write_text_line(writer, &format_bgp_event_line(event))
-    }
-}
-
-const DURABLE_RECONNECT_INITIAL_SECS: u64 = 1;
-const DURABLE_RECONNECT_MAX_SECS: u64 = 30;
-
-fn durable_retryable_status(status: &tonic::Status) -> bool {
-    status.code() == Code::Unavailable
-}
-
-/// Keep one cursorful durable subscription alive without weakening terminal
-/// RPC or output failures. The injected cancellation future makes admission,
-/// stream waits, and backoff independently interruptible.
-async fn durable_subscribe_from_event<W, C>(
-    connection: Connection,
-    base_request: SubscribeFromEventRequest,
-    json: bool,
-    writer: &mut W,
-    cancellation: C,
-) -> Result<(), CliError>
-where
-    W: Write + ?Sized,
-    C: Future<Output = ()>,
-{
-    let mut client =
-        EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut cursor = base_request.from_event_id;
-    let mut backoff_secs = DURABLE_RECONNECT_INITIAL_SECS;
-    tokio::pin!(cancellation);
-
-    loop {
-        let mut request = base_request.clone();
-        request.from_event_id = cursor;
-        let response = tokio::select! {
-            biased;
-            () = &mut cancellation => return Ok(()),
-            response = client.subscribe_from_event(request) => response,
-        };
-
-        let mut stream = match response {
-            Ok(response) => response.into_inner(),
-            Err(status) if durable_retryable_status(&status) => {
-                tokio::select! {
-                    biased;
-                    () = &mut cancellation => return Ok(()),
-                    () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
-                }
-                backoff_secs = (backoff_secs * 2).min(DURABLE_RECONNECT_MAX_SECS);
-                continue;
-            }
-            Err(status) => return Err(status.into()),
-        };
-
-        loop {
-            let next = tokio::select! {
-                biased;
-                () = &mut cancellation => return Ok(()),
-                next = stream.message() => next,
-            };
-            match next {
-                Ok(Some(event)) => {
-                    write_bgp_event(writer, &event, json)?;
-                    if let Some(event_id) = event.event_id {
-                        cursor = Some(cursor.map_or(event_id, |current| current.max(event_id)));
-                    }
-                    backoff_secs = DURABLE_RECONNECT_INITIAL_SECS;
-                }
-                Ok(None) => break,
-                Err(status) if durable_retryable_status(&status) => break,
-                Err(status) => return Err(status.into()),
-            }
-        }
-
-        tokio::select! {
-            biased;
-            () = &mut cancellation => return Ok(()),
-            () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
-        }
-        backoff_secs = (backoff_secs * 2).min(DURABLE_RECONNECT_MAX_SECS);
-    }
 }
 
 fn json_route_stream_lag_event(event: &BgpEvent, lag: &StreamLagEvent) -> JsonRouteEvent {
@@ -956,7 +816,6 @@ fn route_event_to_bgp_event(event: RouteEvent) -> BgpEvent {
         afi_safi: event.afi_safi,
         summary,
         target_peer_address: event.target_peer_address.clone(),
-        event_id: None,
         payload: Some(crate::proto::bgp_event::Payload::Route(event)),
     }
 }
@@ -999,10 +858,7 @@ fn validate_event_filter_categories(
     let wants_session = categories.contains(&(EventCategory::Session as i32));
     let wants_dataplane = categories.contains(&(EventCategory::Dataplane as i32));
     let wants_evpn = categories.contains(&(EventCategory::Evpn as i32));
-    // EVENT_CATEGORY_POLICY carries OtcRouteBlocked which IS peer-
-    // scoped (the structured event stores the peer address), so
-    // `--neighbor` is meaningful here. The legacy PolicyChanged
-    // entries scope by peer too when the mutation targets one
+    // PolicyChanged entries scope by peer when the mutation targets one
     // neighbor; --neighbor narrows to those.
     let wants_policy = categories.contains(&(EventCategory::Policy as i32));
     if !wants_route && !wants_dataplane && (family.is_some() || prefix.is_some()) {
@@ -1029,7 +885,6 @@ fn validate_event_filter_categories(
 pub fn validate_events_watch_filter(
     categories: &[String],
     event_types: &[String],
-    from_event_id: Option<u64>,
 ) -> Result<(), CliError> {
     let categories = categories
         .iter()
@@ -1041,18 +896,10 @@ pub fn validate_events_watch_filter(
         .map(String::as_str)
         .map(parse_bgp_event_type)
         .collect::<Result<Vec<_>, _>>()?;
-    validate_category_event_types(
-        &categories,
-        &event_types,
-        from_event_id.is_some() || event_types.contains(&(BgpEventType::OtcRouteBlocked as i32)),
-    )
+    validate_category_event_types(&categories, &event_types)
 }
 
-fn validate_category_event_types(
-    categories: &[i32],
-    event_types: &[i32],
-    durable: bool,
-) -> Result<(), CliError> {
+fn validate_category_event_types(categories: &[i32], event_types: &[i32]) -> Result<(), CliError> {
     if event_types.is_empty() {
         return Ok(());
     }
@@ -1061,24 +908,15 @@ fn validate_category_event_types(
     });
     let categories = if categories == 0 { 0x3f } else { categories };
     let event_types = event_types.iter().fold(0, |mask, value| {
-        let event_type = BgpEventType::try_from(*value).expect("parsed event type");
-        mask | if durable {
-            durable_event_type_mask(event_type)
-        } else {
-            live_event_type_mask(event_type)
-        }
+        mask | live_event_type_mask(BgpEventType::try_from(*value).expect("parsed event type"))
     });
     if categories & event_types != 0 {
         Ok(())
     } else {
-        let surface = if durable {
-            "durable SubscribeFromEvent"
-        } else {
-            "live WatchEvents"
-        };
-        Err(CliError::Argument(format!(
-            "event category/type filters have no possible intersection for the {surface} stream"
-        )))
+        Err(CliError::Argument(
+            "event category/type filters have no possible intersection for the live WatchEvents stream"
+                .into(),
+        ))
     }
 }
 
@@ -1096,7 +934,7 @@ fn category_mask(category: EventCategory) -> u8 {
 
 fn live_event_type_mask(event_type: BgpEventType) -> u8 {
     match event_type {
-        BgpEventType::Unspecified | BgpEventType::OtcRouteBlocked => 0,
+        BgpEventType::Unspecified => 0,
         BgpEventType::RouteAdded
         | BgpEventType::RouteWithdrawn
         | BgpEventType::RouteBestChanged
@@ -1123,38 +961,6 @@ fn live_event_type_mask(event_type: BgpEventType) -> u8 {
         | BgpEventType::BfdSessionDown
         | BgpEventType::BfdSessionStateChanged => 32,
         BgpEventType::StreamLagged => 1 | 2 | 8 | 16 | 32,
-    }
-}
-
-fn durable_event_type_mask(event_type: BgpEventType) -> u8 {
-    match event_type {
-        BgpEventType::Unspecified => 0,
-        BgpEventType::RouteAdded
-        | BgpEventType::RouteWithdrawn
-        | BgpEventType::RouteBestChanged
-        | BgpEventType::RoutePolicyFiltered => 1,
-        BgpEventType::SessionStateChanged
-        | BgpEventType::SessionEstablished
-        | BgpEventType::SessionLost
-        | BgpEventType::PeerEnabled
-        | BgpEventType::PeerDisabled
-        | BgpEventType::PeerAdded
-        | BgpEventType::PeerRemoved
-        | BgpEventType::MaxPrefixWarning
-        | BgpEventType::NotificationSent
-        | BgpEventType::NotificationReceived => 2,
-        BgpEventType::PolicyChanged | BgpEventType::OtcRouteBlocked => 4,
-        BgpEventType::DataplaneStatusChanged
-        | BgpEventType::DataplaneRouteInstalled
-        | BgpEventType::DataplaneRouteWithdrawn
-        | BgpEventType::DataplaneRouteFailed => 8,
-        BgpEventType::EvpnRouteAdded
-        | BgpEventType::EvpnRouteWithdrawn
-        | BgpEventType::EvpnRouteBestChanged => 16,
-        BgpEventType::BfdSessionUp
-        | BgpEventType::BfdSessionDown
-        | BgpEventType::BfdSessionStateChanged => 32,
-        BgpEventType::StreamLagged => 0x3f,
     }
 }
 
@@ -1186,11 +992,7 @@ pub async fn events_watch(
     connection: Connection,
     options: EventsWatchOptions,
 ) -> Result<(), CliError> {
-    validate_events_watch_filter(
-        &options.categories,
-        &options.event_types,
-        options.from_event_id,
-    )?;
+    validate_events_watch_filter(&options.categories, &options.event_types)?;
     let EventsWatchOptions {
         categories,
         neighbor,
@@ -1198,7 +1000,6 @@ pub async fn events_watch(
         prefix,
         event_types,
         backfill,
-        from_event_id,
         json,
     } = options;
 
@@ -1214,15 +1015,6 @@ pub async fn events_watch(
         .map(parse_bgp_event_type)
         .collect::<Result<Vec<_>, _>>()?;
     let route_events_requested = wants_route_events(&categories, &event_types);
-    if backfill > 0 && from_event_id.is_some() {
-        return Err(CliError::Argument(
-            "--from-event-id and --backfill are mutually exclusive: \
-             --backfill replays the daemon's process-local route ring \
-             (resets on restart), while --from-event-id replays the \
-             durable event outbox (survives restart). Pick one."
-                .into(),
-        ));
-    }
     if backfill > 0 && !route_events_requested {
         return Err(CliError::Argument(
             "--backfill requires a route-capable event stream".into(),
@@ -1230,65 +1022,6 @@ pub async fn events_watch(
     }
     validate_route_only_filters(&categories, &event_types, family, prefix.as_deref())?;
     let (prefix, prefix_length) = parse_optional_prefix_filter(prefix, family)?;
-
-    // ADR-0072 durable cursor path. SubscribeFromEvent replays
-    // committed events with `event_id > N`, then attaches live. The
-    // server emits a leading `StreamLagEvent` if `N` is older than
-    // the retention floor — the existing print path already renders
-    // it as a stream_lag payload.
-    //
-    // Some event types are EHM-only (no legacy WatchEvents
-    // broadcast). Today that's `OtcRouteBlocked` — the OTC
-    // route-leak decision is published exclusively through the
-    // durable outbox under EVENT_CATEGORY_POLICY. If the user
-    // asked for one of those types without `--from-event-id`, we
-    // transparently route through SubscribeFromEvent in live-only
-    // mode (`from_event_id = None`) so the filter actually works.
-    // If EHM is disabled, the server returns FailedPrecondition,
-    // which the CLI surfaces as a clear error rather than the
-    // silent zero-event-stream the legacy path would produce.
-    let request_requires_ehm = event_types.contains(&(BgpEventType::OtcRouteBlocked as i32));
-    if let Some(from_event_id) = from_event_id {
-        let request = SubscribeFromEventRequest {
-            from_event_id: Some(from_event_id),
-            categories,
-            event_types,
-            neighbor_address: neighbor.unwrap_or_default(),
-            afi_safi: family.unwrap_or(0),
-            prefix,
-            prefix_length,
-        };
-        let stdout = std::io::stdout();
-        // The process keeps its existing OS signal behavior: SIGINT terminates
-        // the CLI. The helper's injected cancellation seam independently proves
-        // prompt cancellation at RPC admission, stream wait, and retry backoff.
-        return durable_subscribe_from_event(
-            connection,
-            request,
-            json,
-            &mut stdout.lock(),
-            std::future::pending(),
-        )
-        .await;
-    }
-    if request_requires_ehm {
-        let mut client =
-            EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-        let request = SubscribeFromEventRequest {
-            from_event_id: None,
-            categories,
-            event_types,
-            neighbor_address: neighbor.unwrap_or_default(),
-            afi_safi: family.unwrap_or(0),
-            prefix,
-            prefix_length,
-        };
-        let mut stream = client.subscribe_from_event(request).await?.into_inner();
-        while let Some(event) = stream.message().await? {
-            print_bgp_event(&event, json)?;
-        }
-        return Ok(());
-    }
 
     let mut client =
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1513,11 +1246,9 @@ pub async fn evpn_history(
 mod tests {
     use super::*;
     use crate::connection::connect;
-    use crate::test_support::{MockState, MockSubscribeFromEventPlan, spawn_mock_server};
+    use crate::test_support::spawn_mock_server;
     use prost::Message;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Mutex as StdMutex};
-    use tokio::sync::oneshot;
 
     #[test]
     fn empty_json_history_preserves_exact_bytes() {
@@ -1571,547 +1302,8 @@ mod tests {
         assert!(matches!(error, CliError::Io(_)));
     }
 
-    #[derive(Clone, Default)]
-    struct SharedWriter(Arc<StdMutex<Vec<u8>>>);
-
-    impl SharedWriter {
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-        }
-    }
-
-    impl Write for SharedWriter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct FailingRecordWriter {
-        fail_write: bool,
-    }
-
-    impl Write for FailingRecordWriter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if self.fail_write {
-                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
-            } else {
-                Ok(bytes.len())
-            }
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::other("flush failed"))
-        }
-    }
-
-    fn durable_request(from_event_id: u64) -> SubscribeFromEventRequest {
-        SubscribeFromEventRequest {
-            from_event_id: Some(from_event_id),
-            categories: vec![EventCategory::Route as i32, EventCategory::Policy as i32],
-            event_types: vec![
-                BgpEventType::RouteAdded as i32,
-                BgpEventType::PolicyChanged as i32,
-            ],
-            neighbor_address: "192.0.2.7".into(),
-            afi_safi: AddressFamily::Ipv4Unicast as i32,
-            prefix: "203.0.113.0".into(),
-            prefix_length: 24,
-        }
-    }
-
-    fn durable_event(event_id: Option<u64>, summary: &str) -> BgpEvent {
-        BgpEvent {
-            event_id,
-            timestamp: "2026-08-31T12:00:00Z".into(),
-            category: EventCategory::Route as i32,
-            event_type: BgpEventType::RouteAdded as i32,
-            summary: summary.into(),
-            ..Default::default()
-        }
-    }
-
-    fn durable_lag_event() -> BgpEvent {
-        BgpEvent {
-            event_id: None,
-            timestamp: "2026-08-31T12:00:00Z".into(),
-            category: EventCategory::Route as i32,
-            event_type: BgpEventType::StreamLagged as i32,
-            summary: "retention gap".into(),
-            payload: Some(crate::proto::bgp_event::Payload::StreamLag(
-                StreamLagEvent {
-                    missed_count: 3,
-                    reason: "retention_floor".into(),
-                    ..Default::default()
-                },
-            )),
-            ..Default::default()
-        }
-    }
-
-    fn server_event(event: &BgpEvent) -> rustbgpd_api::proto::BgpEvent {
-        rustbgpd_api::proto::BgpEvent::decode(event.encode_to_vec().as_slice()).unwrap()
-    }
-
-    async fn queue_subscribe_plan(state: &MockState, plan: MockSubscribeFromEventPlan) {
-        state
-            .subscribe_from_event_plans
-            .lock()
-            .await
-            .push_back(plan);
-    }
-
-    async fn wait_for_subscribe_calls(state: &MockState, expected: usize) {
-        for _ in 0..1_000 {
-            if state.subscribe_from_event_calls.load(Ordering::SeqCst) >= expected {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!(
-            "expected {expected} SubscribeFromEvent calls, observed {}",
-            state.subscribe_from_event_calls.load(Ordering::SeqCst)
-        );
-    }
-
-    async fn wait_for_counter(counter: &std::sync::atomic::AtomicUsize, expected: usize) {
-        for _ in 0..1_000 {
-            if counter.load(Ordering::SeqCst) >= expected {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!(
-            "expected counter to reach {expected}, observed {}",
-            counter.load(Ordering::SeqCst)
-        );
-    }
-
-    async fn settle_mock_rpc() {
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-        }
-    }
-
-    fn spawn_durable_watch(
-        connection: Connection,
-        request: SubscribeFromEventRequest,
-        writer: SharedWriter,
-    ) -> (
-        tokio::task::JoinHandle<Result<(), CliError>>,
-        oneshot::Sender<()>,
-    ) {
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            let mut writer = writer;
-            durable_subscribe_from_event(connection, request, true, &mut writer, async move {
-                let _ = cancel_rx.await;
-            })
-            .await
-        });
-        (task, cancel_tx)
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn durable_cursor_preserves_filters_after_eof_and_unavailable_without_duplicates() {
-        let keep_runtime_busy = tokio::spawn(async {
-            loop {
-                tokio::task::yield_now().await;
-            }
-        });
-        for stream_error in [None, Some((Code::Unavailable, "restart".into()))] {
-            let server = spawn_mock_server(None).await;
-            queue_subscribe_plan(
-                &server.state,
-                MockSubscribeFromEventPlan::Stream {
-                    events: vec![
-                        server_event(&durable_event(Some(41), "committed")),
-                        server_event(&durable_event(Some(39), "out-of-order")),
-                    ],
-                    stream_error,
-                    clean_end: true,
-                },
-            )
-            .await;
-            queue_subscribe_plan(
-                &server.state,
-                MockSubscribeFromEventPlan::Stream {
-                    events: vec![],
-                    stream_error: None,
-                    clean_end: false,
-                },
-            )
-            .await;
-            let connection = connect(&server.addr, None).await.unwrap();
-            let output = SharedWriter::default();
-            let (task, cancel) =
-                spawn_durable_watch(connection, durable_request(40), output.clone());
-
-            wait_for_subscribe_calls(&server.state, 1).await;
-            settle_mock_rpc().await;
-            tokio::time::advance(Duration::from_secs(1)).await;
-            wait_for_subscribe_calls(&server.state, 2).await;
-            cancel.send(()).unwrap();
-            task.await.unwrap().unwrap();
-
-            let requests = server.state.subscribe_from_event_requests.lock().await;
-            assert_eq!(requests.len(), 2);
-            let mut expected = requests[0].clone();
-            expected.from_event_id = Some(41);
-            assert_eq!(requests[1], expected);
-            let lines = output.text();
-            assert_eq!(lines.lines().count(), 2, "{lines}");
-            assert_eq!(lines.matches("\"event_id\":41").count(), 1, "{lines}");
-            assert_eq!(lines.matches("\"event_id\":39").count(), 1, "{lines}");
-        }
-        keep_runtime_busy.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn durable_lag_frame_does_not_advance_the_cursor() {
-        let keep_runtime_busy = tokio::spawn(async {
-            loop {
-                tokio::task::yield_now().await;
-            }
-        });
-        let server = spawn_mock_server(None).await;
-        queue_subscribe_plan(
-            &server.state,
-            MockSubscribeFromEventPlan::Stream {
-                events: vec![server_event(&durable_lag_event())],
-                stream_error: None,
-                clean_end: true,
-            },
-        )
-        .await;
-        queue_subscribe_plan(
-            &server.state,
-            MockSubscribeFromEventPlan::Stream {
-                events: vec![],
-                stream_error: None,
-                clean_end: false,
-            },
-        )
-        .await;
-        let output = SharedWriter::default();
-        let (task, cancel) = spawn_durable_watch(
-            connect(&server.addr, None).await.unwrap(),
-            durable_request(40),
-            output.clone(),
-        );
-        wait_for_subscribe_calls(&server.state, 1).await;
-        settle_mock_rpc().await;
-        tokio::time::advance(Duration::from_secs(1)).await;
-        wait_for_subscribe_calls(&server.state, 2).await;
-        cancel.send(()).unwrap();
-        task.await.unwrap().unwrap();
-
-        let requests = server.state.subscribe_from_event_requests.lock().await;
-        assert_eq!(requests[0].from_event_id, Some(40));
-        assert_eq!(requests[1].from_event_id, Some(40));
-        assert_eq!(output.text().lines().count(), 1);
-        keep_runtime_busy.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn durable_backoff_doubles_and_caps_at_thirty_seconds() {
-        let keep_runtime_busy = tokio::spawn(async {
-            loop {
-                tokio::task::yield_now().await;
-            }
-        });
-        let server = spawn_mock_server(None).await;
-        for _ in 0..8 {
-            queue_subscribe_plan(
-                &server.state,
-                MockSubscribeFromEventPlan::AdmissionError(
-                    Code::Unavailable,
-                    "daemon restarting".into(),
-                ),
-            )
-            .await;
-        }
-        queue_subscribe_plan(&server.state, MockSubscribeFromEventPlan::PendingAdmission).await;
-        let (task, cancel) = spawn_durable_watch(
-            connect(&server.addr, None).await.unwrap(),
-            durable_request(40),
-            SharedWriter::default(),
-        );
-        wait_for_subscribe_calls(&server.state, 1).await;
-        for (index, delay) in [1_u64, 2, 4, 8, 16, 30, 30, 30].into_iter().enumerate() {
-            settle_mock_rpc().await;
-            tokio::time::advance(Duration::from_millis(delay * 1_000 - 1)).await;
-            tokio::task::yield_now().await;
-            assert_eq!(
-                server
-                    .state
-                    .subscribe_from_event_calls
-                    .load(Ordering::SeqCst),
-                index + 1
-            );
-            tokio::time::advance(Duration::from_millis(1)).await;
-            wait_for_subscribe_calls(&server.state, index + 2).await;
-        }
-        cancel.send(()).unwrap();
-        task.await.unwrap().unwrap();
-        keep_runtime_busy.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn durable_successful_flush_resets_backoff() {
-        let keep_runtime_busy = tokio::spawn(async {
-            loop {
-                tokio::task::yield_now().await;
-            }
-        });
-        let server = spawn_mock_server(None).await;
-        for _ in 0..2 {
-            queue_subscribe_plan(
-                &server.state,
-                MockSubscribeFromEventPlan::AdmissionError(
-                    Code::Unavailable,
-                    "daemon restarting".into(),
-                ),
-            )
-            .await;
-        }
-        queue_subscribe_plan(
-            &server.state,
-            MockSubscribeFromEventPlan::Stream {
-                events: vec![server_event(&durable_event(Some(41), "committed"))],
-                stream_error: Some((Code::Unavailable, "restart".into())),
-                clean_end: false,
-            },
-        )
-        .await;
-        queue_subscribe_plan(&server.state, MockSubscribeFromEventPlan::PendingAdmission).await;
-        let (task, cancel) = spawn_durable_watch(
-            connect(&server.addr, None).await.unwrap(),
-            durable_request(40),
-            SharedWriter::default(),
-        );
-        wait_for_subscribe_calls(&server.state, 1).await;
-        settle_mock_rpc().await;
-        tokio::time::advance(Duration::from_secs(1)).await;
-        wait_for_subscribe_calls(&server.state, 2).await;
-        settle_mock_rpc().await;
-        tokio::time::advance(Duration::from_secs(2)).await;
-        wait_for_subscribe_calls(&server.state, 3).await;
-        settle_mock_rpc().await;
-        tokio::time::advance(Duration::from_millis(999)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            server
-                .state
-                .subscribe_from_event_calls
-                .load(Ordering::SeqCst),
-            3
-        );
-        tokio::time::advance(Duration::from_millis(1)).await;
-        wait_for_subscribe_calls(&server.state, 4).await;
-        assert_eq!(
-            server.state.subscribe_from_event_requests.lock().await[3].from_event_id,
-            Some(41)
-        );
-        cancel.send(()).unwrap();
-        task.await.unwrap().unwrap();
-        keep_runtime_busy.abort();
-    }
-
     #[tokio::test]
-    async fn durable_write_and_flush_failures_are_terminal() {
-        for fail_write in [true, false] {
-            let server = spawn_mock_server(None).await;
-            queue_subscribe_plan(
-                &server.state,
-                MockSubscribeFromEventPlan::Stream {
-                    events: vec![server_event(&durable_event(Some(41), "committed"))],
-                    stream_error: None,
-                    clean_end: true,
-                },
-            )
-            .await;
-            queue_subscribe_plan(&server.state, MockSubscribeFromEventPlan::PendingAdmission).await;
-            let mut writer = FailingRecordWriter { fail_write };
-            let error = durable_subscribe_from_event(
-                connect(&server.addr, None).await.unwrap(),
-                durable_request(40),
-                true,
-                &mut writer,
-                std::future::pending(),
-            )
-            .await
-            .unwrap_err();
-            assert!(matches!(error, CliError::Io(_)));
-            assert_eq!(
-                server
-                    .state
-                    .subscribe_from_event_calls
-                    .load(Ordering::SeqCst),
-                1
-            );
-            assert_eq!(
-                server.state.subscribe_from_event_plans.lock().await.len(),
-                1
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn durable_nonretry_statuses_are_terminal_at_admission_and_in_stream() {
-        let statuses = [
-            Code::Cancelled,
-            Code::Unknown,
-            Code::InvalidArgument,
-            Code::DeadlineExceeded,
-            Code::NotFound,
-            Code::AlreadyExists,
-            Code::PermissionDenied,
-            Code::ResourceExhausted,
-            Code::FailedPrecondition,
-            Code::Aborted,
-            Code::OutOfRange,
-            Code::Unimplemented,
-            Code::Internal,
-            Code::DataLoss,
-            Code::Unauthenticated,
-        ];
-        for code in statuses {
-            for in_stream in [false, true] {
-                let server = spawn_mock_server(None).await;
-                let plan = if in_stream {
-                    MockSubscribeFromEventPlan::Stream {
-                        events: vec![],
-                        stream_error: Some((code, "terminal".into())),
-                        clean_end: false,
-                    }
-                } else {
-                    MockSubscribeFromEventPlan::AdmissionError(code, "terminal".into())
-                };
-                queue_subscribe_plan(&server.state, plan).await;
-                let mut writer = Vec::new();
-                let error = durable_subscribe_from_event(
-                    connect(&server.addr, None).await.unwrap(),
-                    durable_request(40),
-                    true,
-                    &mut writer,
-                    std::future::pending(),
-                )
-                .await
-                .unwrap_err();
-                assert!(matches!(error, CliError::Rpc(_)), "{code:?}: {error}");
-                assert_eq!(
-                    server
-                        .state
-                        .subscribe_from_event_calls
-                        .load(Ordering::SeqCst),
-                    1,
-                    "{code:?}, in_stream={in_stream}"
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn durable_cancellation_interrupts_admission_stream_wait_and_backoff() {
-        for mode in 0..3 {
-            let server = spawn_mock_server(None).await;
-            let plan = match mode {
-                0 => MockSubscribeFromEventPlan::PendingAdmission,
-                1 => MockSubscribeFromEventPlan::Stream {
-                    events: vec![],
-                    stream_error: None,
-                    clean_end: false,
-                },
-                2 => MockSubscribeFromEventPlan::Stream {
-                    events: vec![],
-                    stream_error: None,
-                    clean_end: true,
-                },
-                _ => unreachable!(),
-            };
-            queue_subscribe_plan(&server.state, plan).await;
-            let (task, cancel) = spawn_durable_watch(
-                connect(&server.addr, None).await.unwrap(),
-                durable_request(40),
-                SharedWriter::default(),
-            );
-            wait_for_subscribe_calls(&server.state, 1).await;
-            match mode {
-                0 => {}
-                1 => {
-                    wait_for_counter(&server.state.subscribe_from_event_active, 1).await;
-                    settle_mock_rpc().await;
-                }
-                2 => {
-                    wait_for_counter(&server.state.subscribe_from_event_terminations, 1).await;
-                    settle_mock_rpc().await;
-                }
-                _ => unreachable!(),
-            }
-            cancel.send(()).unwrap();
-            tokio::time::timeout(Duration::from_secs(1), task)
-                .await
-                .expect("cancellation must be prompt")
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                server
-                    .state
-                    .subscribe_from_event_calls
-                    .load(Ordering::SeqCst),
-                1
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn cursorless_otc_and_ordinary_watch_events_remain_one_shot_and_isolated() {
-        let otc_server = spawn_mock_server(None).await;
-        queue_subscribe_plan(
-            &otc_server.state,
-            MockSubscribeFromEventPlan::Stream {
-                events: vec![],
-                stream_error: None,
-                clean_end: true,
-            },
-        )
-        .await;
-        events_watch(
-            connect(&otc_server.addr, None).await.unwrap(),
-            EventsWatchOptions {
-                categories: vec!["policy".into()],
-                event_types: vec!["otc_route_blocked".into()],
-                neighbor: None,
-                family: None,
-                prefix: None,
-                backfill: 0,
-                from_event_id: None,
-                json: true,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            otc_server
-                .state
-                .subscribe_from_event_calls
-                .load(Ordering::SeqCst),
-            1
-        );
-        assert_eq!(
-            otc_server.state.watch_events_calls.load(Ordering::SeqCst),
-            0
-        );
-        assert_eq!(
-            otc_server.state.subscribe_from_event_requests.lock().await[0].from_event_id,
-            None
-        );
-
+    async fn ordinary_watch_events_is_one_shot() {
         let watch_server = spawn_mock_server(None).await;
         watch_server
             .state
@@ -2126,7 +1318,6 @@ mod tests {
                 family: None,
                 prefix: None,
                 backfill: 0,
-                from_event_id: None,
                 json: true,
             },
         )
@@ -2135,13 +1326,6 @@ mod tests {
         assert_eq!(
             watch_server.state.watch_events_calls.load(Ordering::SeqCst),
             1
-        );
-        assert_eq!(
-            watch_server
-                .state
-                .subscribe_from_event_calls
-                .load(Ordering::SeqCst),
-            0
         );
     }
 
@@ -2208,9 +1392,7 @@ mod tests {
             "summary": event.summary,
         });
         if let Some(object) = value.as_object_mut()
-            && let Some(event_id) = event
-                .event_id
-                .or_else(|| route_event_id(event).filter(|id| *id > 0))
+            && let Some(event_id) = route_event_id(event).filter(|id| *id > 0)
         {
             object.insert(
                 "event_id".to_string(),
@@ -2377,46 +1559,6 @@ mod tests {
                     .map_or(serde_json::Value::Null, legacy_json_evpn_route_entry),
             );
         }
-        if let Some(crate::proto::bgp_event::Payload::OtcRouteBlocked(otc)) = event.payload.as_ref()
-            && let Some(object) = value.as_object_mut()
-        {
-            object.insert(
-                "direction".to_string(),
-                serde_json::Value::String(otc.direction.clone()),
-            );
-            object.insert(
-                "reason".to_string(),
-                serde_json::Value::String(otc.reason.clone()),
-            );
-            object.insert(
-                "prefixes".to_string(),
-                serde_json::Value::Array(
-                    otc.prefixes
-                        .iter()
-                        .cloned()
-                        .map(serde_json::Value::String)
-                        .collect(),
-                ),
-            );
-            object.insert("count".to_string(), serde_json::Value::from(otc.count));
-            object.insert(
-                "local_role".to_string(),
-                serde_json::Value::String(otc.local_role.clone()),
-            );
-            object.insert(
-                "remote_role".to_string(),
-                serde_json::Value::String(otc.remote_role.clone()),
-            );
-            object.insert(
-                "otc_value".to_string(),
-                otc.otc_value
-                    .map_or(serde_json::Value::Null, serde_json::Value::from),
-            );
-            object.insert(
-                "as_path".to_string(),
-                serde_json::Value::String(otc.as_path.clone()),
-            );
-        }
         if let Some(crate::proto::bgp_event::Payload::StreamLag(lag)) = event.payload.as_ref()
             && let Some(object) = value.as_object_mut()
         {
@@ -2538,11 +1680,11 @@ mod tests {
     #[test]
     fn direct_bgp_event_json_matches_legacy_value() {
         use crate::proto::bgp_event::Payload;
-        fn envelope(category: EventCategory, afi_safi: i32, event_id: Option<u64>) -> BgpEvent {
+        fn envelope(category: EventCategory, afi_safi: i32) -> BgpEvent {
             BgpEvent {
                 timestamp: "2026-06-15T00:00:00Z".to_string(),
                 category: category as i32,
-                event_type: BgpEventType::OtcRouteBlocked as i32,
+                event_type: BgpEventType::PolicyChanged as i32,
                 severity: crate::proto::EventSeverity::Warning as i32,
                 peer_address: "10.0.0.2".to_string(),
                 previous_peer_address: "10.0.0.9".to_string(),
@@ -2551,7 +1693,6 @@ mod tests {
                 afi_safi,
                 summary: "summary text".to_string(),
                 target_peer_address: "10.0.0.3".to_string(),
-                event_id,
                 payload: None,
             }
         }
@@ -2568,16 +1709,10 @@ mod tests {
         };
 
         let mut cases: Vec<(&str, BgpEvent)> = Vec::new();
-        cases.push((
-            "none_with_id",
-            envelope(EventCategory::Route, ipv4, Some(11)),
-        ));
-        cases.push((
-            "none_no_id_unspec",
-            envelope(EventCategory::Route, unspec, None),
-        ));
+        cases.push(("none_with_id", envelope(EventCategory::Route, ipv4)));
+        cases.push(("none_no_id_unspec", envelope(EventCategory::Route, unspec)));
         cases.push(("route", {
-            let mut e = envelope(EventCategory::Route, ipv4, None);
+            let mut e = envelope(EventCategory::Route, ipv4);
             e.payload = Some(Payload::Route(crate::proto::RouteEvent {
                 event_id: 42,
                 ..Default::default()
@@ -2585,7 +1720,7 @@ mod tests {
             e
         }));
         cases.push(("session", {
-            let mut e = envelope(EventCategory::Session, ipv4, Some(1));
+            let mut e = envelope(EventCategory::Session, ipv4);
             e.payload = Some(Payload::Session(crate::proto::SessionEvent {
                 old_state: "idle".to_string(),
                 new_state: "established".to_string(),
@@ -2596,7 +1731,7 @@ mod tests {
             e
         }));
         cases.push(("notification", {
-            let mut e = envelope(EventCategory::Session, unspec, Some(2));
+            let mut e = envelope(EventCategory::Session, unspec);
             e.payload = Some(Payload::Notification(crate::proto::NotificationEvent {
                 direction: "outbound".to_string(),
                 code: 6,
@@ -2610,7 +1745,7 @@ mod tests {
             e
         }));
         cases.push(("policy", {
-            let mut e = envelope(EventCategory::Policy, ipv4, None);
+            let mut e = envelope(EventCategory::Policy, ipv4);
             e.payload = Some(Payload::Policy(crate::proto::PolicyEvent {
                 operation: "apply".to_string(),
                 target_type: "neighbor".to_string(),
@@ -2622,7 +1757,7 @@ mod tests {
             e
         }));
         cases.push(("dataplane", {
-            let mut e = envelope(EventCategory::Dataplane, ipv4, Some(4));
+            let mut e = envelope(EventCategory::Dataplane, ipv4);
             e.payload = Some(Payload::Dataplane(crate::proto::DataplaneEvent {
                 source: "fib".to_string(),
                 installed: 10,
@@ -2632,7 +1767,7 @@ mod tests {
             e
         }));
         cases.push(("dataplane_route", {
-            let mut e = envelope(EventCategory::Dataplane, ipv4, None);
+            let mut e = envelope(EventCategory::Dataplane, ipv4);
             e.payload = Some(Payload::DataplaneRoute(crate::proto::DataplaneRouteEvent {
                 source: "fib".to_string(),
                 action: "add".to_string(),
@@ -2646,7 +1781,7 @@ mod tests {
             e
         }));
         cases.push(("evpn_with_routes", {
-            let mut e = envelope(EventCategory::Evpn, ipv4, Some(5));
+            let mut e = envelope(EventCategory::Evpn, ipv4);
             e.payload = Some(Payload::Evpn(crate::proto::EvpnRouteEvent {
                 route_type: 2,
                 rd: "65000:1".to_string(),
@@ -2659,7 +1794,7 @@ mod tests {
             e
         }));
         cases.push(("evpn_no_route", {
-            let mut e = envelope(EventCategory::Evpn, ipv4, None);
+            let mut e = envelope(EventCategory::Evpn, ipv4);
             e.payload = Some(Payload::Evpn(crate::proto::EvpnRouteEvent {
                 route_type: 3,
                 rd: "65000:2".to_string(),
@@ -2671,42 +1806,8 @@ mod tests {
             }));
             e
         }));
-        cases.push(("otc_some_value", {
-            let mut e = envelope(EventCategory::Policy, ipv4, Some(7));
-            e.payload = Some(Payload::OtcRouteBlocked(
-                crate::proto::OtcRouteBlockedEvent {
-                    direction: "ingress".to_string(),
-                    reason: "ingress_from_customer".to_string(),
-                    prefixes: vec!["203.0.113.0/24".to_string(), "2001:db8::/32".to_string()],
-                    count: 2,
-                    local_role: "provider".to_string(),
-                    remote_role: "customer".to_string(),
-                    otc_value: Some(65002),
-                    as_path: "65002 {65003 65004}".to_string(),
-                    ..Default::default()
-                },
-            ));
-            e
-        }));
-        cases.push(("otc_no_value", {
-            let mut e = envelope(EventCategory::Policy, unspec, None);
-            e.payload = Some(Payload::OtcRouteBlocked(
-                crate::proto::OtcRouteBlockedEvent {
-                    direction: "ingress".to_string(),
-                    reason: "malformed_length".to_string(),
-                    prefixes: vec!["203.0.113.0/24".to_string()],
-                    count: 1,
-                    local_role: "provider".to_string(),
-                    remote_role: String::new(),
-                    otc_value: None,
-                    as_path: String::new(),
-                    ..Default::default()
-                },
-            ));
-            e
-        }));
         cases.push(("stream_lag", {
-            let mut e = envelope(EventCategory::Session, ipv4, Some(9));
+            let mut e = envelope(EventCategory::Session, ipv4);
             e.payload = Some(Payload::StreamLag(crate::proto::StreamLagEvent {
                 source_category: EventCategory::Session as i32,
                 missed_count: 5,
@@ -2715,7 +1816,7 @@ mod tests {
             e
         }));
         cases.push(("bfd", {
-            let mut e = envelope(EventCategory::Bfd, ipv4, Some(10));
+            let mut e = envelope(EventCategory::Bfd, ipv4);
             e.payload = Some(Payload::Bfd(crate::proto::BfdSessionEvent::default()));
             e
         }));
@@ -2886,102 +1987,6 @@ mod tests {
         });
 
         assert!(format_bgp_event_line(&event).ends_with(" id=42"));
-    }
-
-    #[test]
-    fn json_bgp_event_surfaces_otc_route_blocked_payload() {
-        // Regression: --json output must surface every
-        // OtcRouteBlockedEvent payload field. Earlier versions
-        // dropped the payload arm and rendered only the envelope +
-        // summary string, hiding prefixes, role pair, OTC value,
-        // and AS_PATH from operators driving the CLI.
-        let payload = crate::proto::OtcRouteBlockedEvent {
-            event_type: BgpEventType::OtcRouteBlocked as i32,
-            peer_address: "10.0.0.2".to_string(),
-            timestamp: "1".to_string(),
-            direction: "ingress".to_string(),
-            reason: "ingress_from_customer_rsclient".to_string(),
-            prefixes: vec!["203.0.113.0/24".to_string(), "2001:db8::/32".to_string()],
-            count: 2,
-            local_role: "provider".to_string(),
-            remote_role: "customer".to_string(),
-            otc_value: Some(65002),
-            as_path: "65002 {65003 65004}".to_string(),
-            summary:
-                "OTC ingress blocked 2 route(s) on peer 10.0.0.2 (ingress_from_customer_rsclient)"
-                    .to_string(),
-        };
-        let event = BgpEvent {
-            timestamp: "1".to_string(),
-            category: EventCategory::Policy as i32,
-            event_type: BgpEventType::OtcRouteBlocked as i32,
-            severity: crate::proto::EventSeverity::Warning as i32,
-            peer_address: "10.0.0.2".to_string(),
-            previous_peer_address: String::new(),
-            prefix: String::new(),
-            prefix_length: 0,
-            afi_safi: AddressFamily::Unspecified as i32,
-            summary: payload.summary.clone(),
-            target_peer_address: String::new(),
-            event_id: Some(7),
-            payload: Some(crate::proto::bgp_event::Payload::OtcRouteBlocked(payload)),
-        };
-
-        let value = json_bgp_event(&event);
-        assert_eq!(value["category"], "policy");
-        assert_eq!(value["event_type"], "otc_route_blocked");
-        assert_eq!(value["event_id"], 7);
-        assert_eq!(value["direction"], "ingress");
-        assert_eq!(value["reason"], "ingress_from_customer_rsclient");
-        assert_eq!(value["count"], 2);
-        assert_eq!(value["local_role"], "provider");
-        assert_eq!(value["remote_role"], "customer");
-        assert_eq!(value["otc_value"], 65002);
-        // AS_SET segment survives lossless via {…} notation.
-        assert_eq!(value["as_path"], "65002 {65003 65004}");
-        let prefixes = value["prefixes"].as_array().expect("prefixes array");
-        assert_eq!(prefixes.len(), 2);
-        assert_eq!(prefixes[0], "203.0.113.0/24");
-        assert_eq!(prefixes[1], "2001:db8::/32");
-    }
-
-    #[test]
-    fn json_bgp_event_omits_otc_value_when_payload_value_absent() {
-        // Malformed_length path: the attribute couldn't be decoded
-        // and otc_value is None. The CLI JSON must surface that as
-        // a JSON null, not silently drop the field or emit zero.
-        let payload = crate::proto::OtcRouteBlockedEvent {
-            event_type: BgpEventType::OtcRouteBlocked as i32,
-            peer_address: "10.0.0.2".to_string(),
-            timestamp: "1".to_string(),
-            direction: "ingress".to_string(),
-            reason: "malformed_length".to_string(),
-            prefixes: vec!["203.0.113.0/24".to_string()],
-            count: 1,
-            local_role: "provider".to_string(),
-            remote_role: String::new(),
-            otc_value: None,
-            as_path: String::new(),
-            summary: "summary".to_string(),
-        };
-        let event = BgpEvent {
-            timestamp: "1".to_string(),
-            category: EventCategory::Policy as i32,
-            event_type: BgpEventType::OtcRouteBlocked as i32,
-            severity: crate::proto::EventSeverity::Warning as i32,
-            peer_address: "10.0.0.2".to_string(),
-            previous_peer_address: String::new(),
-            prefix: String::new(),
-            prefix_length: 0,
-            afi_safi: AddressFamily::Unspecified as i32,
-            summary: payload.summary.clone(),
-            target_peer_address: String::new(),
-            event_id: Some(7),
-            payload: Some(crate::proto::bgp_event::Payload::OtcRouteBlocked(payload)),
-        };
-        let value = json_bgp_event(&event);
-        assert!(value["otc_value"].is_null());
-        assert_eq!(value["remote_role"], "");
     }
 
     #[test]
@@ -3305,7 +2310,6 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "session established".to_string(),
-            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Session(
                 crate::proto::SessionEvent {
                     event_type: BgpEventType::SessionEstablished as i32,
@@ -3325,23 +2329,6 @@ mod tests {
     }
 
     #[test]
-    fn json_bgp_event_session_includes_envelope_event_id() {
-        let event = BgpEvent {
-            timestamp: "1".to_string(),
-            category: EventCategory::Session as i32,
-            event_type: BgpEventType::SessionEstablished as i32,
-            severity: 1,
-            peer_address: "10.0.0.1".to_string(),
-            summary: "session established".to_string(),
-            event_id: Some(42),
-            ..Default::default()
-        };
-
-        let value = json_bgp_event(&event);
-        assert_eq!(value["event_id"], 42);
-    }
-
-    #[test]
     fn json_bgp_event_stream_lag_includes_missed_count() {
         let event = BgpEvent {
             timestamp: "2".to_string(),
@@ -3350,7 +2337,6 @@ mod tests {
             severity: 2,
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "route event stream lagged; missed 7 event(s)".to_string(),
-            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::StreamLag(
                 crate::proto::StreamLagEvent {
                     source_category: EventCategory::Route as i32,
@@ -3378,7 +2364,6 @@ mod tests {
             severity: 2,
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "route event stream lagged; missed 7 event(s)".to_string(),
-            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::StreamLag(
                 crate::proto::StreamLagEvent {
                     source_category: EventCategory::Route as i32,
@@ -3410,7 +2395,6 @@ mod tests {
             peer_address: "10.0.0.1".to_string(),
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "BGP NOTIFICATION sent for peer 10.0.0.1: 6/7 (Connection Collision Resolution)".to_string(),
-            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Notification(
                 crate::proto::NotificationEvent {
                     event_type: BgpEventType::NotificationSent as i32,
@@ -3445,7 +2429,6 @@ mod tests {
             event_type: BgpEventType::PolicyChanged as i32,
             severity: 1,
             summary: "policy set policy audit-policy".to_string(),
-            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Policy(
                 crate::proto::PolicyEvent {
                     event_type: BgpEventType::PolicyChanged as i32,
@@ -3525,7 +2508,6 @@ mod tests {
             severity: 2,
             afi_safi: AddressFamily::Unspecified as i32,
             summary: "dataplane fib status changed".to_string(),
-            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Dataplane(
                 crate::proto::DataplaneEvent {
                     source: "fib".to_string(),
@@ -3559,7 +2541,6 @@ mod tests {
             prefix_length: 24,
             afi_safi: AddressFamily::Ipv4Unicast as i32,
             summary: "dataplane fib route failed 203.0.113.0/24".to_string(),
-            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::DataplaneRoute(
                 crate::proto::DataplaneRouteEvent {
                     source: "fib".to_string(),
@@ -3603,7 +2584,6 @@ mod tests {
             previous_peer_address: "10.0.0.3".to_string(),
             afi_safi: AddressFamily::L2vpnEvpn as i32,
             summary: "EVPN route best changed mac".to_string(),
-            event_id: None,
             payload: Some(crate::proto::bgp_event::Payload::Evpn(
                 crate::proto::EvpnRouteEvent {
                     event_type: BgpEventType::EvpnRouteBestChanged as i32,
@@ -3673,32 +2653,28 @@ mod tests {
     }
 
     #[test]
-    fn unified_filter_live_and_durable_matrices_are_exhaustive() {
+    fn live_filter_matrix_is_exhaustive() {
         for raw in 0..=100 {
             let Ok(event_type) = BgpEventType::try_from(raw) else {
                 continue;
             };
-            let (live, durable) = match raw {
-                1..=4 => (1, 1),
-                10..=16 | 20..=21 => (2, 2),
-                22 => (4, 4),
-                23 => (0, 4),
-                30..=33 => (8, 8),
-                40..=42 => (16, 16),
-                50..=52 => (32, 32),
-                53 => (2, 2),
-                100 => (1 | 2 | 8 | 16 | 32, 0x3f),
-                0 => (0, 0),
+            let live = match raw {
+                1..=4 => 1,
+                10..=16 | 20..=21 | 53 => 2,
+                22 => 4,
+                30..=33 => 8,
+                40..=42 => 16,
+                50..=52 => 32,
+                100 => 1 | 2 | 8 | 16 | 32,
+                0 => 0,
                 _ => unreachable!("known enum value covered"),
             };
             assert_eq!(live_event_type_mask(event_type), live);
-            assert_eq!(durable_event_type_mask(event_type), durable);
         }
         let policy = [EventCategory::Policy as i32];
-        assert!(validate_category_event_types(&policy, &[22, 100], false).is_ok());
-        assert!(validate_category_event_types(&[1, 2], &[1], false).is_ok());
-        assert!(validate_category_event_types(&policy, &[100], false).is_err());
-        assert!(validate_category_event_types(&[2], &[23], true).is_err());
+        assert!(validate_category_event_types(&policy, &[22, 100]).is_ok());
+        assert!(validate_category_event_types(&[1, 2], &[1]).is_ok());
+        assert!(validate_category_event_types(&policy, &[100]).is_err());
     }
 
     #[test]
@@ -3768,13 +2744,12 @@ mod tests {
             category: EventCategory::Session as i32,
             event_type: BgpEventType::SessionStateChanged as i32,
             summary: "session state changed for peer 198.51.100.2: connect -> active".to_string(),
-            event_id: Some(7),
             ..Default::default()
         };
         assert_eq!(
             format_bgp_event_line(&session),
             "[2026-09-23T03:05:14Z] state_changed session state changed for peer \
-             198.51.100.2: connect -> active id=7"
+             198.51.100.2: connect -> active"
         );
         let json = json_bgp_event(&session);
         assert_eq!(json["timestamp"], "1790132714");

@@ -12,9 +12,8 @@ description = "gRPC API server — tonic bindings for the rustbgpd management an
 readme = "README.md"
 
 [features]
-# Exposes the RIB manager's benchmark-only event-publish driver to the
-# event-history producer benchmark. Normal API and daemon builds do not compile
-# that surface.
+# Exposes RIB benchmark-only internals to the VPN query benchmarks. Normal API
+# and daemon builds do not compile that surface.
 bench-internals = ["rustbgpd-rib/bench-internals"]
 vpn-query-allocation = []
 
@@ -26,7 +25,6 @@ rustbgpd-policy.workspace = true
 rustbgpd-transport.workspace = true
 rustbgpd-telemetry.workspace = true
 rustbgpd-evpn.workspace = true
-rustbgpd-event-history.workspace = true
 rustbgpd-rpki.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
@@ -64,11 +62,6 @@ tikv-jemallocator.workspace = true
 [[bench]]
 name = "import_roster"
 harness = false
-
-[[bench]]
-name = "event_history_producer"
-harness = false
-required-features = ["bench-internals"]
 
 [[bench]]
 name = "vpn_query_timing"

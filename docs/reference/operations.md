@@ -953,7 +953,7 @@ is waiting on a mutation, and it still leaves the same durable state behind.
 the RFC 8212 `config_epoch` / `ebgp_requires_policy` tuple,
 `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
-`[mrt]`, `[flowspec]`, `[event_history]`, `[inbound_admission]`,
+`[mrt]`, `[flowspec]`, `[inbound_admission]`,
 `[security.grpc]`, `[managed_netdevs]`, `[[bfd_profiles]]` definitions, and
 `apply_bum_enforcement`. The [reload matrix](reload-matrix.md) is the full
 per-field list. EVPN table edits are
@@ -1059,7 +1059,7 @@ such change, expect all of the following:
 - fields inside the sections the file keeps are written out with their
   resolved values, but optional feature sections still at their defaults
   (`[security]`, an all-default `[policy]`, `[flowspec]`, `[managed_netdevs]`,
-  `[event_history]`, `[inbound_admission]`) are omitted, and selected
+  `[inbound_admission]`) are omitted, and selected
   default-empty inline-policy community lists are omitted because omission
   and `[]` decode identically;
 - the temp-file + rename leaves the file owned by the daemon user at mode
@@ -1305,7 +1305,7 @@ transport, not a collector acknowledgement; `PublishResponse` remains reserved
 and no remote-apply acknowledgement exists. Every (re)connection restarts the subscription, so the
 collector resyncs from a fresh initial snapshot + `sync_response` — the
 disconnect window is not replayed (same contract as a dial-in Subscribe
-reconnect; use the durable event cursor for gap-free history).
+reconnect; BMP, Prometheus, and the daemon logs are the durable record).
 
 ### MRT dump failure
 
@@ -1384,7 +1384,7 @@ an in-place trim of previously retained paths.
 `max_prefix_warning_percent` adds a threshold to any action: when a scope's
 usage reaches that percentage of its bound the daemon emits one warn log line
 (`max prefix warning threshold crossed`), one `max_prefix_warning` session event
-(visible in `rbgp watch` and the durable event stream), and one
+(visible in `rbgp watch` and the session event stream), and one
 `bgp_max_prefix_warning_total{peer,scope}` increment, then stays quiet until
 usage falls back under the threshold and crosses it again.
 
@@ -1584,7 +1584,7 @@ internally and available via gRPC `GetMetrics` and `GetHealth` RPCs, but the
 HTTP `/livez` and `/readyz` probes are disabled.
 
 Metric names are split by prefix on purpose: `bgp_*` covers the BGP core
-(sessions, RIB, policy, RPKI/ASPA, GR, event stream/outbox, FIB) and
+(sessions, RIB, policy, RPKI/ASPA, GR, event stream, FIB) and
 `evpn_*` covers the EVPN/VTEP dataplane surface — the two subsystems have
 different cardinality profiles and are typically dashboarded and alerted
 separately. `bfd_*` names the BFD liveness metrics; `bmp_*` and `mrt_*`
@@ -1621,7 +1621,7 @@ one OS thread, plus a short-lived blocking thread while a scrape renders.
 
 Readiness is actor responsiveness, not routing policy. A daemon with zero
 configured peers, zero Established peers, or zero routes can still be ready.
-Event-history, EVPN, FIB, and peer-count health are surfaced through their own
+EVPN, FIB, and peer-count health are surfaced through their own
 metrics and status commands rather than as v1 readiness gates.
 
 Enable the separate alpha dataplane probe with
@@ -2013,8 +2013,7 @@ blocked, the RIB withdraws it and removes the logical advertised entry. Where a 
 carries a `reason` label, its values are the canonical contract
 pinned in `crates/telemetry/src/reason_labels.rs` — stable across
 releases and shared verbatim by the metric label, the log-line
-`reason` token, and (for OTC) the structured `OTC_ROUTE_BLOCKED`
-event payload, so alert expressions can key on them safely. Metrics
+`reason` token, so alert expressions can key on them safely. Metrics
 without a `reason` label encode the mechanism in the metric name.
 
 | Metric | What it tells you |
@@ -2084,9 +2083,13 @@ structured daemon logs for the corresponding BGP NOTIFICATION or local
 teardown cause.
 `WatchEvents` is a live tail, not a durable queue. Non-zero
 `bgp_event_stream_lagged_total` means at least one live subscriber fell behind
-after the event reached the peer manager; combine a fresh snapshot or `ListRouteEvents`
-query with a new live watch. `bgp_event_outbox_dropped_total` instead reports
-loss at the later durable-outbox or durable-cursor boundary.
+after the event reached the peer manager; open a new live watch, then take a fresh
+snapshot or `ListRouteEvents` query. There is no durable event cursor: a
+consumer that reconnects opens and buffers a new watch before re-reading state,
+because separate RPCs give no atomic handoff and a change between a state read
+and a later watch is lost with no lag signal. gNMI `Subscribe` ON_CHANGE
+subscribes before its snapshot internally. BMP to a collector, Prometheus,
+and the daemon logs are the durable record.
 
 ### gNMI dial-out
 
@@ -2136,148 +2139,6 @@ drop that already recovered.
 | `mrt_last_dump_duration_milliseconds` | Wall-clock duration of the last successful dump from trigger to published file (RIB snapshot, encode, write, rename) |
 | `mrt_dump_bytes_written_total` | Bytes of dump files published on disk (after compression) |
 | `mrt_dump_failures_total{stage}` | Failed dumps by bounded stage: `preflight` (output directory), `snapshot` (RIB actor query), `encode`, `write`. A caller-canceled on-demand dump is not counted; a periodic failure also logs at error level, an on-demand failure is returned to its caller |
-
-### Durable Event Cursor (ADR-0072)
-
-The durable outbox (`SubscribeFromEvent` RPC, CLI
-`rbgp events watch --from-event-id <N>`, and the
-`examples/event-bridge/` reference binary) survives daemon restart and
-exposes a monotonic `event_id` cursor. The legacy live surfaces above
-(`WatchEvents` / `List*Events`) keep their existing
-ring-backed behavior and are unaffected by this section.
-
-While `rbgp events watch --from-event-id <N>` remains running, it reconnects
-only after clean EOF or gRPC `UNAVAILABLE`. Backoff starts at 1 second, doubles
-to a 30-second cap, and resets after a complete human or JSON record plus
-newline is written and stdout is flushed. Each request preserves the original
-category, type, neighbor, family, and prefix filters; only the cursor changes.
-The cursor uses the highest flushed top-level `BgpEvent.event_id`, so lag frames
-without that field do not advance it. Every other RPC status and any output
-failure is terminal. This cursor lives only for the running CLI process; use
-the event bridge when a downstream-confirmed cursor must survive CLI restart.
-Cursorless OTC subscriptions and ordinary `WatchEvents` streams remain
-one-shot.
-
-**Opt-in — default off as of v0.32.0.** The outbox is disabled by default
-(v0.32.0 benchmarking measured ~62 MB RSS plus roughly double the peak CPU at
-2p/100k — too much to impose on operators who never consume the cursor). Enable
-it explicitly and restart:
-
-```toml
-[event_history]
-enabled = true
-max_bytes = 256_000_000   # size retention to your collector's reconnect SLA
-```
-
-**Two deployment profiles:**
-
-- **Lean / high-scale (the default):** `[event_history].enabled = false`.
-  Routing fast and lean; `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
-  return `FAILED_PRECONDITION`, but the live `WatchEvents` /
-  `List*Events` surfaces still provide real-time observability.
-  **Security-signal caveat:** the structured `OTC_ROUTE_BLOCKED` event (RFC 9234
-  route-leak prevention — per-decision prefixes, AS_PATH, roles) is emitted
-  *only* through the durable outbox, so with the lean default it is **not**
-  available via `SubscribeFromEvent`. Blocks are still observable via the
-  always-on `bgp_otc_routes_blocked_total{peer,reason}` counter, the
-  `otc_routes_blocked` per-neighbor scalar, and the daemon log — but if you need
-  the rich per-decision event for incident reconstruction or a SIEM feed, enable
-  event-history (the observability/replay profile below).
-- **Observability / replay:** `[event_history].enabled = true` with
-  `max_events` / `max_bytes` sized for your collector's worst-case reconnect
-  window. Gives restart-safe `event_id` cursor replay; budget the ~62 MB RSS +
-  CPU shown in `docs/benchmarks.md`.
-
-Producer set: `route`, `evpn`, `session` (lifecycle + notification),
-`policy` (config-mutation `POLICY_CHANGED` events **plus**
-transport-layer `OTC_ROUTE_BLOCKED` route-leak decisions — both
-ride on `EVENT_CATEGORY_POLICY`, discriminated by `BgpEventType`),
-`bfd`, and `dataplane` (FIB + blackhole summaries and per-route
-install / withdraw / failure events). All six categories are
-produced through the durable outbox when
-`[event_history].enabled = true`. The dataplane poller is
-startup-spawned so durable summaries flow regardless of whether
-any `WatchEvents` subscriber is alive.
-
-| Metric | What it tells you |
-|--------|-------------------|
-| `bgp_event_outbox_committed_total{category}` | Events durably committed to the local outbox, per category. Increments inside EHM after the SQLite transaction commits — not on producer enqueue. |
-| `bgp_event_outbox_dropped_total{category, reason}` | Events lost before durable storage, or committed events skipped during durable cursor delivery. `reason` is `queue_full`, `closed`, `db_error`, `shutdown_timeout`, `decode_failure`, `opaque_codec`, or `source_lagged`. `shutdown_timeout` means an accepted event remained actor-queued or in an accepted producer handoff when the coordinated shutdown deadline expired; an append already owned by the actor has unknown outcome and is not counted as a definite per-category drop. `source_lagged` fires when an upstream broadcast receiver (FIB or BFD bridge) reports `Lagged(missed)` — those missed events never reached the bridge body and therefore never reached EHM; the counter increments by `missed`. `queue_full`, `db_error`, `shutdown_timeout`, decode/codec failures, and `source_lagged` flip `bgp_event_outbox_degraded` to `1`; shutdown-time `closed` drops do not. After a runtime storage failure, events that were already accepted count as `db_error` and producers count refused events as `closed`; `bgp_event_outbox_storage_failed` distinguishes these from shutdown. |
-| `bgp_event_outbox_queue_depth{category}` | Accepted pending events in the EHM producer queue by category, including a producer handoff between its admission CAS and `permit.send`. Climbs before drops start — early-warning signal. |
-| `bgp_event_outbox_db_size_bytes` | Combined size of `events.db` + WAL on disk, refreshed after commits and retention passes. `[event_history].max_bytes` is the scheduled size-retention target; a bounded pass can finish while the store remains above it. |
-| `bgp_event_outbox_retention_evicted_total{reason}` | Events evicted by the retention pass. `reason` is `count_cap` or `byte_cap`. |
-| `bgp_event_outbox_latest_event_id` | The latest committed `event_id`. Forward progress indicator. |
-| `bgp_event_outbox_open_failures_total` | DB-open failures across the process lifetime. Typically 0 or 1; non-zero means EHM went into recovery or pass-through at startup. |
-| `bgp_event_outbox_degraded` | `1` once the outbox has seen durability-impacting loss, a committed-event delivery skip, or DB open/recovery/quarantine failure since start. Expected shutdown `reason=closed` drops are excluded. The signal does not auto-clear in v1; restart clears the latch. |
-| `bgp_event_outbox_storage_failed` | `1` once the event-history storage thread stopped (exited or panicked) while the daemon was running. The outbox then refuses producer events and durable cursor subscriptions, and `bgp_event_outbox_degraded` is also `1`. Restart the daemon to recover; the signal does not auto-clear. |
-| `bgp_event_outbox_cursor_gap_total` | Cursor-gap `StreamLagEvent` frames sent on `SubscribeFromEvent` streams: the leading frame when the requested cursor was older than the retention floor, plus one for each time retention evicted events ahead of a replay still in progress. Operator signal that `[event_history].max_events` / `max_bytes` is undersized for the collector reconnect SLA. |
-
-**`FAILED_PRECONDITION` on `SubscribeFromEvent`** means one of:
-
-1. `[event_history].enabled = false` in the daemon config — by design;
-   the legacy live surfaces still work, but the durable cursor is
-   intentionally off. Flip to `true` and restart.
-2. `[event_history].required = false` and EHM failed to open
-   `events.db` at startup (permission denied, disk full, corruption).
-   `bgp_event_outbox_open_failures_total` will be ≥ 1 and
-   `bgp_event_outbox_degraded` is `1`. Check the daemon log for the
-   reason; fix permissions / free disk / restore from backup, then
-   restart. Pre-1.0, `required = true` is the strictest posture — the
-   daemon refuses to start when the outbox cannot be opened.
-3. Event-history startup failed because the allocator anchor was unrecoverable
-   (for example, a moved `.stale-<ts>` quarantine file with no sidecar
-   fallback). With `required = false`, the daemon continues live-only without
-   EHM; with `required = true`, startup fails. Check the startup log, fix the
-   underlying I/O issue, and restart.
-
-**`UNAVAILABLE` during `SubscribeFromEvent` replay** means the storage actor
-stopped accepting work or failed to reply. Inspect daemon health and logs,
-restart if necessary, and resume from the last received top-level `event_id`.
-Events already delivered remain valid; the terminal status is emitted once.
-
-**`UNAVAILABLE` at `SubscribeFromEvent` admission** means the storage thread
-has already stopped: `bgp_event_outbox_storage_failed` is `1` and the daemon
-log has the error `event-history storage stopped` (after a panic, also a
-crash report). From that point the outbox accepts no producer events, so the
-events produced before the restart are lost. Streams that were open when the
-storage stopped end with `DATA_LOSS`, and gNMI `Subscribe ON_CHANGE` streams,
-including new ones, end the same way. Restart the daemon, then reconcile
-collectors against authoritative state before resuming from their last
-`event_id`.
-
-**Sizing retention** — `max_events` and `max_bytes` are retention targets
-evaluated during each scheduled pass. The count target is evaluated first and
-removes at most 5,000 oldest events above the target; the byte target then
-removes up to ten 5,000-event batches while the database remains oversized.
-Default `100_000` events /
-`256_000_000` bytes covers a few minutes of even a busy daemon's
-event stream. Operators with longer collector-reconnect tolerance
-should raise both proportionally; collectors should alert on
-`bgp_event_outbox_cursor_gap_total > 0` to know when retention is
-too small for their SLA. A busy or heavily oversized store can remain
-above either target between passes or after one bounded pass. If sustained
-event production exceeds the maximum per-pass eviction throughput, the store
-can continue growing without a hard ceiling; alert on
-`bgp_event_outbox_db_size_bytes`. SQLite may also hold onto freed pages rather
-than immediately shrink the main DB.
-
-**External-bus integration** — see `examples/event-bridge/` for the
-reference skeleton. The pattern is:
-1. Connect with the last `event_id` your downstream sink confirmed
-   durable.
-2. Forward `BgpEvent` records to your sink.
-3. Advance the persisted `last_seen_event_id` **only after** the
-   sink confirms durable receipt.
-4. Treat a `StreamLagEvent` as a gap signal, not a stream
-   end — your collector lost events older than the retention floor.
-   It is the leading frame when the cursor was already too old, and it
-   can also arrive mid-replay if retention evicts events ahead of a
-   slow replay; `missed_count` covers exactly the ids skipped at that
-   point.
-5. Use `BgpEvent.timestamp`, not `event_id`, for causal joins
-   across event categories. The durable `event_id` is
-   order-of-arrival at the EHM actor, not order-of-occurrence at
-   each producer.
 
 ## Delayed outbound registration
 
@@ -2531,7 +2392,7 @@ The RPCs that deserve the most attention are:
 | Class | Examples | Guardrail |
 |-------|----------|-----------|
 | Large sensitive reads | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListEvpnRoutes`, `ListFlowSpecRoutes`, `ComparePolicy`, `GetMetrics` | Prefer pagination or narrow filters, set client deadlines, and alert on sustained `sensitive_read` volume |
-| Live streams | `EventService.WatchEvents`, `EventService.SubscribeFromEvent` | Keep clients draining, reconnect after `stream_lagged`, and alert on subscriber count or lag spikes |
+| Live streams | `EventService.WatchEvents` | Keep clients draining, reconnect after `stream_lagged`, and alert on subscriber count or lag spikes |
 | History queries | `ListRouteEvents`, `ListSessionEvents`, `ListPolicyEvents` | Histories are bounded and process-local; use explicit limits for dashboards |
 | Mutating calls | Neighbor, policy, peer-group, injection RPCs | Use listener `max_tier`, role enforcement, and audit alerts on `mutating` volume |
 | Operator-only calls | `Shutdown`, `TriggerMrtDump`, `SetGracefulShutdown`, selected policy/global changes | Restrict to operator principals/listeners and page on unexpected `operator_only` activity |
@@ -3117,7 +2978,7 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 | `evpn.core_isolation.uplinks` | With `uplinks` configured, `evpn_core_isolated{signal="uplinks"}` at 1 while `signal="sessions"` reads 0 | yellow: every configured uplink lacks carrier while EVPN sessions are up, which points to a wrong `uplinks` list |
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
-| `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, crash reports, and the event-history DB write there |
+| `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, and crash reports write there |
 | `host.run_context` | systemd / container / unknown from pid-1 facts | tailors remediation lines (e.g. `LimitNOFILE=` vs container ulimits) |
 | `daemon.config_freshness.<pid>` | whether config file mtime is newer than the daemon's last config-file marker (process start fallback) | yellow means on-disk changes may be pending; green does not prove effective runtime agreement |
 
@@ -3724,11 +3585,6 @@ rbgp events watch --prefix 203.0.113.0/24 --type added,best_changed
 rbgp events watch --category session --type established,lost
 rbgp events watch --category session --type notification_sent,notification_received
 rbgp events watch --category policy --type policy_changed
-# OTC route-leak decisions are published only through the durable
-# outbox; the CLI automatically routes this filter through
-# SubscribeFromEvent in live-only mode. Add `--from-event-id 0` to
-# also replay any retained history.
-rbgp events watch --category policy --type otc_route_blocked
 rbgp events watch --category dataplane --type dataplane_status_changed
 rbgp events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24
 rbgp events watch --prefix 203.0.113.0/24 --type policy_filtered
@@ -3774,24 +3630,11 @@ live tail after a gap. Policy and peerless dataplane lag is metric-only, with
 no in-band warning. Use `--backfill N`
 to print recent matching route history before the live tail starts. Backfill
 is route-history only; session, policy, EVPN, dataplane, and BFD events are not
-backfilled from process-local history through the live stream command. When
-EHM is enabled, those categories — including per-route FIB dataplane events —
-can instead be replayed durably with `SubscribeFromEvent` or
-`rbgp events watch --from-event-id <N>`. Use `rbgp rib fib` for the current
-route ownership snapshot after a reconnect.
-
-For the cursorful CLI form, clean EOF and gRPC `UNAVAILABLE` reconnect from the
-highest complete record flushed to stdout, using 1-second exponential backoff
-capped at 30 seconds. Other statuses and output failures stop the command; lag
-frames without a top-level `BgpEvent.event_id` do not advance its process-local
-cursor. All filters are preserved on reconnect. Cursorless OTC subscriptions
-and ordinary `WatchEvents` streams remain one-shot.
+backfilled from process-local history through the live stream command. Use
+`rbgp rib fib` for the current route ownership snapshot after a reconnect.
 
 Category/type values are ORed within each dimension and ANDed across them. The
-CLI rejects impossible combinations locally before connecting. On the server,
-a missing EHM or an EHM in pass-through mode returns `FAILED_PRECONDITION`
-before category/type parsing. Durable lag is global for every category; OTC is
-durable-policy only.
+CLI rejects impossible combinations locally before connecting.
 
 Backfilled route events use the same output shape as live route events, but
 the command still prints a history block followed by the live tail rather than
@@ -3824,7 +3667,7 @@ Use the narrowest surface for the question you are asking:
 | "What is changing right now?" | `rbgp events watch` / `EventService.WatchEvents` | Default live route + session stream. Policy, EVPN, dataplane, and BFD streams are opt-in with `--category` or matching `--type`. No replay after reconnect. |
 | "What just changed for this prefix?" | `rbgp events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
 | "Why did this prefix not reach a peer?" | `rbgp events watch --neighbor 10.0.0.2 --type policy_filtered --prefix 203.0.113.0/24` / `ListRouteEvents` | Export-policy denials where the peer is the denied outbound target. |
-| "Did FIB apply fail for this prefix?" | `rbgp events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; replayable through `SubscribeFromEvent` when `[event_history].enabled = true`. |
+| "Did FIB apply fail for this prefix?" | `rbgp events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome. No replay after reconnect; use `rbgp rib fib` for current ownership. |
 | "What policy changed recently?" | `rbgp events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
 | "What EVPN route changed recently?" | `rbgp events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |
 | "Are BFD sessions up?" | `rbgp bfd`, `rbgp bfd show 10.0.0.2` / `BfdService.GetBfdSessions` | Snapshot of configured single-hop and multihop BFD sessions, mode, strict flag, state, diagnostic, and presence-aware remote-AdminDown cause. `Down` plus remote AdminDown means the peer disabled BFD and RFC 5882 permits BGP; an absent cause from an older daemon is shown as unknown. `rbgp doctor` records the same bool/null in `peers/bfd.json`. |

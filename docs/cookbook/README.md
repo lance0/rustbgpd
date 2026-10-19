@@ -70,7 +70,7 @@ two instances of any mode are [paired route servers](paired-route-servers.md).
 | [IXP filter pipeline](ixp-filter-pipeline.md) | Keep your arouteserver `general.yml`/`clients.yml`: render member filters with `rs-config-render`, reload fail-stale, serve Alice-LG | M83, M90 |
 | [IXP Manager route server](ixp-manager-route-server.md) | IXP Manager v7.4 provisions the route server: Foil export → render → `--check --strict` receipt → atomic activation → lock/fetch/callback lifecycle, paired handles, IXP Manager looking glass through the Birdwatcher surface — with the boundary stated | M96, M97 (local), pinned v7.4 contract oracle |
 | [MANRS IXP Action 1](manrs-ixp-action1.md) | Document your MANRS IXP Programme participation: Action 1 mapped requirement-by-requirement to validated config and member-verifiable surfaces | M83, fragments pass `rustbgpd --check --strict` |
-| [Controller / monitoring feed](monitoring-feed.md) | Streaming BMP, durable events, and MRT into a controller or collector stack | M24, M81 |
+| [Controller / monitoring feed](monitoring-feed.md) | Streaming BMP, live events, and MRT into a controller or collector stack | M24, M81 |
 | [EVPN fabric route reflector](evpn-fabric-rr.md) | Control-plane-only RR for a VXLAN-EVPN leaf/spine fabric | M29, M30, M82, M33 |
 | [Policy quickstart (`.rpol`)](policy-quickstart.md) | First typed policy: tests, dry-run, hot swap, explain | M80, M34 |
 | [Backup route with conditional advertisement](conditional-advertisement-backup.md) | Announce a prefix to a backup upstream only while the primary upstream's route is absent: config, metrics, explain, alerting | [M115](../interop.md) |

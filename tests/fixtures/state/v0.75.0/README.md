@@ -14,7 +14,8 @@ It covers the formats the [v0.74.0 sample](../v0.74.0/README.md) left out.
   `config.toml.commit-confirm-locator.json`), the metadata, and the raw
   normalized prior config.
 - `events.db`: the event-history store (`metadata.schema_version = 1`) after
-  coordinated shutdown.
+  coordinated shutdown. Kept as captured; current daemons no longer read it
+  because the durable event history was removed after v0.78.0.
 - `warm-bundle-v1/`: the shutdown warm checkpoint (manifest `format_version = 2`
   and its MRT snapshot) for one Established IPv4 view with no routes.
 - `gr-restart.toml`: the v3 restart marker written with that checkpoint; its
@@ -57,7 +58,7 @@ From the repository root, with Python 3.11+, Docker, a locally available
 ```sh
 python3 scripts/capture-released-state-v075.py rustbgpd-linux-amd64.tar.gz /tmp/released-state-capture
 cargo test --locked -p rustbgpd --bin rustbgpd released_v075
-cargo test --locked -p rustbgpd-event-history -p rustbgpd-mrt --lib released_v075
+cargo test --locked -p rustbgpd-mrt --lib released_v075
 ```
 
 Use a new output directory. The script compares the recapture with these
@@ -85,8 +86,8 @@ current reader and refuses a copy declaring the next version:
 |----------|----------|--------------|
 | FIB receipt | Both routes adopted under the archived `[[fib_tables]]` entry | Version 6 is quarantined to `.stale`; nothing owned |
 | BLACKHOLE receipt | Prefix adopted, kernel mutations available | `/v2` schema disables mutations; file untouched |
-| Commit-confirm v3 | Locator and metadata decode, linkage, raw digest and retained-snapshot checks pass | Version 4 locator and metadata refused |
-| Event store | Opens in place; allocator continues at 28 | Schema 2 refused in place, not quarantined |
+| Commit-confirm v3 | Locator and metadata decode, linkage and raw digest pass; the retained prior is refused because it carries the removed `[event_history]` section | Version 4 locator and metadata refused |
+| Event store | Not read: the durable event history was removed after v0.78.0 | — |
 | Warm bundle | Startup scavenging keeps it; full load and snapshot decode pass | Format 3 refused by both; files untouched |
 | GR marker | v3 decodes with the bundle's generation | Version 4 refused |
 

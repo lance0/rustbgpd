@@ -485,8 +485,8 @@ Nothing depends on the shadow, so teardown is unceremonious and total:
 3. Volunteers delete their shadow-tap session; the incumbent operator
    deletes the feed/observer session. Both are ordinary neighbor
    removals on their side.
-4. Delete the shadow's `runtime_state_dir` (journal, event history,
-   MRT dumps, crash reports) — and its candidate/receipt directories —
+4. Delete the shadow's `runtime_state_dir` (journal, MRT dumps,
+   crash reports) — and its candidate/receipt directories —
    once the close-out artifacts are archived.
 5. Confirm the exchange's state is prior state: incumbent session
    counts and member `PfxRcd` are what they were before step 1 of the
