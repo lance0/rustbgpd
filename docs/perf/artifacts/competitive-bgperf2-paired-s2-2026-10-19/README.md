@@ -57,6 +57,23 @@ maximum.
 - `analysis.txt`: the queue's summary for both measurements, with local paths
   and internal tracker references replaced by placeholders and labels.
 
+## Raw evidence
+
+Both measurements were a local same-host campaign; there is no hosted CI run.
+The raw per-run bgperf2 events JSON and logs, and the S2 matrix outputs, are
+retained in the local campaign directory (`<campaign>`) and are not published.
+What ran is identified by source commit `3e3fba0de`, rustbgpd image
+`sha256:9e5afded9a636a84f2a526059d31f98603a72c87415e1e4a74450b72d96c7d5e`, the
+comparator image ids in `provenance.json`, bgperf2 fork commit `1a2648d`, the
+OpenBGPD digest above, and the SHA-256 of each matrix binary (also in `analysis.txt`):
+
+```text
+288fd536a4de074325a3e8278e9171098393a8b820eee1eb58c9ed5fddd515b6  rustbgpd
+b220eb6eb3dd497b5e907684f14ee9db6cc43845119bc9a2df62eee3903d6022  rbgp
+00916eddb0a91852de14f5958cb83000d76ace59cc0f10992191ea57def8bc7c  rs-config-render
+65d69b0303348fa7436e95bf891e7c9ec31f5e43183ffb1e4265ff5868ea89d6  reloadstall
+```
+
 `SHA256SUMS` hashes each file. The host is the AMD Ryzen Threadripper 7970X
 described in [the benchmark page](../../../benchmarks.md#2026-10-19-paired-read-rerun).
 bgperf2 total time moves in roughly one-second steps, set by the monitor's poll
