@@ -1731,6 +1731,13 @@ impl RibManager {
         let prefix = route.prefix;
         let mut route = route;
         self.attr_intern.intern(&mut route.attributes);
+        // Validate against the current VRP table, as session routes are on
+        // insert and as cache revalidation later does for the local
+        // Adj-RIB-In; otherwise a replacement would reset the origin state to
+        // NotFound until the next covering VRP change.
+        if let Some(table) = self.vrp_table.as_deref() {
+            route.validation_state = validate_route_rpki(&route, table);
+        }
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
@@ -1738,8 +1745,9 @@ impl RibManager {
         // Decide from the local Adj-RIB-In, not Loc-RIB, as for FlowSpec: a
         // received route that out-selects the local one leaves Loc-RIB
         // unchanged even when the local route really was replaced. These are
-        // the fields a controller sets; `received_at` is excluded, so an
-        // identical re-add changes nothing that selection or export reads.
+        // the fields a controller sets. An identical re-add returns before
+        // touching the stored route, keeping its derived state (RPKI
+        // validation, receipt time) and selection exactly as they were.
         let outcome = match rib.get(&prefix, route.path_id) {
             None => InjectOutcome::Created,
             Some(old)
@@ -1751,6 +1759,11 @@ impl RibManager {
             }
             Some(_) => InjectOutcome::Replaced,
         };
+        if outcome == InjectOutcome::Unchanged {
+            debug!(%prefix, ?outcome, "injected local route");
+            let _ = reply.send(Ok(outcome));
+            return;
+        }
         let replaced = rib.insert(route);
         debug!(%prefix, ?outcome, "injected local route");
         let rib_len = rib.len();
