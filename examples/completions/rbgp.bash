@@ -12715,7 +12715,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__delete)
-            opts="-s -j -h --path-id --owner --override-owner --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            opts="-s -j -h --path-id --allow-missing --owner --override-owner --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

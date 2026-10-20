@@ -49,3 +49,88 @@ impl InjectedOwner {
         status.into()
     }
 }
+
+/// Name an `AddPath` or `AddFlowSpec` outcome against the previous local
+/// entry; `unknown` for a daemon that predates it. `PathInjectOutcome` and
+/// `FlowSpecInjectOutcome` share one numbering, pinned by a test below.
+pub(crate) fn inject_outcome_name(outcome: i32) -> &'static str {
+    use crate::proto::PathInjectOutcome;
+    match PathInjectOutcome::try_from(outcome) {
+        Ok(PathInjectOutcome::Created) => "created",
+        Ok(PathInjectOutcome::Replaced) => "replaced",
+        Ok(PathInjectOutcome::Unchanged) => "unchanged",
+        Ok(PathInjectOutcome::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+/// Name a `DeletePath` or `DeleteFlowSpec` outcome; `unknown` for a daemon
+/// that predates it. `PathDeleteOutcome` and `FlowSpecDeleteOutcome` share
+/// one numbering, pinned by a test below.
+pub(crate) fn delete_outcome_name(outcome: i32) -> &'static str {
+    use crate::proto::PathDeleteOutcome;
+    match PathDeleteOutcome::try_from(outcome) {
+        Ok(PathDeleteOutcome::Deleted) => "deleted",
+        Ok(PathDeleteOutcome::NotPresent) => "not_present",
+        Ok(PathDeleteOutcome::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_outcome_name, inject_outcome_name};
+    use crate::proto::{
+        FlowSpecDeleteOutcome, FlowSpecInjectOutcome, PathDeleteOutcome, PathInjectOutcome,
+    };
+
+    #[test]
+    fn unicast_and_flowspec_outcomes_share_names() {
+        for (path, flowspec, name) in [
+            (
+                PathInjectOutcome::Unspecified,
+                FlowSpecInjectOutcome::Unspecified,
+                "unknown",
+            ),
+            (
+                PathInjectOutcome::Created,
+                FlowSpecInjectOutcome::Created,
+                "created",
+            ),
+            (
+                PathInjectOutcome::Replaced,
+                FlowSpecInjectOutcome::Replaced,
+                "replaced",
+            ),
+            (
+                PathInjectOutcome::Unchanged,
+                FlowSpecInjectOutcome::Unchanged,
+                "unchanged",
+            ),
+        ] {
+            assert_eq!(inject_outcome_name(path as i32), name);
+            assert_eq!(inject_outcome_name(flowspec as i32), name);
+        }
+        for (path, flowspec, name) in [
+            (
+                PathDeleteOutcome::Unspecified,
+                FlowSpecDeleteOutcome::Unspecified,
+                "unknown",
+            ),
+            (
+                PathDeleteOutcome::Deleted,
+                FlowSpecDeleteOutcome::Deleted,
+                "deleted",
+            ),
+            (
+                PathDeleteOutcome::NotPresent,
+                FlowSpecDeleteOutcome::NotPresent,
+                "not_present",
+            ),
+        ] {
+            assert_eq!(delete_outcome_name(path as i32), name);
+            assert_eq!(delete_outcome_name(flowspec as i32), name);
+        }
+        // A value newer than this CLI is not guessed at.
+        assert_eq!(inject_outcome_name(99), "unknown");
+        assert_eq!(delete_outcome_name(99), "unknown");
+    }
+}

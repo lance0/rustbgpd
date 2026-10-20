@@ -330,7 +330,7 @@ pub async fn add(
     )
     .await?
     .into_inner();
-    let outcome = inject_outcome_name(response.outcome);
+    let outcome = super::inject_outcome_name(response.outcome);
     if json {
         output::print_json_pretty(&serde_json::json!({
             "ok": true,
@@ -342,17 +342,6 @@ pub async fn add(
         output::print_line("FlowSpec rule added")
     } else {
         output::print_line(&format!("FlowSpec rule added ({outcome})"))
-    }
-}
-
-/// Name the local Adj-RIB-In outcome; `unknown` for a daemon that predates it.
-fn inject_outcome_name(outcome: i32) -> &'static str {
-    use crate::proto::FlowSpecInjectOutcome;
-    match FlowSpecInjectOutcome::try_from(outcome) {
-        Ok(FlowSpecInjectOutcome::Created) => "created",
-        Ok(FlowSpecInjectOutcome::Replaced) => "replaced",
-        Ok(FlowSpecInjectOutcome::Unchanged) => "unchanged",
-        Ok(FlowSpecInjectOutcome::Unspecified) | Err(_) => "unknown",
     }
 }
 
@@ -387,7 +376,7 @@ pub async fn delete(
     .await
     .map_err(super::InjectedOwner::delete_error)?
     .into_inner();
-    let outcome = delete_outcome_name(response.outcome);
+    let outcome = super::delete_outcome_name(response.outcome);
     if json {
         output::print_json_pretty(&serde_json::json!({
             "ok": true,
@@ -402,16 +391,6 @@ pub async fn delete(
             // An older daemon returns OK only after removing a local rule.
             _ => "FlowSpec rule deleted (the daemon did not report an outcome)",
         })
-    }
-}
-
-/// Name the delete outcome; `unknown` for a daemon that predates it.
-fn delete_outcome_name(outcome: i32) -> &'static str {
-    use crate::proto::FlowSpecDeleteOutcome;
-    match FlowSpecDeleteOutcome::try_from(outcome) {
-        Ok(FlowSpecDeleteOutcome::Deleted) => "deleted",
-        Ok(FlowSpecDeleteOutcome::NotPresent) => "not_present",
-        Ok(FlowSpecDeleteOutcome::Unspecified) | Err(_) => "unknown",
     }
 }
 

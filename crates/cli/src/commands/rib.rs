@@ -2728,7 +2728,7 @@ pub async fn add_route(
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    mutation_rpc(
+    let response = mutation_rpc(
         "AddPath",
         MUTATION_RPC_TIMEOUT,
         &format!("`rbgp rib --prefix {prefix}`"),
@@ -2746,21 +2746,35 @@ pub async fn add_route(
             path_id: opts.path_id.unwrap_or(0),
         }),
     )
-    .await?;
-    output::print_result(json, "add_route", prefix, &format!("Route {prefix} added"))
+    .await?
+    .into_inner();
+    let outcome = super::inject_outcome_name(response.outcome);
+    if json {
+        output::print_json_pretty(&serde_json::json!({
+            "ok": true,
+            "action": "add_route",
+            "target": prefix,
+            "outcome": outcome,
+        }))
+    } else if outcome == "unknown" {
+        output::print_line(&format!("Route {prefix} added"))
+    } else {
+        output::print_line(&format!("Route {prefix} added ({outcome})"))
+    }
 }
 
 pub async fn delete_route(
     connection: Connection,
     prefix: &str,
     path_id: Option<u32>,
+    allow_missing: bool,
     owner: super::InjectedOwner,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
     let mut client =
         InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    mutation_rpc(
+    let response = mutation_rpc(
         "DeletePath",
         MUTATION_RPC_TIMEOUT,
         &format!("`rbgp rib --prefix {prefix}`"),
@@ -2768,19 +2782,30 @@ pub async fn delete_route(
             prefix: addr,
             prefix_length: len,
             path_id: path_id.unwrap_or(0),
-            allow_missing: false,
+            allow_missing,
             owner: owner.owner,
             override_owner: owner.override_owner,
         }),
     )
     .await
-    .map_err(super::InjectedOwner::delete_error)?;
-    output::print_result(
-        json,
-        "delete_route",
-        prefix,
-        &format!("Route {prefix} deleted"),
-    )
+    .map_err(super::InjectedOwner::delete_error)?
+    .into_inner();
+    let outcome = super::delete_outcome_name(response.outcome);
+    if json {
+        output::print_json_pretty(&serde_json::json!({
+            "ok": true,
+            "action": "delete_route",
+            "target": prefix,
+            "outcome": outcome,
+        }))
+    } else {
+        output::print_line(&match outcome {
+            "deleted" => format!("Route {prefix} deleted"),
+            "not_present" => format!("Route {prefix} not present"),
+            // An older daemon returns OK only after removing a local route.
+            _ => format!("Route {prefix} deleted (the daemon did not report an outcome)"),
+        })
+    }
 }
 
 #[cfg(test)]
