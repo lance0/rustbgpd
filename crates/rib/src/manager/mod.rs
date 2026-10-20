@@ -1563,10 +1563,10 @@ fn replacement_readiness_checkpoint_tagged(
     let Some(context) = readiness else {
         return;
     };
-    // Instrumented builds still measure eligible opportunities, including
-    // idle checkpoints, on forced and sampled checkpoints. Once armed,
-    // production idle dispatch needs no mutex or clock. A capped drain
-    // retains its hint until it can rearm below.
+    // Instrumented builds measure eligible opportunities, including idle
+    // checkpoints, at forced checkpoints and during a retirement capture.
+    // Once armed, production idle dispatch needs no mutex or clock. A capped
+    // drain retains its hint until it can rearm below.
     if force || bench_support::measure_checkpoint() {
         let mut readiness = context
             .state
