@@ -1074,21 +1074,45 @@ def emitted_label_values(
     position = defined_labels.index(label)
     values: set[str] = set()
     setters: list[tuple[str, int]] = []
-    pattern = rf"\.{re.escape(binding.group(1))}\s*\.with_label_values\(\s*&\[([^\]]*)\]"
+    # `&[...]` literally, `&helper(...)`, or `&name` bound by `let name = helper(...);`.
+    pattern = (
+        rf"\.{re.escape(binding.group(1))}\s*\.with_label_values\(\s*&\s*"
+        r"(?:\[([^\]]*)\]|(\w+)\s*\(([^()]*)\)|(\w+)\s*\))"
+    )
     for use in re.finditer(pattern, metric_source):
-        elements = [element.strip() for element in use.group(1).split(",") if element.strip()]
+        functions = list(
+            re.finditer(r"\bfn\s+(\w+)\s*\(([^)]*)\)", metric_source[: use.start()])
+        )
+        setter = functions[-1] if functions else None
+        body = metric_source[setter.end() : use.start()] if setter else ""
+        if use.group(1) is not None:
+            elements = [element.strip() for element in use.group(1).split(",") if element.strip()]
+        else:
+            call = (use.group(2), use.group(3)) if use.group(2) else None
+            if use.group(4):
+                bound = re.findall(
+                    rf"\blet\s+{re.escape(use.group(4))}\s*=\s*(\w+)\s*\(([^()]*)\)\s*;", body
+                )
+                call = bound[-1] if bound else None
+            elements = pass_through_elements(metric_source, *call) if call else []
         if len(elements) != len(defined_labels):
             continue
         element = elements[position]
         if element.startswith('"'):
             values.add(element.strip('"'))
             continue
-        functions = list(
-            re.finditer(r"\bfn\s+(\w+)\s*\(([^)]*)\)", metric_source[: use.start()])
-        )
-        if not functions:
+        if setter is None:
             continue
-        setter = functions[-1]
+        # `for element in CONST { ... }` in the setter emits every value of CONST.
+        loops = re.findall(
+            rf"\bfor\s+{re.escape(element)}\s+in\s+([A-Z][A-Z0-9_]*)\s*\{{", body
+        )
+        if loops:
+            # The constant lives beside the setter; a module-local path resolves it.
+            values.update(
+                const_label_values({METRIC_PATH: metric_source}, METRIC_PATH, metric_source, loops[-1])
+            )
+            continue
         parameters = [
             part.split(":", 1)[0].strip()
             for part in setter.group(2).split(",")
@@ -1132,6 +1156,10 @@ def emitted_label_values(
                 if re.fullmatch(r"(?:\w+::)*[A-Z][A-Z0-9_]*", argument):
                     values.update(const_label_values(sources, path, text, argument))
                     continue
+                label_method = re.fullmatch(r"\w+\s*\.\s*(\w+)\(\s*\)", argument)
+                if label_method:
+                    values.update(label_method_values(sources, path, label_method.group(1)))
+                    continue
                 direct = re.fullmatch(r"(\w+)\(.*\)", argument, flags=re.DOTALL)
                 bound = re.search(
                     rf"\blet\s+{re.escape(argument)}\s*=\s*(\w+)\(", text[: call.start()]
@@ -1144,6 +1172,75 @@ def emitted_label_values(
                     through = enclosing_parameter(text, call.start(), argument)
                     if through:
                         pending.append((*through, None if through[2] else path))
+    return values
+
+
+# A module-local path for the metric source itself, used to resolve its own constants.
+METRIC_PATH = "src/metrics.rs"
+
+
+def function_body(text: str, definition: re.Match) -> str:
+    """The `{ ... }` body of the function whose signature `definition` starts."""
+    start = text.find("{", definition.end())
+    depth, end = 1, start + 1
+    while start >= 0 and end < len(text) and depth:
+        depth += {"{": 1, "}": -1}.get(text[end], 0)
+        end += 1
+    return text[start + 1 : end - 1] if start >= 0 else ""
+
+
+def pass_through_elements(source: str, helper: str, arguments: str) -> list[str]:
+    """A label helper's returned array, rewritten in terms of one call's arguments.
+
+    The helper must be defined once in the metric source and end by returning
+    an array of its own parameters or string literals. Anything else yields no
+    elements, so its call sites are no evidence.
+    """
+    definitions = list(re.finditer(rf"\bfn\s+{re.escape(helper)}\s*(?:<[^>{{]*>)?\s*\(", source))
+    if len(definitions) != 1:
+        return []
+    parameters = [
+        part.split(":", 1)[0].strip() for part in call_arguments(source, definitions[0].end()) or []
+    ]
+    passed = [argument.strip() for argument in arguments.split(",") if argument.strip()]
+    returned = re.search(r"\[([^\[\]]*)\]\s*$", function_body(source, definitions[0]))
+    if returned is None or len(passed) != len(parameters):
+        return []
+    elements = []
+    for element in (part.strip() for part in returned.group(1).split(",") if part.strip()):
+        if element in parameters:
+            elements.append(passed[parameters.index(element)])
+        elif re.fullmatch(r"\"[^\"]+\"", element):
+            elements.append(element)
+        else:
+            return []
+    return elements
+
+
+def label_method_values(sources: dict[str, str], path: str, method: str, depth: int = 0) -> set[str]:
+    """String literals a `receiver.method()` label call returns from its match arms.
+
+    ponytail: resolves by name, not receiver type. The method must be the only
+    `fn method(self) -> &'static str` in the calling crate, else it is no
+    evidence; an arm delegating to another such method is followed.
+    """
+    origin = rust_module(path)
+    if origin is None or depth > 4:
+        return set()
+    pattern = rf"\bfn\s+{re.escape(method)}\s*\(\s*&?\s*self\s*\)\s*->\s*&'static\s+str(?=\s*\{{)"
+    found = [
+        (candidate, match)
+        for candidate, text in sources.items()
+        if (rust_module(candidate) or ("",))[0] == origin[0]
+        for match in re.finditer(pattern, text)
+    ]
+    if len(found) != 1:
+        return set()
+    candidate, match = found[0]
+    body = function_body(sources[candidate], match)
+    values = set(re.findall(r"=>\s*\"([^\"]+)\"", body))
+    for delegated in re.findall(r"=>\s*\w+\s*\.\s*(\w+)\(\s*\)", body):
+        values.update(label_method_values(sources, candidate, delegated, depth + 1))
     return values
 
 
