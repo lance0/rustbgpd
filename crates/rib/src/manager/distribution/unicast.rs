@@ -3184,14 +3184,11 @@ impl RibManager {
     }
 }
 
-/// Map an ADR-0141 ownership or capacity rejection to its command error.
+/// Map an ADR-0141 lease table rejection to its command error.
 pub(in crate::manager) fn lease_rejection(
     rejection: crate::injection_lease::LeaseRejection,
 ) -> RibCommandError {
     match rejection {
-        crate::injection_lease::LeaseRejection::OwnerMismatch(message) => {
-            RibCommandError::FailedPrecondition(message)
-        }
         crate::injection_lease::LeaseRejection::OwnerCap => {
             RibCommandError::ResourceExhausted(format!(
                 "at most {} owners can hold a live injection lease",

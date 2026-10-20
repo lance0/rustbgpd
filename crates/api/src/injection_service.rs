@@ -14,7 +14,7 @@ use crate::route_distinguisher::parse_rd;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::injection_lease::{
-    InjectionLeases, LeaseGeneration, validate_lease, validate_owner,
+    InjectionLeases, LeaseConflict, LeaseGeneration, validate_lease, validate_owner,
 };
 use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
 use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition};
@@ -33,31 +33,25 @@ use rustbgpd_wire::{
 pub struct InjectionService {
     access_mode: AccessMode,
     rib_tx: mpsc::Sender<RibUpdate>,
-    leases: Option<Arc<InjectionLeases>>,
+    leases: Arc<InjectionLeases>,
 }
 
 impl InjectionService {
-    /// Create a new injection service backed by the given RIB channel.
-    pub fn new(rib_tx: mpsc::Sender<RibUpdate>, access_mode: AccessMode) -> Self {
+    /// Create an injection service backed by the given RIB channel and the
+    /// daemon-wide lease table that RIB manager owns
+    /// ([`rustbgpd_rib::RibManager::injection_leases`], ADR-0141). Requiring
+    /// the table here means a service that accepts leased adds can always
+    /// renew and list them.
+    pub fn new(
+        rib_tx: mpsc::Sender<RibUpdate>,
+        access_mode: AccessMode,
+        leases: Arc<InjectionLeases>,
+    ) -> Self {
         Self {
             access_mode,
             rib_tx,
-            leases: None,
+            leases,
         }
-    }
-
-    /// Serve `RenewLease` and `ListInjectionLeases` from the daemon-wide
-    /// lease table the RIB manager owns (ADR-0141).
-    #[must_use]
-    pub fn with_injection_leases(mut self, leases: Arc<InjectionLeases>) -> Self {
-        self.leases = Some(leases);
-        self
-    }
-
-    fn leases(&self) -> Result<&InjectionLeases, Status> {
-        self.leases
-            .as_deref()
-            .ok_or_else(|| Status::unavailable("injection lease table unavailable"))
     }
 }
 
@@ -83,8 +77,11 @@ fn generation_to_proto(generation: LeaseGeneration) -> proto::LeaseGeneration {
     }
 }
 
-fn millis(duration: std::time::Duration) -> u32 {
-    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+/// Lease time left in whole milliseconds, rounded up: 0 only once the
+/// deadline has passed, when a renewal is refused, never for a sub-millisecond
+/// remainder that can still renew.
+pub(crate) fn millis(duration: std::time::Duration) -> u32 {
+    u32::try_from(duration.as_nanos().div_ceil(1_000_000)).unwrap_or(u32::MAX)
 }
 
 /// Audit summary of a completed delete, naming the owner and generation the
@@ -345,11 +342,62 @@ fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
     Ok(nh)
 }
 
+/// `ErrorInfo.domain` of every lease conflict.
+const LEASE_ERROR_DOMAIN: &str = "rustbgpd";
+
+/// `google.rpc.Status`, the payload of the `grpc-status-details-bin`
+/// trailer. Declared here so the existing `prost` encodes it.
+#[derive(Clone, PartialEq, prost::Message)]
+struct RpcStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+
+/// `google.rpc.ErrorInfo` without `metadata`, which a lease conflict leaves
+/// empty.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ErrorInfo {
+    #[prost(string, tag = "1")]
+    reason: String,
+    #[prost(string, tag = "2")]
+    domain: String,
+}
+
+/// `FAILED_PRECONDITION` for an ADR-0141 ownership or generation refusal,
+/// with a `google.rpc.ErrorInfo` detail whose `reason` names the conflict.
+/// The reason is contract; the message is not.
+fn lease_conflict_status(conflict: LeaseConflict, message: String) -> Status {
+    use prost::Message as _;
+    let info = ErrorInfo {
+        reason: conflict.reason().to_string(),
+        domain: LEASE_ERROR_DOMAIN.to_string(),
+    };
+    let details = RpcStatus {
+        code: tonic::Code::FailedPrecondition as i32,
+        message: message.clone(),
+        details: vec![prost_types::Any {
+            type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
+            value: info.encode_to_vec(),
+        }],
+    };
+    Status::with_details(
+        tonic::Code::FailedPrecondition,
+        message,
+        details.encode_to_vec().into(),
+    )
+}
+
 /// Map a RIB-side command error into the right gRPC status code.
 fn map_rib_command_error(operation: &str, error: RibCommandError) -> Status {
     match error {
         RibCommandError::NotFound(message) => Status::not_found(message),
-        RibCommandError::FailedPrecondition(message) => Status::failed_precondition(message),
+        RibCommandError::FailedPrecondition(conflict, message) => {
+            lease_conflict_status(conflict, message)
+        }
         RibCommandError::ResourceExhausted(message) => Status::resource_exhausted(message),
         RibCommandError::Internal(message) => Status::internal(format!("{operation}: {message}")),
     }
@@ -784,12 +832,13 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .ok_or_else(|| Status::invalid_argument("generation is required"))?;
         set_request_summary(&request, lease_summary(&req.owner, Some(generation), false));
         let remaining = self
-            .leases()?
+            .leases
             .renew(&req.owner, generation, req.lease_seconds)
             .ok_or_else(|| {
                 tracing::debug!(owner = %req.owner, "injection lease renewal rejected");
-                Status::failed_precondition(
-                    "lease generation is not live; re-add the owner's desired state",
+                lease_conflict_status(
+                    LeaseConflict::GenerationNotLive,
+                    "lease generation is not live; re-add the owner's desired state".to_string(),
                 )
             })?;
         Ok(Response::new(proto::RenewLeaseResponse {
@@ -857,7 +906,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
     ) -> Result<Response<proto::ListInjectionLeasesResponse>, Status> {
         let owner = request.into_inner().owner;
         let leases = self
-            .leases()?
+            .leases
             .list((!owner.is_empty()).then_some(owner.as_str()))
             .into_iter()
             .map(|row| proto::InjectionLeaseEntry {
@@ -1637,12 +1686,15 @@ mod tests {
 
     fn make_service() -> InjectionService {
         let (tx, _rx) = mpsc::channel(16);
-        InjectionService::new(tx, AccessMode::ReadWrite)
+        InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()))
     }
 
     fn make_service_with_rx() -> (InjectionService, mpsc::Receiver<RibUpdate>) {
         let (tx, rx) = mpsc::channel(16);
-        (InjectionService::new(tx, AccessMode::ReadWrite), rx)
+        (
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new())),
+            rx,
+        )
     }
 
     fn add_path_request(origin: u32, next_hop: &str) -> Request<proto::AddPathRequest> {
@@ -1721,7 +1773,8 @@ mod tests {
     async fn add_path_send_failure_is_unavailable() {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let svc =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
         let err = svc
             .add_path(add_path_request(0, "192.0.2.1"))
             .await
@@ -1741,7 +1794,7 @@ mod tests {
         use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition, RouteExportPage};
 
         let (tx, mut rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
         let responder = tokio::spawn(async move {
             let mut seen = Vec::new();
             while let Some(update) = rx.recv().await {
@@ -2084,7 +2137,7 @@ mod tests {
     #[tokio::test]
     async fn add_path_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
         let req = Request::new(proto::AddPathRequest {
             prefix: "10.0.0.0".into(),
             prefix_length: 24,
@@ -2109,7 +2162,7 @@ mod tests {
     #[tokio::test]
     async fn non_evpn_mutations_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
 
         let err = svc
             .delete_path(Request::new(proto::DeletePathRequest {
@@ -2275,7 +2328,8 @@ mod tests {
     async fn raw_rd_round_trips_add_and_delete_evpn_route() {
         let rd = RouteDistinguisher([0, 2, 0, 0, 0xfd, 0xe8, 0, 100]);
         let (tx, mut rx) = mpsc::channel(2);
-        let service = InjectionService::new(tx, AccessMode::ReadWrite);
+        let service =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
         let actor = tokio::spawn(async move {
             let Some(RibUpdate::InjectEvpn { route, reply }) = rx.recv().await else {
                 panic!("expected injection");
@@ -2321,7 +2375,8 @@ mod tests {
     #[tokio::test]
     async fn add_evpn_type2_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let svc =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
 
         // Drive the reply side: accept one InjectEvpn, reply Ok(()).
         let reply_task = tokio::spawn(async move {
@@ -2371,7 +2426,8 @@ mod tests {
     #[tokio::test]
     async fn add_evpn_default_request_attaches_vxlan_encap_community() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let svc =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -2425,7 +2481,8 @@ mod tests {
     #[tokio::test]
     async fn add_evpn_disable_vxlan_encap_suppresses_community() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let svc =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -2582,7 +2639,8 @@ mod tests {
     #[tokio::test]
     async fn add_evpn_type5_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let svc =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -2659,7 +2717,8 @@ mod tests {
     #[tokio::test]
     async fn add_evpn_type5_overlay_gateway_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let svc =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -2707,7 +2766,8 @@ mod tests {
     #[tokio::test]
     async fn add_evpn_type5_ipv6_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let svc =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -2969,7 +3029,8 @@ mod tests {
     #[tokio::test]
     async fn delete_evpn_type5_reaches_rib_channel() {
         let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let svc =
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new()));
 
         let reply_task = tokio::spawn(async move {
             let update = rx.recv().await.expect("service should send one RibUpdate");
@@ -3090,7 +3151,7 @@ mod tests {
     #[tokio::test]
     async fn add_evpn_rejected_on_read_only_listener() {
         let (tx, _rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
         let req = Request::new(proto::AddEvpnRouteRequest {
             route_type: 2,
             rd: "65000:100".into(),
@@ -3114,7 +3175,7 @@ mod tests {
     #[tokio::test]
     async fn delete_evpn_rejected_on_read_only_listener() {
         let (tx, mut rx) = mpsc::channel(16);
-        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
         let req = Request::new(proto::DeleteEvpnRouteRequest {
             route_type: 2,
             rd: "65000:100".into(),
@@ -3252,7 +3313,11 @@ mod tests {
             rustbgpd_telemetry::BgpMetrics::new(),
         );
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::new(InjectionLeases::new()),
+        );
         let rib = crate::rib_service::RibService::new(rib_tx.clone());
 
         assert_eq!(
@@ -3360,7 +3425,11 @@ mod tests {
         )
         .with_flowspec_validation(65000);
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::new(InjectionLeases::new()),
+        );
         let rib = crate::rib_service::RibService::new(rib_tx.clone());
 
         assert_eq!(
@@ -3523,7 +3592,11 @@ mod tests {
             rustbgpd_telemetry::BgpMetrics::new(),
         );
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::new(InjectionLeases::new()),
+        );
         let rib = crate::rib_service::RibService::new(rib_tx.clone());
 
         let actions = vec![
@@ -3610,7 +3683,11 @@ mod tests {
             rustbgpd_telemetry::BgpMetrics::new(),
         );
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::new(InjectionLeases::new()),
+        );
 
         assert_eq!(
             add_unicast(&svc, "0.0.0.0", vec![1]).await,
@@ -3671,6 +3748,93 @@ mod tests {
         }
     }
 
+    /// ADR-0141 §3: a leased add creates leased state or no state. Both
+    /// leased adds reach the RIB as owned intent, never as a permanent
+    /// `InjectRoute` or `InjectFlowSpec`. A leased method the server does not
+    /// serve, as on a daemon that predates leases, answers `UNIMPLEMENTED`
+    /// from the generated service's fallback before any handler or RIB work.
+    ///
+    /// Break-to-red: a leased add forwarded as a plain injection fails the
+    /// owned-intent match.
+    #[tokio::test]
+    async fn leased_adds_never_fall_back_to_permanent_injection() {
+        use tower::ServiceExt as _;
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let svc = Arc::new(InjectionService::new(
+            tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::new(InjectionLeases::new()),
+        ));
+        let path = tokio::spawn({
+            let svc = Arc::clone(&svc);
+            async move {
+                svc.add_leased_path(Request::new(leased_path("ctl", 30)))
+                    .await
+            }
+        });
+        let RibUpdate::InjectLeasedRoute {
+            owner,
+            lease_seconds,
+            ..
+        } = rx.recv().await.unwrap()
+        else {
+            panic!("a leased path add must reach the RIB as owned intent");
+        };
+        assert_eq!((owner.as_str(), lease_seconds), ("ctl", 30));
+        assert_eq!(
+            path.await.unwrap().unwrap_err().code(),
+            tonic::Code::Internal
+        );
+        let rule = tokio::spawn({
+            let svc = Arc::clone(&svc);
+            async move {
+                svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                    rule: Some(proto::AddFlowSpecRequest {
+                        afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                        components: flowspec_rule_components(),
+                        actions: vec![flowspec_rate(0.0)],
+                        communities: vec![],
+                        extended_communities: vec![],
+                    }),
+                    lease: Some(proto::InjectionLease {
+                        owner: "ctl".into(),
+                        lease_seconds: 30,
+                    }),
+                }))
+                .await
+            }
+        });
+        let RibUpdate::InjectLeasedFlowSpec { owner, .. } = rx.recv().await.unwrap() else {
+            panic!("a leased FlowSpec add must reach the RIB as owned intent");
+        };
+        assert_eq!(owner, "ctl");
+        assert_eq!(
+            rule.await.unwrap().unwrap_err().code(),
+            tonic::Code::Internal
+        );
+
+        let server = proto::injection_service_server::InjectionServiceServer::new(
+            InjectionService::new(tx, AccessMode::ReadWrite, Arc::new(InjectionLeases::new())),
+        );
+        let request = tonic::codegen::http::Request::builder()
+            .method("POST")
+            .uri("/rustbgpd.v1.InjectionService/AddLeasedRoute")
+            .header("content-type", "application/grpc")
+            .body(tonic::body::Body::empty())
+            .unwrap();
+        let response = server.oneshot(request).await.unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get("grpc-status")
+                .map(tonic::codegen::http::HeaderValue::as_bytes),
+            Some(&b"12"[..]),
+            "an unserved method is UNIMPLEMENTED"
+        );
+        assert!(rx.try_recv().is_err(), "nothing reached the RIB");
+    }
+
     /// Malformed leases are `INVALID_ARGUMENT` before anything reaches the
     /// RIB: no lease, a bad owner, and a duration outside 5..=3600.
     #[tokio::test]
@@ -3714,6 +3878,62 @@ mod tests {
         ));
     }
 
+    /// A service built from the RIB manager's lease table renews and lists
+    /// the leases its own leased adds create: there is no configuration in
+    /// which a leased add succeeds but its renewal is unavailable.
+    ///
+    /// Break-to-red: a constructor that keeps its own table instead of the
+    /// one it is given refuses the renewal with `FAILED_PRECONDITION`.
+    #[tokio::test]
+    async fn a_service_renews_the_leases_its_adds_create() {
+        let (rib_tx, rib_rx) = mpsc::channel(16);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadWrite,
+            manager.injection_leases(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let generation = svc
+            .add_leased_path(Request::new(leased_path("ctl", 30)))
+            .await
+            .unwrap()
+            .into_inner()
+            .generation;
+        let renewed = svc
+            .renew_lease(Request::new(proto::RenewLeaseRequest {
+                owner: "ctl".into(),
+                generation,
+                lease_seconds: 30,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(renewed.generation, generation);
+        let listed = svc
+            .list_injection_leases(Request::new(proto::ListInjectionLeasesRequest::default()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            listed
+                .leases
+                .iter()
+                .map(|row| row.owner.as_str())
+                .collect::<Vec<_>>(),
+            ["ctl"]
+        );
+        drop(svc);
+        drop(rib_tx);
+        manager_task.await.unwrap();
+    }
+
     /// Renewal and listing are served from the lease table and never wait
     /// behind the RIB: they complete with the RIB channel full and unread.
     #[tokio::test]
@@ -3723,8 +3943,7 @@ mod tests {
             .unwrap();
         let leases = Arc::new(InjectionLeases::new());
         let generation = leases.admit("ctl", 30).unwrap().generation;
-        let svc = InjectionService::new(tx, AccessMode::ReadWrite)
-            .with_injection_leases(Arc::clone(&leases));
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite, Arc::clone(&leases));
         let renewed = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             svc.renew_lease(Request::new(proto::RenewLeaseRequest {
@@ -3757,8 +3976,7 @@ mod tests {
         );
         let leases = manager.injection_leases();
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite)
-            .with_injection_leases(Arc::clone(&leases));
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
         let audited = |audit: &GrpcAuditHandle| {
             audit
                 .summary()
@@ -3856,7 +4074,11 @@ mod tests {
             rustbgpd_telemetry::BgpMetrics::new(),
         );
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::new(InjectionLeases::new()),
+        );
         let generation = svc
             .add_leased_path(Request::new(leased_path("ctl", 30)))
             .await
@@ -3933,6 +4155,235 @@ mod tests {
         manager_task.await.unwrap();
     }
 
+    /// A lease with less than a millisecond left is listed as 1 ms, not 0,
+    /// because it can still renew; 0 is reserved for a passed deadline.
+    ///
+    /// Break-to-red: truncating to whole milliseconds lists it as 0.
+    #[tokio::test(start_paused = true)]
+    async fn remaining_zero_means_the_renewal_is_refused() {
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let leases = Arc::new(InjectionLeases::new());
+        let generation = leases.admit("ctl", 5).unwrap().generation;
+        let svc = InjectionService::new(rib_tx, AccessMode::ReadWrite, Arc::clone(&leases));
+        let listed = || async {
+            svc.list_injection_leases(Request::new(proto::ListInjectionLeasesRequest::default()))
+                .await
+                .unwrap()
+                .into_inner()
+                .leases[0]
+                .lease_remaining_ms
+        };
+        tokio::time::advance(
+            std::time::Duration::from_secs(5) - std::time::Duration::from_micros(500),
+        )
+        .await;
+        assert_eq!(listed().await, 1);
+        assert_eq!(millis(std::time::Duration::ZERO), 0);
+        tokio::time::advance(std::time::Duration::from_micros(500)).await;
+        assert_eq!(listed().await, 0);
+        let refused = svc
+            .renew_lease(Request::new(proto::RenewLeaseRequest {
+                owner: "ctl".into(),
+                generation: Some(generation_to_proto(generation)),
+                lease_seconds: 5,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(lease_conflict_reason(&refused), "GENERATION_NOT_LIVE");
+    }
+
+    /// The `ErrorInfo` reason of a lease conflict, decoded from the status
+    /// details exactly as a client reads the `grpc-status-details-bin`
+    /// trailer.
+    fn lease_conflict_reason(status: &Status) -> String {
+        use prost::Message as _;
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+        let details = RpcStatus::decode(status.details()).expect("google.rpc.Status");
+        assert_eq!(details.code, tonic::Code::FailedPrecondition as i32);
+        let [any] = details.details.as_slice() else {
+            panic!("one detail expected: {details:?}");
+        };
+        assert_eq!(any.type_url, "type.googleapis.com/google.rpc.ErrorInfo");
+        let info = ErrorInfo::decode(any.value.as_slice()).expect("google.rpc.ErrorInfo");
+        assert_eq!(info.domain, "rustbgpd");
+        info.reason
+    }
+
+    /// Every lease-ownership refusal carries its `ErrorInfo` reason through
+    /// the RIB-to-API boundary, on every RPC that can raise it:
+    /// `OWNER_MISMATCH` for a key another owner holds, `KEY_UNOWNED` for a key
+    /// no owner holds, and `GENERATION_NOT_LIVE` for a refused renewal.
+    ///
+    /// Break-to-red: mapping `KeyUnowned` to `OWNER_MISMATCH` fails the
+    /// unowned cases.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of every lease conflict across the six mutating RPCs and renewal"
+    )]
+    async fn lease_conflicts_carry_a_machine_readable_reason() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let leases = manager.injection_leases();
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, leases);
+
+        let lease = |owner: &str| {
+            Some(proto::InjectionLease {
+                owner: owner.into(),
+                lease_seconds: 30,
+            })
+        };
+        let owned_path = || leased_path("ctl", 30).path.unwrap();
+        let unowned_path = || proto::AddPathRequest {
+            prefix: "203.0.113.0".into(),
+            prefix_length: 24,
+            next_hop: "0.0.0.0".into(),
+            ..Default::default()
+        };
+        let rule = |port: &str| {
+            let mut components = flowspec_rule_components();
+            components[1].value = port.into();
+            proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components,
+                actions: vec![flowspec_rate(0.0)],
+                communities: vec![],
+                extended_communities: vec![],
+            }
+        };
+        let delete_path = |path: proto::AddPathRequest, owner: &str| proto::DeletePathRequest {
+            prefix: path.prefix,
+            prefix_length: path.prefix_length,
+            path_id: 0,
+            allow_missing: false,
+            owner: owner.into(),
+            override_owner: false,
+        };
+        let delete_rule = |port: &str, owner: &str| proto::DeleteFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            components: rule(port).components,
+            allow_missing: false,
+            owner: owner.into(),
+            override_owner: false,
+        };
+
+        // "ctl" owns a route and the =80 rule; the /24 and the =443 rule are
+        // unowned.
+        let generation = svc
+            .add_leased_path(Request::new(leased_path("ctl", 30)))
+            .await
+            .unwrap()
+            .into_inner()
+            .generation;
+        svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+            rule: Some(rule("=80")),
+            lease: lease("ctl"),
+        }))
+        .await
+        .unwrap();
+        svc.add_path(Request::new(unowned_path())).await.unwrap();
+        svc.add_flow_spec(Request::new(rule("=443"))).await.unwrap();
+
+        let leased_path_add = |path, owner| {
+            svc.add_leased_path(Request::new(proto::AddLeasedPathRequest {
+                path: Some(path),
+                lease: lease(owner),
+            }))
+        };
+        let leased_rule_add = |port, owner| {
+            svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                rule: Some(rule(port)),
+                lease: lease(owner),
+            }))
+        };
+        let cases = [
+            (
+                "AddLeasedPath onto another owner's key",
+                leased_path_add(owned_path(), "other").await.unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "AddLeasedPath onto an unowned key",
+                leased_path_add(unowned_path(), "ctl").await.unwrap_err(),
+                "KEY_UNOWNED",
+            ),
+            (
+                "AddLeasedFlowSpec onto another owner's key",
+                leased_rule_add("=80", "other").await.unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "AddLeasedFlowSpec onto an unowned key",
+                leased_rule_add("=443", "ctl").await.unwrap_err(),
+                "KEY_UNOWNED",
+            ),
+            (
+                "AddPath onto an owned key",
+                svc.add_path(Request::new(owned_path())).await.unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "AddFlowSpec onto an owned key",
+                svc.add_flow_spec(Request::new(rule("=80")))
+                    .await
+                    .unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "DeletePath by the wrong owner",
+                svc.delete_path(Request::new(delete_path(owned_path(), "")))
+                    .await
+                    .unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "DeletePath of an unowned key by an owner",
+                svc.delete_path(Request::new(delete_path(unowned_path(), "ctl")))
+                    .await
+                    .unwrap_err(),
+                "KEY_UNOWNED",
+            ),
+            (
+                "DeleteFlowSpec by the wrong owner",
+                svc.delete_flow_spec(Request::new(delete_rule("=80", "other")))
+                    .await
+                    .unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "DeleteFlowSpec of an unowned key by an owner",
+                svc.delete_flow_spec(Request::new(delete_rule("=443", "ctl")))
+                    .await
+                    .unwrap_err(),
+                "KEY_UNOWNED",
+            ),
+            (
+                "RenewLease of a generation that is not live",
+                svc.renew_lease(Request::new(proto::RenewLeaseRequest {
+                    owner: "other".into(),
+                    generation,
+                    lease_seconds: 30,
+                }))
+                .await
+                .unwrap_err(),
+                "GENERATION_NOT_LIVE",
+            ),
+        ];
+        for (case, status, reason) in &cases {
+            assert_eq!(lease_conflict_reason(status), *reason, "{case}");
+        }
+
+        drop((svc, rib_tx));
+        manager_task.await.unwrap();
+    }
+
     /// The controller contract against a real RIB: a leased add returns the
     /// owner's generation, renewal of that generation succeeds and of any
     /// other is `FAILED_PRECONDITION`, the lease table lists it, and the
@@ -3955,8 +4406,7 @@ mod tests {
         );
         let leases = manager.injection_leases();
         let manager_task = tokio::spawn(manager.run());
-        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite)
-            .with_injection_leases(Arc::clone(&leases));
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
         let rib = crate::rib_service::RibService::new(rib_tx.clone())
             .with_injection_leases(Arc::clone(&leases));
 

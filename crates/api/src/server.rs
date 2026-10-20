@@ -2183,8 +2183,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
-        InjectionService::new(rib_tx, access_mode)
-            .with_injection_leases(Arc::clone(&injection_leases)),
+        InjectionService::new(rib_tx, access_mode, Arc::clone(&injection_leases)),
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(
@@ -2469,8 +2468,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
-        InjectionService::new(rib_tx, access_mode)
-            .with_injection_leases(Arc::clone(&injection_leases)),
+        InjectionService::new(rib_tx, access_mode, Arc::clone(&injection_leases)),
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(

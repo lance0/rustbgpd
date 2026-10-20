@@ -1267,9 +1267,10 @@ pub enum RibCommandError {
     NotFound(String),
     /// Unexpected RIB command failure.
     Internal(String),
-    /// The command conflicts with current state, such as injection ownership
-    /// (ADR-0141); nothing changed.
-    FailedPrecondition(String),
+    /// The command conflicts with injection ownership (ADR-0141); nothing
+    /// changed. The conflict is the machine-readable reason; the message is
+    /// for people.
+    FailedPrecondition(crate::injection_lease::LeaseConflict, String),
     /// A bounded resource, such as the live lease owners, is full; nothing
     /// changed.
     ResourceExhausted(String),
@@ -1292,7 +1293,7 @@ impl std::fmt::Display for RibCommandError {
         match self {
             Self::NotFound(message)
             | Self::Internal(message)
-            | Self::FailedPrecondition(message)
+            | Self::FailedPrecondition(_, message)
             | Self::ResourceExhausted(message) => f.write_str(message),
         }
     }

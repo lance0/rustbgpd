@@ -3161,9 +3161,13 @@ message Route {
   bool atomic_aggregate = 22;
   // For a route injected with AddLeasedPath (source peer 0.0.0.0): its lease
   // owner, the generation it is tagged with, and the time to the owner's
-  // deadline, where 0 means expired and withdrawal pending. Set on received
+  // deadline, rounded up to whole milliseconds, where 0 means expired and
+  // withdrawal pending. Set on received
   // and best rows only: advertised rows carry an outbound path_id, so they
-  // leave these unset. Unset for every other route.
+  // leave these unset. Unset for every other route. The three are set
+  // together or not at all: a row with injection_owner non-empty also has
+  // lease_generation and lease_remaining_ms, and a row with any of them
+  // unset has none.
   string injection_owner = 23;
   LeaseGeneration lease_generation = 24;
   optional uint32 lease_remaining_ms = 25;
@@ -3550,6 +3554,8 @@ service InjectionService {
   // periodically and after every reconnect by re-adding its desired routes
   // (an UNCHANGED re-add is cheap). A lower ControlService.GetHealth
   // uptime_seconds is an extra trigger, not a reliable restart detector.
+  // A key held by a lease owner (ADR-0141) returns FAILED_PRECONDITION with
+  // ErrorInfo reason OWNER_MISMATCH; see AddLeasedPath.
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
   // Withdraw a locally injected unicast route by its (prefix, prefix_length,
   // path_id) key. Only routes added through AddPath are affected; routes
@@ -3582,7 +3588,9 @@ service InjectionService {
   // Graceful Restart selection deferral is active for the family. OK does
   // not mean any peer received or installed the rule, and a received rule
   // with the same key can out-select it. Injected rules are process-local:
-  // a controller must re-inject them after a daemon restart.
+  // a controller must re-inject them after a daemon restart. A key held by a
+  // lease owner returns FAILED_PRECONDITION with ErrorInfo reason
+  // OWNER_MISMATCH; see AddLeasedPath.
   rpc AddFlowSpec(AddFlowSpecRequest) returns (AddFlowSpecResponse);
   // Withdraw a locally injected FlowSpec rule by its (afi_safi, components)
   // key. Only rules added through AddFlowSpec are affected; rules received
@@ -3610,11 +3618,33 @@ service InjectionService {
   // state may be gone and it must re-add its full desired state. A leased
   // add on a key held by another owner, or by no owner, returns
   // FAILED_PRECONDITION: convert an unleased entry by deleting it first, or
-  // add under a fresh key such as another path_id. A 65th live owner, or an
-  // owner's 16,385th key, returns RESOURCE_EXHAUSTED. Both leave everything
-  // unchanged. A daemon without
-  // these RPCs answers UNIMPLEMENTED and creates nothing; never retry a
-  // failed leased add through AddPath or AddFlowSpec.
+  // add under a fresh key such as another path_id. A 65th live owner
+  // returns RESOURCE_EXHAUSTED. An owner holds at most 16,384 keys, per
+  // owner across unicast and FlowSpec together; its 16,385th returns
+  // RESOURCE_EXHAUSTED, and keys of an expired generation count until the
+  // expiry sweep removes them. Every refusal leaves everything unchanged. A
+  // daemon without these RPCs answers UNIMPLEMENTED and creates nothing;
+  // never retry a failed leased add through AddPath or AddFlowSpec.
+  //
+  // A leased add whose outcome is unknown, such as a deadline, a lost
+  // connection or INTERNAL "RIB manager dropped reply" (which can follow a
+  // commit), may be retried as the same leased add. The entry is owned
+  // intent whether or not the first attempt committed: the retry joins the
+  // owner's lease, or starts a new generation if it has expired, and a
+  // leased add never becomes permanent injection.
+  //
+  // Lease conflicts. Every ownership or generation refusal on AddLeasedPath,
+  // AddLeasedFlowSpec, AddPath, AddFlowSpec, DeletePath, DeleteFlowSpec and
+  // RenewLease is FAILED_PRECONDITION with one google.rpc.ErrorInfo detail
+  // (domain "rustbgpd") in the grpc-status-details-bin trailer. Its reason
+  // is contract and tells the cases apart; the message text is not:
+  //   OWNER_MISMATCH       the key is held by a different owner (for an
+  //                        unleased add or delete, by any owner).
+  //   KEY_UNOWNED          the key is held by no owner: a leased add must
+  //                        not adopt it, and an owner-scoped delete must not
+  //                        remove it.
+  //   GENERATION_NOT_LIVE  RenewLease named an unknown owner, or an expired
+  //                        or superseded generation.
   rpc AddLeasedPath(AddLeasedPathRequest) returns (AddLeasedPathResponse);
   rpc AddLeasedFlowSpec(AddLeasedFlowSpecRequest) returns (AddLeasedFlowSpecResponse);
   // Set the owner's lease deadline to exactly now + lease_seconds, which may
@@ -3624,9 +3654,16 @@ service InjectionService {
   // deadline loses) or a superseded generation, including one from before a
   // daemon restart. A renewal never creates or resurrects a lease; on
   // FAILED_PRECONDITION the controller re-adds its full desired state, and
-  // the first leased add starts a new generation.
+  // the first leased add starts a new generation. The refusal's ErrorInfo
+  // reason is GENERATION_NOT_LIVE.
   rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
-  // The lease table, optionally for one owner.
+  // The lease table, optionally for one owner. An owner past its deadline
+  // stays listed, with lease_remaining_ms 0, until the expiry task's pass
+  // scheduled for that deadline takes it and hands its routes to the RIB
+  // for withdrawal; until the RIB applies that batch the routes may still be
+  // present. RenewLease refuses that generation with GENERATION_NOT_LIVE,
+  // so a controller adopting a listed entry with remaining 0 re-adds its
+  // full desired state instead.
   rpc ListInjectionLeases(ListInjectionLeasesRequest) returns (ListInjectionLeasesResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
@@ -3706,7 +3743,10 @@ message DeletePathRequest {
   bool allow_missing = 5;
   // Owner the caller expects the route to have; "" means unowned. A
   // mismatch, including "" on an owned route, returns FAILED_PRECONDITION
-  // unless override_owner is set. A delete does not renew a lease.
+  // unless override_owner is set, with ErrorInfo reason OWNER_MISMATCH when
+  // another owner holds the route and KEY_UNOWNED when an owner is named
+  // but the route is unowned (see AddLeasedPath). A delete does not renew a
+  // lease.
   string owner = 6;
   // Delete regardless of the route's owner (operator override).
   bool override_owner = 7;
@@ -3858,7 +3898,8 @@ message FlowSpecRouteEntry {
   repeated uint64 extended_communities = 7;
   // Same as Route.injection_owner, lease_generation and lease_remaining_ms,
   // for a rule injected with AddLeasedFlowSpec. Set only in the
-  // received_peer_address "0.0.0.0" view of ListFlowSpecRoutes.
+  // received_peer_address "0.0.0.0" view of ListFlowSpecRoutes. As on
+  // Route, the three are set together or not at all.
   string injection_owner = 8;
   LeaseGeneration lease_generation = 9;
   optional uint32 lease_remaining_ms = 10;
@@ -3981,7 +4022,11 @@ message InjectionLeaseEntry {
   LeaseGeneration generation = 2;
   // The lease_seconds that last set the deadline.
   uint32 lease_seconds = 3;
-  // Time to the deadline; 0 means expired, withdrawal pending.
+  // Time to the deadline, rounded up to whole milliseconds; 0 means the
+  // deadline has passed and removal is pending: the entry stays listed
+  // until the expiry pass takes it and withdraws the owner's routes.
+  // RenewLease refuses it with GENERATION_NOT_LIVE, and the controller
+  // re-adds its full desired state.
   uint32 lease_remaining_ms = 4;
 }
 
