@@ -249,6 +249,12 @@ pub(crate) struct MockState {
     pub(crate) delete_flowspec_matches: Mutex<bool>,
     // Emulate a daemon that predates `allow_missing` and the delete outcome.
     pub(crate) delete_flowspec_legacy: Mutex<bool>,
+    // ADR-0141: the lease owner of the injected entry a delete targets ("" =
+    // unowned). A delete naming another owner without `override_owner` gets
+    // the daemon's FAILED_PRECONDITION.
+    pub(crate) injected_entry_owner: Mutex<String>,
+    pub(crate) last_delete_path: Mutex<Option<server_proto::DeletePathRequest>>,
+    pub(crate) last_delete_flowspec: Mutex<Option<server_proto::DeleteFlowSpecRequest>>,
     pub(crate) last_list_flowspec: Mutex<Option<server_proto::ListFlowSpecRequest>>,
     pub(crate) last_list_evpn: Mutex<Option<server_proto::ListEvpnRequest>>,
     pub(crate) last_list_received_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
@@ -1475,6 +1481,24 @@ struct MockInjectionService {
     state: Arc<MockState>,
 }
 
+impl MockInjectionService {
+    /// The daemon's ADR-0141 owner check on a delete.
+    async fn check_injected_owner(&self, owner: &str, override_owner: bool) -> Result<(), Status> {
+        let holder = self.state.injected_entry_owner.lock().await.clone();
+        if override_owner || holder == owner {
+            Ok(())
+        } else if holder.is_empty() {
+            Err(Status::failed_precondition(format!(
+                "key is held by no owner, not {owner:?}"
+            )))
+        } else {
+            Err(Status::failed_precondition(format!(
+                "key is held by owner {holder:?}"
+            )))
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInjectionService {
     async fn add_path(
@@ -1487,9 +1511,13 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
 
     async fn delete_path(
         &self,
-        _request: Request<server_proto::DeletePathRequest>,
+        request: Request<server_proto::DeletePathRequest>,
     ) -> Result<Response<server_proto::DeletePathResponse>, Status> {
         self.state.delete_path_calls.fetch_add(1, Ordering::SeqCst);
+        let request = request.into_inner();
+        *self.state.last_delete_path.lock().await = Some(request.clone());
+        self.check_injected_owner(&request.owner, request.override_owner)
+            .await?;
         Ok(Response::new(server_proto::DeletePathResponse::default()))
     }
 
@@ -1506,6 +1534,9 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         &self,
         request: Request<server_proto::DeleteFlowSpecRequest>,
     ) -> Result<Response<server_proto::DeleteFlowSpecResponse>, Status> {
+        *self.state.last_delete_flowspec.lock().await = Some(request.get_ref().clone());
+        self.check_injected_owner(&request.get_ref().owner, request.get_ref().override_owner)
+            .await?;
         let matches = *self.state.delete_flowspec_matches.lock().await;
         let legacy = *self.state.delete_flowspec_legacy.lock().await;
         let outcome = match (matches, legacy) {
