@@ -183,7 +183,7 @@ async fn delete_route(
     })
     .await
     .unwrap();
-    rx.await.unwrap()
+    rx.await.unwrap().map(|removal| removal.removed)
 }
 
 async fn local_prefixes(tx: &mpsc::Sender<RibUpdate>) -> Vec<Prefix> {
@@ -682,7 +682,7 @@ async fn an_owner_holds_at_most_the_key_cap() {
         .unwrap();
     let (reply, mut deleted) = oneshot::channel();
     manager.handle_withdraw_injected(route(1).prefix, 0, false, "a", false, reply);
-    assert_eq!(deleted.try_recv().unwrap(), Ok(true));
+    assert!(deleted.try_recv().unwrap().unwrap().removed);
     assert!(
         manager
             .inject_local_route(route(MAX_KEYS_PER_OWNER + 1), Some(("a", 30)))

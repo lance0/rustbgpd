@@ -4406,7 +4406,7 @@ async fn withdraw_local_unicast(
     })
     .await
     .unwrap();
-    reply_rx.await.unwrap()
+    reply_rx.await.unwrap().map(|removal| removal.removed)
 }
 
 /// Unicast injection outcomes come from the local Adj-RIB-In and match what

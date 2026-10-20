@@ -84,6 +84,38 @@ fn millis(duration: std::time::Duration) -> u32 {
     u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
 }
 
+/// Audit summary of a completed delete, naming the owner and generation the
+/// removed entry held rather than the requested owner, so an override names
+/// the owner it bypassed (ADR-0141 §8). A nonempty requested owner that
+/// differs is kept as `requested_owner`. An unowned entry deleted without an owner or
+/// override leaves the summary unset.
+fn finish_delete_summary(
+    audit: Option<&GrpcAuditHandle>,
+    requested_owner: &str,
+    override_owner: bool,
+    removal: &rustbgpd_rib::InjectedRemoval,
+) {
+    let Some(audit) = audit else { return };
+    let (owner, generation) = removal
+        .tag
+        .as_ref()
+        .map_or(("", None), |tag| (&*tag.owner, Some(tag.generation)));
+    if owner.is_empty() && requested_owner.is_empty() && !override_owner {
+        return;
+    }
+    let mut summary = lease_summary(owner, generation, override_owner)
+        .as_str()
+        .to_string();
+    if !requested_owner.is_empty() && requested_owner != owner {
+        let _ = write!(
+            summary,
+            " requested_owner={}",
+            safe_summary_value(requested_owner)
+        );
+    }
+    audit.set_summary(GrpcRequestSummary::new(summary));
+}
+
 fn lease_summary(
     owner: &str,
     generation: Option<LeaseGeneration>,
@@ -472,7 +504,9 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 lease_summary(&req.owner, None, req.override_owner),
             );
         }
+        let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
         let req = request.into_inner();
+        let (requested_owner, override_owner) = (req.owner.clone(), req.override_owner);
 
         let addr: IpAddr = req
             .prefix
@@ -509,11 +543,12 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .await
             .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
-        let deleted = reply_rx
+        let removal = reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
             .map_err(|error| map_rib_command_error("withdraw failed", error))?;
-        let outcome = if deleted {
+        finish_delete_summary(audit.as_ref(), &requested_owner, override_owner, &removal);
+        let outcome = if removal.removed {
             proto::PathDeleteOutcome::Deleted
         } else {
             proto::PathDeleteOutcome::NotPresent
@@ -572,7 +607,9 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 lease_summary(&req.owner, None, req.override_owner),
             );
         }
+        let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
         let req = request.into_inner();
+        let (requested_owner, override_owner) = (req.owner.clone(), req.override_owner);
         let afi = parse_flowspec_afi(req.afi_safi)?;
 
         let components = parse_flowspec_components(&req.components, afi)?;
@@ -593,12 +630,13 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .await
             .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
-        let deleted = reply_rx
+        let removal = reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
             .map_err(|error| map_rib_command_error("FlowSpec withdraw failed", error))?;
+        finish_delete_summary(audit.as_ref(), &requested_owner, override_owner, &removal);
 
-        let outcome = if deleted {
+        let outcome = if removal.removed {
             proto::FlowSpecDeleteOutcome::Deleted
         } else {
             proto::FlowSpecDeleteOutcome::NotPresent
@@ -3346,6 +3384,101 @@ mod tests {
         .expect("renewal does not wait for the RIB")
         .unwrap();
         assert_eq!(renewed.into_inner().lease_remaining_ms, 10_000);
+    }
+
+    /// A delete's audit names the owner and generation the removed entry held,
+    /// for both families: an override with no requested owner names the
+    /// owner it bypassed, and an override with a different requested owner
+    /// keeps that as `requested_owner` beside the real one.
+    ///
+    /// Break-to-red: building the summary from the request logs `owner=`
+    /// and `owner=other`.
+    #[tokio::test]
+    async fn delete_audit_names_the_removed_entry_owner() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let generation = svc
+            .add_leased_path(Request::new(leased_path("ctl", 30)))
+            .await
+            .unwrap()
+            .into_inner()
+            .generation
+            .unwrap();
+        svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+            rule: Some(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: flowspec_rule_components(),
+                actions: vec![flowspec_rate(0.0)],
+                communities: vec![],
+                extended_communities: vec![],
+            }),
+            lease: Some(proto::InjectionLease {
+                owner: "ctl".into(),
+                lease_seconds: 30,
+            }),
+        }))
+        .await
+        .unwrap();
+        let held = format!(
+            "owner=ctl generation={}:{} override_owner=true",
+            generation.incarnation, generation.sequence
+        );
+        let audited = |audit: &GrpcAuditHandle| {
+            audit
+                .summary()
+                .map(|summary| summary.as_str().to_string())
+                .unwrap_or_default()
+        };
+
+        let audit = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::DeletePathRequest {
+            prefix: "198.51.100.7".into(),
+            prefix_length: 32,
+            path_id: 0,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: true,
+        });
+        request.extensions_mut().insert(audit.clone());
+        assert_eq!(
+            svc.delete_path(request)
+                .await
+                .unwrap()
+                .into_inner()
+                .outcome(),
+            proto::PathDeleteOutcome::Deleted
+        );
+        assert_eq!(audited(&audit), held);
+
+        let audit = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::DeleteFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            components: flowspec_rule_components(),
+            allow_missing: false,
+            owner: "other".into(),
+            override_owner: true,
+        });
+        request.extensions_mut().insert(audit.clone());
+        assert_eq!(
+            svc.delete_flow_spec(request)
+                .await
+                .unwrap()
+                .into_inner()
+                .outcome(),
+            proto::FlowSpecDeleteOutcome::Deleted
+        );
+        assert_eq!(audited(&audit), format!("{held} requested_owner=other"));
+
+        drop((svc, rib_tx));
+        manager_task.await.unwrap();
     }
 
     /// The controller contract against a real RIB: a leased add returns the

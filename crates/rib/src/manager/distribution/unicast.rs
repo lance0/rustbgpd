@@ -1859,7 +1859,9 @@ impl RibManager {
         allow_missing: bool,
         owner: &str,
         override_owner: bool,
-        reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::InjectedRemoval, RibCommandError>,
+        >,
     ) {
         let key = InjectedKey::Unicast(prefix, path_id);
         let present = self
@@ -1879,12 +1881,15 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw(&prefix, path_id) {
             let unicast_lens = rib.unicast_lens();
-            self.forget_injected(&key);
+            let tag = self.forget_injected(&key);
             debug!(%prefix, "withdrawn injected route");
             self.finish_local_unicast_withdrawals(&HashSet::from([prefix]), unicast_lens);
-            let _ = reply.send(Ok(true));
+            let _ = reply.send(Ok(crate::update::InjectedRemoval { removed: true, tag }));
         } else if allow_missing {
-            let _ = reply.send(Ok(false));
+            let _ = reply.send(Ok(crate::update::InjectedRemoval {
+                removed: false,
+                tag: None,
+            }));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
                 "prefix {prefix} not found"

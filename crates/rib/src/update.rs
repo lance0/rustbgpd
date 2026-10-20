@@ -1236,6 +1236,17 @@ pub struct ExportPolicyTermHits {
     pub terms: Vec<rustbgpd_policy::TermHitRow>,
 }
 
+/// A local delete's result: whether an entry was removed and, when it was
+/// owned, the ADR-0141 owner and generation it held, read in the deleting
+/// turn so an audit names the owner a delete or an override removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectedRemoval {
+    /// Whether a local entry was removed.
+    pub removed: bool,
+    /// The removed entry's lease tag; `None` when unowned or not removed.
+    pub tag: Option<crate::injection_lease::InjectionTag>,
+}
+
 /// Outcome of a local unicast or `FlowSpec` injection, decided against the
 /// local Adj-RIB-In rather than Loc-RIB, so a received route that out-selects
 /// the local one cannot mask a real replacement.
@@ -2596,8 +2607,8 @@ pub enum RibUpdate {
         owner: String,
         /// Delete regardless of the entry's owner.
         override_owner: bool,
-        /// Completion reply: `true` when a local route was removed.
-        reply: oneshot::Sender<Result<bool, RibCommandError>>,
+        /// Completion reply: whether a local route was removed, and its tag.
+        reply: oneshot::Sender<Result<InjectedRemoval, RibCommandError>>,
     },
     /// Inject a locally-originated route under an owner's lease (ADR-0141).
     InjectLeasedRoute {
@@ -3338,8 +3349,8 @@ pub enum RibUpdate {
         owner: String,
         /// Delete regardless of the entry's owner.
         override_owner: bool,
-        /// Completion reply: `true` when a local rule was removed.
-        reply: oneshot::Sender<Result<bool, RibCommandError>>,
+        /// Completion reply: whether a local rule was removed, and its tag.
+        reply: oneshot::Sender<Result<InjectedRemoval, RibCommandError>>,
     },
     /// Inject a locally-originated `FlowSpec` rule under an owner's lease
     /// (ADR-0141).

@@ -122,16 +122,16 @@ impl RibManager {
         Ok(tag)
     }
 
-    /// Drop `key`'s ownership tag after the RIB removed it.
-    pub(super) fn forget_injected(&mut self, key: &InjectedKey) {
-        if let Some(tag) = self.injected_owners.remove(key)
-            && let Some(keys) = self.owner_keys.get_mut(&tag.owner)
-        {
+    /// Drop `key`'s ownership tag after the RIB removed it, returning it.
+    pub(super) fn forget_injected(&mut self, key: &InjectedKey) -> Option<InjectionTag> {
+        let tag = self.injected_owners.remove(key)?;
+        if let Some(keys) = self.owner_keys.get_mut(&tag.owner) {
             keys.remove(key);
             if keys.is_empty() {
                 self.owner_keys.remove(&tag.owner);
             }
         }
+        Some(tag)
     }
 
     /// Untag and return every key of `expired.owner` tagged at or below its

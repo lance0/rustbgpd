@@ -235,7 +235,9 @@ impl RibManager {
         allow_missing: bool,
         owner: &str,
         override_owner: bool,
-        reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::InjectedRemoval, RibCommandError>,
+        >,
     ) {
         let owned_key = InjectedKey::FlowSpec(key.clone());
         let route_key = FlowSpecRouteKey {
@@ -266,14 +268,17 @@ impl RibManager {
             rib.flowspec_lens(),
         );
         if removed {
-            self.forget_injected(&owned_key);
+            let tag = self.forget_injected(&owned_key);
             debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
             let mut fs_affected = HashSet::new();
             fs_affected.insert(key);
             self.recompute_and_distribute_flowspec(&fs_affected);
-            let _ = reply.send(Ok(true));
+            let _ = reply.send(Ok(crate::update::InjectedRemoval { removed: true, tag }));
         } else if allow_missing {
-            let _ = reply.send(Ok(false));
+            let _ = reply.send(Ok(crate::update::InjectedRemoval {
+                removed: false,
+                tag: None,
+            }));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
                 "FlowSpec {:?} rule {} not found",

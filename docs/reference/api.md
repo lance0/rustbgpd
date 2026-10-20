@@ -3178,7 +3178,10 @@ owned entry's `injection_owner`, `lease_generation` and `lease_remaining_ms`
 (0 means expired, withdrawal pending); unowned entries leave them unset.
 `InjectionService.ListInjectionLeases` lists the lease table. The leased adds
 and `RenewLease` are `operator_only`; a successful `RenewLease` is audited at
-INFO rather than WARN. The owner is a label that keeps controllers from
+INFO rather than WARN. A delete's audit summary names the owner and
+generation the removed entry held, so an `override_owner` delete names the
+owner it bypassed; a different requested owner is logged as
+`requested_owner`. The owner is a label that keeps controllers from
 changing each other's state by mistake, not a security boundary between
 operators.
 

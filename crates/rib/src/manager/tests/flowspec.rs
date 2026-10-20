@@ -1675,7 +1675,7 @@ async fn local_flowspec_gauge_tracks_injected_intent() {
     for (key, expected) in [(first.selection_key(), 1), (second.selection_key(), 0)] {
         let (reply, response) = oneshot::channel();
         manager.handle_withdraw_flowspec(key, false, "", false, reply);
-        assert!(response.await.unwrap().unwrap());
+        assert!(response.await.unwrap().unwrap().removed);
         assert_flowspec_gauge(&manager, LOCAL_PEER, expected);
     }
     for allow_missing in [true, false] {
@@ -1683,7 +1683,7 @@ async fn local_flowspec_gauge_tracks_injected_intent() {
         manager.handle_withdraw_flowspec(first.selection_key(), allow_missing, "", false, reply);
         let outcome = response.await.unwrap();
         if allow_missing {
-            assert!(!outcome.unwrap());
+            assert!(!outcome.unwrap().removed);
         } else {
             assert!(outcome.is_err());
         }
