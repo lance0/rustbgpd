@@ -13,7 +13,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::time::Duration;
 
 use rustbgpd_wire::{Afi, Safi};
 use tracing::info;
@@ -25,9 +24,10 @@ use super::RibManager;
 pub struct EorGracePeerConfig {
     /// Static peer address.
     pub peer: IpAddr,
-    /// Time from process start until held End-of-RIB is released. Already
-    /// clamped to the remaining restarting-speaker (marker) window.
-    pub window: Duration,
+    /// Absolute release deadline: daemon start plus the configured window,
+    /// clamped to the restarting-speaker (marker) window. Counting from
+    /// daemon start keeps startup work from stretching the window.
+    pub deadline: tokio::time::Instant,
     /// Families covered by the restart (the Graceful Restart families this
     /// daemon advertises to the peer).
     pub families: Vec<(Afi, Safi)>,
@@ -46,7 +46,6 @@ pub struct EorGraceConfig {
 /// per-turn timer probe O(1).
 #[derive(Debug)]
 pub(super) struct EorGracePeer {
-    window: Duration,
     families: HashSet<(Afi, Safi)>,
     /// The current session negotiated helper retention: the peer advertised
     /// a Graceful Restart capability (a helper-only capability lists no
@@ -63,28 +62,31 @@ impl RibManager {
         let mut peers: HashMap<IpAddr, EorGracePeer> = HashMap::new();
         let mut deadlines = super::graceful_restart::DeadlineMap::default();
         for entry in config.peers {
-            if entry.window.is_zero() || entry.families.is_empty() {
+            if entry.families.is_empty() {
                 continue;
             }
-            let candidate = EorGracePeer {
-                window: entry.window,
-                families: entry.families.into_iter().collect(),
-                helper_session: false,
-            };
             // Address-only RIB identity cannot tell scoped duplicates apart;
-            // the shorter window is the conservative choice.
-            match peers.get(&entry.peer) {
-                Some(existing) if existing.window <= candidate.window => {}
-                _ => {
-                    deadlines.insert(entry.peer, now + entry.window);
-                    peers.insert(entry.peer, candidate);
-                }
+            // the earlier deadline is the conservative choice.
+            if deadlines
+                .get(&entry.peer)
+                .is_some_and(|existing| *existing <= entry.deadline)
+            {
+                continue;
             }
+            deadlines.insert(entry.peer, entry.deadline);
+            peers.insert(
+                entry.peer,
+                EorGracePeer {
+                    families: entry.families.into_iter().collect(),
+                    helper_session: false,
+                },
+            );
         }
-        for (peer, grace) in &peers {
+        for (peer, deadline) in &deadlines {
             info!(
                 %peer,
-                window_secs = grace.window.as_secs(),
+                remaining_ms = u64::try_from(deadline.saturating_duration_since(now).as_millis())
+                    .unwrap_or(u64::MAX),
                 "planned restart: holding End-of-RIB toward this Graceful Restart helper until the grace window ends"
             );
         }
@@ -136,8 +138,15 @@ impl RibManager {
             .filter(|&(_, &deadline)| deadline <= due)
             .map(|(&peer, _)| peer)
             .collect();
+        let now = tokio::time::Instant::now();
         for peer in expired {
-            self.eor_grace_deadlines.remove(&peer);
+            let late_ms = self
+                .eor_grace_deadlines
+                .remove(&peer)
+                .map_or(0, |deadline| {
+                    u64::try_from(now.saturating_duration_since(deadline).as_millis())
+                        .unwrap_or(u64::MAX)
+                });
             let Some(grace) = self.eor_grace.remove(&peer) else {
                 continue;
             };
@@ -153,7 +162,7 @@ impl RibManager {
             self.metrics.record_gr_eor_grace_expired(&peer.to_string());
             info!(
                 %peer,
-                window_secs = grace.window.as_secs(),
+                late_ms,
                 helper_session = grace.helper_session,
                 held_families = %held.join(","),
                 "End-of-RIB grace window ended at its deadline; releasing held End-of-RIB. \

@@ -53,12 +53,13 @@ fn local_route(octet: u8) -> Route {
 }
 
 fn grace(peers: &[IpAddr]) -> EorGraceConfig {
+    let start = tokio::time::Instant::now();
     EorGraceConfig {
         peers: peers
             .iter()
             .map(|&peer| EorGracePeerConfig {
                 peer,
-                window: WINDOW,
+                deadline: start + WINDOW,
                 families: vec![V4, V6],
             })
             .collect(),
@@ -712,7 +713,7 @@ fn manager_with(metrics: &BgpMetrics) -> RibManager {
 async fn grace_deadlines_use_the_cached_deadline_map() {
     let metrics = BgpMetrics::new();
     let mut config = grace(&[UPSTREAM, CLIENT]);
-    config.peers[1].window = WINDOW * 2;
+    config.peers[1].deadline += WINDOW;
     let (_tx, rx) = mpsc::channel(8);
     let mut manager =
         RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()).with_eor_grace(config);
@@ -735,7 +736,7 @@ async fn grace_deadlines_use_the_cached_deadline_map() {
 async fn later_window_waits_for_its_own_turn() {
     let metrics = BgpMetrics::new();
     let mut config = grace(&[UPSTREAM, CLIENT]);
-    config.peers[1].window = WINDOW + Duration::from_secs(1);
+    config.peers[1].deadline += Duration::from_secs(1);
     let (_tx, rx) = mpsc::channel(8);
     let mut manager =
         RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()).with_eor_grace(config);
@@ -759,4 +760,27 @@ async fn later_window_waits_for_its_own_turn() {
     assert!(helper.observe(&mut later, |helper| helper.has(KEPT)));
     assert_eq!(helper.eor, vec![V4]);
     assert_eq!(helper.log.last().map(String::as_str), Some("eor"));
+}
+
+/// Startup work can run past the window. The deadline was fixed at daemon
+/// start, so End-of-RIB leaves on the first registration after it instead of
+/// a full window later.
+#[tokio::test(start_paused = true)]
+async fn deadline_counts_from_daemon_start_not_install() {
+    let metrics = BgpMetrics::new();
+    let start = tokio::time::Instant::now();
+    let config = grace(&[UPSTREAM]);
+    tokio::time::advance(WINDOW + Duration::from_secs(5)).await;
+    let mut manager = manager_from(config, &metrics);
+    let due = manager.next_eor_hold_deadline().unwrap();
+    assert_eq!(due, start + WINDOW);
+    let mut rx = connect(&mut manager, UPSTREAM, HELPER);
+    assert_no_eor(&mut rx, "the held session before the timer turn");
+    manager.expire_eor_holds(due);
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, vec![V4]);
+}
+
+fn manager_from(config: EorGraceConfig, metrics: &BgpMetrics) -> RibManager {
+    let (_tx, rx) = mpsc::channel(8);
+    RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()).with_eor_grace(config)
 }
