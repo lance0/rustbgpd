@@ -40,7 +40,9 @@ principal = "automation.example"
 For readability the examples omit the accompanying
 `-H "authorization: bearer <token>"` metadata header.
 
-The proto definition lives at `proto/rustbgpd.proto`.
+The proto definition lives at `proto/rustbgpd.proto`. Each tagged release
+also publishes that file as a release asset; see
+[pinning the proto to a release](#pinning-the-proto-to-a-release).
 
 For a worked client in a general-purpose language — stub generation, mTLS with
 composed bearer-token call credentials, per-call deadlines, and the
@@ -52,6 +54,34 @@ listed in the narrow [v1 route-server / route-reflector / controller contract](v
 That machine inventory pins method names, streaming modes, and top-level
 request/response messages; a service or RPC existing in this reference does
 not by itself make it v1-stable.
+
+## Pinning the proto to a release
+
+A controller that generates stubs should pin them to the daemon release it
+targets instead of hand-vendoring a copy that drifts. Each tagged release
+publishes the exact tagged `proto/rustbgpd.proto` as the `rustbgpd.proto`
+asset, with `rustbgpd.proto.sha256` beside it:
+
+```bash
+TAG=vX.Y.Z  # the rustbgpd release you target
+base=https://github.com/lance0/rustbgpd/releases/download/$TAG
+curl -fsSLO "$base/rustbgpd.proto" &&
+  curl -fsSLO "$base/rustbgpd.proto.sha256" &&
+  sha256sum -c rustbgpd.proto.sha256 &&
+  python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. rustbgpd.proto
+```
+
+Each command runs only if the previous one succeeded, so a failed download or
+a checksum mismatch never regenerates stubs.
+
+Commit the tag, and the checksum if you like, next to the generated code.
+Moving to a new release means changing `TAG`, verifying again and
+regenerating. A release that predates the asset has none; take its file with
+`git show $TAG:proto/rustbgpd.proto` from a clone instead.
+
+Publishing the file does not promote anything into v1. Alpha messages, fields
+and RPCs in it stay alpha; the
+[v1 contract](v1-stable-contract.md) still defines the stable subset.
 
 ## Service overview
 

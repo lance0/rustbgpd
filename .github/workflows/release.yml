@@ -331,6 +331,23 @@ jobs:
         # fetching an artifact and its matching checksum manifest.
         run: cp packaging/install.sh artifacts/install.sh
 
+      - name: Stage the tagged proto and its checksum
+        # Publish the exact proto/rustbgpd.proto of the tagged checkout so
+        # controller authors can pin their generated stubs to a release and
+        # verify the file. Names stay version-less like the other assets;
+        # the tag in the download URL selects the version. Publishing the
+        # file promotes nothing: the v1 inventory still defines which
+        # fields are stable. Runs on dispatch too, so a dry run exercises it.
+        run: |
+          set -euo pipefail
+          git diff --quiet HEAD -- proto/rustbgpd.proto
+          grep -qx 'package rustbgpd.v1;' proto/rustbgpd.proto
+          cp proto/rustbgpd.proto artifacts/rustbgpd.proto
+          cd artifacts
+          sha256sum rustbgpd.proto > rustbgpd.proto.sha256
+          sha256sum -c rustbgpd.proto.sha256
+          cat rustbgpd.proto.sha256
+
       - name: Create GitHub Release
         # The only externally visible step in the workflow. Guarded on
         # the push event itself (not the dry_run input) so a dispatch
