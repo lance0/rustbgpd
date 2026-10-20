@@ -267,8 +267,9 @@ impl InjectionLeases {
     #[must_use]
     pub fn new() -> Self {
         // std's randomly keyed hasher: OS-seeded keys, distinct per instance,
-        // no clock involved and no new dependency.
-        let incarnation = RandomState::new().build_hasher().finish();
+        // no clock involved and no new dependency. Never zero, which
+        // `CheckLivenessResponse` reserves for a server without the field.
+        let incarnation = RandomState::new().build_hasher().finish().max(1);
         Self {
             incarnation,
             state: Mutex::new(State {

@@ -251,7 +251,7 @@ shape itself does not raise the tier.
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `Shutdown` | `operator_only` | Process termination. Worst-case outage primitive on the daemon. |
-| `CheckLiveness` | `read` | Empty authenticated response: only the gRPC handler answered. No actor readiness or topology; outside the narrow v1 contract. |
+| `CheckLiveness` | `read` | Authenticated response carrying only the process `incarnation`: the gRPC handler answered, and a changed value means the daemon restarted. No actor readiness or topology; outside the narrow v1 contract. |
 | `GetHealth` | `sensitive_read` | Core-actor readiness plus `active_peers` and `total_routes`; the counts reveal operational state and route volume. |
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |

@@ -60,6 +60,10 @@ RECONCILE_SECS=30
 # interval plus margin, stays below the 120 s Restart Time rustbgpd
 # advertises, and far below FRR's 360 s stale-path time.
 GRACE_SECS=40
+# Phase 5: the latest the bridge's replay may refresh both bans after the
+# daemon starts. The restart watch reconciles on the first probe that sees a
+# new incarnation; FRR is polled once a second.
+FRESH_MAX_SECS=5
 V4="203.0.113.7/32"
 V6="2001:db8:66::7/128"
 V4_NH="10.0.0.1"
@@ -528,6 +532,13 @@ if [ -n "$fresh" ] && [ "$fresh" -lt "$GRACE_SECS" ]; then
     ok "phase 5 the bridge's replay refreshed both bans ${fresh}s after start, inside the window"
 else
     bad "phase 5 replay did not refresh both bans inside the ${GRACE_SECS}s window (fresh=${fresh:-never})"
+fi
+# The bridge's liveness probe sees the new incarnation and replays at once,
+# well before its periodic reconcile pass would.
+if [ -n "$fresh" ] && [ "$fresh" -le "$FRESH_MAX_SECS" ]; then
+    ok "phase 5 the restart watch replayed within ${FRESH_MAX_SECS}s (${fresh}s), not at the ${RECONCILE_SECS}s reconcile pass"
+else
+    bad "phase 5 both bans fresh only at ${fresh:-never}s after start, expected <= ${FRESH_MAX_SECS}s"
 fi
 # From FRR's log order: each family's first blackhole UPDATE after the
 # restart came before its End-of-RIB, so the helper never dropped the ban.
