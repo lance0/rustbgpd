@@ -1,0 +1,26 @@
+loss-action (attempt-SXk5gzB4/loss-action/loss-bound-loss-action.json): action_enabled=True rate=2000 pps flow seed 154, 10/12 valid cycles, 0 censored at the end of the 8.0 s post-cut window
+  frames lost                                          n=10 min 28 median 35.5 max 57
+  loss window ms (first..last lost send time)          n=10 min 14.0 median 17.75 max 28.5
+  lost frames x 0.5 ms                                 n=10 min 14.0 median 17.75 max 28.5
+  cut -> first lost ms                                 n=10 min 1.425 median 1.697 max 1.887
+  cut -> last lost ms                                  n=10 min 15.212 median 19.0265 max 29.687
+  cut -> last frame on rustbgpd member ms              n=10 min 15.212 median 19.0265 max 29.689
+  cut -> first frame on FRR member ms                  n=10 min 15.714 median 19.5285 max 30.19
+  cut -> member admin-down seen (100 ms poll) s        n=10 min 0.1081937039270997 median 0.1088391556404531 max 0.10936202807351947
+  cut -> CE member inactive seen (100 ms poll) s       n=10 min 0.1081937039270997 median 0.10917801596224308 max 0.21427626023069024
+  neighbor reset -> steady s                           n=10 min 13.517 median 14.900500000000001 max 16.068
+  invalid cycle 4: 1 sent frames missing from the member captures
+  invalid cycle 6: 1 sent frames missing from the member captures
+loss-control (attempt-SXk5gzB4/loss-control/loss-bound-loss-control.json): action_enabled=False rate=2000 pps flow seed 154, 11/12 valid cycles, 11 censored at the end of the 8.0 s post-cut window
+  frames lost                                          n=11 min 16058 median 16060 max 16060
+  loss window ms (first..last lost send time)          n=11 min 8029.0 median 8030.0 max 8030.0
+  lost frames x 0.5 ms                                 n=11 min 8029.0 median 8030.0 max 8030.0
+  cut -> first lost ms                                 n=11 min 1.311 median 1.615 max 1.971
+  cut -> last lost ms                                  n=11 min 8030.115 median 8030.811 max 8031.251
+  cut -> last frame on rustbgpd member ms              n=11 min 8030.115 median 8030.812 max 8031.252
+  cut -> first frame on FRR member ms                  -
+  cut -> member admin-down seen (100 ms poll) s        -
+  cut -> CE member inactive seen (100 ms poll) s       -
+  neighbor reset -> steady s                           n=11 min 1.101 median 1.76 max 2.036
+  invalid cycle 3: sender stalled 2895.0 ms
+VERDICT: MEASURED; with action loss window ms min 14.0 median 17.75 max 28.5 (0 censored); action disabled min 8029.0 median 8030.0 max 8030.0 (11 censored)

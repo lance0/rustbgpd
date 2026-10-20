@@ -6,7 +6,10 @@ controller, the ownership receipt, the `--release-core-isolation` helper and
 the observability surface, with unit and privileged netns evidence. The
 M121 interop leg's core-isolation cell covers decision 8's underlay cut,
 recovery hold and restart against a Linux LACP CE beside FRR 10.7.1, as
-functional evidence; the transition-loss bound still needs a quiet host.
+functional evidence. The transition-loss bound was measured on a quiet host
+on 2026-10-20: a median of about 15 ms against loss for the whole post-cut
+window with the action disabled
+([receipt](../perf/evpn-core-isolation-loss-2026-10-20.md)).
 **Date:** 2026-10-12
 
 ## Context

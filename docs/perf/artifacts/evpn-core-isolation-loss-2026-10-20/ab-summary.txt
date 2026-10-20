@@ -1,0 +1,25 @@
+ac5 = ac5a1b8d5 rustbgpd:qq1014-m121-ac5a1b8d5: 24/24 valid cycles in 6 blocks (0 censored)
+  loss window ms                                   n=24 min 4 p25 14.5 median 15 p75 16 max 35.5
+  cut -> last frame on rustbgpd member ms          n=24 min 5.061 p25 15.65 median 16.277 p75 17.086 max 36.617
+  frames lost                                      n=24 min 8 p25 29 median 30 p75 32 max 71
+  cut -> first frame on FRR member ms              n=24 min 5.562 p25 16.1528 median 16.7785 p75 17.5873 max 37.118
+  cut -> member admin-down seen (100 ms poll) s    n=24 min 0.0031625 p25 0.108494 median 0.108826 p75 0.10906 max 0.10997
+  neighbor reset -> steady s                       n=24 min 11.956 p25 13.4842 median 14.791 p75 15.2647 max 15.831
+  loss_window_ms: first cycle of block (no prior reset) n=6 min 14.5 p25 14.5 median 14.5 p75 15.625 max 35.5
+  loss_window_ms: later cycles (after >= 1 reset)        n=18 min 4 p25 14.5 median 15.25 p75 15.875 max 27.5
+  cut_to_last_ceb_frame_ms: first cycle of block (no prior reset) n=6 min 15.482 p25 15.5855 median 15.643 p75 16.7168 max 36.617
+  cut_to_last_ceb_frame_ms: later cycles (after >= 1 reset)        n=18 min 5.061 p25 15.8848 median 16.427 p75 17.0595 max 28.666
+  per-block median loss window ms: b01-ac5:14.5 b04-ac5:15.75 b05-ac5:15.25 b08-ac5:14.5 b09-ac5:15.5 b12-ac5:15.75
+090 = 090022493 rustbgpd:qq1019-m121-090022493: 24/24 valid cycles in 6 blocks (0 censored)
+  loss window ms                                   n=24 min 14.5 p25 15 median 15.5 p75 16.75 max 30.5
+  cut -> last frame on rustbgpd member ms          n=24 min 15.321 p25 15.8637 median 16.637 p75 17.886 max 31.741
+  frames lost                                      n=24 min 29 p25 30 median 31 p75 33.5 max 61
+  cut -> first frame on FRR member ms              n=24 min 15.823 p25 16.3665 median 17.1385 p75 18.3872 max 32.243
+  cut -> member admin-down seen (100 ms poll) s    n=24 min 0.107708 p25 0.108545 median 0.108781 p75 0.108953 max 0.109408
+  neighbor reset -> steady s                       n=24 min 11.948 p25 14.4477 median 14.8035 p75 15.7802 max 16.038
+  loss_window_ms: first cycle of block (no prior reset) n=6 min 14.5 p25 14.5 median 14.75 p75 15 max 30.5
+  loss_window_ms: later cycles (after >= 1 reset)        n=18 min 14.5 p25 15 median 15.75 p75 18.25 max 26
+  cut_to_last_ceb_frame_ms: first cycle of block (no prior reset) n=6 min 15.321 p25 15.5945 median 15.7775 p75 15.8975 max 31.741
+  cut_to_last_ceb_frame_ms: later cycles (after >= 1 reset)        n=18 min 15.494 p25 16.1465 median 16.7425 p75 19.336 max 27.028
+  per-block median loss window ms: b02-090:19.5 b03-090:15.5 b06-090:15.5 b07-090:15.25 b10-090:15.25 b11-090:15.5
+VERDICT A/B: MEASURED n=24/24 valid cycles; loss window median ac5 15 ms vs 090 15.5 ms (ac5 4..35.5, 090 14.5..30.5; ranges overlap); cut->last rustbgpd frame median ac5 16.277 ms vs 090 16.637 ms (ac5 5.061..36.617, 090 15.321..31.741; ranges overlap)
