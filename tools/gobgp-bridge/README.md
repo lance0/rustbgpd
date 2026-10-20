@@ -158,11 +158,21 @@ table describes rustbgpd's local state only.
 
 Losing the daemon's local state is not the same as peers withdrawing the
 route. A peer without Graceful Restart withdraws the daemon's routes when the
-session drops. A peer with Graceful Restart or Long-Lived Graceful Restart can
-keep them as stale routes after an abrupt stop, so a blackhole can stay in
-force remotely until the session comes back and the peer receives End-of-RIB,
-or until its stale timers expire. That remote behaviour is left to a
-separate lab with real peers.
+session drops. rustbgpd advertises Graceful Restart by default, so a helper
+peer keeps them as stale routes across a stop, and a blackhole stays in force
+remotely until the session comes back and the peer receives End-of-RIB, or
+until its stale timers expire. Interop leg
+[M126](../../tests/interop/m126-fastnetmon-rtbh/README.md) measures this with
+FRR as the helper:
+
+- After a planned rustbgpd restart, the daemon sends End-of-RIB before the
+  bridge's next reconcile pass. FRR drops the stale bans at End-of-RIB and
+  learns them again when the bridge replays them, so the upstream has no
+  blackhole for up to one reconcile interval. A shorter
+  `--reconcile-interval-secs` narrows that gap.
+- An unban that fails while rustbgpd is stopped leaves the stale blackhole at
+  the peer until rustbgpd returns and sends End-of-RIB, or until the peer's
+  restart timer expires.
 
 A detector deadline can expire while the daemon is still applying a change.
 The daemon finishes a change it has accepted, so check the RIB before
@@ -173,8 +183,12 @@ re-sending an unban that timed out.
 - GoBGP API: `api/gobgp.proto` from GoBGP v3.37.0.
 - Detector: request bytes match FastNetMon Community 1.2.10 development
   sources (commit `2436f447`), including its IPv6 MP_REACH_NLRI encoding.
-  The unit tests and the integration test replay those layouts. A run against
-  the real FastNetMon binary is not yet recorded.
+  The unit tests and the integration test replay those layouts.
+- Real detector: the official FastNetMon Community 1.2.9 package bans and
+  unbans an IPv4 /32 and an IPv6 /128 through the bridge to FRR 10.7.1, across
+  rustbgpd and bridge restarts, in interop leg
+  [M126](../../tests/interop/m126-fastnetmon-rtbh/README.md). Its GoBGP client
+  is identical to the development sources above.
 - rustbgpd: the version in this repository.
 
 ## Vendored protocol definition

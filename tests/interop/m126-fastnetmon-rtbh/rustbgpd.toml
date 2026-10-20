@@ -1,0 +1,47 @@
+# rustbgpd for M126: one eBGP session to FRR carrying IPv4 and IPv6 unicast
+# over IPv4 transport. The gRPC API is only the default owner-only Unix
+# socket, which rustbgpd-gobgp-bridge uses.
+
+config_epoch = 2
+
+[global]
+asn = 65001
+ebgp_requires_policy = true
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# Nothing is learned from the upstream.
+[policy.definitions.deny-all]
+default_action = "deny"
+
+# The export policy recommended by the bridge README: only locally injected
+# /32 and /128 routes that carry BLACKHOLE leave toward the upstream.
+[policy.definitions.rtbh-only]
+default_action = "deny"
+[[policy.definitions.rtbh-only.statements]]
+action = "permit"
+match_route_type = "local"
+prefix = "0.0.0.0/0"
+ge = 32
+match_community = ["BLACKHOLE"]
+[[policy.definitions.rtbh-only.statements]]
+action = "permit"
+match_route_type = "local"
+prefix = "::/0"
+ge = 128
+match_community = ["BLACKHOLE"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-upstream"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+# Next-hop self for IPv6 routes on this IPv4-transport session.
+local_ipv6_nexthop = "2001:db8:126::1"
+import_policy_chain = ["deny-all"]
+export_policy_chain = ["rtbh-only"]
