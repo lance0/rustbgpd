@@ -334,6 +334,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unlock from a session the RIB no longer tracks is discarded and counted in
   `bgp_rib_stale_session_message_ignored_total` under the new
   `kind="family_sendable"` label.
+- The metrics/readiness server thread now reports how it ended: a requested
+  stop, an accept-loop exit or panic, or a start failure carrying the runtime
+  or thread error. A requested stop is no longer reported as "did not start",
+  and a thread panic seen while joining at teardown is logged as a warning.
+  **Operator-visible:** the `result` field of `metrics/readiness server exited
+  unexpectedly` now reads, for example, `Ok(Exited(Ok(())))` or
+  `Ok(StartFailed("metrics/readiness runtime did not start: ..."))`; the
+  message, coordinated shutdown and exit status 1 are unchanged.
+- A session that negotiates a family but withholds it from export, such as
+  eBGP IPv6 unicast with no IPv6 next hop, now sends that family an empty
+  End-of-RIB after the initial table. Previously no End-of-RIB was sent for
+  the family, so a graceful-restart peer that was restarting waited out its
+  full selection deferral timer for it (RFC 4724 §4.1). The marker follows
+  the same holds as a sendable family's End-of-RIB, and no route is exported
+  in the family.
 
 ### Documentation
 
@@ -506,6 +521,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `bgp_rib_stale_session_message_ignored_total` has a new `kind` value,
   `family_sendable`. Alerts or recording rules that enumerate its `kind`
   values should include it.
+- Log scrapers that parse the `result` field of the `metrics/readiness
+  server exited unexpectedly` error must accept the new outcome names, for
+  example `Ok(Exited(Ok(())))` or `Ok(StartFailed("..."))`, instead of the
+  previous `Ok(Ok(()))` or
+  `Ok(Err("metrics/readiness thread did not start"))`.
+  The message text, the coordinated shutdown and exit status 1 are unchanged.
+- A session that negotiates a family but withholds it from export, such as
+  eBGP IPv6 unicast without an IPv6 next hop, now sends that family an empty
+  End-of-RIB. A restarting graceful-restart peer stops waiting out its
+  selection deferral timer for the family, and BMP or packet captures show
+  the extra marker. No routes are exported in the family, and no action is
+  needed.
 
 ## [0.78.0] — 2026-10-18
 
