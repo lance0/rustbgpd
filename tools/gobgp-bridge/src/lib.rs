@@ -6,8 +6,10 @@
 //! rustbgpd's `InjectionService` as an ordinary authenticated gRPC client.
 //! Every other GoBGP method returns `UNIMPLEMENTED`.
 //!
-//! The bridge keeps no state. A request succeeds only after rustbgpd has
-//! acknowledged the mutation, and daemon errors are returned as they arrive.
+//! The bridge keeps the announced bans in memory and re-adds them on each
+//! reconcile pass, so a restarted daemon gets them back. A request succeeds
+//! only after rustbgpd has acknowledged the mutation, and daemon errors are
+//! returned as they arrive.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
@@ -15,11 +17,14 @@
 
 pub mod decode;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
+use tokio::sync::Mutex;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -27,6 +32,7 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+use crate::rustbgpd as rbgp;
 use decode::Mutation;
 
 /// GoBGP v3 API (`apipb`), generated from the vendored `proto/gobgp.proto`.
@@ -50,6 +56,11 @@ pub mod rustbgpd {
 }
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deadline for each daemon RPC. Requests and reconcile passes share one
+/// lock, so a daemon that accepts the connection but never answers would
+/// otherwise block every later ban, unban and pass.
+pub const DAEMON_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where the daemon's gRPC API listens.
 #[derive(Debug, Clone)]
@@ -112,24 +123,27 @@ pub fn load_token(path: &Path) -> Result<Bearer, String> {
 }
 
 type Injection =
-    rustbgpd::injection_service_client::InjectionServiceClient<InterceptedService<Channel, Bearer>>;
+    rbgp::injection_service_client::InjectionServiceClient<InterceptedService<Channel, Bearer>>;
 
 /// A lazily connected channel: the bridge starts while the daemon is down
-/// and reconnects on the next request after the daemon returns.
+/// and reconnects on the next request after the daemon returns. Every RPC on
+/// it fails after `rpc_timeout` (normally [`DAEMON_RPC_TIMEOUT`]).
 ///
 /// # Errors
 ///
 /// The endpoint URI is invalid.
-pub fn daemon_channel(endpoint: &DaemonEndpoint) -> Result<Channel, String> {
+pub fn daemon_channel(endpoint: &DaemonEndpoint, rpc_timeout: Duration) -> Result<Channel, String> {
     match endpoint {
         DaemonEndpoint::Tcp(uri) => Ok(Endpoint::from_shared(uri.clone())
             .map_err(|e| format!("invalid daemon endpoint: {e}"))?
             .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(rpc_timeout)
             .connect_lazy()),
         DaemonEndpoint::Uds(path) => {
             let path = path.clone();
             Ok(Endpoint::from_static("http://[::]:50051")
                 .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(rpc_timeout)
                 .connect_with_connector_lazy(tower::service_fn(move |_: Uri| {
                     let path = path.clone();
                     async move {
@@ -142,22 +156,160 @@ pub fn daemon_channel(endpoint: &DaemonEndpoint) -> Result<Channel, String> {
     }
 }
 
+/// Default cap on tracked paths: announced bans plus pending withdrawals.
+pub const DEFAULT_MAX_TRACKED: usize = 65_536;
+
+/// Paths the detector wants, kept so a restarted daemon gets them back.
+#[derive(Default)]
+struct Desired {
+    /// The last acknowledged announcement per path, replayed by `reconcile`.
+    routes: HashMap<[u8; 16], rbgp::AddPathRequest>,
+    /// Withdrawals the daemon has not acknowledged, retried by `reconcile`.
+    pending_deletes: HashMap<[u8; 16], rbgp::DeletePathRequest>,
+}
+
 /// The GoBGP API service backed by rustbgpd injection.
+///
+/// It keeps the announced paths in memory and re-adds them on every
+/// `reconcile`, so bans survive a daemon restart. A bridge restart loses them.
+#[derive(Clone)]
 pub struct Bridge {
     injection: Injection,
+    // ponytail: one lock serializes detector requests and reconcile passes,
+    // which makes ordering trivial (a replay can never race a withdraw). A
+    // pass over a very large set delays detector requests until it finishes.
+    desired: Arc<Mutex<Desired>>,
+    max_tracked: usize,
 }
 
 impl Bridge {
-    /// Build the service over a daemon channel and optional bearer token.
+    /// Build the service over a daemon channel and optional bearer token,
+    /// tracking at most `max_tracked` paths.
     #[must_use]
-    pub fn new(channel: Channel, bearer: Option<Bearer>) -> Self {
+    pub fn new(channel: Channel, bearer: Option<Bearer>, max_tracked: usize) -> Self {
         Self {
-            injection: rustbgpd::injection_service_client::InjectionServiceClient::with_interceptor(
+            injection: rbgp::injection_service_client::InjectionServiceClient::with_interceptor(
                 channel,
                 bearer.unwrap_or(Bearer(None)),
             ),
+            desired: Arc::default(),
+            max_tracked,
         }
     }
+
+    async fn apply(&self, decoded: &decode::Decoded) -> Result<(), Status> {
+        let mut desired = self.desired.lock().await;
+        let mut injection = self.injection.clone();
+        let key = decoded.uuid;
+        match &decoded.mutation {
+            Mutation::Announce(req) => {
+                // Reserve the slot before the daemon sees the route, so an
+                // acknowledged ban is never left untracked.
+                if !desired.routes.contains_key(&key)
+                    && !desired.pending_deletes.contains_key(&key)
+                    && desired.routes.len() + desired.pending_deletes.len() >= self.max_tracked
+                {
+                    return Err(Status::resource_exhausted(format!(
+                        "the bridge already tracks {} paths; withdraw some first",
+                        self.max_tracked
+                    )));
+                }
+                let outcome = injection
+                    .add_path(req.clone())
+                    .await?
+                    .into_inner()
+                    .outcome();
+                desired.pending_deletes.remove(&key);
+                desired.routes.insert(key, req.clone());
+                info!(action = "announce", prefix = %prefix_of(&req.prefix, req.prefix_length), outcome = ?outcome, "applied");
+            }
+            Mutation::Withdraw(req) => {
+                // Stop replaying it first: whatever the daemon answers, the
+                // detector no longer wants this path.
+                desired.routes.remove(&key);
+                // Record the retry before the daemon call: if this request is
+                // cancelled while the call is pending, the next reconcile
+                // pass still applies the withdrawal. A full tracker makes it
+                // best effort.
+                let retried = desired.pending_deletes.contains_key(&key)
+                    || desired.routes.len() + desired.pending_deletes.len() < self.max_tracked;
+                if retried {
+                    desired.pending_deletes.insert(key, req.clone());
+                }
+                match injection.delete_path(req.clone()).await {
+                    Ok(response) => {
+                        // Deleted, or NOT_PRESENT under allow_missing.
+                        desired.pending_deletes.remove(&key);
+                        info!(action = "withdraw", prefix = %prefix_of(&req.prefix, req.prefix_length), outcome = ?response.into_inner().outcome(), "applied");
+                    }
+                    Err(status) => {
+                        return Err(Status::new(
+                            status.code(),
+                            if retried {
+                                format!("{}; the bridge retries this withdrawal", status.message())
+                            } else {
+                                status.message().to_string()
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Retry pending withdrawals, then re-add every tracked announcement. An
+    /// unchanged re-add is a no-op in the daemon; after a daemon restart it
+    /// restores the ban. Stops at the first daemon error and tries again on
+    /// the next pass.
+    pub async fn reconcile(&self) {
+        let mut desired = self.desired.lock().await;
+        let mut injection = self.injection.clone();
+        let deletes: Vec<_> = desired
+            .pending_deletes
+            .iter()
+            .map(|(k, r)| (*k, r.clone()))
+            .collect();
+        for (key, req) in deletes {
+            if let Err(status) = injection.delete_path(req.clone()).await {
+                warn!(code = ?status.code(), error = status.message(), "reconcile paused");
+                return;
+            }
+            desired.pending_deletes.remove(&key);
+            info!(action = "withdraw", prefix = %prefix_of(&req.prefix, req.prefix_length), "retried withdrawal applied");
+        }
+        for req in desired.routes.values() {
+            match injection.add_path(req.clone()).await {
+                Ok(response) => {
+                    let outcome = response.into_inner().outcome();
+                    if outcome != rbgp::PathInjectOutcome::Unchanged {
+                        info!(action = "announce", prefix = %prefix_of(&req.prefix, req.prefix_length), outcome = ?outcome, "replayed");
+                    }
+                }
+                Err(status) => {
+                    warn!(code = ?status.code(), error = status.message(), "reconcile paused");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Run `reconcile` every `interval` for the life of the process.
+    pub fn spawn_reconcile(&self, interval: Duration) {
+        let bridge = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                bridge.reconcile().await;
+            }
+        });
+    }
+}
+
+fn prefix_of(prefix: &str, len: u32) -> String {
+    format!("{prefix}/{len}")
 }
 
 #[tonic::async_trait]
@@ -169,36 +321,12 @@ impl gobgp::gobgp_api_server::GobgpApi for Bridge {
         let decoded = decode::decode(request.get_ref()).inspect_err(|status| {
             warn!(code = ?status.code(), error = status.message(), "rejected AddPath");
         })?;
-        let mut injection = self.injection.clone();
-        // The daemon's outcome goes to the log; GoBGP's response has no field
-        // for it.
-        let result = match &decoded.mutation {
-            Mutation::Announce(req) => injection
-                .add_path(req.clone())
-                .await
-                .map(|r| format!("{:?}", r.into_inner().outcome())),
-            Mutation::Withdraw(req) => injection
-                .delete_path(req.clone())
-                .await
-                .map(|r| format!("{:?}", r.into_inner().outcome())),
-        };
-        let (action, prefix, len) = match &decoded.mutation {
-            Mutation::Announce(r) => ("announce", &r.prefix, r.prefix_length),
-            Mutation::Withdraw(r) => ("withdraw", &r.prefix, r.prefix_length),
-        };
-        match &result {
-            Ok(outcome) => info!(action, prefix = %format!("{prefix}/{len}"), outcome, "applied"),
-            Err(status) => warn!(
-                action,
-                prefix = %format!("{prefix}/{len}"),
-                code = ?status.code(),
-                error = status.message(),
-                "rustbgpd refused or unreachable"
-            ),
-        }
         // Keep the daemon's code and message; drop its response metadata,
         // which belongs to the daemon's HTTP/2 response, not this one.
-        result.map_err(|status| Status::new(status.code(), status.message()))?;
+        self.apply(&decoded).await.map_err(|status| {
+            warn!(code = ?status.code(), error = status.message(), "rustbgpd refused or unreachable");
+            Status::new(status.code(), status.message())
+        })?;
         Ok(Response::new(gobgp::AddPathResponse {
             uuid: decoded.uuid.to_vec(),
         }))

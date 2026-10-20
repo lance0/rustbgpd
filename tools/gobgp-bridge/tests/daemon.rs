@@ -115,6 +115,7 @@ async fn start_daemon(dir: &Path) -> (Killed, RibServiceClient<Channel>) {
     let mut daemon = Killed(child);
     let channel = rustbgpd_gobgp_bridge::daemon_channel(
         &format!("unix://{}", socket(dir).display()).parse().unwrap(),
+        rustbgpd_gobgp_bridge::DAEMON_RPC_TIMEOUT,
     )
     .unwrap();
     let mut rib = RibServiceClient::new(channel);
@@ -150,7 +151,13 @@ fn stop_daemon(daemon: Killed) {
 /// Start the bridge binary on an ephemeral loopback port and connect to it.
 async fn start_bridge(daemon_args: &[&str]) -> (Killed, GobgpApiClient<Channel>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rustbgpd-gobgp-bridge"))
-        .args(["--listen", "127.0.0.1:0", "--daemon"])
+        .args([
+            "--reconcile-interval-secs",
+            "1",
+            "--listen",
+            "127.0.0.1:0",
+            "--daemon",
+        ])
         .args(daemon_args)
         .env("NO_COLOR", "1")
         .stderr(Stdio::piped())
@@ -365,23 +372,39 @@ async fn bridge_against_real_daemon() {
     assert!(routes(&mut rib, "203.0.113.7", 32).await.is_empty());
 
     // Daemon unavailable: a ban and an unban both fail with UNAVAILABLE.
+    // The bridge still tracks the IPv6 ban, and drops the IPv4 one from
+    // replay because the detector withdrew it.
     gobgp.add_path(ban_v4(false)).await.unwrap();
+    gobgp.add_path(ban_v6(false)).await.unwrap();
     stop_daemon(daemon);
-    assert_eq!(
-        gobgp.add_path(ban_v4(true)).await.unwrap_err().code(),
-        Code::Unavailable
+    let unban = gobgp.add_path(ban_v4(true)).await.unwrap_err();
+    assert_eq!(unban.code(), Code::Unavailable);
+    assert!(
+        unban.message().contains("retries this withdrawal"),
+        "{unban:?}"
     );
     assert_eq!(
-        gobgp.add_path(ban_v6(false)).await.unwrap_err().code(),
+        gobgp.add_path(ban_v4(false)).await.unwrap_err().code(),
         Code::Unavailable
     );
+    gobgp.add_path(ban_v4(true)).await.unwrap_err();
 
-    // Daemon restart: injected routes are process-local, so the ban made
-    // before the stop is gone. The same bridge reconnects; the unban the
-    // detector missed now succeeds as a no-op, and a re-announce restores it.
+    // Daemon restart: injected routes are process-local, so the daemon comes
+    // back empty. With no detector action, the bridge's next reconcile pass
+    // (one second here) re-adds the IPv6 ban and does not bring back the
+    // IPv4 one withdrawn during the outage.
     let (_daemon, mut rib) = start_daemon(dir).await;
+    let mut restored = false;
+    for _ in 0..100 {
+        if routes(&mut rib, "2001:db8::7", 128).await.len() == 1 {
+            restored = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(restored, "the ban was not replayed within five seconds");
+    // Another full pass later, the withdrawn ban is still absent.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(routes(&mut rib, "203.0.113.7", 32).await.is_empty());
-    gobgp.add_path(ban_v4(true)).await.unwrap();
-    gobgp.add_path(ban_v4(false)).await.unwrap();
-    assert_eq!(routes(&mut rib, "203.0.113.7", 32).await.len(), 1);
+    assert_eq!(routes(&mut rib, "2001:db8::7", 128).await.len(), 1);
 }
