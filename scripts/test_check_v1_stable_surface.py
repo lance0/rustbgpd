@@ -701,12 +701,27 @@ class VariantEmissionTests(unittest.TestCase):
     )
     CALLER = "fn caller(m: &M) { m.record(\"p\", crate::reason::Reason::A); }"
 
-    def emitted(self, metric):
+    def emitted(self, metric, caller=CALLER, **extra):
         sources = {
             "crates/fixture/src/reason.rs": self.REASON,
-            "crates/fixture/src/caller.rs": self.CALLER,
+            "crates/fixture/src/caller.rs": caller,
+            **extra,
         }
         return checker.emitted_label_values(metric, sources, "bgp_y", "reason", ["peer", "reason"])
+
+    def test_wrapper_passes_its_callers_variant_unless_shadowed(self):
+        caller = "fn caller(m: &M) { crate::wrap::emit(m, crate::reason::Reason::A); }"
+        plain = "pub fn emit(m: &M, reason: Reason) {\n    m.record(\"p\", reason);\n}\n"
+        self.assertEqual(
+            self.emitted(self.METRIC, caller, **{"crates/fixture/src/wrap.rs": plain}), {"a"}
+        )
+        shadowed = (
+            "pub fn emit(m: &M, reason: Reason) {\n"
+            "    for reason in [Reason::B] {\n        m.record(\"p\", reason);\n    }\n}\n"
+        )
+        self.assertEqual(
+            self.emitted(self.METRIC, caller, **{"crates/fixture/src/wrap.rs": shadowed}), set()
+        )
 
     def test_passed_variant_counts_only_its_arm(self):
         self.assertEqual(self.emitted(self.METRIC), {"a"})
