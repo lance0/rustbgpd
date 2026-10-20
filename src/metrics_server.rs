@@ -153,28 +153,59 @@ pub(crate) struct MetricsServerThread {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How the metrics/readiness thread ended, as reported on its exit channel.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MetricsServerExit {
+    /// The handle was dropped: the stop the daemon requests at teardown.
+    StopRequested,
+    /// The server stopped on its own: `Ok` when its accept loop ended, `Err`
+    /// with the panic when it panicked.
+    Exited(Result<(), String>),
+    /// The thread or its runtime could not start (also logged).
+    StartFailed(String),
+}
+
 impl MetricsServerThread {
-    /// The receiver resolves when the server stops on its own: its accept
-    /// loop ended or it panicked. It is closed without a value when the thread
-    /// or its runtime could not start (logged), or after the handle is dropped.
+    /// The receiver resolves with how the server ended. It closes without a
+    /// value only if the thread panicked outside its serving task.
     pub(crate) fn spawn(
         server: MetricsListener,
         metrics: BgpMetrics,
         readiness_probe: CoreReadinessProbe,
         dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
-    ) -> (Self, oneshot::Receiver<Result<(), String>>) {
-        let (exit_tx, exited) = oneshot::channel();
+    ) -> (Self, oneshot::Receiver<MetricsServerExit>) {
+        Self::spawn_with_runtime(
+            || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+            },
+            server,
+            metrics,
+            readiness_probe,
+            dataplane_probe,
+        )
+    }
+
+    fn spawn_with_runtime(
+        build_runtime: fn() -> std::io::Result<tokio::runtime::Runtime>,
+        server: MetricsListener,
+        metrics: BgpMetrics,
+        readiness_probe: CoreReadinessProbe,
+        dataplane_probe: Option<Vec<DataplaneWorkerProbe>>,
+    ) -> (Self, oneshot::Receiver<MetricsServerExit>) {
+        let (exit_tx, mut exited) = oneshot::channel();
         let (stop, stop_rx) = oneshot::channel::<()>();
         let thread = std::thread::Builder::new()
             .name("metrics-http".to_string())
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
+                let runtime = match build_runtime() {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         error!(%error, "failed to build the metrics/readiness runtime");
+                        let _ = exit_tx.send(MetricsServerExit::StartFailed(format!(
+                            "metrics/readiness runtime did not start: {error}"
+                        )));
                         return;
                     }
                 };
@@ -187,19 +218,30 @@ impl MetricsServerThread {
                 let exit = runtime.block_on(async {
                     tokio::select! {
                         biased;
-                        _ = stop_rx => None,
-                        result = serve => Some(result),
+                        _ = stop_rx => MetricsServerExit::StopRequested,
+                        result = serve => {
+                            MetricsServerExit::Exited(result.map_err(|error| error.to_string()))
+                        }
                     }
                 });
-                if let Some(result) = exit {
-                    let _ = exit_tx.send(result.map_err(|error| error.to_string()));
-                }
+                let _ = exit_tx.send(exit);
                 // An in-flight render on the blocking pool must not hold the
                 // join; it finishes, or dies with the process, on its own.
                 runtime.shutdown_background();
-            })
-            .inspect_err(|error| error!(%error, "failed to spawn the metrics/readiness thread"))
-            .ok();
+            });
+        let thread = match thread {
+            Ok(thread) => Some(thread),
+            Err(error) => {
+                error!(%error, "failed to spawn the metrics/readiness thread");
+                // The failed spawn dropped the closure and its sender.
+                let (exit_tx, start_failed) = oneshot::channel();
+                exited = start_failed;
+                let _ = exit_tx.send(MetricsServerExit::StartFailed(format!(
+                    "metrics/readiness thread did not start: {error}"
+                )));
+                None
+            }
+        };
         let server = Self {
             stop: Some(stop),
             thread,
@@ -211,8 +253,11 @@ impl MetricsServerThread {
 impl Drop for MetricsServerThread {
     fn drop(&mut self) {
         drop(self.stop.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            // The panic hook has already recorded the payload.
+            warn!("metrics/readiness thread panicked");
         }
     }
 }
@@ -649,6 +694,55 @@ pub(crate) mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response)?;
         Ok(response)
+    }
+
+    fn bound_listener() -> MetricsListener {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(MetricsListener::bind("127.0.0.1:0".parse().unwrap()))
+            .unwrap()
+    }
+
+    /// A requested stop after a successful start reports a stop, not a
+    /// failure to start.
+    #[test]
+    fn requested_stop_reports_stop_requested() {
+        let (server, exited) =
+            MetricsServerThread::spawn(bound_listener(), BgpMetrics::new(), unused_probe(), None);
+        drop(server);
+        assert_eq!(exited.blocking_recv(), Ok(MetricsServerExit::StopRequested));
+    }
+
+    #[test]
+    fn runtime_build_failure_reports_start_failed() {
+        let (server, exited) = MetricsServerThread::spawn_with_runtime(
+            || Err(std::io::Error::other("injected")),
+            bound_listener(),
+            BgpMetrics::new(),
+            unused_probe(),
+            None,
+        );
+        let exit = exited.blocking_recv();
+        drop(server);
+        assert_eq!(
+            exit,
+            Ok(MetricsServerExit::StartFailed(
+                "metrics/readiness runtime did not start: injected".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn unusable_listener_reports_accept_loop_exit() {
+        let listener = bound_listener();
+        listener.shut_down_for_test();
+        let (server, exited) =
+            MetricsServerThread::spawn(listener, BgpMetrics::new(), unused_probe(), None);
+        let exit = exited.blocking_recv();
+        drop(server);
+        assert_eq!(exit, Ok(MetricsServerExit::Exited(Ok(()))));
     }
 
     #[test]

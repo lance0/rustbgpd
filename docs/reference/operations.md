@@ -2792,6 +2792,7 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `metrics/readiness server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `metrics/readiness thread panicked` | WARN | The metrics/readiness thread panicked outside its serving task; logged when teardown joins it, after the panic report |
 | `injection lease expiry task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `listener accept failing; backing off` | ERROR | A gRPC TCP, gRPC UDS or metrics listener hit resource exhaustion (EMFILE, ENFILE, ENOMEM or ENOBUFS). Accepts back off from 100 ms, doubling to a 1 s cap; the line is logged once per episode and then every 60th failure, with `listener`, `failures` and `backoff_ms` |
 | `listener accept recovered` | INFO | The next connection was accepted after a backoff episode; `failures` counts the episode |

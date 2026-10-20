@@ -6343,9 +6343,11 @@ async fn run<T>(
         let Some(exited) = metrics_exited else {
             return std::future::pending().await;
         };
-        exited
-            .await
-            .unwrap_or_else(|_| Err("metrics/readiness thread did not start".to_string()))
+        exited.await.unwrap_or_else(|_| {
+            metrics_server::MetricsServerExit::Exited(Err(
+                "metrics/readiness thread panicked".to_string()
+            ))
+        })
     });
     let runtime_probe = runtime_probe::RuntimeProbe::spawn(&metrics);
 
