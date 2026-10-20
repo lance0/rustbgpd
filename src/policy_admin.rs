@@ -1175,6 +1175,64 @@ remote_asn = 65002
         assert!(error.contains("export policy \"shared\""), "{error}");
     }
 
+    /// An API policy edit with an unspecified next hop fails the candidate's
+    /// validation and names the value; a normal address still applies.
+    #[test]
+    fn set_policy_event_refuses_unspecified_set_next_hop() {
+        let config = minimal_config();
+        let statement = |next_hop: &str| PolicyStatementDefinition {
+            action: "permit".to_string(),
+            prefix: Some("0.0.0.0/0".to_string()),
+            ge: None,
+            le: Some(32),
+            match_community: Vec::new(),
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            set_local_pref: None,
+            set_med: None,
+            set_next_hop: Some(next_hop.to_string()),
+            set_community_add: Vec::new(),
+            set_community_remove: Vec::new(),
+            set_as_path_prepend: None,
+        };
+        let event = |next_hop: &str| ConfigEvent::SetPolicy {
+            name: "nh".to_string(),
+            definition: NamedPolicyDefinition {
+                default_action: "permit".to_string(),
+                statements: vec![statement(next_hop)],
+            },
+            ack: None,
+        };
+        for next_hop in ["0.0.0.0", "::"] {
+            let error = apply_config_event(&mut config.clone(), &event(next_hop))
+                .expect_err("an unspecified set_next_hop must not validate");
+            assert!(
+                matches!(error, ConfigError::InvalidPolicyEntry { .. }),
+                "{error}"
+            );
+            let error = error.to_string();
+            assert!(
+                error.contains(&format!("invalid set_next_hop \"{next_hop}\"")),
+                "{error}"
+            );
+        }
+        for next_hop in ["self", "192.0.2.9"] {
+            apply_config_event(&mut config.clone(), &event(next_hop))
+                .unwrap_or_else(|error| panic!("{next_hop} must apply: {error}"));
+        }
+    }
+
     #[test]
     fn policy_references_find_global_and_neighbor_chains() {
         let mut config = minimal_config();
