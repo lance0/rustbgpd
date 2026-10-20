@@ -154,6 +154,8 @@ impl RibManager {
         // session's final input and teardown. Only remove the ending session's
         // pending metadata; its replacement still needs the accepted context.
         self.pending_peer_export_context.remove(&(peer, session_id));
+        self.pending_peer_withheld_families
+            .remove(&(peer, session_id));
         self.pending_peer_rs_control.remove(&(peer, session_id));
         self.pending_peer_export_encoders
             .remove(&(peer, session_id));
@@ -748,6 +750,8 @@ impl RibManager {
         self.peer_down_teardown(peer);
         self.pending_peer_export_context
             .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_withheld_families
+            .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_rs_control
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_export_encoders
@@ -1123,6 +1127,13 @@ impl RibManager {
             // Resolve the embedding fallback once. Later accepted `None`
             // policies must remain permit-all when this record is promoted.
             export_policy: export_policy.or_else(|| self.export_chains.global().cloned()),
+            withheld_families: self
+                .pending_peer_withheld_families
+                .remove(&(peer, session_id))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|family| !sendable_families.contains(family))
+                .collect(),
             sendable_families,
             is_ebgp,
             route_reflector_client,
@@ -1730,6 +1741,18 @@ impl RibManager {
         peer_group: Option<String>,
     ) {
         self.set_peer_group(peer, peer_group);
+    }
+
+    /// Negotiated families the registered session withholds from export.
+    pub(super) fn registered_withheld_families(&self, peer: IpAddr) -> Vec<(Afi, Safi)> {
+        let Some(session_id) = self.outbound_session_ids.get(&peer) else {
+            return Vec::new();
+        };
+        self.live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.iter().find(|r| r.session_id == *session_id))
+            .map(|record| record.withheld_families.clone())
+            .unwrap_or_default()
     }
 
     /// Send the full Loc-RIB to a newly established peer (initial table dump).
@@ -2752,8 +2775,13 @@ impl RibManager {
             );
         }
 
-        // Determine EoR families from this peer's sendable families
+        // Determine EoR families from this peer's sendable families, plus an
+        // empty EoR for each negotiated family the session withholds: we
+        // will send nothing there, and a restarting peer must not wait out
+        // its RFC 4724 §4.1 selection deferral for it. Both go through the
+        // same GR/ORF and convergence holds below.
         let mut eor_families = sendable.clone().unwrap_or_default();
+        eor_families.extend(self.registered_withheld_families(peer));
         // RFC 4724: a GR RESTARTER takes our EoR as "this peer's initial
         // update is complete", proceeds with route selection, and sweeps the
         // stale routes it retained from our previous session. For an

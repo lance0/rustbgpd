@@ -2555,6 +2555,20 @@ pub enum RibUpdate {
         /// Local RFC 9234 BGP Role, if configured.
         local_role: Option<BgpRole>,
     },
+    /// Stage the negotiated families the session withholds from `PeerUp`'s
+    /// `sendable_families`, e.g. eBGP IPv6 unicast with no IPv6 next hop.
+    /// Sent before `PeerUp`, only when non-empty. The initial dump sends
+    /// each an empty `EoR` under the same hold rules as a sendable family,
+    /// so a restarting peer need not wait out its RFC 4724 §4.1 selection
+    /// deferral for a family we will not advertise. No route is exported.
+    SetPeerWithheldFamilies {
+        /// Peer whose withheld families are being staged.
+        peer: IpAddr,
+        /// Transport session identity that will accompany `PeerUp`.
+        session_id: u64,
+        /// Negotiated families absent from `sendable_families`.
+        families: Vec<(Afi, Safi)>,
+    },
     /// Stage the session's RFC 7947 §2.3.2 route-server control-community
     /// context immediately before [`RibUpdate::PeerUp`] builds the initial
     /// Adj-RIB-Out. The session id prevents a collision loser from

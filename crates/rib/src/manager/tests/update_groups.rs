@@ -1295,6 +1295,131 @@ fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
     assert_eq!(private.bench_route_capacity(), 0);
 }
 
+/// Register an IPv4-sendable peer whose session withheld negotiated IPv6
+/// unicast (`SetPeerWithheldFamilies` staged before `PeerUp`).
+fn register_withheld_v6_peer(
+    manager: &mut RibManager,
+    peer: IpAddr,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
+        peer,
+        session_id: 0,
+        families: vec![(Afi::Ipv6, Safi::Unicast)],
+    });
+    register_direct_peer(manager, peer)
+}
+
+/// Announce one IPv4 and one IPv6 route from `source`.
+fn distribute_dual_stack_routes(
+    manager: &mut RibManager,
+    source: Ipv4Addr,
+    v4: Ipv4Prefix,
+    v6: Ipv6Prefix,
+) {
+    let mut v6_route = crate::test_support::make_route(v4, source);
+    v6_route.prefix = Prefix::V6(v6);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced: vec![crate::test_support::make_route(v4, source), v6_route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+}
+
+/// A negotiated family the session withholds still gets an empty `EoR` at
+/// registration, after the sendable dump, so a restarting peer need not
+/// wait out its RFC 4724 §4.1 selection deferral for it. No IPv6 route is
+/// sent and the sendable set is unchanged.
+#[test]
+fn withheld_family_gets_an_empty_eor_after_the_initial_dump() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 5, 0, 0, 0, 0, 0), 48);
+    distribute_dual_stack_routes(&mut manager, Ipv4Addr::new(192, 0, 2, 14), v4, v6);
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 3, 1));
+    let mut outbound = register_withheld_v6_peer(&mut manager, peer);
+    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
+    let announced: Vec<_> = updates
+        .iter()
+        .flat_map(|u| u.announce.iter().map(|r| r.prefix))
+        .collect();
+    assert_eq!(announced, vec![Prefix::V4(v4)], "no IPv6 NLRI");
+    let last = updates.last().expect("initial dump sent");
+    assert!(last.announce.is_empty() && last.withdraw.is_empty());
+    assert_eq!(
+        last.end_of_rib,
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        "one EoR per negotiated family, after the dump"
+    );
+    assert_eq!(updates.iter().map(|u| u.end_of_rib.len()).sum::<usize>(), 2);
+    assert_eq!(manager.peer_sendable_families[&peer], ipv4_sendable());
+}
+
+/// The withheld family's empty `EoR` follows the GR/ORF rule of a sendable
+/// family: an ORF-gated restarter gets it only with the gated flood.
+#[test]
+fn withheld_family_eor_is_deferred_for_an_orf_gated_restarter() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 3, 2));
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    manager.gr_peers.insert(peer, HashSet::new());
+    manager
+        .peer_orf_pending
+        .insert(peer, std::iter::once(ipv6).collect());
+    let mut outbound = register_withheld_v6_peer(&mut manager, peer);
+    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok())
+        .flat_map(|u| u.end_of_rib)
+        .collect();
+    assert_eq!(eor, ipv4_sendable());
+    assert!(manager.gr_deferred_eor[&peer].contains(&ipv6));
+}
+
+/// After the registration `EoR`, unlocking the withheld family still sends
+/// its whole table and another `EoR` (permitted by RFC 4724): no state from
+/// the first marker suppresses the export.
+#[test]
+fn withheld_family_unlock_after_its_eor_still_exports_the_table() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 6, 0, 0, 0, 0, 0), 48);
+    distribute_dual_stack_routes(&mut manager, Ipv4Addr::new(192, 0, 2, 15), v4, v6);
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 3, 3));
+    let mut outbound = register_withheld_v6_peer(&mut manager, peer);
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    let initial: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
+    assert!(initial.iter().any(|u| u.end_of_rib.contains(&ipv6)));
+
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 0,
+        family: ipv6,
+        add_path_send_limit: None,
+    });
+    while manager.process_next_route_chunk() {}
+
+    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
+    let announced: Vec<_> = updates
+        .iter()
+        .flat_map(|u| u.announce.iter().map(|r| r.prefix))
+        .collect();
+    assert_eq!(announced, vec![Prefix::V6(v6)], "the table is not skipped");
+    assert_eq!(updates.last().unwrap().end_of_rib, vec![ipv6]);
+    assert_eq!(
+        manager.registered_withheld_families(peer),
+        Vec::<(Afi, Safi)>::new()
+    );
+}
+
 /// A family the session withheld at `PeerUp` (eBGP IPv6 unicast without a
 /// next hop) becomes sendable mid-session: the peer regroups and receives
 /// that family's table then its `EoR`, without re-sending IPv4 and without

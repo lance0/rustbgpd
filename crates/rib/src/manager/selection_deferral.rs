@@ -1267,7 +1267,14 @@ impl RibManager {
             .peer_sendable_families
             .iter()
             .inspect(|_| checkpoint())
-            .filter(|(_, sendable)| sendable.contains(&family))
+            .filter(|(peer, sendable)| {
+                // A withheld family's empty EoR waits in `pending_eor` too.
+                sendable.contains(&family)
+                    || self
+                        .pending_eor
+                        .get(peer)
+                        .is_some_and(|families| families.contains(&family))
+            })
             .map(|(&peer, _)| {
                 (
                     peer,
