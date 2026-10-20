@@ -529,7 +529,8 @@ else
 fi
 eor4=$(frr_eor_after IPv4 "$t0")
 eor6=$(frr_eor_after IPv6 "$t0")
-if [ -n "$eor4" ] && [ -n "$eor6" ] && [ $((eor4 - t0)) -ge $((GRACE_SECS - 2)) ]; then
+if [ -n "$eor4" ] && [ -n "$eor6" ] && [ $((eor4 - t0)) -ge $((GRACE_SECS - 2)) ] &&
+    [ $((eor6 - t0)) -ge $((GRACE_SECS - 2)) ]; then
     ok "phase 5 FRR received End-of-RIB at the window's end ($((eor4 - t0))s / $((eor6 - t0))s after start)"
 else
     bad "phase 5 End-of-RIB timing: IPv4 ${eor4:-none}, IPv6 ${eor6:-none}, start $t0"
