@@ -1,0 +1,44 @@
+# Containerlab topology: FastNetMon Community -> rustbgpd -> FRR (M126 — RTBH)
+#
+# The detector node runs the official FastNetMon Community binary,
+# rustbgpd-gobgp-bridge and rustbgpd together, as FastNetMon and gobgpd run
+# in a stock install. tcpreplay drives a mirror veth (fnmmirror0 ->
+# fnmmirror1) that FastNetMon captures with AF_PACKET. FRR is the upstream
+# and the observer.
+#
+# Run end to end (builds the lab image, deploys, tests, destroys):
+#   bash tests/interop/scripts/test-m126-fastnetmon-rtbh.sh
+
+name: m126-fastnetmon-rtbh
+
+topology:
+  nodes:
+    detector:
+      kind: linux
+      image: ${M126_IMAGE:=rustbgpd-fnm:m126}
+      cmd: sleep infinity
+      binds:
+        - ./m126-fastnetmon-rtbh/rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip -6 addr add 2001:db8:126::1/64 dev eth1 nodad
+        - ip link set eth1 up
+        - ip link add fnmmirror0 type veth peer name fnmmirror1
+        - ip link set fnmmirror0 up
+        - ip link set fnmmirror1 up promisc on
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./m126-fastnetmon-rtbh/frr.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip -6 addr add 2001:db8:126::2/64 dev eth1 nodad
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["detector:eth1", "frr:eth1"]
+
+# rustbgpd 10.0.0.1 / 2001:db8:126::1, AS 65001 <-> FRR 10.0.0.2 / 2001:db8:126::2, AS 65002
