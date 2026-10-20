@@ -63,7 +63,9 @@ one UDP frame per victim; tcpreplay loops them at 10,000 frames per second.
 50 checks, 0 failed, on the head that adds this leg. The window phases were
 added later. On 2026-10-20 the extended driver passed 75 checks with 0
 failed: the control gap opened 1 s after the start, with no withdrawal, and
-the bans returned at 13 s. Every ban, unban and
+the bans returned at 13 s. A re-run with the bridge's liveness probe passed
+76 checks: FRR's log showed both replayed bans before End-of-RIB in phase 5
+(gap 0 ms), against 409 ms in the control. Every ban, unban and
 absence check also requires the session to be Established without a flap
 since the last restart the driver caused: FRR's connection counters, and
 rustbgpd's `bgp_session_established_total` and `bgp_session_flaps_total`.
