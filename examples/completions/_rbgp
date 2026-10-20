@@ -1753,6 +1753,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'--allow-missing[Succeed and report "not present" when no injected route matches]' \
 '--override-owner[Delete the injected route whatever its lease owner, for example a stuck blackhole whose controller is gone]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \

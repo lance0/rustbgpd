@@ -1962,6 +1962,9 @@ enum RibAction {
         /// Path ID for Add-Path
         #[arg(long)]
         path_id: Option<u32>,
+        /// Succeed and report "not present" when no injected route matches
+        #[arg(long)]
+        allow_missing: bool,
         /// Lease owner the injected route belongs to; without it
         /// only an unowned route is deleted
         #[arg(long, value_name = "NAME", conflicts_with = "override_owner")]
@@ -5464,6 +5467,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 Some(RibAction::Delete {
                     prefix,
                     path_id,
+                    allow_missing,
                     owner,
                     override_owner,
                 }) => {
@@ -5476,6 +5480,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         connection,
                         &prefix,
                         path_id,
+                        allow_missing,
                         commands::InjectedOwner::new(owner, override_owner),
                         json,
                     )

@@ -244,6 +244,12 @@ pub(crate) struct MockState {
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     pub(crate) list_flowspec_response: Mutex<server_proto::ListFlowSpecResponse>,
     pub(crate) add_flowspec_response: Mutex<server_proto::AddFlowSpecResponse>,
+    pub(crate) add_path_response: Mutex<server_proto::AddPathResponse>,
+    // Whether the next DeletePath finds no local route; a miss follows the
+    // daemon: NOT_FOUND unless the request sets `allow_missing`.
+    pub(crate) delete_path_missing: Mutex<bool>,
+    // Emulate a daemon that predates `allow_missing` and the delete outcome.
+    pub(crate) delete_path_legacy: Mutex<bool>,
     // Whether a local rule matches the next DeleteFlowSpec; a miss follows
     // the daemon: NOT_FOUND unless the request sets `allow_missing`.
     pub(crate) delete_flowspec_matches: Mutex<bool>,
@@ -1506,7 +1512,7 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         _request: Request<server_proto::AddPathRequest>,
     ) -> Result<Response<server_proto::AddPathResponse>, Status> {
         self.state.add_path_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(server_proto::AddPathResponse::default()))
+        Ok(Response::new(*self.state.add_path_response.lock().await))
     }
 
     async fn delete_path(
@@ -1518,7 +1524,17 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         *self.state.last_delete_path.lock().await = Some(request.clone());
         self.check_injected_owner(&request.owner, request.override_owner)
             .await?;
-        Ok(Response::new(server_proto::DeletePathResponse::default()))
+        let missing = *self.state.delete_path_missing.lock().await;
+        let legacy = *self.state.delete_path_legacy.lock().await;
+        let outcome = match (missing, legacy) {
+            (false, true) => server_proto::PathDeleteOutcome::Unspecified,
+            (false, false) => server_proto::PathDeleteOutcome::Deleted,
+            (true, false) if request.allow_missing => server_proto::PathDeleteOutcome::NotPresent,
+            (true, _) => return Err(Status::not_found("route not found")),
+        };
+        Ok(Response::new(server_proto::DeletePathResponse {
+            outcome: outcome as i32,
+        }))
     }
 
     async fn add_flow_spec(
