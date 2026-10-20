@@ -576,7 +576,8 @@ Notes on the sandbox:
   `prometheus_addr` health listener cannot bind, or any configured gRPC
   listener cannot bind. An unexpected gRPC server,
   RIB manager, peer manager, RPKI subsystem task, BGP listener task, inbound
-  accept-forwarding task, or metrics/readiness server exit instead runs the
+  accept-forwarding task, metrics/readiness server, or injection lease expiry
+  task exit instead runs the
   coordinated peer teardown before exit 1. These components are not respawned in place; the supervisor is the
   recovery path.
   Exit 70 is also a failure: it is the runtime-config settlement watchdog's

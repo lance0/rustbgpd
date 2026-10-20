@@ -21,9 +21,16 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with_ingest_stall(None).await
+    }
+
+    /// Start with the ADR-0078 ingest stall set, so a `RoutesReceived`
+    /// batch holds the RIB actor for `stall` while later messages queue.
+    async fn start_with_ingest_stall(stall: Option<Duration>) -> Self {
         let (tx, rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+        manager.test_ingest_stall = stall;
         let leases = manager.injection_leases();
         let (cancel, cancel_rx) = oneshot::channel();
         let expiry = tokio::spawn(Arc::clone(&leases).run_expiry(tx.clone(), cancel_rx));
@@ -75,6 +82,28 @@ impl Harness {
             tokio::task::yield_now().await;
         }
         let _ = query_best_routes(&self.tx).await;
+    }
+
+    /// Hold the RIB actor in the ingest stall: queue an empty
+    /// `RoutesReceived` batch and let the actor pop it.
+    async fn stall_rib(&self) {
+        self.tx
+            .send(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: TARGET,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
     }
 
     fn drain(&mut self) -> Vec<OutboundRouteUpdate> {
@@ -864,4 +893,363 @@ async fn lease_tags_follow_source_path_ids_and_skip_advertised_rows() {
     assert_eq!(advertised.len(), 1);
     assert_eq!(advertised[0].1, None, "advertised rows are not tagged");
     h.stop().await;
+}
+
+/// Queue a leased add without waiting for its reply.
+async fn queue_leased_route(
+    tx: &mpsc::Sender<RibUpdate>,
+    octet: u8,
+    owner: &str,
+) -> oneshot::Receiver<Result<(InjectOutcome, LeaseGeneration), RibCommandError>> {
+    let (reply, rx) = oneshot::channel();
+    tx.send(RibUpdate::InjectLeasedRoute {
+        route: local_route(octet),
+        owner: owner.to_string(),
+        lease_seconds: 10,
+        reply,
+    })
+    .await
+    .unwrap();
+    rx
+}
+
+/// Queue an owner's delete without waiting for its reply.
+async fn queue_delete(
+    tx: &mpsc::Sender<RibUpdate>,
+    octet: u8,
+    owner: &str,
+) -> oneshot::Receiver<Result<crate::update::InjectedRemoval, RibCommandError>> {
+    let (reply, rx) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawInjected {
+        prefix: host(octet),
+        path_id: 0,
+        allow_missing: false,
+        owner: owner.to_string(),
+        override_owner: false,
+        reply,
+    })
+    .await
+    .unwrap();
+    rx
+}
+
+fn withdrawn_hosts(updates: &[OutboundRouteUpdate]) -> Vec<Prefix> {
+    let mut hosts: Vec<Prefix> = updates
+        .iter()
+        .flat_map(|update| update.withdraw.iter().map(|(prefix, _)| *prefix))
+        .collect();
+    hosts.sort_unstable();
+    hosts
+}
+
+/// ADR-0141 §12 race: a leased add queued behind a stalled RIB before the
+/// deadline is applied after it, by which time the expiry task has reaped g
+/// and queued `Expire(g)` behind the add. The add starts generation g+1, and
+/// `Expire(g)` withdraws only keys still tagged g: the re-added key and the
+/// new key survive, an untouched g key goes. (An add applied after the
+/// deadline but before the reap is pinned by
+/// `late_expiry_of_an_old_generation_spares_a_retagged_key`.)
+///
+/// Break-to-red: withdrawing every key of the owner takes the re-added and
+/// new keys too.
+#[tokio::test(start_paused = true)]
+async fn an_add_queued_across_the_deadline_starts_a_new_generation() {
+    let mut h = Harness::start_with_ingest_stall(Some(Duration::from_secs(20))).await;
+    let (_, g) = leased_route(&h.tx, local_route(1), "ctl", 10)
+        .await
+        .unwrap();
+    leased_route(&h.tx, local_route(3), "ctl", 10)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+
+    h.stall_rib().await;
+    let readd = queue_leased_route(&h.tx, 1, "ctl").await;
+    let new_key = queue_leased_route(&h.tx, 2, "ctl").await;
+    // The deadline passes while the RIB is stalled; the expiry task queues
+    // Expire(g) behind the two adds.
+    tokio::time::advance(Duration::from_secs(10)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(10)).await;
+
+    let (outcome, g_readd) = readd.await.unwrap().unwrap();
+    assert_eq!(outcome, InjectOutcome::Unchanged);
+    let (_, g_new) = new_key.await.unwrap().unwrap();
+    assert_ne!(g_readd, g);
+    assert_eq!(g_readd, g_new);
+    h.settle().await;
+    assert_eq!(withdrawn_hosts(&h.drain()), vec![host(3)]);
+    assert_eq!(local_prefixes(&h.tx).await, vec![host(1), host(2)]);
+    assert!(h.leases.renew("ctl", g_new, 10).is_some());
+    h.stop().await;
+}
+
+/// ADR-0141 §12 expiry vs delete, delete first: the owner's delete, applied
+/// after the deadline but ahead of `Expire(g)`, still matches its owner and
+/// removes its key, and the expiry withdraws the owner's remaining key. Each
+/// key is withdrawn once.
+///
+/// Break-to-red: judging the delete by lease liveness instead of the key's
+/// tag refuses it once the deadline has passed.
+#[tokio::test(start_paused = true)]
+async fn a_delete_ahead_of_expiry_is_withdrawn_once() {
+    let mut h = Harness::start_with_ingest_stall(Some(Duration::from_secs(20))).await;
+    leased_route(&h.tx, local_route(1), "ctl", 10)
+        .await
+        .unwrap();
+    leased_route(&h.tx, local_route(2), "ctl", 10)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+
+    h.stall_rib().await;
+    let deleted = queue_delete(&h.tx, 1, "ctl").await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(deleted.await.unwrap().unwrap().removed);
+    h.settle().await;
+    assert_eq!(withdrawn_hosts(&h.drain()), vec![host(1), host(2)]);
+    assert_eq!(local_prefixes(&h.tx).await, Vec::<Prefix>::new());
+    let (_, g) = leased_route(&h.tx, local_route(3), "ctl", 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        h.leases.list(Some("ctl"))[0].generation,
+        g,
+        "the expired generation left nothing behind"
+    );
+    h.stop().await;
+}
+
+/// ADR-0141 §12 expiry vs delete, expiry first: `Expire(g)` queued ahead of
+/// the owner's delete withdraws the key, and the delete then reports it
+/// missing without a second withdrawal.
+///
+/// Break-to-red: an expiry that leaves the key in the RIB lets the delete
+/// succeed.
+#[tokio::test(start_paused = true)]
+async fn a_delete_behind_expiry_finds_the_key_gone() {
+    let mut h = Harness::start_with_ingest_stall(Some(Duration::from_secs(20))).await;
+    leased_route(&h.tx, local_route(1), "ctl", 10)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+
+    h.stall_rib().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let deleted = queue_delete(&h.tx, 1, "ctl").await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(matches!(
+        deleted.await.unwrap(),
+        Err(RibCommandError::NotFound(_))
+    ));
+    h.settle().await;
+    assert_eq!(withdrawn_hosts(&h.drain()), vec![host(1)]);
+    assert_eq!(local_prefixes(&h.tx).await, Vec::<Prefix>::new());
+    h.stop().await;
+}
+
+/// With no lease, the expiry task costs nothing: after its first pass it
+/// parks without a timer, so a day passes with no further pass and no RIB
+/// send. A lease wakes it, and once that lease is gone it parks again.
+///
+/// Break-to-red: an idle wait on a periodic tick makes a pass per tick.
+#[tokio::test(start_paused = true)]
+async fn an_idle_expiry_task_never_wakes() {
+    let leases = Arc::new(InjectionLeases::new());
+    let (tx, mut rx) = mpsc::channel(8);
+    let (cancel, cancel_rx) = oneshot::channel();
+    let task = tokio::spawn(Arc::clone(&leases).run_expiry(tx, cancel_rx));
+    let settle = || async {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    };
+    settle().await;
+    assert_eq!(leases.expiry_passes(), 1);
+    tokio::time::advance(Duration::from_hours(24)).await;
+    settle().await;
+    assert_eq!(leases.expiry_passes(), 1, "no pass while idle");
+    assert!(rx.try_recv().is_err(), "no RIB send while idle");
+
+    leases.admit("ctl", 5).unwrap();
+    settle().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    settle().await;
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RibUpdate::ExpireInjectionLeases { leases }) if leases.len() == 1
+    ));
+    let parked = leases.expiry_passes();
+    tokio::time::advance(Duration::from_hours(24)).await;
+    settle().await;
+    assert_eq!(leases.expiry_passes(), parked, "parked again once empty");
+    assert!(rx.try_recv().is_err());
+
+    cancel.send(()).unwrap();
+    assert_eq!(task.await.unwrap(), ExpiryExit::Cancelled);
+}
+
+/// Measures one expiry batch's RIB turn: `RUSTBGPD_LEASE_EXPIRY_OWNERS`
+/// owners (default 1), each at the per-owner key cap, expire together with
+/// one eBGP peer attached. A learned update queued at the batch's start
+/// waits the whole turn. Run in release:
+/// `cargo test --release -p rustbgpd-rib --lib -- --ignored --nocapture
+/// expiry_batch_turn`.
+#[tokio::test(start_paused = true)]
+#[ignore = "measurement; run explicitly in release"]
+async fn expiry_batch_turn() {
+    let owners: usize = std::env::var("RUSTBGPD_LEASE_EXPIRY_OWNERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (out_tx, mut out_rx) = mpsc::channel(1 << 16);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: TARGET,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    let leases = manager.injection_leases();
+    let mut index = 0u32;
+    for owner in 0..owners {
+        let owner = format!("o{owner}");
+        for _ in 0..MAX_KEYS_PER_OWNER {
+            let mut route = local_route(0);
+            route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 | index), 32));
+            index += 1;
+            manager
+                .inject_local_route(route, Some((&owner, 5)))
+                .unwrap();
+        }
+        while out_rx.try_recv().is_ok() {}
+    }
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let (expired, _) = leases.take_expired();
+    assert_eq!(expired.len(), owners);
+    let started = std::time::Instant::now();
+    manager.handle_expire_injection_leases(&expired);
+    let turn = started.elapsed();
+    let mut withdrawn = 0;
+    while let Ok(update) = out_rx.try_recv() {
+        withdrawn += update.withdraw.len();
+    }
+    assert_eq!(withdrawn, owners * MAX_KEYS_PER_OWNER);
+    eprintln!(
+        "expiry batch: owners={owners} keys={} turn_ms={:.1}",
+        owners * MAX_KEYS_PER_OWNER,
+        turn.as_secs_f64() * 1000.0
+    );
+}
+
+/// The peer-down comparison for [`expiry_batch_turn`]: one eBGP peer's
+/// session ends holding as many learned routes as the expiry batch
+/// withdraws, with the same receiving peer attached.
+#[tokio::test(start_paused = true)]
+#[ignore = "measurement; run explicitly in release"]
+async fn peer_down_turn() {
+    const SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 81);
+    let owners: usize = std::env::var("RUSTBGPD_LEASE_EXPIRY_OWNERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_up = |peer: IpAddr, asn: u32, outbound_tx| RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: asn,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    };
+    let (out_tx, mut out_rx) = mpsc::channel(1 << 16);
+    manager.handle_update(peer_up(TARGET, 65100, out_tx));
+    let (source_tx, _source_rx) = mpsc::channel(1 << 16);
+    manager.handle_update(peer_up(IpAddr::V4(SOURCE), 65200, source_tx));
+    let total = owners * MAX_KEYS_PER_OWNER;
+    let mut index = 0u32;
+    while (index as usize) < total {
+        let announced = (0..4096)
+            .map(|_| {
+                let mut route = make_route(
+                    Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 | index), 32),
+                    SOURCE,
+                );
+                index += 1;
+                route.attributes = AttrSet::new(vec![
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::AsPath(AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![65200])],
+                    }),
+                    PathAttribute::NextHop(SOURCE),
+                ]);
+                route
+            })
+            .collect();
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(SOURCE),
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+        while out_rx.try_recv().is_ok() {}
+    }
+    let started = std::time::Instant::now();
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: IpAddr::V4(SOURCE),
+        session_id: 0,
+    });
+    while manager.process_next_route_chunk() {}
+    let turn = started.elapsed();
+    let mut withdrawn = 0;
+    while let Ok(update) = out_rx.try_recv() {
+        withdrawn += update.withdraw.len();
+    }
+    assert_eq!(withdrawn, total);
+    eprintln!(
+        "peer down: routes={total} turn_ms={:.1}",
+        turn.as_secs_f64() * 1000.0
+    );
 }

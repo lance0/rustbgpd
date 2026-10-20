@@ -195,6 +195,9 @@ pub struct InjectionLeases {
     incarnation: u64,
     state: Mutex<State>,
     changed: Notify,
+    /// Expiry-loop passes, so a test can prove an idle table never wakes.
+    #[cfg(test)]
+    expiry_passes: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for InjectionLeases {
@@ -217,6 +220,8 @@ impl InjectionLeases {
                 ..State::default()
             }),
             changed: Notify::new(),
+            #[cfg(test)]
+            expiry_passes: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -405,6 +410,12 @@ impl InjectionLeases {
         (std::mem::take(&mut state.pending), next)
     }
 
+    /// Passes the expiry loop has made.
+    #[cfg(test)]
+    pub(crate) fn expiry_passes(&self) -> usize {
+        self.expiry_passes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Whether the lock is free, for tests that prove a code path does not
     /// hold it.
     #[cfg(test)]
@@ -424,6 +435,9 @@ impl InjectionLeases {
         mut cancel: oneshot::Receiver<()>,
     ) -> ExpiryExit {
         loop {
+            #[cfg(test)]
+            self.expiry_passes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (expired, next) = self.take_expired();
             if !expired.is_empty() {
                 tokio::select! {

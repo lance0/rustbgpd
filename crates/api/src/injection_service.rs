@@ -3386,6 +3386,105 @@ mod tests {
         assert_eq!(renewed.into_inner().lease_remaining_ms, 10_000);
     }
 
+    /// Leased adds of both families and `RenewLease` record the owner and the
+    /// generation they ended with in the audit summary; a refused renewal
+    /// records the owner and the generation it asked for.
+    ///
+    /// Break-to-red: an add that records only the requested owner loses the
+    /// generation.
+    #[tokio::test]
+    async fn leased_add_and_renew_audits_name_owner_and_generation() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let leases = manager.injection_leases();
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite)
+            .with_injection_leases(Arc::clone(&leases));
+        let audited = |audit: &GrpcAuditHandle| {
+            audit
+                .summary()
+                .map(|summary| summary.as_str().to_string())
+                .unwrap_or_default()
+        };
+        let with_audit = |message| {
+            let audit = GrpcAuditHandle::default();
+            let mut request = Request::new(message);
+            request.extensions_mut().insert(audit.clone());
+            (request, audit)
+        };
+
+        let (request, audit) = with_audit(leased_path("ctl", 30));
+        let generation = svc
+            .add_leased_path(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .generation
+            .unwrap();
+        let expected = format!(
+            "owner=ctl generation={}:{}",
+            generation.incarnation, generation.sequence
+        );
+        assert_eq!(audited(&audit), expected);
+
+        let audit = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::AddLeasedFlowSpecRequest {
+            rule: Some(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: flowspec_rule_components(),
+                actions: vec![flowspec_rate(0.0)],
+                communities: vec![],
+                extended_communities: vec![],
+            }),
+            lease: Some(proto::InjectionLease {
+                owner: "ctl".into(),
+                lease_seconds: 30,
+            }),
+        });
+        request.extensions_mut().insert(audit.clone());
+        svc.add_leased_flow_spec(request).await.unwrap();
+        assert_eq!(audited(&audit), expected);
+
+        let renew = |generation| proto::RenewLeaseRequest {
+            owner: "ctl".into(),
+            generation: Some(generation),
+            lease_seconds: 30,
+        };
+        let audit = GrpcAuditHandle::default();
+        let mut request = Request::new(renew(generation));
+        request.extensions_mut().insert(audit.clone());
+        svc.renew_lease(request).await.unwrap();
+        assert_eq!(audited(&audit), expected);
+
+        let stale = proto::LeaseGeneration {
+            sequence: generation.sequence + 1,
+            ..generation
+        };
+        let audit = GrpcAuditHandle::default();
+        let mut request = Request::new(renew(stale));
+        request.extensions_mut().insert(audit.clone());
+        assert_eq!(
+            svc.renew_lease(request).await.unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            audited(&audit),
+            format!(
+                "owner=ctl generation={}:{}",
+                stale.incarnation, stale.sequence
+            )
+        );
+
+        drop((svc, rib_tx));
+        manager_task.await.unwrap();
+    }
+
     /// A delete's audit names the owner and generation the removed entry held,
     /// for both families: an override with no requested owner names the
     /// owner it bypassed, and an override with a different requested owner

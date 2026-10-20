@@ -2369,8 +2369,8 @@ neither family; explicit
 .B listen_addresses
 mode could not bind every configured endpoint; a configured metrics/readiness
 listener failed to bind; or the RIB manager, peer manager, RPKI subsystem,
-gRPC server, BGP listener task, BGP accept-forwarding task, or metrics/readiness
-server exited unexpectedly),
+gRPC server, BGP listener task, BGP accept-forwarding task, metrics/readiness
+server, or injection lease expiry task exited unexpectedly),
 so that a supervisor configured
 with
 .B Restart=on\-failure
@@ -2466,7 +2466,7 @@ fn main() -> ExitCode {
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
                   or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
                   gRPC server, BGP listener task, BGP accept-forwarding task,\n     \
-                  or metrics/readiness server exit)\n  \
+                  metrics/readiness server, or injection lease expiry task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument).\n     \
                   For --diff: also a config that could not be loaded\n  \
                   --release-core-isolation exits 0 only when no owned link is left\n     \
@@ -3235,6 +3235,11 @@ const TEST_INITIAL_ROSTER_HOLD_ENV: &str = "RUSTBGPD_TEST_INITIAL_ROSTER_HOLD";
 const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
 
 /// Test-only fault injection; never set this in production. The only accepted
+/// value is `1`, which panics the ADR-0141 lease expiry task as it starts; all
+/// others are ignored with a sanitized warning.
+const TEST_LEASE_EXPIRY_PANIC_ENV: &str = "RUSTBGPD_TEST_LEASE_EXPIRY_PANIC";
+
+/// Test-only fault injection; never set this in production. The only accepted
 /// value is `1`, which shuts down the bound metrics/readiness listening socket
 /// so its accept loop takes the unusable-socket exit; all others are ignored
 /// with a sanitized warning.
@@ -3260,6 +3265,17 @@ fn resolve_test_peer_manager_panic() -> bool {
         Ok(value) if value == "1" => true,
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
             warn!("ignoring invalid {TEST_PEER_MANAGER_PANIC_ENV}; expected 1");
+            false
+        }
+    }
+}
+
+fn resolve_test_lease_expiry_panic() -> bool {
+    match std::env::var(TEST_LEASE_EXPIRY_PANIC_ENV) {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "1" => true,
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring invalid {TEST_LEASE_EXPIRY_PANIC_ENV}; expected 1");
             false
         }
     }
@@ -3877,6 +3893,7 @@ async fn run<T>(
     let test_peer_manager_panic = resolve_test_peer_manager_panic();
     let test_rpki_task_exit = resolve_test_rpki_task_exit();
     let test_metrics_listener_unusable = resolve_test_metrics_listener_unusable();
+    let test_lease_expiry_panic = resolve_test_lease_expiry_panic();
 
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
@@ -4590,9 +4607,12 @@ async fn run<T>(
     // joins it explicitly; an unexpected exit would leave owned injected
     // state permanent, so it is supervised like the RIB.
     let (lease_expiry_cancel, lease_expiry_cancel_rx) = tokio::sync::oneshot::channel();
-    let mut lease_expiry_handle = tokio::spawn(
-        Arc::clone(&injection_leases).run_expiry(rib_tx.clone(), lease_expiry_cancel_rx),
-    );
+    let lease_expiry =
+        Arc::clone(&injection_leases).run_expiry(rib_tx.clone(), lease_expiry_cancel_rx);
+    let mut lease_expiry_handle = tokio::spawn(async move {
+        assert!(!test_lease_expiry_panic, "injected lease expiry task panic");
+        lease_expiry.await
+    });
     let mut lease_expiry_exited = false;
 
     // Validation snapshot channel: broadcast VRP + ASPA tables to transport
