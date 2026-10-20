@@ -203,9 +203,13 @@ separate set for `ListBestEvpnRoutesRequest`; its filters are inventoried,
 while the additional peer filters remain excluded. A digest cannot verify a
 value restriction: the daemon still answers type 0 and 6 calls, as alpha behavior.
 `evpn_peer_page_json_matches_inventory_floor` executes the CLI floor. The
-metric floor is checked against the metric definitions, and each pinned label
-value must be passed by a production call site of that metric's setter, either
-as a literal or through a label function's match arm.
+metric floor is checked against the metric definitions. Each pinned label value
+must be passed by a production call site of that metric's setter, in one of
+three forms:
+
+- a literal;
+- a label function's match arm;
+- a named constant, passed through a wrapper's parameter or a loop over it.
 
 Evidence is functional, on small topologies:
 [M122](../artifacts/interop/m122-evpn-rr-gr-20261012/README.md) retains,
@@ -327,10 +331,30 @@ experimental instead of pinning them.
 Prometheus metrics and structured event payloads used by the stable roles are
 covered by semantic rules rather than a promise that no new metric, event kind,
 or optional field will appear. Consumers must ignore unknown additive fields
-and series. The `route-reflector-evpn` role additionally enumerates its
-series under `metrics.scoped_rr_only_series`, whose names, types and label sets
-the checker compares with the metric definitions, and whose pinned label values
-it requires at a production emission site.
+and series. Metrics fall into three classes:
+
+- **Floor:** `metrics.stable_series` enumerates the series route-server and
+  route-reflector deployments can build dashboards and alerts on. It covers:
+  - session state, flaps, teardown reasons, messages and NOTIFICATIONs;
+  - received, selected and advertised prefixes per canonical family;
+  - max-prefix usage, limits and actions per `family` and `stage`;
+  - RPKI cache and VRP state;
+  - reload and confirmed-transaction outcomes;
+  - readiness probe failures.
+
+  The `route-reflector-evpn` role adds its series under
+  `metrics.scoped_rr_only_series`. For both lists, the checker compares names,
+  types and label sets with the metric definitions, and requires each pinned
+  label value at a production emission site.
+- **Diagnostic:** series matching a `metrics.diagnostic_series` pattern expose
+  internal mechanism and carry no v1 compatibility promise. This covers RIB
+  actor slices and work timing, operator and readiness query waits, runtime
+  worker and scheduler probes, update-group membership and recovery, policy
+  transition actor polls, and dirty-resync, outbound-registration and
+  stale-session-message bookkeeping. They can change or disappear in any release with a changelog
+  note. The shipped alert rules and dashboards use some of them and change
+  with them. A pattern must match a registered series and no floor series.
+- **Other series** follow the semantic rules below.
 
 ## Compatibility rules
 
@@ -349,7 +373,7 @@ it requires at a production emission site.
   parses.
 - **Metrics:** stable names and metric types remain; existing label names and
   meanings are not removed or reinterpreted. New bounded labels and metrics
-  are additive.
+  are additive. Diagnostic series are exempt.
 - **Events / JSON:** existing event kinds and fields retain their meaning. New
   optional fields and event kinds are additive. Consumers must ignore unknown
   fields.

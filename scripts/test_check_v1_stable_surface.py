@@ -355,6 +355,152 @@ class EvpnReflectorRoleTests(unittest.TestCase):
                 self.check_with({"fixture.rs": text})
 
 
+class MetricFloorTests(unittest.TestCase):
+    """The RS/RR floor is checked like the EVPN set; diagnostic patterns stay disjoint."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.inventory = checker.load_json(checker.INVENTORY_PATH)
+        metrics_path = checker.ROOT / cls.inventory["metrics"]["source"]
+        cls.metric_source = checker.strip_rust_comments(metrics_path.read_text())
+        cls.emission_sources = checker.production_rust_sources(checker.ROOT)
+
+    def rejected(self, action, expected):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            action()
+        self.assertIn(expected, stderr.getvalue())
+
+    def check(self, inventory, sources=None):
+        checker.check_metrics(inventory, self.metric_source, sources or self.emission_sources)
+
+    def test_floor_pins_unicast_families_through_the_pair_helper(self):
+        series = self.inventory["metrics"]["stable_series"]
+        rib = next(entry for entry in series if entry["name"] == "bgp_rib_prefixes")
+        self.assertEqual(rib["label_values"], {"family": ["ipv4_unicast", "ipv6_unicast"]})
+        # The only unicast emitter is the constant the pair helpers loop over.
+        path = "crates/rib/src/manager/helpers.rs"
+        old = 'UNICAST_FAMILIES: [&str; 2] = ["ipv4_unicast", "ipv6_unicast"]'
+        sources = dict(self.emission_sources)
+        self.assertEqual(sources[path].count(old), 1)
+        sources[path] = sources[path].replace(old, 'UNICAST_FAMILIES: [&str; 2] = ["ipv4", "ipv6"]')
+        self.rejected(
+            lambda: self.check(self.inventory, sources),
+            # The first floor gauge fed by that constant fails.
+            "pinned metric bgp_rib_adj_out_prefixes label family values ['ipv4_unicast', 'ipv6_unicast']",
+        )
+
+    def test_floor_series_drift_fails(self):
+        inventory = copy.deepcopy(self.inventory)
+        series = inventory["metrics"]["stable_series"]
+        next(s for s in series if s["name"] == "bgp_max_prefix_usage")["labels"] = ["family", "peer"]
+        self.rejected(lambda: self.check(inventory), "pinned metric bgp_max_prefix_usage changed labels")
+        inventory = copy.deepcopy(self.inventory)
+        del inventory["metrics"]["stable_series"]
+        self.rejected(lambda: self.check(inventory), "metrics must be an object with exactly")
+
+    def test_diagnostic_patterns_must_match_and_stay_disjoint(self):
+        cases = [
+            (["bgp_nonexistent_*"], "pattern 'bgp_nonexistent_*' matches no registered metric"),
+            (["bgp_rib_*"], "pattern 'bgp_rib_*' matches pinned series ['bgp_rib_adj_out_prefixes'"),
+            (["bgp_runtime_*", "bgp_rib_actor_*"], "metrics.diagnostic_series must be sorted"),
+        ]
+        for patterns, expected in cases:
+            with self.subTest(patterns=patterns):
+                inventory = copy.deepcopy(self.inventory)
+                inventory["metrics"]["diagnostic_series"] = patterns
+                self.rejected(lambda inventory=inventory: self.check(inventory), expected)
+
+
+class PassThroughEmissionTests(unittest.TestCase):
+    """A label value counts when a wrapper passes a constant through to the setter.
+
+    Callers and constants resolve by module path: a same-named function or
+    constant in another module is no evidence.
+    """
+
+    METRIC = (
+        'let gauge = IntGaugeVec::new(Opts::new("bgp_x", "help"), &["peer", "family"]).unwrap();\n'
+        "pub fn set_x(&self, peer: &str, family: &str, value: i64) {\n"
+        "    self.0.gauge.with_label_values(&[peer, family]).set(value);\n"
+        "}\n"
+    )
+    WRAPPER = (
+        'pub const PAIR: [&str; 2] = ["fam_a", "fam_b"];\n'
+        'pub const OTHER: [&str; 1] = ["fam_c"];\n'
+        "pub fn publish(metrics: &M, peer: &str, families: [&str; 2], counts: [usize; 2]) {\n"
+        "    for (family, count) in families.into_iter().zip(counts) {\n"
+        "        metrics.set_x(peer, family, count);\n"
+        "    }\n"
+        "}\n"
+    )
+    # Same names, no metric: neither the function nor its constants emit bgp_x.
+    UNRELATED = (
+        'pub const PAIR: [&str; 2] = ["old_a", "old_b"];\n'
+        "pub fn publish(metrics: &M, peer: &str, families: [&str; 2], counts: [usize; 2]) {}\n"
+    )
+
+    def emitted(self, caller, **extra):
+        sources = {
+            "crates/fixture/src/wrapper.rs": self.WRAPPER,
+            "crates/fixture/src/unrelated.rs": self.UNRELATED,
+            "crates/fixture/src/caller.rs": caller,
+            **extra,
+        }
+        return checker.emitted_label_values(
+            self.METRIC, sources, "bgp_x", "family", ["peer", "family"]
+        )
+
+    def test_constant_passed_through_a_loop_parameter_counts(self):
+        for caller in (
+            'fn caller(m: &M) { crate::wrapper::publish(m, "p", crate::wrapper::PAIR, [1, 2]); }',
+            'use crate::wrapper::{publish, PAIR};\n'
+            'fn caller(m: &M) { publish(m, "p", PAIR, [1, 2]); }',
+            'use crate::wrapper;\n'
+            'fn caller(m: &M) { wrapper::publish(m, "p", wrapper::PAIR, [1, 2]); }',
+        ):
+            with self.subTest(caller=caller):
+                self.assertEqual(self.emitted(caller), {"fam_a", "fam_b"})
+
+    def test_unpassed_constant_and_same_named_method_do_not_count(self):
+        # OTHER is defined but never passed; `.publish(` is some other method.
+        self.assertEqual(
+            self.emitted(
+                'fn caller(m: &M, x: &X) { x.publish(m, "p", crate::wrapper::OTHER, [1, 2]); }'
+            ),
+            set(),
+        )
+
+    def test_same_named_function_in_another_module_is_no_evidence(self):
+        # Only crate::wrapper::publish reaches the metric.
+        for caller in (
+            'fn caller(m: &M) { crate::unrelated::publish(m, "p", crate::unrelated::PAIR, [1, 2]); }',
+            'use crate::unrelated::{publish, PAIR};\n'
+            'fn caller(m: &M) { publish(m, "p", PAIR, [1, 2]); }',
+        ):
+            with self.subTest(caller=caller):
+                self.assertEqual(self.emitted(caller), set())
+
+    def test_constant_resolves_to_the_referenced_module_only(self):
+        # The live call passes crate::wrapper::PAIR; the unused same-named
+        # crate::unrelated::PAIR keeps the old labels and must not count.
+        caller = 'fn caller(m: &M) { crate::wrapper::publish(m, "p", crate::wrapper::PAIR, [1, 2]); }'
+        self.assertEqual(self.emitted(caller), {"fam_a", "fam_b"})
+        renamed = self.WRAPPER.replace('["fam_a", "fam_b"]', '["new_a", "new_b"]')
+        emitted = self.emitted(caller, **{"crates/fixture/src/wrapper.rs": renamed})
+        self.assertEqual(emitted, {"new_a", "new_b"})
+
+    def test_ambiguous_or_unresolvable_constant_is_no_evidence(self):
+        caller = 'fn caller(m: &M) { crate::wrapper::publish(m, "p", PAIR, [1, 2]); }'
+        # Bare PAIR is neither declared in the caller nor imported.
+        self.assertEqual(self.emitted(caller), set())
+        twice = self.WRAPPER + 'pub const PAIR: [&str; 1] = ["fam_z"];\n'
+        qualified = caller.replace(", PAIR,", ", crate::wrapper::PAIR,")
+        self.assertEqual(
+            self.emitted(qualified, **{"crates/fixture/src/wrapper.rs": twice}), set()
+        )
+
+
 class RoleFamilyTests(unittest.TestCase):
     """Role families must use the configuration labels the daemon accepts."""
 
