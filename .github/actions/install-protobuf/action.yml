@@ -1,11 +1,14 @@
 name: "Install pinned protobuf compiler"
 description: >-
   Install the official protoc 25.3 archive after verifying its checksum and
-  architecture.
+  architecture. The verified archive is cached by version and pinned SHA-256,
+  so most jobs skip the release download; a cached archive is verified again
+  before use.
 runs:
   using: "composite"
   steps:
-    - name: Install protobuf compiler
+    - name: Resolve the pinned protoc archive
+      id: pin
       shell: bash
       run: |
         set -euo pipefail
@@ -16,18 +19,51 @@ runs:
         fi
 
         version="25.3"
-        sha256="$(.github/scripts/archive-pin.sh "protoc-${version}-linux-x86_64.zip")"
-        install_root="$(mktemp -d "${RUNNER_TEMP}/protoc-${version}.XXXXXX")"
-        archive="${install_root}/protoc.zip"
+        name="protoc-${version}-linux-x86_64.zip"
+        sha256="$(.github/scripts/archive-pin.sh "$name")"
+        {
+          echo "version=${version}"
+          echo "name=${name}"
+          echo "sha256=${sha256}"
+          echo "key=protoc-${version}-linux-x86_64-${sha256}"
+        } >> "$GITHUB_OUTPUT"
 
-        curl -sSfL \
-          --connect-timeout 10 --max-time 120 \
-          --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
-          -o "$archive" \
-          "https://github.com/protocolbuffers/protobuf/releases/download/v${version}/protoc-${version}-linux-x86_64.zip"
-        printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
+    # The key carries the pinned digest, so a new pin never reuses an old
+    # archive. A cache entry is only a download shortcut: the install step
+    # verifies the archive against the pin whatever its source, so a bad
+    # entry fails closed (delete it with `gh cache delete <key>`).
+    - name: Restore the verified protoc archive
+      id: cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ~/.cache/rustbgpd-protoc/${{ steps.pin.outputs.name }}
+        key: ${{ steps.pin.outputs.key }}
+
+    - name: Install protobuf compiler
+      shell: bash
+      env:
+        PROTOC_VERSION: ${{ steps.pin.outputs.version }}
+        PROTOC_ARCHIVE: ${{ steps.pin.outputs.name }}
+        PROTOC_SHA256: ${{ steps.pin.outputs.sha256 }}
+        PROTOC_CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+
+        version="$PROTOC_VERSION"
+        archive="${HOME}/.cache/rustbgpd-protoc/${PROTOC_ARCHIVE}"
+        if [[ "$PROTOC_CACHE_HIT" == "true" ]]; then
+          echo "Using the cached ${PROTOC_ARCHIVE}; verifying it against the pin"
+        else
+          mkdir -p "$(dirname "$archive")"
+          curl -sSfL \
+            --connect-timeout 10 --max-time 120 \
+            --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+            -o "$archive" \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${version}/${PROTOC_ARCHIVE}"
+        fi
+        printf '%s  %s\n' "$PROTOC_SHA256" "$archive" | sha256sum -c -
+        install_root="$(mktemp -d "${RUNNER_TEMP}/protoc-${version}.XXXXXX")"
         unzip -q "$archive" -d "$install_root" 'bin/protoc' 'include/*'
-        rm -f "$archive"
         chmod 0755 "${install_root}/bin/protoc"
 
         echo "${install_root}/bin" >> "$GITHUB_PATH"
@@ -38,3 +74,11 @@ runs:
           exit 1
         fi
         echo "$actual_version"
+
+    # Saved only after the install step verified the downloaded archive.
+    - name: Save the verified protoc archive
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.cache/rustbgpd-protoc/${{ steps.pin.outputs.name }}
+        key: ${{ steps.pin.outputs.key }}
