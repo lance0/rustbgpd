@@ -138,6 +138,39 @@ The existing consecutive-release configuration fixture chain remains the
 upgrade check; it is not a FlowSpec RPC qualification receipt. Release
 preparation advances that chain normally.
 
+### Injection lease lifecycle
+
+The owner-scoped leases of
+[ADR-0141](../adr/0141-injection-owner-lease.md) are inventoried as one
+lifecycle in the stable `InjectionService` set: `AddLeasedPath`,
+`AddLeasedFlowSpec`, `RenewLease` and `ListInjectionLeases`; the
+owner-aware delete fields `owner` and `override_owner` on `DeletePath` and
+`DeleteFlowSpec`; and the `injection_owner`, `lease_generation` and
+`lease_remaining_ms` read-back on `Route` and `FlowSpecRouteEntry`. The
+following semantics are part of the promise:
+
+| Semantics | Pinned by |
+|---|---|
+| A renewal never creates or resurrects a lease: an expired, superseded or unknown generation returns `FAILED_PRECONDITION`, including a renewal at exactly the deadline. | `renewal_at_the_deadline_loses_and_never_resurrects`, `expired_renewal_fails_and_readd_starts_a_new_generation` |
+| A daemon restart invalidates every generation: a new process refuses a previous process's generation, even at the same sequence. | `incarnations_differ_between_tables_and_fence_generations`, `a_restart_invalidates_every_generation` |
+| Expiry removes the expired owner's local intent and nothing else; other owners' and unowned entries stay. | `expiry_withdraws_both_families_and_reaches_the_peer`, `expiry_spares_other_owners_and_unowned_intent` |
+| A leased add creates leased state or none. It never becomes a permanent add, and a server without the leased RPCs answers `UNIMPLEMENTED`. | `leased_adds_never_fall_back_to_permanent_injection` |
+| Every ownership or generation refusal is `FAILED_PRECONDITION` with one `google.rpc.ErrorInfo` (`domain: "rustbgpd"`) whose `reason` tells the cases apart: `OWNER_MISMATCH` (held by another owner), `KEY_UNOWNED` (held by no owner) or `GENERATION_NOT_LIVE` (a refused renewal). The reason is contract; the message text is not. | `lease_conflicts_carry_a_machine_readable_reason`, `ownership_mismatches_are_failed_precondition_and_change_nothing` |
+
+A leased add with an unknown outcome may be retried as the same leased add.
+`ListInjectionLeases` lists an owner past its deadline with
+`lease_remaining_ms` 0 until the expiry pass takes it; that generation is not
+renewable. On `Route` and `FlowSpecRouteEntry`, `injection_owner`,
+`lease_generation` and `lease_remaining_ms` are set together or not at all.
+An owner holds at most 16,384 keys across unicast and FlowSpec together.
+
+When peers withdraw an expired entry, and whether any dataplane stops
+enforcing it, are outside the guarantee. Expiry removes local intent; the
+hosted M22 lease-expiry leg observes FRR 10.7.1 losing both entries within
+lease + 5 s of the controller stopping, which is evidence, not a timing
+promise. The lease bounds how long a stopped controller's state outlives it,
+not how long the daemon outlives the controller.
+
 ### Bounded reflected-family queries
 
 The scoped L3VPN, labeled-unicast, RT-Constrain and BGP-LS roles use

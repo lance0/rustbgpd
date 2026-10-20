@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::injection_lease::{
-    ExpiryExit, InjectedKey, InjectionLeases, LeaseGeneration, LeasedKeysPage, LeasedKeysResume,
-    MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiryExit, InjectedKey, InjectionLeases, LeaseConflict, LeaseGeneration, LeasedKeysPage,
+    LeasedKeysResume, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::update::{InjectOutcome, RibCommandError, RoutePage};
 
@@ -352,6 +352,91 @@ async fn expired_renewal_fails_and_readd_starts_a_new_generation() {
     assert_eq!(h.leases.renew("ctl", g1, 5), None);
     assert!(h.leases.renew("ctl", g2, 5).is_some());
     h.stop().await;
+}
+
+/// Expiry removes the expired owner's local intent and nothing else:
+/// another owner's route and rule, and an unowned route, stay, and the
+/// other owner's lease still renews.
+///
+/// Break-to-red: an expiry sweep that takes every owned key instead of the
+/// expired owner's withdraws `b`'s entries here.
+#[tokio::test(start_paused = true)]
+async fn expiry_spares_other_owners_and_unowned_intent() {
+    let mut h = Harness::start().await;
+    let (_, g_a) = leased_route(&h.tx, local_route(1), "a", 5).await.unwrap();
+    let (_, g_b) = leased_route(&h.tx, local_route(3), "b", 30).await.unwrap();
+    leased_rule(&h.tx, local_rule(), "b", 30).await.unwrap();
+    unowned_route(&h.tx, local_route(2)).await.unwrap();
+    h.settle().await;
+    h.drain();
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+    h.settle().await;
+    let withdrawn = h.drain();
+    assert_eq!(
+        withdrawn
+            .iter()
+            .flat_map(|u| u.withdraw.iter())
+            .collect::<Vec<_>>(),
+        vec![&(host(1), 0)]
+    );
+    assert_eq!(
+        withdrawn
+            .iter()
+            .map(|u| u.flowspec_withdraw.len())
+            .sum::<usize>(),
+        0,
+        "b's rule stays"
+    );
+    assert_eq!(local_prefixes(&h.tx).await, vec![host(2), host(3)]);
+    assert_eq!(h.leases.renew("a", g_a, 30), None);
+    assert!(h.leases.renew("b", g_b, 30).is_some());
+    h.stop().await;
+}
+
+/// A daemon restart invalidates every generation: the new process's lease
+/// table refuses the old generation even at the same sequence, and the
+/// controller's re-add starts a new generation on a key the restart dropped.
+///
+/// Break-to-red: an incarnation that does not change per process (for
+/// example a constant) lets the restarted table renew the old generation.
+#[tokio::test]
+async fn a_restart_invalidates_every_generation() {
+    let first = RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    );
+    let (_, before) = {
+        let mut first = first;
+        first
+            .inject_local_route(local_route(1), Some(("ctl", 30)))
+            .unwrap()
+    };
+    let before = before.unwrap();
+
+    let mut restarted = RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    );
+    assert_eq!(restarted.injection_leases().renew("ctl", before, 30), None);
+    let (outcome, after) = restarted
+        .inject_local_route(local_route(1), Some(("ctl", 30)))
+        .unwrap();
+    let after = after.unwrap();
+    assert_eq!(
+        outcome,
+        InjectOutcome::Created,
+        "a restart drops injected state"
+    );
+    assert_eq!(after.sequence, before.sequence);
+    assert_ne!(after, before);
+    assert_eq!(restarted.injection_leases().renew("ctl", before, 30), None);
 }
 
 fn sync_leased(
@@ -734,6 +819,7 @@ async fn late_expiry_of_an_old_generation_spares_a_retagged_key() {
 /// Ownership mismatches are refused with no change: a leased add onto an
 /// unowned key (convert by delete-then-add), onto another owner's key, an
 /// unowned add onto an owned key, and deletes with the wrong owner or `""`.
+/// Each carries the conflict the API reports as its `ErrorInfo` reason.
 /// `override_owner` deletes regardless.
 #[tokio::test(start_paused = true)]
 async fn ownership_mismatches_are_failed_precondition_and_change_nothing() {
@@ -745,32 +831,44 @@ async fn ownership_mismatches_are_failed_precondition_and_change_nothing() {
 
     let mut changed = local_route(1);
     changed.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
-    assert!(matches!(
-        leased_route(&h.tx, changed.clone(), "a", 30).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
+    let conflict = |result: Result<(), RibCommandError>| match result {
+        Err(RibCommandError::FailedPrecondition(conflict, _)) => Some(conflict),
+        _ => None,
+    };
+    assert_eq!(
+        conflict(
+            leased_route(&h.tx, changed.clone(), "a", 30)
+                .await
+                .map(drop)
+        ),
+        Some(LeaseConflict::KeyUnowned)
+    );
     let mut changed_owned = local_route(2);
     changed_owned.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
-    assert!(matches!(
-        leased_route(&h.tx, changed_owned.clone(), "b", 30).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
-    assert!(matches!(
-        unowned_route(&h.tx, changed_owned).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
-    assert!(matches!(
-        delete_route(&h.tx, 2, "", false).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
-    assert!(matches!(
-        delete_route(&h.tx, 2, "b", false).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
-    assert!(matches!(
-        delete_route(&h.tx, 1, "a", false).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
+    assert_eq!(
+        conflict(
+            leased_route(&h.tx, changed_owned.clone(), "b", 30)
+                .await
+                .map(drop)
+        ),
+        Some(LeaseConflict::OwnerMismatch)
+    );
+    assert_eq!(
+        conflict(unowned_route(&h.tx, changed_owned).await.map(drop)),
+        Some(LeaseConflict::OwnerMismatch)
+    );
+    assert_eq!(
+        conflict(delete_route(&h.tx, 2, "", false).await.map(drop)),
+        Some(LeaseConflict::OwnerMismatch)
+    );
+    assert_eq!(
+        conflict(delete_route(&h.tx, 2, "b", false).await.map(drop)),
+        Some(LeaseConflict::OwnerMismatch)
+    );
+    assert_eq!(
+        conflict(delete_route(&h.tx, 1, "a", false).await.map(drop)),
+        Some(LeaseConflict::KeyUnowned)
+    );
     assert_eq!(h.leases.list(Some("b")), Vec::new());
     h.settle().await;
     assert!(
@@ -942,7 +1040,10 @@ async fn refused_leased_adds_leave_the_intern_table_alone() {
         route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);
         assert!(matches!(
             manager.inject_local_route(route, Some(("b", 30))),
-            Err(RibCommandError::FailedPrecondition(_))
+            Err(RibCommandError::FailedPrecondition(
+                LeaseConflict::OwnerMismatch,
+                _
+            ))
         ));
         let mut route = local_route(200);
         route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);

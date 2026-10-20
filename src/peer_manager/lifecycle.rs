@@ -2418,7 +2418,7 @@ impl PeerManager {
             Err(RibCommandError::NotFound(_)) => Err(OutboundRefreshError::PeerUnavailable(peer)),
             Err(
                 RibCommandError::Internal(message)
-                | RibCommandError::FailedPrecondition(message)
+                | RibCommandError::FailedPrecondition(_, message)
                 | RibCommandError::ResourceExhausted(message),
             ) => Err(OutboundRefreshError::Internal(message)),
         }

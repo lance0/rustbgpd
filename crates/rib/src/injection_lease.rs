@@ -175,14 +175,39 @@ pub struct InjectionTag {
     pub generation: LeaseGeneration,
 }
 
-/// Why a leased add or an ownership check was refused. The table, the RIB
-/// and the wire are unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a lease table admission was refused. The table, the RIB and the wire
+/// are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseRejection {
-    /// The key belongs to another owner, or to no owner.
-    OwnerMismatch(String),
     /// A new owner would exceed [`MAX_LIVE_OWNERS`].
     OwnerCap,
+}
+
+/// Which ADR-0141 ownership or generation check refused a command. The API
+/// reports it as the `google.rpc.ErrorInfo` reason of the
+/// `FAILED_PRECONDITION`, so controllers can tell the cases apart without
+/// reading the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseConflict {
+    /// The key is held by a different owner.
+    OwnerMismatch,
+    /// The key is held by no owner: a leased add or an owner-scoped delete
+    /// must not take it over.
+    KeyUnowned,
+    /// The renewed generation is unknown, superseded or expired.
+    GenerationNotLive,
+}
+
+impl LeaseConflict {
+    /// The stable `ErrorInfo.reason` for this conflict.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::OwnerMismatch => "OWNER_MISMATCH",
+            Self::KeyUnowned => "KEY_UNOWNED",
+            Self::GenerationNotLive => "GENERATION_NOT_LIVE",
+        }
+    }
 }
 
 /// Validate a lease request's owner and duration. The message names the

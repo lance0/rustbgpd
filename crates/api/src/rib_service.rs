@@ -1922,7 +1922,7 @@ fn set_row_lease(
         incarnation: tag.generation.incarnation,
         sequence: tag.generation.sequence,
     });
-    *remaining_ms = Some(u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX));
+    *remaining_ms = Some(crate::injection_service::millis(remaining));
 }
 
 fn route_page_to_response(
