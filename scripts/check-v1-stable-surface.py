@@ -1208,8 +1208,10 @@ def variant_label_values(sources: dict[str, str], enum: str, variant: str, metho
     ponytail: a shape check by name, not a Rust parser. `enum Enum` must be
     declared in exactly one file with exactly one inherent `impl Enum` there,
     holding one `fn method(self) -> &'static str` whose body is one
-    `match self { .. }` with exactly one arm naming the variant and returning a
-    string literal. Any other shape is no evidence.
+    `match self { .. }` whose arms are all unguarded or-patterns of the
+    enum's own variants, exactly one of them naming the variant and returning
+    a string literal. A guard, wildcard or binding arm could make the named
+    arm unreachable, so any other shape is no evidence.
     """
     homes = [
         text for text in sources.values()
@@ -1228,14 +1230,18 @@ def variant_label_values(sources: dict[str, str], enum: str, variant: str, metho
     whole = re.fullmatch(r"\s*match\s+self\s*\{(.*)\}\s*", function_body(block, methods[0]), re.DOTALL)
     if whole is None:
         return set()
-    named = rf"\b(?:Self|{re.escape(enum)})::{re.escape(variant)}\b"
-    arms = [
-        arm for arm in filter(None, split_top_level(whole.group(1), ","))
-        if "=>" in arm and re.search(named, arm.split("=>", 1)[0])
-    ]
+    path = rf"(?:Self|{re.escape(enum)})::(\w+)"
+    arms = []
+    for arm in filter(None, split_top_level(whole.group(1), ",")):
+        pattern, _, result = arm.partition("=>")
+        variants = [part.strip() for part in pattern.split("|")]
+        if not result or not all(re.fullmatch(path, part) for part in variants):
+            return set()
+        if any(re.fullmatch(path, part).group(1) == variant for part in variants):
+            arms.append(result.strip())
     if len(arms) != 1:
         return set()
-    literal = re.fullmatch(r"\"([^\"]+)\"", arms[0].split("=>", 1)[1].strip())
+    literal = re.fullmatch(r"\"([^\"]+)\"", arms[0])
     return {literal.group(1)} if literal else set()
 
 

@@ -511,6 +511,13 @@ class MetricFloorTests(unittest.TestCase):
             # The arm no longer returns a literal.
             ([(reasons, 'Self::MissingIpv6NextHop => "missing_ipv6_next_hop"',
                "Self::MissingIpv6NextHop => Self::Encoding.as_str()")], reason),
+            # A guarded arm may never run; a later catch-all would return another value.
+            ([(reasons, 'Self::MissingIpv6NextHop => "missing_ipv6_next_hop"',
+               'Self::MissingIpv6NextHop if false => "missing_ipv6_next_hop",\n'
+               '            _ => "renamed"')], reason),
+            # A wildcard arm ahead of the variant's makes it unreachable.
+            ([(reasons, "            Self::Encoding => \"encoding\",",
+               "            _ => \"renamed\",\n            Self::Encoding => \"encoding\",")], reason),
             # A second same-named enum makes the variant ambiguous.
             ([(reasons, "pub enum ExactExportReason {",
                "pub enum ExactExportReason {}\npub enum ExactExportReason {")], reason),
