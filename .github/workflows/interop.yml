@@ -90,8 +90,10 @@ name: Interop
 # Operational + security tier — BMP monitoring, transport security,
 # FlowSpec:
 #   - M22 (~30 s test): FlowSpec (RFC 5575/8955) injection,
-#     distribution, and withdrawal. Wait windows are deliberately
-#     wide (60 s) because FRR's `show bgp ipv4 flowspec` view
+#     distribution, and withdrawal, then the controller lifecycle and
+#     the ADR-0141 lease-expiry leg (~90 s) on fresh topologies. Wait
+#     windows are deliberately wide (60 s) because FRR's
+#     `show bgp ipv4 flowspec` view
 #     reconverges slowly after MP_UNREACH — observed up to ~44 s
 #     of empty display before rule 2 reappears. Underlying
 #     data-plane state is correct; the lag is FRR's display path.
@@ -684,7 +686,8 @@ jobs:
     needs: [prime_dev_image]
     name: M22 — FlowSpec (FRR 10.7.1)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Three fresh deployments; the lease-expiry leg alone waits ~70 s.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -720,6 +723,18 @@ jobs:
           label: M22 controller
           topology: tests/interop/m22-flowspec-frr.clab.yml
           script: tests/interop/scripts/test-m22-flowspec-controller.sh
+
+      # ADR-0141 owner leases: a killed controller's leased blackhole and
+      # FlowSpec rule must leave FRR after the lease deadline, within
+      # lease + 5 s. Timing-bound, so a single attempt: a retry would hide
+      # a late expiry.
+      - name: Run M22 lease expiry on a fresh topology
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M22 lease expiry
+          topology: tests/interop/m22-flowspec-frr.clab.yml
+          script: tests/interop/scripts/test-m22-lease-expiry.sh
+          max_attempts: "1"
 
   m24:
     needs: [prime_dev_image]
