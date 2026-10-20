@@ -153,7 +153,7 @@ table describes rustbgpd's local state only.
 
 | Event | Result | Local blackhole state | Recovery |
 |-------|--------|-----------------------|----------|
-| Daemon restart | The daemon starts with no injected routes. The bridge's next liveness probe sees the daemon answer again and re-adds every tracked ban at once. | Bans are missing from the restart until that pass, within one probe interval (0.5 s) of the daemon answering, or one reconcile interval if the probes miss the restart. | None needed. |
+| Daemon restart | The daemon starts with no injected routes. The bridge's next liveness probe sees the daemon answer again and re-adds every tracked ban at once. | Bans are missing from the restart until that pass. The probe runs at a nominal 0.5 s interval; recovery also waits for the probe call, the bridge's lock and one daemon call per tracked ban, so it grows with the number of tracked bans and with RPC latency. A restart the probes miss waits for the next reconcile pass. | None needed. |
 | Bridge restart | Daemon routes are untouched. A new bridge process withdraws them normally. | The new process tracks nothing, so bans made before the restart are not replayed after a later daemon restart. A ban or unban sent while the bridge is down fails at the detector and is not retried. | Restart the bridge. Re-send any ban or unban the detector logged as failed, and any ban that must survive a later daemon restart. |
 | Duplicate ban | Succeeds and returns the same UUID. The daemon keeps one route. | None. | None. |
 | Duplicate unban | Succeeds as a no-op. | None. | None. |
