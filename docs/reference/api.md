@@ -3294,12 +3294,20 @@ lag from the deadline, and counts it in
 | Leased add, owner has a live lease | Joins it; the deadline becomes `max(current, now + lease_seconds)` and never moves earlier |
 | Leased add, no live lease | Starts a new generation; at most 64 live owners, else `RESOURCE_EXHAUSTED` |
 | Leased add of a key the owner does not hold | At most 16,384 keys per owner, unicast and FlowSpec together, else `RESOURCE_EXHAUSTED`; keys awaiting expiry still count |
-| `RenewLease(owner, generation, lease_seconds)` | Sets the deadline to exactly `now + lease_seconds`, which may shorten it; `FAILED_PRECONDITION` unless `generation` is the owner's live lease |
-| Leased add on a key held by another owner or by no owner | `FAILED_PRECONDITION`; delete the unowned entry first, or add under another `path_id` |
-| Unowned add on an owned key | `FAILED_PRECONDITION` |
-| `DeletePath`/`DeleteFlowSpec` | `owner` must match the entry (`""` for unowned) unless `override_owner` is set, else `FAILED_PRECONDITION` |
+| `RenewLease(owner, generation, lease_seconds)` | Sets the deadline to exactly `now + lease_seconds`, which may shorten it; `FAILED_PRECONDITION` (`GENERATION_NOT_LIVE`) unless `generation` is the owner's live lease |
+| Leased add on a key held by another owner | `FAILED_PRECONDITION` (`OWNER_MISMATCH`) |
+| Leased add on a key held by no owner | `FAILED_PRECONDITION` (`KEY_UNOWNED`); delete the unowned entry first, or add under another `path_id` |
+| Unowned add on an owned key | `FAILED_PRECONDITION` (`OWNER_MISMATCH`) |
+| `DeletePath`/`DeleteFlowSpec` | `owner` must match the entry (`""` for unowned) unless `override_owner` is set, else `FAILED_PRECONDITION`: `OWNER_MISMATCH` when an owner holds the entry, `KEY_UNOWNED` when an owner is named but the entry is unowned |
 
 Every rejection above leaves the RIB, the lease table and the wire unchanged.
+Each ownership or generation `FAILED_PRECONDITION` carries one
+`google.rpc.ErrorInfo` detail with `domain: "rustbgpd"` in the
+`grpc-status-details-bin` trailer. Its `reason`, shown in parentheses above,
+is the contract for telling the cases apart; the status code stays
+`FAILED_PRECONDITION` and the message text is not contract. Clients read it
+with their gRPC library's rich-error support, for example `tonic-types` in
+Rust or `status.FromError(err).Details()` in Go.
 A lease is live while `now < deadline` on the daemon's monotonic clock, so a
 renewal at exactly the deadline fails. A renewal never creates or resurrects a
 lease. A controller that gets `FAILED_PRECONDITION` from `RenewLease`, or a
@@ -3313,6 +3321,21 @@ strings, such as `{"incarnation": "3238451053446743976", "sequence": "1"}`;
 keep them as strings rather than parsing them into floating-point numbers.
 Renew well inside the lease, for example every third of it.
 `RenewLease` is served from the lease table and never waits behind RIB work.
+
+A leased add whose outcome is unknown, such as a deadline, a lost connection
+or `INTERNAL` "RIB manager dropped reply" (which can follow a commit), may be
+retried as the same leased add. Whether or not the first attempt committed,
+the entry is owned intent: the retry joins the owner's lease, or starts a new
+generation if it has expired, and a leased add never becomes permanent
+injection.
+
+`ListInjectionLeases` keeps listing an owner past its deadline, with
+`lease_remaining_ms: 0`, until the expiry pass scheduled for that deadline
+takes it and hands its routes to the RIB for withdrawal; the routes may still
+be present until the RIB applies that batch. Remaining 0 means expired and
+pending removal: `RenewLease` refuses that generation with
+`GENERATION_NOT_LIVE`, so a controller that adopts such an entry after its
+own restart re-adds its full desired state instead of renewing.
 
 Expiry removes local intent only. An equal or better route from elsewhere, or
 a received FlowSpec rule with the same key, keeps applying, and the daemon
@@ -3334,7 +3357,9 @@ dataplane stops enforcing it, are outside the guarantee.
 `RibService.ListReceivedRoutes` with `neighbor_address: "0.0.0.0"` and
 `ListFlowSpecRoutes` with `received_peer_address: "0.0.0.0"` report each
 owned entry's `injection_owner`, `lease_generation` and `lease_remaining_ms`
-(0 means expired, withdrawal pending); unowned entries leave them unset.
+(0 means expired, withdrawal pending); unowned entries leave them unset. The
+three are set together or not at all, so a row with only some of them is
+malformed.
 `ListBestRoutes` reports them on a best local route too. Advertised rows never
 carry them, because their `path_id` is the outbound one.
 `InjectionService.ListInjectionLeases` lists the lease table. `rbgp rib
