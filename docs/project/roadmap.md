@@ -220,7 +220,16 @@ are treated as withdraws. It publishes wire 0.26.0, FSM 0.13.0 and RPKI
 0.8.0. A 24-hour route-server flagship soak on the release-candidate source,
 whose Rust sources match v0.78.0, passed all gates: 1,000 sessions held
 through six planned max-prefix trips, RSS peaked at 611 MB with a late slope
-of +0.45 MB/h, and there were no readiness failures. The
+of +0.45 MB/h, and there were no readiness failures. v0.79.0 (2026-10-20) is
+a minor release that adds owner-scoped leases on injected routes and FlowSpec
+rules, next-hop self for injected routes with an unspecified next hop, and
+the separate `rustbgpd-gobgp-bridge` for GoBGP-driven RTBH detectors. It
+removes the optional durable event history, renames metric family labels to
+the canonical configuration labels, reports inbound max-prefix bounds by
+family and stage, and widens the v1 inventory to the everyday neighbor,
+peer-group and policy-chain commands and a route-server and route-reflector
+metric floor. It publishes no library crate. It ships on its per-change
+regression tests and main CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
