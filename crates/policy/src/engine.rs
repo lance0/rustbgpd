@@ -1000,9 +1000,15 @@ fn well_known_ext_community_value(s: &str) -> Option<ExtendedCommunity> {
 ///
 /// Supports Cisco/Quagga-style `_` as a boundary anchor that matches
 /// start of string, end of string, or a space.
+///
+/// A single-ASN boundary pattern (`_<digits>_`, which `.rpol`
+/// `route.as-path contains N` lowers to) is matched by a token scan
+/// instead of a compiled automaton: one interned pattern costs its
+/// string, not a regex, however many distinct ASNs a policy names.
 #[derive(Clone)]
 pub struct AsPathRegex {
-    regex: Regex,
+    /// `None` for a `_<digits>_` pattern, matched by [`contains_asn_token`].
+    regex: Option<Regex>,
     pattern: String,
 }
 
@@ -1018,9 +1024,15 @@ impl AsPathRegex {
     ///
     /// Returns an error if the resulting regex is invalid.
     pub fn new(pattern: &str) -> Result<Self, String> {
-        let expanded = pattern.replace('_', "(?:^| |$|[{}])");
-        let regex =
-            Regex::new(&expanded).map_err(|e| format!("invalid AS_PATH regex {pattern:?}: {e}"))?;
+        let regex = if is_asn_token(pattern) {
+            None
+        } else {
+            let expanded = pattern.replace('_', "(?:^| |$|[{}])");
+            Some(
+                Regex::new(&expanded)
+                    .map_err(|e| format!("invalid AS_PATH regex {pattern:?}: {e}"))?,
+            )
+        };
         Ok(Self {
             regex,
             pattern: pattern.to_string(),
@@ -1030,7 +1042,11 @@ impl AsPathRegex {
     /// Check whether an `AS_PATH` string matches this regex.
     #[must_use]
     pub fn is_match(&self, aspath_str: &str) -> bool {
-        self.regex.is_match(aspath_str)
+        match &self.regex {
+            Some(regex) => regex.is_match(aspath_str),
+            // `new` admitted `_<digits>_`: strip the ASCII underscores.
+            None => contains_asn_token(aspath_str, &self.pattern[1..self.pattern.len() - 1]),
+        }
     }
 
     /// The pattern as configured (before `_` boundary expansion).
@@ -1039,6 +1055,30 @@ impl AsPathRegex {
     pub fn pattern(&self) -> &str {
         &self.pattern
     }
+}
+
+/// Whether `pattern` is `_<digits>_`: exactly the patterns whose expanded
+/// regex, `(?:^| |$|[{}])<digits>(?:^| |$|[{}])`, is equivalent to
+/// [`contains_asn_token`].
+fn is_asn_token(pattern: &str) -> bool {
+    pattern
+        .strip_prefix('_')
+        .and_then(|rest| rest.strip_suffix('_'))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether `digits` occurs in `path` with an `AS_PATH` boundary on each
+/// side: the string start or end, a space, or an `AS_SET` brace — the
+/// unanchored search the expanded `_<digits>_` regex performs.
+fn contains_asn_token(path: &str, digits: &str) -> bool {
+    let boundary = |byte: u8| matches!(byte, b' ' | b'{' | b'}');
+    let bytes = path.as_bytes();
+    // Non-overlapping occurrences suffice: a later occurrence overlapping
+    // an earlier one is preceded by a digit, so it has no left boundary.
+    path.match_indices(digits).any(|(start, _)| {
+        let end = start + digits.len();
+        (start == 0 || boundary(bytes[start - 1])) && (end == bytes.len() || boundary(bytes[end]))
+    })
 }
 
 impl PartialEq for AsPathRegex {
