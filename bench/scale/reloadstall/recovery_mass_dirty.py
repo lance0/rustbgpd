@@ -1692,6 +1692,8 @@ def analyze_dataset(root, manifest):
             before = reload_outcomes((leg / f"metrics-before-{generation}.prom").read_text())
             after = reload_outcomes((leg / f"metrics-after-{generation}.prom").read_text())
             deltas, outcome = outcome_failure(before, after)
+            # The wait already saw complete +1; less at the after scrape is a regression.
+            require(deltas["complete"] >= 1, "reload outcome counter regressed")
             require(outcome in failures if outcome else deltas["complete"] == 1, "replayed reload outcome differs")
             require(json.loads((leg / f"last-reload-{generation}.json").read_text()) == operation["last_reload"],
                     "last-reload evidence differs")

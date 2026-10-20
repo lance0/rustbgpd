@@ -2309,6 +2309,17 @@ class DatasetReloadTests(unittest.TestCase):
                 self.assertEqual((verdict["status"], verdict["reason"]), ("INVALID", reason))
                 shutil.rmtree(self.root / "campaign")
 
+    def test_complete_counter_falling_back_under_a_recorded_outcome_stays_invalid(self):
+        # complete goes 0 -> 1 (seen by the wait) -> 0 at the after scrape while
+        # known_partial rises: the recorded outcome failure must not hide the regression.
+        failure = "SIGHUP reload outcome known_partial +1"
+        for keep, before in ((1, 0), (2, 1)):
+            with self.subTest(operation=keep):
+                shutil.rmtree(self.root / "campaign", ignore_errors=True)
+                after = self.outcomes(before, known_partial=1)
+                verdict = self.finalize(self.interrupted(keep, 1e9, failure, 0, after=after), 1)
+                self.assertEqual((verdict["status"], verdict["reason"]), ("INVALID", "reload outcome counter regressed"))
+
 
 if __name__ == "__main__":
     unittest.main()
