@@ -1312,8 +1312,12 @@ def target_failure(daemon, engine, errors):
     return f"exact fold or session continuity failed: {error}"
 
 
-def observe_target(error, daemon, engine, errors):
-    """Convert an interrupted controller step into the target failure that caused it, or re-raise."""
+def observe_target(error, daemon, engine, errors, recorded=None):
+    """Convert an interrupted controller step into the target failure that caused it, or re-raise.
+
+    The interruption is classified first: a bar breached earlier (`recorded`)
+    stays the reason only when the interruption is the target's as well.
+    """
     failure = target_failure(daemon, engine, errors)
     # A stall counts only while the harness is alive: an ended harness with
     # an instrument error leaves the measurement untrustworthy.
@@ -1321,7 +1325,7 @@ def observe_target(error, daemon, engine, errors):
         failure = f"daemon unresponsive: {error}"
     if failure is None:
         raise error
-    return failure
+    return recorded or failure
 
 
 def await_reload(daemon, engine, records, port, before, deadline, correct, errors):
@@ -1392,11 +1396,13 @@ def run_dataset_cell(args, root, manifest):
             daemon = own_child(subprocess.Popen(daemon_command, stdout=daemon_log, stderr=subprocess.STDOUT, start_new_session=True))
             pid = daemon_pid(binary, min(deadline, time.monotonic() + 120))
             require(pid == daemon.pid, "daemon scope launcher did not retain the owned PID")
-            owner = process_identity(pid, binary)
-            write_json(leg / "daemon-owner.json", owner)
-            # From here the owned daemon is identified: an exit or stall during
-            # startup or the baseline table load is a target failure as well.
+            # From here the owned PID has been seen running the daemon binary:
+            # an exit during identity capture, startup or the baseline table
+            # load is a target failure. An exit before that sighting cannot be
+            # told from a launcher failure and stays INVALID.
             try:
+                owner = process_identity(pid, binary)
+                write_json(leg / "daemon-owner.json", owner)
                 while True:
                     require(daemon.poll() is None, "daemon startup failed")
                     if time.monotonic() >= deadline:
@@ -1509,8 +1515,7 @@ def run_dataset_cell(args, root, manifest):
                 # Through the finish boundary, a daemon exit or receiver failure
                 # that interrupts a controller step is the measured FAIL; only
                 # an instrument error stays INVALID.
-                # A bar already breached in this step stays the recorded failure.
-                failure = failure or observe_target(error, daemon, engine, leg / "harness.stderr")
+                failure = observe_target(error, daemon, engine, leg / "harness.stderr", recorded=failure)
                 result["interrupted_step"] = f"{type(error).__name__}: {error}"
             if failure is not None:
                 result["bar_failures"].append(failure)

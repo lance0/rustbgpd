@@ -196,7 +196,10 @@ The manifest freezes these bars before any result:
   the `last-reload` query, the next arm, the exit record) is the same FAIL. So
   is a live daemon that stops answering: a metrics scrape that fails or a
   `last-reload` query that times out, or startup or the baseline load not
-  finishing by the leg deadline. Only an instrument error is INVALID.
+  finishing by the leg deadline. INVALID is kept for an instrument error, even
+  one that interrupts a step after a bar was breached, and for an exit before
+  the owned PID is first seen running the daemon binary, which cannot be told
+  from a launcher failure.
 - **Applied:** each SIGHUP adds exactly one `complete` to
   `bgp_sighup_reload_outcomes_total` and nothing to any other outcome, and
   `rbgp config last-reload` reports outcome `complete` with nothing unapplied.

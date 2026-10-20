@@ -2138,29 +2138,45 @@ class DatasetReloadTests(unittest.TestCase):
         self.assertEqual((verdict["status"], verdict["reason"]), ("FAIL", failure))
         self.assertEqual(verdict["readiness"]["samples"], 0)
 
-    def run_startup(self, daemon_script):
-        """Run the dataset controller against a fake daemon that never reaches the harness."""
+    def run_startup(self, daemon_script, identify=None):
+        """Run the dataset controller against a fake daemon that never reaches the harness.
+
+        The daemon binary is a private copy of /bin/sh running `daemon_script`
+        as its config, so the real PID discovery and identity capture see it.
+        `identify(real, pid, binary, daemon)` may wrap identity capture.
+        """
         root, manifest = self.manifest(correctness=True)
-        paths = {}
-        for name, body in (("rustbgpd", daemon_script), ("reloadstall", "exit 0"), ("rbgp", "exit 0")):
-            paths[name] = self.root / name
-            paths[name].write_text(f"#!/bin/sh\n[ \"$1\" = --check ] && exit 0\n{body}\n")
-            paths[name].chmod(0o755)
-        owned, own_child = [], receipt.own_child
+        paths = {"rustbgpd": self.root / "rustbgpd", "reloadstall": self.root / "reloadstall", "rbgp": self.root / "rbgp"}
+        shutil.copy2(os.path.realpath("/bin/sh"), paths["rustbgpd"])
+        paths["reloadstall"].write_text("harness\n")
+        paths["rbgp"].write_text("rbgp\n")
+        owned, own_child, process_identity = [], receipt.own_child, receipt.process_identity
 
         def own(process):
             owned.append(own_child(process))
             return process
+
+        def generate(directory, *_args, **_kwargs):
+            directory.mkdir()
+            (directory / "config.toml").write_text(daemon_script + "\n")
+            return {}
+
+        def identity(pid, binary):
+            if identify is None:
+                return process_identity(pid, binary)
+            return identify(process_identity, pid, binary, owned[0])
         args = argparse.Namespace(arm="candidate", index=0, daemon=paths["rustbgpd"],
                                   harness=paths["reloadstall"], rbgp=paths["rbgp"])
         binaries = {"rustbgpd-candidate": receipt.digest(paths["rustbgpd"]),
                     "reloadstall": receipt.digest(paths["reloadstall"]), "rbgp": receipt.digest(paths["rbgp"])}
+        checked = subprocess.CompletedProcess([], 0)
         with mock.patch.object(receipt, "verified_build_evidence", return_value=binaries), \
+                mock.patch.object(receipt, "generate", side_effect=generate), \
+                mock.patch.object(receipt.subprocess, "run", return_value=checked), \
                 mock.patch.object(receipt, "own_child", side_effect=own), \
-                mock.patch.object(receipt, "daemon_pid", side_effect=lambda *_: owned[-1].pid), \
-                mock.patch.object(receipt, "process_identity", return_value={}), \
+                mock.patch.object(receipt, "process_identity", side_effect=identity), \
                 mock.patch.object(receipt, "http_metrics", side_effect=ConnectionRefusedError("refused")), \
-                mock.patch.dict(receipt.LIMITS, leg_deadline_seconds=1):
+                mock.patch.dict(receipt.LIMITS, leg_deadline_seconds=2):
             # The controller ignores SIGTERM/SIGINT during cleanup; a later
             # child would inherit that, so restore this process's handlers.
             handlers = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGINT)}
@@ -2173,13 +2189,46 @@ class DatasetReloadTests(unittest.TestCase):
 
     def test_controller_records_a_startup_exit_or_stall_before_the_harness(self):
         # Cases 1 and 2 at the controller: no exception escapes, so result.json carries the FAIL.
-        row = self.run_startup("exit 70")
-        self.assertEqual((row["status"], row["bar_failures"], row["daemon_exit"], row["harness_exit"]),
-                         ("FAIL", ["daemon exited with status 70 (fail-stop)"], 70, None))
+        exited = ("FAIL", ["daemon exited with status 70 (fail-stop)"], 70, None)
+        row = self.run_startup("sleep 0.5; exit 70")
+        self.assertEqual((row["status"], row["bar_failures"], row["daemon_exit"], row["harness_exit"]), exited)
         shutil.rmtree(self.root / "campaign")
-        row = self.run_startup("exec sleep 30")
+        row = self.run_startup("while :; do sleep 0.1; done")
         self.assertEqual((row["status"], row["bar_failures"]),
                          ("FAIL", ["daemon unresponsive: metrics endpoint not serving within the fixed leg deadline"]))
+
+    def test_controller_records_a_daemon_exit_during_identity_capture(self):
+        # PID discovery saw the binary; the daemon then exits before its
+        # identity is read, so the real capture fails on the reaped process.
+        def exit_first(real, pid, binary, daemon):
+            daemon.wait(timeout=10)
+            return real(pid, binary)
+        row = self.run_startup("sleep 0.3; exit 70", identify=exit_first)
+        self.assertEqual((row["status"], row["bar_failures"], row["daemon_exit"]),
+                         ("FAIL", ["daemon exited with status 70 (fail-stop)"], 70))
+        self.assertNotIn("daemon-owner.json", row["raw_sha256"])
+        self.assertTrue(row["interrupted_step"].startswith("FileNotFoundError"), row["interrupted_step"])
+
+    def test_ownership_mismatch_of_a_live_daemon_stays_invalid(self):
+        def mismatch(real, pid, binary, daemon):
+            raise ValueError("daemon binary ownership mismatch")
+        with self.assertRaisesRegex(ValueError, "ownership mismatch"):
+            self.run_startup("while :; do sleep 0.1; done", identify=mismatch)
+        self.assertFalse((self.root / "campaign" / "leg-0-candidate" / "result.json").exists())
+
+    def test_interruption_after_a_recorded_bar_is_classified_first(self):
+        _, alive, ended, errors = self.processes("instrument: controller ended")
+        recorded = "SIGHUP reload outcome known_partial +1"
+        # The last-reload RPC answered with an error while both processes live.
+        refused = subprocess.CalledProcessError(1, ["rbgp", "config", "last-reload"])
+        with self.assertRaises(subprocess.CalledProcessError):
+            receipt.observe_target(refused, alive, alive, errors, recorded=recorded)
+        # A stall after the harness hit an instrument error.
+        stall = receipt.DaemonStall("last-reload RPC: timed out")
+        with self.assertRaises(receipt.DaemonStall):
+            receipt.observe_target(stall, alive, ended, errors, recorded=recorded)
+        # A target interruption keeps the bar breached first.
+        self.assertEqual(receipt.observe_target(stall, alive, alive, errors, recorded=recorded), recorded)
 
     def test_missing_baseline_or_samples_without_that_failure_stays_invalid(self):
         failure = "daemon exited with status 70 (fail-stop)"
