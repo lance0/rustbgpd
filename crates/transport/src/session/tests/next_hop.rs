@@ -4278,3 +4278,67 @@ async fn dropped_ipv6_next_hop_override_warns_once_per_export_pass() {
         );
     }
 }
+
+/// Only an injected route (`RouteOrigin::Local`) turns an unspecified next
+/// hop into next-hop self. A learned route whose import policy set `0.0.0.0`
+/// or `::` keeps that next hop toward iBGP and route-server-client sessions:
+/// IPv4 sends it as stored, and IPv6 is refused rather than rewritten to the
+/// local address.
+#[tokio::test]
+async fn learned_unspecified_next_hop_is_never_rewritten_to_self() {
+    let local_v6: Ipv6Addr = "2001:db8::fe".parse().unwrap();
+    for origin_type in [
+        rustbgpd_rib::RouteOrigin::Ebgp,
+        rustbgpd_rib::RouteOrigin::Ibgp,
+    ] {
+        let mut v4 = make_route(100);
+        v4.origin_type = origin_type;
+        v4.next_hop = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        AttrSet::edit(&mut v4.attributes, |attrs| {
+            for attr in attrs.iter_mut() {
+                if let PathAttribute::NextHop(next_hop) = attr {
+                    *next_hop = Ipv4Addr::UNSPECIFIED;
+                }
+            }
+        });
+        let mut v6 = make_v6_unicast_route(Ipv6Addr::UNSPECIFIED);
+        v6.origin_type = origin_type;
+        assert_ne!(v4.peer, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_ne!(v6.peer, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
+        for (remote_asn, route_server_client) in [(65001, false), (65002, true)] {
+            let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+            session.config.route_server_client = route_server_client;
+            session.config.local_ipv6_nexthop = Some(local_v6);
+            session.negotiated = Some(Arc::new(negotiated_session(remote_asn, false)));
+            let case = format!(
+                "{origin_type:?} route, remote AS {remote_asn}, \
+                 route server client {route_server_client}"
+            );
+            let profile = session.publish_export_profile();
+            assert_ne!(profile.local_ipv4(), Ipv4Addr::UNSPECIFIED, "{case}");
+
+            let export::PreparedUnicastCandidate::Ipv4Body { attrs, .. } =
+                profile.prepare_unicast_candidate(&v4, None).unwrap()
+            else {
+                panic!("{case}: IPv4 without Extended Next Hop must use body NLRI");
+            };
+            let next_hops: Vec<_> = attrs
+                .iter()
+                .filter_map(|attr| match attr {
+                    PathAttribute::NextHop(next_hop) => Some(*next_hop),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(next_hops, vec![Ipv4Addr::UNSPECIFIED], "{case}");
+
+            assert!(
+                matches!(
+                    profile.prepare_unicast_candidate(&v6, None),
+                    Err(export::ExportProbeError::MissingIpv6NextHop)
+                ),
+                "{case}: a learned `::` is refused, never rewritten to {local_v6}"
+            );
+        }
+    }
+}
