@@ -5347,7 +5347,7 @@ mod tests {
                 event_type,
                 peer: "10.0.0.2".parse().unwrap(),
                 peer_label: None,
-                timestamp: "1".to_string(),
+                timestamp_unix_ms: 1_000,
                 old_state: Some(SessionState::Established),
                 new_state,
                 session_role: Some("primary".to_string()),

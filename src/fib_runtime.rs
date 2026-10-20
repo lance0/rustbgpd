@@ -165,7 +165,8 @@ pub struct FibRuntimeEvent {
     pub prefix: Prefix,
     pub next_hop: Option<IpAddr>,
     pub peer: Option<IpAddr>,
-    pub timestamp: String,
+    /// Event time in Unix epoch milliseconds.
+    pub timestamp_unix_ms: i64,
     pub reason: String,
 }
 
@@ -1752,7 +1753,7 @@ fn emit_fib_event(
         prefix: route.key.prefix,
         next_hop: Some(route.target.primary()),
         peer: Some(route.peer),
-        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
+        timestamp_unix_ms: rustbgpd_rib::event::unix_time_ms_now(),
         reason: reason.into(),
     });
 }

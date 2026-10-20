@@ -8,7 +8,7 @@ use rustbgpd_api::peer_types::{
     SessionNotificationEvent, SessionNotificationEventType,
 };
 use rustbgpd_fsm::SessionState;
-use rustbgpd_rib::event::unix_timestamp_now;
+use rustbgpd_rib::event::unix_time_ms_now;
 use rustbgpd_transport::{
     SessionNotificationDirection as TransportNotificationDirection,
     SessionNotificationEvent as TransportNotificationEvent,
@@ -18,8 +18,8 @@ use tokio::sync::oneshot;
 use super::PeerManager;
 
 impl PeerManager {
-    pub(super) fn session_event_timestamp() -> String {
-        unix_timestamp_now()
+    pub(super) fn session_event_timestamp() -> i64 {
+        unix_time_ms_now()
     }
 
     pub(super) fn session_role_label(role: rustbgpd_transport::SessionRole) -> &'static str {
@@ -169,7 +169,7 @@ impl PeerManager {
             peer,
             peer_label,
             affected_peer_count,
-            timestamp: Self::session_event_timestamp(),
+            timestamp_unix_ms: Self::session_event_timestamp(),
             reason,
         });
     }
@@ -184,7 +184,7 @@ impl PeerManager {
             event_type,
             peer: peer.address,
             peer_label: Some(peer.label()),
-            timestamp: Self::session_event_timestamp(),
+            timestamp_unix_ms: Self::session_event_timestamp(),
             old_state: None,
             new_state: None,
             session_role: None,
@@ -197,7 +197,7 @@ impl PeerManager {
             event_type: SessionLifecycleEventType::PeerAdded,
             peer: peer.address,
             peer_label: Some(peer.label()),
-            timestamp: Self::session_event_timestamp(),
+            timestamp_unix_ms: Self::session_event_timestamp(),
             old_state: None,
             new_state: Some(SessionState::Idle),
             session_role: None,
@@ -250,7 +250,7 @@ impl PeerManager {
             event_type,
             peer: peer.address,
             peer_label: Some(peer_label),
-            timestamp: Self::session_event_timestamp(),
+            timestamp_unix_ms: Self::session_event_timestamp(),
             old_state: Some(old),
             new_state: Some(new),
             session_role: Some(Self::session_role_label(role).to_string()),
@@ -287,7 +287,7 @@ impl PeerManager {
             event_type,
             peer: event.peer_addr,
             peer_label,
-            timestamp: Self::session_event_timestamp(),
+            timestamp_unix_ms: Self::session_event_timestamp(),
             code: event.code,
             subcode: event.subcode,
             description: event.description,

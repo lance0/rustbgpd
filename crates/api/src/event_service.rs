@@ -424,7 +424,7 @@ impl proto::event_service_server::EventService for EventService {
                         Ok(event) => {
                             let _subscriber_guard = &evpn_subscriber_guard;
                             if evpn_filter.matches_evpn_event(&event) {
-                                Some(Ok(evpn_event_to_bgp_event(event.as_ref().clone())))
+                                Some(Ok(evpn_event_to_bgp_event(&event)))
                             } else {
                                 None
                             }
@@ -501,7 +501,7 @@ impl proto::event_service_server::EventService for EventService {
         })
         .await?;
         Ok(Response::new(proto::ListEvpnEventsResponse {
-            events: events.into_iter().map(evpn_event_to_bgp_event).collect(),
+            events: events.iter().map(evpn_event_to_bgp_event).collect(),
         }))
     }
 
@@ -940,7 +940,7 @@ mod tests {
             peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             previous_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             target_peer: None,
-            timestamp: "123".to_string(),
+            timestamp_unix_ms: 123_000,
             path_id: 42,
             reason: String::new(),
         };
@@ -978,7 +978,7 @@ mod tests {
             peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             previous_peer: None,
             target_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
-            timestamp: "123".to_string(),
+            timestamp_unix_ms: 123_000,
             path_id: 9,
             reason: "policy_denied".to_string(),
         };
@@ -1003,7 +1003,7 @@ mod tests {
     fn evpn_bgp_event_contract_uses_l2vpn_payload() {
         let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-        let bgp_event = evpn_event_to_bgp_event(evpn_event(
+        let bgp_event = evpn_event_to_bgp_event(&evpn_event(
             RouteEventType::BestChanged,
             Some(peer2),
             Some(peer1),

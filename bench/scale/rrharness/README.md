@@ -146,6 +146,10 @@ query latency. These instrumented observations must not be directly compared
 with historical pre-checkpoint costs without a same-build control. Normal
 daemon builds without `bench-internals` contain none of these capture fields
 or callback clocks; a real-daemon receipt must retain its actual build features.
+Outside a retirement capture, the instrumented build takes that lock and clock
+only at forced checkpoints, service passes and every 64th checkpoint. Other
+modes' timings therefore carry little of the overhead, and their logged
+eligible-opportunity gap is an upper bound rather than an exact maximum.
 
 For correctness checks, `rrharness recovery-retirement
 retirement-{full,empty,adj-out-full,adj-out-empty,regroup-full,regroup-empty}

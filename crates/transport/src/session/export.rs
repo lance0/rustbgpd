@@ -13,6 +13,7 @@ use super::{
     RtcRibRouteKey, Safi, TransportConfig, UpdateMessage, VpnRibRoute, VpnRibRouteKey,
     is_ipv6_link_local, is_private_asn,
 };
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -895,10 +896,10 @@ impl SessionExportProfile {
 
     /// [`Self::prepare_mp_attributes`] memoized per source attribute `Arc`
     /// within one envelope (see [`MpAttrCache`]).
-    pub(super) fn prepare_mp_attributes_cached(
+    pub(super) fn prepare_mp_attributes_cached<'a>(
         &self,
-        cache: &mut MpAttrCache,
-        attributes: &Arc<rustbgpd_rib::AttrSet>,
+        cache: &mut MpAttrCache<'a>,
+        attributes: &'a Arc<rustbgpd_rib::AttrSet>,
         origin_type: rustbgpd_rib::RouteOrigin,
         peer_router_id: Ipv4Addr,
         family: (Afi, Safi),
@@ -1091,13 +1092,13 @@ impl SessionExportProfile {
     }
 
     /// Memoize route-varying inputs in one immutable profile; fixed fields are omitted, so never reuse across peers/generations; live and probe paths share this.
-    pub(super) fn prepared_unicast_attributes_cached<'a>(
+    pub(super) fn prepared_unicast_attributes_cached<'c, 'r>(
         &self,
-        cache: &'a mut PreparedAttrCache,
-        route: &Route,
+        cache: &'c mut PreparedAttrCache<'r>,
+        route: &'r Route,
         local_ipv4: Ipv4Addr,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
-    ) -> &'a PreparedUnicastAttributes {
+    ) -> &'c PreparedUnicastAttributes {
         #[cfg(debug_assertions)]
         cache.bind(self.owner_id, self.generation);
         let key = self.prepared_attr_cache_key(route, local_ipv4, next_hop_override);
@@ -1815,16 +1816,21 @@ pub(super) struct PreparedAttrCacheKey {
     next_hop_override: NextHopOverrideKey,
 }
 
+/// Prepared unicast attributes keyed by source attribute `Arc` address.
+/// `'r` borrows the routes whose addresses are keys: every keyed allocation
+/// stays alive while the cache does, so a freed address cannot be reused
+/// by another attribute set and hit a stale entry.
 #[derive(Default)]
-pub(super) struct PreparedAttrCache {
+pub(super) struct PreparedAttrCache<'r> {
     entries: FastMap<PreparedAttrCacheKey, PreparedUnicastAttributes>,
     /// The shared update-group encode's drops; one cache spans its pass.
     pub(super) dropped_ipv6_next_hops: DroppedIpv6NextHops,
     #[cfg(debug_assertions)]
     snapshot: Option<(u64, u64)>,
+    keys_borrow: PhantomData<&'r rustbgpd_rib::AttrSet>,
 }
 
-impl PreparedAttrCache {
+impl PreparedAttrCache<'_> {
     #[cfg(debug_assertions)]
     fn bind(&mut self, owner_id: u64, generation: u64) {
         match self.snapshot {
@@ -1918,12 +1924,15 @@ struct MpAttrCacheKey {
 }
 
 /// Prepared multiprotocol attributes for one envelope, keyed by the source
-/// attribute `Arc`. Routes sharing a source allocation share one prepared
-/// vector, so grouping hashes and compares it once rather than per route.
-/// Pointer keys are sound only while the envelope that owns the source
-/// `Arc`s is borrowed, so a cache must not outlive one `send_route_update_slice`.
+/// attribute `Arc` address. Routes sharing a source allocation share one
+/// prepared vector, so grouping hashes and compares it once rather than per
+/// route. `'a` borrows the keyed attributes, so the cache cannot outlive the
+/// envelope or accept a temporary `Arc` whose address could be reused.
 #[derive(Default)]
-pub(super) struct MpAttrCache(FastMap<MpAttrCacheKey, Arc<Vec<PathAttribute>>>);
+pub(super) struct MpAttrCache<'a>(
+    FastMap<MpAttrCacheKey, Arc<Vec<PathAttribute>>>,
+    PhantomData<&'a rustbgpd_rib::AttrSet>,
+);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ExportProbeError {
@@ -3371,6 +3380,40 @@ mod tests {
                 "specific next-hop address is part of the cache key"
             );
         }
+    }
+
+    /// The memo keys on the source allocation. Its `'a` borrow keeps every
+    /// keyed allocation alive, so a later `Arc` cannot reuse a keyed address;
+    /// passing a temporary `Arc` per loop iteration fails to compile (E0597).
+    #[test]
+    fn mp_attr_cache_shares_one_allocation_and_separates_live_distinct_ones() {
+        let config = config_with_auth_secret("not-retained");
+        let profile = SessionExportProfile::initial(&config, None, false);
+        let attrs = || AttrSet::new(vec![PathAttribute::Origin(rustbgpd_wire::Origin::Igp)]);
+        let (first, second) = (attrs(), attrs());
+        let mut cache = MpAttrCache::default();
+        let mut prepare = |source| {
+            profile.prepare_mp_attributes_cached(
+                &mut cache,
+                source,
+                rustbgpd_rib::RouteOrigin::Ibgp,
+                Ipv4Addr::new(192, 0, 2, 2),
+                (Afi::L2Vpn, Safi::Evpn),
+            )
+        };
+        let a = prepare(&first);
+        let a_again = prepare(&first);
+        let b = prepare(&second);
+        assert!(
+            Arc::ptr_eq(&a, &a_again),
+            "one source allocation is prepared once"
+        );
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "a live distinct allocation gets its own entry"
+        );
+        assert_eq!(a, b, "equal source values prepare equal attributes");
+        assert_eq!(cache.0.len(), 2);
     }
 
     #[cfg(debug_assertions)]

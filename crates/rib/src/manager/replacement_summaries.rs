@@ -896,6 +896,47 @@ mod tests {
         });
     }
 
+    /// An instrumented build samples its checkpoint clock, so the service
+    /// pass itself must record the gap it ends. Calling the service seam
+    /// directly stands in for an unsampled checkpoint.
+    #[tokio::test(start_paused = true)]
+    async fn replacement_readiness_service_records_the_gap_it_ends() {
+        let (_tx, rx) = mpsc::channel(1);
+        let (_general_tx, general_rx) = mpsc::channel(1);
+        let (readiness_tx, readiness_rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new());
+        manager.readiness_rx = Some(readiness_rx);
+        let ms = std::time::Duration::from_millis;
+        manager.flush_poll_budget = ms(25);
+        manager.with_replacement_readiness(|manager| {
+            let context = manager.replacement_readiness.clone().unwrap();
+            {
+                let mut readiness = context.state.lock().unwrap();
+                readiness.max_gap = std::time::Duration::ZERO;
+                readiness.last_service = readiness.last_service.checked_sub(ms(40)).unwrap();
+                readiness.last_opportunity =
+                    readiness.last_opportunity.checked_sub(ms(40)).unwrap();
+            }
+            let (reply, mut response) = oneshot::channel();
+            readiness_tx
+                .try_send(crate::update::RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: std::time::Instant::now(),
+                })
+                .unwrap();
+            super::super::service_replacement_readiness(&context, false);
+            assert_eq!(
+                response.try_recv().unwrap(),
+                Ok(0),
+                "served past the budget"
+            );
+            assert!(
+                context.state.lock().unwrap().max_gap >= ms(40),
+                "the service pass records the 40 ms gap it ends"
+            );
+        });
+    }
+
     #[test]
     fn replacement_summaries_drain_only_the_bounded_lane_budget() {
         let (_tx, rx) = mpsc::channel(1);

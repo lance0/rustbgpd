@@ -141,8 +141,9 @@ pub struct SessionLifecycleEvent {
     /// Operator-facing peer label. Scoped IPv6 link-local peers render as
     /// `address%interface`; numbered peers may leave this absent.
     pub peer_label: Option<String>,
-    /// Unix epoch seconds, string-shaped to match `RouteEvent`.
-    pub timestamp: String,
+    /// Event time in Unix epoch milliseconds, captured when the event is
+    /// built.
+    pub timestamp_unix_ms: i64,
     /// Previous BGP FSM state, when this is a session transition.
     pub old_state: Option<SessionState>,
     /// New BGP FSM state, when this is a session transition.
@@ -173,8 +174,9 @@ pub struct SessionNotificationEvent {
     /// Operator-facing peer label. Scoped IPv6 link-local peers render as
     /// `address%interface`, matching lifecycle events so streams correlate.
     pub peer_label: Option<String>,
-    /// Unix epoch seconds, string-shaped to match `RouteEvent`.
-    pub timestamp: String,
+    /// Event time in Unix epoch milliseconds, captured when the event is
+    /// built.
+    pub timestamp_unix_ms: i64,
     /// BGP NOTIFICATION error code.
     pub code: u8,
     /// BGP NOTIFICATION error subcode.
@@ -207,8 +209,9 @@ pub struct PolicyEvent {
     pub peer_label: Option<String>,
     /// Number of currently managed peers the runtime mutation touched.
     pub affected_peer_count: usize,
-    /// Unix epoch seconds, string-shaped to match `RouteEvent`.
-    pub timestamp: String,
+    /// Event time in Unix epoch milliseconds, captured when the event is
+    /// built.
+    pub timestamp_unix_ms: i64,
     /// Operator-facing reason/summary.
     pub reason: String,
 }

@@ -67,7 +67,7 @@ impl FakeDaemon {
                 event_type,
                 peer: PEER,
                 peer_label: None,
-                timestamp: "0".to_string(),
+                timestamp_unix_ms: 0,
                 old_state: Some(old),
                 new_state: Some(new),
                 session_role: Some("primary".to_string()),

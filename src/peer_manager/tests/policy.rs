@@ -112,7 +112,7 @@ async fn policy_history_and_live_broadcast_share_arc_but_queries_are_owned() {
         peer: None,
         peer_label: None,
         affected_peer_count: 0,
-        timestamp: "1".to_string(),
+        timestamp_unix_ms: 1_000,
         reason: "original".to_string(),
     });
 

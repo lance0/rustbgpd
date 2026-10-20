@@ -330,10 +330,10 @@ struct SharedGroup {
     clippy::too_many_lines,
     reason = "mirrors the per-session grouping branches in one auditable pass"
 )]
-pub(super) fn encode_shared_unicast_slice(
+pub(super) fn encode_shared_unicast_slice<'r>(
     export: &SessionExportProfile,
-    cache: &mut PreparedAttrCache,
-    announce: &[Route],
+    cache: &mut PreparedAttrCache<'r>,
+    announce: &'r [Route],
     next_hop_override: &[Option<rustbgpd_policy::NextHopAction>],
     indices: &[usize],
 ) -> Option<Vec<SharedUnicastChunk>> {
