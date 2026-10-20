@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::injection_lease::{
-    ExpiryExit, InjectionLeases, LeaseGeneration, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiryExit, InjectionLeases, LeaseConflict, LeaseGeneration, MAX_KEYS_PER_OWNER,
+    MAX_LIVE_OWNERS,
 };
 use crate::update::{InjectOutcome, RibCommandError, RoutePage};
 
@@ -497,6 +498,7 @@ async fn late_expiry_of_an_old_generation_spares_a_retagged_key() {
 /// Ownership mismatches are refused with no change: a leased add onto an
 /// unowned key (convert by delete-then-add), onto another owner's key, an
 /// unowned add onto an owned key, and deletes with the wrong owner or `""`.
+/// Each carries the conflict the API reports as its `ErrorInfo` reason.
 /// `override_owner` deletes regardless.
 #[tokio::test(start_paused = true)]
 async fn ownership_mismatches_are_failed_precondition_and_change_nothing() {
@@ -508,32 +510,44 @@ async fn ownership_mismatches_are_failed_precondition_and_change_nothing() {
 
     let mut changed = local_route(1);
     changed.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
-    assert!(matches!(
-        leased_route(&h.tx, changed.clone(), "a", 30).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
+    let conflict = |result: Result<(), RibCommandError>| match result {
+        Err(RibCommandError::FailedPrecondition(conflict, _)) => Some(conflict),
+        _ => None,
+    };
+    assert_eq!(
+        conflict(
+            leased_route(&h.tx, changed.clone(), "a", 30)
+                .await
+                .map(drop)
+        ),
+        Some(LeaseConflict::KeyUnowned)
+    );
     let mut changed_owned = local_route(2);
     changed_owned.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
-    assert!(matches!(
-        leased_route(&h.tx, changed_owned.clone(), "b", 30).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
-    assert!(matches!(
-        unowned_route(&h.tx, changed_owned).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
-    assert!(matches!(
-        delete_route(&h.tx, 2, "", false).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
-    assert!(matches!(
-        delete_route(&h.tx, 2, "b", false).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
-    assert!(matches!(
-        delete_route(&h.tx, 1, "a", false).await,
-        Err(RibCommandError::FailedPrecondition(_))
-    ));
+    assert_eq!(
+        conflict(
+            leased_route(&h.tx, changed_owned.clone(), "b", 30)
+                .await
+                .map(drop)
+        ),
+        Some(LeaseConflict::OwnerMismatch)
+    );
+    assert_eq!(
+        conflict(unowned_route(&h.tx, changed_owned).await.map(drop)),
+        Some(LeaseConflict::OwnerMismatch)
+    );
+    assert_eq!(
+        conflict(delete_route(&h.tx, 2, "", false).await.map(drop)),
+        Some(LeaseConflict::OwnerMismatch)
+    );
+    assert_eq!(
+        conflict(delete_route(&h.tx, 2, "b", false).await.map(drop)),
+        Some(LeaseConflict::OwnerMismatch)
+    );
+    assert_eq!(
+        conflict(delete_route(&h.tx, 1, "a", false).await.map(drop)),
+        Some(LeaseConflict::KeyUnowned)
+    );
     assert_eq!(h.leases.list(Some("b")), Vec::new());
     h.settle().await;
     assert!(
@@ -705,7 +719,10 @@ async fn refused_leased_adds_leave_the_intern_table_alone() {
         route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);
         assert!(matches!(
             manager.inject_local_route(route, Some(("b", 30))),
-            Err(RibCommandError::FailedPrecondition(_))
+            Err(RibCommandError::FailedPrecondition(
+                LeaseConflict::OwnerMismatch,
+                _
+            ))
         ));
         let mut route = local_route(200);
         route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);

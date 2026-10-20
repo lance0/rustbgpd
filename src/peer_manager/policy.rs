@@ -3391,7 +3391,7 @@ impl PeerManager {
             )),
             Ok(Err(
                 error @ (RibCommandError::Internal(_)
-                | RibCommandError::FailedPrecondition(_)
+                | RibCommandError::FailedPrecondition(..)
                 | RibCommandError::ResourceExhausted(_)),
             )) => Err(DatasetRefreshFailure::Ambiguous(format!(
                 "dataset export re-evaluation: {error}"

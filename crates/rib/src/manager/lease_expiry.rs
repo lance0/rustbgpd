@@ -10,7 +10,7 @@ use tracing::warn;
 use super::helpers::{LOCAL_PEER, gauge_val};
 use super::{AdjRibIn, ExactExportKey, RibManager};
 use crate::injection_lease::{
-    ExpiredLease, InjectedKey, InjectionTag, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiredLease, InjectedKey, InjectionTag, LeaseConflict, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::route::FlowSpecRouteKey;
 use crate::update::RibCommandError;
@@ -58,13 +58,15 @@ impl RibManager {
         if holder == owner {
             Ok(())
         } else if holder.is_empty() {
-            Err(RibCommandError::FailedPrecondition(format!(
-                "key is held by no owner, not {owner:?}"
-            )))
+            Err(RibCommandError::FailedPrecondition(
+                LeaseConflict::KeyUnowned,
+                format!("key is held by no owner, not {owner:?}"),
+            ))
         } else {
-            Err(RibCommandError::FailedPrecondition(format!(
-                "key is held by owner {holder:?}"
-            )))
+            Err(RibCommandError::FailedPrecondition(
+                LeaseConflict::OwnerMismatch,
+                format!("key is held by owner {holder:?}"),
+            ))
         }
     }
 
@@ -81,13 +83,14 @@ impl RibManager {
     ) -> Result<InjectionTag, RibCommandError> {
         match self.injected_owners.get(key) {
             Some(tag) if &*tag.owner != owner => {
-                return Err(RibCommandError::FailedPrecondition(format!(
-                    "key is held by owner {:?}",
-                    tag.owner
-                )));
+                return Err(RibCommandError::FailedPrecondition(
+                    LeaseConflict::OwnerMismatch,
+                    format!("key is held by owner {:?}", tag.owner),
+                ));
             }
             None if present => {
                 return Err(RibCommandError::FailedPrecondition(
+                    LeaseConflict::KeyUnowned,
                     "key is held by no owner; delete it before a leased add".to_string(),
                 ));
             }
