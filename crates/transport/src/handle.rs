@@ -1103,9 +1103,13 @@ pub struct PeerSessionState {
     pub updates_received: u64,
     /// Total UPDATE messages sent.
     pub updates_sent: u64,
-    /// Total NOTIFICATION messages received.
+    /// Total NOTIFICATION messages received from this neighbor, all codes.
+    /// Read from the neighbor's [`crate::NeighborCounters`], so it persists
+    /// across session resets and replacement sessions until the neighbor is
+    /// deleted.
     pub notifications_received: u64,
-    /// Total NOTIFICATION messages sent.
+    /// Total NOTIFICATION messages sent to this neighbor, all codes (same
+    /// scope).
     pub notifications_sent: u64,
     /// Total BGP messages received, all types. Read from the per-peer
     /// telemetry counters, so the value is daemon-lifetime (persists
@@ -1114,7 +1118,8 @@ pub struct PeerSessionState {
     /// Total BGP messages sent, all types (daemon-lifetime; includes
     /// writer-task cadence KEEPALIVEs).
     pub messages_sent: u64,
-    /// Number of times the session went from Established to non-Established.
+    /// Number of times this neighbor's session went from Established to
+    /// non-Established (same scope as the NOTIFICATION totals).
     pub flap_count: u64,
     /// Seconds since last transition to Established (0 if never established).
     pub uptime_secs: u64,
