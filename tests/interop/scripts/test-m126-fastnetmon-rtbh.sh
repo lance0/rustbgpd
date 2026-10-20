@@ -229,6 +229,16 @@ expect_unbanned() { # label limit
 }
 
 # Fail if either prefix appears at FRR during the next N seconds.
+# Milliseconds from FRR's End-of-RIB to the first blackhole UPDATE after line
+# MARK of its log, or 0 when the UPDATE came first (FRR never dropped the ban).
+frr_gap_ms() { # mark eor-pattern update-pattern
+    docker exec "$FRR" tail -n +"$(($1 + 1))" /tmp/bgpd.log | awk -v e="$2" -v u="$3" '
+        function ms(line,  t) { split($2, t, /[:.]/); return ((t[1] * 60 + t[2]) * 60 + t[3]) * 1000 + t[4] }
+        index($0, e) && !te { te = ms($0) }
+        index($0, u) && !tu { tu = ms($0) }
+        END { if (!te || !tu) print "unknown"; else print (tu > te ? tu - te : 0) }'
+}
+
 expect_stays_absent() { # label seconds
     local end=$(($(date +%s) + $2)) seen="" unstable=""
     while [ "$(date +%s)" -lt "$end" ]; do
@@ -317,6 +327,7 @@ stop_one rustbgpd
 expect_stale "phase 2 daemon stopped, FRR keeps stale bans" 10
 sleep 10
 expect_stale "phase 2 stale bans held 10s into the outage" 1
+mark=$(docker exec "$FRR" sh -c 'wc -l < /tmp/bgpd.log')
 start_rustbgpd
 t0=$(date +%s)
 wait_session "phase 2 restart" 120 || true
@@ -338,6 +349,8 @@ else
 fi
 record "phase2_first_absent_after_start_s=${gap_from:-never}"
 record "phase2_bans_back_after_start_s=${back:-never}"
+record "phase2_v4_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "attr: nexthop $V4_NH, origin ?, community blackhole")"
+record "phase2_v6_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "mp_nexthop $V6_NH, community blackhole")"
 stop_replay
 expect_unbanned "phase 2 unban after restart" 90
 

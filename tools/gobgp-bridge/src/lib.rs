@@ -7,7 +7,8 @@
 //! Every other GoBGP method returns `UNIMPLEMENTED`.
 //!
 //! The bridge keeps the announced bans in memory and re-adds them on each
-//! reconcile pass, so a restarted daemon gets them back. A request succeeds
+//! reconcile pass, so a restarted daemon gets them back. A liveness probe
+//! starts a pass as soon as the daemon answers again after a restart. A request succeeds
 //! only after rustbgpd has acknowledged the mutation, and daemon errors are
 //! returned as they arrive.
 
@@ -124,6 +125,31 @@ pub fn load_token(path: &Path) -> Result<Bearer, String> {
 
 type Injection =
     rbgp::injection_service_client::InjectionServiceClient<InterceptedService<Channel, Bearer>>;
+type Control =
+    rbgp::control_service_client::ControlServiceClient<InterceptedService<Channel, Bearer>>;
+
+/// Default interval between daemon liveness probes.
+pub const DEFAULT_LIVENESS_POLL: Duration = Duration::from_millis(500);
+
+/// What the previous liveness probe saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Probe {
+    /// No probe yet.
+    Unknown,
+    /// The daemon did not answer, or a pass after it answered did not finish.
+    Down,
+    /// The daemon answered.
+    Up,
+}
+
+/// Whether a probe that did (`answered`) or did not answer, after `last`,
+/// means the daemon came back: it answers after a failed probe. That is how a
+/// restart shows, and a daemon that was unreachable for any other reason may
+/// also have lost its routes. The first probe after the bridge starts is not
+/// a restart.
+fn came_back(last: Probe, answered: bool) -> bool {
+    last == Probe::Down && answered
+}
 
 /// A lazily connected channel: the bridge starts while the daemon is down
 /// and reconnects on the next request after the daemon returns. Every RPC on
@@ -175,6 +201,7 @@ struct Desired {
 #[derive(Clone)]
 pub struct Bridge {
     injection: Injection,
+    control: Control,
     // ponytail: one lock serializes detector requests and reconcile passes,
     // which makes ordering trivial (a replay can never race a withdraw). A
     // pass over a very large set delays detector requests until it finishes.
@@ -187,10 +214,14 @@ impl Bridge {
     /// tracking at most `max_tracked` paths.
     #[must_use]
     pub fn new(channel: Channel, bearer: Option<Bearer>, max_tracked: usize) -> Self {
+        let bearer = bearer.unwrap_or(Bearer(None));
         Self {
             injection: rbgp::injection_service_client::InjectionServiceClient::with_interceptor(
-                channel,
-                bearer.unwrap_or(Bearer(None)),
+                channel.clone(),
+                bearer.clone(),
+            ),
+            control: rbgp::control_service_client::ControlServiceClient::with_interceptor(
+                channel, bearer,
             ),
             desired: Arc::default(),
             max_tracked,
@@ -261,8 +292,8 @@ impl Bridge {
     /// Retry pending withdrawals, then re-add every tracked announcement. An
     /// unchanged re-add is a no-op in the daemon; after a daemon restart it
     /// restores the ban. Stops at the first daemon error and tries again on
-    /// the next pass.
-    pub async fn reconcile(&self) {
+    /// the next pass. Returns whether the pass finished.
+    pub async fn reconcile(&self) -> bool {
         let mut desired = self.desired.lock().await;
         let mut injection = self.injection.clone();
         let deletes: Vec<_> = desired
@@ -273,7 +304,7 @@ impl Bridge {
         for (key, req) in deletes {
             if let Err(status) = injection.delete_path(req.clone()).await {
                 warn!(code = ?status.code(), error = status.message(), "reconcile paused");
-                return;
+                return false;
             }
             desired.pending_deletes.remove(&key);
             info!(action = "withdraw", prefix = %prefix_of(&req.prefix, req.prefix_length), "retried withdrawal applied");
@@ -288,10 +319,11 @@ impl Bridge {
                 }
                 Err(status) => {
                     warn!(code = ?status.code(), error = status.message(), "reconcile paused");
-                    return;
+                    return false;
                 }
             }
         }
+        true
     }
 
     /// Run `reconcile` every `interval` for the life of the process.
@@ -303,6 +335,42 @@ impl Bridge {
             loop {
                 tick.tick().await;
                 bridge.reconcile().await;
+            }
+        });
+    }
+
+    /// Probe the daemon with `CheckLiveness` every `poll` for the life of the
+    /// process, and run `reconcile` at once when the daemon answers after a
+    /// failed probe. `CheckLiveness` is the daemon's cheapest call and is
+    /// audited at DEBUG. A restart quicker than one probe goes unseen here;
+    /// the periodic pass is the backstop.
+    pub fn spawn_restart_watch(&self, poll: Duration) {
+        let bridge = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(poll);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last = Probe::Unknown;
+            loop {
+                tick.tick().await;
+                let answered = bridge
+                    .control
+                    .clone()
+                    .check_liveness(rbgp::CheckLivenessRequest {})
+                    .await
+                    .is_ok();
+                last = if !answered {
+                    Probe::Down
+                } else if came_back(last, answered) {
+                    info!("rustbgpd answered again; reconciling now");
+                    // An unfinished pass is retried on the next answer.
+                    if bridge.reconcile().await {
+                        Probe::Up
+                    } else {
+                        Probe::Down
+                    }
+                } else {
+                    Probe::Up
+                };
             }
         });
     }
@@ -371,6 +439,17 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daemon_comes_back_when_it_answers_after_a_failed_probe() {
+        assert!(came_back(Probe::Down, true));
+        // Bridge start, still down, or running.
+        assert!(!came_back(Probe::Unknown, true));
+        assert!(!came_back(Probe::Unknown, false));
+        assert!(!came_back(Probe::Down, false));
+        assert!(!came_back(Probe::Up, true));
+        assert!(!came_back(Probe::Up, false));
+    }
 
     #[test]
     fn listen_address_must_be_loopback_unless_allowed() {
