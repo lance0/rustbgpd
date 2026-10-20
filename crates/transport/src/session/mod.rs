@@ -561,7 +561,7 @@ pub(crate) struct PeerSession {
     import_policy_routes_permitted: u64,
     import_policy_routes_denied: u64,
     /// Times this actor left Established; only for connect-failure logging.
-    /// The operator-facing count is the peer's daemon-lifetime telemetry.
+    /// The operator-facing count is the neighbor's `NeighborCounters`.
     flap_count: u64,
     established_at: Option<tokio::time::Instant>,
     last_error: String,

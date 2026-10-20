@@ -3260,10 +3260,7 @@ async fn ipv4_mp_reach_next_hop_length_boundary() {
                 );
                 assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
                 assert_eq!(
-                    session
-                        .metrics
-                        .peer_session_totals(&session.peer_label)
-                        .notifications_sent,
+                    session.config.neighbor_counters.notifications_sent(),
                     0,
                     "{case}"
                 );
@@ -3371,10 +3368,7 @@ async fn labeled_ipv4_mp_reach_next_hop_length_boundary() {
                 assert_eq!(announced[0].next_hop, *expected_next_hop, "{case}");
                 assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
                 assert_eq!(
-                    session
-                        .metrics
-                        .peer_session_totals(&session.peer_label)
-                        .notifications_sent,
+                    session.config.neighbor_counters.notifications_sent(),
                     0,
                     "{case}"
                 );

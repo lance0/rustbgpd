@@ -2671,10 +2671,28 @@ async fn establish_inbound(
     client
 }
 
+/// Sum of one counter family's series for a `peer` label.
+fn prometheus_peer_total(metrics: &BgpMetrics, family: &str, peer: &str) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .filter(|metric_family| metric_family.name() == family)
+        .flat_map(prometheus::proto::MetricFamily::get_metric)
+        .filter(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|pair| pair.name() == "peer" && pair.value() == peer)
+        })
+        .map(|metric| metric.get_counter().get_value())
+        .sum()
+}
+
 /// A peer Hard Reset (Cease 6/9) followed by a reconnect replaces the
-/// session actor. The neighbor's flap and NOTIFICATION counters are
-/// daemon-lifetime: after the new session establishes they still equal the
-/// Prometheus counters, not the fresh actor's zeros.
+/// session actor. The neighbor's flap and NOTIFICATION counters live in the
+/// neighbor's counter block, shared by both sessions: after the new session
+/// establishes the API still reads the block, and Prometheus agrees.
 #[tokio::test]
 async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
@@ -2729,12 +2747,37 @@ async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
         .iter()
         .find(|row| row.address == peer_addr)
         .expect("neighbor row");
-    let totals = mgr
-        .metrics
-        .peer_session_totals(&rustbgpd_telemetry::peer_label(peer_addr));
-    assert_eq!(totals.flaps, 1, "bgp_session_flaps_total counts the reset");
-    assert_eq!(totals.notifications_received, 1);
-    assert_eq!(row.flap_count, totals.flaps);
-    assert_eq!(row.notifications_received, totals.notifications_received);
-    assert_eq!(row.notifications_sent, totals.notifications_sent);
+    let block = mgr.peers[&key(peer_addr)]
+        .transport_config
+        .neighbor_counters
+        .clone();
+    assert_eq!(block.flaps(), 1, "the reset counts once");
+    assert_eq!(block.notifications_received(), 1);
+    assert_eq!(
+        (
+            row.flap_count,
+            row.notifications_received,
+            row.notifications_sent
+        ),
+        (
+            block.flaps(),
+            block.notifications_received(),
+            block.notifications_sent()
+        )
+    );
+    let label = rustbgpd_telemetry::peer_label(peer_addr);
+    for (family, api) in [
+        ("bgp_session_flaps_total", row.flap_count),
+        (
+            "bgp_notifications_received_total",
+            row.notifications_received,
+        ),
+        ("bgp_notifications_sent_total", row.notifications_sent),
+    ] {
+        let prometheus = prometheus_peer_total(&mgr.metrics, family, &label);
+        assert!(
+            (prometheus - f64::from(u32::try_from(api).unwrap())).abs() < f64::EPSILON,
+            "{family} {prometheus} agrees with the API value {api}"
+        );
+    }
 }

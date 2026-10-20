@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::ControlFlow;
@@ -572,6 +572,11 @@ pub struct PeerManager {
     dynamic_ranges: Vec<DynamicRange>,
     /// Current number of active dynamic peers (for limit enforcement).
     dynamic_peer_count: usize,
+    /// Lifetime counter blocks by neighbor key, shared with every session
+    /// spawned for that neighbor. A block lives until the neighbor is
+    /// deleted, like its Prometheus series, so a reconfigure that re-adds
+    /// the neighbor keeps counting.
+    neighbor_counters: BTreeMap<PeerKey, rustbgpd_transport::NeighborCounters>,
     /// Maximum dynamic peers allowed. Default 100.
     dynamic_neighbor_limit: u32,
     /// ADR-0120 per-source accept-rate limiter. `None` when
@@ -1222,6 +1227,7 @@ impl PeerManager {
             staged_policy_routes_prior: None,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
+            neighbor_counters: BTreeMap::new(),
             dynamic_neighbor_limit: current_config.effective_dynamic_neighbor_limit(),
             inbound_admission: admission::InboundAdmission::from_config(
                 &current_config.inbound_admission,

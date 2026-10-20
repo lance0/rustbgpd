@@ -366,13 +366,7 @@ async fn outbound_pacing_releases_deadline_after_filtered_slice() {
         assert!(session.pending_outbound.is_none());
         assert!(session.outbound_admission_timer.is_none());
         assert_eq!(session.fsm.state(), SessionState::Established);
-        assert_eq!(
-            session
-                .metrics
-                .peer_session_totals(&session.peer_label)
-                .notifications_sent,
-            0
-        );
+        assert_eq!(session.config.neighbor_counters.notifications_sent(), 0);
     }
 }
 

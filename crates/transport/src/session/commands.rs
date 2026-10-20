@@ -1110,10 +1110,10 @@ impl PeerSession {
         // OpenConfirm.
         let neg = self.fsm.negotiated().or(self.negotiated.as_deref());
         let (messages_received, messages_sent) = self.metrics.peer_message_totals(&self.peer_label);
-        // Daemon-lifetime per neighbor: a replacement session (collision
-        // promotion, admin reset, recovery respawn) starts with fresh actor
-        // state, so these come from the peer's telemetry counters.
-        let totals = self.metrics.peer_session_totals(&self.peer_label);
+        // Daemon-lifetime per neighbor: a replacement session (inbound
+        // reconnect, collision promotion, recovery respawn) shares the
+        // neighbor's counter block instead of starting from fresh actor state.
+        let totals = &self.config.neighbor_counters;
         let prefix_count = self.known_prefix_count();
         let prefix_count_ipv4 = self.known_unicast_v4;
         let prefix_count_ipv6 = self.known_unicast_v6;
@@ -1220,14 +1220,14 @@ impl PeerSession {
                 .unwrap_or_default(),
             updates_received: self.updates_received,
             updates_sent: self.updates_sent,
-            notifications_received: totals.notifications_received,
-            notifications_sent: totals.notifications_sent,
+            notifications_received: totals.notifications_received(),
+            notifications_sent: totals.notifications_sent(),
             messages_received,
             messages_sent,
             otc_routes_blocked: self.otc_routes_blocked,
             import_policy_routes_permitted: self.import_policy_routes_permitted,
             import_policy_routes_denied: self.import_policy_routes_denied,
-            flap_count: totals.flaps,
+            flap_count: totals.flaps(),
             uptime_secs,
             last_error: self.last_error.clone(),
             tcp_ao_info: self.tcp_ao_info.clone().map(Box::new),
@@ -1851,6 +1851,7 @@ impl PeerSession {
                 );
                 self.emit_notification_event(SessionNotificationDirection::Sent, &notif, None);
                 let _ = self.enqueue_priority(&Message::Notification(notif));
+                self.config.neighbor_counters.record_notification_sent();
                 self.metrics.record_notification_sent(
                     &self.peer_label,
                     &NotificationCode::Cease.as_u8().to_string(),

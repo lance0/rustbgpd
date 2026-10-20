@@ -657,15 +657,15 @@ message NeighborState {
   uint64 prefixes_sent = 5;
   uint64 updates_received = 6;
   uint64 updates_sent = 7;
-  // NOTIFICATION messages received from / sent to this neighbor, all codes.
-  // Mirror bgp_notifications_{received,sent}_total summed over code and
-  // subcode: daemon-lifetime per neighbor, persisting across session resets
-  // and replacement sessions, cleared only by daemon restart or neighbor
+  // NOTIFICATION messages received from / sent to this neighbor, all codes:
+  // the events bgp_notifications_{received,sent}_total count. Daemon-lifetime
+  // per neighbor (address and interface), persisting across session resets
+  // and replacement sessions; cleared only by daemon restart or neighbor
   // deletion.
   uint64 notifications_received = 8;
   uint64 notifications_sent = 9;
-  // Transitions out of Established. Mirrors bgp_session_flaps_total, with
-  // the same daemon-lifetime scope as the notification counters.
+  // Transitions out of Established (the events bgp_session_flaps_total
+  // counts), with the same per-neighbor daemon-lifetime scope.
   uint64 flap_count = 10;
   string last_error = 11;
   // True for peers auto-created from a dynamic_neighbors prefix range.

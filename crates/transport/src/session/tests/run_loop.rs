@@ -281,10 +281,7 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
     session.trigger_outbound_saturation_teardown();
     session.trigger_outbound_saturation_teardown();
     assert_eq!(
-        session
-            .metrics
-            .peer_session_totals(&session.peer_label)
-            .notifications_sent,
+        session.config.neighbor_counters.notifications_sent(),
         1,
         "a duplicate saturation trigger must not invent another sent notification"
     );
