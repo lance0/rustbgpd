@@ -1,0 +1,5 @@
+# Build-context exclusions for .oss-scanner/Dockerfile only. BuildKit reads this file instead of the root
+# .dockerignore, which trims the release image's context: it drops docs/artifacts/, integrations/ and other inputs
+# that tests and the audit need.
+target/
+**/target/
