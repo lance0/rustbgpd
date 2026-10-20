@@ -470,5 +470,179 @@ sample_row 0 0 0 0'''
         for script in ("hot-reload", "inject-churn"):
             self.assertEqual(self.bash(f"run-soak-{script}.sh", body).returncode, 19)
 
+LEASE_META = {
+    "soak_seconds": 120, "warmup_sec": 0, "churn_interval_sec": 7200,
+    "lease_mode": 1, "lease_owners": 2, "lease_keys_per_owner": 4,
+    "lease_seconds": 10, "lease_renew_sec": 3, "lease_flap_interval_sec": 60,
+}
+LEASE_FIELDS = ["timestamp", "rss_mb", "intern_size", "bgp_established",
+                "elapsed_sec", "live_target", "frr_route_count", "churn_cycles",
+                "add_total", "del_total", "flap_count", "uptime_seconds"]
+LEASE_ROWS = [
+    {**BASE, "elapsed_sec": str(elapsed), "live_target": "8", "frr_route_count": "8",
+     "churn_cycles": str(cycles), "add_total": "8", "del_total": "0",
+     "flap_count": "0", "uptime_seconds": str(10 + elapsed)}
+    for elapsed, cycles in ((0, 0), (120, 1))
+]
+# The banner a daemon with both gRPC listeners prints (TCP, then UDS).
+DUAL_LISTENER_LOG = (
+    "  rustbgpd 0.79.0 | AS 65001 | router-id 10.0.0.1\n"
+    "  |- 1 peers (1 eBGP)\n"
+    "  |- grpc: tcp://0.0.0.0:50051 (token auth)\n"
+    "  |- grpc: unix:///var/lib/rustbgpd/grpc.sock\n"
+    "  |- metrics: http://0.0.0.0:9179/metrics\n"
+    "\n" + CLEAN_LOG
+)
+# Owner 1 is healthy; owner 2 flaps once: its last renewal was sent at 103.0
+# and answered at 103.1, so its lease ends in [113.0, 113.1] and FRR must
+# have lost every key by 118.1.
+LEASE_EVENTS = """\
+100.0 soak-lease-1 controller_start pid=11
+100.0 soak-lease-2 controller_start pid=12
+101.0 soak-lease-1 added gen=77:1
+101.5 soak-lease-2 added gen=77:2
+103.1 soak-lease-1 renew renewed
+103.1 soak-lease-2 renew renewed
+106.1 soak-lease-1 renew renewed
+106.5 soak-lease-2 flap_stop gen=77:2 t0=103.0 t1=103.1
+113.6 soak-lease-2 frr_gone drop=113.4 at=113.6
+113.7 soak-lease-2 stale_renew refused phase=expired
+114.0 soak-lease-2 added gen=77:3
+114.1 soak-lease-2 stale_renew refused phase=superseded
+114.5 soak-lease-2 frr_back drop=none at=114.5
+117.0 soak-lease-2 renew renewed
+220.0 soak-lease-1 controller_exit rc=0
+220.0 soak-lease-2 controller_exit rc=0
+"""
+
+
+def lease_sample(elapsed, counts=(4, 4), owners=("soak-lease-1", "soak-lease-2")):
+    leases = [{"owner": o, "generation": {"incarnation": "77", "sequence": "1"},
+               "leaseSeconds": 10, "leaseRemainingMs": 9000} for o in owners]
+    return json.dumps({"elapsed_sec": elapsed, "frr_counts": list(counts),
+                       "leases": leases})
+
+
+LEASE_SAMPLES = "\n".join([lease_sample(0), lease_sample(60), lease_sample(120)]) + "\n"
+READYZ = "epoch,code,seconds\n" + "".join(f"{100 + i},200,0.001\n" for i in range(60))
+
+
+def run_lease_analyzer(events=LEASE_EVENTS, samples=LEASE_SAMPLES, readyz=READYZ,
+                       metadata=LEASE_META):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "run.json").write_text(json.dumps(metadata))
+        (root / "rustbgpd.log").write_text(DUAL_LISTENER_LOG)
+        with (root / "samples.csv").open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=LEASE_FIELDS)
+            writer.writeheader()
+            writer.writerows(LEASE_ROWS)
+        for name, text in (("lease-events.log", events),
+                           ("lease-samples.jsonl", samples), ("readyz.csv", readyz)):
+            if text is not None:
+                (root / name).write_text(text)
+        return subprocess.run(
+            ["python3", str(HERE / "analyze-soak-inject-churn.py"), tmp],
+            text=True, capture_output=True, check=False,
+        )
+
+
+class LeaseModeContracts(unittest.TestCase):
+    def test_clean_lease_run_passes(self):
+        result = run_lease_analyzer()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        gates = json.loads(result.stdout)["gates"]
+        self.assertEqual(gates["lease_flap_expiry"]["value"]["cycles"], 1)
+        self.assertEqual(gates["lease_stale_renewals_refused"]["value"]["by_phase"],
+                         {"expired": {"attempts": 1, "refused": 1},
+                          "superseded": {"attempts": 1, "refused": 1}})
+
+    def test_lease_gates_are_skipped_without_lease_mode(self):
+        result = run_lease_analyzer(events=None, samples=None, readyz=None,
+                                    metadata={**LEASE_META, "lease_mode": 0})
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn("readyz", json.loads(result.stdout)["gates"])
+
+    def test_seeded_defects_fail_exactly_their_gate(self):
+        events = LEASE_EVENTS
+        cases = {
+            # A renewal at a superseded generation was accepted, as when
+            # the daemon skips the generation check.
+            "stale_renewal_accepted": ("lease_stale_renewals_refused", {
+                "events": events.replace("stale_renew refused phase=superseded",
+                                         "stale_renew renewed phase=superseded")}),
+            # A renewal resurrected an expired lease.
+            "expired_renewal_accepted": ("lease_stale_renewals_refused", {
+                "events": events.replace("stale_renew refused phase=expired",
+                                         "stale_renew renewed phase=expired")}),
+            "stale_renewal_errored": ("lease_stale_renewals_refused", {
+                "events": events.replace("stale_renew refused phase=expired",
+                                         "stale_renew error phase=expired")}),
+            "stale_renewal_skipped": ("lease_flap_expiry", {
+                "events": events.replace("114.1 soak-lease-2 stale_renew refused phase=superseded\n", "")}),
+            # A healthy owner's prefixes went missing at FRR.
+            "healthy_prefixes_missing": ("lease_healthy_presence", {
+                "samples": LEASE_SAMPLES + lease_sample(120, counts=(3, 4)) + "\n"}),
+            "healthy_lease_missing": ("lease_healthy_presence", {
+                "samples": lease_sample(60, owners=("soak-lease-2",)) + "\n"}),
+            "no_presence_samples": ("lease_healthy_presence", {"samples": ""}),
+            "expiry_late": ("lease_flap_expiry", {
+                "events": events.replace("at=113.6", "at=118.2")}),
+            "expiry_never": ("lease_flap_expiry", {
+                "events": events.replace("drop=113.4 at=113.6", "drop=none timeout")}),
+            "expiry_early": ("lease_flap_expiry", {
+                "events": events.replace("drop=113.4", "drop=112.9")}),
+            "never_back": ("lease_flap_expiry", {
+                "events": events.replace("frr_back drop=none at=114.5", "frr_back drop=none timeout")}),
+            "incomplete_cycle": ("lease_flap_expiry", {
+                "events": events.replace("114.5 soak-lease-2 frr_back drop=none at=114.5\n", "")}),
+            "no_cycles": ("lease_flap_expiry", {
+                "events": "".join(line + "\n" for line in events.splitlines()
+                                  if "flap_stop" not in line and "frr_" not in line)}),
+            "generation_reused": ("lease_generation_increase", {
+                "events": events.replace("added gen=77:3", "added gen=77:2")}),
+            "generation_new_incarnation": ("lease_generation_increase", {
+                "events": events.replace("added gen=77:3", "added gen=78:3")}),
+            "healthy_renewal_refused": ("lease_renewals", {
+                "events": events.replace("106.1 soak-lease-1 renew renewed",
+                                         "106.1 soak-lease-1 renew refused")}),
+            "controller_failed": ("lease_controllers", {
+                "events": events.replace("soak-lease-1 controller_exit rc=0",
+                                         "soak-lease-1 controller_exit rc=1")}),
+            "controller_exit_missing": ("lease_controllers", {
+                "events": events.replace("220.0 soak-lease-1 controller_exit rc=0\n", "")}),
+            "readyz_503": ("readyz", {"readyz": READYZ + "200,503,0.201\n"}),
+            "readyz_unreachable": ("readyz", {"readyz": READYZ + "200,000,5.0\n"}),
+            "readyz_too_few": ("readyz", {"readyz": "epoch,code,seconds\n100,200,0.001\n"}),
+        }
+        for name, (target, kwargs) in cases.items():
+            with self.subTest(name):
+                result = run_lease_analyzer(**kwargs)
+                self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+                gates = json.loads(result.stdout)["gates"]
+                self.assertFalse(gates[target]["pass"], gates[target])
+                self.assertEqual([k for k, g in gates.items() if not g["pass"]], [target])
+
+    def test_missing_or_malformed_lease_evidence_is_input_error(self):
+        cases = {
+            "no_events": {"events": None},
+            "no_samples": {"samples": None},
+            "no_readyz": {"readyz": None},
+            "unknown_owner": {"events": LEASE_EVENTS + "1.0 someone renew renewed\n"},
+            "bad_timestamp": {"events": LEASE_EVENTS + "x soak-lease-1 renew renewed\n"},
+            "short_counts": {"samples": json.dumps(
+                {"elapsed_sec": 0, "frr_counts": [4], "leases": []}) + "\n"},
+            "bad_json": {"samples": "{\n"},
+            "readyz_header": {"readyz": "epoch,code\n1,200\n"},
+            "readyz_code": {"readyz": READYZ + "1,abc,0.1\n"},
+            "lease_meta": {"metadata": {**LEASE_META, "lease_seconds": 0}},
+            "lease_mode": {"metadata": {**LEASE_META, "lease_mode": "1"}},
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                result = run_lease_analyzer(**kwargs)
+                self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

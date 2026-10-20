@@ -16,12 +16,26 @@
 #   SOAK_HOURS=24  bash tests/soak/run-soak-inject-churn.sh     # 24h
 #   bash tests/soak/run-soak-inject-churn.sh                    # 24h default
 #
+# Lease mode (LEASE_MODE=1, off by default) adds ADR-0141 owner leases
+# beside the unowned churn. LEASE_OWNERS controllers each hold
+# LEASE_KEYS_PER_OWNER leased /32s (owner k uses 172.(15+k).0.0/16) under a
+# LEASE_SECONDS lease and renew every LEASE_RENEW_SEC. The last owner
+# flaps: every LEASE_FLAP_INTERVAL_SEC it stops renewing, waits for FRR to
+# lose its keys and re-adds under a new generation; a renewal at the old
+# generation must be refused both before and after the re-add. The controllers call AddLeasedPath,
+# RenewLease and ListInjectionLeases with grpcurl over the lab's gRPC TCP
+# listener, using the shared public test-only token, and a 1 Hz prober
+# records /readyz. Requires grpcurl and jq on the host.
+#
 # Output: tests/soak/runs/soak-inject-churn-<UTC>/
 #   - samples.csv      one row per sample interval
 #   - soak.log         harness stdout/stderr
 #   - churn.log        per-cycle add/delete log
 #   - rustbgpd.log     rustbgpd daemon log copied from inside the container
 #   - run.json         run metadata
+#   - lease-events.log     (lease mode) controller adds, renewals and flap cycles
+#   - lease-samples.jsonl  (lease mode) per-sample FRR counts per owner + lease table
+#   - readyz.csv           (lease mode) 1 Hz /readyz status and latency
 
 set -euo pipefail
 
@@ -49,6 +63,16 @@ FRR_IP="${FRR_IP:-10.0.0.2}"
 GRPC_ADDR="${GRPC_ADDR:-unix:///var/lib/rustbgpd/grpc.sock}"
 NEXTHOP="${NEXTHOP:-10.0.0.1}"
 
+LEASE_MODE="${LEASE_MODE:-0}"
+LEASE_OWNERS="${LEASE_OWNERS:-4}"
+LEASE_KEYS_PER_OWNER="${LEASE_KEYS_PER_OWNER:-512}"
+LEASE_SECONDS="${LEASE_SECONDS:-30}"
+LEASE_RENEW_SEC="${LEASE_RENEW_SEC:-10}"
+LEASE_FLAP_INTERVAL_SEC="${LEASE_FLAP_INTERVAL_SEC:-600}"
+LEASE_TOKEN_FILE="${LEASE_TOKEN_FILE:-$REPO_ROOT/tests/fixtures/grpc-test-only-operator.token}"
+LEASE_GRPC_ADDR=""
+LEASE_PIDS=()
+
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RUN_DIR_OVERRIDE:-$SOAK_SCRIPT_DIR/runs/soak-inject-churn-$RUN_ID}"
 
@@ -58,6 +82,10 @@ CHURN_LOG="$RUN_DIR/churn.log"
 RUN_JSON="$RUN_DIR/run.json"
 RUSTBGPD_LOG="$RUN_DIR/rustbgpd.log"
 LIVE_SET_FILE="$RUN_DIR/live-prefix-indexes.txt"
+LEASE_EVENTS="$RUN_DIR/lease-events.log"
+LEASE_SAMPLES="$RUN_DIR/lease-samples.jsonl"
+READYZ_CSV="$RUN_DIR/readyz.csv"
+LEASE_STOP_FILE="$RUN_DIR/lease-stop"
 
 # shellcheck source=tests/soak/host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
@@ -196,13 +224,16 @@ container_rss_mb() {
     ' 2>/dev/null || true
 }
 
+# Unowned churn routes only: the lease-mode pool (172.16.0.0/12) is
+# counted per owner by lease_frr_count.
 frr_route_count() {
     frr_vtysh "show bgp ipv4 unicast json" |
-        python3 -c 'import json,sys
+        python3 -c 'import ipaddress,json,sys
 d=json.load(sys.stdin)
 r=d.get("routes")
 if not isinstance(r, dict): raise SystemExit(2)
-print(len(r))'
+pool=ipaddress.ip_network("172.16.0.0/12")
+print(sum(1 for p in r if not ipaddress.ip_network(p).subnet_of(pool)))'
 }
 
 run_analyzer() {
@@ -237,6 +268,12 @@ write_run_json() {
         printf '  "prefix_pool_size": %d,\n' "$PREFIX_POOL_SIZE"
         printf '  "live_target_prefixes": %d,\n' "$LIVE_TARGET_PREFIXES"
         printf '  "warmup_sec": %d,\n' "$WARMUP_SEC"
+        printf '  "lease_mode": %d,\n' "$LEASE_MODE"
+        printf '  "lease_owners": %d,\n' "$LEASE_OWNERS"
+        printf '  "lease_keys_per_owner": %d,\n' "$LEASE_KEYS_PER_OWNER"
+        printf '  "lease_seconds": %d,\n' "$LEASE_SECONDS"
+        printf '  "lease_renew_sec": %d,\n' "$LEASE_RENEW_SEC"
+        printf '  "lease_flap_interval_sec": %d,\n' "$LEASE_FLAP_INTERVAL_SEC"
         printf '  "rustbgpd_container": "%s",\n' "$RUSTBGPD"
         printf '  "frr_container": "%s",\n' "$FRR"
         printf '  "topology": "%s"\n' "$TOPOLOGY"
@@ -273,6 +310,7 @@ drain_live_prefixes() {
 cleanup() {
     local exit_code=$?
     set +e
+    stop_lease_controllers
     drain_live_prefixes
     stop_log_stream
     if [ "$CLEANUP" = "1" ]; then
@@ -300,6 +338,238 @@ validate_config() {
         log "ERROR: PREFIX_POOL_SIZE - LIVE_TARGET_PREFIXES must be at least CHURN_BATCH"
         exit 2
     fi
+    case "$LEASE_MODE" in
+        0) return 0 ;;
+        1) ;;
+        *) log "ERROR: LEASE_MODE must be 0 or 1"; exit 2 ;;
+    esac
+    # Owners map to 172.16-31.x.x (disjoint from the 10.x churn pool); the
+    # daemon allows 16,384 keys per owner and leases of 5..=3600 s.
+    if [ "$LEASE_OWNERS" -lt 2 ] || [ "$LEASE_OWNERS" -gt 16 ] \
+        || [ "$LEASE_KEYS_PER_OWNER" -lt 1 ] || [ "$LEASE_KEYS_PER_OWNER" -gt 16384 ] \
+        || [ "$LEASE_SECONDS" -lt 5 ] || [ "$LEASE_SECONDS" -gt 3600 ] \
+        || [ "$LEASE_RENEW_SEC" -lt 1 ] || [ $((2 * LEASE_RENEW_SEC)) -ge "$LEASE_SECONDS" ] \
+        || [ "$LEASE_FLAP_INTERVAL_SEC" -le "$LEASE_SECONDS" ]; then
+        log "ERROR: lease mode needs 2-16 owners, 1-16384 keys each, a 5-3600 s lease," \
+            "renewal under half the lease and a flap interval above the lease"
+        exit 2
+    fi
+}
+
+lease_owner() {
+    printf 'soak-lease-%d' "${1:?}"
+}
+
+lease_prefix_addr() {
+    local k=${1:?} i=${2:?}
+    printf '172.%d.%d.%d' $((15 + k)) $(((i >> 8) & 255)) $((i & 255))
+}
+
+lease_event() {
+    printf '%s %s\n' "$(date +%s.%N)" "$*" >>"$LEASE_EVENTS"
+}
+
+# grpcurl against the lab's TCP listener with the shared test-only token,
+# the same controller shape as tests/interop/scripts/test-m22-lease-expiry.sh.
+lease_grpc() {
+    local method=${1:?} token=""
+    shift
+    IFS= read -r token <"$LEASE_TOKEN_FILE"
+    [ -n "$token" ] || return 1
+    grpcurl -plaintext -import-path "$REPO_ROOT" -proto proto/rustbgpd.proto \
+        -H "authorization: Bearer $token" "$@" "$LEASE_GRPC_ADDR" \
+        "rustbgpd.v1.InjectionService/$method"
+}
+
+# "<incarnation>:<sequence>" of the generation in a response on stdin.
+lease_gen_of() {
+    jq -er '.generation | "\(.incarnation // "0"):\(.sequence // "0")"'
+}
+
+# Add every key of owner $1 under its lease. Sets LEASE_GEN from the last
+# add and LEASE_OK_T0/T1 to the bracket around it; any failure fails.
+lease_add_all() {
+    local k=${1:?} owner i out t0
+    owner=$(lease_owner "$k")
+    for ((i = 0; i < LEASE_KEYS_PER_OWNER; i++)); do
+        t0=$(date +%s.%N)
+        if ! out=$(lease_grpc AddLeasedPath -d "{\"path\": {\"prefix\": \"$(lease_prefix_addr "$k" "$i")\", \"prefixLength\": 32, \"nextHop\": \"$NEXTHOP\"}, \"lease\": {\"owner\": \"$owner\", \"leaseSeconds\": $LEASE_SECONDS}}" 2>&1); then
+            lease_event "$owner add_failed $(tr '\n' ' ' <<<"$out")"
+            return 1
+        fi
+    done
+    LEASE_OK_T1=$(date +%s.%N)
+    LEASE_OK_T0=$t0
+    if ! LEASE_GEN=$(lease_gen_of <<<"$out"); then
+        lease_event "$owner add_failed unparsable generation"
+        return 1
+    fi
+    lease_event "$owner added gen=$LEASE_GEN"
+}
+
+# One RenewLease for owner $1 at generation $2 ("inc:seq"); prints
+# renewed, refused (FAILED_PRECONDITION) or error.
+lease_renew() {
+    local owner=${1:?} gen=${2:?} out
+    if out=$(lease_grpc RenewLease -d "{\"owner\": \"$owner\", \"generation\": {\"incarnation\": \"${gen%%:*}\", \"sequence\": \"${gen##*:}\"}, \"leaseSeconds\": $LEASE_SECONDS}" 2>&1); then
+        echo renewed
+    elif grep -q FailedPrecondition <<<"$out"; then
+        echo refused
+    else
+        echo "error $(tr '\n' ' ' <<<"$out")"
+    fi
+}
+
+# FRR's count of owner $1's /32s.
+lease_frr_count() {
+    frr_vtysh "show bgp ipv4 unicast 172.$((15 + ${1:?})).0.0/16 longer-prefixes json" 2>/dev/null |
+        python3 -c 'import json,sys
+d=json.load(sys.stdin)
+r=d.get("routes", {})
+if not isinstance(r, dict): raise SystemExit(2)
+print(len(r))'
+}
+
+# Wait (polling twice a second) until FRR holds exactly $2 of owner $1's
+# keys or $3 epoch seconds pass; prints the first observation time of each
+# fewer-than-full count as "drop=<t>" and of the target as "at=<t>".
+lease_wait_frr() {
+    local k=${1:?} want=${2:?} limit=${3:?} count drop=""
+    while [ "$(date +%s)" -le "$limit" ]; do
+        count=$(lease_frr_count "$k") || count=""
+        if [ -n "$count" ]; then
+            if [ -z "$drop" ] && [ "$count" -lt "$LEASE_KEYS_PER_OWNER" ]; then
+                drop=$(date +%s.%N)
+            fi
+            if [ "$count" -eq "$want" ]; then
+                printf 'drop=%s at=%s\n' "${drop:-none}" "$(date +%s.%N)"
+                return 0
+            fi
+        fi
+        sleep 0.5
+    done
+    printf 'drop=%s timeout\n' "${drop:-none}"
+    return 1
+}
+
+# Stop renewing owner $1 (generation $2) and observe its expiry at FRR.
+# Renewing the old generation must be refused both once it has expired
+# (no resurrection) and once the re-add has superseded it (the generation
+# check itself).
+lease_flap_cycle() {
+    local k=${1:?} gen=${2:?} owner seen
+    owner=$(lease_owner "$k")
+    lease_event "$owner flap_stop gen=$gen t0=$LEASE_OK_T0 t1=$LEASE_OK_T1"
+    seen=$(lease_wait_frr "$k" 0 $((${LEASE_OK_T1%.*} + LEASE_SECONDS + 30))) || true
+    lease_event "$owner frr_gone $seen"
+    lease_event "$owner stale_renew $(lease_renew "$owner" "$gen") phase=expired"
+    lease_add_all "$k" || return 1
+    lease_event "$owner stale_renew $(lease_renew "$owner" "$gen") phase=superseded"
+    seen=$(lease_wait_frr "$k" "$LEASE_KEYS_PER_OWNER" $(($(date +%s) + 60))) || true
+    lease_event "$owner frr_back $seen"
+}
+
+# One owner's controller. The last owner flaps; every owner re-adds its
+# full state when a renewal is refused, as a real controller must.
+lease_owner_loop() {
+    local k=${1:?} owner gen t0 result next_flap=""
+    owner=$(lease_owner "$k")
+    lease_add_all "$k" || return 1
+    gen=$LEASE_GEN
+    if [ "$k" -eq "$LEASE_OWNERS" ]; then
+        next_flap=$(($(date +%s) + LEASE_FLAP_INTERVAL_SEC))
+    fi
+    while [ ! -e "$LEASE_STOP_FILE" ]; do
+        if [ -n "$next_flap" ] && [ "$(date +%s)" -ge "$next_flap" ]; then
+            lease_flap_cycle "$k" "$gen" || return 1
+            gen=$LEASE_GEN
+            next_flap=$(($(date +%s) + LEASE_FLAP_INTERVAL_SEC))
+            continue
+        fi
+        t0=$(date +%s.%N)
+        result=$(lease_renew "$owner" "$gen")
+        lease_event "$owner renew $result"
+        case "$result" in
+            renewed) LEASE_OK_T0=$t0; LEASE_OK_T1=$(date +%s.%N) ;;
+            refused) lease_add_all "$k" || return 1; gen=$LEASE_GEN ;;
+        esac
+        sleep "$LEASE_RENEW_SEC"
+    done
+}
+
+readyz_probe_loop() {
+    local url="http://${1:?}:9179/readyz"
+    while [ ! -e "$LEASE_STOP_FILE" ]; do
+        printf '%s,%s\n' "$(date +%s)" \
+            "$(curl -s -o /dev/null -m 5 -w '%{http_code},%{time_total}' "$url" || true)" \
+            >>"$READYZ_CSV"
+        sleep 1
+    done
+}
+
+start_lease_controllers() {
+    local ip k
+    ip=$(docker inspect --format \
+        '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' \
+        "$RUSTBGPD" | awk '{print $1}')
+    [ -n "$ip" ] || { log "ERROR: no management IP for $RUSTBGPD"; return 1; }
+    LEASE_GRPC_ADDR="$ip:50051"
+    rm -f "$LEASE_STOP_FILE"
+    : >"$LEASE_EVENTS"
+    echo "epoch,code,seconds" >"$READYZ_CSV"
+    readyz_probe_loop "$ip" &
+    LEASE_PIDS+=("$!")
+    for ((k = 1; k <= LEASE_OWNERS; k++)); do
+        lease_owner_loop "$k" &
+        LEASE_PIDS+=("$!")
+        lease_event "$(lease_owner "$k") controller_start pid=$!"
+    done
+    log "Lease controllers started: $LEASE_OWNERS owners x $LEASE_KEYS_PER_OWNER keys via $LEASE_GRPC_ADDR"
+}
+
+wait_lease_adds() {
+    local added
+    for _ in $(seq 1 600); do
+        added=$(grep -c ' added gen=' "$LEASE_EVENTS" || true)
+        [ "$added" -ge "$LEASE_OWNERS" ] && return 0
+        if grep -q ' add_failed ' "$LEASE_EVENTS"; then
+            break
+        fi
+        sleep 1
+    done
+    log "ERROR: lease owners did not finish their initial adds"
+    return 1
+}
+
+# Stop the controllers between cycles and record each exit status; the
+# analyzer requires every controller to exit 0.
+stop_lease_controllers() {
+    local pid rc k=0
+    [ "${#LEASE_PIDS[@]}" -gt 0 ] || return 0
+    touch "$LEASE_STOP_FILE"
+    for pid in "${LEASE_PIDS[@]}"; do
+        rc=0
+        wait "$pid" || rc=$?
+        if [ "$k" -gt 0 ]; then
+            lease_event "$(lease_owner "$k") controller_exit rc=$rc"
+        fi
+        k=$((k + 1))
+    done
+    LEASE_PIDS=()
+}
+
+lease_sample_row() {
+    local elapsed=${1:?} k count leases counts=()
+    for ((k = 1; k <= LEASE_OWNERS; k++)); do
+        count=$(lease_frr_count "$k")
+        counts+=("$count")
+    done
+    leases=$(lease_grpc ListInjectionLeases -d '{}')
+    python3 -c 'import json,sys
+print(json.dumps({"elapsed_sec": int(sys.argv[1]),
+                  "frr_counts": [int(c) for c in sys.argv[2:]],
+                  "leases": json.load(sys.stdin).get("leases", [])}))' \
+        "$elapsed" "${counts[@]}" <<<"$leases" >>"$LEASE_SAMPLES"
 }
 
 prefill_live_set() {
@@ -387,6 +657,10 @@ main() {
     check_lab_source_ids "$TOPO" "$RUSTBGPD" "$FRR" || exit 2
     ensure_daemon_running
     validate_config
+    if [ "$LEASE_MODE" = 1 ]; then
+        require_tool grpcurl
+        require_tool jq
+    fi
 
     write_run_json
     start_log_stream
@@ -396,10 +670,17 @@ main() {
     log "  sample:   ${SAMPLE_INTERVAL}s"
     log "  churn:    ${CHURN_BATCH} del + ${CHURN_BATCH} add every ${CHURN_INTERVAL_SEC}s"
     log "  pool:     ${PREFIX_POOL_SIZE}, live target: ${LIVE_TARGET_PREFIXES}"
+    log "  lease:    mode $LEASE_MODE"
     log "  output:   $RUN_DIR"
 
     wait_established
+    if [ "$LEASE_MODE" = 1 ]; then
+        start_lease_controllers
+    fi
     prefill_live_set
+    if [ "$LEASE_MODE" = 1 ]; then
+        wait_lease_adds
+    fi
 
     echo "timestamp,elapsed_sec,rss_mb,intern_size,live_target,frr_route_count,bgp_established,churn_cycles,add_total,del_total,flap_count,uptime_seconds" >"$SAMPLES_CSV"
 
@@ -431,11 +712,15 @@ main() {
         if [ "$now" -ge "$next_sample" ]; then
             local elapsed=$((now - start_epoch))
             sample_row "$elapsed" "$cycles" "$add_total" "$del_total"
+            if [ "$LEASE_MODE" = 1 ]; then
+                lease_sample_row "$elapsed"
+            fi
             next_sample=$((now + SAMPLE_INTERVAL))
         fi
         sleep 1
     done
 
+    stop_lease_controllers
     local final_elapsed=$(( $(date +%s) - start_epoch ))
     wait_final_routes
     sample_row "$final_elapsed" "$cycles" "$add_total" "$del_total"

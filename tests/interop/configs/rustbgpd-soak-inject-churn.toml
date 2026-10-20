@@ -10,11 +10,23 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-# No gRPC listener: the soak's rbgp rib add/delete calls run inside the
-# container and use the implicit owner-only UDS socket (local-operator).
+# The soak's rbgp rib add/delete calls run inside the container and use the
+# implicit owner-only UDS socket (local-operator), which stays enabled beside
+# this TCP listener. LEASE_MODE=1 drives the owner-lease RPCs with grpcurl
+# from the host through it, using the shared public test-only token.
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 description = "frr-soak-inject"
 hold_time = 90
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
