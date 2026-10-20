@@ -2074,6 +2074,116 @@ async fn link_local_next_hop_peer_up_and_reconnect_update_sendable_families() {
     }
 }
 
+/// Counts WARN events whose message names the IPv6 family suppression.
+struct SuppressionWarnCapture(Arc<std::sync::atomic::AtomicUsize>);
+
+impl tracing::Subscriber for SuppressionWarnCapture {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() == tracing::Level::WARN
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        if message
+            .0
+            .contains("IPv6 unicast negotiated but withheld from export")
+        {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Establish an eBGP session over IPv4 transport with `ipv6_unicast`
+/// negotiated; return its `PeerUp` sendable families.
+async fn establish_v6_over_v4(
+    session: &mut PeerSession,
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+) -> Vec<(Afi, Safi)> {
+    let mut neg = negotiated_session(65002, false);
+    neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    session
+        .execute_actions(vec![Action::SessionEstablished(Box::new(neg))])
+        .await;
+    let mut registered = None;
+    while let Ok(message) = rib_rx.try_recv() {
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = message
+        {
+            registered = Some(sendable_families);
+        }
+    }
+    registered.expect("session must register with the RIB")
+}
+
+fn v6_suppressed_count(metrics: &BgpMetrics) -> f64 {
+    counter_samples(metrics, "bgp_export_family_suppressed_total")
+        .into_iter()
+        .find_map(|(labels, value)| {
+            (labels.get("peer").map(String::as_str) == Some("10.0.0.2")
+                && labels.get("family").map(String::as_str) == Some("ipv6_unicast")
+                && labels.get("reason").map(String::as_str) == Some("missing_ipv6_next_hop"))
+            .then_some(value)
+        })
+        .unwrap_or(0.0)
+}
+
+/// eBGP IPv6 unicast over IPv4 transport with no IPv6 next hop is withheld
+/// for the session: one WARN and one counter increment per session, never
+/// silent. With `local_ipv6_nexthop` set the family is sendable and nothing
+/// fires.
+#[tokio::test]
+async fn ebgp_ipv6_without_next_hop_is_suppressed_visibly_once_per_session() {
+    let warns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _subscriber = tracing::subscriber::set_default(SuppressionWarnCapture(Arc::clone(&warns)));
+    // Warm the callsite on this thread, then rebuild interest so a sibling
+    // test that reached it first without a subscriber cannot blind us.
+    {
+        let (mut warm, mut warm_rx) = make_test_session_with_rib(65001, 65002);
+        establish_v6_over_v4(&mut warm, &mut warm_rx).await;
+    }
+    tracing::callsite::rebuild_interest_cache();
+    warns.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let families = establish_v6_over_v4(&mut session, &mut rib_rx).await;
+    assert!(families.contains(&(Afi::Ipv4, Safi::Unicast)));
+    assert!(!families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(v6_suppressed_count(&session.metrics), 1.0);
+
+    // A reconnect is a new session: one more of each.
+    session.execute_actions(vec![Action::SessionDown]).await;
+    while rib_rx.try_recv().is_ok() {}
+    establish_v6_over_v4(&mut session, &mut rib_rx).await;
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(v6_suppressed_count(&session.metrics), 2.0);
+
+    // Control: a configured IPv6 next hop makes the family sendable.
+    warns.store(0, std::sync::atomic::Ordering::SeqCst);
+    let (mut control, mut control_rx) = make_test_session_with_rib(65001, 65002);
+    control.config.local_ipv6_nexthop = Some("2001:db8:0:1::1".parse().unwrap());
+    let families = establish_v6_over_v4(&mut control, &mut control_rx).await;
+    assert!(families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(v6_suppressed_count(&control.metrics), 0.0);
+}
+
 /// A permit statement rewriting the next hop, optionally for one prefix and
 /// with a `LOCAL_PREF` (a distinct modification set).
 fn next_hop_statement(

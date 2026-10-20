@@ -643,6 +643,7 @@ struct BgpMetricsInner {
     update_group_interned_chains: IntGauge,
     update_group_keys: IntGauge,
     exact_export_rejections: IntCounterVec,
+    export_family_suppressed: IntCounterVec,
     blackhole_discard_installed: IntCounter,
     blackhole_discard_withdrawn: IntCounter,
     blackhole_discard_adopted: IntCounter,
@@ -1862,6 +1863,15 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_exact_export_rejections_total",
                 "Post-policy route announcements rejected before Adj-RIB-Out commit because their exact one-route wire form is not exportable, by peer, negotiated AFI/SAFI family, and bounded reason.",
+            ),
+            &["peer", "family", "reason"],
+        )
+        .expect("valid metric definition");
+
+        let export_family_suppressed = IntCounterVec::new(
+            Opts::new(
+                "bgp_export_family_suppressed_total",
+                "Established sessions on which a negotiated address family is withheld from export for the whole session, by peer, family, and bounded reason. Counted once per session, not per route.",
             ),
             &["peer", "family", "reason"],
         )
@@ -3201,6 +3211,9 @@ impl BgpMetrics {
             .register(Box::new(exact_export_rejections.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(export_family_suppressed.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(blackhole_discard_installed.clone()))
             .expect("metric not already registered");
         registry
@@ -3655,6 +3668,7 @@ impl BgpMetrics {
             update_group_interned_chains,
             update_group_keys,
             exact_export_rejections,
+            export_family_suppressed,
             blackhole_discard_installed,
             blackhole_discard_withdrawn,
             blackhole_discard_adopted,
@@ -3928,6 +3942,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.hold_timer_rearmed_pending_input, peer);
         Self::reap_peer_series_from_vec(&self.0.send_hold_expirations, peer);
         Self::reap_peer_series_from_vec(&self.0.exact_export_rejections, peer);
+        Self::reap_peer_series_from_vec(&self.0.export_family_suppressed, peer);
         Self::reap_peer_series_from_vec(&self.0.as_path_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.0.rr_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.0.bgpls_nlri_discarded, peer);
@@ -5182,6 +5197,45 @@ impl BgpMetrics {
             .exact_export_rejections
             .with_label_values(&[peer, family, reason])
             .inc();
+    }
+
+    /// Record an established session that withholds a negotiated family from
+    /// export for its whole lifetime, e.g. eBGP IPv6 unicast over IPv4
+    /// transport with no usable IPv6 next hop. The routes are never offered
+    /// to the exact-export probe, so [`Self::record_exact_export_rejection`]
+    /// does not see them.
+    pub fn record_export_family_suppressed(
+        &self,
+        peer: &str,
+        family: &str,
+        reason: crate::reason_labels::ExactExportReason,
+    ) {
+        self.0
+            .export_family_suppressed
+            .with_label_values(&[
+                peer,
+                Self::exact_export_family_label(family),
+                reason.as_str(),
+            ])
+            .inc();
+    }
+
+    /// Materialize the zero series [`Self::record_export_family_suppressed`]
+    /// can move, so a range query sees the first session's increment.
+    pub fn initialize_export_family_suppressed_series(
+        &self,
+        peer: &str,
+        family: &str,
+        reason: crate::reason_labels::ExactExportReason,
+    ) {
+        self.0
+            .export_family_suppressed
+            .with_label_values(&[
+                peer,
+                Self::exact_export_family_label(family),
+                reason.as_str(),
+            ])
+            .inc_by(0);
     }
 
     fn exact_export_family_label(family: &str) -> &str {
@@ -9945,6 +9999,11 @@ mod tests {
             "ipv4_unicast",
             crate::reason_labels::ExactExportReason::MessageTooLong,
         );
+        m.record_export_family_suppressed(
+            peer,
+            "ipv6_unicast",
+            crate::reason_labels::ExactExportReason::MissingIpv6NextHop,
+        );
         m.record_rib_outbound_registration_replaced(peer);
         m.record_rib_stale_peer_down_ignored(peer);
         m.record_rib_stale_session_message_ignored(peer, StaleSessionMessageKind::Routes);
@@ -10009,10 +10068,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 77 peer-labeled series; state transitions and EVPN discard types
+        // 78 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 77);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 78);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -10022,7 +10081,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 77);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 78);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -10351,7 +10410,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 65] = [
+    const PEER_LABELED_FAMILIES: [&str; 66] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -10359,6 +10418,7 @@ mod tests {
         "bgp_evpn_nlri_discarded_by_type_total",
         "bgp_evpn_nlri_discarded_total",
         "bgp_exact_export_rejections_total",
+        "bgp_export_family_suppressed_total",
         "bgp_fsm_stale_timer_events_total",
         "bgp_gr_active_peers",
         "bgp_gr_stale_routes",

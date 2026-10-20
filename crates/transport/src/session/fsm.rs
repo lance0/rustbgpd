@@ -4,6 +4,7 @@ use super::{
     SessionDownReason, SessionLifecycleNotification, SessionNotification,
     SessionNotificationDirection, SessionState, cease_subcode, debug, info, mpsc, warn,
 };
+use rustbgpd_telemetry::reason_labels::ExactExportReason;
 
 pub(super) fn notification_description(
     notification: &rustbgpd_wire::NotificationMessage,
@@ -822,13 +823,31 @@ impl PeerSession {
                             neg.link_local_next_hop && self.is_scoped_link_local_peer(),
                         )
                         .is_some();
+                        let withhold_v6 = !has_v6_nh
+                            && !self.config.route_server_client
+                            && neg
+                                .negotiated_families
+                                .contains(&(Afi::Ipv6, Safi::Unicast));
+                        if withhold_v6 {
+                            // Once per session: the family is withheld before
+                            // any route reaches the exact-export probe, so
+                            // nothing per route would otherwise show it.
+                            warn!(
+                                peer = %self.peer_label,
+                                family = "ipv6_unicast",
+                                reason = ExactExportReason::MissingIpv6NextHop.as_str(),
+                                "IPv6 unicast negotiated but withheld from export for this session: \
+                                 no usable local IPv6 next hop; set local_ipv6_nexthop and reset the session"
+                            );
+                            self.metrics.record_export_family_suppressed(
+                                &self.peer_label,
+                                "ipv6_unicast",
+                                ExactExportReason::MissingIpv6NextHop,
+                            );
+                        }
                         neg.negotiated_families
                             .iter()
-                            .filter(|f| {
-                                **f != (Afi::Ipv6, Safi::Unicast)
-                                    || has_v6_nh
-                                    || self.config.route_server_client
-                            })
+                            .filter(|f| !withhold_v6 || **f != (Afi::Ipv6, Safi::Unicast))
                             .copied()
                             .collect()
                     } else {

@@ -74,13 +74,13 @@ pub(crate) fn effective_prefix_str(prefix: &str) -> Option<(IpAddr, u8)> {
 /// `rustbgpd --check`, counted for `--check --strict`, and logged once at
 /// daemon startup. Each one states the condition (`headline`) and then the
 /// consequence and the action that clears it (`detail`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigAdvisory {
     /// The condition, as a single sentence.
     pub(crate) headline: &'static str,
     /// Consequence, then the action. Hard-wrapped for the framed `--check`
     /// block; use [`ConfigAdvisory::one_line`] for a log record.
-    pub(crate) detail: &'static str,
+    pub(crate) detail: std::borrow::Cow<'static, str>,
 }
 
 impl ConfigAdvisory {
@@ -1734,7 +1734,8 @@ impl Config {
                          enforcement remains disabled and missing chains remain permit-all. Choose \
                          exactly one explicit posture: set root config_epoch = 1 and \
                          [global].ebgp_requires_policy = false, or set root config_epoch = 2 and \
-                         [global].ebgp_requires_policy = true.",
+                         [global].ebgp_requires_policy = true."
+                    .into(),
             });
         }
 
@@ -1752,11 +1753,74 @@ impl Config {
                          this config have no effect. Add \"linkstate\" to the families of the\n\
                          neighbor carrying the BGP-LS feed, or remove orr_vantage from the\n\
                          neighbors and peer groups that set it. See\n\
-                         docs/adr/0095-optimal-route-reflection.md.",
+                         docs/adr/0095-optimal-route-reflection.md."
+                    .into(),
+            });
+        }
+
+        // Legal (the operator may not mean to export IPv6 there), so a warning:
+        // the session withholds IPv6 unicast from export for its lifetime.
+        let v6_without_next_hop = self.ebgp_ipv6_unicast_without_next_hop();
+        if !v6_without_next_hop.is_empty() {
+            let neighbors = v6_without_next_hop
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            advisories.push(ConfigAdvisory {
+                headline: "ipv6_unicast is configured toward eBGP neighbors on IPv4 transport \
+                           with no local_ipv6_nexthop.",
+                detail: format!(
+                    "Neighbors: {neighbors}.\n\
+                     The session has no IPv6 next hop to advertise, so every IPv6 unicast route\n\
+                     toward these neighbors is withheld from export for the whole session (one\n\
+                     WARN per session, counted in bgp_export_family_suppressed_total). Set\n\
+                     local_ipv6_nexthop on the neighbor or its peer group, or remove ipv6_unicast\n\
+                     from its families."
+                )
+                .into(),
             });
         }
 
         advisories
+    }
+
+    /// Static eBGP neighbors on IPv4 transport that negotiate `ipv6_unicast`
+    /// with no `local_ipv6_nexthop`. The session cannot derive an IPv6 next
+    /// hop, so it withholds the family from export. Route-server clients are
+    /// exempt (they keep the received next hop), and so is a neighbor whose
+    /// export chain denies everything, such as a route collector's.
+    pub(crate) fn ebgp_ipv6_unicast_without_next_hop(&self) -> Vec<IpAddr> {
+        // A chain stops at the first Deny, so one TOML member that can only
+        // deny makes the whole chain export nothing.
+        let exports_nothing = |chain: &rustbgpd_policy::PolicyChain| {
+            chain.policies.iter().any(|member| {
+                member.rpol.is_none()
+                    && member.policy.default_action == rustbgpd_policy::PolicyAction::Deny
+                    && member
+                        .policy
+                        .entries
+                        .iter()
+                        .all(|entry| entry.action == rustbgpd_policy::PolicyAction::Deny)
+            })
+        };
+        self.resolved_neighbors()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|neighbor| !neighbor.export_policy.as_ref().is_some_and(exports_nothing))
+            .map(|neighbor| neighbor.transport_config)
+            .filter(|tc| {
+                tc.remote_addr.is_ipv4()
+                    && tc.peer.local_asn != tc.peer.remote_asn
+                    && !tc.route_server_client
+                    && tc.local_ipv6_nexthop.is_none()
+                    && tc
+                        .peer
+                        .effective_families()
+                        .contains(&(rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast))
+            })
+            .map(|tc| tc.remote_addr.ip())
+            .collect()
     }
 }
 
