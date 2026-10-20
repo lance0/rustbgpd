@@ -1440,6 +1440,7 @@ mod join_cohort;
 mod labeled;
 mod lifecycle;
 mod llgr_families;
+mod local_route_export;
 mod multipath_fib;
 mod no_export;
 mod non_unicast_pushdown;

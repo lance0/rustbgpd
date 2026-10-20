@@ -1595,6 +1595,13 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         Err(Status::unimplemented("not mocked"))
     }
 
+    async fn list_path_export_dispositions(
+        &self,
+        _request: Request<server_proto::ListPathExportDispositionsRequest>,
+    ) -> Result<Response<server_proto::ListPathExportDispositionsResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
     async fn list_injection_leases(
         &self,
         _request: Request<server_proto::ListInjectionLeasesRequest>,

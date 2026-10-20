@@ -1132,7 +1132,7 @@ impl RibManager {
                 .remove(&(peer, session_id))
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|family| !sendable_families.contains(family))
+                .filter(|(family, _)| !sendable_families.contains(family))
                 .collect(),
             sendable_families,
             is_ebgp,
@@ -1743,16 +1743,21 @@ impl RibManager {
         self.set_peer_group(peer, peer_group);
     }
 
-    /// Negotiated families the registered session withholds from export.
-    pub(super) fn registered_withheld_families(&self, peer: IpAddr) -> Vec<(Afi, Safi)> {
-        let Some(session_id) = self.outbound_session_ids.get(&peer) else {
-            return Vec::new();
-        };
-        self.live_sessions
+    /// Negotiated families the registered session withholds from export,
+    /// with the session's reason for each.
+    pub(super) fn registered_withheld_families(
+        &self,
+        peer: IpAddr,
+    ) -> &[crate::update::WithheldFamily] {
+        self.outbound_session_ids
             .get(&peer)
-            .and_then(|sessions| sessions.iter().find(|r| r.session_id == *session_id))
-            .map(|record| record.withheld_families.clone())
-            .unwrap_or_default()
+            .and_then(|session_id| {
+                self.live_sessions
+                    .get(&peer)?
+                    .iter()
+                    .find(|r| r.session_id == *session_id)
+            })
+            .map_or(&[], |record| record.withheld_families.as_slice())
     }
 
     /// Send the full Loc-RIB to a newly established peer (initial table dump).
@@ -2781,7 +2786,11 @@ impl RibManager {
         // its RFC 4724 §4.1 selection deferral for it. Both go through the
         // same GR/ORF and convergence holds below.
         let mut eor_families = sendable.clone().unwrap_or_default();
-        eor_families.extend(self.registered_withheld_families(peer));
+        eor_families.extend(
+            self.registered_withheld_families(peer)
+                .iter()
+                .map(|(family, _)| *family),
+        );
         // RFC 4724: a GR RESTARTER takes our EoR as "this peer's initial
         // update is complete", proceeds with route selection, and sweeps the
         // stale routes it retained from our previous session. For an

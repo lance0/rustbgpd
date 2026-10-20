@@ -1343,6 +1343,10 @@ pub struct ExplainAdvertisedRoute {
     pub path_id: u32,
     /// Peer that originated the selected best route.
     pub route_peer: Option<IpAddr>,
+    /// Adj-RIB-In path ID of the selected unicast route at `route_peer`,
+    /// its source identity together with `route_peer`. `None` before the
+    /// ladder selects a route, and for other families.
+    pub route_path_id: Option<u32>,
     /// Selected best route type.
     pub route_type: Option<rustbgpd_policy::RouteType>,
     /// Explanation reasons, in order. Most entries are decisive; stable
@@ -1378,6 +1382,50 @@ pub struct ExplainAdvertisedRoute {
     /// Requested Adj-RIB-In identity. `None` preserves the legacy
     /// winner-oriented explanation.
     pub source: Option<RouteSourceIdentity>,
+}
+
+/// A negotiated family a session withholds from export, with the reason.
+pub type WithheldFamily = ((Afi, Safi), ExactExportErrorCode);
+
+/// Export state of one locally injected unicast route toward one peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteExportDisposition {
+    /// The route sits in the peer's Adj-RIB-Out: committed to its outbound
+    /// path. Remote receipt is not observable.
+    Committed,
+    /// The route is not exported to this peer.
+    Withheld,
+    /// Export has not settled: selection, an ORF gate or outbound delivery is
+    /// still outstanding.
+    Pending,
+}
+
+/// One peer's export disposition for a locally injected unicast route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRouteExport {
+    /// Destination peer.
+    pub peer: IpAddr,
+    /// The one disposition this peer has.
+    pub disposition: RouteExportDisposition,
+    /// Bounded reason: empty for `Committed`, otherwise a fixed code such as
+    /// `export_policy` or `family_suppressed:missing_ipv6_next_hop`.
+    pub reason: String,
+    /// Stop code of the export explain ladder behind the reason, when one
+    /// applies (the `ExplainAdvertisedRoute` vocabulary).
+    pub explain_code: &'static str,
+    /// Human-readable detail.
+    pub detail: String,
+    /// Outbound Add-Path identifier when committed (0 on single-best).
+    pub advertised_path_id: u32,
+}
+
+/// One page of [`PeerRouteExport`] rows in peer-address order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExportPage {
+    /// Rows for this page.
+    pub peers: Vec<PeerRouteExport>,
+    /// Whether peers remain after the last row.
+    pub more: bool,
 }
 
 /// Outcome of explicit RFC 9819 cross-route Argument inspection.
@@ -2566,8 +2614,9 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// Transport session identity that will accompany `PeerUp`.
         session_id: u64,
-        /// Negotiated families absent from `sendable_families`.
-        families: Vec<(Afi, Safi)>,
+        /// Negotiated families absent from `sendable_families`, each with
+        /// the reason the session withholds it.
+        families: Vec<WithheldFamily>,
     },
     /// Stage the session's RFC 7947 §2.3.2 route-server control-community
     /// context immediately before [`RibUpdate::PeerUp`] builds the initial
@@ -2828,6 +2877,23 @@ pub enum RibUpdate {
         source: Option<RouteSourceIdentity>,
         /// Response channel.
         reply: oneshot::Sender<Result<ExplainAdvertisedRoute, ExplainAdvertisedRouteError>>,
+    },
+    /// Per-peer export disposition of one locally injected unicast route,
+    /// identified by its local Adj-RIB-In key `(prefix, path_id)`. Peers are
+    /// the sessions registered for outbound updates, in address order after
+    /// `after`, at most `page_size` of them. `None` when no such local route
+    /// exists.
+    QueryLocalRouteExport {
+        /// Prefix of the local route.
+        prefix: Prefix,
+        /// Path ID of the local route (the `AddPath` key).
+        path_id: u32,
+        /// Resume after this peer address.
+        after: Option<IpAddr>,
+        /// Peers per page, clamped to `1..=ROUTE_QUERY_MAX_PAGE_SIZE`.
+        page_size: usize,
+        /// Response channel.
+        reply: oneshot::Sender<Option<RouteExportPage>>,
     },
     /// Subscribe to route change events via broadcast channel.
     SubscribeRouteEvents {

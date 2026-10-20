@@ -445,6 +445,7 @@ impl RibManager {
             next_hop: None,
             path_id: 0,
             route_peer: None,
+            route_path_id: None,
             route_type: None,
             reasons: Vec::new(),
             modifications: rustbgpd_policy::RouteModifications::default(),
@@ -951,6 +952,7 @@ impl RibManager {
         };
 
         explain.route_peer = Some(best.peer);
+        explain.route_path_id = Some(best.path_id);
         explain.route_type = Some(route_type(best.origin_type));
 
         // The two suppression checks below are no-ops for an ORR winner
@@ -2463,6 +2465,7 @@ impl RibManager {
         };
         if let Some(trace) = target.trace() {
             trace.best_peer = Some(best.peer);
+            trace.best_path_id = Some(best.path_id);
             trace.best_route_type = Some(route_type(best.origin_type));
             trace.push(
                 "best_route",
