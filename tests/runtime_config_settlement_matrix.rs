@@ -43,6 +43,17 @@ const SETUP_BUDGET: Duration = Duration::from_secs(30);
 const GRACE: Duration = AMBIGUITY_FENCE_GRACE;
 const EXIT_JITTER: Duration = Duration::from_secs(2);
 const MATRIX_LIMIT: Duration = Duration::from_secs(180);
+// Harness bound for a spawned daemon to report its metrics endpoint. A loaded
+// host has taken about 15 s to exec and initialise a debug daemon; this is
+// setup time, not a product deadline.
+const SPAWN_LIMIT: Duration = Duration::from_secs(30);
+// Harness bound for observing a held owner's budget fence. The fence itself
+// lands at the budget; this only bounds a stalled observer, so it outlasts
+// BUDGET + GRACE. A daemon that never fences still fails here, and one that
+// fences exits 70 within the grace whatever this bound is.
+const FENCE_OBSERVATION_LIMIT: Duration = Duration::from_secs(15);
+// Fresh labs one cycle may spend on proven host stalls before the matrix fails.
+const STALL_ATTEMPTS: usize = 3;
 const TOKEN: &str = "settlement-matrix-token";
 #[derive(Clone, Copy, Debug)]
 enum MatrixRow {
@@ -96,6 +107,31 @@ impl MatrixRow {
             Self::PeerGroup | Self::Policy => "attached",
         }
     }
+}
+
+/// A host stall that decided a cycle before its row could observe the held,
+/// unfenced owner. Each is proven from the daemon's own evidence, and the
+/// cycle then reruns in a fresh lab.
+#[derive(Debug)]
+enum HostStall {
+    /// The pre-effect deadline expired before the owner reached the armed
+    /// checkpoint, and it settled cleanly with nothing applied.
+    RefusedBeforeCheckpoint,
+    /// The stall spanned the budget as well, and the owner observed its
+    /// pre-effect deadline at least a margin late.
+    FencedBeforeCheckpoint,
+    /// The owner was held, but the row's first scrape already read an
+    /// elapsed at or past the budget, so its unfenced state was gone.
+    FencedBeforeFirstLook,
+}
+
+/// A mutation decided by a host stall must not report success.
+fn stalled(stall: HostStall, request: Process) -> HostStall {
+    assert_failed(
+        &request.wait_output(Duration::from_secs(15)),
+        "mutation decided by a host stall",
+    );
+    stall
 }
 
 struct Process {
@@ -228,7 +264,7 @@ impl Daemon {
             command.env(CONTROL_ENV, control);
         }
         let mut process = Process::spawn(&mut command);
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + SPAWN_LIMIT;
         let metrics = loop {
             let logs = std::fs::read_to_string(&log).unwrap_or_default();
             if let Some(addr) = bound_metrics_addr(&logs) {
@@ -413,6 +449,51 @@ impl Control {
                 & 0o777;
             assert_eq!(mode, 0o600, "{name} mode");
         }
+    }
+
+    /// Wait for the row's armed checkpoint to be claimed, or for the
+    /// daemon's own proof that a host stall decided the attempt first.
+    fn wait_for_hold(&self, row: MatrixRow, daemon: &mut Daemon) -> Result<(), HostStall> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.dir.join(RECEIPT).exists() {
+            if let Some(stall) = self.stall_before_checkpoint(row, daemon) {
+                return Err(stall);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "missing control receipt\n{}",
+                daemon.log()
+            );
+            daemon.assert_running();
+            thread::sleep(Duration::from_millis(10));
+        }
+        self.wait_for_receipt(row.checkpoint(), daemon.pid(), daemon);
+        Ok(())
+    }
+
+    /// The armed owner's pre-effect deadline expired before it reached the
+    /// still-unclaimed checkpoint. Settling cleanly is the product outcome;
+    /// a fence is accepted only with proof that the owner observed that
+    /// deadline at least a margin late, so the budget had already expired.
+    fn stall_before_checkpoint(&self, row: MatrixRow, daemon: &mut Daemon) -> Option<HostStall> {
+        if !self.dir.join(ARM).exists() {
+            return None;
+        }
+        let kind = format!("\"kind\":\"{}\"", row.kind());
+        if daemon.log_has(FAIL_STOP_LINE, &kind) {
+            let log = daemon.log();
+            let margin = self.budget / 10;
+            assert!(
+                stall_fence_proven(&log, margin),
+                "fenced before the armed checkpoint without a proven host stall: \
+                 observed lateness {:?} ms, margin {margin:?}\n{log}",
+                pre_effect_observations(&log)
+            );
+            daemon.wait_exit(70, CLEAN_EXIT_LIMIT);
+            return Some(HostStall::FencedBeforeCheckpoint);
+        }
+        (daemon.log_has(SETTLED_LINE, &kind) && pre_effect_observations(&daemon.log()).len() == 1)
+            .then_some(HostStall::RefusedBeforeCheckpoint)
     }
 
     fn assert_one_claim_without_release(&self) {
@@ -736,8 +817,54 @@ fn wait_metrics(
     }
 }
 
-fn wait_fenced(lab: &Lab, row: MatrixRow, daemon: &mut Daemon) -> Instant {
+/// Elapsed of the one registered settlement, whatever its labels.
+fn settlement_elapsed(text: &str) -> Option<f64> {
+    let mut lines = text
+        .lines()
+        .filter(|line| line.starts_with("bgp_runtime_config_settlement_elapsed_seconds{"));
+    let line = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    line.rsplit_once(' ')?.1.parse().ok()
+}
+
+/// Observe the held owner's unfenced metric tuple. The budget runs from
+/// registration, so a host stall can carry the row's first look past it;
+/// that is accepted only when the first successful scrape already reads an
+/// elapsed at or past the budget, and the daemon then shows the exact
+/// budget fence and exits 70 within the grace.
+fn wait_held_metrics(lab: &Lab, row: MatrixRow, daemon: &mut Daemon) -> Result<(), HostStall> {
+    let budget = lab.control.budget;
     let deadline = Instant::now() + Duration::from_secs(4);
+    let mut first_look = true;
+    loop {
+        if let Some(text) = metrics(daemon.metrics) {
+            if exact_metrics(&text, row, "none", false, budget) {
+                return Ok(());
+            }
+            if first_look
+                && settlement_elapsed(&text).is_some_and(|elapsed| elapsed >= budget.as_secs_f64())
+            {
+                let fenced_at = wait_fenced(lab, row, daemon);
+                daemon.sigterm();
+                daemon.wait_exit70(fenced_at);
+                return Err(HostStall::FencedBeforeFirstLook);
+            }
+            first_look = false;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing none metric tuple\n{}",
+            daemon.log()
+        );
+        daemon.assert_running();
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_fenced(lab: &Lab, row: MatrixRow, daemon: &mut Daemon) -> Instant {
+    let deadline = Instant::now() + FENCE_OBSERVATION_LIMIT;
     loop {
         if ready(daemon.metrics) == Some(503)
             && metrics(daemon.metrics).is_some_and(|text| {
@@ -844,7 +971,7 @@ enum RowResult {
     None,
 }
 
-fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> RowResult {
+fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall> {
     let candidate = lab.candidate("apply-candidate");
     let (snapshot, plan) = lab.plan(&candidate);
     lab.control.arm(MatrixRow::Apply.checkpoint());
@@ -858,8 +985,9 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> RowResult {
         "--plan-token",
         &plan,
     ]);
-    lab.control
-        .wait_for_receipt(MatrixRow::Apply.checkpoint(), daemon.pid(), daemon);
+    if let Err(stall) = lab.control.wait_for_hold(MatrixRow::Apply, daemon) {
+        return Err(stalled(stall, first));
+    }
     assert!(
         first.try_wait().is_none(),
         "held Apply exited before cancellation"
@@ -867,7 +995,7 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     first.signal(Signal::SIGTERM);
     let status = first.wait_status(Duration::from_secs(1));
     assert!(!status.success());
-    wait_metrics(lab, MatrixRow::Apply, "none", false, daemon);
+    wait_held_metrics(lab, MatrixRow::Apply, daemon)?;
 
     let log = daemon.log();
     let address = bound_grpc_addr(&log)
@@ -893,7 +1021,7 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     lab.assert_disk("apply-candidate", false);
     lab.assert_disk("queued-second-owner", false);
     assert!(!lab.stage_path().exists());
-    RowResult::Apply(queued)
+    Ok(RowResult::Apply(queued))
 }
 
 fn apply_confirmed(lab: &Lab, candidate: &Path) {
@@ -918,7 +1046,7 @@ fn apply_confirmed(lab: &Lab, candidate: &Path) {
     );
 }
 
-fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> RowResult {
+fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall> {
     let candidate = lab.candidate("auto-candidate");
     apply_confirmed(lab, &candidate);
     wait_metrics_idle(daemon.metrics, daemon);
@@ -929,9 +1057,8 @@ fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     assert!(locator.is_file());
     lab.assert_disk("auto-candidate", true);
     lab.control.arm(MatrixRow::AutoRevert.checkpoint());
-    lab.control
-        .wait_for_receipt(MatrixRow::AutoRevert.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(lab, MatrixRow::AutoRevert, "none", false, daemon);
+    lab.control.wait_for_hold(MatrixRow::AutoRevert, daemon)?;
+    wait_held_metrics(lab, MatrixRow::AutoRevert, daemon)?;
     assert!(locator.is_file(), "hold must retain rollback authority");
     lab.assert_disk("auto-candidate", true);
     // Auto-revert now durably stages the reverted config before the held
@@ -943,7 +1070,7 @@ fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> RowResult {
         !staged.contains("auto-candidate"),
         "the staged revert must drop the auto-candidate"
     );
-    RowResult::None
+    Ok(RowResult::None)
 }
 
 fn wait_metrics_idle(addr: SocketAddr, daemon: &mut Daemon) {
@@ -965,7 +1092,7 @@ fn wait_metrics_idle(addr: SocketAddr, daemon: &mut Daemon) {
     }
 }
 
-fn exercise_peer_group(lab: &Lab, daemon: &mut Daemon) -> RowResult {
+fn exercise_peer_group(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall> {
     let definition = lab.root.path().join("peer-group.json");
     std::fs::write(
         &definition,
@@ -980,9 +1107,13 @@ fn exercise_peer_group(lab: &Lab, daemon: &mut Daemon) -> RowResult {
         "--from-file",
         definition.to_str().unwrap(),
     ]);
-    lab.control
-        .wait_for_receipt(MatrixRow::PeerGroup.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(lab, MatrixRow::PeerGroup, "none", false, daemon);
+    if let Err(stall) = lab
+        .control
+        .wait_for_hold(MatrixRow::PeerGroup, daemon)
+        .and_then(|()| wait_held_metrics(lab, MatrixRow::PeerGroup, daemon))
+    {
+        return Err(stalled(stall, request));
+    }
     wait_read_success(
         lab,
         &["--json", "peer-group", "get", "matrix-peer-group"],
@@ -991,10 +1122,10 @@ fn exercise_peer_group(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     lab.assert_disk("matrix-peer-group", false);
     let staged = std::fs::read_to_string(lab.stage_path()).expect("peer-group stage");
     assert!(staged.contains("matrix-peer-group"));
-    RowResult::Requests(vec![request])
+    Ok(RowResult::Requests(vec![request]))
 }
 
-fn exercise_policy(lab: &Lab, daemon: &mut Daemon) -> RowResult {
+fn exercise_policy(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall> {
     let definition = lab.root.path().join("policy.json");
     std::fs::write(
         &definition,
@@ -1009,14 +1140,18 @@ fn exercise_policy(lab: &Lab, daemon: &mut Daemon) -> RowResult {
         "--from-file",
         definition.to_str().unwrap(),
     ]);
-    lab.control
-        .wait_for_receipt(MatrixRow::Policy.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(lab, MatrixRow::Policy, "none", false, daemon);
+    if let Err(stall) = lab
+        .control
+        .wait_for_hold(MatrixRow::Policy, daemon)
+        .and_then(|()| wait_held_metrics(lab, MatrixRow::Policy, daemon))
+    {
+        return Err(stalled(stall, request));
+    }
     wait_read_success(lab, &["--json", "policy", "get", "matrix-policy"], daemon);
     lab.assert_disk("matrix-policy", false);
     let staged = std::fs::read_to_string(lab.stage_path()).expect("policy stage");
     assert!(staged.contains("matrix-policy"));
-    RowResult::Requests(vec![request])
+    Ok(RowResult::Requests(vec![request]))
 }
 
 fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult) {
@@ -1130,6 +1265,10 @@ fn grpc_endpoint_requires_bound_nonzero_tcp_listener_evidence() {
     );
 }
 
+/// Each cycle holds one owner at its row's checkpoint under the 2 s budget and
+/// proves the fence, exit 70 and restart recovery. The budget and pre-effect
+/// deadline are wall clock, so a host stall can decide a cycle first; only a
+/// [`HostStall`] proven from the daemon's own evidence reruns it in a fresh lab.
 #[test]
 fn runtime_config_settlement_matrix_four_rows_three_cycles() {
     let _ = rbgp_binary();
@@ -1137,19 +1276,34 @@ fn runtime_config_settlement_matrix_four_rows_three_cycles() {
     let mut ordinal = 1;
     for row in MatrixRow::ALL {
         for cycle in 0..3 {
-            let lab = Lab::new(row, cycle, ordinal);
-            ordinal += 1;
-            let mut daemon = lab.spawn("controlled", true);
-            wait_ready_and_idle(daemon.metrics, &mut daemon);
-            assert!(lab.control.dir.join(SETTINGS).is_file());
+            for attempt in 1..=STALL_ATTEMPTS {
+                let lab = Lab::new(row, cycle, ordinal);
+                ordinal += 1;
+                let mut daemon = lab.spawn("controlled", true);
+                wait_ready_and_idle(daemon.metrics, &mut daemon);
+                assert!(lab.control.dir.join(SETTINGS).is_file());
 
-            let requests = match row {
-                MatrixRow::Apply => exercise_apply(&lab, &mut daemon),
-                MatrixRow::AutoRevert => exercise_auto_revert(&lab, &mut daemon),
-                MatrixRow::PeerGroup => exercise_peer_group(&lab, &mut daemon),
-                MatrixRow::Policy => exercise_policy(&lab, &mut daemon),
-            };
-            finish_row(&lab, row, &mut daemon, requests);
+                let result = match row {
+                    MatrixRow::Apply => exercise_apply(&lab, &mut daemon),
+                    MatrixRow::AutoRevert => exercise_auto_revert(&lab, &mut daemon),
+                    MatrixRow::PeerGroup => exercise_peer_group(&lab, &mut daemon),
+                    MatrixRow::Policy => exercise_policy(&lab, &mut daemon),
+                };
+                match result {
+                    Ok(requests) => {
+                        finish_row(&lab, row, &mut daemon, requests);
+                        break;
+                    }
+                    Err(stall) => {
+                        eprintln!("{row:?} cycle {cycle} attempt {attempt}: {stall:?}");
+                        assert!(
+                            attempt < STALL_ATTEMPTS,
+                            "{row:?} cycle {cycle}: host stalls decided all \
+                             {STALL_ATTEMPTS} attempts"
+                        );
+                    }
+                }
+            }
         }
     }
     assert!(
@@ -1228,7 +1382,7 @@ fn escalation_row_held_auto_revert(ordinal: usize, via: Stop) {
     wait_ready_and_idle(daemon.metrics, &mut daemon);
     assert!(matches!(
         exercise_auto_revert(&lab, &mut daemon),
-        RowResult::None
+        Ok(RowResult::None)
     ));
     shutdown_waits_on_held_owner(&lab, MatrixRow::AutoRevert, &mut daemon, via);
     let signalled = escalate_and_wait_exit70(&lab, MatrixRow::AutoRevert, &mut daemon);
@@ -1244,8 +1398,8 @@ fn escalation_row_owner_settles_first(ordinal: usize) {
     let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal).with_hold_budget(ESCALATION_HOLD_BUDGET);
     let mut daemon = lab.spawn("controlled", true);
     wait_ready_and_idle(daemon.metrics, &mut daemon);
-    let RowResult::Requests(requests) = exercise_peer_group(&lab, &mut daemon) else {
-        panic!("peer-group row returns its request");
+    let Ok(RowResult::Requests(requests)) = exercise_peer_group(&lab, &mut daemon) else {
+        panic!("peer-group row did not hold its owner");
     };
     shutdown_waits_on_held_owner(&lab, MatrixRow::PeerGroup, &mut daemon, Stop::Signal);
     lab.control.release(MatrixRow::PeerGroup.checkpoint());
@@ -1296,8 +1450,8 @@ fn escalation_row_signal_lands_first(ordinal: usize) {
     let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal).with_hold_budget(ESCALATION_HOLD_BUDGET);
     let mut daemon = lab.spawn("controlled", true);
     wait_ready_and_idle(daemon.metrics, &mut daemon);
-    let RowResult::Requests(requests) = exercise_peer_group(&lab, &mut daemon) else {
-        panic!("peer-group row returns its request");
+    let Ok(RowResult::Requests(requests)) = exercise_peer_group(&lab, &mut daemon) else {
+        panic!("peer-group row did not hold its owner");
     };
     shutdown_waits_on_held_owner(&lab, MatrixRow::PeerGroup, &mut daemon, Stop::Signal);
     let signalled = escalate_and_wait_exit70(&lab, MatrixRow::PeerGroup, &mut daemon);
@@ -1376,8 +1530,8 @@ fn escalation_row_already_fenced(ordinal: usize) {
     let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal);
     let mut daemon = lab.spawn("controlled", true);
     wait_ready_and_idle(daemon.metrics, &mut daemon);
-    let RowResult::Requests(requests) = exercise_peer_group(&lab, &mut daemon) else {
-        panic!("peer-group row returns its request");
+    let Ok(RowResult::Requests(requests)) = exercise_peer_group(&lab, &mut daemon) else {
+        panic!("peer-group row did not hold its owner");
     };
     daemon.sigterm();
     daemon.wait_log("initiating coordinated shutdown", "");
