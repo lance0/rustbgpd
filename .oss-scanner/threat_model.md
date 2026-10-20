@@ -51,11 +51,18 @@ Treat all of the following as attacker-controlled:
   and per-principal role ceilings are both enforced. Treat a lower-tier principal as untrusted with respect to
   anything above its tier. That covers mutation and credential exposure through read responses or audit logs. Config
   commits (`ApplyConfigTransaction`, `StreamApplyConfigTransaction`, `RollbackConfigTransaction`) are `operator_only`.
-  However, `DiffRuntimeConfig`, `PlanConfigTransaction` and `StreamPlanConfigTransaction` are `sensitive_read`: they
-  parse candidate TOML from a lower-tier caller. That parsing and planning must not mutate state, exhaust the
-  daemon or leak secrets. The vendored OpenConfig gNMI service is served on the same listeners: `Get`, `Subscribe`
-  and `Capabilities` are `sensitive_read`, and `Set` is `operator_only` because it commits config. Unauthenticated
-  network clients of a TCP listener are fully untrusted.
+  Several RPCs below `operator_only` parse complex, caller-supplied text. Treat these payloads as untrusted. Parsing,
+  compiling and evaluating them must not mutate state, exhaust the daemon or leak secrets:
+  - candidate TOML in `DiffRuntimeConfig`, `PlanConfigTransaction` and `StreamPlanConfigTransaction`
+    (`sensitive_read`) and in `ApplyEvpnRuntime` (`mutating`, including `validate_only`);
+  - `.rpol` policy source and inline datasets in `PolicyService.TestPolicy` and `ComparePolicy` (`sensitive_read`,
+    `crates/api/src/policy_service.rs`). These reach the rpol parser, the dataset parser, policy compilation
+    (including AS-path regular expressions) and a dry-run evaluation over the RIB;
+  - gNMI paths in `Get` and `Subscribe`, and AS-path segments in `RpkiService.VerifyAsPath` (all `sensitive_read`).
+
+  The vendored OpenConfig gNMI service is served on the same listeners: `Get`, `Subscribe` and `Capabilities` are
+  `sensitive_read`, and `Set` is `operator_only` because it commits config. Unauthenticated network clients of a TCP
+  listener are fully untrusted.
 - **Offline capture converters in `rbgp`**: `rbgp diff snapshot from-bmp` (RFC 7854 BMP byte streams) and
   `from-mrt` (MRT files) parse third-party captures (`crates/cli/src/ribsnap_bmp.rs`, `crates/cli/src/ribsnap.rs`,
   `crates/wire/src/mrt.rs`). They promise to reject malformed input with exit status 2 and never panic.
@@ -65,11 +72,12 @@ Treat all of the following as attacker-controlled:
   its request bounds, or getting anything other than the documented blackhole injections through to the daemon.
   `tools/mcp` (`rustbgpd-mcp`) is a read-only stdio server over the explain RPCs. It must never invoke a mutating RPC.
 
-**Trusted inputs.** The configuration file, policy files (`rpol`) and external dataset files are operator input, as
-are command-line flags, signals (SIGHUP reload) and files under `runtime_state_dir`. A malicious config is out of
-scope. The same goes for a crafted policy or dataset or a tampered state directory written by the daemon's own user.
-Crashes in those parsers are still worth reporting as robustness bugs, at low severity. Candidate TOML sent to the
-`sensitive_read` planning RPCs is the exception, as described above.
+**Trusted inputs.** Only local operator input and `operator_only` RPCs are trusted. Local operator input means the
+configuration file, `rpol` policy files and dataset files on disk, command-line flags, signals (SIGHUP reload) and
+files under `runtime_state_dir`. A malicious local config, a crafted local policy or dataset, or a state directory
+tampered with by the daemon's own user is out of scope. Crashes in those parsers are still worth reporting as
+robustness bugs, at low severity. Text that reaches the same parsers through a `sensitive_read` or `mutating` RPC, as
+listed above, is untrusted and rated by impact.
 
 **Outbound only.** The BMP exporter (`crates/bmp`) and MRT dump writer only send or write data. The daemon does not
 parse BMP from collectors. The shutdown warm checkpoint is written, not loaded at startup.
@@ -207,7 +215,7 @@ route server, that means any IXP member.
 | Critical | Memory corruption reachable from the network. An unauthenticated network client reaching `mutating` or `operator_only` gRPC methods. |
 | High | Peer, RPKI cache or BFD input that crashes the daemon, hangs it or wedges the RIB, in any component, alpha code included. Unbounded memory growth to OOM from bounded input. One peer's input resetting, stalling or degrading other peers' sessions. Bypassing import policy, RPKI/ASPA validation or RFC 8212. Session hijacking or injection, including TCP MD5, TCP-AO or GTSM bypass. A lower-tier principal performing a `mutating` or `operator_only` action. Secret material (MD5/TCP-AO keys, tokens, candidate TOML) leaking through the API, logs or metrics. |
 | Medium | An incorrect reset confined to the sender's own session, for example a reset where RFC 7606 requires treat-as-withdraw or attribute discard. If other peers are affected, the finding is High. Disproportionate CPU or memory that stays within configured limits. `sensitive_read` data exposed at `read` tier. Panics in the `rbgp` capture converters or in the separate GoBGP bridge process. |
-| Low | Crashes from operator-controlled config, policy or dataset input. Panics that only debug assertions or overflow checks raise in the dev profile, with no release-profile consequence. Log-only information disclosure. |
+| Low | Crashes from local operator-controlled config, policy or dataset files (the same text sent through a non-`operator_only` RPC is rated by impact). Panics that only debug assertions or overflow checks raise in the dev profile, with no release-profile consequence. Log-only information disclosure. |
 
 Report the behavior of a release build (`cargo build --release`) when it differs from the dev profile.
 

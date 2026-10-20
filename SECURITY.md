@@ -58,8 +58,8 @@ Severity follows impact. A feature's alpha status does not lower it.
   - `sensitive_read` data exposed at `read` tier.
   - Crashes in the offline `rbgp` capture converters or the separate
     GoBGP bridge process.
-- **Low:** crashes from operator-controlled configuration, policy, or
-  dataset input; panics raised only by dev-profile debug assertions or
+- **Low:** crashes from local operator-controlled configuration, policy,
+  or dataset files; panics raised only by dev-profile debug assertions or
   overflow checks; log-only disclosure.
 
 ### Response Timeline
