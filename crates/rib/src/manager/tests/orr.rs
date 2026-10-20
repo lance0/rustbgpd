@@ -41,6 +41,7 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
         peer: feed_peer,
         session_id: 1,
         peer_restart_state: false,
+        peer_gr_helper: true,
         peer_gr_families: vec![family],
         peer_enhanced_refresh: true,
         peer_llgr_families: Vec::new(),

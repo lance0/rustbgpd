@@ -1508,6 +1508,12 @@ therefore own the graceful stop and the verification that follows it.
    This is not a forwarding-continuity guarantee; use a drained route-server
    pair when traffic continuity matters.
 
+   If a controller injects routes that must survive the restart at a GR
+   helper (for example blackholes), consider
+   [`gr_eor_grace_time`](../reference/configuration.md#planned-restart-end-of-rib-grace-window)
+   on that neighbor: End-of-RIB then waits for the controller's replay, up
+   to a fixed deadline, instead of leaving with the initial table.
+
    With the daemon inactive, repeat the checks that only a stopped daemon can
    make authoritative: verify the absence of a config-adjacent
    `*.commit-confirm-locator.json`, make any explicit offline posture correction

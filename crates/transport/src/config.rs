@@ -622,6 +622,10 @@ pub struct TransportConfig {
     /// Local upper bound on the peer-advertised RFC 4724 Restart Time used
     /// for initial disconnected stale-route retention.
     pub gr_peer_restart_time_max: u16,
+    /// Planned-restart End-of-RIB grace window (seconds, 0 = off). Read by
+    /// the daemon when a marker-backed restart starts; the session itself
+    /// does not use it.
+    pub gr_eor_grace_time: u16,
     /// Long-lived stale routes time (RFC 9494, seconds). 0 = disabled.
     pub llgr_stale_time: u32,
     /// Local restarting-speaker GR window. When set, outbound OPEN messages
@@ -779,6 +783,7 @@ impl TransportConfig {
             local_ipv6_nexthop: None,
             gr_stale_routes_time: 360,
             gr_peer_restart_time_max: 4095,
+            gr_eor_grace_time: 0,
             llgr_stale_time: 0,
             gr_restart_until: None,
             local_forwarding_state: None,

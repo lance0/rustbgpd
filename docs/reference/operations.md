@@ -2552,6 +2552,7 @@ counters, using a 15-minute increase window:
 | `bgp_gr_active_peers` | Peers currently in GR stale-route state |
 | `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale); falls as the peer re-advertises or withdraws them before End-of-RIB |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
+| `bgp_gr_eor_grace_expired_total{peer}` | Planned-restart End-of-RIB grace windows that reached their deadline and released any held End-of-RIB toward the peer ([`gr_eor_grace_time`](configuration.md#planned-restart-end-of-rib-grace-window)) |
 | `bgp_selection_deferral_active{family}` | Planned-restart family convergence/release gate (1 = active); it remains active while collision failback waits for EoRR even after route selection is staged |
 | `bgp_selection_deferral_waiters{family}` | Frozen-roster peers still blocking family convergence/release, including an `awaiting_refresh` survivor after route selection is staged |
 | `bgp_selection_deferral_releases_total{family,reason}` | Family gates released after `all_eor`, `collision_refresh`, `all_excluded`, or `timer` |

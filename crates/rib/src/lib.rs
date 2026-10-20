@@ -81,7 +81,9 @@ pub use manager::{
     bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
     bench_recovery_capture_scan,
 };
-pub use manager::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
+pub use manager::{
+    EorGraceConfig, EorGracePeerConfig, SelectionDeferralConfig, SelectionDeferralWaiterConfig,
+};
 pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
     OrrState, OrrStatusSnapshot, OrrTopology, OrrTopologySnapshot, OrrVantageStatus, SpfResult,
