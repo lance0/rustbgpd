@@ -1373,6 +1373,155 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
     assert!(other_outbound.try_recv().is_err(), "co-member untouched");
 }
 
+/// Unlocking a family can move the peer into an update group that already
+/// exists because another member negotiated the family from the start. The
+/// moved peer gets that group's IPv6 rows and one IPv6 `EoR`; the existing
+/// member and the old group's remaining member get nothing.
+#[test]
+fn family_made_sendable_mid_session_joins_an_existing_group() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let dual = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 4));
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 5));
+    let v4_only = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 6));
+    let mut dual_rx = register_direct_peer_with_families(&mut manager, dual, dual_stack_sendable());
+    let mut peer_rx = register_direct_peer(&mut manager, peer);
+    let mut v4_rx = register_direct_peer(&mut manager, v4_only);
+    assert_eq!(
+        dual_rx.try_recv().unwrap().end_of_rib,
+        dual_stack_sendable()
+    );
+    for rx in [&mut peer_rx, &mut v4_rx] {
+        assert_eq!(rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    }
+    let dual_gid = manager.grouped_member_of(dual).expect("grouped");
+    let v4_gid = manager.grouped_member_of(peer).expect("grouped");
+    assert_ne!(dual_gid, v4_gid);
+
+    let source = Ipv4Addr::new(192, 0, 2, 12);
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 3, 0, 0, 0, 0, 0), 48);
+    let mut v6_route = crate::test_support::make_route(v4, source);
+    v6_route.prefix = Prefix::V6(v6);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced: vec![crate::test_support::make_route(v4, source), v6_route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+    let mut dual_prefixes: Vec<_> = std::iter::from_fn(|| dual_rx.try_recv().ok())
+        .flat_map(|u| u.announce.iter().map(|r| r.prefix).collect::<Vec<_>>())
+        .collect();
+    dual_prefixes.sort_unstable();
+    let mut expected = vec![Prefix::V4(v4), Prefix::V6(v6)];
+    expected.sort_unstable();
+    assert_eq!(dual_prefixes, expected);
+    for rx in [&mut peer_rx, &mut v4_rx] {
+        let prefixes: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .flat_map(|u| u.announce.iter().map(|r| r.prefix).collect::<Vec<_>>())
+            .collect();
+        assert_eq!(prefixes, vec![Prefix::V4(v4)]);
+    }
+
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 0,
+        family: ipv6,
+        add_path_send_limit: None,
+    });
+    while manager.process_next_route_chunk() {}
+
+    assert_eq!(manager.grouped_member_of(peer), Some(dual_gid), "joined");
+    assert_eq!(manager.grouped_member_of(v4_only), Some(v4_gid));
+    let updates: Vec<_> = std::iter::from_fn(|| peer_rx.try_recv().ok()).collect();
+    let announced: Vec<_> = updates
+        .iter()
+        .flat_map(|u| u.announce.iter().map(|r| r.prefix))
+        .collect();
+    assert_eq!(announced, vec![Prefix::V6(v6)]);
+    assert!(updates.iter().all(|u| u.withdraw.is_empty()));
+    let eor: Vec<_> = updates.iter().flat_map(|u| u.end_of_rib.clone()).collect();
+    assert_eq!(eor, vec![ipv6]);
+    assert_eq!(updates.last().unwrap().end_of_rib, vec![ipv6]);
+    assert!(dual_rx.try_recv().is_err(), "existing member untouched");
+    assert!(v4_rx.try_recv().is_err(), "old group member untouched");
+}
+
+/// A GR restarter whose unlocked family is still ORF-gated gets no `EoR`
+/// ahead of the gated flood: the marker waits in `gr_deferred_eor`.
+#[test]
+fn family_made_sendable_defers_eor_for_an_orf_gated_restarter() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 8));
+    let mut outbound = register_direct_peer(&mut manager, peer);
+    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    manager.gr_peers.insert(peer, HashSet::new());
+    manager
+        .peer_orf_pending
+        .insert(peer, std::iter::once(ipv6).collect());
+
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 0,
+        family: ipv6,
+        add_path_send_limit: None,
+    });
+    while manager.process_next_route_chunk() {}
+
+    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok())
+        .flat_map(|u| u.end_of_rib)
+        .collect();
+    assert_eq!(eor, vec![], "no EoR ahead of the gated flood");
+    assert!(manager.gr_deferred_eor[&peer].contains(&ipv6));
+}
+
+/// A superseded session's unlock is discarded and counted as stale.
+#[test]
+fn stale_family_sendable_is_discarded_and_counted() {
+    let (_tx, rx) = mpsc::channel(1);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 7));
+    let mut outbound = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 2);
+    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 1,
+        family: (Afi::Ipv6, Safi::Unicast),
+        add_path_send_limit: None,
+    });
+    while manager.process_next_route_chunk() {}
+
+    assert_eq!(manager.peer_sendable_families[&peer], ipv4_sendable());
+    assert!(outbound.try_recv().is_err());
+    let stale = metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_rib_stale_session_message_ignored_total")
+        .expect("stale counter registered")
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "kind" && label.value() == "family_sendable")
+        })
+        .map(|metric| metric.get_counter().get_value());
+    assert_eq!(stale, Some(1.0), "stale message counted");
+}
+
 /// An unlocked family that negotiated Add-Path send carries its limit: the
 /// peer leaves its group (Add-Path send is private) and receives every path
 /// up to the limit, even with no other Add-Path family to seed the scalar.

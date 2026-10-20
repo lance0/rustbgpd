@@ -3053,6 +3053,14 @@ impl RibManager {
         family: (Afi, Safi),
         add_path_send_limit: Option<u32>,
     ) {
+        if self.stale_session_message(
+            peer,
+            session_id,
+            "PeerFamilySendable",
+            rustbgpd_telemetry::metrics::StaleSessionMessageKind::FamilySendable,
+        ) {
+            return;
+        }
         // Update the session record so a deferred registration or a
         // collision failback installs the family too.
         let Some(record) = self
@@ -3098,17 +3106,34 @@ impl RibManager {
                 *max = limit;
             }
         }
-        let mut evpn_feed = if self.update_groups.members.contains_key(&peer) {
-            self.recompute_update_group(peer)
+        // A GR restarter would sweep its retained routes on an `EoR` sent
+        // ahead of an ORF-gated flood: defer it as `send_initial_table`
+        // does, until the peer's ROUTE-REFRESH lifts the gate.
+        let orf_gated = self
+            .peer_orf_pending
+            .get(&peer)
+            .is_some_and(|gated| gated.contains(&family));
+        if orf_gated && self.gr_peers.contains_key(&peer) {
+            self.gr_deferred_eor.entry(peer).or_default().insert(family);
         } else {
-            None
-        };
-        self.pending_eor.entry(peer).or_default().insert(family);
-        self.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
-        self.distribute_changes_with_evpn_feeds(
-            evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
-            true,
-        );
+            self.pending_eor.entry(peer).or_default().insert(family);
+        }
+        // The regroup can build a destination table from the whole Loc-RIB;
+        // keep readiness served across it as other full-table paths do.
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                let mut evpn_feed = if manager.update_groups.members.contains_key(&peer) {
+                    manager.recompute_update_group(peer)
+                } else {
+                    None
+                };
+                manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
+                manager.distribute_changes_with_evpn_feeds(
+                    evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
+                    true,
+                );
+            });
+        });
     }
 
     /// Build the classifier input for one peer.

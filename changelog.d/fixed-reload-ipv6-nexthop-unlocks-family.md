@@ -9,3 +9,6 @@
   new INFO line, `local_ipv6_nexthop now provides an IPv6 next hop:
   exporting IPv6 unicast`, records the restore. Route-server clients and iBGP
   sessions are unchanged.
+  A superseded session's unlock is discarded and counted in
+  `bgp_rib_stale_session_message_ignored_total` under the new
+  `kind="family_sendable"` label.
