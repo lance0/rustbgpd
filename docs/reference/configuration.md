@@ -987,6 +987,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_peer_restart_time_max` | u16  | no       | 4095    | Local upper bound on the peer-advertised Restart Time used for initial disconnected stale-route retention (seconds, 1--4095); does not change this daemon's OPEN |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
+| `gr_eor_grace_time`    | u16      | no       | 0 (off) | Planned-restart End-of-RIB grace window toward this static neighbor (seconds, at most the effective `gr_restart_time`); see [End-of-RIB grace window](#planned-restart-end-of-rib-grace-window) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
 | `send_non_transitive_extended_communities` | bool | no | false | Permit non-transitive Extended Communities to cross a plain eBGP boundary. iBGP and `route_server_client` sessions always preserve them. Inherits from the peer-group |
 | `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: when export policy denies the Loc-RIB best toward this peer, advertise the best *permitted* candidate instead of hiding the prefix. Requires `route_server_client = true`; inherits from the peer-group (see below) |
@@ -1968,6 +1969,79 @@ affected family and release sweeps the complete Adj-RIB-In plus Loc-RIB family
 so an already-withdrawn identity cannot remain stale. All labels are bounded by
 configured family and release reason.
 See [ADR-0024](../adr/0024-graceful-restart.md).
+
+#### Planned-restart End-of-RIB grace window
+
+After a planned restart, an injection controller (for example a DDoS detector
+feeding blackholes through `rustbgpd-gobgp-bridge`) re-adds its routes only
+once it notices the restart. Without a window, rustbgpd sends End-of-RIB with
+its initial table, about a second after the session returns. The upstream
+helper then removes every stale route it kept from the previous session, and
+a blackhole stays missing until the controller replays it.
+
+`gr_eor_grace_time` holds End-of-RIB toward one static neighbor (or the static
+members of a peer group) for that many seconds after daemon start:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+gr_eor_grace_time = 25   # off by default
+```
+
+- **Activation.** Only a valid planned restart (a usable GR restart marker)
+  starts a window; a cold boot or crash restart keeps the immediate
+  End-of-RIB. The window applies only while the neighbor's current session
+  advertises a Graceful Restart capability, including a helper-only one with
+  no families, without Restart State. It covers the families this daemon
+  advertises in its own GR capability. A family advertised with the
+  Forwarding State bit clear (configured kernel installers) is flushed by the
+  helper as soon as the session returns (RFC 4724 §4.2), so the window cannot
+  keep those routes. Neighbors that do not set the key,
+  such as route-reflector clients, get End-of-RIB at once as before (RFC 4724
+  §4.2 has a helper waiting for it).
+- **What is held.** Only the End-of-RIB marker. Route announcements and
+  withdrawals keep flowing, so replayed routes reach the helper fresh and
+  always arrive before the released marker. Route refresh responses, operator
+  outbound replay (refused while held), resyncs and families that become
+  sendable mid-session all respect the hold.
+- **Deadline.** One absolute deadline per neighbor, counted from daemon start
+  and never later than the restart-marker window. A reconnect inside the window
+  does not restart it. At the deadline End-of-RIB is released, the log records
+  `End-of-RIB grace window ended at its deadline`, and
+  `bgp_gr_eor_grace_released_total{peer,reason="deadline"}` increments. The
+  release is timer-driven: rustbgpd does not know whether replay finished, and
+  a route not re-injected by then is removed by the helper at that End-of-RIB.
+- **Scope of the guarantee.** The window closes the observed gap when replay
+  completes before release. A timer does not prove that replay completed, so
+  this is a bounded mitigation, not a gap-free restart.
+
+**Choosing the value.** Set the window a few seconds beyond the controller's
+measured replay time after a restart. End-of-RIB is per address family, so the
+hold also delays cleanup of every other stale route in that family toward that
+peer. That includes a ban lifted while rustbgpd was down: the restarted daemon
+has no record of it and cannot withdraw it, so the upstream keeps the stale
+route until End-of-RIB is released or its own timer expires. A ban that the
+controller re-adds and then lifts during the hold is withdrawn at once.
+Whether keeping stale routes longer is the right trade during an attack is an
+operator decision.
+
+**Restart Time and helper limits.** `--check` rejects a window longer than
+the effective `gr_restart_time`, because the hold belongs to the restarting
+window this daemon advertises. That bound is not sufficient. Once the session
+is back, RFC 4724 §4.2 lets the helper limit how long it waits for End-of-RIB
+with its own stale-route timer, and the GR capability does not carry that
+value (RFC 4724 §3). If the helper's timer runs out first, it removes every
+stale route of the family before rustbgpd releases End-of-RIB. FRR 10.7.1's
+default `bgp graceful-restart stalepath-time` is 360 seconds, and Junos
+documents a `stale-routes-time` default of 300 seconds. Check the upstream's
+configuration and leave a margin. `--check` warns above 240 seconds as a
+heuristic only; it cannot see the upstream's real limit. The local
+`gr_stale_routes_time` is the opposite direction (how long rustbgpd keeps a
+restarting peer's routes) and does not bound this window.
+
+A reload stores a new value for the next planned restart; it does not change a
+window already running.
 
 ### Long-Lived Graceful Restart (RFC 9494)
 
@@ -5537,6 +5611,7 @@ quoting it:
 | `gr_peer_restart_time_max` must be > 0 | `gr_peer_restart_time_max must be > 0` |
 | `gr_peer_restart_time_max` must be <= 4095 | `gr_peer_restart_time_max <value> exceeds 4095 (12-bit max)` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `gr_stale_routes_time must be > 0` / `gr_stale_routes_time <value> exceeds 3600 (1 hour max)` |
+| A non-zero `gr_eor_grace_time` requires `graceful_restart` and must not exceed the effective `gr_restart_time` | `gr_eor_grace_time requires graceful_restart` / `gr_eor_grace_time <value> exceeds the Restart Time <value> this daemon advertises` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `prefix length ... exceeds` |
 | Policy entry must have at least one match condition (see [Match conditions](#match-conditions)) | `must have at least one match condition` |
 | Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates re-evaluate established peers whose import policy depends on validation state, by inbound Route Refresh unless `[rpki] local_revalidation` re-evaluates them locally | *(informational — no error)* |

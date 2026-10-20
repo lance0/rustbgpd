@@ -140,7 +140,8 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
                             | TermAction::Break
                             | TermAction::ContinueLoop
                             | TermAction::CommunityVar { .. }
-                            | TermAction::RemoveLargeCommunityAdmin { .. } => true,
+                            | TermAction::RemoveLargeCommunityAdmin { .. }
+                            | TermAction::RemoveAllCommunities { .. } => true,
                         };
                         action_comparable
                             && !term.guard.any_node(&|guard| match guard {

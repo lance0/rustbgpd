@@ -1553,7 +1553,9 @@ fn unsafe_term(
     match &term.action {
         TermAction::Permit(mods) | TermAction::Continue(mods) => unsafe_mods(mods, forbidden),
         TermAction::CommunityVar { .. } => Some("community variables are refused"),
-        TermAction::RemoveLargeCommunityAdmin { .. } => Some("community removal is refused"),
+        TermAction::RemoveLargeCommunityAdmin { .. } | TermAction::RemoveAllCommunities { .. } => {
+            Some("community removal is refused")
+        }
         TermAction::ForEach(node) => node
             .body
             .iter()

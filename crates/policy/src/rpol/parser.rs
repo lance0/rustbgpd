@@ -974,6 +974,11 @@ impl Parser<'_> {
                     Some(wildcard) if wildcard.kind == Tok::LargeCommunityWildcard => {
                         CommunityArg::LargeAdminWildcard(self.large_admin_wildcard()?)
                     }
+                    Some(wildcard)
+                        if matches!(wildcard.kind, Tok::Star | Tok::LargeCommunityAllWildcard) =>
+                    {
+                        CommunityArg::All(self.all_wildcard(kind)?)
+                    }
                     Some(ident)
                         if ident.kind == Tok::Ident && !self.is_well_known_community(ident) =>
                     {
@@ -985,6 +990,7 @@ impl Parser<'_> {
                 let end = match &arg {
                     CommunityArg::Lit(lit) => lit.span,
                     CommunityArg::LargeAdminWildcard(global) => global.span,
+                    CommunityArg::All(span) => *span,
                     CommunityArg::Var(name) => name.span,
                 };
                 let span = token.span.to(end);
@@ -1867,12 +1873,9 @@ impl Parser<'_> {
             if self.with_community_keyword() {
                 let kind = self.bump().expect("peeked community kind");
                 if modifier == "removes"
-                    && self.text(kind) == "large-community"
-                    && self.at(Tok::LargeCommunityWildcard)
+                    && let Some(wildcard) = self.removes_wildcard(kind)?
                 {
-                    return Ok(WithAssertion::RemovesLargeAdmin(
-                        self.large_admin_wildcard()?.node,
-                    ));
+                    return Ok(wildcard);
                 }
                 let lit = self.community_lit()?;
                 return Ok(if modifier == "removes" {
@@ -1963,6 +1966,52 @@ impl Parser<'_> {
         }
         self.bump();
         Ok(WithAssertion::NotRemoved(self.community_lit()?))
+    }
+
+    /// A wildcard `removes` operand after the community keyword `kind`:
+    /// `GA:*:*` for large communities, or the strip-all form of any kind.
+    fn removes_wildcard(&mut self, kind: Token) -> PResult<Option<WithAssertion>> {
+        let kind = match self.text(kind) {
+            "large-community" => CommunityKind::Large,
+            "ext-community" => CommunityKind::Ext,
+            _ => CommunityKind::Standard,
+        };
+        if kind == CommunityKind::Large && self.at(Tok::LargeCommunityWildcard) {
+            return Ok(Some(WithAssertion::RemovesLargeAdmin(
+                self.large_admin_wildcard()?.node,
+            )));
+        }
+        if self.at(Tok::Star) || self.at(Tok::LargeCommunityAllWildcard) {
+            self.all_wildcard(kind)?;
+            return Ok(Some(WithAssertion::RemovesAll(kind)));
+        }
+        Ok(None)
+    }
+
+    /// The strip-all operand: `*` for standard and extended communities,
+    /// `*:*:*` for large communities (the literal shape of each kind).
+    fn all_wildcard(&mut self, kind: CommunityKind) -> PResult<Span> {
+        let (expected, wrong, hint) = match kind {
+            CommunityKind::Large => (
+                Tok::LargeCommunityAllWildcard,
+                Tok::Star,
+                "write every large community as `*:*:*`",
+            ),
+            CommunityKind::Standard | CommunityKind::Ext => (
+                Tok::Star,
+                Tok::LargeCommunityAllWildcard,
+                "`*:*:*` is the large-community form; write `*`",
+            ),
+        };
+        if let Some(token) = self.peek().filter(|token| token.kind == wrong) {
+            self.diags.push(Diagnostic::new(
+                token.span,
+                format!("wrong wildcard for `{}`", super::typeck::kind_keyword(kind)),
+                hint,
+            ));
+            return Err(Fail);
+        }
+        Ok(self.expect(expected, "a community wildcard")?.span)
     }
 
     fn large_admin_wildcard(&mut self) -> PResult<Spanned<u32>> {

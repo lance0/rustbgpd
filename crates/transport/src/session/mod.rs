@@ -557,11 +557,11 @@ pub(crate) struct PeerSession {
     /// Session counters
     updates_received: u64,
     updates_sent: u64,
-    notifications_received: u64,
-    notifications_sent: u64,
     otc_routes_blocked: u64,
     import_policy_routes_permitted: u64,
     import_policy_routes_denied: u64,
+    /// Times this actor left Established; only for connect-failure logging.
+    /// The operator-facing count is the neighbor's `NeighborCounters`.
     flap_count: u64,
     established_at: Option<tokio::time::Instant>,
     last_error: String,
@@ -2246,8 +2246,6 @@ impl PeerSession {
             refresh_accounting_timer: None,
             updates_received: 0,
             updates_sent: 0,
-            notifications_received: 0,
-            notifications_sent: 0,
             otc_routes_blocked: 0,
             import_policy_routes_permitted: 0,
             import_policy_routes_denied: 0,

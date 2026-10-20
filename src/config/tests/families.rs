@@ -921,3 +921,75 @@ fn ipv6_next_hop_advisory_survives_a_missing_link_local_interface() {
     let text = v6_next_hop_advisory(&config).expect("the IPv4 eBGP neighbor is still flagged");
     assert!(text.contains("Neighbors: 192.0.2.1."), "{text}");
 }
+
+#[test]
+fn eor_grace_time_is_bounded_by_the_advertised_restart_time() {
+    // The default Restart Time (120 s) bounds an unset gr_restart_time.
+    assert_gr_reason(
+        &gr_toml("gr_eor_grace_time = 121"),
+        "gr_eor_grace_time 121 exceeds the Restart Time 120 this daemon advertises",
+    );
+    assert_gr_reason(
+        &gr_toml("gr_restart_time = 30\ngr_eor_grace_time = 31"),
+        "gr_eor_grace_time 31 exceeds the Restart Time 30 this daemon advertises",
+    );
+    assert_gr_reason(
+        &gr_toml("graceful_restart = false\ngr_eor_grace_time = 5"),
+        "gr_eor_grace_time requires graceful_restart",
+    );
+    // An inherited window meets the member's own Restart Time.
+    let inherited = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.upstream]
+gr_eor_grace_time = 90
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "upstream"
+gr_restart_time = 60
+"#;
+    assert_gr_reason(
+        inherited,
+        "gr_eor_grace_time 90 exceeds the Restart Time 60 this daemon advertises",
+    );
+
+    let accepted = parse(&gr_toml("gr_restart_time = 300\ngr_eor_grace_time = 0")).unwrap();
+    assert_eq!(accepted.eor_grace_above_ceiling(), []);
+    let accepted = parse(&gr_toml("gr_eor_grace_time = 120")).unwrap();
+    let neighbors = accepted.resolved_neighbors().unwrap();
+    assert_eq!(neighbors[0].transport_config.gr_eor_grace_time, 120);
+    assert_eq!(accepted.eor_grace_above_ceiling(), []);
+}
+
+#[test]
+fn eor_grace_time_above_the_ceiling_is_an_advisory_not_an_error() {
+    let at_ceiling = parse(&gr_toml("gr_restart_time = 600\ngr_eor_grace_time = 240")).unwrap();
+    assert!(
+        at_ceiling
+            .advisories()
+            .iter()
+            .all(|advisory| !advisory.headline.contains("gr_eor_grace_time"))
+    );
+    let above = parse(&gr_toml("gr_restart_time = 600\ngr_eor_grace_time = 241")).unwrap();
+    let text = above
+        .advisories()
+        .into_iter()
+        .find(|advisory| advisory.headline.contains("gr_eor_grace_time"))
+        .expect("advisory above the ceiling")
+        .one_line();
+    assert!(text.contains("10.0.0.2 (241 s)"), "{text}");
+    // The advisory must not claim to have checked the upstream.
+    assert!(
+        text.contains("heuristic") && text.contains("cannot read it"),
+        "{text}"
+    );
+    assert!(text.contains("gr_stale_routes_time"), "{text}");
+}

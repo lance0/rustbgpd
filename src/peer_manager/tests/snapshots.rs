@@ -593,3 +593,81 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
     let managed = mgr.peers.remove(&peer_key).unwrap();
     managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }
+
+/// The `(flap_count, notifications_received)` the neighbor row reports.
+async fn neighbor_counter_row(mgr: &PeerManager, peer: &PeerKey) -> (u64, u64) {
+    let row = mgr
+        .list_peers()
+        .await
+        .into_iter()
+        .find(|info| info.address == peer.address && info.interface == peer.interface)
+        .expect("neighbor row");
+    assert!(!row.stale, "the row must come from the live session");
+    (row.flap_count, row.notifications_received)
+}
+
+fn record_reset(mgr: &PeerManager, peer: &PeerKey) {
+    let counters = &mgr.peers[peer].transport_config.neighbor_counters;
+    counters.record_flap();
+    counters.record_notification_received();
+}
+
+/// Two neighbors on one link-local address but different interfaces are
+/// different neighbors: a reset counted on one leaves the other at 0, even
+/// though Prometheus labels both by the bare address.
+#[tokio::test]
+async fn neighbor_counters_are_scoped_to_the_interface_bound_key() {
+    let mut mgr = test_peer_manager();
+    let address: IpAddr = "fe80::1".parse().unwrap();
+    for (interface, scope_id) in [("rustbgpd-test-a0", 41), ("rustbgpd-test-a1", 42)] {
+        let mut config = make_config(address, 65002);
+        config.interface = Some(interface.to_string());
+        config.scope_id = Some(scope_id);
+        mgr.add_peer_with_admin_state(config, false, false)
+            .await
+            .unwrap();
+    }
+    let (reset, quiet) = (
+        scoped_key(address, "rustbgpd-test-a0"),
+        scoped_key(address, "rustbgpd-test-a1"),
+    );
+    record_reset(&mgr, &reset);
+
+    assert_eq!(neighbor_counter_row(&mgr, &reset).await, (1, 1));
+    assert_eq!(neighbor_counter_row(&mgr, &quiet).await, (0, 0));
+    assert!(
+        !mgr.peers[&reset]
+            .transport_config
+            .neighbor_counters
+            .same_block(&mgr.peers[&quiet].transport_config.neighbor_counters)
+    );
+}
+
+/// A reconfigure re-adds the neighbor and keeps counting, like its
+/// Prometheus series; deleting it ends the block, so a re-add starts at 0.
+#[tokio::test]
+async fn neighbor_counters_survive_reconfigure_and_end_with_deletion() {
+    let mut mgr = test_peer_manager();
+    let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+    let peer = key(address);
+    mgr.add_peer_with_admin_state(make_config(address, 65002), false, false)
+        .await
+        .unwrap();
+    record_reset(&mgr, &peer);
+    assert_eq!(neighbor_counter_row(&mgr, &peer).await, (1, 1));
+
+    let mut changed = make_config(address, 65002);
+    changed.hold_time = Some(30);
+    mgr.reconfigure_peer(changed).await.unwrap();
+    assert_eq!(
+        neighbor_counter_row(&mgr, &peer).await,
+        (1, 1),
+        "a reconfigure is not a deletion"
+    );
+
+    mgr.delete_peer(peer.clone(), false).await.unwrap();
+    mgr.add_peer_with_admin_state(make_config(address, 65002), false, false)
+        .await
+        .unwrap();
+    assert_eq!(neighbor_counter_row(&mgr, &peer).await, (0, 0));
+}

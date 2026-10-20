@@ -1,8 +1,9 @@
 //! Replay ordering and capacity against a scripted daemon: an unban during an
 //! outage is retried after it, a cancelled unban is still retried, a replay
 //! never reinstalls a withdrawn path, a daemon that stops answering does not
-//! hold the bridge, and the tracking cap is checked before the daemon sees a
-//! new ban.
+//! hold the bridge, the tracking cap is checked before the daemon sees a
+//! new ban, and a liveness probe that sees the daemon come back replays at
+//! once.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -11,6 +12,7 @@ use std::time::Duration;
 use rustbgpd_gobgp_bridge::gobgp::{self, gobgp_api_server::GobgpApi};
 use rustbgpd_gobgp_bridge::rustbgpd::{
     self as rbgp,
+    control_service_server::{ControlService, ControlServiceServer},
     injection_service_server::{InjectionService, InjectionServiceServer},
 };
 use rustbgpd_gobgp_bridge::{Bridge, daemon_channel};
@@ -33,6 +35,8 @@ struct Script {
     hold_delete: Option<Arc<Notify>>,
     /// Accept every call and never answer.
     stalled: bool,
+    /// Answer AddPath with UNAVAILABLE while other calls succeed.
+    refuse_add: bool,
 }
 
 #[derive(Clone, Default)]
@@ -47,7 +51,7 @@ impl InjectionService for Daemon {
         let prefix = request.into_inner().prefix;
         let (hold, parked, stalled) = {
             let mut script = self.0.lock().unwrap();
-            if script.down {
+            if script.down || script.refuse_add {
                 return Err(Status::unavailable("scripted outage"));
             }
             let hold = script.hold_add.take();
@@ -102,6 +106,19 @@ impl InjectionService for Daemon {
     }
 }
 
+#[tonic::async_trait]
+impl ControlService for Daemon {
+    async fn check_liveness(
+        &self,
+        _request: Request<rbgp::CheckLivenessRequest>,
+    ) -> Result<Response<rbgp::CheckLivenessResponse>, Status> {
+        if self.0.lock().unwrap().down {
+            return Err(Status::unavailable("scripted outage"));
+        }
+        Ok(Response::new(rbgp::CheckLivenessResponse {}))
+    }
+}
+
 async fn bridge(max_tracked: usize) -> (Bridge, Daemon) {
     bridge_with_deadline(max_tracked, rustbgpd_gobgp_bridge::DAEMON_RPC_TIMEOUT).await
 }
@@ -114,6 +131,7 @@ async fn bridge_with_deadline(max_tracked: usize, rpc_timeout: Duration) -> (Bri
     tokio::spawn(
         tonic::transport::Server::builder()
             .add_service(service)
+            .add_service(ControlServiceServer::new(daemon.clone()))
             .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
     );
     let channel = daemon_channel(&format!("http://{addr}").parse().unwrap(), rpc_timeout).unwrap();
@@ -298,4 +316,77 @@ async fn a_daemon_that_stops_answering_does_not_hold_the_bridge() {
     bridge.add_path(ban(3, false)).await.unwrap();
     bridge.reconcile().await;
     assert_eq!(held(&daemon), ["203.0.113.2", "203.0.113.3"]);
+}
+
+/// Poll until the scripted daemon holds `want`, or give up after 5 s.
+async fn wait_held(daemon: &Daemon, want: &[&str]) -> bool {
+    for _ in 0..100 {
+        if held(daemon) == want {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_probe_that_sees_the_daemon_come_back_replays_at_once() {
+    let (bridge, daemon) = bridge(8).await;
+    // No periodic pass: only the restart watch can replay.
+    bridge.spawn_restart_watch(Duration::from_millis(20));
+    bridge.add_path(ban(1, false)).await.unwrap();
+    // The daemon goes away with its routes, a probe sees it down, then it
+    // comes back.
+    {
+        let mut script = daemon.0.lock().unwrap();
+        script.down = true;
+        script.routes.clear();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    daemon.0.lock().unwrap().down = false;
+    assert!(
+        wait_held(&daemon, &["203.0.113.1"]).await,
+        "{:?}",
+        held(&daemon)
+    );
+}
+
+#[tokio::test]
+async fn a_daemon_that_stays_up_is_not_replayed_by_the_watch() {
+    let (bridge, daemon) = bridge(8).await;
+    bridge.spawn_restart_watch(Duration::from_millis(20));
+    bridge.add_path(ban(1, false)).await.unwrap();
+    // Routes vanish while every probe is answered: the watch leaves them to
+    // the periodic pass.
+    daemon.0.lock().unwrap().routes.clear();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(held(&daemon).is_empty(), "{:?}", held(&daemon));
+}
+
+#[tokio::test]
+async fn an_unfinished_pass_after_the_daemon_returns_is_retried() {
+    let (bridge, daemon) = bridge(8).await;
+    bridge.spawn_restart_watch(Duration::from_millis(20));
+    bridge.add_path(ban(1, false)).await.unwrap();
+    {
+        let mut script = daemon.0.lock().unwrap();
+        script.down = true;
+        script.routes.clear();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The daemon answers probes again but still refuses injections, so the
+    // first passes fail.
+    {
+        let mut script = daemon.0.lock().unwrap();
+        script.down = false;
+        script.refuse_add = true;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(held(&daemon).is_empty(), "{:?}", held(&daemon));
+    daemon.0.lock().unwrap().refuse_add = false;
+    assert!(
+        wait_held(&daemon, &["203.0.113.1"]).await,
+        "{:?}",
+        held(&daemon)
+    );
 }

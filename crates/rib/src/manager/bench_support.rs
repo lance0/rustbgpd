@@ -1668,6 +1668,7 @@ impl RibManager {
                 peer,
                 session_id,
                 peer_restart_state: false,
+                peer_gr_helper: true,
                 peer_gr_families: gate_families.to_vec(),
                 peer_enhanced_refresh: true,
                 peer_llgr_families: Vec::new(),

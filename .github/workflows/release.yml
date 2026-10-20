@@ -105,20 +105,10 @@ jobs:
           # bits/libc-header-start.h.
           apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
-      - name: Install protobuf compiler
-        # Bullseye's packaged protoc (3.12) predates the proto3
-        # `optional` fields in proto/rustbgpd.proto; install a pinned
-        # upstream release binary instead.
-        run: |
-          set -euo pipefail
-          sha256="$(.github/scripts/archive-pin.sh protoc-25.3-linux-x86_64.zip)"
-          curl -sSfL -o /tmp/protoc.zip \
-            --connect-timeout 10 --max-time 120 \
-            --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
-            https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip
-          echo "${sha256}  /tmp/protoc.zip" | sha256sum -c
-          unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-          protoc --version
+      # Bullseye's packaged protoc (3.12) predates the proto3 `optional`
+      # fields in proto/rustbgpd.proto; install the pinned upstream archive
+      # through the shared action, which caches and verifies it.
+      - uses: ./.github/actions/install-protobuf
 
       - name: Build release binaries
         # --features rustbgpd/jemalloc: the shipped daemon must be the

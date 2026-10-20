@@ -223,12 +223,25 @@ impl EffectiveHoldTimers {
     }
 }
 
+/// `--check` advisory ceiling for `gr_eor_grace_time`: the lower of two common
+/// helper stale-route defaults (Junos 300 s; FRR 360 s) less 60 s of margin.
+/// A heuristic only: the real limit is the upstream's unadvertised setting.
+const EOR_GRACE_ADVISORY_CEILING_SECS: u16 = 240;
+
+/// Default advertised Restart Time when `gr_restart_time` is unset.
+const DEFAULT_GR_RESTART_TIME: u16 = 120;
+
 struct EffectiveGracefulRestartTimers {
     enabled: bool,
     restart_time: Option<u16>,
     peer_restart_time_max: Option<u16>,
     stale_routes_time: Option<u64>,
     llgr_stale_time: Option<u32>,
+    eor_grace_time: Option<u16>,
+    /// Compare the grace window with the default Restart Time when none is
+    /// set. A peer group without its own Restart Time leaves that check to
+    /// each member, which may set one.
+    restart_time_defaulted: bool,
 }
 
 impl EffectiveGracefulRestartTimers {
@@ -250,6 +263,10 @@ impl EffectiveGracefulRestartTimers {
             llgr_stale_time: neighbor
                 .llgr_stale_time
                 .or_else(|| group.and_then(|g| g.llgr_stale_time)),
+            eor_grace_time: neighbor
+                .gr_eor_grace_time
+                .or_else(|| group.and_then(|g| g.gr_eor_grace_time)),
+            restart_time_defaulted: true,
         }
     }
 
@@ -260,6 +277,8 @@ impl EffectiveGracefulRestartTimers {
             peer_restart_time_max: group.gr_peer_restart_time_max,
             stale_routes_time: group.gr_stale_routes_time,
             llgr_stale_time: group.llgr_stale_time,
+            eor_grace_time: group.gr_eor_grace_time,
+            restart_time_defaulted: false,
         }
     }
 
@@ -298,6 +317,23 @@ impl EffectiveGracefulRestartTimers {
             && t > 16_777_215
         {
             return Err(format!("llgr_stale_time {t} exceeds 16777215 (24-bit max)"));
+        }
+        if let Some(grace) = self.eor_grace_time.filter(|grace| *grace > 0) {
+            if !self.enabled {
+                return Err("gr_eor_grace_time requires graceful_restart".to_string());
+            }
+            // The hold is part of the restarting-speaker window this daemon
+            // advertises; it cannot outlive it.
+            let restart_time = self.restart_time.or(self
+                .restart_time_defaulted
+                .then_some(DEFAULT_GR_RESTART_TIME));
+            if let Some(restart_time) = restart_time
+                && grace > restart_time
+            {
+                return Err(format!(
+                    "gr_eor_grace_time {grace} exceeds the Restart Time {restart_time} this daemon advertises"
+                ));
+            }
         }
         Ok(())
     }
@@ -1782,7 +1818,51 @@ impl Config {
             });
         }
 
+        let long_grace = self.eor_grace_above_ceiling();
+        if !long_grace.is_empty() {
+            let neighbors = long_grace
+                .iter()
+                .map(|(address, grace)| format!("{address} ({grace} s)"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            advisories.push(ConfigAdvisory {
+                headline: "gr_eor_grace_time exceeds the conservative ceiling of 240 seconds.",
+                detail: format!(
+                    "Neighbors: {neighbors}.\n\
+                     This check is a heuristic, not proof that the upstream keeps its stale\n\
+                     routes that long. A Graceful Restart helper's stale-route limit is local\n\
+                     configuration that the GR capability does not carry (RFC 4724 section 3),\n\
+                     so --check cannot read it. Common defaults are 360 s (FRR stalepath-time)\n\
+                     and 300 s (Junos stale-routes-time); a helper that gives up first drops\n\
+                     every stale route of the family before End-of-RIB is released. Check the\n\
+                     upstream's setting and keep the window well below it, a few seconds above\n\
+                     the measured controller replay time. Local gr_stale_routes_time is the\n\
+                     opposite direction (routes this daemon keeps from its peers) and does not\n\
+                     bound this window."
+                )
+                .into(),
+            });
+        }
+
         advisories
+    }
+
+    /// Static neighbors whose effective `gr_eor_grace_time` exceeds
+    /// [`EOR_GRACE_ADVISORY_CEILING_SECS`], with that value.
+    pub(crate) fn eor_grace_above_ceiling(&self) -> Vec<(String, u16)> {
+        self.neighbors
+            .iter()
+            .filter_map(|neighbor| {
+                let grace = neighbor.gr_eor_grace_time.or_else(|| {
+                    neighbor
+                        .peer_group
+                        .as_deref()
+                        .and_then(|name| self.peer_groups.get(name))
+                        .and_then(|group| group.gr_eor_grace_time)
+                })?;
+                (grace > EOR_GRACE_ADVISORY_CEILING_SECS).then(|| (neighbor.address.clone(), grace))
+            })
+            .collect()
     }
 
     /// Static eBGP neighbors on IPv4 transport that negotiate `ipv6_unicast`

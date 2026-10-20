@@ -2405,6 +2405,7 @@ fn reconnect_with_llgr_stale_time(
         peer,
         session_id: 0,
         peer_restart_state: false,
+        peer_gr_helper: true,
         peer_gr_families: gr_families.to_vec(),
         peer_enhanced_refresh: false,
         peer_llgr_families: llgr_families

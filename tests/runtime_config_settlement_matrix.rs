@@ -120,9 +120,9 @@ enum HostStall {
     /// The stall spanned the budget as well, and the owner observed its
     /// pre-effect deadline at least a margin late.
     FencedBeforeCheckpoint,
-    /// The owner was held, but the row's first scrape already read an
-    /// elapsed at or past the budget, so its unfenced state was gone.
-    FencedBeforeFirstLook,
+    /// The owner was held, but the observer missed its expected unfenced
+    /// tuple before the budget expired (including an attached Apply).
+    FencedBeforeHeldLook,
 }
 
 /// A mutation decided by a host stall must not report success.
@@ -454,17 +454,42 @@ impl Control {
     /// Wait for the row's armed checkpoint to be claimed, or for the
     /// daemon's own proof that a host stall decided the attempt first.
     fn wait_for_hold(&self, row: MatrixRow, daemon: &mut Daemon) -> Result<(), HostStall> {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        self.wait_for_hold_until(
+            row,
+            daemon,
+            Instant::now() + Duration::from_secs(10),
+            |_| {},
+        )
+    }
+
+    /// The callback lets a regression complete the daemon's exit after the
+    /// first evidence read, without racing a sleep against the observer.
+    fn wait_for_hold_until(
+        &self,
+        row: MatrixRow,
+        daemon: &mut Daemon,
+        deadline: Instant,
+        mut after_evidence: impl FnMut(&mut Daemon),
+    ) -> Result<(), HostStall> {
         while !self.dir.join(RECEIPT).exists() {
             if let Some(stall) = self.stall_before_checkpoint(row, daemon) {
                 return Err(stall);
             }
-            assert!(
-                Instant::now() < deadline,
-                "missing control receipt\n{}",
-                daemon.log()
-            );
-            daemon.assert_running();
+            after_evidence(daemon);
+            let exited = daemon.process.try_wait();
+            if exited.is_some() || Instant::now() >= deadline {
+                // Exit or timeout may have landed after the evidence read.
+                // An exited process now has its complete log available.
+                if let Some(stall) = self.stall_before_checkpoint(row, daemon) {
+                    return Err(stall);
+                }
+                assert!(
+                    exited.is_none(),
+                    "rustbgpd exited early with {exited:?}\n{}",
+                    daemon.log()
+                );
+                panic!("missing control receipt\n{}", daemon.log());
+            }
             thread::sleep(Duration::from_millis(10));
         }
         self.wait_for_receipt(row.checkpoint(), daemon.pid(), daemon);
@@ -850,28 +875,33 @@ fn settlement_elapsed(text: &str) -> Option<f64> {
 }
 
 /// Observe the held owner's unfenced metric tuple. The budget runs from
-/// registration, so a host stall can carry the row's first look past it;
-/// that is accepted only when the first successful scrape already reads an
-/// elapsed at or past the budget, and the daemon then shows the exact
-/// budget fence and exits 70 within the grace.
+/// registration, so a host stall can carry any look past it, including after
+/// seeing an Apply still attached. Accept that only with the exact budget
+/// fence and exit 70 within the grace.
 fn wait_held_metrics(lab: &Lab, row: MatrixRow, daemon: &mut Daemon) -> Result<(), HostStall> {
+    wait_held_metrics_with(lab, row, daemon, |_, _| {})
+}
+
+fn wait_held_metrics_with(
+    lab: &Lab,
+    row: MatrixRow,
+    daemon: &mut Daemon,
+    mut after_scrape: impl FnMut(&str, &mut Daemon),
+) -> Result<(), HostStall> {
     let budget = lab.control.budget;
     let deadline = Instant::now() + Duration::from_secs(4);
-    let mut first_look = true;
     loop {
         if let Some(text) = metrics(daemon.metrics) {
+            after_scrape(&text, daemon);
             if exact_metrics(&text, row, "none", false, budget) {
                 return Ok(());
             }
-            if first_look
-                && settlement_elapsed(&text).is_some_and(|elapsed| elapsed >= budget.as_secs_f64())
-            {
+            if settlement_elapsed(&text).is_some_and(|elapsed| elapsed >= budget.as_secs_f64()) {
                 let fenced_at = wait_fenced(lab, row, daemon);
                 daemon.sigterm();
                 daemon.wait_exit70(fenced_at);
-                return Err(HostStall::FencedBeforeFirstLook);
+                return Err(HostStall::FencedBeforeHeldLook);
             }
-            first_look = false;
         }
         assert!(
             Instant::now() < deadline,
@@ -991,11 +1021,11 @@ enum RowResult {
     None,
 }
 
-fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall> {
+fn held_apply(lab: &Lab, daemon: &mut Daemon) -> Result<Process, HostStall> {
     let candidate = lab.candidate("apply-candidate");
     let (snapshot, plan) = lab.plan(&candidate);
     lab.control.arm(MatrixRow::Apply.checkpoint());
-    let mut first = lab.command(&[
+    let first = lab.command(&[
         "--json",
         "config",
         "apply",
@@ -1008,6 +1038,11 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall
     if let Err(stall) = lab.control.wait_for_hold(MatrixRow::Apply, daemon) {
         return Err(stalled(stall, first));
     }
+    Ok(first)
+}
+
+fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall> {
+    let mut first = held_apply(lab, daemon)?;
     assert!(
         first.try_wait().is_none(),
         "held Apply exited before cancellation"
@@ -1044,9 +1079,17 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall
     Ok(RowResult::Apply(queued))
 }
 
-fn apply_confirmed(lab: &Lab, candidate: &Path) {
+fn apply_confirmed(lab: &Lab, candidate: &Path, daemon: &mut Daemon) {
     let (snapshot, plan) = lab.plan(candidate);
-    let output = lab.run(&[
+    let checkpoint = MatrixRow::AutoRevert.checkpoint();
+    let setup = Control {
+        dir: lab.control.dir.clone(),
+        nonce: format!("{:032x}", u128::MAX),
+        budget: SETUP_BUDGET,
+    };
+    assert_ne!(setup.nonce, lab.control.nonce);
+    setup.arm(checkpoint);
+    let request = lab.command(&[
         "--json",
         "config",
         "apply",
@@ -1060,25 +1103,46 @@ fn apply_confirmed(lab: &Lab, candidate: &Path) {
         "--confirm-timeout",
         "4",
     ]);
+    setup.wait_for_receipt(checkpoint, daemon.pid(), daemon);
+    setup.assert_one_claim_without_release();
+    // The confirmed Apply has consumed its checkpoint, but cannot commit
+    // or start the confirmation timer until released. Arm AutoRevert first.
+    for name in [CLAIMED, RECEIPT] {
+        std::fs::remove_file(setup.dir.join(name)).unwrap();
+    }
+    lab.control.arm(checkpoint);
+    // Release only the setup nonce; it cannot release the AutoRevert hold.
+    atomic_write(&setup.dir, RELEASE, setup.command(checkpoint).as_bytes());
+    let output = request.wait_output(Duration::from_secs(15));
     assert!(
         output.status.success(),
         "confirmed apply failed: {output:?}"
     );
+    assert_eq!(
+        std::fs::read_to_string(setup.dir.join(RELEASE)).unwrap(),
+        setup.command(checkpoint)
+    );
+    std::fs::remove_file(setup.dir.join(RELEASE)).unwrap();
 }
 
 fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall> {
+    exercise_auto_revert_after_apply(lab, daemon, |_| Ok(()))
+}
+
+fn exercise_auto_revert_after_apply(
+    lab: &Lab,
+    daemon: &mut Daemon,
+    after_apply: impl FnOnce(&mut Daemon) -> Result<(), HostStall>,
+) -> Result<RowResult, HostStall> {
     let candidate = lab.candidate("auto-candidate");
-    apply_confirmed(lab, &candidate);
-    wait_metrics_idle(daemon.metrics, daemon);
+    apply_confirmed(lab, &candidate, daemon);
+    after_apply(daemon)?;
+    lab.control.wait_for_hold(MatrixRow::AutoRevert, daemon)?;
+    wait_held_metrics(lab, MatrixRow::AutoRevert, daemon)?;
     let locator = PathBuf::from(format!(
         "{}.commit-confirm-locator.json",
         lab.config.display()
     ));
-    assert!(locator.is_file());
-    lab.assert_disk("auto-candidate", true);
-    lab.control.arm(MatrixRow::AutoRevert.checkpoint());
-    lab.control.wait_for_hold(MatrixRow::AutoRevert, daemon)?;
-    wait_held_metrics(lab, MatrixRow::AutoRevert, daemon)?;
     assert!(locator.is_file(), "hold must retain rollback authority");
     lab.assert_disk("auto-candidate", true);
     // Auto-revert now durably stages the reverted config before the held
@@ -1091,6 +1155,187 @@ fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, Hos
         "the staged revert must drop the auto-candidate"
     );
     Ok(RowResult::None)
+}
+
+/// The first scrape deliberately precedes cancellation. Wait for the daemon's
+/// fence before allowing another scrape, establishing the missed-detach window.
+fn assert_apply_observation(after_budget: bool) {
+    for attempt in 1..=STALL_ATTEMPTS {
+        let lab = Lab::new(MatrixRow::Apply, 0, 300 + attempt);
+        let mut daemon = lab.spawn("controlled", true);
+        wait_ready_and_idle(daemon.metrics, &mut daemon);
+        let Ok(mut request) = held_apply(&lab, &mut daemon) else {
+            continue;
+        };
+        if after_budget {
+            daemon.wait_log(FAIL_STOP_LINE, "\"fence_reason\":\"budget_expired\"");
+        }
+        let mut witnessed_attached = false;
+        let result = wait_held_metrics_with(&lab, MatrixRow::Apply, &mut daemon, |text, daemon| {
+            if witnessed_attached {
+                return;
+            }
+            if settlement_elapsed(text).is_some_and(|elapsed| elapsed >= BUDGET.as_secs_f64()) {
+                request.terminate_and_reap();
+                assert!(!request.try_wait().unwrap().success());
+                return;
+            }
+            assert!(text.contains("response_attached=\"attached\""), "{text}");
+            witnessed_attached = true;
+            request.signal(Signal::SIGTERM);
+            assert!(!request.wait_status(Duration::from_secs(1)).success());
+            wait_fenced(&lab, MatrixRow::Apply, daemon);
+        });
+        assert!(matches!(result, Err(HostStall::FencedBeforeHeldLook)));
+        if after_budget {
+            assert!(!witnessed_attached);
+            return;
+        }
+        if witnessed_attached {
+            return;
+        }
+    }
+    panic!("host stalls prevented an attached Apply observation in all {STALL_ATTEMPTS} attempts");
+}
+
+#[test]
+fn apply_observer_can_miss_detach_after_an_attached_scrape() {
+    assert_apply_observation(false);
+}
+
+#[test]
+fn apply_observer_can_first_scrape_after_the_budget() {
+    assert_apply_observation(true);
+}
+
+/// Keep the observer behind the completed Apply until AutoRevert has fenced.
+/// Its arm must already exist before the confirmation timer can even start.
+#[test]
+fn auto_revert_is_armed_before_the_post_apply_observer_resumes() {
+    for attempt in 1..=STALL_ATTEMPTS {
+        let lab = Lab::new(MatrixRow::AutoRevert, 0, 310 + attempt);
+        let mut daemon = lab.spawn("controlled", true);
+        wait_ready_and_idle(daemon.metrics, &mut daemon);
+        let result = exercise_auto_revert_after_apply(&lab, &mut daemon, |daemon| {
+            lab.control.wait_for_hold(MatrixRow::AutoRevert, daemon)?;
+            wait_fenced(&lab, MatrixRow::AutoRevert, daemon);
+            Ok(())
+        });
+        match result {
+            Err(HostStall::FencedBeforeHeldLook) => {
+                lab.control.assert_one_claim_without_release();
+                assert_auto_revert_recovery(&lab);
+                return;
+            }
+            Err(HostStall::RefusedBeforeCheckpoint | HostStall::FencedBeforeCheckpoint) => {}
+            Ok(_) => panic!("the post-Apply observer must resume after the AutoRevert fence"),
+        }
+    }
+    panic!("host stalls prevented an AutoRevert hold in all {STALL_ATTEMPTS} attempts");
+}
+
+/// A process fixture publishes its final evidence only after the observer's
+/// first read, then exits. The pipe is the ordering handshake, not a sleep.
+fn completed_checkpoint_observation(reason: &str) -> Result<(), HostStall> {
+    let root = tempfile::tempdir().unwrap();
+    let control = Control::new(root.path(), 303);
+    control.arm(MatrixRow::Policy.checkpoint());
+    let log = root.path().join("completed.log");
+    let evidence = root.path().join("evidence.jsonl");
+    std::fs::write(
+        &evidence,
+        format!(
+            "{{\"fields\":{{\"message\":\"{PRE_EFFECT_OBSERVED}\",\"late_ms\":300}}}}\n\
+             {{\"fields\":{{\"message\":\"{FAIL_STOP_LINE}\",\"kind\":\"policy_set\",\"fence_reason\":\"{reason}\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-c",
+            "read -r gate; while IFS= read -r line; do printf '%s\\n' \"$line\"; done < \"$1\"; exit 70",
+            "checkpoint-observer",
+        ])
+        .arg(&evidence)
+        .stdin(Stdio::piped())
+        .stdout(File::create(&log).unwrap())
+        .stderr(Stdio::null());
+    let mut daemon = Daemon {
+        process: Process::spawn(&mut command),
+        log,
+        metrics: "127.0.0.1:0".parse().unwrap(),
+    };
+    control.wait_for_hold_until(
+        MatrixRow::Policy,
+        &mut daemon,
+        Instant::now() + Duration::from_secs(10),
+        |daemon| {
+            assert!(fail_stop_lines(&daemon.log(), "\"kind\":\"policy_set\"").is_empty());
+            daemon
+                .process
+                .child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"resume\n")
+                .unwrap();
+            daemon.wait_exit(70, CLEAN_EXIT_LIMIT);
+        },
+    )
+}
+
+#[test]
+fn receipt_wait_rechecks_completed_budget_evidence_after_exit() {
+    assert!(matches!(
+        completed_checkpoint_observation("budget_expired"),
+        Err(HostStall::FencedBeforeCheckpoint)
+    ));
+}
+
+#[test]
+fn receipt_wait_still_rejects_a_seeded_non_budget_fence() {
+    let failure =
+        std::panic::catch_unwind(|| completed_checkpoint_observation("acknowledgement_lost"))
+            .expect_err("a non-budget fence must fail the matrix");
+    let message = failure.downcast_ref::<String>().unwrap();
+    assert!(
+        message.contains("reason other than the budget"),
+        "{message}"
+    );
+}
+
+#[test]
+fn receipt_wait_still_fails_when_a_real_mutation_skips_the_hold() {
+    let lab = Lab::new(MatrixRow::Policy, 0, 304).with_hold_budget(SETUP_BUDGET);
+    let mut daemon = lab.spawn("controlled", true);
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    let definition = lab.root.path().join("policy.json");
+    std::fs::write(
+        &definition,
+        r#"{"default_action":"permit","statements":[]}"#,
+    )
+    .unwrap();
+    // PolicySet never reaches the transaction-only checkpoint: the seed
+    // lets the mutation commit without the hold the matrix must require.
+    lab.control.arm(MatrixRow::Apply.checkpoint());
+    let output = lab.run(&[
+        "policy",
+        "set",
+        "unheld-policy",
+        "--from-file",
+        definition.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    lab.assert_disk("unheld-policy", true);
+    assert!(!daemon.log_has(FAIL_STOP_LINE, ""));
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        lab.control
+            .wait_for_hold_until(MatrixRow::Policy, &mut daemon, Instant::now(), |_| {})
+    }))
+    .expect_err("an unclaimed checkpoint must fail, not become a host-stall retry");
+    let message = failure.downcast_ref::<String>().unwrap();
+    assert!(message.contains("missing control receipt"), "{message}");
 }
 
 fn wait_metrics_idle(addr: SocketAddr, daemon: &mut Daemon) {

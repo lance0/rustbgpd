@@ -526,6 +526,10 @@ pub enum CommunityArg {
     /// wildcard form. The evaluator expands it against the arrived route
     /// into concrete large-community removals.
     LargeAdminWildcard(Spanned<u32>),
+    /// `remove community *`, `remove ext-community *`, or
+    /// `remove large-community *:*:*` — every value of the action's kind on
+    /// the arrived route. Removal-only.
+    All(Span),
     /// A `let`/loop binding or policy parameter (standard communities
     /// only; parameters resolve to literals at compile time).
     Var(Spanned<String>),
@@ -875,6 +879,9 @@ pub enum WithAssertion {
     Removes(Spanned<CommunityLit>),
     /// `removes large-community 65001:*:*` — remove every matching fixture value.
     RemovesLargeAdmin(u32),
+    /// `removes community *`, `removes ext-community *` or `removes
+    /// large-community *:*:*` — every fixture value of the kind is removed.
+    RemovesAll(CommunityKind),
     /// `not removed community 65001:999` — a fixture value is not removed.
     NotRemoved(Spanned<CommunityLit>),
     /// `without community 65001:999` (any kind) — absent from the adds.

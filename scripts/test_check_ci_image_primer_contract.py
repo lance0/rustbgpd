@@ -422,10 +422,10 @@ class PrimerContractTests(unittest.TestCase):
             )
         with self.subTest("composite action drops its checksum"):
             self.assert_red(
-                ".github/actions/install-protobuf/action.yml:10: fetches without verifying a SHA-256",
+                ".github/actions/install-protobuf/action.yml:49: fetches without verifying a SHA-256",
                 (
                     ".github/actions/install-protobuf/action.yml",
-                    """printf '%s  %s\\n' "$sha256" "$archive" | sha256sum -c -""",
+                    """printf '%s  %s\\n' "$PROTOC_SHA256" "$archive" | sha256sum -c -""",
                     "true",
                 ),
             )

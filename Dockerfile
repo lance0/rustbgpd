@@ -84,7 +84,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/ci/rustbgpd /out/ && \
     cp target/ci/rbgp /out/ && \
     cp target/ci/evpn-tester /out/ && \
-    cp target/ci/evpn-monitor /out/
+    cp target/ci/evpn-monitor /out/ && \
+    cp target/ci/rustbgpd-gobgp-bridge /out/
 
 # ── builder-release: benchmarked-profile build for the runtime image ─
 # Full `release` profile (fat-LTO, codegen-units=1) with jemalloc as
@@ -127,6 +128,7 @@ COPY --from=builder /out/rustbgpd /usr/local/bin/rustbgpd
 COPY --from=builder /out/rbgp /usr/local/bin/rbgp
 COPY --from=builder /out/evpn-tester /usr/local/bin/evpn-tester
 COPY --from=builder /out/evpn-monitor /usr/local/bin/evpn-monitor
+COPY --from=builder /out/rustbgpd-gobgp-bridge /usr/local/bin/rustbgpd-gobgp-bridge
 COPY tests/interop/scripts/start-rustbgpd.sh /usr/local/bin/start-rustbgpd.sh
 # Content hash of the build inputs; compare with scripts/source-id.sh.
 COPY --from=planner /build/source-id /usr/local/share/rustbgpd/source-id

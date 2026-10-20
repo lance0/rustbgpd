@@ -20,14 +20,14 @@ use rustbgpd_wire::{
 use crate::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
 use crate::engine::{
     NamedPolicy, NextHopAction, PolicyAction, PolicyChain, RouteContext, RouteFamily,
-    RouteModifications, RouteType,
+    RouteModifications, RouteType, ext_community_identity,
 };
 use crate::ir::CompiledChain;
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    CommunityLit, DatasetEntryAst, ExpectDef, ExpectVerdict, NextHopArg, PeerField, RouteField,
-    ScalarAttr, TestDef, WithAssertion,
+    CommunityKind, CommunityLit, DatasetEntryAst, ExpectDef, ExpectVerdict, NextHopArg, PeerField,
+    RouteField, ScalarAttr, TestDef, WithAssertion,
 };
 use super::lower::{Lowerer, ext_community_value};
 
@@ -619,6 +619,7 @@ fn check_assertion(
                     })
             }
         }
+        WithAssertion::RemovesAll(kind) => check_removes_all(*kind, mods, fixture),
         WithAssertion::NotRemoved(lit) => {
             let present = match lit.node {
                 CommunityLit::Standard(value) => fixture.communities.contains(&value),
@@ -688,6 +689,24 @@ fn discard_asserted(assertion: &WithAssertion, fixture: &Fixture, mods: &mut Rou
         WithAssertion::RemovesLargeAdmin(global) => mods
             .large_communities_remove
             .retain(|lc| lc.global_admin != *global || !fixture.large_communities.contains(lc)),
+        WithAssertion::RemovesAll(kind) => match kind {
+            CommunityKind::Standard => mods
+                .communities_remove
+                .retain(|value| !fixture.communities.contains(value)),
+            CommunityKind::Ext => {
+                let fixture: std::collections::HashSet<_> = fixture
+                    .extended_communities
+                    .iter()
+                    .copied()
+                    .map(ext_community_identity)
+                    .collect();
+                mods.extended_communities_remove
+                    .retain(|value| !fixture.contains(&ext_community_identity(*value)));
+            }
+            CommunityKind::Large => mods
+                .large_communities_remove
+                .retain(|value| !fixture.large_communities.contains(value)),
+        },
         WithAssertion::Community(lit) | WithAssertion::Removes(lit) => {
             let add = matches!(assertion, WithAssertion::Community(_));
             match lit.node {
@@ -766,6 +785,63 @@ fn community_listed(
             }
         }
     }
+}
+
+/// `removes <kind> *`: every fixture value of the kind is removed.
+fn check_removes_all(
+    kind: CommunityKind,
+    mods: &RouteModifications,
+    fixture: &Fixture,
+) -> Option<String> {
+    // Each kind compares under the identity the runtime apply uses: exact
+    // values for standard and large communities, the logical RT/RO
+    // identity for extended communities.
+    let missing = match kind {
+        CommunityKind::Standard => unremoved(
+            &fixture.communities,
+            &mods.communities_remove,
+            |value| *value,
+            |value| format!("{}:{}", value >> 16, value & 0xffff),
+        ),
+        CommunityKind::Ext => unremoved(
+            &fixture.extended_communities,
+            &mods.extended_communities_remove,
+            |value| ext_community_identity(*value),
+            ToString::to_string,
+        ),
+        CommunityKind::Large => unremoved(
+            &fixture.large_communities,
+            &mods.large_communities_remove,
+            |value| *value,
+            ToString::to_string,
+        ),
+    };
+    let keyword = super::typeck::kind_keyword(kind);
+    match missing {
+        Ok(None) => None,
+        Ok(Some(value)) => Some(format!(
+            "expected community {value} to be removed (removes {keyword} *)"
+        )),
+        Err(()) => Some(format!("the fixture carries no {keyword} to remove")),
+    }
+}
+
+/// The first fixture value absent from `removed`, rendered; `Err` when the
+/// fixture has none, so a strip-all assertion is never vacuous.
+fn unremoved<T, K: Eq + std::hash::Hash>(
+    fixture: &[T],
+    removed: &[T],
+    identity: impl Fn(&T) -> K,
+    render: impl Fn(&T) -> String,
+) -> Result<Option<String>, ()> {
+    if fixture.is_empty() {
+        return Err(());
+    }
+    let removed: std::collections::HashSet<K> = removed.iter().map(&identity).collect();
+    Ok(fixture
+        .iter()
+        .find(|value| !removed.contains(&identity(value)))
+        .map(render))
 }
 
 fn lit_text(lit: &CommunityLit) -> String {

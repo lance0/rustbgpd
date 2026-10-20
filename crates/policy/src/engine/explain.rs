@@ -618,6 +618,17 @@ fn trace_rpol_policy(
                     break;
                 }
             }
+            TermActionView::RemoveAllCommunities { attributes } => {
+                if !crate::eval::exec_remove_all_communities(attributes, ctx, &mut continued) {
+                    term_traces.push(format!(
+                        "term {}: community input exceeds the `{}` bound — fail closed => reject",
+                        term.name.as_deref().unwrap_or("<unnamed>"),
+                        attributes.render(),
+                    ));
+                    decided = Some((index, term));
+                    break;
+                }
+            }
             // Policy-level loop control is a compiler-bug rail.
             TermActionView::Break | TermActionView::ContinueLoop => {
                 term_traces.push(format!(
@@ -764,6 +775,7 @@ fn render_term_action(action: &TermAction, tables: &CompiledChain) -> String {
         TermAction::RemoveLargeCommunityAdmin { global_admin } => {
             return format!("remove large-community {global_admin}:*:*");
         }
+        TermAction::RemoveAllCommunities { attributes } => return attributes.render(),
     };
     let mut parts = mods.map_or_else(Vec::new, render_action_stmts);
     parts.push(verdict.to_string());

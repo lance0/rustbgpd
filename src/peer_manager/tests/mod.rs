@@ -1267,6 +1267,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         gr_restart_time: None,
         gr_peer_restart_time_max: None,
         gr_stale_routes_time: None,
+        gr_eor_grace_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
         route_reflector_client: None,

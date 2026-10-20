@@ -1194,6 +1194,15 @@ arrive from every eligible waiter or the marker-bounded selection timer
 expires. Peer Restart State and absent GR families exclude that peer/family;
 superseded-session EoRs are rejected.
 
+RFC 4724 has the restarting speaker send End-of-RIB once its initial update is
+complete. With the opt-in
+[`gr_eor_grace_time`](configuration.md#planned-restart-end-of-rib-grace-window),
+rustbgpd counts routes that injection controllers replay after the restart as
+part of that update and holds End-of-RIB toward a helper until one deadline
+fixed at process start. Routes keep flowing during the hold. The deadline is
+not a replay-complete signal, so the window closes the observed gap only when
+replay completes before release.
+
 When `warm_cache_checkpoint_on_shutdown = true`, a successful bounded
 checkpoint publication binds its generation into the restart marker
 (ADR-0104). Linux marker v3 also binds the expiry to a complete boot and time
@@ -1263,7 +1272,9 @@ each negotiated family via `OutboundRouteUpdate.end_of_rib`. Toward a peer
 that negotiated RT-Constrain with an empty membership and is not itself
 restarting, the VPN and EVPN markers wait for the peer's RT-Constrain
 End-of-RIB for up to 60 seconds; see
-[RFC 4684](#rfc-4684--rt-constrain-membership-matching).
+[RFC 4684](#rfc-4684--rt-constrain-membership-matching). After a planned
+restart, a neighbor with `gr_eor_grace_time` gets its markers when that window
+ends (see §4.1 above).
 
 ### Metrics
 
@@ -1273,6 +1284,9 @@ End-of-RIB for up to 60 seconds; see
   EoR, and completion/expiry. It counts every route held for retention,
   GR-stale or LLGR-stale.
 - `bgp_gr_timer_expired_total` — counter, incremented on timer expiry
+- `bgp_gr_eor_grace_released_total{peer,reason}` — counter, incremented with
+  `reason="deadline"` when a planned-restart End-of-RIB grace window reaches
+  its deadline
 
 ---
 

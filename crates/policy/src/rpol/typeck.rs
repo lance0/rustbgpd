@@ -33,6 +33,9 @@ pub(super) enum Field {
     ExtCommunities,
     AsPath,
     AsPathLen,
+    CommunitiesLen,
+    LargeCommunitiesLen,
+    ExtCommunitiesLen,
     OriginAs,
     LocalPref,
     Med,
@@ -216,17 +219,27 @@ pub(super) fn resolve_field(path: &FieldPath) -> Result<Field, Diagnostic> {
     };
     match path.segs.len() {
         1 => Ok(field),
-        2 if field == Field::AsPath && path.segs[1].node == "len" => Ok(Field::AsPathLen),
-        _ => {
-            let extra = &path.segs[1];
-            Err(Diagnostic::new(
-                extra.span,
-                format!("field `{}` has no sub-field `{}`", first.node, extra.node),
-                "unexpected sub-field",
-            )
-            .with_note("the only sub-field is `route.as-path.len`"))
-        }
+        2 if path.segs[1].node == "len" => match field {
+            Field::AsPath => Ok(Field::AsPathLen),
+            Field::Communities => Ok(Field::CommunitiesLen),
+            Field::LargeCommunities => Ok(Field::LargeCommunitiesLen),
+            Field::ExtCommunities => Ok(Field::ExtCommunitiesLen),
+            _ => Err(no_sub_field(first, &path.segs[1])),
+        },
+        _ => Err(no_sub_field(first, &path.segs[1])),
     }
+}
+
+fn no_sub_field(first: &Spanned<String>, extra: &Spanned<String>) -> Diagnostic {
+    Diagnostic::new(
+        extra.span,
+        format!("field `{}` has no sub-field `{}`", first.node, extra.node),
+        "unexpected sub-field",
+    )
+    .with_note(
+        "the sub-fields are `route.as-path.len`, `route.communities.len`, \
+         `route.large-communities.len`, and `route.ext-communities.len`",
+    )
 }
 
 /// The u32-typed [`ValueField`] a resolved field reads as a
@@ -239,6 +252,9 @@ pub(super) fn value_field_of(field: Field) -> Option<ValueField> {
         Field::LocalPref => Some(ValueField::LocalPref),
         Field::Med => Some(ValueField::Med),
         Field::AsPathLen => Some(ValueField::AsPathLen),
+        Field::CommunitiesLen => Some(ValueField::CommunitiesLen),
+        Field::LargeCommunitiesLen => Some(ValueField::LargeCommunitiesLen),
+        Field::ExtCommunitiesLen => Some(ValueField::ExtCommunitiesLen),
         Field::OriginAs => Some(ValueField::OriginAs),
         Field::PeerAsn => Some(ValueField::PeerAsn),
         _ => None,
@@ -928,7 +944,14 @@ impl<'a> Checker<'a> {
     )]
     fn check_action(&mut self, action: &ActionStmt, scope: &Scope<'_>, loop_depth: u32) {
         match action {
-            ActionStmt::Accept(_) | ActionStmt::Reject(_) | ActionStmt::SetNextHop(..) => {}
+            ActionStmt::Accept(_)
+            | ActionStmt::Reject(_)
+            | ActionStmt::SetNextHop(..)
+            | ActionStmt::Community {
+                add: false,
+                arg: CommunityArg::All(_),
+                ..
+            } => {}
             ActionStmt::Let { .. } => unreachable!("`let` is scoped by the statement walkers"),
             // Loop control outside a loop body (LAN-303).
             ActionStmt::Break(span) | ActionStmt::Continue(span) => {
@@ -971,6 +994,18 @@ impl<'a> Checker<'a> {
                         .with_note(format!("use `add/remove {lit_word}` for this literal")),
                     );
                 }
+            }
+            ActionStmt::Community {
+                add: true,
+                kind,
+                arg: CommunityArg::All(span),
+                ..
+            } => {
+                self.diags.push(Diagnostic::new(
+                    *span,
+                    format!("`add {}` takes a literal value", kind_keyword(*kind)),
+                    "wildcards are removal-only",
+                ));
             }
             ActionStmt::Community {
                 add,
@@ -1585,6 +1620,10 @@ impl<'a> Checker<'a> {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per field type; splitting would scatter the comparison rules"
+    )]
     fn check_cmp(&mut self, field: &FieldPath, op: CmpOp, rhs: &Rhs, scope: &Scope<'_>) {
         let resolved = match resolve_field(field) {
             Ok(resolved) => resolved,
@@ -1606,7 +1645,12 @@ impl<'a> Checker<'a> {
             }
         };
         match resolved {
-            Field::LocalPref | Field::Med | Field::AsPathLen => {
+            Field::LocalPref
+            | Field::Med
+            | Field::AsPathLen
+            | Field::CommunitiesLen
+            | Field::LargeCommunitiesLen
+            | Field::ExtCommunitiesLen => {
                 self.expect_u32_rhs(field, rhs, scope);
             }
             Field::PeerAsn | Field::OriginAs => {
@@ -2602,6 +2646,11 @@ fn action_value_cost(action: &ActionStmt, fns: &HashMap<&str, FnCost>) -> u64 {
             arg: CommunityArg::LargeAdminWildcard(_),
             ..
         } => crate::eval::MAX_LARGE_COMMUNITIES_PER_ROUTE,
+        ActionStmt::Community {
+            kind,
+            arg: CommunityArg::All(_),
+            ..
+        } => crate::eval::max_communities_per_route(community_attribute(*kind)),
         _ => 0,
     }
 }
@@ -2976,7 +3025,16 @@ fn kind_describe(kind: CommunityKind) -> &'static str {
     }
 }
 
-fn kind_keyword(kind: CommunityKind) -> &'static str {
+/// The IR attribute a community action kind addresses.
+pub(super) fn community_attribute(kind: CommunityKind) -> crate::ir::CommunityAttribute {
+    match kind {
+        CommunityKind::Standard => crate::ir::CommunityAttribute::Standard,
+        CommunityKind::Large => crate::ir::CommunityAttribute::Large,
+        CommunityKind::Ext => crate::ir::CommunityAttribute::Extended,
+    }
+}
+
+pub(super) fn kind_keyword(kind: CommunityKind) -> &'static str {
     match kind {
         CommunityKind::Standard => "community",
         CommunityKind::Large => "large-community",

@@ -167,8 +167,8 @@ impl ArithOp {
 /// - [`LocalPref`](Self::LocalPref) / [`Med`](Self::Med): the RFC 4271
 ///   implicit defaults (100 / 0) when the attribute is absent — the
 ///   same values plain comparisons already see.
-/// - [`AsPathLen`](Self::AsPathLen): always present (0 for an empty
-///   path).
+/// - [`AsPathLen`](Self::AsPathLen) and the community counts: always
+///   present (0 for an empty path or list).
 /// - [`OriginAs`](Self::OriginAs) / [`PeerAsn`](Self::PeerAsn): no
 ///   default exists. An absent value makes the whole expression
 ///   unresolvable — an **evaluation error** (uniform Deny, ADR-0103
@@ -187,6 +187,12 @@ pub enum ValueField {
     /// a chain whose value expressions contain it counts toward
     /// [`CompiledChain::requires_peer_context`].
     PeerAsn,
+    /// `route.communities.len` — standard communities on the arrived route.
+    CommunitiesLen,
+    /// `route.large-communities.len` — large communities on the arrived route.
+    LargeCommunitiesLen,
+    /// `route.ext-communities.len` — extended communities on the arrived route.
+    ExtCommunitiesLen,
 }
 
 impl ValueField {
@@ -199,6 +205,9 @@ impl ValueField {
             ValueField::AsPathLen => "route.as-path.len",
             ValueField::OriginAs => "route.origin-as",
             ValueField::PeerAsn => "peer.asn",
+            ValueField::CommunitiesLen => "route.communities.len",
+            ValueField::LargeCommunitiesLen => "route.large-communities.len",
+            ValueField::ExtCommunitiesLen => "route.ext-communities.len",
         }
     }
 }
@@ -800,6 +809,90 @@ pub enum TermAction {
         /// Exact RFC 8092 global administrator to remove.
         global_admin: u32,
     },
+    /// Scan the arrived route's communities of each listed attribute once
+    /// and stage a concrete removal for every value. `.rpol` `remove
+    /// community *`, `remove large-community *:*:*` and `remove
+    /// ext-community *`; adjacent forms share one action, so their guard is
+    /// evaluated once. Route-only, with the same bounded scan as
+    /// [`RemoveLargeCommunityAdmin`](Self::RemoveLargeCommunityAdmin).
+    RemoveAllCommunities {
+        /// The community attributes to clear.
+        attributes: CommunityAttributes,
+    },
+}
+
+/// A community attribute, for actions that address one as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommunityAttribute {
+    /// RFC 1997 standard communities.
+    Standard,
+    /// RFC 4360 extended communities.
+    Extended,
+    /// RFC 8092 large communities.
+    Large,
+}
+
+impl CommunityAttribute {
+    /// The `.rpol` strip-all spelling (also the explain rendering).
+    #[must_use]
+    pub fn remove_all_str(self) -> &'static str {
+        match self {
+            Self::Standard => "remove community *",
+            Self::Extended => "remove ext-community *",
+            Self::Large => "remove large-community *:*:*",
+        }
+    }
+}
+
+/// The set of community attributes one
+/// [`TermAction::RemoveAllCommunities`] clears.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct CommunityAttributes {
+    /// RFC 1997 standard communities.
+    pub standard: bool,
+    /// RFC 4360 extended communities.
+    pub extended: bool,
+    /// RFC 8092 large communities.
+    pub large: bool,
+}
+
+impl CommunityAttributes {
+    /// Add `attribute` to the set.
+    pub fn insert(&mut self, attribute: CommunityAttribute) {
+        match attribute {
+            CommunityAttribute::Standard => self.standard = true,
+            CommunityAttribute::Extended => self.extended = true,
+            CommunityAttribute::Large => self.large = true,
+        }
+    }
+
+    /// The listed attributes, in standard, extended, large order.
+    pub fn iter(self) -> impl Iterator<Item = CommunityAttribute> {
+        [
+            (self.standard, CommunityAttribute::Standard),
+            (self.extended, CommunityAttribute::Extended),
+            (self.large, CommunityAttribute::Large),
+        ]
+        .into_iter()
+        .filter_map(|(listed, attribute)| listed.then_some(attribute))
+    }
+
+    /// The `.rpol` statements, joined as written in source order.
+    #[must_use]
+    pub fn render(self) -> String {
+        self.iter()
+            .map(CommunityAttribute::remove_all_str)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+impl From<CommunityAttribute> for CommunityAttributes {
+    fn from(attribute: CommunityAttribute) -> Self {
+        let mut attributes = Self::default();
+        attributes.insert(attribute);
+        attributes
+    }
 }
 
 /// Borrowed, one-to-one view of [`TermAction`] used by the three policy
@@ -829,6 +922,9 @@ pub(crate) enum TermActionView<'a> {
     RemoveLargeCommunityAdmin {
         global_admin: u32,
     },
+    RemoveAllCommunities {
+        attributes: CommunityAttributes,
+    },
 }
 
 impl TermAction {
@@ -857,6 +953,9 @@ impl TermAction {
                     global_admin: *global_admin,
                 }
             }
+            Self::RemoveAllCommunities { attributes } => TermActionView::RemoveAllCommunities {
+                attributes: *attributes,
+            },
         }
     }
 }
