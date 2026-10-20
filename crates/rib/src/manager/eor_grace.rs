@@ -41,9 +41,11 @@ pub struct EorGraceConfig {
     pub peers: Vec<EorGracePeerConfig>,
 }
 
+/// One configured peer's held families. Its deadline lives in
+/// `RibManager::eor_grace_deadlines`, whose cached minimum keeps the
+/// per-turn timer probe O(1).
 #[derive(Debug)]
 pub(super) struct EorGracePeer {
-    deadline: tokio::time::Instant,
     window: Duration,
     families: HashSet<(Afi, Safi)>,
     /// The current session negotiated helper retention: the peer advertised
@@ -59,12 +61,12 @@ impl RibManager {
     pub fn with_eor_grace(mut self, config: EorGraceConfig) -> Self {
         let now = tokio::time::Instant::now();
         let mut peers: HashMap<IpAddr, EorGracePeer> = HashMap::new();
+        let mut deadlines = super::graceful_restart::DeadlineMap::default();
         for entry in config.peers {
             if entry.window.is_zero() || entry.families.is_empty() {
                 continue;
             }
             let candidate = EorGracePeer {
-                deadline: now + entry.window,
                 window: entry.window,
                 families: entry.families.into_iter().collect(),
                 helper_session: false,
@@ -74,6 +76,7 @@ impl RibManager {
             match peers.get(&entry.peer) {
                 Some(existing) if existing.window <= candidate.window => {}
                 _ => {
+                    deadlines.insert(entry.peer, now + entry.window);
                     peers.insert(entry.peer, candidate);
                 }
             }
@@ -86,6 +89,7 @@ impl RibManager {
             );
         }
         self.eor_grace = peers;
+        self.eor_grace_deadlines = deadlines;
         self
     }
 
@@ -111,10 +115,11 @@ impl RibManager {
     /// A deleted peer has no future session to hold for.
     pub(super) fn eor_grace_peer_deleted(&mut self, peer: IpAddr) {
         self.eor_grace.remove(&peer);
+        self.eor_grace_deadlines.remove(&peer);
     }
 
-    pub(super) fn next_eor_grace_deadline(&self) -> Option<tokio::time::Instant> {
-        self.eor_grace.values().map(|grace| grace.deadline).min()
+    pub(super) fn next_eor_grace_deadline(&mut self) -> Option<tokio::time::Instant> {
+        self.eor_grace_deadlines.min()
     }
 
     /// Release every window whose deadline passed. The release is
@@ -123,12 +128,13 @@ impl RibManager {
     pub(super) fn expire_eor_grace(&mut self) {
         let now = tokio::time::Instant::now();
         let expired: Vec<IpAddr> = self
-            .eor_grace
+            .eor_grace_deadlines
             .iter()
-            .filter(|(_, grace)| grace.deadline <= now)
+            .filter(|&(_, &deadline)| deadline <= now)
             .map(|(&peer, _)| peer)
             .collect();
         for peer in expired {
+            self.eor_grace_deadlines.remove(&peer);
             let Some(grace) = self.eor_grace.remove(&peer) else {
                 continue;
             };

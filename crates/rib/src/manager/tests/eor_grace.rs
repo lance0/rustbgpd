@@ -704,3 +704,23 @@ async fn late_family_marker_retry_and_selection_release_respect_the_hold() {
 fn manager_with(metrics: &BgpMetrics) -> RibManager {
     manager(Some(&[UPSTREAM]), metrics)
 }
+
+/// The run loop probes the nearest hold deadline every turn. Grace deadlines
+/// sit in a `DeadlineMap`, so that probe reads a cached minimum instead of
+/// scanning the configured peers, and deleting the earliest peer moves it.
+#[tokio::test(start_paused = true)]
+async fn grace_deadlines_use_the_cached_deadline_map() {
+    let metrics = BgpMetrics::new();
+    let mut config = grace(&[UPSTREAM, CLIENT]);
+    config.peers[1].window = WINDOW * 2;
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager =
+        RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()).with_eor_grace(config);
+    let start = tokio::time::Instant::now();
+    assert!(!manager.eor_grace_deadlines.is_stale());
+    assert_eq!(manager.next_eor_hold_deadline(), Some(start + WINDOW));
+    manager.handle_update(RibUpdate::PeerDeleted { peer: UPSTREAM });
+    assert!(manager.eor_grace_deadlines.is_stale());
+    assert_eq!(manager.next_eor_hold_deadline(), Some(start + WINDOW * 2));
+    assert!(!manager.eor_grace_deadlines.is_stale());
+}

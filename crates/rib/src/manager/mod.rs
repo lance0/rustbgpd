@@ -893,6 +893,9 @@ pub struct RibManager {
     /// Opt-in End-of-RIB grace windows after a planned restart, keyed by
     /// configured peer. Empty on cold starts and once each deadline passes.
     eor_grace: HashMap<IpAddr, eor_grace::EorGracePeer>,
+    /// Each grace window's absolute deadline, with a cached minimum so the
+    /// run loop's per-turn timer probe does not scan the peers.
+    eor_grace_deadlines: graceful_restart::DeadlineMap<IpAddr>,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
     /// Route identities touched while their family's Loc-RIB was frozen.
@@ -2409,6 +2412,7 @@ impl RibManager {
             rtc_eor_hold: graceful_restart::DeadlineMap::default(),
             rtc_eor_hold_ready: HashSet::new(),
             eor_grace: HashMap::new(),
+            eor_grace_deadlines: graceful_restart::DeadlineMap::default(),
             selection_deferral: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
             selection_deferred_refresh: HashMap::new(),
