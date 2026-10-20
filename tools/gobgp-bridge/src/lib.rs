@@ -24,7 +24,7 @@ use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint, Uri};
-use tonic::{Code, Request, Response, Status};
+use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use decode::Mutation;
@@ -170,21 +170,24 @@ impl gobgp::gobgp_api_server::GobgpApi for Bridge {
             warn!(code = ?status.code(), error = status.message(), "rejected AddPath");
         })?;
         let mut injection = self.injection.clone();
+        // The daemon's outcome goes to the log; GoBGP's response has no field
+        // for it.
         let result = match &decoded.mutation {
-            Mutation::Announce(req) => injection.add_path(req.clone()).await.map(|_| ()),
-            Mutation::Withdraw(req) => match injection.delete_path(req.clone()).await {
-                // LAN-2396: send DeletePath with allow_missing once the daemon
-                // has it, and stop treating NOT_FOUND as success here.
-                Err(status) if status.code() == Code::NotFound => Ok(()),
-                other => other.map(|_| ()),
-            },
+            Mutation::Announce(req) => injection
+                .add_path(req.clone())
+                .await
+                .map(|r| format!("{:?}", r.into_inner().outcome())),
+            Mutation::Withdraw(req) => injection
+                .delete_path(req.clone())
+                .await
+                .map(|r| format!("{:?}", r.into_inner().outcome())),
         };
         let (action, prefix, len) = match &decoded.mutation {
             Mutation::Announce(r) => ("announce", &r.prefix, r.prefix_length),
             Mutation::Withdraw(r) => ("withdraw", &r.prefix, r.prefix_length),
         };
         match &result {
-            Ok(()) => info!(action, prefix = %format!("{prefix}/{len}"), "applied"),
+            Ok(outcome) => info!(action, prefix = %format!("{prefix}/{len}"), outcome, "applied"),
             Err(status) => warn!(
                 action,
                 prefix = %format!("{prefix}/{len}"),

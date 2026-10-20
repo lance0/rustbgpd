@@ -58,8 +58,7 @@ fn unsupported(message: impl Into<String>) -> Status {
 /// # Errors
 ///
 /// `UNIMPLEMENTED` for a valid GoBGP request outside the supported subset,
-/// `INVALID_ARGUMENT` for malformed bytes or an incomplete announcement, and
-/// `FAILED_PRECONDITION` for an unspecified next hop.
+/// and `INVALID_ARGUMENT` for malformed bytes or an incomplete announcement.
 pub fn decode(request: &gobgp::AddPathRequest) -> Result<Decoded, Status> {
     if request.table_type != gobgp::TableType::Global as i32 {
         return Err(unsupported(format!(
@@ -123,7 +122,9 @@ pub fn decode(request: &gobgp::AddPathRequest) -> Result<Decoded, Status> {
                 prefix: addr,
                 prefix_length: u32::from(len),
                 path_id,
-                allow_missing: false,
+                // A withdraw of a route the daemon no longer holds (a
+                // duplicate unban, or one after a daemon restart) is OK.
+                allow_missing: true,
                 owner: String::new(),
                 override_owner: false,
             }),
@@ -134,14 +135,8 @@ pub fn decode(request: &gobgp::AddPathRequest) -> Result<Decoded, Status> {
     let next_hop = attrs.next_hop.ok_or_else(|| {
         invalid("announcement has no next hop: send NEXT_HOP (IPv4) or MP_REACH_NLRI (IPv6)")
     })?;
-    // LAN-2396: rustbgpd rejects an unspecified next hop until it gains
-    // next-hop-self for injected routes; then pass 0.0.0.0 and :: through.
-    if next_hop.is_unspecified() {
-        return Err(Status::failed_precondition(format!(
-            "next hop {next_hop} (next-hop-self) is not supported by rustbgpd yet; \
-             configure an explicit next hop in the detector"
-        )));
-    }
+    // 0.0.0.0 and :: pass through: the daemon resolves an unspecified next
+    // hop to next-hop-self on each session, as GoBGP does.
     Ok(Decoded {
         mutation: Mutation::Announce(rbgp::AddPathRequest {
             prefix: addr,
@@ -495,7 +490,7 @@ mod tests {
                 prefix: "203.0.113.7".into(),
                 prefix_length: 32,
                 path_id: 0,
-                allow_missing: false,
+                allow_missing: true,
                 owner: String::new(),
                 override_owner: false,
             })
@@ -522,17 +517,13 @@ mod tests {
     }
 
     #[test]
-    fn unspecified_next_hop_is_refused() {
+    fn unspecified_next_hop_passes_through_as_next_hop_self() {
         let zero = [0x40, 3, 4, 0, 0, 0, 0];
-        assert_eq!(
-            code(&request(IP, NLRI_V4_HOST, &[&zero], false)),
-            tonic::Code::FailedPrecondition
-        );
+        let req = announce(decode(&request(IP, NLRI_V4_HOST, &[&zero], false)).unwrap());
+        assert_eq!(req.next_hop, "0.0.0.0");
         let mp = mp_reach_v6([0; 16], NLRI_V6_HOST);
-        assert_eq!(
-            code(&request(IP6, NLRI_V6_HOST, &[&mp], false)),
-            tonic::Code::FailedPrecondition
-        );
+        let req = announce(decode(&request(IP6, NLRI_V6_HOST, &[&mp], false)).unwrap());
+        assert_eq!(req.next_hop, "::");
     }
 
     #[test]

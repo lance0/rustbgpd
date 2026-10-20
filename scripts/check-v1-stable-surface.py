@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import fnmatch
 import hashlib
 import io
 import json
@@ -1095,9 +1096,31 @@ def emitted_label_values(
         ]
         if element in parameters:
             setters.append((setter.group(1), parameters.index(element)))
-    for setter, index in setters:
-        for text in sources.values():
-            for call in re.finditer(rf"\.\s*{re.escape(setter)}\s*\(", text):
+    # (function, parameter index, is method, defining file); a method's file is
+    # None because its callers are matched by receiver-free `.name(` alone.
+    pending: list[tuple[str, int, bool, str | None]] = [
+        (setter, index, True, None) for setter, index in setters
+    ]
+    seen: set[tuple[str, int, bool, str | None]] = set()
+    while pending:
+        item = pending.pop()
+        if item in seen:
+            continue
+        seen.add(item)
+        setter, index, method, defined_in = item
+        # A method is called as `.name(`; a free function by a bare or path name,
+        # which must resolve to the module that defines it.
+        call_pattern = (
+            rf"\.\s*{re.escape(setter)}\s*\("
+            if method
+            else rf"(?<!fn )(?<![\w.:])((?:\w+::)*){re.escape(setter)}\s*\("
+        )
+        for path, text in sources.items():
+            for call in re.finditer(call_pattern, text):
+                if not method and not calls_function(
+                    path, text, call.group(1), setter, defined_in
+                ):
+                    continue
                 arguments = call_arguments(text, call.end())
                 if arguments is None or len(arguments) <= index:
                     continue
@@ -1106,6 +1129,9 @@ def emitted_label_values(
                 if literal:
                     values.add(literal.group(1))
                     continue
+                if re.fullmatch(r"(?:\w+::)*[A-Z][A-Z0-9_]*", argument):
+                    values.update(const_label_values(sources, path, text, argument))
+                    continue
                 direct = re.fullmatch(r"(\w+)\(.*\)", argument, flags=re.DOTALL)
                 bound = re.search(
                     rf"\blet\s+{re.escape(argument)}\s*=\s*(\w+)\(", text[: call.start()]
@@ -1113,15 +1139,173 @@ def emitted_label_values(
                 function = (direct or bound).group(1) if (direct or bound) else None
                 if function:
                     values.update(label_function_values(sources, function))
+                elif re.fullmatch(r"\w+", argument):
+                    # A wrapper passing its own parameter through: follow its callers.
+                    through = enclosing_parameter(text, call.start(), argument)
+                    if through:
+                        pending.append((*through, None if through[2] else path))
     return values
+
+
+def rust_module(path: str) -> tuple[str, tuple[str, ...]] | None:
+    """(source root, module path) of a Rust file under a `src` directory."""
+    parts = Path(path).parts
+    if "src" not in parts:
+        return None
+    root = parts.index("src")
+    module = [*parts[root + 1 : -1], Path(parts[-1]).stem]
+    if module[-1] in {"lib", "main", "mod"}:
+        module.pop()
+    return "/".join(parts[: root + 1]), tuple(module)
+
+
+def use_imports(text: str) -> dict[str, list[str]]:
+    """Names a file's `use` declarations bring into scope, mapped to their paths."""
+    imports: dict[str, list[str]] = {}
+
+    def add(prefix: list[str], tree: str) -> None:
+        tree = tree.strip()
+        braced = re.fullmatch(r"((?:\w+::)*)\{(.*)\}", tree, flags=re.DOTALL)
+        if braced:
+            inner = [*prefix, *[seg for seg in braced.group(1).split("::") if seg]]
+            depth, start = 0, 0
+            body = braced.group(2)
+            for position, char in enumerate(body + ","):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                elif char == "," and depth == 0:
+                    if body[start:position].strip():
+                        add(inner, body[start:position])
+                    start = position + 1
+            return
+        alias = re.fullmatch(r"((?:\w+::)*\w+)\s+as\s+(\w+)", tree)
+        target, name = (alias.group(1), alias.group(2)) if alias else (tree, tree.split("::")[-1])
+        if re.fullmatch(r"(?:\w+::)*\w+", target):
+            imports[name] = [*prefix, *target.split("::")]
+
+    for declaration in re.finditer(r"\buse\s+([^;]+);", text):
+        add([], declaration.group(1))
+    return imports
+
+
+def resolve_module(
+    path: str, text: str, segments: list[str], depth: int = 0
+) -> tuple[str, tuple[str, ...]] | None:
+    """The module a `::` path names from one file, or None when it cannot be told."""
+    origin = rust_module(path)
+    if origin is None or not segments or depth > 4:
+        return None
+    root, here = origin
+    head, rest = segments[0], segments[1:]
+    if head == "crate":
+        return root, tuple(rest)
+    if head in {"self", "super"}:
+        module = list(here)
+        while segments and segments[0] in {"self", "super"}:
+            if segments.pop(0) == "super":
+                if not module:
+                    return None
+                module.pop()
+        return root, (*module, *segments)
+    imported = use_imports(text).get(head)
+    if imported is not None:
+        return resolve_module(path, text, [*imported, *rest], depth + 1)
+    if re.search(rf"\bmod\s+{re.escape(head)}\s*[;{{]", text):
+        return root, (*here, head, *rest)
+    return None
+
+
+def calls_function(
+    path: str, text: str, prefix: str, name: str, defined_in: str | None
+) -> bool:
+    """Whether a free call `prefix name(` resolves to the function in `defined_in`."""
+    if defined_in is None:
+        return False
+    target = rust_module(defined_in)
+    if target is None:
+        return False
+    segments = [segment for segment in prefix.split("::") if segment]
+    if segments:
+        return resolve_module(path, text, segments) == target
+    if path == defined_in:
+        return True
+    imported = use_imports(text).get(name)
+    return imported is not None and resolve_module(path, text, imported[:-1]) == target
+
+
+def const_label_values(sources: dict[str, str], path: str, text: str, argument: str) -> set[str]:
+    """String literals of the one `const` an argument names from the calling file.
+
+    The constant resolves by its path, or its bare name in the calling module
+    or through a `use`; a constant that cannot be resolved to a single
+    declaration is no evidence.
+    """
+    segments = argument.split("::")
+    name = segments[-1]
+    if len(segments) > 1:
+        module = resolve_module(path, text, segments[:-1])
+    elif re.search(rf"\bconst\s+{name}\b", text):
+        module = rust_module(path)
+    else:
+        imported = use_imports(text).get(name)
+        module = resolve_module(path, text, imported[:-1]) if imported else None
+    if module is None:
+        return set()
+    pattern = rf"\bconst\s+{name}\s*:[^=]*=\s*(\[[^\]]*\]|\"[^\"]*\")\s*;"
+    found = [
+        match.group(1)
+        for candidate, body in sources.items()
+        if rust_module(candidate) == module
+        for match in re.finditer(pattern, body)
+    ]
+    if len(found) != 1:
+        return set()
+    return set(re.findall(r"\"([^\"]+)\"", found[0]))
+
+
+def enclosing_parameter(text: str, position: int, identifier: str) -> tuple[str, int, bool] | None:
+    """(function, parameter index, is method) when `identifier` passes a parameter through.
+
+    The identifier is a parameter of the function enclosing `position`, or a
+    `for` binding that iterates one. Only that function's callers can then
+    supply its values.
+    """
+    functions = list(re.finditer(r"\bfn\s+(\w+)\s*(?:<[^>{]*>)?\s*\(", text[:position]))
+    if not functions:
+        return None
+    function = functions[-1]
+    arguments = call_arguments(text, function.end())
+    if arguments is None:
+        return None
+    method = any(
+        re.fullmatch(r"&?\s*(?:'\w+\s+)?(?:mut\s+)?self", argument) for argument in arguments
+    )
+    parameters = [
+        re.sub(r"^mut\s+", "", argument.split(":", 1)[0].strip())
+        for argument in arguments
+        if ":" in argument
+    ]
+    source = identifier
+    loops = re.findall(
+        rf"\bfor\s+\(?\s*{re.escape(identifier)}\b[^{{;]*?\bin\s+(\w+)",
+        text[function.end() : position],
+    )
+    if identifier not in parameters and loops:
+        source = loops[-1]
+    if source not in parameters:
+        return None
+    return function.group(1), parameters.index(source), method
 
 
 def check_metrics(
     inventory: dict, source: str | None = None, emission_sources: dict[str, str] | None = None
 ) -> None:
     section = inventory.get("metrics")
-    if not isinstance(section, dict) or set(section) != {"source", "scoped_rr_only_series"}:
-        fail("metrics must be an object with exactly 'source' and 'scoped_rr_only_series'")
+    expected = {*METRIC_SERIES_KEYS, "source", "diagnostic_series"}
+    if not isinstance(section, dict) or set(section) != expected:
+        fail(f"metrics must be an object with exactly {sorted(expected)}")
     if source is None:
         path = ROOT / safe_relative_path(section["source"], "metric source")
         try:
@@ -1130,14 +1314,43 @@ def check_metrics(
             fail(f"cannot read metric source {section['source']}: {error}")
     # Test-only literals in the metric module itself are not emission evidence.
     source = strip_cfg_test_items(source)
-    series = section["scoped_rr_only_series"]
+    for key in METRIC_SERIES_KEYS:
+        emission_sources = check_metric_series(
+            f"metrics.{key}", section[key], source, emission_sources
+        )
+    check_diagnostic_series(section, source)
+
+
+def check_diagnostic_series(section: dict, source: str) -> None:
+    """Diagnostic name patterns each match a registered series and no pinned one."""
+    patterns = section["diagnostic_series"]
+    if not isinstance(patterns, list) or not patterns:
+        fail("metrics.diagnostic_series must list at least one name pattern")
+    require_sorted_unique(patterns, "metrics.diagnostic_series")
+    registered = set(re.findall(r"(?:Histogram)?Opts::new\(\s*\"(\w+)\"", source))
+    pinned = {entry["name"] for key in METRIC_SERIES_KEYS for entry in section[key]}
+    for pattern in patterns:
+        if not any(fnmatch.fnmatchcase(name, pattern) for name in registered):
+            fail(f"metrics.diagnostic_series pattern {pattern!r} matches no registered metric")
+        overlap = sorted(name for name in pinned if fnmatch.fnmatchcase(name, pattern))
+        if overlap:
+            fail(f"metrics.diagnostic_series pattern {pattern!r} matches pinned series {overlap}")
+
+
+# The RS/RR floor every stable role relies on, and the scoped EVPN reflector set.
+METRIC_SERIES_KEYS = ("stable_series", "scoped_rr_only_series")
+
+
+def check_metric_series(
+    key: str, series, source: str, emission_sources: dict[str, str] | None
+) -> dict[str, str] | None:
     if not isinstance(series, list) or not series:
-        fail("metrics.scoped_rr_only_series must pin at least one series")
+        fail(f"{key} must pin at least one series")
     names = [entry.get("name") for entry in series]
-    require_sorted_unique(names, "metrics.scoped_rr_only_series")
+    require_sorted_unique(names, key)
     for entry in series:
         name = entry["name"]
-        label = f"metrics.scoped_rr_only_series.{name}"
+        label = f"{key}.{name}"
         unknown = sorted(set(entry) - {"name", "type", "labels", "label_values", "meaning"})
         if unknown:
             fail(f"{label} has unknown keys {unknown}")
@@ -1155,21 +1368,22 @@ def check_metrics(
             fail(f"pinned metric {name} changed type: inventory {entry.get('type')!r}, source {kind!r}")
         if sorted(defined_labels) != labels:
             fail(f"pinned metric {name} changed labels: inventory {labels}, source {sorted(defined_labels)}")
-        for key, values in entry.get("label_values", {}).items():
-            if key not in labels:
-                fail(f"{label}.label_values names unknown label {key!r}")
+        for label_name, values in entry.get("label_values", {}).items():
+            if label_name not in labels:
+                fail(f"{label}.label_values names unknown label {label_name!r}")
             if not isinstance(values, list) or not values:
-                fail(f"{label}.label_values.{key} must pin at least one value")
-            require_sorted_unique(values, f"{label}.label_values.{key}")
+                fail(f"{label}.label_values.{label_name} must pin at least one value")
+            require_sorted_unique(values, f"{label}.label_values.{label_name}")
             if emission_sources is None:
                 emission_sources = production_rust_sources(ROOT)
-            emitted = emitted_label_values(source, emission_sources, name, key, defined_labels)
+            emitted = emitted_label_values(source, emission_sources, name, label_name, defined_labels)
             missing = [value for value in values if value not in emitted]
             if missing:
                 fail(
-                    f"pinned metric {name} label {key} values {missing} have no production "
+                    f"pinned metric {name} label {label_name} values {missing} have no production "
                     "call site or label function emitting them"
                 )
+    return emission_sources
 
 
 def semantic_toml_sha256(path: Path) -> str:

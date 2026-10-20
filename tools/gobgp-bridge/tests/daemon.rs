@@ -212,13 +212,18 @@ fn ban_v4(withdraw: bool) -> gobgp::AddPathRequest {
 }
 
 fn ban_v6(withdraw: bool) -> gobgp::AddPathRequest {
-    let mut mp = vec![0x80, 14, 38, 0, 2, 1, 16];
-    mp.extend_from_slice(
-        &"2001:db8::1"
+    ban_v6_via(
+        "2001:db8::1"
             .parse::<std::net::Ipv6Addr>()
             .unwrap()
             .octets(),
-    );
+        withdraw,
+    )
+}
+
+fn ban_v6_via(next_hop: [u8; 16], withdraw: bool) -> gobgp::AddPathRequest {
+    let mut mp = vec![0x80, 14, 38, 0, 2, 1, 16];
+    mp.extend_from_slice(&next_hop);
     mp.push(0);
     mp.extend_from_slice(BAN_V6);
     path(
@@ -296,18 +301,27 @@ async fn bridge_against_real_daemon() {
     gobgp.add_path(ban_v4(true)).await.unwrap();
     assert!(routes(&mut rib, "203.0.113.7", 32).await.is_empty());
 
-    // The detector default next hop 0.0.0.0 is refused until rustbgpd has
-    // next-hop-self for injected routes.
+    // The detector default next hop 0.0.0.0 (and :: for IPv6) passes
+    // through. The daemon stores it unspecified and resolves it to
+    // next-hop-self on each session at export.
     let zero = path(
         gobgp::family::Afi::Ip,
         BAN_V4,
-        &[ORIGIN_IGP, NEXT_HOP_ZERO],
+        &[ORIGIN_IGP, NEXT_HOP_ZERO, COMMUNITY_BLACKHOLE],
         false,
     );
-    assert_eq!(
-        gobgp.add_path(zero).await.unwrap_err().code(),
-        Code::FailedPrecondition
-    );
+    gobgp.add_path(zero).await.unwrap();
+    let installed = routes(&mut rib, "203.0.113.7", 32).await;
+    assert_eq!(installed.len(), 1, "{installed:?}");
+    assert_eq!(installed[0].next_hop, "0.0.0.0");
+    gobgp.add_path(ban_v4(true)).await.unwrap();
+    gobgp.add_path(ban_v6_via([0; 16], false)).await.unwrap();
+    let installed = routes(&mut rib, "2001:db8::7", 128).await;
+    assert_eq!(installed.len(), 1, "{installed:?}");
+    assert_eq!(installed[0].next_hop, "::");
+    gobgp.add_path(ban_v6(true)).await.unwrap();
+    assert!(routes(&mut rib, "203.0.113.7", 32).await.is_empty());
+    assert!(routes(&mut rib, "2001:db8::7", 128).await.is_empty());
     // Every other GoBGP method is UNIMPLEMENTED.
     assert_eq!(
         gobgp
