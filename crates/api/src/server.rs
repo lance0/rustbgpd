@@ -2288,7 +2288,8 @@ async fn run_tcp_listener(
             mrt_trigger_tx,
         )
         .with_peer_manager_readiness(peer_mgr_readiness_tx)
-        .with_rib_readiness(rib_readiness_tx),
+        .with_rib_readiness(rib_readiness_tx)
+        .with_incarnation(injection_leases.incarnation()),
         interceptor.clone(),
     ));
     if tls_enabled {
@@ -2572,7 +2573,8 @@ async fn run_uds_listener(
             mrt_trigger_tx,
         )
         .with_peer_manager_readiness(peer_mgr_readiness_tx)
-        .with_rib_readiness(rib_readiness_tx),
+        .with_rib_readiness(rib_readiness_tx)
+        .with_incarnation(injection_leases.incarnation()),
         interceptor.clone(),
     ));
     routes.add_service(GNmiServer::with_interceptor(

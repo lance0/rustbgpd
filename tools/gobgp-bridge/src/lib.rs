@@ -138,17 +138,23 @@ enum Probe {
     Unknown,
     /// The daemon did not answer, or a pass after it answered did not finish.
     Down,
-    /// The daemon answered.
-    Up,
+    /// The daemon answered with this incarnation.
+    Up(u64),
 }
 
-/// Whether a probe that did (`answered`) or did not answer, after `last`,
-/// means the daemon came back: it answers after a failed probe. That is how a
-/// restart shows, and a daemon that was unreachable for any other reason may
+/// Whether a probe that answered with an incarnation (`Some`) or did not
+/// answer (`None`), after `last`, means the daemon came back: it answers after
+/// a failed probe, or with a different incarnation, which is a restart
+/// between two probes. A daemon that was unreachable for any other reason may
 /// also have lost its routes. The first probe after the bridge starts is not
-/// a restart.
-fn came_back(last: Probe, answered: bool) -> bool {
-    last == Probe::Down && answered
+/// a restart. A daemon without the field always answers zero, so only a
+/// failed probe shows its restart.
+fn came_back(last: Probe, answer: Option<u64>) -> bool {
+    match (last, answer) {
+        (Probe::Down, Some(_)) => true,
+        (Probe::Up(seen), Some(now)) => seen != now,
+        _ => false,
+    }
 }
 
 /// A lazily connected channel: the bridge starts while the daemon is down
@@ -341,9 +347,10 @@ impl Bridge {
 
     /// Probe the daemon with `CheckLiveness` every `poll` for the life of the
     /// process, and run `reconcile` at once when the daemon answers after a
-    /// failed probe. `CheckLiveness` is the daemon's cheapest call and is
-    /// audited at DEBUG. A restart quicker than one probe goes unseen here;
-    /// the periodic pass is the backstop.
+    /// failed probe or with a new incarnation. `CheckLiveness` is the
+    /// daemon's cheapest call and is audited at DEBUG. Against a daemon that
+    /// predates the incarnation, a restart quicker than one probe goes unseen
+    /// here; the periodic pass is the backstop.
     pub fn spawn_restart_watch(&self, poll: Duration) {
         let bridge = self.clone();
         tokio::spawn(async move {
@@ -352,24 +359,25 @@ impl Bridge {
             let mut last = Probe::Unknown;
             loop {
                 tick.tick().await;
-                let answered = bridge
+                let answer = bridge
                     .control
                     .clone()
                     .check_liveness(rbgp::CheckLivenessRequest {})
                     .await
-                    .is_ok();
-                last = if !answered {
-                    Probe::Down
-                } else if came_back(last, answered) {
-                    info!("rustbgpd answered again; reconciling now");
-                    // An unfinished pass is retried on the next answer.
-                    if bridge.reconcile().await {
-                        Probe::Up
-                    } else {
-                        Probe::Down
+                    .ok()
+                    .map(|response| response.into_inner().incarnation);
+                last = match answer {
+                    None => Probe::Down,
+                    Some(incarnation) if came_back(last, answer) => {
+                        info!(incarnation, "rustbgpd answered again; reconciling now");
+                        // An unfinished pass is retried on the next answer.
+                        if bridge.reconcile().await {
+                            Probe::Up(incarnation)
+                        } else {
+                            Probe::Down
+                        }
                     }
-                } else {
-                    Probe::Up
+                    Some(incarnation) => Probe::Up(incarnation),
                 };
             }
         });
@@ -442,13 +450,25 @@ mod tests {
 
     #[test]
     fn the_daemon_comes_back_when_it_answers_after_a_failed_probe() {
-        assert!(came_back(Probe::Down, true));
+        assert!(came_back(Probe::Down, Some(7)));
+        assert!(came_back(Probe::Down, Some(0)));
         // Bridge start, still down, or running.
-        assert!(!came_back(Probe::Unknown, true));
-        assert!(!came_back(Probe::Unknown, false));
-        assert!(!came_back(Probe::Down, false));
-        assert!(!came_back(Probe::Up, true));
-        assert!(!came_back(Probe::Up, false));
+        assert!(!came_back(Probe::Unknown, Some(7)));
+        assert!(!came_back(Probe::Unknown, None));
+        assert!(!came_back(Probe::Down, None));
+        assert!(!came_back(Probe::Up(7), Some(7)));
+        assert!(!came_back(Probe::Up(7), None));
+    }
+
+    #[test]
+    fn a_restart_between_two_probes_is_a_new_incarnation() {
+        // No failed probe in between: only the incarnation shows the restart,
+        // including an upgrade from or downgrade to a daemon without it.
+        assert!(came_back(Probe::Up(7), Some(8)));
+        assert!(came_back(Probe::Up(0), Some(8)));
+        assert!(came_back(Probe::Up(7), Some(0)));
+        // A daemon without the field: unchanged behaviour.
+        assert!(!came_back(Probe::Up(0), Some(0)));
     }
 
     #[test]
