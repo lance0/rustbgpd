@@ -2009,9 +2009,9 @@ gr_eor_grace_time = 25   # off by default
   and never later than the restart-marker window. A reconnect inside the window
   does not restart it. At the deadline End-of-RIB is released, the log records
   `End-of-RIB grace window ended at its deadline`, and
-  `bgp_gr_eor_grace_expired_total{peer}` increments. The release is
-  timer-driven: rustbgpd does not know whether replay finished, and a route not
-  re-injected by then is removed by the helper at that End-of-RIB.
+  `bgp_gr_eor_grace_released_total{peer,reason="deadline"}` increments. The
+  release is timer-driven: rustbgpd does not know whether replay finished, and
+  a route not re-injected by then is removed by the helper at that End-of-RIB.
 - **Scope of the guarantee.** The window closes the observed gap when replay
   completes before release. A timer does not prove that replay completed, so
   this is a bounded mitigation, not a gap-free restart.

@@ -159,7 +159,10 @@ impl RibManager {
                 .map(|&(afi, safi)| super::helpers::afi_safi_label(afi, safi).to_string())
                 .collect();
             held.sort_unstable();
-            self.metrics.record_gr_eor_grace_expired(&peer.to_string());
+            self.metrics.record_gr_eor_grace_released(
+                &peer.to_string(),
+                rustbgpd_telemetry::reason_labels::GrEorGraceReleaseReason::Deadline,
+            );
             info!(
                 %peer,
                 late_ms,

@@ -1284,8 +1284,9 @@ ends (see §4.1 above).
   EoR, and completion/expiry. It counts every route held for retention,
   GR-stale or LLGR-stale.
 - `bgp_gr_timer_expired_total` — counter, incremented on timer expiry
-- `bgp_gr_eor_grace_expired_total` — counter per peer, incremented when a
-  planned-restart End-of-RIB grace window reaches its deadline
+- `bgp_gr_eor_grace_released_total{peer,reason}` — counter, incremented with
+  `reason="deadline"` when a planned-restart End-of-RIB grace window reaches
+  its deadline
 
 ---
 
