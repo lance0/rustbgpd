@@ -2833,6 +2833,10 @@ impl RibManager {
             .pending_regroup_baseline
             .get(&peer)
             .filter(|base| !base.unicast.is_empty());
+        // A dirty member may never have admitted a prior group slot: the group
+        // table advances before the send that failed. Without a regroup
+        // baseline its resync replays its current view instead (ADR-0099
+        // permits idempotent announces on that recovery path).
         let clean_stage =
             stage.filter(|stage| !self.dirty_peers.contains(&peer) && stage.has_next_hop_actions);
         if private.is_none() && baseline.is_none() && clean_stage.is_none() {

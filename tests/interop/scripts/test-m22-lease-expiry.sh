@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# M22 lease-expiry leg (local): ADR-0141 owner leases at FRR.
+# M22 lease-expiry leg: ADR-0141 owner leases at FRR. Hosted in the
+# Interop workflow's M22 job as a single-attempt fresh-topology step.
 #
 # A controller process adds a leased IPv4 /32 blackhole (65535:666, next-hop
 # self) and a leased IPv4 FlowSpec discard rule with a 10 s lease and renews

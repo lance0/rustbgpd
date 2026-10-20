@@ -6192,6 +6192,29 @@ async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
     }
 }
 
+/// [`fold`] without the next-hop action, for a profile that encodes every
+/// action identically: the wire end state.
+fn fold_without_actions(stream: &Streams) -> FoldedState {
+    let mut state = fold(stream);
+    for entry in state.values_mut().flat_map(HashMap::values_mut) {
+        entry.3 = None;
+    }
+    state
+}
+
+/// Message indexes between a stream's recovery `Begin` and `End` markers.
+fn recovery_window(messages: &[NormMsg]) -> std::ops::Range<usize> {
+    let position = |boundary: fn(&RecoveryBoundary) -> bool| {
+        messages
+            .iter()
+            .position(|msg| msg.recovery.as_ref().is_some_and(boundary))
+            .expect("recovery window recorded")
+    };
+    position(|b| matches!(b, RecoveryBoundary::Begin(_)))..position(|b| {
+        matches!(b, RecoveryBoundary::End)
+    })
+}
+
 /// End-of-RIB through the RIB with action-only suppression in the same
 /// envelope. C's initial End-of-RIB cannot be queued behind its initial
 /// table, so it waits for the dirty resync. Before that resync, C's policy
@@ -6200,15 +6223,19 @@ async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
 /// partly suppressed, and must still carry the End-of-RIB after the table
 /// progress it covers. `finish` validates each stream's End-of-RIB coverage.
 ///
-/// The grouped side is not compared for parity: a grouped member that is
-/// dirty without a regroup baseline has no admitted slot to suppress
-/// against, so it replays the equivalent key. Only the ordering and the
-/// End-of-RIB are asserted for it.
+/// The grouped side is compared by end state, not by per-key events
+/// (ADR-0099's recovery-path rule). A grouped member that is dirty without
+/// a regroup baseline keeps no record of its own wire state: the group table
+/// is intended state that may hold slots it never admitted, so suppressing
+/// against it could drop an announce the member needs. Its resync replays
+/// its current view instead, and the equivalent key repeats inside the
+/// recovery window only.
 #[tokio::test]
 async fn oracle_action_only_suppressed_resync_keeps_eor_after_its_table() {
     tokio::time::pause();
     for initially_self in [false, true] {
         for new_key in [false, true] {
+            let mut runs = Vec::new();
             for force_ungrouped in [false, true] {
                 let policy = |use_self: bool| {
                     permit_all_with(RouteModifications {
@@ -6288,14 +6315,26 @@ async fn oracle_action_only_suppressed_resync_keeps_eor_after_its_table() {
                         "{label}: the new key carries the new action"
                     );
                 }
+                let pfx1: Vec<_> = announced
+                    .iter()
+                    .filter(|(_, prefix, _)| *prefix == Prefix::V4(pfx(1, 0)))
+                    .collect();
                 if force_ungrouped {
-                    let pfx1: Vec<_> = announced
-                        .iter()
-                        .filter(|(_, prefix, _)| *prefix == Prefix::V4(pfx(1, 0)))
-                        .collect();
                     assert_eq!(pfx1.len(), 1, "{label}: the equivalent key is suppressed");
+                } else {
+                    let (window, replays) = (recovery_window(messages), &pfx1[1..]);
+                    assert!(
+                        replays.iter().all(|(index, ..)| window.contains(index)),
+                        "{label}: a grouped replay stays inside the recovery window"
+                    );
                 }
+                runs.push(stream);
             }
+            assert_eq!(
+                fold_without_actions(&runs[0]),
+                fold_without_actions(&runs[1]),
+                "initially_self={initially_self} new_key={new_key}: grouped and ungrouped wire end state"
+            );
         }
     }
 }
