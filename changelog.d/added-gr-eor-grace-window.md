@@ -9,3 +9,6 @@
   `bgp_gr_eor_grace_expired_total{peer}` counts it. The window closes the
   observed gap only when replay completes before release; see
   [the configuration reference](../docs/reference/configuration.md#planned-restart-end-of-rib-grace-window).
+  **Operator-visible:** an explicit outbound replay ends in a wire End-of-RIB,
+  so it is now refused while the grace window holds that peer's family, as it
+  already was during restart selection deferral; retry after the window ends.
