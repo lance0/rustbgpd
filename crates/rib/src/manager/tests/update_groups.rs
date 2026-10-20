@@ -1484,6 +1484,92 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_restarter() {
     assert!(manager.gr_deferred_eor[&peer].contains(&ipv6));
 }
 
+/// RFC 4271 §6.8 collision: `PeerUp(A)`, `PeerUp(B)`, then A's unlock, then
+/// `PeerDown(B)`. The unlock lands while B owns the registration, so it must
+/// be kept on A's retained record: transport has already cleared its
+/// withheld flag and will not resend it. After failback A exports IPv6 and
+/// its `EoR`.
+#[test]
+fn family_unlock_from_a_superseded_session_survives_failback() {
+    let (_tx, rx) = mpsc::channel(1);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 9));
+    let mut a_rx = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 1);
+    assert_eq!(a_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    let mut b_rx = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 2);
+    assert_eq!(b_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+
+    let source = Ipv4Addr::new(192, 0, 2, 13);
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 4, 0, 0, 0, 0, 0), 48);
+    let mut v6_route = crate::test_support::make_route(v4, source);
+    v6_route.prefix = Prefix::V6(v6);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced: vec![crate::test_support::make_route(v4, source), v6_route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 1,
+        family: ipv6,
+        add_path_send_limit: None,
+    });
+    while manager.process_next_route_chunk() {}
+    assert_eq!(
+        manager.peer_sendable_families[&peer],
+        ipv4_sendable(),
+        "B's installed registration is untouched"
+    );
+    while b_rx.try_recv().is_ok() {}
+    while a_rx.try_recv().is_ok() {}
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    });
+    while manager.process_next_route_chunk() {}
+
+    assert!(manager.peer_sendable_families[&peer].contains(&ipv6));
+    let updates: Vec<_> = std::iter::from_fn(|| a_rx.try_recv().ok()).collect();
+    let announced: Vec<_> = updates
+        .iter()
+        .flat_map(|u| u.announce.iter().map(|r| r.prefix))
+        .collect();
+    assert!(
+        announced.contains(&Prefix::V6(v6)),
+        "failback exports IPv6: {announced:?}"
+    );
+    assert!(
+        updates.iter().any(|u| u.end_of_rib.contains(&ipv6)),
+        "failback sends the IPv6 EoR"
+    );
+    let stale = metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_rib_stale_session_message_ignored_total")
+        .into_iter()
+        .flat_map(|family| family.get_metric().to_vec())
+        .any(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "kind" && label.value() == "family_sendable")
+        });
+    assert!(!stale, "a retained session's unlock is not stale");
+}
+
 /// A superseded session's unlock is discarded and counted as stale.
 #[test]
 fn stale_family_sendable_is_discarded_and_counted() {

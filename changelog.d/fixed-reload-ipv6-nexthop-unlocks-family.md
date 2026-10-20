@@ -9,6 +9,8 @@
   new INFO line, `local_ipv6_nexthop now provides an IPv6 next hop:
   exporting IPv6 unicast`, records the restore. Route-server clients and iBGP
   sessions are unchanged.
-  A superseded session's unlock is discarded and counted in
+  During a session collision, an unlock from the superseded session is kept
+  for that session and applied if the registration fails back to it. An
+  unlock from a session the RIB no longer tracks is discarded and counted in
   `bgp_rib_stale_session_message_ignored_total` under the new
   `kind="family_sendable"` label.

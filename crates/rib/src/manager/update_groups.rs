@@ -3053,21 +3053,20 @@ impl RibManager {
         family: (Afi, Safi),
         add_path_send_limit: Option<u32>,
     ) {
-        if self.stale_session_message(
-            peer,
-            session_id,
-            "PeerFamilySendable",
-            rustbgpd_telemetry::metrics::StaleSessionMessageKind::FamilySendable,
-        ) {
-            return;
-        }
-        // Update the session record so a deferred registration or a
-        // collision failback installs the family too.
+        // Update the session's retained record even when another session
+        // owns the registration: a collision failback reinstalls it from
+        // this record, and transport does not resend the unlock.
         let Some(record) = self
             .live_sessions
             .get_mut(&peer)
             .and_then(|sessions| sessions.iter_mut().find(|r| r.session_id == session_id))
         else {
+            let _ = self.stale_session_message(
+                peer,
+                session_id,
+                "PeerFamilySendable",
+                rustbgpd_telemetry::metrics::StaleSessionMessageKind::FamilySendable,
+            );
             return;
         };
         if record.sendable_families.contains(&family) {
