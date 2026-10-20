@@ -906,3 +906,18 @@ fn ebgp_ipv6_unicast_over_ipv4_without_next_hop_raises_an_advisory() {
         assert_eq!(v6_next_hop_advisory(&config), None, "{neighbor} / {group}");
     }
 }
+
+/// A link-local neighbor whose interface is absent on the host running
+/// `--check` must not hide the advisory for the other neighbors.
+#[test]
+fn ipv6_next_hop_advisory_survives_a_missing_link_local_interface() {
+    let toml = v6_over_v4_toml(
+        "address = \"192.0.2.1\"\nremote_asn = 65002\n\
+         families = [\"ipv4_unicast\", \"ipv6_unicast\"]\n\n\
+         [[neighbors]]\naddress = \"fe80::2\"\ninterface = \"rbgp-absent0\"\nremote_asn = 65003",
+        "",
+    );
+    let config = parse(&toml).expect("a missing interface is legal at load");
+    let text = v6_next_hop_advisory(&config).expect("the IPv4 eBGP neighbor is still flagged");
+    assert!(text.contains("Neighbors: 192.0.2.1."), "{text}");
+}

@@ -1804,7 +1804,9 @@ impl Config {
                         .all(|entry| entry.action == rustbgpd_policy::PolicyAction::Deny)
             })
         };
-        self.resolved_neighbors()
+        // Scope-independent: a link-local neighbor whose interface is absent
+        // on the host running `--check` must not fail the whole roster.
+        self.resolved_neighbors_for_comparison()
             .unwrap_or_default()
             .into_iter()
             .filter(|neighbor| !neighbor.export_policy.as_ref().is_some_and(exports_nothing))
