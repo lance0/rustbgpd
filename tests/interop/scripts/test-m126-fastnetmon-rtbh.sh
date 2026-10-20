@@ -180,27 +180,34 @@ expect_route() { # label afi prefix want limit
 # restart it causes; any other change is a flap.
 EXPECTED_EST=1
 
-# "<FRR state> <FRR established> <FRR dropped> <rustbgpd state> <rustbgpd flaps>"
+# "<FRR state> <FRR established> <FRR dropped> <rustbgpd established> <rustbgpd flaps>"
+# The rustbgpd counters are its bgp_session_established_total and
+# bgp_session_flaps_total for FRR, which start at zero with each process.
 session_counters() {
     local frr daemon
     frr=$(docker exec "$FRR" vtysh -c 'show bgp neighbors 10.0.0.1 json' 2>/dev/null \
         | jq -r '.["10.0.0.1"] | "\(.bgpState) \(.connectionsEstablished) \(.connectionsDropped)"')
-    daemon=$(docker exec "$DET" rbgp --json neighbor 10.0.0.2 2>/dev/null \
-        | jq -r '"\(.state) \(.flap_count)"')
+    daemon=$(docker exec "$DET" rbgp metrics 2>/dev/null | awk '
+        /^bgp_session_established_total\{peer="10.0.0.2"\}/ { e = $2 }
+        /^bgp_session_flaps_total\{peer="10.0.0.2"\}/ { f = $2 }
+        END { print (e == "" ? "-" : e), (f == "" ? 0 : f) }')
     echo "$frr $daemon"
 }
 
+stable_want() { echo "Established $EXPECTED_EST $((EXPECTED_EST - 1)) 1 0"; }
+
 # The session is up and has not dropped since the driver last restarted
-# rustbgpd: FRR's connection counters match, and rustbgpd counts no flap.
+# rustbgpd: FRR's connection counters match, and this rustbgpd process has
+# reached Established once and never left it.
 session_stable() {
-    [ "$(session_counters)" = "Established $EXPECTED_EST $((EXPECTED_EST - 1)) Established 0" ]
+    [ "$(session_counters)" = "$(stable_want)" ]
 }
 
 expect_session_stable() { # label
     if session_stable; then
         ok "$1: session Established, no flap"
     else
-        bad "$1: session not stable: '$(session_counters)', expected 'Established $EXPECTED_EST $((EXPECTED_EST - 1)) Established 0'"
+        bad "$1: session not stable: '$(session_counters)', expected '$(stable_want)'"
     fi
 }
 
