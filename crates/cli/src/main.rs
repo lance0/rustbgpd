@@ -1962,6 +1962,14 @@ enum RibAction {
         /// Path ID for Add-Path
         #[arg(long)]
         path_id: Option<u32>,
+        /// Lease owner the injected route belongs to; without it
+        /// only an unowned route is deleted
+        #[arg(long, value_name = "NAME", conflicts_with = "override_owner")]
+        owner: Option<String>,
+        /// Delete the injected route whatever its lease owner, for example
+        /// a stuck blackhole whose controller is gone
+        #[arg(long)]
+        override_owner: bool,
     },
 }
 
@@ -2014,6 +2022,14 @@ enum FlowspecAction {
         /// Succeed and report "not present" when no injected rule matches
         #[arg(long)]
         allow_missing: bool,
+        /// Lease owner the injected rule belongs to; without it
+        /// only an unowned rule is deleted
+        #[arg(long, value_name = "NAME", conflicts_with = "override_owner")]
+        owner: Option<String>,
+        /// Delete the injected rule whatever its lease owner, for example
+        /// a stuck filter whose controller is gone
+        #[arg(long)]
+        override_owner: bool,
     },
 }
 
@@ -5445,13 +5461,25 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     )
                     .await
                 }
-                Some(RibAction::Delete { prefix, path_id }) => {
+                Some(RibAction::Delete {
+                    prefix,
+                    path_id,
+                    owner,
+                    override_owner,
+                }) => {
                     if explain {
                         return Err(CliError::Argument(
                             "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
                         ));
                     }
-                    commands::rib::delete_route(connection, &prefix, path_id, json).await
+                    commands::rib::delete_route(
+                        connection,
+                        &prefix,
+                        path_id,
+                        commands::InjectedOwner::new(owner, override_owner),
+                        json,
+                    )
+                    .await
                 }
             }
         }
@@ -5778,12 +5806,21 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     family: fam,
                     components,
                     allow_missing,
+                    owner,
+                    override_owner,
                 }) => {
                     let f = parse_family(&fam).ok_or_else(|| {
                         CliError::Argument(format!("unknown address family: {fam}"))
                     })?;
-                    commands::flowspec::delete(connection, f, &components, allow_missing, json)
-                        .await
+                    commands::flowspec::delete(
+                        connection,
+                        f,
+                        &components,
+                        allow_missing,
+                        commands::InjectedOwner::new(owner, override_owner),
+                        json,
+                    )
+                    .await
                 }
             }
         }

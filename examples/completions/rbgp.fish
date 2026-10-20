@@ -921,6 +921,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l path-id -d 'Path ID for Add-Path' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l owner -d 'Lease owner the injected route belongs to; without it only an unowned route is deleted' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -928,6 +929,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l override-owner -d 'Delete the injected route whatever its lease owner, for example a stuck blackhole whose controller is gone'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1100,6 +1102,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s a -l family -d 'Address family (required: ipv4_flowspec or ipv6_flowspec)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l match -d 'Match components identifying the rule' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l owner -d 'Lease owner the injected rule belongs to; without it only an unowned rule is deleted' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1108,6 +1111,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l allow-missing -d 'Succeed and report "not present" when no injected rule matches'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l override-owner -d 'Delete the injected rule whatever its lease owner, for example a stuck filter whose controller is gone'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'

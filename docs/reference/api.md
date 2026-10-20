@@ -3178,9 +3178,24 @@ owned entry's `injection_owner`, `lease_generation` and `lease_remaining_ms`
 (0 means expired, withdrawal pending); unowned entries leave them unset.
 `ListBestRoutes` reports them on a best local route too. Advertised rows never
 carry them, because their `path_id` is the outbound one.
-`InjectionService.ListInjectionLeases` lists the lease table. The leased adds
-and `RenewLease` are `operator_only`; a successful `RenewLease` is audited at
-INFO rather than WARN. A delete's audit summary names the owner and
+`InjectionService.ListInjectionLeases` lists the lease table. `rbgp rib
+received 0.0.0.0` and `rbgp flowspec received 0.0.0.0` show each owned
+entry's owner and remaining lease, in text and under `lease` in `--json`.
+
+To remove an owned entry by hand, for example a blackhole still announced for
+a controller that is wedged or gone, delete it as its owner or override the
+owner:
+
+```bash
+rbgp rib delete 198.51.100.7/32 --override-owner
+rbgp flowspec delete -a ipv4_flowspec --match "dest=203.0.113.7/32" --owner rtbh-pop1
+```
+
+Without either flag, a delete of an owned entry fails with exit status 1,
+names the owner and points at both flags. Deleting an entry does not stop a
+live controller from adding it again; stop the controller, or let its lease
+lapse, first. The leased adds and `RenewLease` are `operator_only`; a
+successful `RenewLease` is audited at INFO rather than WARN. A delete's audit summary names the owner and
 generation the removed entry held, so an `override_owner` delete names the
 owner it bypassed; a different requested owner is logged as
 `requested_owner`. The owner is a label that keeps controllers from

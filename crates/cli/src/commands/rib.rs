@@ -1164,6 +1164,9 @@ impl Serialize for JsonRouteRef<'_> {
         if route.atomic_aggregate {
             len += 1;
         }
+        if !route.injection_owner.is_empty() {
+            len += 1;
+        }
 
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("prefix", &JsonRoutePrefix(route))?;
@@ -1210,6 +1213,16 @@ impl Serialize for JsonRouteRef<'_> {
         }
         if route.atomic_aggregate {
             map.serialize_entry("atomic_aggregate", &route.atomic_aggregate)?;
+        }
+        if !route.injection_owner.is_empty() {
+            map.serialize_entry(
+                "lease",
+                &output::lease_json(
+                    &route.injection_owner,
+                    route.lease_generation.as_ref(),
+                    route.lease_remaining_ms,
+                ),
+            )?;
         }
         map.end()
     }
@@ -2741,6 +2754,7 @@ pub async fn delete_route(
     connection: Connection,
     prefix: &str,
     path_id: Option<u32>,
+    owner: super::InjectedOwner,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
@@ -2755,11 +2769,12 @@ pub async fn delete_route(
             prefix_length: len,
             path_id: path_id.unwrap_or(0),
             allow_missing: false,
-            owner: String::new(),
-            override_owner: false,
+            owner: owner.owner,
+            override_owner: owner.override_owner,
         }),
     )
-    .await?;
+    .await
+    .map_err(super::InjectedOwner::delete_error)?;
     output::print_result(
         json,
         "delete_route",
@@ -4719,6 +4734,33 @@ mod tests {
         let value = serde_json::to_value(explain_best_path_to_json(&resp)).unwrap();
         assert_eq!(value["best_route"], expected);
         assert_eq!(value["candidates"][0]["route"], expected);
+    }
+
+    /// ADR-0141: an owned injected route carries its lease, with the
+    /// incarnation as a string; an unowned route has no `lease` key.
+    #[test]
+    fn route_json_reports_lease_only_when_owned() {
+        let mut route = route_for_json(0, "");
+        assert!(
+            serde_json::to_value(JsonRouteRef(&route))
+                .unwrap()
+                .get("lease")
+                .is_none()
+        );
+        route.injection_owner = "rtbh-pop1".to_string();
+        route.lease_generation = Some(crate::proto::LeaseGeneration {
+            incarnation: u64::MAX,
+            sequence: 7,
+        });
+        route.lease_remaining_ms = Some(9_500);
+        assert_eq!(
+            serde_json::to_value(JsonRouteRef(&route)).unwrap()["lease"],
+            serde_json::json!({
+                "owner": "rtbh-pop1",
+                "generation": {"incarnation": "18446744073709551615", "sequence": 7},
+                "remaining_ms": 9_500,
+            })
+        );
     }
 
     #[test]
