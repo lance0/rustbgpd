@@ -1727,8 +1727,9 @@ routes may be exchanged via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` using an
 IPv6 next hop. For eBGP exports, `local_ipv6_nexthop` (if configured) is
 used as the IPv6 self next-hop; otherwise the local IPv6 socket address is
 used when available. An eBGP session with neither (for example IPv6 unicast
-over IPv4 transport) withholds the IPv6 unicast family from export for the
-whole session. It logs one WARN and counts the session in
+over IPv4 transport) withholds the IPv6 unicast family from export until a
+reload supplies `local_ipv6_nexthop`, which restores the family without a
+session reset. It logs one WARN and counts the session in
 `bgp_export_family_suppressed_total`, and `rustbgpd --check` warns about the
 neighbor. Route-server-client sessions keep the family and instead refuse such
 routes one at a time (`bgp_exact_export_rejections_total`).

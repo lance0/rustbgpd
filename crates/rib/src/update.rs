@@ -2458,6 +2458,22 @@ pub enum RibUpdate {
         /// Effective limit per negotiated Add-Path send family.
         limits: Vec<((Afi, Safi), u32)>,
     },
+    /// A negotiated family that the session withheld from `PeerUp`'s
+    /// `sendable_families` became exportable mid-session, e.g. eBGP IPv6
+    /// unicast after a reload supplies `local_ipv6_nexthop`. The RIB adds it
+    /// to the session's sendable set and sends the family's full table and
+    /// `EoR`. Additive only: a family is never removed mid-session.
+    PeerFamilySendable {
+        /// Peer address.
+        peer: IpAddr,
+        /// Transport session identity; a superseded session is ignored.
+        session_id: u64,
+        /// The family to start exporting.
+        family: (Afi, Safi),
+        /// Effective Add-Path send limit when Add-Path send was negotiated
+        /// for `family`, as `PeerAddPathLimits` would have carried it.
+        add_path_send_limit: Option<u32>,
+    },
     /// Peer pushed Address-Prefix ORF entries via ROUTE-REFRESH (RFC 5291).
     /// Install/update the per-peer outbound prefix filter for `(afi, safi)` and
     /// re-evaluate this peer's Adj-RIB-Out.

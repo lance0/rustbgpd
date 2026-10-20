@@ -428,10 +428,11 @@ pub enum StaleSessionMessageKind {
     Orf,
     PolicyContext,
     SlowPeer,
+    FamilySendable,
 }
 
 impl StaleSessionMessageKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Routes,
         Self::BgpLs,
         Self::Vpn,
@@ -442,6 +443,7 @@ impl StaleSessionMessageKind {
         Self::Orf,
         Self::PolicyContext,
         Self::SlowPeer,
+        Self::FamilySendable,
     ];
 
     #[must_use]
@@ -457,6 +459,7 @@ impl StaleSessionMessageKind {
             Self::Orf => "orf",
             Self::PolicyContext => "policy_context",
             Self::SlowPeer => "slow_peer",
+            Self::FamilySendable => "family_sendable",
         }
     }
 }
@@ -1574,7 +1577,8 @@ impl BgpMetrics {
                  RoutesReceived envelope; separate BGP-LS, VPN, labeled-unicast, and \
                  RT-Constrain route-message variants; \
                  End-of-RIB; route-refresh begin/end/request; ORF updates; \
-                 or policy context / PeerSlowState slow-peer updates) discarded \
+                 policy context / PeerSlowState slow-peer updates; or a family \
+                 made sendable mid-session) discarded \
                  because their session id did not match the registered \
                  session for the peer — a message from a superseded session \
                  (collision loser) queued behind the replacement's PeerUp. \
