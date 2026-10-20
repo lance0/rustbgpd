@@ -3150,6 +3150,16 @@ A daemon that predates these fields ignores `allow_missing`: a missing route
 returns `NOT_FOUND`, and a present route is deleted with outcome
 `UNSPECIFIED`.
 
+`rbgp rib add` prints the outcome, for example `Route 10.99.0.0/24 added
+(unchanged)`, and its `--json` result carries `outcome` (`created`,
+`replaced`, `unchanged`, or `unknown` for an older daemon).
+`rbgp rib delete` reports the delete outcome the same way: its `--json`
+result carries `outcome` (`deleted`, `not_present`, or `unknown` for an older
+daemon). With `--allow-missing`, a missing route prints `Route 10.99.0.0/24
+not present` and exits 0; without the flag a missing route is still an error.
+An older daemon's success prints `Route 10.99.0.0/24 deleted (the daemon did
+not report an outcome)`.
+
 Injected routes are process-local. They are not written to the config and do
 not survive a daemon restart. A restart can fall between two polls of any
 signal, so a controller does not rely on detecting it. It reconciles
