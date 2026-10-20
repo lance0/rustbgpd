@@ -10,8 +10,8 @@
 //!   block per client (transparent `route_server_client` sessions,
 //!   per-family max-prefix ceilings, strict next-hop ownership, a
 //!   per-client import policy chain);
-//! - `policy/rs-hygiene.rpol` — the shared hygiene policy (reject
-//!   AS_SET segments FIRST, then invalid-ASN / transit-free /
+//! - `policy/rs-hygiene.rpol` — the shared hygiene policy (scrub
+//!   route-server-only communities, then invalid-ASN / transit-free /
 //!   never-via-RS path terms, AS_PATH length cap, bogon and
 //!   black-list prefix rejects, prefix-length windows, RPKI origin
 //!   validation);
@@ -27,13 +27,11 @@
 //! unless `--allow-shape-drift` is given. Generated per-client policy
 //! always ends in an unconditional reject.
 //!
-//! Term-ordering invariant: the shared hygiene policy runs before any
-//! per-client policy in every import chain, and its first term rejects
-//! AS_SET segments. `route.origin-as` resolves an AS_SET-terminated
-//! aggregate to the last ASN of the rightmost AS_SEQUENCE (a deliberate
-//! deviation from RFC 6811, documented with the accessor), so origin
-//! enforcement must never be reachable by a path that still carries an
-//! AS_SET — the hygiene ordering guarantees it is not.
+//! No hygiene term handles AS_SET: the daemon's UPDATE decoder treats an
+//! AS_SET or AS_CONFED_SET in AS_PATH / AS4_PATH as withdrawn (RFC 9774),
+//! so no received route that reaches import policy carries one, and
+//! per-client origin enforcement (`route.origin-as in ...`) never sees an
+//! AS_SET-terminated aggregate.
 
 #![deny(unsafe_code)]
 
@@ -3157,24 +3155,15 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
     let mut out = generated_header("Shared import hygiene", fingerprint);
     out.push_str(
         "#\n\
-         # Ordering contract: this policy is the first member of every client's\n\
-         # import chain and its first term rejects AS_SET segments, so per-client\n\
-         # origin enforcement (`route.origin-as in ...`) is never evaluated on a\n\
-         # path that still carries an AS_SET.\n\n",
+         # This policy is the first member of every client's import chain. It has\n\
+         # no AS_SET term: the daemon treats an UPDATE carrying an AS_SET or\n\
+         # AS_CONFED_SET as withdrawn when it decodes it (RFC 9774), so no such\n\
+         # route reaches import policy.\n\n",
     );
 
     let mut sets = String::new();
     let mut terms = String::new();
     let mut tests = String::new();
-
-    // Term 1 — AS_SET hygiene, always first.
-    terms.push_str(
-        "    # AS_SET segments render in braces (\"65001 {65002 65003}\").\n\
-         \x20   term reject-as-set { if route.as-path matches \"\\\\{\" { reject } }\n",
-    );
-    tests.push_str(
-        "test as-set-path-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333 {65010 65011}\" }\n    expect rs-hygiene == reject\n}\n",
-    );
 
     // Every community a scrub term removes, for the test that pins them.
     let mut scrubbed: Vec<(CommunityKind, String)> = Vec::new();

@@ -438,8 +438,15 @@ member must then re-establish before you query the statement-level trace.
 The rejected-route view above needs no such switch.
 
 The explain names the deciding term — typically `reject-rpki-invalid`
-(fix the member's ROA or your RTR feed) or an `ixp-hygiene` rule
-(AS_SET or ASPA-invalid in the announcement).
+(fix the member's ROA or your RTR feed) or `ixp-hygiene`'s
+`reject-aspa-invalid`. An announcement carrying an AS_SET never reaches
+import policy, so explain names no deciding term: the daemon treats the
+UPDATE as withdrawn when it decodes it (RFC 9774, RFC 7606). The
+rejected-route view lists such a prefix with reason `treat_as_withdraw`;
+the member's `bgp_update_malformed_total{disposition="treat_as_withdraw"}`
+and `bgp_update_malformed_causes_total{reason="as_set_prohibited"}`
+counters increment, and the log carries a `malformed path attribute`
+warning. The member has to stop sending the AS_SET.
 
 **A prefix is hidden from one member but present in the Loc-RIB.** That
 member's own export policy denies the single best path. In `single-best`
