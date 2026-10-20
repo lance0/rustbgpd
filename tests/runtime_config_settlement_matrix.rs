@@ -1126,17 +1126,17 @@ fn apply_confirmed(lab: &Lab, candidate: &Path, daemon: &mut Daemon) {
 }
 
 fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> Result<RowResult, HostStall> {
-    exercise_auto_revert_after_apply(lab, daemon, |_| {})
+    exercise_auto_revert_after_apply(lab, daemon, |_| Ok(()))
 }
 
 fn exercise_auto_revert_after_apply(
     lab: &Lab,
     daemon: &mut Daemon,
-    after_apply: impl FnOnce(&mut Daemon),
+    after_apply: impl FnOnce(&mut Daemon) -> Result<(), HostStall>,
 ) -> Result<RowResult, HostStall> {
     let candidate = lab.candidate("auto-candidate");
     apply_confirmed(lab, &candidate, daemon);
-    after_apply(daemon);
+    after_apply(daemon)?;
     lab.control.wait_for_hold(MatrixRow::AutoRevert, daemon)?;
     wait_held_metrics(lab, MatrixRow::AutoRevert, daemon)?;
     let locator = PathBuf::from(format!(
@@ -1193,15 +1193,26 @@ fn apply_observer_can_miss_detach_after_an_attached_scrape() {
 /// Its arm must already exist before the confirmation timer can even start.
 #[test]
 fn auto_revert_is_armed_before_the_post_apply_observer_resumes() {
-    let lab = Lab::new(MatrixRow::AutoRevert, 0, 302);
-    let mut daemon = lab.spawn("controlled", true);
-    wait_ready_and_idle(daemon.metrics, &mut daemon);
-    let result = exercise_auto_revert_after_apply(&lab, &mut daemon, |daemon| {
-        wait_fenced(&lab, MatrixRow::AutoRevert, daemon);
-    });
-    assert!(matches!(result, Err(HostStall::FencedBeforeHeldLook)));
-    lab.control.assert_one_claim_without_release();
-    assert_auto_revert_recovery(&lab);
+    for attempt in 1..=STALL_ATTEMPTS {
+        let lab = Lab::new(MatrixRow::AutoRevert, 0, 310 + attempt);
+        let mut daemon = lab.spawn("controlled", true);
+        wait_ready_and_idle(daemon.metrics, &mut daemon);
+        let result = exercise_auto_revert_after_apply(&lab, &mut daemon, |daemon| {
+            lab.control.wait_for_hold(MatrixRow::AutoRevert, daemon)?;
+            wait_fenced(&lab, MatrixRow::AutoRevert, daemon);
+            Ok(())
+        });
+        match result {
+            Err(HostStall::FencedBeforeHeldLook) => {
+                lab.control.assert_one_claim_without_release();
+                assert_auto_revert_recovery(&lab);
+                return;
+            }
+            Err(HostStall::RefusedBeforeCheckpoint | HostStall::FencedBeforeCheckpoint) => {}
+            Ok(_) => panic!("the post-Apply observer must resume after the AutoRevert fence"),
+        }
+    }
+    panic!("host stalls prevented an AutoRevert hold in all {STALL_ATTEMPTS} attempts");
 }
 
 /// A process fixture publishes its final evidence only after the observer's
