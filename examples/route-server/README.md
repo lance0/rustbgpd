@@ -7,7 +7,7 @@ with OTC, RPKI origin validation, and both path-hiding mitigations.
 | File | Purpose |
 |---|---|
 | `config.toml` | Daemon config: two members, RPKI, policy chain |
-| `hygiene.rpol` | Import hygiene in the rpol policy language, with in-language tests: reject AS_SET and ASPA-invalid paths and prefixes in a dated dual-stack special-purpose snapshot. It does not add RPKI validation state to routes as a community, because members would receive it and [draft-ietf-sidrops-avoid-rpki-state-in-bgp §6](https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-avoid-rpki-state-in-bgp-12#section-6) forbids that |
+| `hygiene.rpol` | Import hygiene in the rpol policy language, with in-language tests: reject ASPA-invalid paths and prefixes in a dated dual-stack special-purpose snapshot. AS_SET announcements need no term; the daemon treats them as withdrawn when it decodes the UPDATE (RFC 9774). It does not add RPKI validation state to routes as a community, because members would receive it and [draft-ietf-sidrops-avoid-rpki-state-in-bgp §6](https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-avoid-rpki-state-in-bgp-12#section-6) forbids that |
 
 ## Special-purpose prefix starter
 

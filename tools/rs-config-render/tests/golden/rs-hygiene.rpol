@@ -2,10 +2,10 @@
 # next refresh. Regenerate from `arouteserver template-context` output.
 # Shared import hygiene. Context-shape fingerprint: 6cf0b6c6d60bb276.
 #
-# Ordering contract: this policy is the first member of every client's
-# import chain and its first term rejects AS_SET segments, so per-client
-# origin enforcement (`route.origin-as in ...`) is never evaluated on a
-# path that still carries an AS_SET.
+# This policy is the first member of every client's import chain. It has
+# no AS_SET term: the daemon treats an UPDATE carrying an AS_SET or
+# AS_CONFED_SET as withdrawn when it decodes it (RFC 9774), so no such
+# route reaches import policy.
 
 asn-set rs-transit-free-asns { 174, 3356 }
 prefix-set rs-bogon-prefixes {
@@ -26,8 +26,6 @@ prefix-set rs-v6-len-outside-window {
 }
 
 policy rs-hygiene {
-    # AS_SET segments render in braces ("65001 {65002 65003}").
-    term reject-as-set { if route.as-path matches "\\{" { reject } }
     # The ARIN whois tag is set by the route server only; members cannot pre-tag.
     term scrub-arin-whois-tag { remove community 65530:4; remove large-community 65500:65530:4 }
     # arouteserver's internal rpki_bgp_origin_validation_unknown community; members cannot send it.
@@ -57,10 +55,6 @@ policy rs-hygiene {
 }
 
 # In-language tests, run by `rbgp policy check`.
-test as-set-path-is-rejected {
-    route { prefix 203.0.113.0/24; as-path "3333 {65010 65011}" }
-    expect rs-hygiene == reject
-}
 test member-sent-scrubbed-communities-are-removed {
     route { communities [65530:4, 65530:31, 65530:100]; large-communities [65500:65530:4, 65500:65530:31, 65500:65521:3] }
     expect rs-hygiene == accept with removes community 65530:4, removes large-community 65500:65530:4, removes community 65530:31, removes large-community 65500:65530:31, removes large-community 65500:65521:3, removes community 65530:100

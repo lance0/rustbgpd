@@ -37,7 +37,7 @@ configuration that passes `rustbgpd --check --strict` (the
 |------------------|-------------------------|-------------|
 | RPKI-based filtering (validated cache) | [`[rpki]`](../reference/configuration.md#rpki) RTR client + a one-statement deny policy; `maxLength` is enforced in the Invalid determination (RFC 6811) | `rbgp policy explain`, looking-glass filtered view |
 | IRR-based filtering (AS-SET resolution) | Per-member prefix/origin sets rendered from arouteserver's resolved IRR data ([IXP filter pipeline](ixp-filter-pipeline.md)) | render receipt + looking-glass filtered view |
-| Bogon / martian hygiene | Shared hygiene chain: special-purpose prefix rejection, AS_SET reject, ASPA-invalid reject ([`examples/route-server/hygiene.rpol`](../../examples/route-server/hygiene.rpol)); the rendered `rs-hygiene.rpol` adds transit-free and path-length caps | `rbgp rib received <member> --rejected` |
+| Bogon / martian hygiene | Shared hygiene chain: special-purpose prefix rejection, ASPA-invalid reject (AS_SET announcements are treated as withdrawn at decode, RFC 9774) ([`examples/route-server/hygiene.rpol`](../../examples/route-server/hygiene.rpol)); the rendered `rs-hygiene.rpol` adds transit-free and path-length caps | `rbgp rib received <member> --rejected` |
 | Filtering per published policy, fail-closed | RFC 8212 posture (`ebgp_requires_policy`), fail-stale rendering, parse-then-swap reload | `rustbgpd --check --strict`, `rbgp policy` surfaces |
 | Containment of misbehaving members | Per-family max-prefix ceilings with latched teardown ([ADR-0108](../adr/0108-per-family-max-prefix-limits.md)), outbound mirrors ([ADR-0113](../adr/0113-outbound-prefix-limits.md)) | `rbgp neighbor <ip>` limit state, metrics |
 | Member-visible transparency | Reject-retention store + looking-glass filtered view with reject-reason communities | Alice-LG, `rbgp rib received <member> --rejected` |
@@ -94,11 +94,12 @@ repository.
 
 The checked-in starter hygiene chain
 ([`examples/route-server/hygiene.rpol`](../../examples/route-server/hygiene.rpol))
-rejects announcements carrying AS_SET segments, rejects ASPA-invalid
-paths, and applies a dated dual-stack special-purpose (bogon/martian)
+rejects ASPA-invalid paths and applies a dated dual-stack special-purpose (bogon/martian)
 prefix snapshot; the rendered pipeline's `rs-hygiene.rpol` adds
 transit-free rejection and a path-length cap, with RPKI origin
-validation folded in. Wire it into
+validation folded in. Announcements carrying AS_SET segments never reach
+this chain: the daemon treats them as withdrawn when it decodes the
+UPDATE (RFC 9774). Wire it into
 the import chain ahead of member-specific filters, as the
 [route-server cookbook](route-server.md) does.
 

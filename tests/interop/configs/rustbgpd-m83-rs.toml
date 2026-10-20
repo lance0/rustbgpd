@@ -96,7 +96,7 @@ match_community = ["65001:666"]
 action = "deny"
 
 [policy]
-# ixp-hygiene (reject AS_SET, reject ASPA-invalid) lives in
+# ixp-hygiene (reject ASPA-invalid) lives in
 # m83-hygiene.rpol; rpol and TOML policies share one namespace.
 rpol_files = ["m83-hygiene.rpol"]
 import_chain = [

@@ -101,8 +101,10 @@ rs-config-render --context /var/lib/rs/context.yml \
 
 This emits `config.toml` (one `[[neighbors]]` per client with
 per-family max-prefix ceilings and a per-client import chain),
-`policy/rs-hygiene.rpol` (the shared hygiene chain: AS_SET reject,
-bogons, transit-free, path-length cap, RPKI origin validation),
+`policy/rs-hygiene.rpol` (the shared hygiene chain: bogons,
+transit-free, path-length cap, RPKI origin validation; an AS_SET
+announcement never reaches it, because the daemon treats it as withdrawn
+at decode),
 `policy/client-<id>.rpol` (the client's IRR-derived prefix/origin
 tests and dataset bindings), `datasets/client-<id>-origins.list` and
 `datasets/client-<id>-prefixes.list` (the generated IRR membership, plus a
