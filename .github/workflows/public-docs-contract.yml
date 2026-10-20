@@ -85,6 +85,8 @@ jobs:
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
+        with:
+          github-token: ${{ github.token }}
         if: steps.pinned.outputs.selection
       - uses: Swatinem/rust-cache@v2
         if: steps.pinned.outputs.selection

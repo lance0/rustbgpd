@@ -1998,6 +1998,8 @@ jobs:
           fetch-depth: 0
 
       - uses: ./.github/actions/install-protobuf
+        with:
+          github-token: ${{ github.token }}
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -2094,6 +2096,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/install-protobuf
+        with:
+          github-token: ${{ github.token }}
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab

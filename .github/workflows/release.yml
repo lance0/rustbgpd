@@ -61,6 +61,8 @@ jobs:
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
+        with:
+          github-token: ${{ github.token }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace
 
@@ -109,10 +111,13 @@ jobs:
         # Bullseye's packaged protoc (3.12) predates the proto3
         # `optional` fields in proto/rustbgpd.proto; install a pinned
         # upstream release binary instead.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           sha256="$(.github/scripts/archive-pin.sh protoc-25.3-linux-x86_64.zip)"
           curl -sSfL -o /tmp/protoc.zip \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             --connect-timeout 10 --max-time 120 \
             --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
             https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip

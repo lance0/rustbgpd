@@ -80,6 +80,8 @@ jobs:
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
+        with:
+          github-token: ${{ github.token }}
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
