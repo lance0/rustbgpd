@@ -141,8 +141,6 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
-        with:
-          github-token: ${{ github.token }}
       # PRs restore main caches; only main saves Rust artifacts to limit duplication.
       - uses: Swatinem/rust-cache@v2
         with:
@@ -448,8 +446,6 @@ jobs:
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
-        with:
-          github-token: ${{ github.token }}
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -515,8 +511,6 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
-        with:
-          github-token: ${{ github.token }}
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -691,8 +685,6 @@ jobs:
         with:
           toolchain: "1.95"
       - uses: ./.github/actions/install-protobuf
-        with:
-          github-token: ${{ github.token }}
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -816,8 +808,6 @@ jobs:
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
-        with:
-          github-token: ${{ github.token }}
       - name: Check recovery receipt negative fixtures
         run: |
           bash -n bench/scale/compare-recovery-memory.sh
@@ -912,8 +902,6 @@ jobs:
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
-        with:
-          github-token: ${{ github.token }}
       - name: Check mass-dirty receipt negative fixtures
         run: |
           bash -n bench/scale/reloadstall/run-recovery-mass-dirty.sh

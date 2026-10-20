@@ -124,11 +124,7 @@ class ScaleSplitContractTests(unittest.TestCase):
                 self.mutate(old, new)
 
     def test_recovery_memory_receipt_requires_an_actual_toolchain_input(self) -> None:
-        tail = (
-            "        with:\n"
-            "          github-token: ${{ github.token }}\n"
-            "      - name: Check recovery receipt negative fixtures\n"
-        )
+        tail = "      - name: Check recovery receipt negative fixtures\n"
         original = "        with:\n          toolchain: stable\n      - uses: ./.github/actions/install-protobuf\n" + tail
         for replacement in (
             "",

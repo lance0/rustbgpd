@@ -48,8 +48,6 @@ jobs:
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
-        with:
-          github-token: ${{ github.token }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace
 

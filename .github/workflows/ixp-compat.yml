@@ -50,7 +50,5 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/install-protobuf
-        with:
-          github-token: ${{ github.token }}
       - name: Verify the pinned upstream contract
         run: tests/compat/ixp-manager-birdseye/run.sh

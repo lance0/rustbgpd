@@ -2,17 +2,11 @@ name: "Install pinned protobuf compiler"
 description: >-
   Install the official protoc 25.3 archive after verifying its checksum and
   architecture.
-inputs:
-  github-token:
-    description: GitHub token for authenticated release downloads
-    required: true
 runs:
   using: "composite"
   steps:
     - name: Install protobuf compiler
       shell: bash
-      env:
-        GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
 
@@ -27,7 +21,6 @@ runs:
         archive="${install_root}/protoc.zip"
 
         curl -sSfL \
-          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
           --connect-timeout 10 --max-time 120 \
           --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
           -o "$archive" \
