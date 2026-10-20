@@ -3,7 +3,8 @@
 //! One daemon-wide [`InjectionLeases`](crate::injection_lease::InjectionLeases)
 //! table is shared by every `InjectionService` instance, the RIB manager and
 //! the expiry task. It holds only bounded owner-level state: each owner's
-//! lease and the pending-expiry queue, at most [`MAX_LIVE_OWNERS`] live
+//! lease and the pending-expiry queue, at most
+//! [`MAX_LIVE_OWNERS`](crate::injection_lease::MAX_LIVE_OWNERS) live
 //! entries. Which local keys an owner holds is indexed in the RIB actor, so
 //! sweeping a large owner's routes never holds this lock. Renewal and lease
 //! listing touch only this table, never the RIB actor, so a backlogged RIB
