@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.79.0] — 2026-10-20
+
 ### Added
 
 - `rbgp rib delete` and `rbgp flowspec delete` take `--owner <name>` and
