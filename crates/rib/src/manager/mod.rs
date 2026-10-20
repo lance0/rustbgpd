@@ -1563,10 +1563,11 @@ fn replacement_readiness_checkpoint_tagged(
     let Some(context) = readiness else {
         return;
     };
-    // Instrumented builds still measure every eligible opportunity, including
-    // idle checkpoints. Once armed, production idle dispatch needs no mutex
-    // or clock. A capped drain retains its hint until it can rearm below.
-    {
+    // Instrumented builds still measure eligible opportunities, including
+    // idle checkpoints, on forced and sampled checkpoints. Once armed,
+    // production idle dispatch needs no mutex or clock. A capped drain
+    // retains its hint until it can rearm below.
+    if force || bench_support::measure_checkpoint() {
         let mut readiness = context
             .state
             .lock()
@@ -1690,6 +1691,11 @@ fn service_replacement_readiness_with_origin(
         readiness.last_service = started;
         #[cfg(any(test, feature = "bench-internals"))]
         {
+            // A sampled build may not have measured this checkpoint; record
+            // the gap that ends here before the service pass resets it.
+            readiness.max_gap = readiness
+                .max_gap
+                .max(started.duration_since(readiness.last_opportunity));
             readiness.last_opportunity = started;
         }
     }
