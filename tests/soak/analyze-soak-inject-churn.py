@@ -13,6 +13,24 @@ and emits a JSON verdict against the soak-specific gates:
   - unchanged flap count and nondecreasing session uptime
   - valid daemon log with no ERROR records
 
+With run.json lease_mode == 1 (ADR-0141 owner leases), also:
+
+  - every owner controller exits 0 with no failed add, and every ordinary
+    renewal succeeds
+  - healthy owners hold all their keys at FRR and a live lease in every
+    post-warmup sample
+  - each flap cycle: FRR drops the flapping owner's keys no earlier than
+    lease after the send of its last renewal and has lost them all within
+    lease + 5 s of that renewal's reply, then holds them all again after
+    the re-add; at least max(1, active / (2 * (flap interval + lease)))
+    cycles complete
+  - every stale-generation renewal is refused (attempts > 0): one after the
+    expiry (no resurrection) and one after the re-add (superseded
+    generation) in each cycle
+  - the flapping owner's generation keeps its incarnation and its
+    sequence strictly increases at every add
+  - every 1 Hz /readyz probe returns 200, at least soak_seconds / 2 probes
+
 Stdlib only. Exit code 0 on pass, 1 on any gate failure, 2 on
 harness/input error.
 """
@@ -24,6 +42,7 @@ import csv
 import json
 import math
 import sys
+from pathlib import Path
 from typing import Optional
 
 from flagship_daemon_log import analyze_daemon_log, unique_members
@@ -34,6 +53,9 @@ REQUIRED = {
     "flap_count", "uptime_seconds",
 }
 COUNTERS = REQUIRED - {"elapsed_sec", "rss_mb", "bgp_established"}
+LEASE_META = ("lease_owners", "lease_keys_per_owner", "lease_seconds",
+              "lease_renew_sec", "lease_flap_interval_sec")
+EXPIRY_SLACK_SEC = 5.0
 
 
 def safe_float(value: str | None) -> Optional[float]:
@@ -148,6 +170,178 @@ def analyze(rows: list[dict[str, str]], minimum_cycles: int) -> dict:
     }
 
 
+def gate(value, ok: bool) -> dict:
+    return {"value": value, "pass": bool(ok)}
+
+
+def load_lease_evidence(run_dir: str, meta: dict):
+    """Parse the lease evidence; any malformed or missing file is ValueError."""
+    for key in LEASE_META:
+        if type(meta.get(key)) is not int or meta[key] < 1:
+            raise ValueError(f"run.json has invalid {key}")
+    owners = [f"soak-lease-{k}" for k in range(1, meta["lease_owners"] + 1)]
+    root = Path(run_dir)
+    events = []
+    for number, line in enumerate(
+            (root / "lease-events.log").read_text(encoding="utf-8").splitlines(), 1):
+        parts = line.split()
+        if len(parts) < 3 or parts[1] not in owners:
+            raise ValueError(f"lease-events.log line {number} is malformed")
+        stamp = safe_float(parts[0])
+        if stamp is None:
+            raise ValueError(f"lease-events.log line {number} has no timestamp")
+        fields = dict(p.split("=", 1) for p in parts[3:] if "=" in p)
+        events.append((stamp, parts[1], parts[2], parts[3:], fields))
+    samples = []
+    for number, line in enumerate(
+            (root / "lease-samples.jsonl").read_text(encoding="utf-8").splitlines(), 1):
+        row = json.loads(line, object_pairs_hook=unique_members)
+        if (not isinstance(row, dict) or type(row.get("elapsed_sec")) is not int
+                or not isinstance(row.get("leases"), list)
+                or not isinstance(row.get("frr_counts"), list)
+                or len(row["frr_counts"]) != len(owners)
+                or any(type(c) is not int for c in row["frr_counts"])):
+            raise ValueError(f"lease-samples.jsonl line {number} is malformed")
+        samples.append(row)
+    with (root / "readyz.csv").open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames != ["epoch", "code", "seconds"]:
+            raise ValueError("readyz.csv has the wrong header")
+        readyz = []
+        for number, row in enumerate(reader, 2):
+            seconds = safe_float(row["seconds"])
+            if not (row["code"] or "").isdigit() or seconds is None:
+                raise ValueError(f"readyz.csv row {number} is malformed")
+            readyz.append((int(row["code"]), seconds))
+    return owners, events, samples, readyz
+
+
+def generation(text: str):
+    incarnation, _, sequence = (text or "").partition(":")
+    if not incarnation.isdigit() or not sequence.isdigit():
+        return None
+    return int(incarnation), int(sequence)
+
+
+def analyze_leases(run_dir: str, meta: dict) -> dict:
+    owners, events, samples, readyz = load_lease_evidence(run_dir, meta)
+    keys, lease = meta["lease_keys_per_owner"], meta["lease_seconds"]
+    flapper, healthy = owners[-1], owners[:-1]
+
+    exits = {o: [f.get("rc") for _, owner, kind, _, f in events
+                 if owner == o and kind == "controller_exit"] for o in owners}
+    add_failures = sum(1 for e in events if e[2] == "add_failed")
+    renewals = {o: {"renewed": 0, "other": 0} for o in owners}
+    for _, owner, kind, args, _ in events:
+        if kind == "renew":
+            renewals[owner]["renewed" if args == ["renewed"] else "other"] += 1
+
+    presence_violations = []
+    checked = 0
+    for row in samples:
+        if row["elapsed_sec"] < meta["warmup_sec"]:
+            continue
+        checked += 1
+        live = {entry.get("owner") for entry in row["leases"]
+                if isinstance(entry, dict)
+                and safe_float(str(entry.get("leaseRemainingMs", 0))) not in (None, 0.0)}
+        for index, owner in enumerate(healthy):
+            if row["frr_counts"][index] != keys or owner not in live:
+                presence_violations.append(
+                    {"elapsed_sec": row["elapsed_sec"], "owner": owner,
+                     "frr_count": row["frr_counts"][index], "lease_live": owner in live})
+
+    # Flap cycles, in this order.
+    order = ["flap_stop", "frr_gone", "stale_renew:expired", "added",
+             "stale_renew:superseded", "frr_back"]
+    cycles, cycle_violations, gens = [], [], []
+    current = None
+    for _, owner, kind, _args, fields in events:
+        if owner != flapper:
+            continue
+        if kind == "added":
+            gens.append(fields.get("gen"))
+        if kind == "flap_stop":
+            if current is not None:
+                cycle_violations.append({"cycle": len(cycles) + 1, "error": "incomplete"})
+            current = {"steps": [kind], "fields": fields}
+            continue
+        step = f"{kind}:{fields.get('phase')}" if kind == "stale_renew" else kind
+        if current is None or step not in order:
+            continue
+        current["steps"].append(step)
+        current[kind] = fields
+        if kind != "frr_back":
+            continue
+        cycle_number = len(cycles) + 1
+        stop = current["fields"]
+        t0, t1 = safe_float(stop.get("t0")), safe_float(stop.get("t1"))
+        gone = current.get("frr_gone", {})
+        drop, gone_at = safe_float(gone.get("drop")), safe_float(gone.get("at"))
+        back_at = safe_float(fields.get("at"))
+        error = None
+        if current["steps"] != order:
+            error = f"out-of-order steps {current['steps']}"
+        elif t0 is None or t1 is None or drop is None or gone_at is None:
+            error = "FRR never lost the keys"
+        elif drop < t0 + lease:
+            error = f"dropped {t0 + lease - drop:.2f} s before the deadline"
+        elif gone_at > t1 + lease + EXPIRY_SLACK_SEC:
+            error = f"still present {gone_at - t1 - lease:.2f} s after the deadline"
+        elif back_at is None:
+            error = "FRR never regained the keys after the re-add"
+        cycles.append(None if gone_at is None or t1 is None
+                      else round(gone_at - t1 - lease, 3))
+        if error:
+            cycle_violations.append({"cycle": cycle_number, "error": error})
+        current = None
+    if current is not None:
+        cycle_violations.append({"cycle": len(cycles) + 1, "error": "incomplete"})
+    active = meta["soak_seconds"] - meta["warmup_sec"]
+    minimum_cycles = max(1, active // (2 * (meta["lease_flap_interval_sec"] + lease)))
+
+    stale = {"expired": [0, 0], "superseded": [0, 0]}
+    for _, _, kind, args, fields in events:
+        if kind == "stale_renew":
+            counts = stale.setdefault(str(fields.get("phase")), [0, 0])
+            counts[0] += 1
+            counts[1] += args[0] == "refused"
+    attempts = sum(a for a, _ in stale.values())
+    refused = sum(r for _, r in stale.values())
+
+    parsed = [generation(g) for g in gens]
+    increasing = (len(parsed) >= 2 and None not in parsed
+                  and len({g[0] for g in parsed}) == 1
+                  and all(a[1] < b[1] for a, b in zip(parsed, parsed[1:])))
+
+    failures = [code for code, _ in readyz if code != 200]
+    minimum_probes = meta["soak_seconds"] // 2
+
+    return {
+        "lease_controllers": gate(
+            {"exits": exits, "add_failures": add_failures},
+            add_failures == 0 and all(v == ["0"] for v in exits.values())),
+        "lease_renewals": gate(
+            renewals, all(r["renewed"] > 0 and r["other"] == 0 for r in renewals.values())),
+        "lease_healthy_presence": gate(
+            {"samples": checked, "violations": presence_violations[:20]},
+            checked > 0 and not presence_violations),
+        "lease_flap_expiry": gate(
+            {"cycles": len(cycles), "minimum": minimum_cycles,
+             "seconds_past_deadline": cycles, "violations": cycle_violations},
+            len(cycles) >= minimum_cycles and not cycle_violations),
+        "lease_stale_renewals_refused": gate(
+            {"attempts": attempts, "refused": refused,
+             "by_phase": {k: {"attempts": a, "refused": r} for k, (a, r) in stale.items()}},
+            attempts > 0 and refused == attempts),
+        "lease_generation_increase": gate(gens, increasing),
+        "readyz": gate(
+            {"probes": len(readyz), "minimum": minimum_probes, "failures": len(failures),
+             "max_seconds": max((t for _, t in readyz), default=None)},
+            len(readyz) >= minimum_probes and not failures),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze inject-churn soak")
     parser.add_argument("run_dir",
@@ -206,6 +400,16 @@ def main() -> int:
 
     result = analyze(rows, minimum_cycles)
     result["gates"]["daemon_log"] = analyze_daemon_log(args.run_dir)
+    lease_mode = meta.get("lease_mode", 0)
+    if type(lease_mode) is not int or lease_mode not in (0, 1):
+        print("error reading run metadata: run.json has invalid lease_mode", file=sys.stderr)
+        return 2
+    if lease_mode:
+        try:
+            result["gates"].update(analyze_leases(args.run_dir, meta))
+        except (OSError, ValueError) as exc:
+            print(f"error reading lease evidence: {exc}", file=sys.stderr)
+            return 2
     result["verdict"] = "pass" if all(g["pass"] for g in result["gates"].values()) else "fail"
     out = json.dumps(result, indent=2)
     print(out)

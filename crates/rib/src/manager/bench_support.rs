@@ -52,35 +52,14 @@ pub(in crate::manager) struct RetirementReadiness {
     body_replied: u64,
 }
 
-/// Readiness checkpoints per gap measurement outside a retirement capture.
-/// Checkpoints fire per item in long loops, and a mutex plus clock read on
-/// every one dominated harness wall-clock. Sampled, the logged `max_gap` is an
-/// upper bound that can span this many checkpoint intervals, so it never hides
-/// a stall. Unit controls assert exact per-checkpoint gap receipts.
-const GAP_SAMPLE_EVERY: u32 = if cfg!(test) { 1 } else { 64 };
-
-thread_local! {
-    static GAP_COUNTDOWN: Cell<u32> = const { Cell::new(0) };
-}
-
-/// Whether this checkpoint takes the readiness mutex and clock. A retirement
-/// capture counts every callback, so it measures each one.
+/// Whether this checkpoint takes the readiness mutex and clock. Checkpoints
+/// fire per item in long loops, so only a retirement capture, which counts
+/// every callback, pays that per call. Elsewhere forced checkpoints and service
+/// passes bound the logged gap from above. Unit controls assert exact
+/// per-checkpoint gap receipts.
 #[inline]
 pub(in crate::manager) fn measure_checkpoint() -> bool {
-    RETIREMENT_ACTIVE.load(Ordering::Acquire) || gap_sample_due(GAP_SAMPLE_EVERY)
-}
-
-fn gap_sample_due(every: u32) -> bool {
-    GAP_COUNTDOWN.with(|left| match left.get() {
-        0 => {
-            left.set(every - 1);
-            true
-        }
-        n => {
-            left.set(n - 1);
-            false
-        }
-    })
+    cfg!(test) || RETIREMENT_ACTIVE.load(Ordering::Relaxed)
 }
 
 fn retirement_epoch() -> u64 {
@@ -3020,14 +2999,5 @@ mod recovery_scan_tests {
         for n in 0..spec.keys {
             assert!(proof.contains(&scan_common_key(spec, n).into()));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn gap_sampling_measures_one_checkpoint_per_period() {
-        let due: Vec<bool> = (0..8).map(|_| super::gap_sample_due(4)).collect();
-        assert_eq!(due, [true, false, false, false, true, false, false, false]);
     }
 }
