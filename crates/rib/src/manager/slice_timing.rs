@@ -268,6 +268,7 @@ mod tests {
             ("peer_attribute_gc", RibActorSliceStage::Retirement),
             ("admitted_prior_retain", RibActorSliceStage::Retirement),
             ("peer_down_key_collection", RibActorSliceStage::Retirement),
+            ("lease_expiry_retirement", RibActorSliceStage::Retirement),
             ("family_commit", RibActorSliceStage::UpdateGroup),
             ("staging_evpn", RibActorSliceStage::UpdateGroup),
             ("capture_evpn", RibActorSliceStage::UpdateGroup),
