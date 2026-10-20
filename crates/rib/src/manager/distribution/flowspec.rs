@@ -5,6 +5,7 @@ use super::{
     should_suppress_ibgp_inner, warn,
 };
 use crate::attr_set::AttrSet;
+use crate::injection_lease::{InjectedKey, LeaseGeneration};
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
 use crate::update::InjectOutcome;
 
@@ -144,7 +145,54 @@ impl RibManager {
         route: crate::route::FlowSpecRoute,
         reply: tokio::sync::oneshot::Sender<Result<InjectOutcome, RibCommandError>>,
     ) {
+        let result = self
+            .inject_local_flowspec(route, None)
+            .map(|(outcome, _)| outcome);
+        let _ = reply.send(result);
+    }
+
+    pub(in crate::manager) fn handle_inject_leased_flowspec(
+        &mut self,
+        route: crate::route::FlowSpecRoute,
+        owner: &str,
+        lease_seconds: u32,
+        reply: tokio::sync::oneshot::Sender<
+            Result<(InjectOutcome, LeaseGeneration), RibCommandError>,
+        >,
+    ) {
+        let result = self
+            .inject_local_flowspec(route, Some((owner, lease_seconds)))
+            .map(|(outcome, generation)| {
+                (
+                    outcome,
+                    generation.expect("a leased add returns its generation"),
+                )
+            });
+        let _ = reply.send(result);
+    }
+
+    /// Insert a local `FlowSpec` rule, unowned or under `lease`; see
+    /// `inject_local_route` for the ownership contract (ADR-0141).
+    fn inject_local_flowspec(
+        &mut self,
+        route: crate::route::FlowSpecRoute,
+        lease: Option<(&str, u32)>,
+    ) -> Result<(InjectOutcome, Option<LeaseGeneration>), RibCommandError> {
         let key = route.selection_key();
+        let owned_key = InjectedKey::FlowSpec(key.clone());
+        let present = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get_flowspec(&route.key()).is_some());
+        let generation = if let Some((owner, lease_seconds)) = lease {
+            Some(
+                self.admit_injected_lease(&owned_key, present, owner, lease_seconds)?
+                    .generation,
+            )
+        } else {
+            self.check_injected_owner(&owned_key, "")?;
+            None
+        };
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
@@ -178,24 +226,40 @@ impl RibManager {
         let mut fs_affected = HashSet::new();
         fs_affected.insert(key);
         self.recompute_and_distribute_flowspec(&fs_affected);
-        let _ = reply.send(Ok(outcome));
+        Ok((outcome, generation))
     }
 
     pub(in crate::manager) fn handle_withdraw_flowspec(
         &mut self,
         key: FlowSpecKey,
         allow_missing: bool,
-        reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
+        owner: &str,
+        override_owner: bool,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::InjectedRemoval, RibCommandError>,
+        >,
     ) {
-        let rib = self
-            .ribs
-            .entry(LOCAL_PEER)
-            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        let owned_key = InjectedKey::FlowSpec(key.clone());
         let route_key = FlowSpecRouteKey {
             afi: key.afi,
             rule: key.rule.clone(),
             path_id: 0,
         };
+        let present = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get_flowspec(&route_key).is_some());
+        if !override_owner
+            && present
+            && let Err(rejection) = self.check_injected_owner(&owned_key, owner)
+        {
+            let _ = reply.send(Err(rejection));
+            return;
+        }
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         let removed = rib.withdraw_flowspec(&route_key);
         crate::manager::helpers::set_rib_prefixes(
             &self.metrics,
@@ -204,13 +268,17 @@ impl RibManager {
             rib.flowspec_lens(),
         );
         if removed {
+            let tag = self.forget_injected(&owned_key);
             debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
             let mut fs_affected = HashSet::new();
             fs_affected.insert(key);
             self.recompute_and_distribute_flowspec(&fs_affected);
-            let _ = reply.send(Ok(true));
+            let _ = reply.send(Ok(crate::update::InjectedRemoval { removed: true, tag }));
         } else if allow_missing {
-            let _ = reply.send(Ok(false));
+            let _ = reply.send(Ok(crate::update::InjectedRemoval {
+                removed: false,
+                tag: None,
+            }));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
                 "FlowSpec {:?} rule {} not found",

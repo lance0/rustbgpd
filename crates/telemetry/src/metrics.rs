@@ -561,6 +561,8 @@ struct BgpMetricsInner {
     rib_adj_out_prefixes: IntGaugeVec,
     rib_loc_prefixes: IntGaugeVec,
     rib_attr_intern_global_size: IntGauge,
+    injection_lease_expiries: IntCounterVec,
+    injection_leases: IntGauge,
     route_event_history_depth: IntGauge,
     route_event_history_capacity: IntGauge,
 
@@ -1191,6 +1193,20 @@ impl BgpMetrics {
         let rib_attr_intern_global_size = IntGauge::new(
             "bgp_rib_attr_intern_global_size",
             "Unique attribute sets in the daemon-wide cross-peer intern table. Reclaim sweeps drop entries no route references; refreshed at every insert/remove batch seam.",
+        )
+        .expect("valid metric definition");
+
+        let injection_lease_expiries = IntCounterVec::new(
+            Opts::new(
+                "bgp_injection_lease_expiries_total",
+                "Injection lease generations that expired and had their owner's routes withdrawn (ADR-0141). The owner label takes at most 64 values per process, then _other.",
+            ),
+            &["owner"],
+        )
+        .expect("valid metric definition");
+        let injection_leases = IntGauge::new(
+            "bgp_injection_leases",
+            "Injection lease owners in the lease table, live or awaiting expiry (ADR-0141).",
         )
         .expect("valid metric definition");
 
@@ -2988,6 +3004,12 @@ impl BgpMetrics {
             .register(Box::new(rib_attr_intern_global_size.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(injection_lease_expiries.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(injection_leases.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(route_event_history_depth.clone()))
             .expect("metric not already registered");
         registry
@@ -3585,6 +3607,8 @@ impl BgpMetrics {
             rib_adj_out_prefixes,
             rib_loc_prefixes,
             rib_attr_intern_global_size,
+            injection_lease_expiries,
+            injection_leases,
             route_event_history_depth,
             route_event_history_capacity,
             orr_spf_runs_total,
@@ -4609,6 +4633,20 @@ impl BgpMetrics {
     /// monotonic slope, never a stale flat line.
     pub fn set_rib_attr_intern_global_size(&self, count: i64) {
         self.0.rib_attr_intern_global_size.set(count);
+    }
+
+    /// Count one expired injection lease generation (ADR-0141). The caller
+    /// bounds the owner label.
+    pub fn record_injection_lease_expiry(&self, owner: &str) {
+        self.0
+            .injection_lease_expiries
+            .with_label_values(&[owner])
+            .inc();
+    }
+
+    /// Set the number of injection lease owners in the lease table.
+    pub fn set_injection_leases(&self, count: i64) {
+        self.0.injection_leases.set(count);
     }
 
     /// Set the number of retained events in the bounded route-event

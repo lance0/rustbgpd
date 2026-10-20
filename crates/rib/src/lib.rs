@@ -35,6 +35,8 @@ pub mod export_roster;
 mod fast_hash;
 /// Received `FlowSpec` feasibility against the unicast RIB.
 mod flowspec_validation;
+/// Owner-scoped leases on controller-injected routes (ADR-0141).
+pub mod injection_lease;
 /// Loc-RIB: best route per prefix.
 pub mod loc_rib;
 /// RIB manager task and submodules.
@@ -101,8 +103,8 @@ pub use update::{
     ExplainAdvertisedRouteError, ExplainBestPath, ExplainDecision, ExplainEvpnExport,
     ExplainEvpnRoute, ExplainReason, ExportGateStep, ExportGateVerdict, ExportPolicyCohortOutcome,
     FibInstallCandidatesPage, FlowSpecValidationStatus, GrRetentionFamilyState, GrRetentionPhase,
-    InjectOutcome, InstalledExportChain, LabeledRouteQueryKey, MrtPeerEntry, MrtSnapshotData,
-    NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse,
+    InjectOutcome, InjectedRemoval, InstalledExportChain, LabeledRouteQueryKey, MrtPeerEntry,
+    MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse,
     OUTBOUND_PREFIX_LIMIT_REACHED, OrrExplainCandidate, OrrLinkQueryKey, OrrNodeQueryKey,
     OutboundConvergence, OutboundPrefixLimitConfig, OutboundPrefixLimitFamilyState,
     OutboundPrefixLimitPair, OutboundPrefixLimitViolation, OutboundResyncState,

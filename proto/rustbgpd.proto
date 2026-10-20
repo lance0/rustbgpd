@@ -3152,6 +3152,14 @@ message Route {
   RouteAggregator aggregator = 21;
   // True when the route carries the RFC 4271 ATOMIC_AGGREGATE attribute.
   bool atomic_aggregate = 22;
+  // For a route injected with AddLeasedPath (source peer 0.0.0.0): its lease
+  // owner, the generation it is tagged with, and the time to the owner's
+  // deadline, where 0 means expired and withdrawal pending. Set on received
+  // and best rows only: advertised rows carry an outbound path_id, so they
+  // leave these unset. Unset for every other route.
+  string injection_owner = 23;
+  LeaseGeneration lease_generation = 24;
+  optional uint32 lease_remaining_ms = 25;
 }
 
 enum RouteEventType {
@@ -3561,6 +3569,42 @@ service InjectionService {
   // in the same RIB turn unless Graceful Restart selection deferral is
   // active.
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
+  // Owner-scoped leases (ADR-0141). A leased add is AddPath or AddFlowSpec
+  // with the same request, outcome and validation, plus an owner and a
+  // lease. Every entry an owner adds shares that owner's one lease; when the
+  // lease's deadline passes without a renewal or a further leased add, the
+  // daemon withdraws all of the owner's routes and rules in one batch.
+  // Expiry removes local intent only: an equal or better route, or a
+  // received FlowSpec rule with the same key, keeps applying, and the daemon
+  // promises no remote acceptance or enforcement. The lease bounds how long
+  // a stopped controller's state outlives it; it does not cover the daemon
+  // itself stopping.
+  //
+  // A leased add joins the owner's live lease and extends its deadline to
+  // max(current, now + lease_seconds), never shortening it, or starts a new
+  // generation. The response returns the owner's live generation; a
+  // generation other than the one the controller holds means its previous
+  // state may be gone and it must re-add its full desired state. A leased
+  // add on a key held by another owner, or by no owner, returns
+  // FAILED_PRECONDITION: convert an unleased entry by deleting it first, or
+  // add under a fresh key such as another path_id. A 65th live owner, or an
+  // owner's 16,385th key, returns RESOURCE_EXHAUSTED. Both leave everything
+  // unchanged. A daemon without
+  // these RPCs answers UNIMPLEMENTED and creates nothing; never retry a
+  // failed leased add through AddPath or AddFlowSpec.
+  rpc AddLeasedPath(AddLeasedPathRequest) returns (AddLeasedPathResponse);
+  rpc AddLeasedFlowSpec(AddLeasedFlowSpecRequest) returns (AddLeasedFlowSpecResponse);
+  // Set the owner's lease deadline to exactly now + lease_seconds, which may
+  // shorten it. Served from the lease table, never behind RIB work. Returns
+  // FAILED_PRECONDITION, changing nothing, unless generation is the owner's
+  // live lease: an unknown owner, an expired lease (a renewal at exactly the
+  // deadline loses) or a superseded generation, including one from before a
+  // daemon restart. A renewal never creates or resurrects a lease; on
+  // FAILED_PRECONDITION the controller re-adds its full desired state, and
+  // the first leased add starts a new generation.
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+  // The lease table, optionally for one owner.
+  rpc ListInjectionLeases(ListInjectionLeasesRequest) returns (ListInjectionLeasesResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
   // reflects them to iBGP peers negotiating L2VPN/EVPN.
@@ -3637,6 +3681,12 @@ message DeletePathRequest {
   // it: a missing route returns NOT_FOUND and a present route is deleted
   // with outcome UNSPECIFIED.
   bool allow_missing = 5;
+  // Owner the caller expects the route to have; "" means unowned. A
+  // mismatch, including "" on an owned route, returns FAILED_PRECONDITION
+  // unless override_owner is set. A delete does not renew a lease.
+  string owner = 6;
+  // Delete regardless of the route's owner (operator override).
+  bool override_owner = 7;
 }
 
 message DeletePathResponse {
@@ -3710,6 +3760,12 @@ message FlowSpecRouteEntry {
   repeated uint32 as_path = 5;
   repeated uint32 communities = 6;
   repeated uint64 extended_communities = 7;
+  // Same as Route.injection_owner, lease_generation and lease_remaining_ms,
+  // for a rule injected with AddLeasedFlowSpec. Set only in the
+  // received_peer_address "0.0.0.0" view of ListFlowSpecRoutes.
+  string injection_owner = 8;
+  LeaseGeneration lease_generation = 9;
+  optional uint32 lease_remaining_ms = 10;
 }
 
 message AddFlowSpecRequest {
@@ -3754,6 +3810,84 @@ message DeleteFlowSpecRequest {
   // rule returns NOT_FOUND and a present rule is deleted with outcome
   // UNSPECIFIED.
   bool allow_missing = 3;
+  // Same as DeletePathRequest.owner.
+  string owner = 4;
+  // Same as DeletePathRequest.override_owner.
+  bool override_owner = 5;
+}
+
+// An owner's lease (ADR-0141).
+message InjectionLease {
+  // 1-64 bytes of [A-Za-z0-9._-]; used verbatim as a metric label and in
+  // logs. Malformed is INVALID_ARGUMENT.
+  string owner = 1;
+  // 5..=3600. Starting a lease sets its deadline to now + lease_seconds;
+  // joining a live lease extends it to max(current, now + lease_seconds).
+  // Out of range is INVALID_ARGUMENT.
+  uint32 lease_seconds = 2;
+}
+
+// One lease generation. Only a leased add starts one; a renewal must match
+// both fields. incarnation is drawn at random once per process, so a
+// generation never survives a daemon restart.
+message LeaseGeneration {
+  fixed64 incarnation = 1;
+  uint64 sequence = 2;
+}
+
+message AddLeasedPathRequest {
+  AddPathRequest path = 1;
+  // Required.
+  InjectionLease lease = 2;
+}
+
+message AddLeasedPathResponse {
+  AddPathResponse result = 1;
+  // The owner's live generation after this add.
+  LeaseGeneration generation = 2;
+}
+
+message AddLeasedFlowSpecRequest {
+  AddFlowSpecRequest rule = 1;
+  // Required.
+  InjectionLease lease = 2;
+}
+
+message AddLeasedFlowSpecResponse {
+  AddFlowSpecResponse result = 1;
+  // The owner's live generation after this add.
+  LeaseGeneration generation = 2;
+}
+
+message RenewLeaseRequest {
+  string owner = 1;
+  LeaseGeneration generation = 2;
+  // 5..=3600; the deadline becomes exactly now + lease_seconds.
+  uint32 lease_seconds = 3;
+}
+
+message RenewLeaseResponse {
+  LeaseGeneration generation = 1;
+  // Time to the new deadline, from the daemon's monotonic clock.
+  uint32 lease_remaining_ms = 2;
+}
+
+message ListInjectionLeasesRequest {
+  // Empty lists every owner.
+  string owner = 1;
+}
+
+message InjectionLeaseEntry {
+  string owner = 1;
+  LeaseGeneration generation = 2;
+  // The lease_seconds that last set the deadline.
+  uint32 lease_seconds = 3;
+  // Time to the deadline; 0 means expired, withdrawal pending.
+  uint32 lease_remaining_ms = 4;
+}
+
+message ListInjectionLeasesResponse {
+  repeated InjectionLeaseEntry leases = 1;
 }
 
 message DeleteFlowSpecResponse {

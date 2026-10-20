@@ -4543,6 +4543,7 @@ async fn run<T>(
     // GetPolicyStats reads the RIB's published export roster (ADR-0136)
     // instead of queueing on the RIB.
     let export_roster = rib_manager.export_roster();
+    let injection_leases = rib_manager.injection_leases();
     if config.flowspec.validation == config::FlowSpecValidationMode::Rfc9117 {
         rib_manager = rib_manager.with_flowspec_validation(config.global.asn);
     }
@@ -4585,6 +4586,14 @@ async fn run<T>(
         rib_manager = rib_manager.with_bmp_tx(tx);
     }
     let mut rib_handle = tokio::spawn(rib_manager.run());
+    // ADR-0141 lease expiry. It holds a RIB sender, so teardown cancels and
+    // joins it explicitly; an unexpected exit would leave owned injected
+    // state permanent, so it is supervised like the RIB.
+    let (lease_expiry_cancel, lease_expiry_cancel_rx) = tokio::sync::oneshot::channel();
+    let mut lease_expiry_handle = tokio::spawn(
+        Arc::clone(&injection_leases).run_expiry(rib_tx.clone(), lease_expiry_cancel_rx),
+    );
+    let mut lease_expiry_exited = false;
 
     // Validation snapshot channel: broadcast VRP + ASPA tables to transport
     // sessions for import-time route validation.  Starts empty — sessions fall
@@ -5730,6 +5739,7 @@ async fn run<T>(
         peer_mgr_operator_tx: peer_mgr_operator_tx.clone(),
         import_roster,
         export_roster,
+        injection_leases: Arc::clone(&injection_leases),
         rib_readiness_tx: rib_readiness_tx.clone(),
         rib_summary_tx,
         validation_snapshot: {
@@ -6450,6 +6460,25 @@ async fn run<T>(
                 component_failed = true;
                 break;
             }
+            result = &mut lease_expiry_handle => {
+                lease_expiry_exited = true;
+                if matches!(
+                    result,
+                    Ok(rustbgpd_rib::injection_lease::ExpiryExit::RibChannelClosed)
+                ) {
+                    // The RIB dropped its receiver while a batch was pending.
+                    // Join it to report the original failure.
+                    let result = (&mut rib_handle).await;
+                    error!(?result, "RIB manager exited unexpectedly");
+                    info!("initiating shutdown due to RIB manager failure");
+                    component_failed = true;
+                    break;
+                }
+                error!(?result, "injection lease expiry task exited unexpectedly");
+                info!("initiating shutdown due to injection lease expiry failure");
+                component_failed = true;
+                break;
+            }
             result = &mut metrics_handle => {
                 error!(?result, "metrics/readiness server exited unexpectedly");
                 info!("initiating shutdown due to metrics/readiness server failure");
@@ -7042,6 +7071,15 @@ async fn run<T>(
         .ok();
     }
     let _evpn_apply_fence_guard = evpn_apply_fence;
+
+    // 1.9a-pre-lease Cancel and join the ADR-0141 lease expiry task, out of
+    // its sleep or its RIB queue wait, before any teardown that depends on
+    // the RIB. A cancelled expiry withdraws nothing; closing sessions
+    // withdraw the routes at peers.
+    let _ = lease_expiry_cancel.send(());
+    if !lease_expiry_exited && let Err(error) = lease_expiry_handle.await {
+        error!(%error, "injection lease expiry task panicked");
+    }
 
     // 1.9a-pre Stop the ADR-0085 link-drain coordinator before the
     // EVPN actors drain: a carrier edge arriving mid-teardown must
