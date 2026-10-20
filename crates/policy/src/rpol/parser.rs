@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix};
 
-use crate::engine::{CommunityMatch, PolicyAction, parse_community_match};
+use crate::engine::{CommunityMatch, NextHopAction, PolicyAction, parse_community_match};
 
 use crate::ir::ArithOp;
 
@@ -918,6 +918,14 @@ impl Parser<'_> {
                             NextHopArg::Self_(self_token.span)
                         } else {
                             let (addr, span) = self.expect_ip("an IP address or `self`")?;
+                            if let Err(why) = NextHopAction::check_specific(addr) {
+                                self.diags.push(Diagnostic::new(
+                                    span,
+                                    format!("invalid `set next-hop {addr}`: {why}"),
+                                    "not a usable next hop",
+                                ));
+                                return Err(Fail);
+                            }
                             NextHopArg::Addr(addr, span)
                         };
                         let end = match &arg {

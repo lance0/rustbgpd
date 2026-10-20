@@ -943,3 +943,57 @@ remote_asn = 65002
     assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     assert!(err.to_string().contains("invalid match_next_hop"));
 }
+
+fn set_next_hop_toml(next_hop: &str) -> String {
+    format!(
+        r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.nh]
+[[policy.definitions.nh.statements]]
+action = "permit"
+prefix = "0.0.0.0/0"
+le = 32
+set_next_hop = "{next_hop}"
+"#,
+        GLOBAL_HEADER = valid_toml()
+    )
+}
+
+#[test]
+fn set_next_hop_unspecified_or_multicast_rejected() {
+    for next_hop in ["0.0.0.0", "::", "224.0.0.5", "ff02::1"] {
+        let err = parse(&set_next_hop_toml(next_hop))
+            .expect_err("an unusable set_next_hop must fail config load");
+        assert!(
+            matches!(err, ConfigError::InvalidPolicyEntry { .. }),
+            "{next_hop}: {err}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!("invalid set_next_hop \"{next_hop}\"")),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn set_next_hop_self_unicast_and_link_local_still_parse() {
+    for next_hop in ["self", "192.0.2.1", "2001:db8::1", "fe80::1", "169.254.0.1"] {
+        let config = parse(&set_next_hop_toml(next_hop))
+            .unwrap_or_else(|err| panic!("{next_hop} must parse: {err}"));
+        let policy = parse_named_policy(
+            "nh",
+            &config.policy.definitions["nh"],
+            &config.policy.neighbor_sets,
+            &config.peer_groups,
+        )
+        .unwrap();
+        let expected = if next_hop == "self" {
+            rustbgpd_policy::NextHopAction::Self_
+        } else {
+            rustbgpd_policy::NextHopAction::Specific(next_hop.parse().unwrap())
+        };
+        assert_eq!(policy.entries[0].modifications.set_next_hop, Some(expected));
+    }
+}

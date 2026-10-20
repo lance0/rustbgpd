@@ -3495,6 +3495,10 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_community_remove` | [string]    | Communities to remove                              |
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
+`set_next_hop` refuses an unspecified (`0.0.0.0`, `::`) or multicast address
+at config load, reload and API policy edits; IPv4 and IPv6 link-local
+addresses are accepted. `.rpol` `set next-hop` applies the same rule.
+
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
 unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an
 IPv6 unicast route, whose `MP_REACH_NLRI` next hop must be IPv6 (RFC 2545
