@@ -4,7 +4,8 @@ use crate::output::{self, outln};
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::{
     AddFlowSpecRequest, DeleteFlowSpecRequest, FlowSpecAction, FlowSpecComponent, FlowSpecRedirect,
-    FlowSpecTrafficAction, FlowSpecTrafficMarking, FlowSpecTrafficRate, ListFlowSpecRequest,
+    FlowSpecTrafficAction, FlowSpecTrafficMarking, FlowSpecTrafficRate, FlowSpecTrafficRatePackets,
+    ListFlowSpecRequest,
 };
 
 fn format_component(c: &FlowSpecComponent) -> String {
@@ -55,6 +56,9 @@ fn format_action(a: &FlowSpecAction) -> String {
         }
         Some(crate::proto::flow_spec_action::Action::Redirect(r)) => {
             format!("redirect={}", r.route_target)
+        }
+        Some(crate::proto::flow_spec_action::Action::TrafficRatePackets(r)) => {
+            format!("rate-pps={:.0}", r.rate)
         }
         None => "none".into(),
     }
@@ -246,7 +250,8 @@ fn parse_component(s: &str) -> Result<FlowSpecComponent, String> {
     }
 }
 
-/// Parse an action like "drop", "rate=1000", "redirect=65001:100", "mark-dscp=46".
+/// Parse an action like "drop", "rate=1000", "rate-pps=500", "redirect=65001:100",
+/// "mark-dscp=46".
 fn parse_action(s: &str) -> Result<FlowSpecAction, String> {
     if s == "drop" {
         return Ok(FlowSpecAction {
@@ -260,6 +265,14 @@ fn parse_action(s: &str) -> Result<FlowSpecAction, String> {
         return Ok(FlowSpecAction {
             action: Some(crate::proto::flow_spec_action::Action::TrafficRate(
                 FlowSpecTrafficRate { rate },
+            )),
+        });
+    }
+    if let Some(val) = s.strip_prefix("rate-pps=") {
+        let rate: f32 = val.parse().map_err(|_| format!("invalid rate: {val}"))?;
+        return Ok(FlowSpecAction {
+            action: Some(crate::proto::flow_spec_action::Action::TrafficRatePackets(
+                FlowSpecTrafficRatePackets { rate },
             )),
         });
     }
@@ -417,7 +430,7 @@ fn delete_outcome_name(outcome: i32) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_action;
+    use super::{format_action, parse_action};
 
     #[test]
     fn parse_action_rejects_out_of_range_dscp() {
@@ -427,5 +440,12 @@ mod tests {
     #[test]
     fn parse_action_accepts_max_dscp() {
         assert!(parse_action("mark-dscp=63").is_ok());
+    }
+
+    #[test]
+    fn packet_rate_action_round_trips() {
+        let action = parse_action("rate-pps=500").unwrap();
+        assert_eq!(format_action(&action), "rate-pps=500");
+        assert!(parse_action("rate-pps=fast").is_err());
     }
 }

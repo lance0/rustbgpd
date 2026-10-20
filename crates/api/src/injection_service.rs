@@ -1183,23 +1183,46 @@ fn flowspec_action_to_ec(
             dscp: u8::try_from(m.dscp)
                 .map_err(|_| Status::invalid_argument("dscp must be 0..=63"))?,
         },
-        proto::flow_spec_action::Action::Redirect(r) => {
-            let parts: Vec<&str> = r.route_target.splitn(2, ':').collect();
-            if parts.len() != 2 {
-                return Err(Status::invalid_argument(
-                    "redirect route_target must be \"ASN:value\"",
-                ));
+        proto::flow_spec_action::Action::TrafficRatePackets(r) => {
+            FlowSpecAction::TrafficRatePackets {
+                asn: 0,
+                rate: r.rate,
             }
-            let asn: u16 = parts[0]
-                .parse()
-                .map_err(|_| Status::invalid_argument("redirect ASN must be u16"))?;
-            let value: u32 = parts[1]
-                .parse()
-                .map_err(|_| Status::invalid_argument("redirect value must be u32"))?;
-            FlowSpecAction::Redirect2Octet { asn, value }
         }
+        proto::flow_spec_action::Action::Redirect(r) => return parse_redirect(&r.route_target),
     };
     Ok(Some(ExtendedCommunity::from_flowspec_action(&wire_action)))
+}
+
+/// Parse `FlowSpecRedirect.route_target` into one of the RFC 8955 §7.4 /
+/// RFC 7674 redirect communities. The Route Target grammar picks the form;
+/// RFC 5396 asdot (`high.low:value`) selects the 4-octet-AS form for any ASN,
+/// which is how a listing renders one whose ASN fits in 16 bits.
+fn parse_redirect(s: &str) -> Result<Option<ExtendedCommunity>, Status> {
+    if let Some((admin, value)) = s.split_once(':')
+        && let Some((high, low)) = admin.split_once('.')
+        && !low.contains('.')
+    {
+        let invalid = || {
+            Status::invalid_argument(format!(
+                "redirect route_target {s:?}: asdot form is \"high.low:value\" with 16-bit parts"
+            ))
+        };
+        let high: u16 = high.parse().map_err(|_| invalid())?;
+        let low: u16 = low.parse().map_err(|_| invalid())?;
+        let value: u16 = value.parse().map_err(|_| invalid())?;
+        let asn = (u32::from(high) << 16) | u32::from(low);
+        return Ok(Some(ExtendedCommunity::from_flowspec_action(
+            &rustbgpd_wire::flowspec::FlowSpecAction::Redirect4Octet { asn, value },
+        )));
+    }
+    // RFC 7674 §1: each redirect keeps its Route Target's layout (types 0x00,
+    // 0x01 from RFC 4360, 0x02 from RFC 5668) under types 0x80, 0x81, 0x82,
+    // with sub-type 0x08 in place of the Route Target's 0x02.
+    let mut bytes = parse_route_target(s)?.as_u64().to_be_bytes();
+    bytes[0] |= 0x80;
+    bytes[1] = 0x08;
+    Ok(Some(ExtendedCommunity::new(u64::from_be_bytes(bytes))))
 }
 
 /// Parse a request MAC through the grammar shared with the configuration
@@ -1531,6 +1554,7 @@ pub(crate) fn parse_route_target(s: &str) -> Result<ExtendedCommunity, Status> {
 mod tests {
     use super::*;
     use proto::injection_service_server::InjectionService as _;
+    use rustbgpd_wire::flowspec::FlowSpecAction;
 
     fn make_service() -> InjectionService {
         let (tx, _rx) = mpsc::channel(16);
@@ -3203,6 +3227,160 @@ mod tests {
             assert!(row.selected, "{row:?}");
             assert_eq!(row.route.as_ref().unwrap().peer_address, "0.0.0.0");
         }
+
+        drop((svc, rib, rib_tx));
+        manager_task.await.unwrap();
+    }
+
+    fn flowspec_redirect(route_target: &str) -> proto::FlowSpecAction {
+        proto::FlowSpecAction {
+            action: Some(proto::flow_spec_action::Action::Redirect(
+                proto::FlowSpecRedirect {
+                    route_target: route_target.into(),
+                },
+            )),
+        }
+    }
+
+    fn redirect_action(route_target: &str) -> Result<FlowSpecAction, Status> {
+        Ok(flowspec_action_to_ec(&flowspec_redirect(route_target))?
+            .unwrap()
+            .as_flowspec_action()
+            .expect("a redirect community"))
+    }
+
+    /// Each RFC 8955 §7.4 / RFC 7674 redirect form, at its field bounds. An
+    /// ASN above 65535 selects the 4-octet form instead of truncating into
+    /// the 2-octet one; asdot selects the 4-octet form for a 16-bit ASN.
+    #[test]
+    fn redirect_route_target_selects_each_form() {
+        let ipv4 = Ipv4Addr::new(192, 0, 2, 1);
+        for (route_target, expected) in [
+            (
+                "65535:4294967295",
+                FlowSpecAction::Redirect2Octet {
+                    asn: 65535,
+                    value: u32::MAX,
+                },
+            ),
+            ("0:0", FlowSpecAction::Redirect2Octet { asn: 0, value: 0 }),
+            (
+                "192.0.2.1:65535",
+                FlowSpecAction::RedirectIpv4 {
+                    addr: ipv4,
+                    value: 65535,
+                },
+            ),
+            (
+                "65536:7",
+                FlowSpecAction::Redirect4Octet {
+                    asn: 65536,
+                    value: 7,
+                },
+            ),
+            (
+                "4294967295:65535",
+                FlowSpecAction::Redirect4Octet {
+                    asn: u32::MAX,
+                    value: 65535,
+                },
+            ),
+            (
+                "0.65001:100",
+                FlowSpecAction::Redirect4Octet {
+                    asn: 65001,
+                    value: 100,
+                },
+            ),
+            (
+                "1.10:5",
+                FlowSpecAction::Redirect4Octet {
+                    asn: 65546,
+                    value: 5,
+                },
+            ),
+        ] {
+            assert_eq!(
+                redirect_action(route_target).unwrap(),
+                expected,
+                "{route_target}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_route_target_rejects_malformed_forms() {
+        for route_target in [
+            "",
+            "65001",
+            ":100",
+            "65001:",
+            "asn:100",
+            "-1:100",
+            "65001:4294967296",
+            "4294967296:1",
+            "65536:65536",
+            "192.0.2.1:65536",
+            "192.0.2.256:1",
+            "192.0.2:1",
+            "0.65536:1",
+            "65536.0:1",
+            "0.1:65536",
+            "1.:1",
+            ".1:1",
+            "65001:100:1",
+        ] {
+            let err = redirect_action(route_target).unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{route_target}");
+        }
+    }
+
+    /// Every typed action form survives `AddFlowSpec` → `ListFlowSpecRoutes`
+    /// unchanged, and each action community is also echoed raw.
+    #[tokio::test]
+    async fn flowspec_typed_actions_round_trip_through_injection() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let rib = crate::rib_service::RibService::new(rib_tx.clone());
+
+        let actions = vec![
+            proto::FlowSpecAction {
+                action: Some(proto::flow_spec_action::Action::TrafficRatePackets(
+                    proto::FlowSpecTrafficRatePackets { rate: 500.0 },
+                )),
+            },
+            flowspec_redirect("65001:100"),
+            flowspec_redirect("192.0.2.1:200"),
+            flowspec_redirect("4200000000:300"),
+            flowspec_redirect("0.65001:400"),
+        ];
+        svc.add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            components: flowspec_rule_components(),
+            actions: actions.clone(),
+            communities: vec![],
+            extended_communities: vec![],
+        }))
+        .await
+        .expect("add accepted");
+
+        let local = list_local_flowspec(&rib).await;
+        assert_eq!(local.received_routes.len(), 1, "{local:?}");
+        let route = local.received_routes[0].route.as_ref().unwrap();
+        assert_eq!(route.actions, actions);
+        let raw: Vec<u64> = actions
+            .iter()
+            .map(|action| flowspec_action_to_ec(action).unwrap().unwrap().as_u64())
+            .collect();
+        assert_eq!(route.extended_communities, raw);
 
         drop((svc, rib, rib_tx));
         manager_task.await.unwrap();

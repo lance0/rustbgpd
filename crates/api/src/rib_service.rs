@@ -3900,6 +3900,9 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         .flatten()
         .filter_map(|ec| {
             use rustbgpd_wire::flowspec::FlowSpecAction as FA;
+            let redirect = |route_target| {
+                proto::flow_spec_action::Action::Redirect(proto::FlowSpecRedirect { route_target })
+            };
             let action = ec.as_flowspec_action()?;
             let inner = match action {
                 FA::TrafficRateBytes { rate, .. } => {
@@ -3918,11 +3921,19 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
                         dscp: u32::from(dscp),
                     })
                 }
-                FA::Redirect2Octet { asn, value } => {
-                    proto::flow_spec_action::Action::Redirect(proto::FlowSpecRedirect {
-                        route_target: format!("{asn}:{value}"),
-                    })
+                FA::TrafficRatePackets { rate, .. } => {
+                    proto::flow_spec_action::Action::TrafficRatePackets(
+                        proto::FlowSpecTrafficRatePackets { rate },
+                    )
                 }
+                FA::Redirect2Octet { asn, value } => redirect(format!("{asn}:{value}")),
+                FA::RedirectIpv4 { addr, value } => redirect(format!("{addr}:{value}")),
+                // RFC 5396 asdot keeps a 16-bit ASN in the 4-octet form apart
+                // from the 2-octet form when the string is sent back.
+                FA::Redirect4Octet { asn, value } if u16::try_from(asn).is_ok() => {
+                    redirect(format!("0.{asn}:{value}"))
+                }
+                FA::Redirect4Octet { asn, value } => redirect(format!("{asn}:{value}")),
                 _ => return None,
             };
             Some(proto::FlowSpecAction {
@@ -8458,6 +8469,85 @@ mod tests {
                 reason: "originator_mismatch".into(),
                 pending: true,
             }]
+        );
+    }
+
+    /// A rule received from a peer reports traffic-rate-packets and every
+    /// redirect form typed, in a string `AddFlowSpec` maps back to the same
+    /// community, and still echoes each community raw.
+    #[test]
+    fn received_flowspec_rule_maps_each_action_form_typed() {
+        use rustbgpd_wire::flowspec::FlowSpecAction as FA;
+        let wire_actions = [
+            FA::TrafficRatePackets {
+                asn: 65000,
+                rate: 500.0,
+            },
+            FA::Redirect2Octet {
+                asn: 65001,
+                value: u32::MAX,
+            },
+            FA::RedirectIpv4 {
+                addr: Ipv4Addr::new(192, 0, 2, 1),
+                value: 200,
+            },
+            FA::Redirect4Octet {
+                asn: 4_200_000_000,
+                value: 300,
+            },
+            FA::Redirect4Octet {
+                asn: 65001,
+                value: 400,
+            },
+        ];
+        let ecs: Vec<_> = wire_actions
+            .iter()
+            .map(rustbgpd_wire::ExtendedCommunity::from_flowspec_action)
+            .collect();
+        let route = FlowSpecRoute {
+            rule: rustbgpd_wire::FlowSpecRule {
+                components: vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                    rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(
+                        Ipv4Addr::new(203, 0, 113, 0),
+                        24,
+                    )),
+                )],
+            },
+            afi: Afi::Ipv4,
+            peer: "192.0.2.1".parse().unwrap(),
+            attributes: vec![PathAttribute::ExtendedCommunities(ecs.clone())],
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+        let entry = flowspec_route_to_proto(&route);
+        let redirect = |route_target: &str| proto::FlowSpecAction {
+            action: Some(proto::flow_spec_action::Action::Redirect(
+                proto::FlowSpecRedirect {
+                    route_target: route_target.into(),
+                },
+            )),
+        };
+        assert_eq!(
+            entry.actions,
+            vec![
+                proto::FlowSpecAction {
+                    action: Some(proto::flow_spec_action::Action::TrafficRatePackets(
+                        proto::FlowSpecTrafficRatePackets { rate: 500.0 },
+                    )),
+                },
+                redirect("65001:4294967295"),
+                redirect("192.0.2.1:200"),
+                redirect("4200000000:300"),
+                redirect("0.65001:400"),
+            ]
+        );
+        assert_eq!(
+            entry.extended_communities,
+            ecs.iter().map(|ec| ec.as_u64()).collect::<Vec<_>>()
         );
     }
 
