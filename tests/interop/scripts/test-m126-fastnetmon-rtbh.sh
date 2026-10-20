@@ -332,7 +332,7 @@ frr_withdrawals() { # prefix
     docker exec "$FRR" sh -c 'grep -ac "rcvd UPDATE about $1 .* -- withdrawn" /tmp/bgpd.log || true' _ "$1"
 }
 
-grace_expired_total() {
+grace_release_logs() {
     docker exec "$DET" sh -c 'grep -c "End-of-RIB grace window ended at its deadline" /var/log/rustbgpd.log || true'
 }
 
@@ -489,7 +489,7 @@ start_replay
 expect_banned "phase 5 ban" 60
 stop_one rustbgpd
 expect_stale "phase 5 daemon stopped, FRR keeps stale bans" 10
-expired_before=$(grace_expired_total)
+releases_before=$(grace_release_logs)
 mark=$(docker exec "$FRR" sh -c 'wc -l < /tmp/bgpd.log')
 start_rustbgpd "$GRACE_CONF"
 t0=$(date +%s)
@@ -557,7 +557,7 @@ if [ -n "$eor4" ] && [ -n "$eor6" ] && [ $((eor4 - t0)) -ge $((GRACE_SECS - 2)) 
 else
     bad "phase 5 End-of-RIB timing: IPv4 ${eor4:-none}, IPv6 ${eor6:-none}, start $t0"
 fi
-if [ "$(grace_expired_total)" -gt "$expired_before" ]; then
+if [ "$(grace_release_logs)" -gt "$releases_before" ]; then
     ok "phase 5 rustbgpd logged the grace-window release"
 else
     bad "phase 5 no grace-window release in the rustbgpd log"
