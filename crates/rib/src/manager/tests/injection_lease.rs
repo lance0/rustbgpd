@@ -353,6 +353,91 @@ async fn expired_renewal_fails_and_readd_starts_a_new_generation() {
     h.stop().await;
 }
 
+/// Expiry removes the expired owner's local intent and nothing else:
+/// another owner's route and rule, and an unowned route, stay, and the
+/// other owner's lease still renews.
+///
+/// Break-to-red: an expiry sweep that takes every owned key instead of the
+/// expired owner's withdraws `b`'s entries here.
+#[tokio::test(start_paused = true)]
+async fn expiry_spares_other_owners_and_unowned_intent() {
+    let mut h = Harness::start().await;
+    let (_, g_a) = leased_route(&h.tx, local_route(1), "a", 5).await.unwrap();
+    let (_, g_b) = leased_route(&h.tx, local_route(3), "b", 30).await.unwrap();
+    leased_rule(&h.tx, local_rule(), "b", 30).await.unwrap();
+    unowned_route(&h.tx, local_route(2)).await.unwrap();
+    h.settle().await;
+    h.drain();
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+    h.settle().await;
+    let withdrawn = h.drain();
+    assert_eq!(
+        withdrawn
+            .iter()
+            .flat_map(|u| u.withdraw.iter())
+            .collect::<Vec<_>>(),
+        vec![&(host(1), 0)]
+    );
+    assert_eq!(
+        withdrawn
+            .iter()
+            .map(|u| u.flowspec_withdraw.len())
+            .sum::<usize>(),
+        0,
+        "b's rule stays"
+    );
+    assert_eq!(local_prefixes(&h.tx).await, vec![host(2), host(3)]);
+    assert_eq!(h.leases.renew("a", g_a, 30), None);
+    assert!(h.leases.renew("b", g_b, 30).is_some());
+    h.stop().await;
+}
+
+/// A daemon restart invalidates every generation: the new process's lease
+/// table refuses the old generation even at the same sequence, and the
+/// controller's re-add starts a new generation on a key the restart dropped.
+///
+/// Break-to-red: an incarnation that does not change per process (for
+/// example a constant) lets the restarted table renew the old generation.
+#[tokio::test]
+async fn a_restart_invalidates_every_generation() {
+    let first = RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    );
+    let (_, before) = {
+        let mut first = first;
+        first
+            .inject_local_route(local_route(1), Some(("ctl", 30)))
+            .unwrap()
+    };
+    let before = before.unwrap();
+
+    let mut restarted = RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    );
+    assert_eq!(restarted.injection_leases().renew("ctl", before, 30), None);
+    let (outcome, after) = restarted
+        .inject_local_route(local_route(1), Some(("ctl", 30)))
+        .unwrap();
+    let after = after.unwrap();
+    assert_eq!(
+        outcome,
+        InjectOutcome::Created,
+        "a restart drops injected state"
+    );
+    assert_eq!(after.sequence, before.sequence);
+    assert_ne!(after, before);
+    assert_eq!(restarted.injection_leases().renew("ctl", before, 30), None);
+}
+
 /// An identical leased re-add that commits after generation g died but
 /// before its expiry batch is applied starts g+1, retags the key and causes
 /// no wire churn; the late `Expire(g)` then skips the retagged key.

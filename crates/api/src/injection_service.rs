@@ -3671,6 +3671,89 @@ mod tests {
         }
     }
 
+    /// ADR-0141 §3: a leased add creates leased state or no state. Both
+    /// leased adds reach the RIB as owned intent, never as a permanent
+    /// `InjectRoute` or `InjectFlowSpec`. A leased method the server does not
+    /// serve, as on a daemon that predates leases, answers `UNIMPLEMENTED`
+    /// from the generated service's fallback before any handler or RIB work.
+    ///
+    /// Break-to-red: a leased add forwarded as a plain injection fails the
+    /// owned-intent match.
+    #[tokio::test]
+    async fn leased_adds_never_fall_back_to_permanent_injection() {
+        use tower::ServiceExt as _;
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let svc = Arc::new(InjectionService::new(tx.clone(), AccessMode::ReadWrite));
+        let path = tokio::spawn({
+            let svc = Arc::clone(&svc);
+            async move {
+                svc.add_leased_path(Request::new(leased_path("ctl", 30)))
+                    .await
+            }
+        });
+        let RibUpdate::InjectLeasedRoute {
+            owner,
+            lease_seconds,
+            ..
+        } = rx.recv().await.unwrap()
+        else {
+            panic!("a leased path add must reach the RIB as owned intent");
+        };
+        assert_eq!((owner.as_str(), lease_seconds), ("ctl", 30));
+        assert_eq!(
+            path.await.unwrap().unwrap_err().code(),
+            tonic::Code::Internal
+        );
+        let rule = tokio::spawn({
+            let svc = Arc::clone(&svc);
+            async move {
+                svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                    rule: Some(proto::AddFlowSpecRequest {
+                        afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                        components: flowspec_rule_components(),
+                        actions: vec![flowspec_rate(0.0)],
+                        communities: vec![],
+                        extended_communities: vec![],
+                    }),
+                    lease: Some(proto::InjectionLease {
+                        owner: "ctl".into(),
+                        lease_seconds: 30,
+                    }),
+                }))
+                .await
+            }
+        });
+        let RibUpdate::InjectLeasedFlowSpec { owner, .. } = rx.recv().await.unwrap() else {
+            panic!("a leased FlowSpec add must reach the RIB as owned intent");
+        };
+        assert_eq!(owner, "ctl");
+        assert_eq!(
+            rule.await.unwrap().unwrap_err().code(),
+            tonic::Code::Internal
+        );
+
+        let server = proto::injection_service_server::InjectionServiceServer::new(
+            InjectionService::new(tx, AccessMode::ReadWrite),
+        );
+        let request = tonic::codegen::http::Request::builder()
+            .method("POST")
+            .uri("/rustbgpd.v1.InjectionService/AddLeasedRoute")
+            .header("content-type", "application/grpc")
+            .body(tonic::body::Body::empty())
+            .unwrap();
+        let response = server.oneshot(request).await.unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get("grpc-status")
+                .map(tonic::codegen::http::HeaderValue::as_bytes),
+            Some(&b"12"[..]),
+            "an unserved method is UNIMPLEMENTED"
+        );
+        assert!(rx.try_recv().is_err(), "nothing reached the RIB");
+    }
+
     /// Malformed leases are `INVALID_ARGUMENT` before anything reaches the
     /// RIB: no lease, a bad owner, and a duration outside 5..=3600.
     #[tokio::test]
