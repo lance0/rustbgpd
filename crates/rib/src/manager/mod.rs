@@ -4270,6 +4270,17 @@ impl RibManager {
                 source,
                 reply,
             } => self.handle_explain_advertised_route(peer, prefix, rd, labeled, source, reply),
+            RibUpdate::QueryLeasedKeys {
+                owner,
+                after,
+                page_size,
+                reply,
+            } => {
+                let page = self.leased_keys_page(&owner, after.as_ref(), page_size);
+                if reply.send(page).is_err() {
+                    warn!("query caller dropped before receiving response");
+                }
+            }
             RibUpdate::QueryLocalRouteExport {
                 prefix,
                 path_id,

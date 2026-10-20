@@ -10,7 +10,8 @@ use tracing::warn;
 use super::helpers::{LOCAL_PEER, gauge_val};
 use super::{AdjRibIn, ExactExportKey, RibManager};
 use crate::injection_lease::{
-    ExpiredLease, InjectedKey, InjectionTag, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiredLease, InjectedKey, InjectedKeyCursor, InjectionTag, LeasedKeyRow, LeasedKeysPage,
+    MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::route::FlowSpecRouteKey;
 use crate::update::RibCommandError;
@@ -127,6 +128,46 @@ impl RibManager {
             }
         }
         Some(tag)
+    }
+
+    /// One page of `owner`'s keys in cursor order after `after`. The page
+    /// walks and orders that owner's keys only, which the per-owner key cap
+    /// bounds; another owner's or an unowned entry is never read.
+    pub(super) fn leased_keys_page(
+        &self,
+        owner: &str,
+        after: Option<&InjectedKeyCursor>,
+        page_size: usize,
+    ) -> LeasedKeysPage {
+        let n = page_size.clamp(1, super::ROUTE_QUERY_MAX_PAGE_SIZE);
+        let Some(keys) = self.owner_keys.get(owner) else {
+            return LeasedKeysPage::default();
+        };
+        let mut rows: Vec<(InjectedKeyCursor, &InjectedKey, &InjectionTag)> = keys
+            .iter()
+            .filter_map(|key| {
+                let tag = self.injected_owners.get(key)?;
+                let cursor = InjectedKeyCursor::of(key);
+                after
+                    .is_none_or(|after| cursor > *after)
+                    .then_some((cursor, key, tag))
+            })
+            .collect();
+        rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let more = rows.len() > n;
+        rows.truncate(n);
+        LeasedKeysPage {
+            rows: rows
+                .into_iter()
+                .map(|(cursor, key, tag)| LeasedKeyRow {
+                    key: key.clone(),
+                    cursor,
+                    generation: tag.generation,
+                    remaining: self.injection_leases.remaining(tag),
+                })
+                .collect(),
+            more,
+        }
     }
 
     /// Untag and return every key of `expired.owner` tagged at or below its

@@ -229,7 +229,7 @@ shape itself does not raise the tier.
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
 | `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
 
-### InjectionService (11 RPCs)
+### InjectionService (12 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -242,6 +242,7 @@ shape itself does not raise the tier.
 | `AddLeasedFlowSpec` | `operator_only` | `AddFlowSpec` under an owner's lease (ADR-0141); same risk class as `AddFlowSpec`. |
 | `RenewLease` | `operator_only` | Keeps an owner's injected routes and rules alive. Delaying a dead controller's withdrawal has the blast radius of the injection itself, so it shares the adds' tier; a successful renewal is audited at INFO instead of WARN (ADR-0141). |
 | `ListInjectionLeases` | `sensitive_read` | Lease owners, generations and remaining time; discloses controller identities. |
+| `ListLeasedKeys` | `sensitive_read` | The injected keys one owner holds, with each key's generation and remaining lease, paged. Same disclosure as `ListInjectionLeases` plus the owner's route and rule keys. |
 | `AddEvpnRoute` | `operator_only` | Originates EVPN Type 2/3/5; can blackhole an L2 segment by hijacking a MAC, or steer Type 5 traffic. |
 | `DeleteEvpnRoute` | `operator_only` | Same risk class. |
 
@@ -285,10 +286,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.8% |
-| `sensitive_read` | 80 | 61.5% |
-| `mutating` | 22 | 16.9% |
-| `operator_only` | 27 | 20.8% |
-| **Total** | **130** | **100%** |
+| `sensitive_read` | 81 | 61.8% |
+| `mutating` | 22 | 16.8% |
+| `operator_only` | 27 | 20.6% |
+| **Total** | **131** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`
@@ -303,7 +304,8 @@ specific method if the model warrants it.
 
 1. **Tier vs. service granularity.** Every service has at least one
    `sensitive_read` method; `InjectionService` has only
-   `ListInjectionLeases` and `ListPathExportDispositions`. `CheckLiveness` is a `read` method;
+   `ListInjectionLeases`, `ListLeasedKeys` and `ListPathExportDispositions`.
+   `CheckLiveness` is a `read` method;
    `GetHealth` remains sensitive because it returns peer and route counts.
    `EventService` is pure observability (no mutations at all);
    `RibService` is read-only apart from the mutating `SetFibTable` /
@@ -318,7 +320,7 @@ specific method if the model warrants it.
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
-3. **InjectionService is `operator_only` apart from its two reads.**
+3. **InjectionService is `operator_only` apart from its three reads.**
    Nine of the twenty-seven `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and

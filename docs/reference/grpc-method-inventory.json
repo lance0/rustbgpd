@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 130,
+  "method_count": 131,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 80,
+    "sensitive_read": 81,
     "mutating": 22,
     "operator_only": 27
   },
@@ -126,6 +126,7 @@
     { "service": "rustbgpd.v1.InjectionService", "method": "AddLeasedFlowSpec", "path": "/rustbgpd.v1.InjectionService/AddLeasedFlowSpec", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "RenewLease", "path": "/rustbgpd.v1.InjectionService/RenewLease", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "ListInjectionLeases", "path": "/rustbgpd.v1.InjectionService/ListInjectionLeases", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.InjectionService", "method": "ListLeasedKeys", "path": "/rustbgpd.v1.InjectionService/ListLeasedKeys", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.InjectionService", "method": "AddEvpnRoute", "path": "/rustbgpd.v1.InjectionService/AddEvpnRoute", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "DeleteEvpnRoute", "path": "/rustbgpd.v1.InjectionService/DeleteEvpnRoute", "tier": "operator_only" },
     { "service": "rustbgpd.v1.ControlService", "method": "Shutdown", "path": "/rustbgpd.v1.ControlService/Shutdown", "tier": "operator_only" },

@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::injection_lease::{
-    ExpiryExit, InjectionLeases, LeaseGeneration, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiryExit, InjectedKey, InjectionLeases, LeaseGeneration, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::update::{InjectOutcome, RibCommandError, RoutePage};
 
@@ -351,6 +351,185 @@ async fn expired_renewal_fails_and_readd_starts_a_new_generation() {
     assert_eq!(h.leases.renew("ctl", g1, 5), None);
     assert!(h.leases.renew("ctl", g2, 5).is_some());
     h.stop().await;
+}
+
+fn sync_leased(
+    manager: &mut RibManager,
+    octet: u8,
+    owner: &str,
+    lease_seconds: u32,
+) -> LeaseGeneration {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectLeasedRoute {
+        route: local_route(octet),
+        owner: owner.to_string(),
+        lease_seconds,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap().1
+}
+
+fn sync_leased_rule(manager: &mut RibManager, owner: &str) -> LeaseGeneration {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectLeasedFlowSpec {
+        route: local_rule(),
+        owner: owner.to_string(),
+        lease_seconds: 30,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap().1
+}
+
+fn leased_keys(
+    manager: &mut RibManager,
+    owner: &str,
+    after: Option<crate::injection_lease::InjectedKeyCursor>,
+    page_size: usize,
+) -> crate::injection_lease::LeasedKeysPage {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryLeasedKeys {
+        owner: owner.to_string(),
+        after,
+        page_size,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+fn listed(page: &crate::injection_lease::LeasedKeysPage) -> Vec<InjectedKey> {
+    page.rows.iter().map(|row| row.key.clone()).collect()
+}
+
+/// An owner's listing holds that owner's keys only, unicast in (prefix,
+/// path ID) order then `FlowSpec`, each with its generation and remaining
+/// lease; another owner's and unowned entries never appear.
+///
+/// Break-to-red: a listing that walks every tagged key instead of the
+/// owner's lists `b`'s route under `a`.
+#[tokio::test(start_paused = true)]
+async fn leased_keys_list_only_the_owners_keys_in_order() {
+    let mut manager = RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    );
+    let g_a = sync_leased(&mut manager, 3, "a", 30);
+    sync_leased(&mut manager, 1, "a", 30);
+    sync_leased_rule(&mut manager, "a");
+    let g_b = sync_leased(&mut manager, 2, "b", 30);
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute {
+        route: local_route(4),
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+
+    let page = leased_keys(&mut manager, "a", None, 10);
+    assert!(!page.more);
+    let rule = local_rule();
+    assert_eq!(
+        listed(&page),
+        vec![
+            InjectedKey::Unicast(host(1), 0),
+            InjectedKey::Unicast(host(3), 0),
+            InjectedKey::FlowSpec(crate::route::FlowSpecKey {
+                afi: rule.afi,
+                rule: rule.rule,
+            }),
+        ]
+    );
+    assert!(page.rows.iter().all(|row| row.generation == g_a));
+    assert!(
+        page.rows
+            .iter()
+            .all(|row| row.remaining == Duration::from_secs(30))
+    );
+    let page = leased_keys(&mut manager, "b", None, 10);
+    assert_eq!(listed(&page), vec![InjectedKey::Unicast(host(2), 0)]);
+    assert_eq!(page.rows[0].generation, g_b);
+    assert_eq!(leased_keys(&mut manager, "nobody", None, 10).rows, []);
+
+    // Past the deadline but not yet reaped: listed, with nothing remaining.
+    tokio::time::advance(Duration::from_secs(31)).await;
+    let page = leased_keys(&mut manager, "b", None, 10);
+    assert_eq!(page.rows[0].remaining, Duration::ZERO);
+}
+
+/// Pages hold at most `page_size` keys in the listing order and resume
+/// strictly after the last key returned, even when a key ahead of the
+/// cursor is added between pages.
+#[tokio::test]
+async fn leased_keys_page_within_the_bound() {
+    let mut manager = RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    );
+    for octet in [5, 1, 4, 2, 3] {
+        sync_leased(&mut manager, octet, "a", 30);
+    }
+    let first = leased_keys(&mut manager, "a", None, 2);
+    assert_eq!(
+        listed(&first),
+        vec![
+            InjectedKey::Unicast(host(1), 0),
+            InjectedKey::Unicast(host(2), 0)
+        ]
+    );
+    assert!(first.more);
+    sync_leased(&mut manager, 0, "a", 30);
+    let second = leased_keys(&mut manager, "a", Some(first.rows[1].cursor.clone()), 2);
+    assert_eq!(
+        listed(&second),
+        vec![
+            InjectedKey::Unicast(host(3), 0),
+            InjectedKey::Unicast(host(4), 0)
+        ]
+    );
+    assert!(second.more);
+    let last = leased_keys(&mut manager, "a", Some(second.rows[1].cursor.clone()), 2);
+    assert_eq!(listed(&last), vec![InjectedKey::Unicast(host(5), 0)]);
+    assert!(!last.more);
+    assert_eq!(leased_keys(&mut manager, "a", None, 0).rows.len(), 1);
+    assert_eq!(
+        leased_keys(&mut manager, "a", None, usize::MAX).rows.len(),
+        6
+    );
+}
+
+/// After a daemon restart an owner holds no keys, and the keys it adds
+/// again carry the new process's incarnation.
+#[tokio::test]
+async fn leased_keys_after_a_restart_carry_the_new_incarnation() {
+    let mut first = RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    );
+    let before = sync_leased(&mut first, 1, "ctl", 30);
+    assert_eq!(leased_keys(&mut first, "ctl", None, 10).rows.len(), 1);
+
+    let mut restarted = RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    );
+    assert_eq!(leased_keys(&mut restarted, "ctl", None, 10).rows, []);
+    sync_leased(&mut restarted, 1, "ctl", 30);
+    let page = leased_keys(&mut restarted, "ctl", None, 10);
+    assert_eq!(
+        page.rows[0].generation.incarnation,
+        restarted.injection_leases().incarnation()
+    );
+    assert_ne!(page.rows[0].generation.incarnation, before.incarnation);
 }
 
 /// An identical leased re-add that commits after generation g died but

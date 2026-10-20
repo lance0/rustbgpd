@@ -60,6 +60,62 @@ pub enum InjectedKey {
     FlowSpec(FlowSpecKey),
 }
 
+/// Position of an injected key in the fixed order of per-owner key listings:
+/// unicast by `(prefix, path_id)`, then `FlowSpec` by AFI and the rule's
+/// encoded NLRI. A listing resumes strictly after a cursor, so a page
+/// boundary survives keys added or removed elsewhere in the order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum InjectedKeyCursor {
+    /// Unicast `(prefix, path_id)`.
+    Unicast(Prefix, u32),
+    /// `FlowSpec` AFI code and encoded rule (with its length prefix).
+    FlowSpec(u16, Vec<u8>),
+}
+
+impl InjectedKeyCursor {
+    /// The cursor of `key`.
+    #[must_use]
+    pub fn of(key: &InjectedKey) -> Self {
+        match key {
+            InjectedKey::Unicast(prefix, path_id) => Self::Unicast(*prefix, *path_id),
+            InjectedKey::FlowSpec(key) => {
+                let mut nlri = Vec::new();
+                // Injected rules passed the same length check at the API, so
+                // encoding cannot fail here.
+                let encoded = rustbgpd_wire::flowspec::try_encode_flowspec_nlri(
+                    std::slice::from_ref(&key.rule),
+                    &mut nlri,
+                    key.afi,
+                );
+                debug_assert!(encoded.is_ok(), "an injected rule encodes");
+                Self::FlowSpec(key.afi as u16, nlri)
+            }
+        }
+    }
+}
+
+/// One key an owner holds, as `ListLeasedKeys` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeasedKeyRow {
+    /// The key.
+    pub key: InjectedKey,
+    /// Its position in the listing order.
+    pub cursor: InjectedKeyCursor,
+    /// Generation the key is tagged with.
+    pub generation: LeaseGeneration,
+    /// Time to that generation's deadline; zero once it expired.
+    pub remaining: Duration,
+}
+
+/// One page of an owner's keys in [`InjectedKeyCursor`] order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeasedKeysPage {
+    /// Rows for this page.
+    pub rows: Vec<LeasedKeyRow>,
+    /// Whether keys remain after the last row.
+    pub more: bool,
+}
+
 /// A generation that left the table, with the deadline it had.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpiredLease {

@@ -14,7 +14,8 @@ use crate::route_distinguisher::parse_rd;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::injection_lease::{
-    InjectionLeases, LeaseGeneration, validate_lease, validate_owner,
+    InjectedKey, InjectedKeyCursor, InjectionLeases, LeaseGeneration, LeasedKeyRow, validate_lease,
+    validate_owner,
 };
 use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
 use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition};
@@ -80,6 +81,81 @@ fn generation_to_proto(generation: LeaseGeneration) -> proto::LeaseGeneration {
     proto::LeaseGeneration {
         incarnation: generation.incarnation,
         sequence: generation.sequence,
+    }
+}
+
+/// Keys per `ListLeasedKeys` page when the request leaves it 0.
+const DEFAULT_LEASED_KEYS_PAGE_SIZE: usize = 100;
+
+/// The page token for resuming after `cursor`: `u:<addr>/<len>:<path_id>`
+/// or `f:<afi>:<hex NLRI>`. Clients treat it as opaque.
+fn leased_keys_token(cursor: &InjectedKeyCursor) -> String {
+    match cursor {
+        InjectedKeyCursor::Unicast(prefix, path_id) => {
+            format!(
+                "u:{}/{}:{path_id}",
+                prefix.addr_string(),
+                prefix.prefix_len()
+            )
+        }
+        InjectedKeyCursor::FlowSpec(afi, nlri) => {
+            let mut token = format!("f:{afi}:");
+            for byte in nlri {
+                let _ = write!(token, "{byte:02x}");
+            }
+            token
+        }
+    }
+}
+
+fn parse_leased_keys_token(token: &str) -> Result<InjectedKeyCursor, Status> {
+    let invalid = || Status::invalid_argument("invalid page_token");
+    if let Some(rest) = token.strip_prefix("u:") {
+        let (prefix, path_id) = rest.rsplit_once(':').ok_or_else(invalid)?;
+        let (addr, len) = prefix.rsplit_once('/').ok_or_else(invalid)?;
+        let len: u32 = len.parse().map_err(|_| invalid())?;
+        let prefix = parse_route_key_prefix(addr, len).map_err(|_| invalid())?;
+        let path_id = path_id.parse().map_err(|_| invalid())?;
+        return Ok(InjectedKeyCursor::Unicast(prefix, path_id));
+    }
+    let rest = token.strip_prefix("f:").ok_or_else(invalid)?;
+    let (afi, hex) = rest.split_once(':').ok_or_else(invalid)?;
+    if hex.len() % 2 != 0 || !hex.is_ascii() {
+        return Err(invalid());
+    }
+    let nlri = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid())?;
+    Ok(InjectedKeyCursor::FlowSpec(
+        afi.parse().map_err(|_| invalid())?,
+        nlri,
+    ))
+}
+
+fn leased_key_to_proto(row: &LeasedKeyRow) -> proto::LeasedKey {
+    let key = match &row.key {
+        InjectedKey::Unicast(prefix, path_id) => {
+            proto::leased_key::Key::Path(proto::LeasedPathKey {
+                prefix: prefix.addr_string(),
+                prefix_length: u32::from(prefix.prefix_len()),
+                path_id: *path_id,
+            })
+        }
+        InjectedKey::FlowSpec(key) => proto::leased_key::Key::FlowSpec(proto::LeasedFlowSpecKey {
+            afi_safi: if key.afi == Afi::Ipv6 {
+                proto::AddressFamily::Ipv6Flowspec
+            } else {
+                proto::AddressFamily::Ipv4Flowspec
+            } as i32,
+            components: crate::rib_service::flowspec_components_to_proto(&key.rule),
+        }),
+    };
+    proto::LeasedKey {
+        key: Some(key),
+        generation: Some(generation_to_proto(row.generation)),
+        lease_remaining_ms: millis(row.remaining),
     }
 }
 
@@ -847,6 +923,44 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 .into_iter()
                 .map(export_disposition_to_proto)
                 .collect(),
+            next_page_token,
+        }))
+    }
+
+    async fn list_leased_keys(
+        &self,
+        request: Request<proto::ListLeasedKeysRequest>,
+    ) -> Result<Response<proto::ListLeasedKeysResponse>, Status> {
+        let req = request.into_inner();
+        validate_owner(&req.owner).map_err(Status::invalid_argument)?;
+        let after = if req.page_token.is_empty() {
+            None
+        } else {
+            Some(parse_leased_keys_token(&req.page_token)?)
+        };
+        let page_size = match req.page_size {
+            0 => DEFAULT_LEASED_KEYS_PAGE_SIZE,
+            size => usize::try_from(size)
+                .unwrap_or(usize::MAX)
+                .min(ROUTE_QUERY_MAX_PAGE_SIZE),
+        };
+        let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLeasedKeys {
+            owner: req.owner,
+            after,
+            page_size,
+            reply,
+        })
+        .await?;
+        let next_page_token = if page.more {
+            page.rows
+                .last()
+                .map(|row| leased_keys_token(&row.cursor))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(proto::ListLeasedKeysResponse {
+            keys: page.rows.iter().map(leased_key_to_proto).collect(),
             next_page_token,
         }))
     }
@@ -3652,6 +3766,130 @@ mod tests {
         );
 
         drop((svc, rib_tx));
+        manager_task.await.unwrap();
+    }
+
+    /// `ListLeasedKeys` maps an owner's unicast and `FlowSpec` keys to the
+    /// keys `DeletePath` and `DeleteFlowSpec` take, with the generation the
+    /// leased adds returned; its token resumes after the last key; a bad
+    /// owner or token is `INVALID_ARGUMENT`. Served on read-only listeners.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one controller session: add, page, resume, delete the listed keys and reject bad input"
+    )]
+    async fn list_leased_keys_returns_delete_keys_and_resumes_by_token() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let generation = svc
+            .add_leased_path(Request::new(leased_path("ctl", 30)))
+            .await
+            .unwrap()
+            .into_inner()
+            .generation;
+        svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+            rule: Some(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: flowspec_rule_components(),
+                actions: vec![flowspec_rate(0.0)],
+                communities: vec![],
+                extended_communities: vec![],
+            }),
+            lease: Some(proto::InjectionLease {
+                owner: "ctl".into(),
+                lease_seconds: 30,
+            }),
+        }))
+        .await
+        .unwrap();
+        let reader = InjectionService::new(rib_tx.clone(), AccessMode::ReadOnly);
+        let list = |page_token: String, owner: &str| {
+            reader.list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: owner.into(),
+                page_size: 1,
+                page_token,
+            }))
+        };
+
+        let first = list(String::new(), "ctl").await.unwrap().into_inner();
+        assert_eq!(first.keys.len(), 1);
+        assert_eq!(
+            first.keys[0].key,
+            Some(proto::leased_key::Key::Path(proto::LeasedPathKey {
+                prefix: "198.51.100.7".into(),
+                prefix_length: 32,
+                path_id: 0,
+            }))
+        );
+        assert_eq!(first.keys[0].generation, generation);
+        assert!((25_000..=30_000).contains(&first.keys[0].lease_remaining_ms));
+        assert!(first.next_page_token.starts_with("u:"));
+
+        let second = list(first.next_page_token, "ctl")
+            .await
+            .unwrap()
+            .into_inner();
+        let Some(proto::leased_key::Key::FlowSpec(rule)) = second.keys[0].key.clone() else {
+            panic!("the second key is the FlowSpec rule");
+        };
+        assert_eq!(rule.afi_safi, proto::AddressFamily::Ipv4Flowspec as i32);
+        assert_eq!(second.keys[0].generation, generation);
+        assert_eq!(second.next_page_token, "");
+
+        // The listed keys are exactly what the deletes take.
+        let Some(proto::leased_key::Key::Path(path)) = first.keys[0].key.clone() else {
+            panic!("the first key is the path");
+        };
+        svc.delete_path(Request::new(proto::DeletePathRequest {
+            prefix: path.prefix,
+            prefix_length: path.prefix_length,
+            path_id: path.path_id,
+            owner: "ctl".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+            afi_safi: rule.afi_safi,
+            components: rule.components,
+            owner: "ctl".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            list(String::new(), "ctl").await.unwrap().into_inner().keys,
+            []
+        );
+
+        for (token, owner) in [
+            ("u:198.51.100.7/33:0", "ctl"),
+            ("f:1:abc", "ctl"),
+            ("x", "ctl"),
+            ("", ""),
+            ("", "bad owner"),
+        ] {
+            let error = list(token.into(), owner).await.unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "{token:?} {owner:?}"
+            );
+        }
+        let other = list(String::new(), "other").await.unwrap().into_inner();
+        assert_eq!(other.keys, []);
+        assert_eq!(other.next_page_token, "");
+
+        drop((svc, reader));
+        drop(rib_tx);
         manager_task.await.unwrap();
     }
 
