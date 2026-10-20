@@ -54,8 +54,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `owner` and `override_owner`, and local route and FlowSpec read-back report
   `injection_owner`, `lease_generation` and `lease_remaining_ms`. Unowned
   injection is unchanged. At most 64 owners hold a live lease, each with at
-  most 16,384 entries. The new RPCs and fields are outside the v1 inventory for now. See
-  [leased injection](docs/reference/api.md#leased-injection).
+  most 16,384 entries. The new RPCs and fields are outside the v1 inventory
+  for now. See [leased injection](docs/reference/api.md#leased-injection).
 - `SelectionDeferralFamilyState` carries a canonical `family` label next to
   its numeric `afi`/`safi`, and `rbgp neighbor` JSON and detail output show it.
   The field is empty from an older daemon.
@@ -91,6 +91,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decimal-string `timestamp` field is still populated but deprecated; new
   clients should read the typed field. Producers record whole seconds, so the
   value is currently a multiple of 1000.
+- `rbgp rib add` prints the unicast injection outcome, for example
+  `Route 10.99.0.0/24 added (unchanged)`, and `rbgp rib delete` takes
+  `--allow-missing`, which exits 0 and prints `Route 10.99.0.0/24 not present`
+  for an absent route; without the flag a missing route is still an error.
+  The `--json` results of both carry `outcome` (`created`, `replaced`,
+  `unchanged`, `deleted`, `not_present`, or `unknown` for an older daemon), as
+  `rbgp flowspec add` and `delete` already do. The
+  [API reference](docs/reference/api.md#unicast-injection-contract)
+  describes the outcomes.
 
 ### Changed
 
@@ -192,6 +201,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `authentication` stays stable. Inventory role families use the canonical
   configuration labels (`linkstate`, `linkstate_vpn`, `l3vpn_ipv4_unicast`,
   `l3vpn_ipv6_unicast`), and the stable-surface checker rejects any other.
+- The shipped route-server hygiene no longer carries an AS_SET reject term.
+  `examples/route-server/hygiene.rpol`, and the `policy/rs-hygiene.rpol` and
+  IXP Manager-mode `policy/ixp-hygiene.rpol` that `rs-config-render`
+  generates, dropped `reject-as-set` and its in-language test. The daemon
+  already treats an UPDATE whose AS_PATH or AS4_PATH carries an AS_SET or
+  AS_CONFED_SET as withdrawn when it decodes it (RFC 9774), so no received
+  route could match the term.
+  **Operator-visible:** regenerated hygiene files lose that term and test.
+  `rbgp policy explain` names no deciding term for an AS_SET announcement;
+  `rbgp rib received <member> --rejected` lists it with reason
+  `treat_as_withdraw`, and
+  `bgp_update_malformed_causes_total{reason="as_set_prohibited"}` counts it.
+  The [route-server cookbook](docs/cookbook/route-server.md)
+  troubleshooting text now says so.
 
 ### Removed
 
@@ -270,14 +293,47 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`family="ipv6_unicast"`, `reason="missing_ipv6_next_hop"`), and
   `rustbgpd --check` warns about static neighbors in that shape.
   **Operator-visible:** an injected IPv6 RTBH route toward such a peer still
-  returns success from `AddPath`; set `local_ipv6_nexthop` and reset the
-  session to export it. See the
+  returns success from `AddPath`; setting `local_ipv6_nexthop` and reloading
+  (SIGHUP or API) exports the IPv6 routes without a session reset. See the
   [next-hop self notes](docs/reference/api.md#next-hop-self).
 - An export policy that sets an IPv6 next hop for IPv4 routes toward a peer
   without Extended Next Hop logs one warning per peer per export pass, or one
   per update group (`update_group = true`) when the group shares an encode,
   with the first affected prefix and the route count, instead of one warning
   per route. Exact-export probes no longer log it.
+- FlowSpec `ListFlowSpecRoutes` now reports the IPv4-address and 4-octet-AS
+  redirect forms (RFC 7674) and traffic-rate-packets as typed `actions`;
+  previously they appeared only as raw `extended_communities`. `AddFlowSpec`
+  accepts all three redirect forms in `FlowSpecRedirect.route_target`
+  (`ASN:value`, `a.b.c.d:value`, or RFC 5396 asdot `high.low:value`), where it
+  accepted only the 2-octet-AS form, and the new
+  `FlowSpecAction.traffic_rate_packets` variant, outside the v1 inventory.
+  `rbgp flowspec` shows and accepts it as `rate-pps=N`, and now shows both
+  rates exactly: a fractional rate such as `rate=0.25` was displayed
+  rounded, as `rate=0`, which reads as discard. Action communities
+  are still echoed raw in `extended_communities`; see the
+  [API reference](docs/reference/api.md#list-flowspec-routes).
+  **Operator-visible:** a 4-octet-AS redirect whose ASN fits in 16 bits reads
+  back as `0.ASN:value`, and `ASN:value` with an ASN above 65535, previously
+  rejected, now selects the 4-octet-AS form.
+- An injection lease expiry batch now runs under the same readiness ownership
+  as a source peer-down, so `/readyz` keeps answering while a large batch of
+  expired owners' routes is withdrawn instead of waiting for the batch to
+  finish. Its readiness waits record under the `peer_teardown` seam.
+- Reloading `local_ipv6_nexthop` onto an established eBGP session that
+  withheld IPv6 unicast for lack of an IPv6 next hop now exports the family
+  on the live session: the peer receives the full IPv6 unicast table and an
+  End-of-RIB, with no session reset. Previously the family stayed withheld
+  until the session reset. The establishment WARN now ends with
+  `set local_ipv6_nexthop to export it` instead of advising a reset, and a
+  new INFO line, `local_ipv6_nexthop now provides an IPv6 next hop:
+  exporting IPv6 unicast`, records the restore. Route-server clients and iBGP
+  sessions are unchanged.
+  During a session collision, an unlock from the superseded session is kept
+  for that session and applied if the registration fails back to it. An
+  unlock from a session the RIB no longer tracks is discarded and counted in
+  `bgp_rib_stale_session_message_ignored_total` under the new
+  `kind="family_sendable"` label.
 
 ### Documentation
 
@@ -428,10 +484,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_otc_routes_blocked_total`, the per-neighbor `otc_routes_blocked`
   count and the logs.
 - An eBGP session that negotiates IPv6 unicast without an IPv6 next hop to
-  advertise still withholds IPv6 unicast routes, now with a WARN line and
+  advertise still withholds IPv6 unicast routes, now with a WARN line ending
+  `set local_ipv6_nexthop to export it` and
   `bgp_export_family_suppressed_total`. `AddPath` of an IPv6 RTBH route
-  still succeeds for such a peer; set `local_ipv6_nexthop` and reset the
-  session to export it.
+  still succeeds for such a peer; setting `local_ipv6_nexthop` and reloading
+  (SIGHUP or API) exports the IPv6 routes without a session reset.
+- A FlowSpec redirect `route_target` of `ASN:value` with an ASN above 65535
+  used to return `INVALID_ARGUMENT`; `AddFlowSpec` now encodes it as the
+  4-octet-AS redirect form. A 4-octet-AS redirect whose ASN fits in 16 bits
+  reads back as `0.ASN:value`, and `ListFlowSpecRoutes` reports the
+  IPv4-address and 4-octet-AS forms and traffic-rate-packets as typed
+  `actions`. Clients that parsed those from `extended_communities` alone keep
+  working, since the raw communities are still echoed.
+- `examples/route-server/hygiene.rpol` and the `policy/rs-hygiene.rpol` and
+  IXP Manager-mode `policy/ixp-hygiene.rpol` that `rs-config-render` writes no
+  longer contain the `reject-as-set` term and its test, so regenerated files
+  and their digests change. Tooling that pins or diffs rendered hygiene
+  output must accept the new content. AS_SET announcements are still dropped
+  at decode (treat-as-withdraw), counted under
+  `bgp_update_malformed_causes_total{reason="as_set_prohibited"}`.
+- `bgp_rib_stale_session_message_ignored_total` has a new `kind` value,
+  `family_sendable`. Alerts or recording rules that enumerate its `kind`
+  values should include it.
 
 ## [0.78.0] — 2026-10-18
 
