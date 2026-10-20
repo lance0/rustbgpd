@@ -1050,7 +1050,7 @@ impl PeerSession {
                     Err(_) => {}
                 }
             }
-            prepared_attr_cache.warn_dropped_ipv6_next_hops(&self.peer_label);
+            prepared_attr_cache.warn_dropped_ipv6_next_hops(&self.peer_label, false);
             let max_len = export.max_message_len();
             for group in &v4_body_groups {
                 let attrs = group.attrs.as_ref();

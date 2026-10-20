@@ -620,7 +620,8 @@ impl PeerSession {
                 tokio::task::yield_now().await;
             }
         }
-        cache.warn_dropped_ipv6_next_hops(&self.peer_label);
+        // One warning covers every member: they share this encoding.
+        cache.warn_dropped_ipv6_next_hops(&self.peer_label, true);
         encode.finish(StreamTerminal::Complete);
         drop(guard);
         debug!(

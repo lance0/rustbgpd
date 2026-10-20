@@ -1859,8 +1859,10 @@ impl PreparedAttrCache {
 
     /// Report this pass's dropped IPv6 next hops in one warning, not one per
     /// route: a dual-stack policy over a full table would otherwise log every
-    /// route on every pass.
-    pub(super) fn warn_dropped_ipv6_next_hops(&mut self, peer: &str) {
+    /// route on every pass. A shared update-group encode reports once for
+    /// the whole group, under the encoding member's `peer`, with
+    /// `update_group = true`.
+    pub(super) fn warn_dropped_ipv6_next_hops(&mut self, peer: &str, update_group: bool) {
         let Some((first_prefix, routes)) = self.dropped_ipv6_next_hops.take() else {
             return;
         };
@@ -1868,6 +1870,7 @@ impl PreparedAttrCache {
         IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(count.get() + 1));
         tracing::warn!(
             peer = %peer,
+            update_group,
             %first_prefix,
             routes,
             "export policy set IPv6 next-hop for classic IPv4 NLRI; \
