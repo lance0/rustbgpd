@@ -390,7 +390,9 @@ generation. Tests use `#[tokio::test(start_paused = true)]` and
 - **Expiry task failure:** if the task exits unexpectedly, leases stop
   expiring and owned state becomes permanent without anyone seeing it.
   `main` supervises the task beside the RIB handle (`src/main.rs:6445`), and
-  an unexpected exit starts shutdown as a component failure.
+  an unexpected exit starts shutdown as a component failure. When the task
+  exits because the RIB's receiver is gone, `main` joins the RIB handle and
+  reports the RIB failure instead.
 
 ### 10. Observability
 

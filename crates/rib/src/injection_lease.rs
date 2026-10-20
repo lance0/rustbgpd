@@ -177,6 +177,17 @@ impl State {
     }
 }
 
+/// Why [`InjectionLeases::run_expiry`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum ExpiryExit {
+    /// The cancel signal fired or its sender was dropped.
+    Cancelled,
+    /// The RIB's receiver is gone, so an expiry batch could not be sent.
+    /// The RIB task's own result explains the failure.
+    RibChannelClosed,
+}
+
 /// The daemon-wide lease table (ADR-0141 §4).
 #[derive(Debug)]
 pub struct InjectionLeases {
@@ -410,16 +421,16 @@ impl InjectionLeases {
         self: Arc<Self>,
         rib_tx: mpsc::Sender<RibUpdate>,
         mut cancel: oneshot::Receiver<()>,
-    ) {
+    ) -> ExpiryExit {
         loop {
             let (expired, next) = self.take_expired();
             if !expired.is_empty() {
                 tokio::select! {
                     biased;
-                    _ = &mut cancel => return,
+                    _ = &mut cancel => return ExpiryExit::Cancelled,
                     sent = rib_tx.send(RibUpdate::ExpireInjectionLeases { leases: expired }) => {
                         if sent.is_err() {
-                            return;
+                            return ExpiryExit::RibChannelClosed;
                         }
                     }
                 }
@@ -433,7 +444,7 @@ impl InjectionLeases {
             };
             tokio::select! {
                 biased;
-                _ = &mut cancel => return,
+                _ = &mut cancel => return ExpiryExit::Cancelled,
                 () = self.changed.notified() => {}
                 () = sleep => {}
             }

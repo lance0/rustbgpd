@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::injection_lease::{
-    InjectionLeases, LeaseGeneration, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiryExit, InjectionLeases, LeaseGeneration, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::update::{InjectOutcome, RibCommandError};
 
@@ -15,7 +15,7 @@ struct Harness {
     leases: Arc<InjectionLeases>,
     metrics: BgpMetrics,
     cancel: Option<oneshot::Sender<()>>,
-    expiry: tokio::task::JoinHandle<()>,
+    expiry: tokio::task::JoinHandle<ExpiryExit>,
     manager: tokio::task::JoinHandle<()>,
 }
 
@@ -63,7 +63,7 @@ impl Harness {
 
     async fn stop(mut self) {
         let _ = self.cancel.take().unwrap().send(());
-        self.expiry.await.unwrap();
+        assert_eq!(self.expiry.await.unwrap(), ExpiryExit::Cancelled);
         drop(self.tx);
         self.manager.await.unwrap();
     }
@@ -465,10 +465,13 @@ async fn expiry_task_cancels_out_of_a_blocked_send_and_an_idle_wait() {
     }
     assert!(!task.is_finished(), "parked on the full RIB channel");
     cancel.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("cancelled out of the send")
-        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancelled out of the send")
+            .unwrap(),
+        ExpiryExit::Cancelled
+    );
     assert!(matches!(
         rx.try_recv(),
         Ok(RibUpdate::ExpireInjectionLeases { leases }) if leases.is_empty()
@@ -481,10 +484,36 @@ async fn expiry_task_cancels_out_of_a_blocked_send_and_an_idle_wait() {
         tokio::task::yield_now().await;
     }
     cancel.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), idle)
-        .await
-        .expect("cancelled out of the idle wait")
-        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), idle)
+            .await
+            .expect("cancelled out of the idle wait")
+            .unwrap(),
+        ExpiryExit::Cancelled
+    );
+}
+
+/// An expiry batch that finds the RIB's receiver gone ends the task with
+/// `RibChannelClosed`, so supervision reports the RIB's own failure rather
+/// than an expiry failure.
+///
+/// Break-to-red: reporting a failed send as `Cancelled` fails the match.
+#[tokio::test(start_paused = true)]
+async fn expiry_reports_a_closed_rib_channel() {
+    let leases = Arc::new(InjectionLeases::new());
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+    leases.admit("ctl", 5).unwrap();
+    let (_cancel, cancel_rx) = oneshot::channel();
+    let task = tokio::spawn(Arc::clone(&leases).run_expiry(tx, cancel_rx));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the failed send ends the task")
+            .unwrap(),
+        ExpiryExit::RibChannelClosed
+    );
 }
 
 /// The ownership sweep of an expired owner runs in the RIB actor without the

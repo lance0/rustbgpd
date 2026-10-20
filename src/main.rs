@@ -6461,9 +6461,21 @@ async fn run<T>(
                 break;
             }
             result = &mut lease_expiry_handle => {
+                lease_expiry_exited = true;
+                if matches!(
+                    result,
+                    Ok(rustbgpd_rib::injection_lease::ExpiryExit::RibChannelClosed)
+                ) {
+                    // The RIB dropped its receiver while a batch was pending.
+                    // Join it to report the original failure.
+                    let result = (&mut rib_handle).await;
+                    error!(?result, "RIB manager exited unexpectedly");
+                    info!("initiating shutdown due to RIB manager failure");
+                    component_failed = true;
+                    break;
+                }
                 error!(?result, "injection lease expiry task exited unexpectedly");
                 info!("initiating shutdown due to injection lease expiry failure");
-                lease_expiry_exited = true;
                 component_failed = true;
                 break;
             }
