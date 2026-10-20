@@ -1640,6 +1640,10 @@ impl PeerSession {
                 // `RibUpdate::RefreshPeerOutbound` so preflight-suppressed
                 // routes are re-probed and advertised AS_PATHs re-encoded
                 // under the new values.
+                let ipv6_was_withheld = self
+                    .negotiated
+                    .clone()
+                    .is_some_and(|neg| self.withholds_ipv6_unicast_export(&neg));
                 let received_was_tracked = [
                     (Afi::Ipv4, self.config.max_prefixes_received_ipv4.is_some()),
                     (Afi::Ipv6, self.config.max_prefixes_received_ipv6.is_some()),
@@ -1684,6 +1688,35 @@ impl PeerSession {
                 self.config.local_ipv6_nexthop = local_ipv6_nexthop;
                 self.config.remove_private_as = remove_private_as;
                 self.publish_export_profile();
+                // An eBGP session that withheld IPv6 unicast at establishment
+                // for lack of a next hop exports it as soon as one is
+                // configured, before the reply lets the peer manager's
+                // outbound refresh follow. The reverse change keeps the
+                // family; its routes are then refused one at a time.
+                if let Some(neg) = self.negotiated.clone()
+                    && ipv6_was_withheld
+                    && !self.withholds_ipv6_unicast_export(&neg)
+                {
+                    let family = (Afi::Ipv6, Safi::Unicast);
+                    info!(
+                        peer = %self.peer_label,
+                        family = "ipv6_unicast",
+                        "local_ipv6_nexthop now provides an IPv6 next hop: exporting IPv6 unicast"
+                    );
+                    let _ = self
+                        .rib_tx
+                        .send(RibUpdate::PeerFamilySendable {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                            family,
+                            add_path_send_limit: neg
+                                .effective_add_path_send_limits
+                                .get(&family)
+                                .copied()
+                                .filter(|_| self.config.peer.add_path_send),
+                        })
+                        .await;
+                }
                 info!(peer = %self.peer_label, "hot-applied runtime config knobs");
                 let _ = reply.send(Ok(()));
                 // ADR-0108: a per-family limit lowered below the family's

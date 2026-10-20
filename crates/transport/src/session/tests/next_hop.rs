@@ -2184,6 +2184,96 @@ async fn ebgp_ipv6_without_next_hop_is_suppressed_visibly_once_per_session() {
     assert_eq!(v6_suppressed_count(&control.metrics), 0.0);
 }
 
+/// Hot-apply `local_ipv6_nexthop`, keeping every other runtime knob as is.
+async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<Ipv6Addr>) {
+    let config = &session.config;
+    let update = crate::handle::PeerRuntimeConfigUpdate {
+        max_prefixes: config.max_prefixes,
+        max_prefixes_ipv4: config.max_prefixes_ipv4,
+        max_prefixes_ipv6: config.max_prefixes_ipv6,
+        max_prefixes_received_ipv4: config.max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6: config.max_prefixes_received_ipv6,
+        max_prefixes_family: config.max_prefixes_family,
+        max_prefix_action: config.max_prefix_action,
+        max_prefix_warning_percent: config.max_prefix_warning_percent,
+        gr_stale_routes_time: config.gr_stale_routes_time,
+        gr_peer_restart_time_max: config.gr_peer_restart_time_max,
+        local_ipv6_nexthop: value,
+        remove_private_as: config.remove_private_as,
+    };
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateRuntimeConfig {
+                config: Box::new(update),
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap().unwrap();
+}
+
+/// The `PeerFamilySendable` families the session sent the RIB since the
+/// last drain. The session must not have re-registered or gone down.
+fn drain_family_sendable(rib_rx: &mut mpsc::Receiver<RibUpdate>) -> Vec<(Afi, Safi)> {
+    std::iter::from_fn(|| rib_rx.try_recv().ok())
+        .filter_map(|message| match message {
+            RibUpdate::PeerFamilySendable {
+                family,
+                add_path_send_limit,
+                ..
+            } => {
+                assert_eq!(add_path_send_limit, None);
+                Some(family)
+            }
+            RibUpdate::PeerUp { .. } | RibUpdate::PeerDown { .. } => {
+                panic!("hot apply must not reset the session")
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Reloading `local_ipv6_nexthop` onto an eBGP session that withheld IPv6
+/// unicast asks the RIB to export the family on the live session: no reset,
+/// no second WARN or counter increment. A reload that leaves the session
+/// without a next hop, or repeats an applied value, sends nothing.
+#[tokio::test]
+async fn hot_applied_ipv6_next_hop_unlocks_withheld_family_without_reset() {
+    let warns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _subscriber = tracing::subscriber::set_default(SuppressionWarnCapture(Arc::clone(&warns)));
+    {
+        let (mut warm, mut warm_rx) = make_test_session_with_rib(65001, 65002);
+        establish_v6_over_v4(&mut warm, &mut warm_rx).await;
+    }
+    tracing::callsite::rebuild_interest_cache();
+    warns.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let families = establish_v6_over_v4(&mut session, &mut rib_rx).await;
+    assert!(!families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let session_id = session.session_identity.id;
+
+    // Control: a reload that still leaves no IPv6 next hop changes nothing.
+    hot_apply_local_ipv6_nexthop(&mut session, None).await;
+    assert_eq!(drain_family_sendable(&mut rib_rx), vec![]);
+
+    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await;
+    assert_eq!(
+        drain_family_sendable(&mut rib_rx),
+        vec![(Afi::Ipv6, Safi::Unicast)]
+    );
+    assert_eq!(session.session_identity.id, session_id, "no session reset");
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(v6_suppressed_count(&session.metrics), 1.0);
+
+    // The same value again is not a new unlock.
+    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await;
+    assert_eq!(drain_family_sendable(&mut rib_rx), vec![]);
+}
+
 /// A permit statement rewriting the next hop, optionally for one prefix and
 /// with a `LOCAL_PREF` (a distinct modification set).
 fn next_hop_statement(

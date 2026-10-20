@@ -3038,6 +3038,79 @@ impl RibManager {
         );
     }
 
+    /// Start exporting a family the session withheld at `PeerUp`
+    /// ([`RibUpdate::PeerFamilySendable`]). Same recipe as the slow-peer
+    /// seam: the sendable set is a group-key input, so regroup, then a dirty
+    /// resync diffs the whole Adj-RIB-Out, which announces the family's
+    /// routes, followed by its `EoR`. Families already sendable are left
+    /// alone, so a repeated or no-op reload sends nothing.
+    ///
+    /// [`RibUpdate::PeerFamilySendable`]: crate::update::RibUpdate::PeerFamilySendable
+    pub(super) fn handle_peer_family_sendable(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        family: (Afi, Safi),
+        add_path_send_limit: Option<u32>,
+    ) {
+        // Update the session record so a deferred registration or a
+        // collision failback installs the family too.
+        let Some(record) = self
+            .live_sessions
+            .get_mut(&peer)
+            .and_then(|sessions| sessions.iter_mut().find(|r| r.session_id == session_id))
+        else {
+            return;
+        };
+        if record.sendable_families.contains(&family) {
+            return;
+        }
+        record.sendable_families.push(family);
+        if let Some(limit) = add_path_send_limit {
+            record.add_path_send_families.push(family);
+            record.add_path_send_limits.insert(family, limit);
+            if record.add_path_send_max == 0 {
+                record.add_path_send_max = limit;
+            }
+        }
+        if self.outbound_session_ids.get(&peer) != Some(&session_id)
+            || !self.peer_sendable_families.contains_key(&peer)
+        {
+            return;
+        }
+        info!(%peer, ?family, "family became sendable mid-session: exporting its table");
+        self.advance_advertised_pages();
+        self.peer_sendable_families
+            .entry(peer)
+            .or_default()
+            .push(family);
+        if let Some(limit) = add_path_send_limit {
+            self.peer_add_path_send_families
+                .entry(peer)
+                .or_default()
+                .push(family);
+            self.peer_add_path_send_limits
+                .entry(peer)
+                .or_default()
+                .insert(family, limit);
+            let max = self.peer_add_path_send_max.entry(peer).or_insert(0);
+            if *max == 0 {
+                *max = limit;
+            }
+        }
+        let mut evpn_feed = if self.update_groups.members.contains_key(&peer) {
+            self.recompute_update_group(peer)
+        } else {
+            None
+        };
+        self.pending_eor.entry(peer).or_default().insert(family);
+        self.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
+        self.distribute_changes_with_evpn_feeds(
+            evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
+            true,
+        );
+    }
+
     /// Build the classifier input for one peer.
     ///
     /// `with_policy_fingerprint` gates the O(chain-size) planning-identity

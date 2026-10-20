@@ -3047,9 +3047,9 @@ session:
 
 For IPv6 RTBH over IPv4 sessions, set `local_ipv6_nexthop` on the neighbor or
 its peer group. A reloaded value applies to the per-route refusals on the next
-route emission. On an eBGP session that withheld the family, it applies only
-after the session resets, because that session decides the family when it
-establishes.
+route emission. On an eBGP session that withheld the family, the reload
+restores it without a session reset: the session receives its full IPv6
+unicast table and an End-of-RIB.
 
 The route is stored with the unspecified next hop, so `ListBestRoutes`,
 `ListReceivedRoutes`, BMP Loc-RIB and MRT show `0.0.0.0` or `::`, and a
