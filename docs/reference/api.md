@@ -3224,7 +3224,10 @@ routes, call `RibService.ListReceivedRoutes` with
 exported to, call `ListPathExportDispositions` with the same
 `(prefix, prefix_length, path_id)` key. It returns one row per peer with an
 Established session, in peer-address order, and each row has exactly one
-disposition:
+disposition. Rows cover Established peers only: a configured peer without a
+session is absent from the list. Absent does not mean withheld, it means no
+session exists to export to, so cross-check `NeighborService.ListNeighbors`
+to find configured peers that are not Established.
 
 | `disposition` | Meaning |
 |---|---|

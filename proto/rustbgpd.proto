@@ -3554,10 +3554,13 @@ service InjectionService {
   // Per-peer export disposition of one locally injected unicast route,
   // identified by its exact AddPath key (prefix, prefix_length, path_id).
   // A route for the same prefix from another peer, or under another local
-  // path_id, never counts as this route's export. Each peer registered for
-  // outbound updates (an Established session) gets exactly one disposition,
-  // in peer-address order and paged by page_size and page_token; a
-  // configured peer without a session is not listed. COMMITTED means the
+  // path_id, never counts as this route's export. Rows cover Established
+  // peers only: each peer registered for outbound updates gets exactly one
+  // disposition, in peer-address order and paged by page_size and
+  // page_token. A configured peer without a session is absent from the list,
+  // and absent does not mean withheld: cross-check NeighborService
+  // ListNeighbors to find peers that receive nothing because they are not
+  // Established. COMMITTED means the
   // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
   // not received, accepted or installed by the peer, which BGP does not
   // report. A key with no local route returns NOT_FOUND.
