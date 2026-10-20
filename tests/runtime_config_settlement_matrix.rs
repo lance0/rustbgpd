@@ -1159,8 +1159,7 @@ fn exercise_auto_revert_after_apply(
 
 /// The first scrape deliberately precedes cancellation. Wait for the daemon's
 /// fence before allowing another scrape, establishing the missed-detach window.
-#[test]
-fn apply_observer_can_miss_detach_after_an_attached_scrape() {
+fn assert_apply_observation(after_budget: bool) {
     for attempt in 1..=STALL_ATTEMPTS {
         let lab = Lab::new(MatrixRow::Apply, 0, 300 + attempt);
         let mut daemon = lab.spawn("controlled", true);
@@ -1168,11 +1167,17 @@ fn apply_observer_can_miss_detach_after_an_attached_scrape() {
         let Ok(mut request) = held_apply(&lab, &mut daemon) else {
             continue;
         };
+        if after_budget {
+            daemon.wait_log(FAIL_STOP_LINE, "\"fence_reason\":\"budget_expired\"");
+        }
         let mut witnessed_attached = false;
         let result = wait_held_metrics_with(&lab, MatrixRow::Apply, &mut daemon, |text, daemon| {
-            if witnessed_attached
-                || settlement_elapsed(text).is_some_and(|elapsed| elapsed >= BUDGET.as_secs_f64())
-            {
+            if witnessed_attached {
+                return;
+            }
+            if settlement_elapsed(text).is_some_and(|elapsed| elapsed >= BUDGET.as_secs_f64()) {
+                request.terminate_and_reap();
+                assert!(!request.try_wait().unwrap().success());
                 return;
             }
             assert!(text.contains("response_attached=\"attached\""), "{text}");
@@ -1182,11 +1187,25 @@ fn apply_observer_can_miss_detach_after_an_attached_scrape() {
             wait_fenced(&lab, MatrixRow::Apply, daemon);
         });
         assert!(matches!(result, Err(HostStall::FencedBeforeHeldLook)));
+        if after_budget {
+            assert!(!witnessed_attached);
+            return;
+        }
         if witnessed_attached {
             return;
         }
     }
     panic!("host stalls prevented an attached Apply observation in all {STALL_ATTEMPTS} attempts");
+}
+
+#[test]
+fn apply_observer_can_miss_detach_after_an_attached_scrape() {
+    assert_apply_observation(false);
+}
+
+#[test]
+fn apply_observer_can_first_scrape_after_the_budget() {
+    assert_apply_observation(true);
 }
 
 /// Keep the observer behind the completed Apply until AutoRevert has fenced.
@@ -1288,7 +1307,7 @@ fn receipt_wait_still_rejects_a_seeded_non_budget_fence() {
 
 #[test]
 fn receipt_wait_still_fails_when_a_real_mutation_skips_the_hold() {
-    let lab = Lab::new(MatrixRow::Policy, 0, 304);
+    let lab = Lab::new(MatrixRow::Policy, 0, 304).with_hold_budget(SETUP_BUDGET);
     let mut daemon = lab.spawn("controlled", true);
     wait_ready_and_idle(daemon.metrics, &mut daemon);
     let definition = lab.root.path().join("policy.json");
