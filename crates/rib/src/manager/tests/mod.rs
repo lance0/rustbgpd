@@ -1417,6 +1417,7 @@ mod conditional_advertisement_export;
 mod dataplane_paging;
 mod distribution_window;
 mod eor_deferral_accounting;
+mod eor_grace;
 mod events_metrics;
 mod evpn;
 mod evpn_complete_feed;

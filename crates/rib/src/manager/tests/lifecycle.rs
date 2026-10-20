@@ -2297,6 +2297,7 @@ async fn ending_session_preserves_newer_staged_registration_context() {
         peer,
         session_id: 2,
         peer_restart_state: false,
+        peer_gr_helper: true,
         peer_gr_families: ipv4_sendable(),
         peer_enhanced_refresh: true,
         peer_llgr_families: vec![],

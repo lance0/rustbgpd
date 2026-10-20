@@ -2654,6 +2654,9 @@ pub enum RibUpdate {
         session_id: u64,
         /// Peer's RFC 4724 Restart State bit.
         peer_restart_state: bool,
+        /// The peer's OPEN carried a Graceful Restart capability, including
+        /// a helper-only capability that lists no family (RFC 4724 §3).
+        peer_gr_helper: bool,
         /// Negotiated families present in the peer's GR capability.
         peer_gr_families: Vec<(Afi, Safi)>,
         /// Peer negotiated enhanced route refresh (RFC 7313), so a

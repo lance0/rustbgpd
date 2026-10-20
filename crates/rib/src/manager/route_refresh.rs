@@ -809,7 +809,9 @@ impl RibManager {
             || !replay.is_valid()
             || families.iter().any(|&(afi, safi)| {
                 !matches!((afi, safi), (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
-                    || self.selection_convergence_held((afi, safi))
+                    // The replay terminates in a wire End-of-RIB, so every
+                    // EoR hold refuses it, including the restart grace window.
+                    || self.eor_held(peer, (afi, safi))
                     || self
                         .peer_orf_pending
                         .get(&peer)

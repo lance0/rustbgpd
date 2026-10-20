@@ -939,6 +939,15 @@ impl PeerSession {
                         .collect();
 
                     let peer_restart_state = neg.peer_restart_state;
+                    // `peer_gr_capable` is cleared for a capability that lists
+                    // no usable family, but such a helper-only peer still
+                    // retains our routes across our restart (RFC 4724 §3).
+                    let peer_gr_helper = neg.peer_capabilities.iter().any(|capability| {
+                        matches!(
+                            capability,
+                            rustbgpd_wire::Capability::GracefulRestart { .. }
+                        )
+                    });
                     let peer_gr_families = neg
                         .peer_gr_families
                         .iter()
@@ -1018,6 +1027,7 @@ impl PeerSession {
                             peer: self.peer_ip,
                             session_id: self.session_identity.id,
                             peer_restart_state,
+                            peer_gr_helper,
                             peer_gr_families,
                             peer_enhanced_refresh,
                             peer_llgr_families,

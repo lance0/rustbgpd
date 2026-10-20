@@ -560,6 +560,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         gr_restart_time: None,
         gr_peer_restart_time_max: None,
         gr_stale_routes_time: None,
+        gr_eor_grace_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
         route_reflector_client: None,
@@ -670,6 +671,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     gr_restart_time: Some(cfg.gr_restart_time),
                     gr_peer_restart_time_max: Some(cfg.gr_peer_restart_time_max),
                     gr_stale_routes_time: Some(cfg.gr_stale_routes_time),
+                    gr_eor_grace_time: None,
                     llgr_stale_time: if cfg.llgr_stale_time > 0 {
                         Some(cfg.llgr_stale_time)
                     } else {
@@ -1724,6 +1726,7 @@ peer_group = "fabric"
                 gr_restart_time: None,
                 gr_peer_restart_time_max: None,
                 gr_stale_routes_time: None,
+                gr_eor_grace_time: None,
                 llgr_stale_time: None,
                 local_ipv6_nexthop: None,
                 route_reflector_client: None,

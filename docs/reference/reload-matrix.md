@@ -121,7 +121,7 @@ Static-neighbor edits whose **every** changed field is hot-applied
 `max_prefixes_received_ipv6_unicast`, the non-unicast `max_prefixes_<family>` keys,
 `max_prefix_action`, `max_prefix_warning_percent`, `max_prefixes_out_ipv4_unicast`,
 `max_prefixes_out_ipv6_unicast`, `max_prefix_restart_seconds`,
-`gr_peer_restart_time_max`, `gr_stale_routes_time`,
+`gr_peer_restart_time_max`, `gr_stale_routes_time`, `gr_eor_grace_time`,
 `local_ipv6_nexthop`, `remove_private_as`, `log_level`, the
 import/export policy and chain fields, and `conditional_advertisements` on
 the generation route) are applied **in place** without
@@ -260,6 +260,7 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `gr_restart_time` | live (effective next session) | Advertised in GR capability. On SIGHUP the reconciler rebuilds the session immediately to advertise the new value. |
 | `gr_peer_restart_time_max` | live | Local-only cap on the received GR Restart Time. Hot-applied in place; the new value governs the next GR peer-down event and never changes the OPEN capability. |
 | `gr_stale_routes_time` | live | Used by the local stale-route reaper for received GR routes. Hot-applied in place; the new value governs the next GR peer-down event. |
+| `gr_eor_grace_time` | live | Planned-restart End-of-RIB grace window. Read only when a marker-backed restart starts, so a reload stores the value for the next planned restart and never changes a window already running. No session reset. |
 | `llgr_stale_time` | live (effective next session) | RFC 9494 LLGR capability stale time. On SIGHUP the reconciler rebuilds the session immediately to advertise the new value. |
 | `local_ipv6_nexthop` | live | Used on outbound advertisements; new value applied on next route emission. An eBGP session (not a route-server client) that established with no IPv6 next hop and withheld the IPv6 unicast family exports the family once a reloaded value supplies one: the RIB sends that session its full IPv6 unicast table and an End-of-RIB, without a session reset. Removing the value later keeps the family, and the exact-export preflight refuses each IPv6 route (`missing_ipv6_next_hop`). |
 | `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path and reflection behavior. Registered with the RIB manager at session establishment; on SIGHUP the reconciler rebuilds the session and re-advertises under the new flag. Route withdrawal and GR retention follow the [session-establishment caveat](#session-establishment-caveat). Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
@@ -356,6 +357,7 @@ static neighbors.
 | `gr_restart_time` | live (effective next session) | |
 | `gr_peer_restart_time_max` | live | Inherited local helper cap. An all-`live` SIGHUP or targeted peer-group RPC swaps the cap in place on static and dynamic members alike; a change set that also moves a session-reset field rebuilds static members and leaves accepted dynamic members on their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
 | `gr_stale_routes_time` | live | |
+| `gr_eor_grace_time` | live | Inherited by static members only; dynamic members never take part in a planned restart. |
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |
 | `route_reflector_client` | live (effective next session) | Same as neighbor; a toggle session-resets the inheriting static members. |
